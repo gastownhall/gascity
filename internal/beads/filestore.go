@@ -30,6 +30,8 @@ type FileStore struct {
 	freshness fileFreshness
 }
 
+var _ ConditionalAssignmentReleaser = (*FileStore)(nil)
+
 type fileFreshness struct {
 	known   bool
 	exists  bool
@@ -225,6 +227,30 @@ func (fs *FileStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
+// ReleaseIfCurrent clears an in-progress assignment only when the bead still
+// has the expected assignee, while holding the file-store write lock.
+func (fs *FileStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return false, err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.reloadFromDisk(); err != nil {
+		return false, err
+	}
+	snap := fs.snapshotLocked()
+	released, err := fs.MemStore.ReleaseIfCurrent(id, expectedAssignee)
+	if err != nil || !released {
+		return released, err
+	}
+	if err := fs.save(); err != nil {
+		fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+		return false, err
+	}
+	return true, nil
+}
+
 // Close delegates to MemStore.Close and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) Close(id string) error {
@@ -363,6 +389,11 @@ func (fs *FileStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		return err
 	}
 	return nil
+}
+
+// Tx executes fn sequentially against the FileStore.
+func (fs *FileStore) Tx(_ string, fn func(Tx) error) error {
+	return runSequentialTx(fs, fn)
 }
 
 // Get reloads the on-disk store before reading a bead by ID.
@@ -510,6 +541,16 @@ func (fs *FileStore) DepList(id, direction string) ([]Dep, error) {
 		return nil, err
 	}
 	return fs.MemStore.DepList(id, direction)
+}
+
+// DepListBatch reloads the on-disk store before listing batched dependencies.
+func (fs *FileStore) DepListBatch(ids []string) (map[string][]Dep, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.refreshReadStateLocked(); err != nil {
+		return nil, err
+	}
+	return fs.MemStore.DepListBatch(ids)
 }
 
 // memSnapshot holds a snapshot of MemStore state for rollback.

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/cityinit"
@@ -130,11 +132,19 @@ func cityInitDoInit(_ context.Context, req cityinit.InitRequest) error {
 }
 
 func cityInitFinalize(_ context.Context, req cityinit.InitRequest) error {
-	if code := finalizeInit(req.Dir, io.Discard, io.Discard, initFinalizeOptions{
+	var stdout, stderr bytes.Buffer
+	if code := finalizeInit(req.Dir, &stdout, &stderr, initFinalizeOptions{
 		skipProviderReadiness: req.SkipProviderReadiness,
 		showProgress:          false,
 		commandName:           "gc init",
 	}); code != 0 {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = strings.TrimSpace(stdout.String())
+		}
+		if detail != "" {
+			return fmt.Errorf("finalize failed (exit %d): %s", code, detail)
+		}
 		return fmt.Errorf("finalize failed (exit %d)", code)
 	}
 	return nil

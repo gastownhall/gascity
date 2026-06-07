@@ -9,6 +9,18 @@ import (
 func boolPtr(b bool) *bool    { return &b }
 func strPtr(s string) *string { return &s }
 
+func TestApplyOverridesIdempotent(t *testing.T) {
+	t.Parallel()
+
+	aa := []Order{{Name: "unrouted-feeder"}}
+	if err := ApplyOverrides(aa, []Override{{Name: "unrouted-feeder", Idempotent: boolPtr(true)}}); err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+	if !aa[0].Idempotent {
+		t.Error("override idempotent=true was not applied to the order")
+	}
+}
+
 func TestApplyOverrides(t *testing.T) {
 	t.Parallel()
 
@@ -122,6 +134,27 @@ func TestApplyOverrides(t *testing.T) {
 					if a.Interval != "30s" {
 						t.Errorf("aa[%d] (rig=%q): interval=%q, want 30s", i, a.Rig, a.Interval)
 					}
+				}
+			},
+		},
+		{
+			name: "env override merges with source env",
+			orders: []Order{
+				{Name: "patrol", Rig: "", Env: map[string]string{"KEEP": "source", "OVERRIDE": "source"}},
+			},
+			overrides: []Override{
+				{Name: "patrol", Rig: "", Env: map[string]string{"OVERRIDE": "city", "ADD": "city"}},
+			},
+			check: func(t *testing.T, aa []Order) {
+				t.Helper()
+				if aa[0].Env["KEEP"] != "source" {
+					t.Errorf("KEEP = %q, want source", aa[0].Env["KEEP"])
+				}
+				if aa[0].Env["OVERRIDE"] != "city" {
+					t.Errorf("OVERRIDE = %q, want city", aa[0].Env["OVERRIDE"])
+				}
+				if aa[0].Env["ADD"] != "city" {
+					t.Errorf("ADD = %q, want city", aa[0].Env["ADD"])
 				}
 			},
 		},

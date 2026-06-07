@@ -12,21 +12,11 @@ import (
 	"sync"
 
 	"github.com/BurntSushi/toml"
-	"github.com/gastownhall/gascity/examples/bd"
-	"github.com/gastownhall/gascity/examples/dolt"
-	"github.com/gastownhall/gascity/examples/gastown/packs/gastown"
-	"github.com/gastownhall/gascity/examples/gastown/packs/maintenance"
-	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 )
-
-// builtinPack pairs an embedded FS with the subdirectory name used under .gc/system/packs/.
-type builtinPack struct {
-	fs   fs.FS
-	name string // e.g. "bd", "dolt"
-}
 
 const (
 	legacyOrderConfigFile = "order.toml"
@@ -34,13 +24,7 @@ const (
 
 // builtinPacks lists all packs embedded in the gc binary. These are
 // materialized to .gc/system/packs/ on every gc start and gc init.
-var builtinPacks = []builtinPack{
-	{fs: core.PackFS, name: "core"},
-	{fs: bd.PackFS, name: "bd"},
-	{fs: dolt.PackFS, name: "dolt"},
-	{fs: maintenance.PackFS, name: "maintenance"},
-	{fs: gastown.PackFS, name: "gastown"},
-}
+var builtinPacks = builtinpacks.All()
 
 var builtinPackRefreshCache sync.Map
 
@@ -64,22 +48,34 @@ type builtinPackFile struct {
 // MaterializeBuiltinPacks writes all embedded pack files to
 // .gc/system/packs/{name}/ in the city directory. Files whose content and mode
 // already match are left in place; changed content or mode is repaired with an
-// atomic rename so readers never observe a truncated file. Shell scripts get
-// 0755; everything else 0644.
+// atomic rename so readers never observe a truncated file. Executable scripts
+// get 0755; everything else 0644.
+//
+// Operator edits are preserved only for non-required packs: a regular,
+// correct-mode file in a non-required pack is left untouched even when its
+// content differs from the embedded bytes (see gastownhall/gascity#2429).
+// Required packs (core, maintenance, and the provider-dependent bd/dolt) are
+// always refreshed and validated, so a stale or corrupt required pack on disk
+// is repaired rather than silently accepted.
 // Idempotent: safe to call on every gc start and gc init.
 func MaterializeBuiltinPacks(cityPath string) error {
+	required := requiredBuiltinPackSet(cityPath)
 	for _, bp := range builtinPacks {
-		dst := filepath.Join(cityPath, citylayout.SystemPacksRoot, bp.name)
-		desired, err := materializeFS(bp.fs, ".", dst)
+		dst := filepath.Join(cityPath, citylayout.SystemPacksRoot, bp.Name)
+		_, isRequired := required[bp.Name]
+		desired, err := materializeFS(bp.FS, dst, !isRequired)
 		if err != nil {
-			return fmt.Errorf("materializing %s pack: %w", bp.name, err)
+			return fmt.Errorf("materializing %s pack: %w", bp.Name, err)
 		}
 		if err := pruneStaleGeneratedPackFiles(dst, desired); err != nil {
-			return fmt.Errorf("pruning stale %s pack files: %w", bp.name, err)
+			return fmt.Errorf("pruning stale %s pack files: %w", bp.Name, err)
 		}
-		if err := pruneLegacyEmbeddedOrders(bp.fs, dst); err != nil {
-			return fmt.Errorf("pruning legacy %s order paths: %w", bp.name, err)
+		if err := pruneLegacyEmbeddedOrders(bp.FS, dst); err != nil {
+			return fmt.Errorf("pruning legacy %s order paths: %w", bp.Name, err)
 		}
+	}
+	if err := repairLegacyGcBeadsBdScript(cityPath); err != nil {
+		return fmt.Errorf("repairing legacy gc-beads-bd script: %w", err)
 	}
 	return nil
 }
@@ -155,20 +151,20 @@ func unusableRequiredBuiltinPackNames(cityPath string) []string {
 	var missing []string
 	for _, name := range requiredBuiltinPackNames(cityPath) {
 		bp, ok := builtinPackByName(name)
-		if !ok || !packContainsEmbeddedState(bp.fs, filepath.Join(systemRoot, name)) {
+		if !ok || !packContainsEmbeddedState(bp.FS, filepath.Join(systemRoot, name)) {
 			missing = append(missing, name)
 		}
 	}
 	return missing
 }
 
-func builtinPackByName(name string) (builtinPack, bool) {
+func builtinPackByName(name string) (builtinpacks.Pack, bool) {
 	for _, bp := range builtinPacks {
-		if bp.name == name {
+		if bp.Name == name {
 			return bp, true
 		}
 	}
-	return builtinPack{}, false
+	return builtinpacks.Pack{}, false
 }
 
 func packContainsEmbeddedState(embedded fs.FS, dstDir string) bool {
@@ -213,7 +209,7 @@ func embeddedPackManifest(embedded fs.FS) (map[string]builtinPackFile, error) {
 		}
 		manifest[filepath.ToSlash(path)] = builtinPackFile{
 			data: data,
-			perm: builtinPackFileMode(path),
+			perm: builtinpacks.MaterializedFileMode(path),
 		}
 		return nil
 	})
@@ -221,6 +217,20 @@ func embeddedPackManifest(embedded fs.FS) (map[string]builtinPackFile, error) {
 		return nil, err
 	}
 	return manifest, nil
+}
+
+// requiredBuiltinPackSet returns the set of builtin pack names that must stay
+// in lockstep with the embedded bytes for the city at cityPath. Required packs
+// are refreshed and validated on every materialize; operator edits to them are
+// not preserved. Derived from requiredBuiltinPackNames so the set tracks the
+// provider-dependent membership (bd/dolt) exactly.
+func requiredBuiltinPackSet(cityPath string) map[string]struct{} {
+	names := requiredBuiltinPackNames(cityPath)
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	return set
 }
 
 func requiredBuiltinPackNames(cityPath string) []string {
@@ -289,6 +299,7 @@ func peekBeadsProvider(tomlPath string) string {
 	var peek struct {
 		Beads struct {
 			Provider string `toml:"provider"`
+			Backend  string `toml:"backend"`
 		} `toml:"beads"`
 	}
 	if _, err := toml.Decode(string(data), &peek); err != nil {
@@ -297,30 +308,103 @@ func peekBeadsProvider(tomlPath string) string {
 	return peek.Beads.Provider
 }
 
-// materializeFS walks an embed.FS rooted at root, writes all files to dstDir,
-// and returns the relative file paths that belong in the generated directory.
-func materializeFS(embedded fs.FS, root, dstDir string) (map[string]struct{}, error) {
+func peekBeadsBackend(tomlPath string) string {
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		return ""
+	}
+	var peek struct {
+		Beads struct {
+			Backend string `toml:"backend"`
+		} `toml:"beads"`
+	}
+	if _, err := toml.Decode(string(data), &peek); err != nil {
+		return ""
+	}
+	return peek.Beads.Backend
+}
+
+// peekEventsProvider reads just the events.provider field from a city.toml
+// without doing full config parsing. Returns "" if not set or on error.
+//
+// Used by gc event emit (called from bd hooks on every bead write) to avoid
+// the full loadCityConfig path, which resolves [imports] and runs
+// `git status --porcelain --ignored` against every cached pack-source repo
+// — slow on hosts where a pack source is a large monorepo, and fan-out
+// concurrent across a bd-write burst (see gastownhall/gascity#2099).
+//
+// Trade-off: include/import/pack-provided overrides of [events].provider are
+// not honored on this hook fast path. Operators that need this path to bypass
+// city.toml should use the GC_EVENTS env var.
+func peekEventsProvider(tomlPath string) string {
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		return ""
+	}
+	var peek struct {
+		Events struct {
+			Provider string `toml:"provider"`
+		} `toml:"events"`
+	}
+	if _, err := toml.Decode(string(data), &peek); err != nil {
+		return ""
+	}
+	return peek.Events.Provider
+}
+
+// materializeFS walks an embed.FS, writes all files to dstDir, and returns the
+// relative file paths that belong in the generated directory.
+//
+// When preserveOperatorEdits is true, existing regular files with the correct
+// mode are preserved verbatim — content is NOT overwritten even when it differs
+// from the embedded bytes. This protects operator-authored edits to non-required
+// pack files (formula TOMLs, command scripts, etc.) from being silently reverted
+// on every gc subcommand invocation (see gastownhall/gascity#2429). Operators
+// who want to pick up a fresh embedded version after a binary upgrade must delete
+// the on-disk file first.
+//
+// When preserveOperatorEdits is false (required packs), the preservation skip is
+// disabled: every file is refreshed and validated against the embedded bytes, so
+// a stale or corrupt required pack is repaired rather than silently accepted.
+//
+// The remaining repair semantics are independent of the flag: missing files are
+// written (initial scaffolding), wrong-mode files are rewritten (e.g., script
+// that lost its +x bit), and non-regular files (symlinks, etc.) are replaced
+// with the embedded content.
+func materializeFS(embedded fs.FS, dstDir string, preserveOperatorEdits bool) (map[string]struct{}, error) {
 	desired := make(map[string]struct{})
-	err := fs.WalkDir(embedded, root, func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(embedded, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Compute the relative path from root.
-		rel := path
-		if root != "." {
-			rel = strings.TrimPrefix(path, root+"/")
-			if rel == root {
-				return nil
-			}
-		}
-
-		dst := filepath.Join(dstDir, rel)
+		dst := filepath.Join(dstDir, path)
 
 		if d.IsDir() {
 			return os.MkdirAll(dst, 0o755)
 		}
-		desired[filepath.ToSlash(rel)] = struct{}{}
+		desired[filepath.ToSlash(path)] = struct{}{}
+
+		perm := builtinpacks.MaterializedFileMode(path)
+
+		// Preserve operator-authored content for non-required packs. Skip the
+		// embedded write only when the existing on-disk entry is a regular file
+		// with the correct mode — that's a file the operator might have edited.
+		// Non-regular files (symlinks) and wrong-mode files still get repaired
+		// below, matching the prior contract. Mode comparison uses
+		// fsys.ComparableMode (perm + setuid/setgid/sticky) so it agrees with
+		// the WriteFileIfContentOrModeChangedAtomic repair path below. Required
+		// packs (preserveOperatorEdits == false) skip this branch entirely so
+		// stale content is always refreshed.
+		if preserveOperatorEdits {
+			if info, statErr := os.Lstat(dst); statErr == nil {
+				if info.Mode().IsRegular() && fsys.ComparableMode(info.Mode()) == fsys.ComparableMode(perm) {
+					return nil
+				}
+			} else if !os.IsNotExist(statErr) {
+				return fmt.Errorf("stat %s: %w", dst, statErr)
+			}
+		}
 
 		data, err := fs.ReadFile(embedded, path)
 		if err != nil {
@@ -331,7 +415,6 @@ func materializeFS(embedded fs.FS, root, dstDir string) (map[string]struct{}, er
 			return err
 		}
 
-		perm := builtinPackFileMode(path)
 		return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, dst, data, perm)
 	})
 	if err != nil {
@@ -340,25 +423,42 @@ func materializeFS(embedded fs.FS, root, dstDir string) (map[string]struct{}, er
 	return desired, nil
 }
 
-// isExecutableScriptFilename reports whether a materialized pack asset
-// should be marked executable. Shell, Python, and bash interpreters all
-// rely on shebang-based direct execution, so the file needs +x regardless
-// of extension — gc invokes resolved run paths directly rather than
-// wrapping them with an explicit interpreter command.
-func isExecutableScriptFilename(name string) bool {
-	for _, suffix := range []string{".sh", ".py", ".bash"} {
-		if strings.HasSuffix(name, suffix) {
-			return true
-		}
+func repairLegacyGcBeadsBdScript(cityPath string) error {
+	path := legacyGcBeadsBdScriptPath(cityPath)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
 	}
-	return false
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if !looksLikeGeneratedGcBeadsBdScript(data) {
+		return nil
+	}
+	return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, path, legacyGcBeadsBdShim(), 0o755)
 }
 
-func builtinPackFileMode(name string) os.FileMode {
-	if isExecutableScriptFilename(name) {
-		return 0o755
-	}
-	return 0o644
+func looksLikeGeneratedGcBeadsBdScript(data []byte) bool {
+	text := string(data)
+	return strings.Contains(text, "gc-beads-bd") && strings.Contains(text, "exec: beads provider")
+}
+
+func legacyGcBeadsBdShim() []byte {
+	return []byte(`#!/bin/sh
+set -eu
+
+script_dir=$(dirname "$0")
+city_root=$(cd "$script_dir/../.." && pwd)
+
+exec "$city_root/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh" "$@"
+`)
 }
 
 // pruneLegacyEmbeddedOrders removes deprecated order directory layouts when the

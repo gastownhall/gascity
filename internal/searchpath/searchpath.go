@@ -86,6 +86,21 @@ func userManagedDirs(homeDir string) []string {
 		filepath.Join(homeDir, ".local", "share", "mise", "shims"),
 		filepath.Join(homeDir, ".local", "share", "rtx", "shims"),
 		filepath.Join(homeDir, ".nodebrew", "current", "bin"),
+		// JS package-manager global install bins. pnpm's default PNPM_HOME
+		// is XDG-relative; newer pnpm layouts symlink under a `bin/`
+		// subdirectory while older layouts symlink directly into PNPM_HOME,
+		// so we include both. npm and yarn each support a user-prefix
+		// global bin separate from the system one. gc init's
+		// provider-readiness probes use this search path (NOT the ambient
+		// PATH), so a CLI installed via `pnpm add -g`, `npm i -g` with a
+		// user prefix, or `yarn global add` was previously reported as
+		// "not installed" even though it was on the shell's PATH
+		// (gastownhall/gascity#3001).
+		filepath.Join(homeDir, ".local", "share", "pnpm"),
+		filepath.Join(homeDir, ".local", "share", "pnpm", "bin"),
+		filepath.Join(homeDir, ".npm-global", "bin"),
+		filepath.Join(homeDir, ".yarn", "bin"),
+		filepath.Join(homeDir, ".config", "yarn", "global", "node_modules", ".bin"),
 	)
 	dirs = append(dirs, globExistingDirs(
 		filepath.Join(homeDir, ".nvm", "versions", "node", "*", "bin"),

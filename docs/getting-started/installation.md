@@ -7,7 +7,7 @@ description: Install Gas City from Homebrew, a release tarball, or source.
 
 | Method | Best for | Installs deps? | Auto-upgrades? |
 |--------|----------|----------------|----------------|
-| [Homebrew](#homebrew-recommended) | macOS / Linux daily use | Yes (all 6) | `brew upgrade` |
+| [Homebrew](#homebrew-recommended) | macOS / Linux daily use | Yes (runtime deps) | `brew upgrade` |
 | [Direct download](#direct-download) | CI, containers, air-gapped hosts | No | Manual |
 | [Source build](#build-from-source) | Contributors, bleeding-edge | No | Manual |
 
@@ -26,14 +26,16 @@ for you; the other methods require manual installation.
 | tmux | Yes | — | `brew install tmux` | `apt install tmux` | Session management |
 | jq | Yes | — | `brew install jq` | `apt install jq` | JSON processing |
 | git | Yes | — | (built-in) | (built-in) | Version control |
-| dolt | Yes | 1.86.2 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
+| dolt | Yes | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
 | bd (Beads CLI) | Yes | 1.0.0 | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
+| gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
 | Go 1.25+ | Source only | 1.25 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
 | make | Source only | — | (built-in) | `apt install make` (or `build-essential`) | Drives `make install` |
 
-Use a final Dolt 1.86.2 or newer. Gas City's managed Dolt checks reject older
-and pre-release builds because they can miss the upstream GC/writer deadlock
+Use a final Dolt 2.1.0 or newer. Gas City's managed Dolt checks reject older
+and pre-release builds because they are below the managed bd/Dolt compatibility
+floor; releases before 1.86.2 can also miss the upstream GC/writer deadlock
 fix in dolthub/dolt commit `ccf7bde206`, which can hang `dolt_backup sync`
 under heavy write load.
 
@@ -191,7 +193,14 @@ make build          # outputs bin/gc in the repo root
 ./bin/gc version
 ```
 
-On macOS, `make build` automatically ad-hoc code-signs the binary (`codesign -s -`).
+On macOS, `make build` signs the binary with a stable local codesigning
+identity when one is available, which helps macOS remember local permission
+grants across rebuilds. Without a stable identity, the build leaves Go's
+linker-produced signature unchanged. Set `GC_SIGN_IDENTITY=<certificate name>`
+to choose a specific certificate, `GC_SIGN_IDENTIFIER=<identifier>` to use a
+separate local TCC identity, or `GC_ADHOC_SIGN=1` to opt into ad-hoc signing
+for a local experiment. Successful local signing also removes stale
+`com.apple.provenance` metadata when present.
 
 ### Contributor setup
 
@@ -225,7 +234,8 @@ gc init ~/my-city
 cd ~/my-city
 ```
 
-`gc init` registers the city with the supervisor and starts it automatically.
+`gc init` registers the city with the supervisor, which then starts it. By the
+time the command returns, the city is running.
 See the [Quickstart](/getting-started/quickstart) for a complete walkthrough.
 
 Gas City ships a JSONL archive that snapshots every bead database for

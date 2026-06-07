@@ -141,7 +141,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	alias = createCtx.Alias
 	workDir = createCtx.WorkDir
 
-	mcpServers, err := s.sessionMCPServers(template, resolved.Name, createCtx.Identity, workDir, transport, kind)
+	mcpServers, err := s.sessionMCPServers(template, resolved.Name, createCtx.Identity, workDir, transport, kind, nil)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
@@ -179,7 +179,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// starts the agent process on the next tick. This avoids blocking the
 	// HTTP response for 10-30s while the agent boots in tmux, and lets real-world apps
 	// show the session in the sidebar immediately via optimistic UI.
-	resolvedCfg, err := resolvedSessionConfigForProvider(alias, createCtx.ExplicitName, template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), alias, createCtx.ExplicitName, template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -224,7 +224,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// extraMeta in CreateAliasedBeadOnlyNamedWithMetadata above. Do NOT
 	// overwrite it here — the old code clobbered initial_message by writing
 	// only the options portion.
-	s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, optMeta)
+	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 	s.state.Poke() // wake reconciler to start the agent
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
@@ -241,7 +241,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
-		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false, true, true)
+		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false, true, true, 0)
 	}
 	statusCode := http.StatusAccepted // always async for agent sessions
 	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)
@@ -352,9 +352,11 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	extraMeta := map[string]string{
-		"session_origin": "manual",
+	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
+	if extraMeta == nil {
+		extraMeta = make(map[string]string)
 	}
+	extraMeta["session_origin"] = "manual"
 	if transport == "acp" {
 		extraMeta, err = session.WithStoredMCPMetadata(extraMeta, mcpIdentity, mcpServers)
 		if err != nil {
@@ -364,7 +366,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		}
 	}
 
-	resolvedCfg, err := resolvedSessionConfigForProvider(alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -392,7 +394,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 
 	// Persist kind, option metadata, and project_id on the bead.
-	s.persistSessionMeta(store, info.ID, "provider", body.ProjectID, optMeta)
+	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 	if body.Async {
 		s.state.Poke()
 	}
@@ -428,7 +430,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		}
 	}
 	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
-		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false, true, true)
+		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false, true, true, 0)
 	}
 	statusCode := http.StatusCreated
 	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)
@@ -467,13 +469,10 @@ func (s *Server) rollbackCreatedSession(store beads.Store, sessionID string) err
 }
 
 // persistSessionMeta writes option metadata and project_id to the session bead.
-func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectID string, optMeta map[string]string) {
+func (s *Server) persistSessionMeta(store beads.Store, sessionID, projectID string, optMeta map[string]string) {
 	batch := make(map[string]string)
 	for k, v := range optMeta {
 		batch[k] = v
-	}
-	if kind != "" && kind != "provider" {
-		batch["real_world_app_session_kind"] = kind
 	}
 	if projectID != "" {
 		batch["real_world_app_project_id"] = projectID

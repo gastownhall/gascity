@@ -20,8 +20,8 @@ const tmuxSession = "main"
 // workspace initialization and start its tmux session. Running pods younger
 // than this with dead tmux are treated as still initializing, not stale.
 // Covers the full startup chain: waitForInitContainer (60s) +
-// waitForPodRunning (120s) + waitForTmux (60s).
-const startupGracePeriod = 240 * time.Second
+// waitForExecReady (120s) + waitForPodRunning (120s) + waitForTmux (60s).
+const startupGracePeriod = 360 * time.Second
 
 // SanitizeName converts a session name to a valid K8s resource name.
 // K8s names: lowercase, alphanumeric + '-', max 63 chars, must start/end

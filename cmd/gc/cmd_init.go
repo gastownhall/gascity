@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/cityinit"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -23,6 +25,13 @@ import (
 )
 
 const initPackSchemaVersion = 2
+
+const initMailRetentionExample = `# [mail]
+# retention_ttl controls how long read messages are retained before purge.
+# 0 disables retention; use "168h" for 7 days.
+# "7d" is not a valid Go duration.
+# retention_ttl = "0"
+`
 
 type initPackMeta struct {
 	Name        string                   `toml:"name"`
@@ -66,9 +75,12 @@ var initConventionDirs = cityinit.InitConventionDirs()
 type wizardConfig struct {
 	interactive      bool   // true if the wizard ran with user interaction
 	configName       string // canonical values: "minimal", "gastown", or "custom"
-	provider         string // built-in provider key, or "" if startCommand set
+	defaultProvider  string // selected default provider key
+	providers        []string
+	provider         string // compatibility mirror for older internal callers
 	startCommand     string // custom start command (workspace-level)
 	bootstrapProfile string // hosted bootstrap profile, or "" for local defaults
+	err              error
 }
 
 // defaultWizardConfig returns a non-interactive wizardConfig that produces
@@ -78,7 +90,13 @@ func defaultWizardConfig() wizardConfig {
 }
 
 func canBootstrapExistingCity(wiz wizardConfig) bool {
-	return wiz == defaultWizardConfig()
+	return !wiz.interactive &&
+		wiz.configName == "minimal" &&
+		wizardDefaultProvider(wiz) == "" &&
+		len(wiz.providers) == 0 &&
+		wiz.startCommand == "" &&
+		wiz.bootstrapProfile == "" &&
+		wiz.err == nil
 }
 
 const (
@@ -94,6 +112,8 @@ func isTerminal(f *os.File) bool {
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
 }
+
+var isTerminalFunc = isTerminal
 
 // readLine reads a single line from br and returns it trimmed.
 // Returns empty string on EOF or error.
@@ -145,48 +165,102 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 		}
 	}
 
-	// Build agent menu from built-in provider presets.
-	order := config.BuiltinProviderOrder()
-	builtins := config.BuiltinProviders()
-
-	fmt.Fprintln(stdout, "")                          //nolint:errcheck // best-effort stdout
-	fmt.Fprintln(stdout, "Choose your coding agent:") //nolint:errcheck // best-effort stdout
-	for i, name := range order {
-		spec := builtins[name]
-		suffix := ""
-		if i == 0 {
-			suffix = "  (default)"
-		}
-		fmt.Fprintf(stdout, "  %d. %s%s\n", i+1, spec.DisplayName, suffix) //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "") //nolint:errcheck // best-effort stdout
+	choices, err := configuredWizardProviderChoices(context.Background())
+	if err != nil {
+		return wizardConfig{interactive: true, configName: configName, err: err}
 	}
-	customNum := len(order) + 1
-	fmt.Fprintf(stdout, "  %d. Custom command\n", customNum) //nolint:errcheck // best-effort stdout
-	fmt.Fprintf(stdout, "Agent [1]: ")                       //nolint:errcheck // best-effort stdout
+	if len(choices) == 0 {
+		return wizardConfig{
+			interactive: true,
+			configName:  configName,
+			err:         fmt.Errorf("no configured coding agents found; configure your coding agent and restart the wizard"),
+		}
+	}
 
-	agentChoice := readLine(br)
-	var provider, startCommand string
+	fmt.Fprintln(stdout, "Choose your coding agent:") //nolint:errcheck // best-effort stdout
+	for i, choice := range choices {
+		fmt.Fprintf(stdout, "  %d. %s\n", i+1, choice.DisplayName) //nolint:errcheck // best-effort stdout
+	}
+	fmt.Fprintln(stdout, "If you don't see your coding agent, configure it and restart the wizard.") //nolint:errcheck // best-effort stdout
 
-	provider = resolveAgentChoice(agentChoice, order, builtins, customNum)
-	if provider == "" {
-		// Custom command or invalid choice resolved to custom.
-		switch {
-		case agentChoice == fmt.Sprintf("%d", customNum) || agentChoice == "Custom command":
-			fmt.Fprintf(stdout, "Enter start command: ") //nolint:errcheck // best-effort stdout
-			startCommand = readLine(br)
-		case agentChoice != "":
-			fmt.Fprintf(stdout, "Unknown agent %q, using %s.\n", agentChoice, builtins[order[0]].DisplayName) //nolint:errcheck // best-effort stdout
-			provider = order[0]
-		default:
-			provider = order[0]
+	providers := providerChoiceKeys(choices)
+	defaultProvider := choices[0].Name
+	if len(choices) > 1 {
+		fmt.Fprintf(stdout, "Agent: ") //nolint:errcheck // best-effort stdout
+		agentChoice := readLine(br)
+		defaultProvider = resolveDefaultProviderChoice(agentChoice, choices)
+		if defaultProvider == "" {
+			return wizardConfig{
+				interactive: true,
+				configName:  configName,
+				providers:   providers,
+				err:         fmt.Errorf("provider selection is required; enter a number or exact provider key"),
+			}
 		}
 	}
 
 	return wizardConfig{
-		interactive:  true,
-		configName:   configName,
-		provider:     provider,
-		startCommand: startCommand,
+		interactive:     true,
+		configName:      configName,
+		defaultProvider: defaultProvider,
+		providers:       providers,
+		provider:        defaultProvider,
 	}
+}
+
+type wizardProviderChoice struct {
+	Name        string
+	DisplayName string
+}
+
+func configuredWizardProviderChoices(ctx context.Context) ([]wizardProviderChoice, error) {
+	names := api.ProviderReadinessNames()
+	items, err := initProbeProvidersReadiness(ctx, names, true)
+	if err != nil {
+		return nil, fmt.Errorf("checking provider readiness: %w", err)
+	}
+	choices := make([]wizardProviderChoice, 0, len(names))
+	builtins := config.BuiltinProviders()
+	for _, name := range names {
+		item, ok := items[name]
+		if !ok || item.Status != api.ProbeStatusConfigured {
+			continue
+		}
+		displayName := strings.TrimSpace(item.DisplayName)
+		if displayName == "" {
+			displayName = builtins[name].DisplayName
+		}
+		if displayName == "" {
+			displayName = name
+		}
+		choices = append(choices, wizardProviderChoice{Name: name, DisplayName: displayName})
+	}
+	return choices, nil
+}
+
+func providerChoiceKeys(choices []wizardProviderChoice) []string {
+	out := make([]string, 0, len(choices))
+	for _, choice := range choices {
+		out = append(out, choice.Name)
+	}
+	return out
+}
+
+func resolveDefaultProviderChoice(input string, choices []wizardProviderChoice) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	if n, err := strconv.Atoi(input); err == nil && n >= 1 && n <= len(choices) {
+		return choices[n-1].Name
+	}
+	for _, choice := range choices {
+		if input == choice.Name {
+			return choice.Name
+		}
+	}
+	return ""
 }
 
 // resolveAgentChoice maps user input to a provider name. Input can be a
@@ -233,10 +307,14 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var fileFlag string
 	var fromFlag string
 	var nameFlag string
+	var templateFlag string
 	var providerFlag string
+	var providersFlag []string
+	var defaultProviderFlag string
 	var bootstrapProfileFlag string
 	var skipProviderReadiness bool
 	var preserveExisting bool
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "init [path]",
 		Short: "Initialize a new city",
@@ -245,44 +323,122 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, then
-materializes builtin packs under .gc/system/packs. Use --provider to create the default minimal city
-non-interactively, or --file to initialize from an existing TOML config file.
+materializes builtin packs under .gc/system/packs. Use --template with
+--default-provider to create a city non-interactively, or --file to initialize
+from an existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
 committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 		Example: `  gc init
   gc init ~/my-city
-  gc init --provider codex ~/my-city
-  gc init --provider codex --bootstrap-profile k8s-cell /city
+  gc init --default-provider codex ~/my-city
+  gc init --template gastown --default-provider codex ~/my-city
+  gc init --providers claude,codex --default-provider codex ~/my-city
+  gc init --default-provider codex --bootstrap-profile k8s-cell /city
   gc init --name my-city
   gc init --from ~/elan --name elan /city
-  gc init --file examples/gastown.toml ~/bright-lights
+  gc init --file ./my-city.toml ~/bright-lights
   gc init --file city.toml --preserve-existing .`,
 		Args: cobra.MaximumNArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(runCmd *cobra.Command, args []string) error {
+			out := stdout
+			if jsonOut {
+				out = io.Discard
+			}
+			mode := "default"
 			if fromFlag != "" {
-				return exitForCode(cmdInitFromDirWithOptions(fromFlag, args, nameFlag, stdout, stderr, skipProviderReadiness))
+				mode = "from"
+				code := cmdInitFromDirWithOptions(fromFlag, args, nameFlag, out, stderr, skipProviderReadiness)
+				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, "", "", nil, bootstrapProfileFlag, mode, stdout)
 			}
 			if fileFlag != "" {
-				return exitForCode(cmdInitFromFileWithOptions(fileFlag, args, nameFlag, stdout, stderr, skipProviderReadiness, preserveExisting))
+				mode = "file"
+				code := cmdInitFromFileWithOptions(fileFlag, args, nameFlag, out, stderr, skipProviderReadiness, preserveExisting)
+				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, "", "", nil, bootstrapProfileFlag, mode, stdout)
 			}
-			return exitForCode(cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, nameFlag, stdout, stderr, skipProviderReadiness, preserveExisting))
+			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return err
+			}
+			if flagMode != "" {
+				mode = flagMode
+			}
+			code := cmdInitWithPreparedWizard(args, wiz, flagMode != "", nameFlag, out, stderr, skipProviderReadiness, preserveExisting, jsonOut)
+			return writeInitJSONOrExit(code, jsonOut, args, nameFlag, wiz.configName, wizardDefaultProvider(wiz), wizardProviders(wiz), bootstrapProfileFlag, mode, stdout)
 		},
 	}
 	cmd.Flags().StringVar(&fileFlag, "file", "", "path to a TOML file to use as city.toml")
 	cmd.Flags().StringVar(&fromFlag, "from", "", "path to an example city directory to copy")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "workspace name (default: target directory basename)")
-	cmd.Flags().StringVar(&providerFlag, "provider", "", "built-in workspace provider to use for the default mayor config")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "deprecated alias for --default-provider")
+	cmd.Flags().StringVar(&defaultProviderFlag, "default-provider", "", "default readiness-aware provider to select from --providers")
+	cmd.Flags().StringArrayVar(&providersFlag, "providers", nil, "readiness-aware providers to write to city.toml (repeatable or comma-separated)")
+	cmd.Flags().StringVar(&templateFlag, "template", "", "non-interactive template to write: minimal, gastown, or custom")
 	cmd.Flags().StringVar(&bootstrapProfileFlag, "bootstrap-profile", "", "bootstrap profile to apply for hosted/container defaults")
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
+	cmd.Flags().BoolVar(&assumeYesForSupervisorCycle, "yes", false, "bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail)")
 	cmd.MarkFlagsMutuallyExclusive("file", "from")
 	cmd.MarkFlagsMutuallyExclusive("provider", "file")
 	cmd.MarkFlagsMutuallyExclusive("provider", "from")
+	cmd.MarkFlagsMutuallyExclusive("default-provider", "file")
+	cmd.MarkFlagsMutuallyExclusive("default-provider", "from")
+	cmd.MarkFlagsMutuallyExclusive("providers", "file")
+	cmd.MarkFlagsMutuallyExclusive("providers", "from")
+	cmd.MarkFlagsMutuallyExclusive("template", "file")
+	cmd.MarkFlagsMutuallyExclusive("template", "from")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "file")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "from")
+	_ = cmd.Flags().MarkHidden("provider")
 	return cmd
+}
+
+type initJSONResult struct {
+	SchemaVersion    string   `json:"schema_version"`
+	OK               bool     `json:"ok"`
+	CityPath         string   `json:"city_path"`
+	CityName         string   `json:"city_name"`
+	Mode             string   `json:"mode"`
+	Template         string   `json:"template,omitempty"`
+	Provider         string   `json:"provider,omitempty"`
+	DefaultProvider  string   `json:"default_provider,omitempty"`
+	Providers        []string `json:"providers,omitempty"`
+	BootstrapProfile string   `json:"bootstrap_profile,omitempty"`
+}
+
+func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, templateName, defaultProvider string, providers []string, bootstrapProfile, mode string, stdout io.Writer) error {
+	if code != 0 {
+		return exitForCode(code)
+	}
+	if !jsonOut {
+		return nil
+	}
+	cityPath, err := initTargetPath(args)
+	if err != nil {
+		return err
+	}
+	return writeCLIJSONLine(stdout, initJSONResult{
+		SchemaVersion:    "1",
+		OK:               true,
+		CityPath:         cityPath,
+		CityName:         resolveCityName(nameOverride, "", cityPath),
+		Mode:             mode,
+		Template:         strings.TrimSpace(templateName),
+		Provider:         strings.TrimSpace(defaultProvider),
+		DefaultProvider:  strings.TrimSpace(defaultProvider),
+		Providers:        append([]string(nil), providers...),
+		BootstrapProfile: strings.TrimSpace(bootstrapProfile),
+	})
+}
+
+func initTargetPath(args []string) (string, error) {
+	if len(args) > 0 {
+		return filepath.Abs(args[0])
+	}
+	return os.Getwd()
 }
 
 // cmdInit initializes a new city at the given path (or cwd if no path given).
@@ -294,6 +450,25 @@ func cmdInit(args []string, providerFlag, bootstrapProfileFlag string, stdout, s
 }
 
 func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool) int {
+	return cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
+}
+
+func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool) int {
+	var prepared wizardConfig
+	preparedSet := false
+	if providerFlag != "" || bootstrapProfileFlag != "" {
+		var err error
+		prepared, err = initWizardConfig(providerFlag, bootstrapProfileFlag)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		preparedSet = true
+	}
+	return cmdInitWithPreparedWizard(args, prepared, preparedSet, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, forceDefaultWizard)
+}
+
+func cmdInitWithPreparedWizard(args []string, prepared wizardConfig, preparedSet bool, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool) int {
 	var cityPath string
 	if len(args) > 0 {
 		var err error
@@ -315,18 +490,23 @@ func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameO
 	}
 	var wiz wizardConfig
 	switch {
-	case providerFlag != "" || bootstrapProfileFlag != "":
-		var err error
-		wiz, err = initWizardConfig(providerFlag, bootstrapProfileFlag)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+	case preparedSet:
+		wiz = prepared
+	case forceDefaultWizard:
+		wiz = defaultWizardConfig()
+	case isTerminalFunc(os.Stdin):
+		wiz = runWizard(os.Stdin, stdout)
+		if wiz.err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", wiz.err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-	case isTerminal(os.Stdin):
-		wiz = runWizard(os.Stdin, stdout)
 		maybePrintWizardProviderGuidance(wiz, stdout)
 	default:
 		wiz = defaultWizardConfig()
+	}
+	if err := preflightInitSelectedProviders(wiz, skipProviderReadiness); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	if code := doInit(fsys.OSFS{}, cityPath, wiz, nameOverride, stdout, stderr, preserveExisting); code != 0 {
 		return code
@@ -353,7 +533,7 @@ func resumeExistingInitIfPossible(fs fsys.FS, cityPath string, stdout, stderr io
 }
 
 func initWizardConfig(providerFlag, bootstrapProfileFlag string) (wizardConfig, error) {
-	provider, err := normalizeInitProvider(providerFlag)
+	defaultProvider, err := normalizeInitProvider(providerFlag)
 	if err != nil {
 		return wizardConfig{}, err
 	}
@@ -361,11 +541,83 @@ func initWizardConfig(providerFlag, bootstrapProfileFlag string) (wizardConfig, 
 	if err != nil {
 		return wizardConfig{}, err
 	}
+	providers := []string(nil)
+	if defaultProvider != "" {
+		providers = []string{defaultProvider}
+	}
 	return wizardConfig{
 		configName:       "minimal",
-		provider:         provider,
+		defaultProvider:  defaultProvider,
+		providers:        providers,
+		provider:         defaultProvider,
 		bootstrapProfile: bootstrapProfile,
 	}, nil
+}
+
+func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProviderFlag string, providersFlag []string, templateFlag, bootstrapProfileFlag string) (wizardConfig, string, error) {
+	legacyChanged := cmd.Flags().Changed("provider")
+	defaultChanged := cmd.Flags().Changed("default-provider")
+	providersChanged := cmd.Flags().Changed("providers")
+	templateChanged := cmd.Flags().Changed("template")
+	bootstrapChanged := strings.TrimSpace(bootstrapProfileFlag) != ""
+
+	if !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged {
+		return wizardConfig{}, "", nil
+	}
+	if legacyChanged && defaultChanged {
+		return wizardConfig{}, "", fmt.Errorf("--provider is deprecated; use --default-provider, not both")
+	}
+	if legacyChanged {
+		if strings.ContainsAny(providerFlag, ", \t\n") {
+			return wizardConfig{}, "", fmt.Errorf("--provider accepts one deprecated default provider; use --providers %s --default-provider <name>", strings.TrimSpace(providerFlag))
+		}
+		defaultProviderFlag = providerFlag
+		defaultChanged = true
+	}
+
+	template, err := normalizeInitTemplate(templateFlag, templateChanged)
+	if err != nil {
+		return wizardConfig{}, "", err
+	}
+	defaultProvider, err := normalizeInitProvider(defaultProviderFlag)
+	if err != nil {
+		return wizardConfig{}, "", err
+	}
+	providers, err := normalizeInitProviders(providersFlag)
+	if err != nil {
+		return wizardConfig{}, "", err
+	}
+	if defaultProvider != "" && len(providers) == 0 {
+		providers = []string{defaultProvider}
+	}
+	if len(providers) > 0 && defaultProvider == "" {
+		return wizardConfig{}, "", fmt.Errorf("--providers requires --default-provider")
+	}
+	if defaultProvider != "" && !stringInSlice(defaultProvider, providers) {
+		return wizardConfig{}, "", fmt.Errorf("--default-provider %q must be included in --providers", defaultProvider)
+	}
+	if template == "custom" && (legacyChanged || defaultChanged || providersChanged) {
+		return wizardConfig{}, "", fmt.Errorf("--template custom cannot be combined with provider flags")
+	}
+	if (template == "minimal" || template == "gastown") && defaultProvider == "" {
+		return wizardConfig{}, "", fmt.Errorf("--template %s requires --default-provider", template)
+	}
+
+	bootstrapProfile, err := normalizeBootstrapProfile(bootstrapProfileFlag)
+	if err != nil {
+		return wizardConfig{}, "", err
+	}
+	mode := "provider"
+	if templateChanged {
+		mode = "template"
+	}
+	return wizardConfig{
+		configName:       template,
+		defaultProvider:  defaultProvider,
+		providers:        providers,
+		provider:         defaultProvider,
+		bootstrapProfile: bootstrapProfile,
+	}, mode, nil
 }
 
 func normalizeInitProvider(provider string) (string, error) {
@@ -373,10 +625,86 @@ func normalizeInitProvider(provider string) (string, error) {
 	if provider == "" {
 		return "", nil
 	}
-	if _, ok := config.BuiltinProviders()[provider]; ok {
-		return provider, nil
+	for _, name := range api.ProviderReadinessNames() {
+		if provider == name {
+			return provider, nil
+		}
 	}
-	return "", fmt.Errorf("unknown provider %q (expected one of: %s)", provider, strings.Join(config.BuiltinProviderOrder(), ", "))
+	return "", fmt.Errorf("unknown provider %q (expected one of: %s)", provider, strings.Join(api.ProviderReadinessNames(), ", "))
+}
+
+func normalizeInitProviders(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	for _, value := range values {
+		for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' }) {
+			name, err := normalizeInitProvider(part)
+			if err != nil {
+				return nil, err
+			}
+			seen[name] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil, fmt.Errorf("--providers requires at least one provider")
+	}
+	var out []string
+	for _, name := range api.ProviderReadinessNames() {
+		if seen[name] {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
+func normalizeInitTemplate(template string, supplied bool) (string, error) {
+	template = strings.TrimSpace(template)
+	if template == "" {
+		return "minimal", nil
+	}
+	switch template {
+	case "minimal", "gastown", "custom":
+		return template, nil
+	default:
+		if supplied {
+			return "", fmt.Errorf("unknown template %q (expected one of: minimal, gastown, custom)", template)
+		}
+		return "minimal", nil
+	}
+}
+
+func stringInSlice(value string, items []string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+func preflightInitSelectedProviders(wiz wizardConfig, skip bool) error {
+	providers := wizardProviders(wiz)
+	if skip || len(providers) == 0 {
+		return nil
+	}
+	items, err := initProbeProvidersReadiness(context.Background(), providers, true)
+	if err != nil {
+		return fmt.Errorf("checking provider readiness: %w", err)
+	}
+	var blockers []string
+	for _, provider := range providers {
+		item, ok := items[provider]
+		if !ok || item.Status == api.ProbeStatusConfigured {
+			continue
+		}
+		blockers = append(blockers, fmt.Sprintf("%s: %s", item.DisplayName, providerStatusSummary(item.Status)))
+	}
+	if len(blockers) == 0 {
+		return nil
+	}
+	return fmt.Errorf("provider readiness preflight failed: %s", strings.Join(blockers, "; "))
 }
 
 func normalizeBootstrapProfile(profile string) (string, error) {
@@ -523,6 +851,21 @@ func isZeroValue(v any) bool {
 	return reflect.ValueOf(v).IsZero()
 }
 
+func withInitMailRetentionExample(content []byte) []byte {
+	text := string(content)
+	if strings.Contains(text, "retention_ttl") {
+		return content
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	if !strings.HasSuffix(text, "\n\n") {
+		text += "\n"
+	}
+	text += initMailRetentionExample
+	return []byte(text)
+}
+
 func newInitPackConfig(cityName string) initPackConfig {
 	return initPackConfig{
 		Pack: initPackMeta{
@@ -535,11 +878,12 @@ func newInitPackConfig(cityName string) initPackConfig {
 // splitInitConfig separates a composed init template City into its
 // portable pack-first shape and the machine-local city runtime shape:
 //
-//   - pack.toml owns the portable definition: [pack], [[agent]],
-//     [[named_session]], [imports.*], [providers.*], agent/service
-//     patches, formulas, and agent_defaults.
+//   - pack.toml owns the portable definition: [pack], explicit [[agent]]
+//     entries when the caller keeps them, [[named_session]], [imports.*],
+//     [providers.*], services, and agent patches.
 //   - city.toml keeps only runtime-local deployment settings (e.g.
-//     workspace.provider, workspace.start_command, api, daemon, beads).
+//     workspace.provider, workspace.start_command, agent_defaults,
+//     default-rig imports, rig/provider patches, api, daemon, beads).
 //   - workspace.name and workspace.prefix migrate to .gc/site.toml via
 //     persistInitWorkspaceIdentity, so they are cleared here to avoid
 //     duplicating the city's machine-local identity in city.toml.
@@ -553,12 +897,14 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 	cityCfg.Agents = nil
 	cityCfg.NamedSessions = nil
 	cityCfg.Imports = nil
-	cityCfg.Providers = nil
 	cityCfg.Services = nil
 	cityCfg.Formulas = config.FormulasConfig{}
-	cityCfg.Patches = config.Patches{}
-	cityCfg.AgentDefaults = config.AgentDefaults{}
+	cityCfg.Patches = config.Patches{
+		Rigs:      append([]config.RigPatch(nil), cfg.Patches.Rigs...),
+		Providers: append([]config.ProviderPatch(nil), cfg.Patches.Providers...),
+	}
 	cityCfg.AgentsDefaults = config.AgentDefaults{}
+	cityCfg.Defaults = config.PackDefaults{}
 	cityCfg.Workspace.Name = ""
 	cityCfg.Workspace.Prefix = ""
 
@@ -570,18 +916,9 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 			packCfg.Imports[name] = imp
 		}
 	}
-	if len(cfg.Providers) > 0 {
-		packCfg.Providers = make(map[string]config.ProviderSpec, len(cfg.Providers))
-		for name, spec := range cfg.Providers {
-			packCfg.Providers[name] = spec
-		}
+	packCfg.Patches = config.Patches{
+		Agents: append([]config.AgentPatch(nil), cfg.Patches.Agents...),
 	}
-	packCfg.AgentDefaults = cfg.AgentDefaults
-	if isZeroValue(packCfg.AgentDefaults) && !isZeroValue(cfg.AgentsDefaults) {
-		packCfg.AgentDefaults = cfg.AgentsDefaults
-	}
-	packCfg.Formulas = cfg.Formulas
-	packCfg.Patches = cfg.Patches
 	for _, svc := range cfg.Services {
 		if svc.PublishMode == "direct" {
 			cityCfg.Services = append(cityCfg.Services, svc)
@@ -590,26 +927,37 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 		packCfg.Services = append(packCfg.Services, svc)
 	}
 
-	if len(cfg.Workspace.Includes) > 0 {
+	if len(cfg.Workspace.LegacyIncludes()) > 0 {
 		packCfg.Pack.Includes = appendUniqueStrings(
 			append([]string(nil), packCfg.Pack.Includes...),
-			cfg.Workspace.Includes...,
+			cfg.Workspace.LegacyIncludes()...,
 		)
-		cityCfg.Workspace.Includes = nil
+		cityCfg.Workspace.SetLegacyIncludes(nil)
 	}
-	if len(cfg.DefaultRigImports) > 0 {
-		defaults := packDefaults{
-			Rig: packRigDefaults{
-				Imports: make(map[string]config.Import, len(cfg.DefaultRigImports)),
+	defaultRigImports := initDefaultRigImports(cfg)
+	if len(defaultRigImports) > 0 {
+		defaults := config.PackDefaults{
+			Rig: config.PackRigDefaults{
+				Imports: make(map[string]config.Import, len(defaultRigImports)),
 			},
 		}
-		for name, imp := range cfg.DefaultRigImports {
+		for name, imp := range defaultRigImports {
 			defaults.Rig.Imports[name] = imp
 		}
-		packCfg.Defaults = defaults
-		cityCfg.Workspace.DefaultRigIncludes = nil
+		cityCfg.Defaults = defaults
+		cityCfg.Workspace.SetLegacyDefaultRigIncludes(nil)
 	}
 	return packCfg, cityCfg
+}
+
+func initDefaultRigImports(cfg *config.City) map[string]config.Import {
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.Defaults.Rig.Imports) > 0 {
+		return cfg.Defaults.Rig.Imports
+	}
+	return cfg.DefaultRigImports
 }
 
 func decodeInitPackTemplate(data []byte, cityName string) (initPackConfig, error) {
@@ -695,6 +1043,10 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if cfg.Formulas.Dir != "" {
+		fmt.Fprintln(stderr, "gc init: [formulas].dir is no longer supported; use the well-known formulas/ directory") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// --file creates a new city from a template; default to target dir name.
 	cityName := resolveCityName(nameOverride, "", cityPath)
@@ -742,6 +1094,13 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 	rewriteInitPromptTemplates(cfg)
 	packCfg, cityCfg := splitInitConfig(cityName, cfg)
 	applyInitPackTemplateExtras(&packCfg, templatePack)
+	var rigSiteBindings []config.Rig
+	if hasInitRigSiteBindings(cityCfg.Rigs) {
+		rigSiteBindings = append([]config.Rig(nil), cityCfg.Rigs...)
+		for i := range cityCfg.Rigs {
+			cityCfg.Rigs[i].Path = ""
+		}
+	}
 	wrotePack, err := writeInitPackTomlOpts(fs, cityPath, packCfg, preserveExisting)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -756,24 +1115,46 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
 	}
 
-	// Re-marshal so the name and rewritten prompt paths are updated.
-	content, err := cityCfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
 	// Write city.toml — preserved if --preserve-existing is set and a
 	// committed city.toml is already in place. Persist the workspace identity
 	// regardless so .gc/site.toml agrees with the preserved or newly-written
 	// config.
-	wroteCity, err := writeInitFile(fs, filepath.Join(cityPath, "city.toml"), content, preserveExisting)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if !wroteCity {
-		fmt.Fprintln(stdout, "Preserved existing city.toml.") //nolint:errcheck // best-effort stdout
+	cityTomlPath := filepath.Join(cityPath, "city.toml")
+	if len(rigSiteBindings) > 0 {
+		wroteCity := true
+		if preserveExisting {
+			if _, err := fs.Stat(cityTomlPath); err == nil {
+				wroteCity = false
+			} else if !os.IsNotExist(err) {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		}
+		if wroteCity {
+			writeCfg := cityCfg
+			writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
+			if err := config.WriteCityAndRigSiteBindingsForEdit(fs, cityTomlPath, &writeCfg); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", initSiteBindingPersistError(err)) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		} else {
+			fmt.Fprintln(stdout, "Preserved existing city.toml.") //nolint:errcheck // best-effort stdout
+		}
+	} else {
+		// Re-marshal so the name and rewritten prompt paths are updated.
+		content, err := cityCfg.Marshal()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		wroteCity, err := writeInitFile(fs, cityTomlPath, content, preserveExisting)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if !wroteCity {
+			fmt.Fprintln(stdout, "Preserved existing city.toml.") //nolint:errcheck // best-effort stdout
+		}
 	}
 	if err := persistInitWorkspaceIdentity(fs, cityPath, filepath.Join(cityPath, "city.toml"), &cityCfg, cityName, cityPrefix); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -798,6 +1179,15 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		skipProviderReadiness: skipProviderReadiness,
 		commandName:           "gc init",
 	})
+}
+
+func hasInitRigSiteBindings(rigs []config.Rig) bool {
+	for _, rig := range rigs {
+		if strings.TrimSpace(rig.Path) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // doInit is the pure logic for "gc init". It creates the city directory
@@ -853,13 +1243,17 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// chosen city template actually declares.
 	cityName := resolveCityName(nameOverride, "", cityPath)
 	var cfg config.City
+	defaultProvider := wizardDefaultProvider(wiz)
+	providers := wizardProviders(wiz)
 	switch {
 	case wiz.configName == "custom":
-		cfg = config.DefaultCity(cityName)
+		cfg = config.EmptyCity(cityName)
 	case wiz.configName == "gastown":
-		cfg = config.GastownCity(cityName, wiz.provider, wiz.startCommand)
-	case wiz.provider != "" || wiz.startCommand != "":
-		cfg = config.WizardCity(cityName, wiz.provider, wiz.startCommand)
+		cfg = config.GastownCityWithProviders(cityName, defaultProvider, providers)
+	case defaultProvider != "" || len(providers) > 0:
+		cfg = config.WizardCityWithProviders(cityName, defaultProvider, providers)
+	case wiz.startCommand != "":
+		cfg = config.WizardCity(cityName, "", wiz.startCommand)
 	default:
 		cfg = config.DefaultCity(cityName)
 	}
@@ -881,15 +1275,21 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// --provider path gets the same city shape non-interactively;
 	// custom path gets one mayor + no provider (user configures manually).
 	// Rewrite legacy prompt paths on the composed config before splitting so
-	// the pack-owned [[agent]] entries pick up the V2 agents/<name>/
+	// any explicit template agents point at the V2 agents/<name>/
 	// prompt.template.md paths we actually scaffold.
 	rewriteInitPromptTemplates(&cfg)
 	packCfg, cityCfg := splitInitConfig(cityName, &cfg)
+	// Fresh built-in init scaffolds its default agents by convention under
+	// agents/<name>/ instead of re-emitting inline [[agent]] entries into
+	// pack.toml. The built-in templates currently only need the prompt
+	// scaffold plus the pack-owned named session.
+	packCfg.Agents = nil
 	content, err := cityCfg.Marshal()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	content = withInitMailRetentionExample(content)
 	logInitProgress(stdout, 4, "Writing pack.toml")
 	wrotePack, err := writeInitPackTomlOpts(fs, cityPath, packCfg, preserveExisting)
 	if err != nil {
@@ -928,14 +1328,31 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	switch {
 	case wiz.interactive:
 		fmt.Fprintf(stdout, "Created %s config (Level 1) in %q.\n", wiz.configName, cityName) //nolint:errcheck // best-effort stdout
-	case wiz.provider != "":
-		fmt.Fprintln(stdout, "Welcome to Gas City!")                                                   //nolint:errcheck // best-effort stdout
-		fmt.Fprintf(stdout, "Initialized city %q with default provider %q.\n", cityName, wiz.provider) //nolint:errcheck // best-effort stdout
+	case defaultProvider != "":
+		fmt.Fprintln(stdout, "Welcome to Gas City!")                                                      //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "Initialized city %q with default provider %q.\n", cityName, defaultProvider) //nolint:errcheck // best-effort stdout
 	default:
 		fmt.Fprintln(stdout, "Welcome to Gas City!")                                     //nolint:errcheck // best-effort stdout
 		fmt.Fprintf(stdout, "Initialized city %q with default mayor agent.\n", cityName) //nolint:errcheck // best-effort stdout
 	}
 	return 0
+}
+
+func wizardDefaultProvider(wiz wizardConfig) string {
+	if strings.TrimSpace(wiz.defaultProvider) != "" {
+		return strings.TrimSpace(wiz.defaultProvider)
+	}
+	return strings.TrimSpace(wiz.provider)
+}
+
+func wizardProviders(wiz wizardConfig) []string {
+	if len(wiz.providers) > 0 {
+		return append([]string(nil), wiz.providers...)
+	}
+	if provider := wizardDefaultProvider(wiz); provider != "" {
+		return []string{provider}
+	}
+	return nil
 }
 
 func applyBootstrapProfile(cfg *config.City, profile string) {
@@ -1301,18 +1718,37 @@ func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*
 	}
 	cfg.Workspace.Name = ""
 	cfg.Workspace.Prefix = ""
-
-	content, err := cfg.Marshal()
-	if err != nil {
-		return nil, "", "", false, err
+	var rigSiteBindings []config.Rig
+	if hasInitRigSiteBindings(cfg.Rigs) {
+		rigSiteBindings = append([]config.Rig(nil), cfg.Rigs...)
+		for i := range cfg.Rigs {
+			cfg.Rigs[i].Path = ""
+		}
 	}
-	if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
-		return nil, "", "", false, err
+
+	if len(rigSiteBindings) > 0 {
+		writeCfg := *cfg
+		writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
+		if err := config.WriteCityAndRigSiteBindingsForEdit(fs, copiedToml, &writeCfg); err != nil {
+			return nil, "", "", false, initSiteBindingPersistError(err)
+		}
+	} else {
+		content, err := cfg.Marshal()
+		if err != nil {
+			return nil, "", "", false, err
+		}
+		if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
+			return nil, "", "", false, err
+		}
 	}
 	if err := rewriteCopiedInitPackName(fs, cityPath, cityName); err != nil {
 		return nil, "", "", false, err
 	}
 	return cfg, cityName, cityPrefix, true, nil
+}
+
+func initSiteBindingPersistError(err error) error {
+	return fmt.Errorf("writing .gc/site.toml failed while migrating rig paths; city.toml was restored, fix the site binding write error and retry: %w", err)
 }
 
 func rewriteCopiedInitPackName(fs fsys.FS, cityPath, cityName string) error {

@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -120,6 +121,44 @@ func TestMultiplexerListAllOrdersEqualTimestampsDeterministically(t *testing.T) 
 	}
 }
 
+func TestMultiplexerListAllDoesNotWaitForSlowProvider(t *testing.T) {
+	m := NewMultiplexer()
+	m.providerTimeout = 20 * time.Millisecond
+
+	healthy := NewFake()
+	healthy.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "healthy", Ts: time.Unix(1, 0)})
+	slow := newBlockingProvider()
+	defer slow.release()
+
+	m.Add("healthy", healthy)
+	m.Add("slow", slow)
+
+	result := make(chan struct {
+		evts []TaggedEvent
+		err  error
+	}, 1)
+	go func() {
+		evts, err := m.ListAll(Filter{})
+		result <- struct {
+			evts []TaggedEvent
+			err  error
+		}{evts: evts, err: err}
+	}()
+
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("ListAll() error = %v", got.err)
+		}
+		if len(got.evts) != 1 || got.evts[0].City != "healthy" || got.evts[0].Subject != "healthy" {
+			t.Fatalf("ListAll() = %+v, want only healthy provider event", got.evts)
+		}
+	case <-time.After(200 * time.Millisecond):
+		slow.release()
+		t.Fatal("ListAll() waited for the slow provider")
+	}
+}
+
 func TestMultiplexerListTailLimitsAcrossCities(t *testing.T) {
 	m := NewMultiplexer()
 
@@ -180,6 +219,45 @@ func TestMultiplexerListTailOrdersEqualTimestampsDeterministically(t *testing.T)
 		if got[i] != want[i] {
 			t.Fatalf("events = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestMultiplexerListTailDoesNotWaitForSlowProvider(t *testing.T) {
+	m := NewMultiplexer()
+	m.providerTimeout = 20 * time.Millisecond
+
+	healthy := NewFake()
+	healthy.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "old", Ts: time.Unix(1, 0)})
+	healthy.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "new", Ts: time.Unix(2, 0)})
+	slow := newBlockingProvider()
+	defer slow.release()
+
+	m.Add("healthy", healthy)
+	m.Add("slow", slow)
+
+	result := make(chan struct {
+		evts []TaggedEvent
+		err  error
+	}, 1)
+	go func() {
+		evts, err := m.ListTail(Filter{}, 1)
+		result <- struct {
+			evts []TaggedEvent
+			err  error
+		}{evts: evts, err: err}
+	}()
+
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("ListTail() error = %v", got.err)
+		}
+		if len(got.evts) != 1 || got.evts[0].City != "healthy" || got.evts[0].Subject != "new" {
+			t.Fatalf("ListTail() = %+v, want only healthy provider tail event", got.evts)
+		}
+	case <-time.After(200 * time.Millisecond):
+		slow.release()
+		t.Fatal("ListTail() waited for the slow provider")
 	}
 }
 
@@ -288,6 +366,44 @@ func TestMultiplexerLatestCursorSkipsBrokenProviders(t *testing.T) {
 	}
 }
 
+func TestMultiplexerLatestCursorDoesNotWaitForSlowProvider(t *testing.T) {
+	m := NewMultiplexer()
+	m.providerTimeout = 20 * time.Millisecond
+
+	healthy := NewFake()
+	healthy.Record(Event{Type: SessionWoke, Actor: "a1"})
+	slow := newBlockingProvider()
+	defer slow.release()
+
+	m.Add("healthy", healthy)
+	m.Add("slow", slow)
+
+	result := make(chan struct {
+		cursors map[string]uint64
+		err     error
+	}, 1)
+	go func() {
+		cursors, err := m.LatestCursor()
+		result <- struct {
+			cursors map[string]uint64
+			err     error
+		}{cursors: cursors, err: err}
+	}()
+
+	select {
+	case got := <-result:
+		if got.err == nil {
+			t.Fatal("LatestCursor() error = nil, want slow provider timeout error")
+		}
+		if len(got.cursors) != 1 || got.cursors["healthy"] != 1 {
+			t.Fatalf("LatestCursor() cursors = %v, want healthy:1", got.cursors)
+		}
+	case <-time.After(200 * time.Millisecond):
+		slow.release()
+		t.Fatal("LatestCursor() waited for the slow provider")
+	}
+}
+
 func TestMultiplexerWatch(t *testing.T) {
 	m := NewMultiplexer()
 
@@ -320,6 +436,56 @@ func TestMultiplexerWatch(t *testing.T) {
 	}
 	if !got["city-a"] || !got["city-b"] {
 		t.Errorf("missing cities: %v", got)
+	}
+}
+
+func TestMultiplexerWatchDoesNotWaitForSlowProvider(t *testing.T) {
+	m := NewMultiplexer()
+	m.providerTimeout = 20 * time.Millisecond
+
+	healthy := NewFake()
+	slow := newBlockingProvider()
+	defer slow.release()
+
+	m.Add("healthy", healthy)
+	m.Add("slow", slow)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	result := make(chan struct {
+		w   *MuxWatcher
+		err error
+	}, 1)
+	go func() {
+		w, err := m.Watch(ctx, nil)
+		result <- struct {
+			w   *MuxWatcher
+			err error
+		}{w: w, err: err}
+	}()
+
+	var w *MuxWatcher
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("Watch() error = %v", got.err)
+		}
+		w = got.w
+	case <-time.After(200 * time.Millisecond):
+		slow.release()
+		cancel()
+		t.Fatal("Watch() waited for the slow provider")
+	}
+	defer w.Close() //nolint:errcheck
+
+	healthy.Record(Event{Type: SessionWoke, Actor: "a1"})
+	te, err := w.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if te.City != "healthy" || te.Actor != "a1" {
+		t.Fatalf("Next() = %+v, want healthy provider event", te)
 	}
 }
 
@@ -468,4 +634,48 @@ func (p *providerWithoutTail) Watch(ctx context.Context, afterSeq uint64) (Watch
 
 func (p *providerWithoutTail) Close() error {
 	return p.fake.Close()
+}
+
+type blockingProvider struct {
+	unblock chan struct{}
+	once    sync.Once
+}
+
+func newBlockingProvider() *blockingProvider {
+	return &blockingProvider{unblock: make(chan struct{})}
+}
+
+func (p *blockingProvider) release() {
+	p.once.Do(func() { close(p.unblock) })
+}
+
+func (p *blockingProvider) Record(Event) {}
+
+func (p *blockingProvider) List(Filter) ([]Event, error) {
+	<-p.unblock
+	return nil, context.Canceled
+}
+
+func (p *blockingProvider) ListTail(Filter, int) ([]Event, error) {
+	<-p.unblock
+	return nil, context.Canceled
+}
+
+func (p *blockingProvider) LatestSeq() (uint64, error) {
+	<-p.unblock
+	return 0, context.Canceled
+}
+
+func (p *blockingProvider) Watch(ctx context.Context, _ uint64) (Watcher, error) {
+	select {
+	case <-p.unblock:
+		return nil, context.Canceled
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (p *blockingProvider) Close() error {
+	p.release()
+	return nil
 }

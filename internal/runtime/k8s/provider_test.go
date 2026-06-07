@@ -549,7 +549,8 @@ func TestStartCreatesPodsAndWaits(t *testing.T) {
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
 	cfg := runtime.Config{
-		Command: "claude --settings .gc/settings.json",
+		Command:      "claude --settings .gc/settings.json",
+		ProcessNames: []string{"claude"},
 		Env: map[string]string{
 			"GC_AGENT": "mayor",
 			"GC_CITY":  "/workspace",
@@ -597,7 +598,8 @@ func TestStartDetectsStalePod(t *testing.T) {
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
 	cfg := runtime.Config{
-		Command: "claude",
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
 		Env: map[string]string{
 			"GC_AGENT": "mayor",
 			"GC_CITY":  "/workspace",
@@ -630,8 +632,9 @@ func TestStartRejectsExistingLiveSession(t *testing.T) {
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
 	cfg := runtime.Config{
-		Command: "claude",
-		Env:     map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
+		Env:          map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
 	}
 	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err == nil {
@@ -661,8 +664,9 @@ func TestStartTreatsYoungPodWithDeadTmuxAsInitializing(t *testing.T) {
 		fmt.Errorf("no server running on /tmp/tmux-1000/default"))
 
 	cfg := runtime.Config{
-		Command: "claude",
-		Env:     map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
+		Env:          map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
 	}
 	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err == nil {
@@ -703,7 +707,8 @@ func TestStartDeletesOldPodWithDeadTmux(t *testing.T) {
 	fake.createErr = fmt.Errorf("intentional: verify deletion only")
 
 	cfg := runtime.Config{
-		Command: "claude",
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
 		Env: map[string]string{
 			"GC_AGENT": "mayor",
 			"GC_CITY":  "/workspace",
@@ -1697,8 +1702,9 @@ func TestStartDetectsImmediateSessionDeath(t *testing.T) {
 	}
 
 	cfg := runtime.Config{
-		Command: "claude --resume stale-key",
-		Env:     map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+		Command:      "claude --resume stale-key",
+		Env:          map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+		ProcessNames: []string{"claude"},
 	}
 	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err == nil {
@@ -1714,6 +1720,130 @@ func TestStartDetectsImmediateSessionDeath(t *testing.T) {
 	}
 }
 
+func TestStartAllowsOneShotLifecycleCommands(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "direct agent script",
+			command: "gc agent-script --script /workspace/rig/assets/scripts/hyperscale-worker.yaml",
+		},
+		{
+			name:    "wrapped one shot",
+			command: "env GC_LOG_LEVEL=debug custom-once --work",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeK8sOps()
+			p := newProviderWithOps(fake)
+			p.postStartSettle = 100 * time.Millisecond
+
+			hasSessionCalls := 0
+			fake.execFunc = func(_ string, cmd []string) (string, error) {
+				if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+					hasSessionCalls++
+					if hasSessionCalls == 1 {
+						return "", nil
+					}
+					return "", fmt.Errorf("no server running on /tmp/tmux-1000/default")
+				}
+				return "", nil
+			}
+
+			cfg := runtime.Config{
+				Command:   tt.command,
+				Env:       map[string]string{"GC_AGENT": "hyperscale/worker", "GC_CITY": "/workspace"},
+				Lifecycle: runtime.LifecycleOneShot,
+				Nudge:     "Check your hook for work.",
+			}
+
+			started := time.Now()
+			err := p.Start(context.Background(), "gc-test-agent", cfg)
+			if err != nil {
+				t.Fatalf("Start should allow one-shot lifecycle command: %v", err)
+			}
+			if elapsed := time.Since(started); elapsed >= p.postStartSettle {
+				t.Fatalf("Start returned after %v, want before settle duration %v", elapsed, p.postStartSettle)
+			}
+			if hasSessionCalls != 1 {
+				t.Fatalf("tmux has-session calls = %d, want only waitForTmux check", hasSessionCalls)
+			}
+			if _, exists := fake.pods["gc-test-agent"]; !exists {
+				t.Fatal("pod should remain for normal session reconciliation after one-shot command")
+			}
+		})
+	}
+}
+
+func TestStartChecksLivenessForScriptCommandWithoutOneShotLifecycle(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	hasSessionCalls := 0
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+			hasSessionCalls++
+			if hasSessionCalls == 1 {
+				return "", nil
+			}
+			return "", fmt.Errorf("no server running on /tmp/tmux-1000/default")
+		}
+		return "", nil
+	}
+
+	cfg := runtime.Config{
+		Command: "gc agent-script --script /workspace/rig/assets/scripts/hyperscale-worker.yaml",
+		Env:     map[string]string{"GC_AGENT": "hyperscale/worker", "GC_CITY": "/workspace"},
+		Nudge:   "Check your hook for work.",
+	}
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("Start error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	if hasSessionCalls != 2 {
+		t.Fatalf("tmux has-session calls = %d, want waitForTmux and post-start liveness checks", hasSessionCalls)
+	}
+}
+
+func TestStartChecksLivenessForCustomCommandWithSetupAndNudgeHints(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	// tmux has-session succeeds during waitForTmux, then fails on post-start check.
+	hasSessionCalls := 0
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+			hasSessionCalls++
+			if hasSessionCalls == 1 {
+				return "", nil
+			}
+			return "", fmt.Errorf("no server running on /tmp/tmux-1000/default")
+		}
+		return "", nil
+	}
+
+	cfg := runtime.Config{
+		Command:      "custom-agent --interactive",
+		Env:          map[string]string{"GC_AGENT": "custom/worker", "GC_CITY": "/workspace"},
+		SessionSetup: []string{"printf setup-ready >/tmp/agent-ready"},
+		Nudge:        "Check your hook for work.",
+	}
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("Start error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	if hasSessionCalls != 2 {
+		t.Fatalf("tmux has-session calls = %d, want waitForTmux and post-start liveness checks", hasSessionCalls)
+	}
+	if _, exists := fake.pods["gc-test-agent"]; exists {
+		t.Error("pod should have been deleted after immediate session death")
+	}
+}
+
 func TestStartSucceedsWhenSessionStaysAlive(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
@@ -1724,8 +1854,9 @@ func TestStartSucceedsWhenSessionStaysAlive(t *testing.T) {
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
 	cfg := runtime.Config{
-		Command: "claude --session-id fresh-key",
-		Env:     map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+		Command:      "claude --session-id fresh-key",
+		Env:          map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+		ProcessNames: []string{"claude"},
 	}
 	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err != nil {
@@ -1753,8 +1884,9 @@ func TestStartHonorsCancellationDuringPostStartSettle(t *testing.T) {
 	}()
 
 	cfg := runtime.Config{
-		Command: "claude --session-id fresh-key",
-		Env:     map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+		Command:      "claude --session-id fresh-key",
+		Env:          map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+		ProcessNames: []string{"claude"},
 	}
 
 	started := time.Now()

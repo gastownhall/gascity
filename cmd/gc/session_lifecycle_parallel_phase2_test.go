@@ -15,6 +15,15 @@ import (
 func TestPhase2InitialInputDelivery(t *testing.T) {
 	reporter := newPhase2Reporter(t, "phase2-input-delivery")
 
+	// The resume cases below model a legitimate resume (the keyed transcript is
+	// present on disk). Stub the stale-resume probe to report "present" so the
+	// pre-flight guard does not reclassify these resumes as fresh starts; the
+	// guard's missing-transcript behavior is covered by TestStaleResumeKeyProbe
+	// and the transcript layer's TestHasKeyedTranscript.
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
 	for _, tc := range selectedPhase2ProviderCases(t) {
 		tc := tc
 		t.Run(string(tc.profileID), func(t *testing.T) {
@@ -41,6 +50,22 @@ func TestPhase2InitialInputDelivery(t *testing.T) {
 				})
 
 				reporter.Require(t, inputOverrideDefaultsResult(tc, prepared))
+			})
+
+			t.Run(string(workertest.RequirementInputInProgressResumeRestart), func(t *testing.T) {
+				prepared := preparePhase2ResumeRestartStart(t, tc, map[string]string{
+					"initial_message": "Do the first task.",
+				}, true)
+
+				reporter.Require(t, inProgressResumeRestartResult(tc, prepared))
+			})
+
+			t.Run(string(workertest.RequirementInputPreClaimResumeRestart), func(t *testing.T) {
+				prepared := preparePhase2ResumeRestartStart(t, tc, map[string]string{
+					"initial_message": "Do the first task.",
+				}, false)
+
+				reporter.Require(t, preClaimResumeRestartResult(tc, prepared))
 			})
 		})
 	}
@@ -155,6 +180,58 @@ func preparePhase2Start(t *testing.T, tc phase2ProviderCase, startedConfigHash s
 	prepared, err := prepareStartCandidate(startCandidate{
 		session: &session,
 		tp:      phase2TemplateParams(t, tc, "Base worker prompt"),
+	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate(%s): %v", tc.profileID, err)
+	}
+	return prepared
+}
+
+func preparePhase2ResumeRestartStart(t *testing.T, tc phase2ProviderCase, overrides map[string]string, assignedWork bool) *preparedStart {
+	t.Helper()
+
+	rawOverrides, err := json.Marshal(overrides)
+	if err != nil {
+		t.Fatalf("json.Marshal(overrides): %v", err)
+	}
+
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "phase2-" + tc.family,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "phase2-" + tc.family,
+			"template":            "worker",
+			"template_overrides":  string(rawOverrides),
+			"started_config_hash": "already-started",
+			"session_key":         "phase2-resume-key",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	if assignedWork {
+		work, err := store.Create(beads.Bead{
+			Title: "phase2 in-progress work",
+			Type:  "task",
+		})
+		if err != nil {
+			t.Fatalf("Create work bead: %v", err)
+		}
+		status := "in_progress"
+		assignee := session.ID
+		if err := store.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+			t.Fatalf("assign work bead: %v", err)
+		}
+	}
+
+	tp := phase2TemplateParams(t, tc, "Base worker prompt")
+	tp.Hints.Nudge = ""
+	prepared, err := prepareStartCandidate(startCandidate{
+		session: &session,
+		tp:      tp,
 	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatalf("prepareStartCandidate(%s): %v", tc.profileID, err)

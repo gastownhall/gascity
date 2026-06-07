@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +24,7 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/worker"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 const (
@@ -33,12 +36,14 @@ const (
 	// derived from the wake budget used for starts.
 	defaultMaxParallelStopsPerWave = 3
 	defaultMaxParallelInterrupts   = 16
-
-	// staleKeyDetectDelay is how long to wait after starting a session
-	// before checking if it died immediately (stale resume key detection).
-	// Matches the same constant in internal/session/chat.go.
-	staleKeyDetectDelay = 2 * time.Second
 )
+
+// staleKeyDetectDelay is how long to wait after starting a session before
+// checking if it died immediately (stale resume key detection). Matches the
+// same value in internal/session/chat.go. Made a var so tests driving the
+// start path through a fake runtime can shorten it via
+// setStaleKeyDetectDelayForTest (defined in the test file).
+var staleKeyDetectDelay = 2 * time.Second
 
 type asyncStartLimiter struct {
 	mu       sync.Mutex
@@ -145,6 +150,32 @@ func (c startCandidate) name() string {
 	return c.session.Metadata["session_name"]
 }
 
+// wakeFairnessTime is the ordering key for the per-tick wake budget: the time the
+// session was last woken (last_woke_at), falling back to its creation time so a
+// brand-new session does not jump ahead of one that has been waiting for a slot.
+// Oldest sorts first so the longest-waiting candidates spend the budget first.
+func wakeFairnessTime(c startCandidate) time.Time {
+	if c.session != nil && c.session.Metadata != nil {
+		if t, err := time.Parse(time.RFC3339, c.session.Metadata["last_woke_at"]); err == nil {
+			return t
+		}
+	}
+	if c.session != nil && !c.session.CreatedAt.IsZero() {
+		return c.session.CreatedAt
+	}
+	return time.Time{}
+}
+
+// sortCandidatesByWakeFairness orders candidates least-recently-woken first so a
+// budget-limited tick rotates wakes across sessions instead of always deferring
+// the same back-of-order sessions. Stable on the original order for ties. Callers
+// must only sort within a dependency wave (every candidate's deps are satisfied).
+func sortCandidatesByWakeFairness(candidates []startCandidate) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return wakeFairnessTime(candidates[i]).Before(wakeFairnessTime(candidates[j]))
+	})
+}
+
 func (c startCandidate) logicalTemplate(cfg *config.City) string {
 	if c.tp.TemplateName != "" {
 		return c.tp.TemplateName
@@ -156,7 +187,7 @@ type preparedStart struct {
 	candidate     startCandidate
 	cfg           runtime.Config
 	coreHash      string
-	coreBreakdown map[string]string
+	coreBreakdown runtime.BreakdownV1
 	liveHash      string
 }
 
@@ -180,6 +211,7 @@ type startResult struct {
 // session_key is set, CommitRefresh only on the async path).
 type startPhaseTimings struct {
 	StartCall         time.Duration // startPreparedStartCandidate total (provider Start + any ErrStateSync recovery)
+	ZombieRecycle     time.Duration // provider Stop of a running session whose agent process died (subset of StartCall; ga-yms)
 	StateSyncRecovery time.Duration // workerSessionTargetRunningWithConfig branch when provider Start returned ErrStateSync (subset of StartCall; gc-9ha)
 	PostStartObserve  time.Duration // staleKeyDetectDelay + workerObserveSessionTarget when session_key present
 	CommitRefresh     time.Duration // refreshAsyncStartResult bead reload (async path only)
@@ -196,12 +228,15 @@ type startPhaseTimings struct {
 // 0.5ms doesn't print as "...=0s" (which would be misleading and
 // defeat the elision intent). Sub-ms durations are dropped entirely.
 func (p startPhaseTimings) formatLog() string {
-	if p.StartCall == 0 && p.StateSyncRecovery == 0 && p.PostStartObserve == 0 && p.CommitRefresh == 0 {
+	if p.StartCall == 0 && p.ZombieRecycle == 0 && p.StateSyncRecovery == 0 && p.PostStartObserve == 0 && p.CommitRefresh == 0 {
 		return ""
 	}
 	var parts []string
 	if r := p.StartCall.Round(time.Millisecond); r > 0 {
 		parts = append(parts, fmt.Sprintf("start_call=%s", r))
+	}
+	if r := p.ZombieRecycle.Round(time.Millisecond); r > 0 {
+		parts = append(parts, fmt.Sprintf("zombie_recycle=%s", r))
 	}
 	if r := p.StateSyncRecovery.Round(time.Millisecond); r > 0 {
 		parts = append(parts, fmt.Sprintf("state_sync_recovery=%s", r))
@@ -219,14 +254,18 @@ func (p startPhaseTimings) formatLog() string {
 }
 
 type startExecutionOptions struct {
-	async           bool
-	asyncFollowUp   func()
-	asyncLimiter    *asyncStartLimiter
-	asyncTracker    *asyncStartTracker
-	maxSessionAgeTr maxSessionAgeTracker
+	async            bool
+	asyncFollowUp    func()
+	asyncLimiter     *asyncStartLimiter
+	asyncTracker     *asyncStartTracker
+	asyncStopTracker *asyncStartTracker
+	maxSessionAgeTr  maxSessionAgeTracker
+	workDirResolver  taskWorkDirResolver
 }
 
 type startExecutionOption func(*startExecutionOptions)
+
+type taskWorkDirResolver func(startCandidate, *config.City) string
 
 func withAsyncStartExecution() startExecutionOption {
 	return func(opts *startExecutionOptions) {
@@ -252,6 +291,12 @@ func withAsyncStartTracker(tracker *asyncStartTracker) startExecutionOption {
 	}
 }
 
+func withAsyncDrainAckStopTracker(tracker *asyncStartTracker) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.asyncStopTracker = tracker
+	}
+}
+
 // withMaxSessionAgeTracker installs the preemptive-restart tracker for
 // this reconcile pass. Nil leaves preemptive restarts disabled.
 func withMaxSessionAgeTracker(tr maxSessionAgeTracker) startExecutionOption {
@@ -260,10 +305,17 @@ func withMaxSessionAgeTracker(tr maxSessionAgeTracker) startExecutionOption {
 	}
 }
 
+func withTaskWorkDirResolver(resolver taskWorkDirResolver) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.workDirResolver = resolver
+	}
+}
+
 type asyncStartTracker struct {
-	mu       sync.Mutex
-	wg       sync.WaitGroup
-	stopping bool
+	mu               sync.Mutex
+	wg               sync.WaitGroup
+	stopping         bool
+	drainAckStopKeys sync.Map
 }
 
 func (t *asyncStartTracker) start() (func(), bool) {
@@ -277,6 +329,28 @@ func (t *asyncStartTracker) start() (func(), bool) {
 	}
 	t.wg.Add(1)
 	return t.wg.Done, true
+}
+
+func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
+	if t == nil {
+		return func() {}, true
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return t.start()
+	}
+	if _, loaded := t.drainAckStopKeys.LoadOrStore(key, struct{}{}); loaded {
+		return nil, false
+	}
+	done, ok := t.start()
+	if !ok {
+		t.drainAckStopKeys.Delete(key)
+		return nil, false
+	}
+	return func() {
+		t.drainAckStopKeys.Delete(key)
+		done()
+	}, true
 }
 
 func (t *asyncStartTracker) wait(timeout time.Duration) bool {
@@ -629,7 +703,7 @@ func prepareStartCandidate(
 	store beads.Store,
 	clk clock.Clock,
 ) (*preparedStart, error) {
-	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard)
+	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil)
 }
 
 func prepareStartCandidateForCity(
@@ -641,13 +715,26 @@ func prepareStartCandidateForCity(
 	store beads.Store,
 	clk clock.Clock,
 	stderr io.Writer,
+	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, error) {
 	session := candidate.session
-	if _, _, err := preWakeCommit(session, store, clk); err != nil {
+	if session != nil && strings.TrimSpace(session.ID) != "" && store != nil {
+		if err := sessionpkg.WithSessionMutationLock(session.ID, func() error {
+			current, err := store.Get(session.ID)
+			if err != nil {
+				return err
+			}
+			candidate.session = &current
+			_, _, err = preWakeCommit(candidate.session, store, clk)
+			return err
+		}); err != nil {
+			return nil, err
+		}
+	} else if _, _, err := preWakeCommit(session, store, clk); err != nil {
 		return nil, err
 	}
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
-	return buildPreparedStart(candidate, cfg, store)
+	return buildPreparedStartWithWorkDirResolver(candidate, cfg, store, workDirResolver)
 }
 
 func refreshConfiguredNamedStartCandidate(
@@ -689,9 +776,26 @@ func buildPreparedStart(
 	cfg *config.City,
 	store beads.Store,
 ) (*preparedStart, error) {
+	return buildPreparedStartWithWorkDirResolver(candidate, cfg, store, nil)
+}
+
+func buildPreparedStartWithWorkDirResolver(
+	candidate startCandidate,
+	cfg *config.City,
+	store beads.Store,
+	workDirResolver taskWorkDirResolver,
+) (*preparedStart, error) {
 	session := candidate.session
 	tp := candidate.tp
 	agentCfg := templateParamsToConfig(tp)
+
+	// Fold a per-dispatch reasoning effort from the session's assigned work
+	// bead (gc.reasoning metadata) into template_overrides["effort"], mirroring
+	// how schema option overrides are carried. Only providers with an "effort"
+	// option (codex) consume it; for codex this becomes
+	// `-c model_reasoning_effort=<effort>` via the existing resolution below.
+	// An explicit session-level effort override wins over the dispatch default.
+	applyDispatchReasoningOverride(candidate, cfg, store)
 
 	// Apply template_overrides from bead metadata. These are per-session
 	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
@@ -706,6 +810,7 @@ func buildPreparedStart(
 				log.Printf("session %s: invalid template_overrides JSON: %v", session.ID, err)
 			} else if len(overrides) > 0 {
 				fullOptions := make(map[string]string)
+				hasSchemaOverride := false
 				for k, v := range tp.ResolvedProvider.EffectiveDefaults {
 					fullOptions[k] = v
 				}
@@ -714,12 +819,20 @@ func buildPreparedStart(
 						continue // handled separately below, not a schema option
 					}
 					fullOptions[k] = v
+					hasSchemaOverride = true
 				}
 				args, resolveErr := config.ResolveExplicitOptions(tp.ResolvedProvider.OptionsSchema, fullOptions)
 				if resolveErr != nil {
 					log.Printf("session %s: template_overrides resolution error: %v", session.ID, resolveErr)
 				} else if len(args) > 0 {
 					agentCfg.Command = replaceSchemaFlags(agentCfg.Command, tp.ResolvedProvider.OptionsSchema, args)
+				}
+				if hasSchemaOverride {
+					if command, err := config.BuildProviderResumeCommand(tp.ResolvedProvider, overrides); err == nil && strings.TrimSpace(command) != "" {
+						resolved := *tp.ResolvedProvider
+						resolved.ResumeCommand = command
+						tp.ResolvedProvider = &resolved
+					}
 				}
 			}
 		}
@@ -728,10 +841,30 @@ func buildPreparedStart(
 	coreHash := runtime.CoreFingerprint(agentCfg)
 	coreBreakdown := runtime.CoreFingerprintBreakdown(agentCfg)
 	liveHash := runtime.LiveFingerprint(agentCfg)
-	if wd := resolveTaskWorkDir(store, session.ID, candidate.name(), strings.TrimSpace(session.Metadata["alias"]), candidate.logicalTemplate(cfg)); wd != "" {
+	if wd := resolvePreparedTaskWorkDir(candidate, cfg, store, workDirResolver); wd != "" {
 		agentCfg.WorkDir = wd
 	} else if wd := session.Metadata["work_dir"]; wd != "" {
 		agentCfg.WorkDir = wd
+	}
+	// Pre-flight stale-resume guard: if the bead carries a session_key whose
+	// keyed transcript is no longer on disk (provider session retention
+	// disabled, manual cleanup, worktree rebuild), a resume would hard-fail
+	// (e.g. claude's "No conversation found") and the pane would die ~2s after
+	// spawn. Post-start observation can miss the death (tmux state cache TTL
+	// race), so the bead stays asleep and every subsequent wake re-fires the
+	// same broken command. Clear the stale key here so the regen block below
+	// mints a fresh one and resolveSessionCommand uses --session-id (which
+	// creates a new conversation) instead of --resume (which can't).
+	//
+	// The "is the keyed transcript present" decision is delegated to the
+	// transcript layer so each provider keeps its own resumability rules; for
+	// providers whose resume state we cannot probe on disk (codex/gemini/...)
+	// the probe reports !probeable and we leave their metadata untouched.
+	if sk := strings.TrimSpace(session.Metadata["session_key"]); sk != "" && agentCfg.WorkDir != "" {
+		provider := sessionTranscriptProvider(tp.ResolvedProvider, session.Metadata)
+		if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk); probeable && !present {
+			clearStaleResumeKeyMetadata(session, store)
+		}
 	}
 	if session.Metadata["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
 		sessionKey, err := sessionpkg.GenerateSessionKey()
@@ -759,9 +892,15 @@ func buildPreparedStart(
 	if !firstStart && !forceFresh && hasResumeKey {
 		agentCfg.PromptSuffix = ""
 		agentCfg.PromptFlag = ""
-		agentCfg.Nudge = tp.Hints.Nudge
+		agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
 		if agentCfg.Env != nil {
 			delete(agentCfg.Env, startupPromptDeliveredEnv)
+		}
+		if strings.TrimSpace(tp.Prompt) != "" {
+			if agentCfg.Env == nil {
+				agentCfg.Env = map[string]string{}
+			}
+			agentCfg.Env[startupPromptDeliveredEnv] = "1"
 		}
 	}
 	// Initial message: append to prompt on first start only.
@@ -775,11 +914,7 @@ func buildPreparedStart(
 			forceFresh := session.Metadata["wake_mode"] == "fresh"
 			if msg, ok := overrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
 				if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
-					if agentCfg.Nudge != "" {
-						agentCfg.Nudge = agentCfg.Nudge + "\n\n---\n\nUser message:\n" + msg
-					} else {
-						agentCfg.Nudge = msg
-					}
+					agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
 				} else {
 					existing := ""
 					if agentCfg.PromptSuffix != "" {
@@ -836,6 +971,75 @@ func buildPreparedStart(
 		coreBreakdown: coreBreakdown,
 		liveHash:      liveHash,
 	}, nil
+}
+
+// applyDispatchReasoningOverride reads the per-dispatch reasoning effort from
+// the session's assigned work bead and folds it into the in-memory session
+// template_overrides under the "effort" key, so the normal override resolution
+// (both fresh-start and resume command building) emits the provider's reasoning
+// flag. It is a no-op when the provider has no "effort" option, when no work
+// bead carries gc.reasoning, or when the session already pins an explicit
+// effort override (the more specific session value wins). The persisted bead is
+// not mutated; only the in-memory copy used for this launch is updated.
+func applyDispatchReasoningOverride(candidate startCandidate, cfg *config.City, store beads.Store) {
+	session := candidate.session
+	if session == nil {
+		return
+	}
+	tp := candidate.tp
+	effort := resolveDispatchReasoningEffort(store, tp.ResolvedProvider, taskWorkDirAssignees(candidate, cfg)...)
+	if effort == "" {
+		return
+	}
+	overrides := map[string]string{}
+	if raw := strings.TrimSpace(session.Metadata["template_overrides"]); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
+			// Malformed override metadata is logged and surfaced by the main
+			// resolution block below; don't fold on top of unparseable JSON.
+			return
+		}
+	}
+	if _, ok := overrides["effort"]; ok {
+		// Explicit session-level effort override takes precedence over the
+		// per-dispatch default.
+		return
+	}
+	overrides["effort"] = effort
+	merged, err := json.Marshal(overrides)
+	if err != nil {
+		return
+	}
+	if session.Metadata == nil {
+		session.Metadata = map[string]string{}
+	}
+	session.Metadata["template_overrides"] = string(merged)
+}
+
+func resolvePreparedTaskWorkDir(
+	candidate startCandidate,
+	cfg *config.City,
+	store beads.Store,
+	workDirResolver taskWorkDirResolver,
+) string {
+	if workDirResolver != nil {
+		if workDir := workDirResolver(candidate, cfg); workDir != "" {
+			return workDir
+		}
+	}
+	return resolveTaskWorkDir(store, taskWorkDirAssignees(candidate, cfg)...)
+}
+
+func taskWorkDirAssignees(candidate startCandidate, cfg *config.City) []string {
+	if candidate.session == nil {
+		return nil
+	}
+	session := candidate.session
+	return []string{
+		session.ID,
+		candidate.name(),
+		strings.TrimSpace(session.Metadata["alias"]),
+		candidate.logicalTemplate(cfg),
+	}
 }
 
 func executePreparedStartWave(
@@ -920,7 +1124,7 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	_, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg)
+	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases)
 	startCtxErr := startCtx.Err()
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
@@ -929,9 +1133,9 @@ func runPreparedStartCandidate(
 	// zero on the happy path.
 	if err != nil && errors.Is(err, sessionpkg.ErrStateSync) {
 		recoveryBegin := time.Now()
-		running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		phases.StateSyncRecovery = time.Since(recoveryBegin)
-		if runningErr == nil && running {
+		if runningErr == nil && runtimeObservationLive(obs) {
 			err = nil
 		}
 	}
@@ -941,14 +1145,13 @@ func runPreparedStartCandidate(
 	// likely references a conversation that no longer exists
 	// (e.g., "No conversation found"). Report as a failure so
 	// recordWakeFailure clears the key for the next attempt.
-	if err == nil && item.candidate.session != nil && item.candidate.session.Metadata["session_key"] != "" {
+	if startedFresh && err == nil && item.candidate.session != nil && item.candidate.session.Metadata["session_key"] != "" {
 		postStartBegin := time.Now()
 		time.Sleep(staleKeyDetectDelay)
 		running := false
 		alive := false
 		if store == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
-			running = sp != nil && sp.IsRunning(item.candidate.name())
-			alive = running && (sp == nil || sp.ProcessAlive(item.candidate.name(), item.cfg.ProcessNames))
+			running, alive = observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
 		} else {
 			var obs worker.LiveObservation
 			obs, err = workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
@@ -992,16 +1195,19 @@ func runPreparedStartCandidate(
 	case err == nil:
 		outcome = "success"
 	case errors.Is(err, runtime.ErrSessionExists):
-		running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		switch {
-		case runningErr != nil || !running:
+		case runningErr != nil || !runtimeObservationLive(obs):
 			outcome = "provider_error"
 		case rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp):
 			outcome = "session_exists_converged"
 			err = nil
 			rollbackPending = false
+		case rollbackPending:
+			outcome = "session_exists"
 		default:
 			outcome = "session_exists"
+			err = nil
 		}
 	default:
 		outcome = "provider_error"
@@ -1019,6 +1225,21 @@ func runPreparedStartCandidate(
 		rateLimitScreen: rateLimitScreen,
 		phases:          phases,
 	}
+}
+
+func appendInitialMessageToStartupNudge(nudge, msg string) string {
+	userMessage := "User message:\n" + msg
+	if nudge != "" {
+		return nudge + startupPromptNudgeSeparator + userMessage
+	}
+	return userMessage
+}
+
+func restartPromptNudge(prompt, nudge string) string {
+	if strings.TrimSpace(prompt) == "" {
+		return nudge
+	}
+	return prependStartupPromptToNudge(prompt, nudge)
 }
 
 func startupRateLimitScreenDetected(
@@ -1176,7 +1397,7 @@ func commitAsyncStartResultWithContext(
 		return false
 	}
 	if sp != nil && refreshed.err == nil && refreshed.outcome != "session_initializing" {
-		clearReconcilerDrainAckMetadata(sp, refreshed.prepared.candidate.name())
+		_ = clearReconcilerDrainAckMetadata(sp, refreshed.prepared.candidate.name())
 	}
 	return commitStartResultTraced(refreshed, store, clk, rec, wave, stdout, stderr, trace)
 }
@@ -1332,15 +1553,47 @@ func startPreparedStartCandidate(
 	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
+	phases *startPhaseTimings,
 ) (bool, error) {
+	name := item.candidate.name()
+	if sp != nil {
+		running, alive := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
+		if running {
+			if alive {
+				if shouldRollbackPendingCreate(item.candidate.session) && !runningSessionMatchesPendingCreate(item.candidate.session, name, sp) {
+					return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+				}
+				return false, nil
+			}
+			// Zombie: the runtime container (e.g. tmux pane) is up but the
+			// agent process is gone — typically a session that survived a
+			// supervisor restart and whose CLI exited back to the wrapping
+			// shell. Failing here wedges the reconciler in a collide-loop:
+			// the stale session keeps the name occupied, every retry hits
+			// the same state, and templates depending on this session never
+			// start (ga-yms). A dead agent process has nothing left to
+			// preserve — identity mismatch included, since rolling a pending
+			// create back just recreates the bead next tick against the same
+			// zombie — so recycle it: stop the stale session and fall
+			// through to a fresh start.
+			recycleBegin := time.Now()
+			stopErr := sp.Stop(name)
+			if phases != nil {
+				phases.ZombieRecycle = time.Since(recycleBegin)
+			}
+			if stopErr != nil && !runtime.IsSessionGone(stopErr) {
+				return false, fmt.Errorf("recycling session %q with dead agent process: %w", name, stopErr)
+			}
+		}
+	}
 	if store == nil || item.candidate.session == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
 		handle, err := runtimeWorkerHandleWithConfig(
 			cityPath,
 			store,
 			sp,
 			cfg,
-			item.candidate.name(),
-			item.candidate.name(),
+			name,
+			name,
 			"",
 			nil,
 		)
@@ -1356,6 +1609,92 @@ func startPreparedStartCandidate(
 	return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
 }
 
+func runtimeObservationLive(obs worker.LiveObservation) bool {
+	return obs.Running && obs.Alive
+}
+
+func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNames []string) (running bool, alive bool) {
+	if sp == nil || strings.TrimSpace(name) == "" {
+		return false, false
+	}
+	obs := runtime.ObserveLiveness(sp, name, processNames)
+	return obs.Running, obs.Alive
+}
+
+// staleResumeKeyProbe reports whether the keyed transcript a resume would
+// reattach to is present (present), and whether the provider exposes a keyed
+// transcript that can be probed on disk at all (probeable). It is a package var
+// so tests can model a present or absent transcript without materializing
+// provider-specific transcript trees. Production delegates to the transcript
+// discovery layer, which knows each provider's on-disk layout and merges each
+// provider's own default roots on top of the supplied claude default, so
+// claude/kimi/pi each probe their real location.
+var staleResumeKeyProbe = func(provider, workDir, sessionKey string) (present, probeable bool) {
+	return workertranscript.HasKeyedTranscript(worker.DefaultSearchPaths(), provider, workDir, sessionKey)
+}
+
+// sessionTranscriptProvider resolves the provider-family identifier consumed by
+// the transcript discovery layer, preferring the resolved provider's builtin
+// ancestor and falling back to its start command and then the session's
+// recorded provider metadata.
+func sessionTranscriptProvider(rp *config.ResolvedProvider, metadata map[string]string) string {
+	if rp != nil {
+		if v := strings.TrimSpace(rp.BuiltinAncestor); v != "" {
+			return v
+		}
+		if base := providerCommandBaseName(rp); base != "" {
+			return base
+		}
+	}
+	if v := strings.TrimSpace(metadata["provider_kind"]); v != "" {
+		return v
+	}
+	return strings.TrimSpace(metadata["provider"])
+}
+
+// providerCommandBaseName returns the first token of the provider's start
+// command (e.g. "claude" from "claude --dangerously-skip-permissions ..."),
+// stripped of quoting and path prefix.
+func providerCommandBaseName(rp *config.ResolvedProvider) string {
+	if rp == nil {
+		return ""
+	}
+	cmd := strings.TrimSpace(rp.Command)
+	if cmd == "" {
+		return ""
+	}
+	parts := shellquote.Split(cmd)
+	if len(parts) == 0 {
+		return ""
+	}
+	return filepath.Base(parts[0])
+}
+
+// clearStaleResumeKeyMetadata wipes the resume-tracking metadata for a bead
+// whose stored session_key references a transcript that no longer exists. Mirrors
+// the clears performed by recordWakeFailure (cmd/gc/session_reconcile.go) and
+// Manager.clearStaleResumeMetadata (internal/session/chat.go), so downstream
+// breaker / churn logic treats this as the same kind of recovery cycle.
+func clearStaleResumeKeyMetadata(session *beads.Bead, store beads.Store) {
+	if session == nil {
+		return
+	}
+	patch := map[string]string{
+		"session_key":                "",
+		"started_config_hash":        "",
+		"continuation_reset_pending": "true",
+	}
+	if store != nil && strings.TrimSpace(session.ID) != "" {
+		_ = store.SetMetadataBatch(session.ID, patch)
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, len(patch))
+	}
+	for k, v := range patch {
+		session.Metadata[k] = v
+	}
+}
+
 func commitStartResult(
 	result startResult,
 	store beads.Store,
@@ -1369,14 +1708,14 @@ func commitStartResult(
 
 // confirmPendingStart reports whether a session in the given metadata
 // state should be transitioned to "active" after a successful runtime
-// spawn. Empty, "creating", "asleep", and "drained" all indicate the
+// spawn. Empty, "start-pending", "creating", "asleep", and "drained" all indicate the
 // session was pending a spawn; "awake" is treated by the reconciler as
 // equivalent to "active" and is intentionally NOT restamped (a no-op
 // metadata write on every spawn). Any other state ("draining",
 // "archived", "quarantined", ...) is left alone.
 func confirmPendingStart(currentState string) bool {
 	switch sessionpkg.State(strings.TrimSpace(currentState)) {
-	case "", sessionpkg.StateCreating, sessionpkg.StateAsleep, sessionpkg.State("drained"):
+	case "", sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateAsleep, sessionpkg.State("drained"):
 		return true
 	}
 	return false
@@ -1424,6 +1763,19 @@ func commitStartResultTraced(
 			return false
 		}
 		if result.rollbackPending {
+			if errors.Is(result.err, context.DeadlineExceeded) {
+				rec.Record(events.Event{
+					Type:    events.SessionColdStartTimeout,
+					Actor:   "controller",
+					Subject: name,
+					Message: fmt.Sprintf("session %q cold start timed out", name),
+				})
+			}
+			// A rolled-back pending create is closed and recreated fresh on the
+			// next tick, so it deliberately does not record a wake failure (see
+			// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError).
+			// Genuine wake-failure accounting happens on the non-rollback path
+			// below via recordWakeFailure.
 			if trace != nil {
 				trace.recordOperation("reconciler.start.rollback_pending", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
 					"error": formatLifecycleError(result.err),
@@ -1658,6 +2010,32 @@ func rollbackPendingCreate(session *beads.Bead, store beads.Store, now time.Time
 	closeBead(store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
 }
 
+func rollbackPendingCreateClearingClaim(session *beads.Bead, store beads.Store, now time.Time, stderr io.Writer) {
+	if session == nil || store == nil {
+		return
+	}
+	clearPendingStartInFlightLease(session, store, stderr)
+	if strings.TrimSpace(session.Metadata["session_name_explicit"]) == "true" {
+		if setMeta(store, session.ID, "session_name", "", stderr) == nil {
+			if session.Metadata == nil {
+				session.Metadata = make(map[string]string)
+			}
+			session.Metadata["session_name"] = ""
+		}
+	}
+	if !closeFailedCreateBead(store, session.ID, now, stderr) {
+		return
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string)
+	}
+	for key, value := range sessionpkg.ClosePatch(now.UTC(), string(sessionpkg.StateFailedCreate)) {
+		session.Metadata[key] = value
+	}
+	session.Metadata["pending_create_claim"] = ""
+	session.Metadata["pending_create_started_at"] = ""
+}
+
 func executePlannedStarts(
 	ctx context.Context,
 	candidates []startCandidate,
@@ -1756,6 +2134,12 @@ func executePlannedStartsTraced(
 			}
 			ready = append(ready, candidate)
 		}
+		// Fairness: spend a budget-limited tick on the least-recently-woken
+		// candidates first. The wave order is a stable dependency topo-sort, so
+		// without this the same back-of-order sessions are deferred_by_wake_budget
+		// every tick. Sorting within the dependency wave is safe: every
+		// candidate here already has its dependencies satisfied.
+		sortCandidatesByWakeFairness(ready)
 		for offset := 0; offset < len(ready); {
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
@@ -1848,7 +2232,7 @@ func executePlannedStartsTraced(
 						}
 					}
 				}
-				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
+				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
 				if err != nil {
 					clearPendingStartInFlightLease(candidate.session, store, stderr)
 					if release != nil {
@@ -1893,7 +2277,7 @@ func executePlannedStartsTraced(
 					continue
 				}
 				if result.err == nil && result.outcome != "session_initializing" {
-					clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
+					_ = clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
 				}
 				if commitStartResultTraced(result, store, clk, rec, wave, stdout, stderr, trace) {
 					wakeCount++

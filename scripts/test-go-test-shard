@@ -22,6 +22,7 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/lib/common.sh"
 
 timeout="${GO_TEST_TIMEOUT:-20m}"
 
@@ -30,6 +31,14 @@ gocache_val="$(go env GOCACHE)"
 gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
+
+# Mirror the Makefile's CGO path detection here so tests run via this script
+# see the same system dependency paths as `make`. When invoked from
+# test-integration-shard, CGO_CPPFLAGS/CGO_LDFLAGS may already be set by that
+# script; the helper avoids double-adding duplicate words.
+cgo_cppflags="${CGO_CPPFLAGS:-}"
+cgo_ldflags="${CGO_LDFLAGS:-}"
+configure_cgo_platform_paths
 
 extra_env=()
 while IFS='=' read -r name _; do
@@ -67,7 +76,11 @@ run_go_test() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
-    GC_FAST_UNIT="${GC_FAST_UNIT:-0}"
+    GC_FAST_UNIT="${GC_FAST_UNIT:-0}" \
+    CGO_CPPFLAGS="${cgo_cppflags}" \
+    CGO_LDFLAGS="${cgo_ldflags}" \
+    GC_TEST_SHARD_INDEX="${shard_index}" \
+    GC_TEST_SHARD_TOTAL="${shard_total}"
   )
   if (( ${#extra_env[@]} > 0 )); then
     env -i "${base_env[@]}" "${extra_env[@]}" go test "$@"

@@ -202,7 +202,7 @@ func reassignOpenWorkAssignedToSession(store beads.Store, oldID, newID string) e
 		return nil
 	}
 	for _, status := range []string{"open", "in_progress"} {
-		work, err := store.List(beads.ListQuery{Assignee: oldID, Status: status, Live: true})
+		work, err := store.List(beads.ListQuery{Assignee: oldID, Status: status, Live: true, TierMode: beads.TierBoth})
 		if err != nil {
 			return fmt.Errorf("listing work assigned to retired session %s: %w", oldID, err)
 		}
@@ -304,7 +304,7 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 	if resolved.BuiltinAncestor != "" && resolved.BuiltinAncestor != resolved.Name {
 		extraMeta["builtin_ancestor"] = resolved.BuiltinAncestor
 	}
-	mcpServers, err := s.sessionMCPServers(qualifiedTemplate, resolved.Name, spec.Identity, workDir, transport, "")
+	mcpServers, err := s.sessionMCPServers(qualifiedTemplate, resolved.Name, spec.Identity, workDir, transport, "", nil)
 	if err != nil {
 		return "", err
 	}
@@ -314,7 +314,8 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			return "", err
 		}
 	}
-	hints := sessionCreateHints(resolved, mcpServers)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env)
+	hints := sessionCreateHints(resolved, sessionEnv, mcpServers)
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{spec.Identity, spec.SessionName}, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {
@@ -334,7 +335,7 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			workDir,
 			resolved.Name,
 			transport,
-			resolved.Env,
+			sessionEnv,
 			resume,
 			hints,
 			extraMeta,
@@ -396,16 +397,14 @@ func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string
 	if identifier == "" {
 		return "", false, nil
 	}
-	all, err := store.List(beads.ListQuery{Label: session.LabelSession})
+	all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
 	if err != nil {
 		return "", false, fmt.Errorf("resolveLiveSessionByPathAlias: listing sessions: %w", err)
 	}
 	var best beads.Bead
 	found := false
 	for _, b := range all {
-		if !session.IsSessionBeadOrRepairable(b) {
-			continue
-		}
+		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
 		if apiIsNamedSessionBead(b) {
 			continue
 		}

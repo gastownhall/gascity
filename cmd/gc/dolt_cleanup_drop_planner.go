@@ -9,13 +9,16 @@ import "strings"
 //
 // Convention:
 //   - testdb_*: BEADS_TEST_MODE=1 FNV hash of temp paths
+//   - test_guard_*: guard/registry isolation tests
+//   - test_federation_*: federation isolation tests
 //   - doctest_*: doctor test helpers
 //   - doctortest_*: doctor test helpers
 //   - beads_pt*: orchestrator patrol_helpers_test.go random prefixes
 //   - beads_vr*: orchestrator mail/router_test.go random prefixes
 //   - beads_t[0-9a-f]*: protocol test random prefixes (t + 8 hex chars)
+//   - beads_test_bench_*: benchmark test fixture databases
 var defaultStaleDatabasePrefixes = []string{
-	"testdb_", "doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t",
+	"testdb_", "test_guard_", "test_federation_", "doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t", "beads_test_bench_",
 }
 
 // systemDatabaseNames are the Dolt/MySQL system databases that SHOW
@@ -61,6 +64,42 @@ const DropSkipReasonRigProtected = "rig-protected"
 // its name does not fit the conservative identifier shape allowed for
 // destructive DROP DATABASE targets.
 const DropSkipReasonInvalidIdentifier = "invalid-identifier"
+
+// DropSkipReasonLiveSession marks a stale-matched DB held back because
+// information_schema.processlist reported at least one live session
+// against it at probe time. Third oracle in the three-signal safety
+// contract (architect §"Three-layer protection contract").
+const DropSkipReasonLiveSession = "live-session"
+
+// applyLiveSessionsToPlan removes any name in liveSessions from the
+// caller's ToDrop slice and appends a Skipped entry with reason
+// DropSkipReasonLiveSession for each removed name. Order of remaining
+// ToDrop names and order of new Skipped entries follows the input
+// ToDrop order, so human-readable rendering stays predictable.
+//
+// liveSessions is map[dbName]threadCount. Only the keys are consulted
+// here; thread counts are preserved by the runner for audit/logging
+// in a future slice.
+func applyLiveSessionsToPlan(plan DoltDropPlan, liveSessions map[string]int) DoltDropPlan {
+	if len(liveSessions) == 0 {
+		return plan
+	}
+	out := DoltDropPlan{
+		Protected: plan.Protected,
+		Skipped:   append([]DoltDropSkip{}, plan.Skipped...),
+	}
+	for _, name := range plan.ToDrop {
+		if _, live := liveSessions[name]; live {
+			out.Skipped = append(out.Skipped, DoltDropSkip{
+				Name:   name,
+				Reason: DropSkipReasonLiveSession,
+			})
+			continue
+		}
+		out.ToDrop = append(out.ToDrop, name)
+	}
+	return out
+}
 
 // planDoltDrops classifies the names returned by SHOW DATABASES against the
 // stale-prefix list and the rig-protection list. The protection check wins

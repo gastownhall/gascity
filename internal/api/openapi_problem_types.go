@@ -3,13 +3,15 @@ package api
 import "github.com/danielgtaylor/huma/v2"
 
 const (
-	slingMissingBeadProblemType = "urn:gascity:error:sling-missing-bead"
-	slingCrossRigProblemType    = "urn:gascity:error:sling-cross-rig"
+	slingMissingBeadProblemType     = "urn:gascity:error:sling-missing-bead"
+	slingCrossRigProblemType        = "urn:gascity:error:sling-cross-rig"
+	slingCrossStoreRouteProblemType = "urn:gascity:error:sling-cross-store-route"
 )
 
 var documentedProblemTypes = []string{
 	slingMissingBeadProblemType,
 	slingCrossRigProblemType,
+	slingCrossStoreRouteProblemType,
 }
 
 func documentProblemTypes(oapi *huma.OpenAPI) {

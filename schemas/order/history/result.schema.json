@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "entries", "summary"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "name": { "type": "string" },
+    "rig": { "type": "string" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["order", "bead_id", "executed", "created_at"],
+        "properties": {
+          "order": { "type": "string" },
+          "rig": { "type": "string" },
+          "bead_id": { "type": "string" },
+          "executed": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total"],
+      "properties": {
+        "total": { "type": "integer" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

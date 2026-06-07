@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,6 +22,25 @@ type (
 	orderStoreResolver  func(orders.Order) (beads.Store, error)
 	orderStoresResolver func(orders.Order) ([]beads.Store, error)
 )
+
+type orderTrackingSweepTarget struct {
+	target execStoreTarget
+	label  string
+}
+
+type orderTrackingSweepScopedStore struct {
+	beads.Store
+	label string
+	key   string
+}
+
+func (s orderTrackingSweepScopedStore) orderTrackingSweepLabel() string {
+	return s.label
+}
+
+func (s orderTrackingSweepScopedStore) orderTrackingSweepKey() string {
+	return s.key
+}
 
 func openCityOrderStore(stderr io.Writer, cmdName string) (beads.Store, int) {
 	cityPath, err := resolveCity()
@@ -63,6 +83,19 @@ func resolveOrderStoreTarget(cityPath string, cfg *config.City, a orders.Order) 
 	if cfg == nil {
 		return execStoreTarget{}, fmt.Errorf("rig-scoped order %q requires city config", a.ScopedName())
 	}
+	if strings.TrimSpace(a.Pool) != "" {
+		pool, err := qualifyOrderPool(a, cfg)
+		if err != nil {
+			return execStoreTarget{}, err
+		}
+		if !strings.Contains(pool, "/") {
+			return execStoreTarget{
+				ScopeRoot: cityPath,
+				ScopeKind: "city",
+				Prefix:    config.EffectiveHQPrefix(cfg),
+			}, nil
+		}
+	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 	rig, ok := rigByName(cfg, a.Rig)
 	if !ok {
@@ -87,13 +120,20 @@ func orderStoreTargetKey(target execStoreTarget) string {
 	return target.ScopeKind + "\x00" + filepath.Clean(target.ScopeRoot)
 }
 
-func orderExecEnv(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) []string {
+func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) ([]string, error) {
+	if err := validateOrderExecEnvOverrides(a); err != nil {
+		return nil, err
+	}
 	var env map[string]string
+	var err error
 	if target.ScopeKind == "rig" {
-		env = bdRuntimeEnvForRig(cityPath, cfg, target.ScopeRoot)
+		env, err = bdRuntimeEnvForRigWithError(cityPath, cfg, target.ScopeRoot)
 	} else {
-		env = bdRuntimeEnv(cityPath)
+		env, err = bdRuntimeEnvWithError(cityPath)
 		env["BEADS_DIR"] = filepath.Join(target.ScopeRoot, ".beads")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("building order env for %s: %w", a.ScopedName(), err)
 	}
 	env["GC_STORE_ROOT"] = target.ScopeRoot
 	env["GC_STORE_SCOPE"] = target.ScopeKind
@@ -130,7 +170,23 @@ func orderExecEnv(cityPath string, cfg *config.City, target execStoreTarget, a o
 	}
 	applyOrderExecCanonicalDoltEnv(cityPath, target.ScopeRoot, env)
 	ensureProjectedDoltEnvExplicit(env)
-	return mergeRuntimeEnv(nil, env)
+	ensureProjectedPostgresEnvExplicit(env)
+	// Order-supplied [order.env] entries take effect last so they can tune
+	// non-controller thresholds (e.g. raising GC_DOCTOR_LATENCY_WARN_S for a
+	// noisy city) without editing the order's shell scripts or the parent
+	// process environment.
+	for k, v := range a.Env {
+		env[k] = v
+	}
+	return mergeRuntimeEnv(nil, env), nil
+}
+
+func validateOrderExecEnvOverrides(a orders.Order) error {
+	return orders.ValidateExecEnvOverrides(a)
+}
+
+func isReservedOrderExecEnvKey(key string) bool {
+	return orders.IsReservedExecEnvKey(key)
 }
 
 func orderTriggerOptions(cityPath string, cfg *config.City, a orders.Order) (orders.TriggerOptions, error) {
@@ -141,17 +197,21 @@ func orderTriggerOptions(cityPath string, cfg *config.City, a orders.Order) (ord
 	if err != nil {
 		return orders.TriggerOptions{}, err
 	}
-	return orderTriggerOptionsForTarget(cityPath, cfg, target, a), nil
+	return orderTriggerOptionsForTarget(cityPath, cfg, target, a)
 }
 
-func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) orders.TriggerOptions {
+func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) (orders.TriggerOptions, error) {
 	if a.Trigger != "condition" || strings.TrimSpace(cityPath) == "" {
-		return orders.TriggerOptions{}
+		return orders.TriggerOptions{}, nil
+	}
+	env, err := orderExecEnvWithError(cityPath, cfg, target, a)
+	if err != nil {
+		return orders.TriggerOptions{}, err
 	}
 	return orders.TriggerOptions{
 		ConditionDir: target.ScopeRoot,
-		ConditionEnv: orderExecEnv(cityPath, cfg, target, a),
-	}
+		ConditionEnv: env,
+	}, nil
 }
 
 func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]string) {
@@ -160,6 +220,9 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 	}
 	if strings.TrimSpace(scopeRoot) == "" {
 		scopeRoot = cityPath
+	}
+	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+		return
 	}
 	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
 	if err != nil {
@@ -184,6 +247,9 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 }
 
 func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[string]string, _ error) bool {
+	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+		return false
+	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 	if err != nil || resolved.Kind != contract.ScopeConfigAuthoritative {
 		return false
@@ -443,6 +509,62 @@ func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresRes
 		}
 		return out, nil
 	}
+}
+
+func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []orderTrackingSweepTarget {
+	targets := []orderTrackingSweepTarget{{
+		target: legacyOrderCityTarget(cityPath, cfg),
+		label:  "city",
+	}}
+	if cfg != nil {
+		resolveRigPaths(cityPath, cfg.Rigs)
+		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
+			targets = append(targets, orderTrackingSweepTarget{
+				target: execStoreTarget{
+					ScopeRoot: rig.Path,
+					ScopeKind: "rig",
+					Prefix:    rig.EffectivePrefix(),
+					RigName:   rig.Name,
+				},
+				label: fmt.Sprintf("rig %q", rig.Name),
+			})
+		}
+	}
+	return targets
+}
+
+func orderTrackingSweepStoresForConfig(cityPath string, cfg *config.City) ([]beads.Store, error) {
+	targets := orderTrackingSweepTargetsForConfig(cityPath, cfg)
+	return orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
+		return openStoreAtForCity(sweepTarget.target.ScopeRoot, cityPath)
+	})
+}
+
+func orderTrackingSweepStoresFromTargets(targets []orderTrackingSweepTarget, openStore func(orderTrackingSweepTarget) (beads.Store, error)) ([]beads.Store, error) {
+	stores := make([]beads.Store, 0, len(targets))
+	seen := make(map[string]struct{}, len(targets))
+	var errs []error
+	for _, sweepTarget := range targets {
+		key := orderStoreTargetKey(sweepTarget.target)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		store, err := openStore(sweepTarget)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("opening %s order store: %w", sweepTarget.label, err))
+			continue
+		}
+		stores = append(stores, orderTrackingSweepScopedStore{
+			Store: store,
+			label: sweepTarget.label,
+			key:   key,
+		})
+	}
+	return stores, errors.Join(errs...)
 }
 
 func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr io.Writer) orderStoresResolver {

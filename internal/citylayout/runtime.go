@@ -102,6 +102,14 @@ func PackStateDir(cityRoot, packName string) string {
 	return filepath.Join(RuntimePacksDir(cityRoot), packName)
 }
 
+// SuspensionStateFile returns the path to the unified runtime
+// suspension-state file. It holds the live city, rig, and (in a
+// follow-up) agent suspension preferences that should not be
+// committed to city.toml — each clone gets its own copy.
+func SuspensionStateFile(cityRoot string) string {
+	return RuntimePath(cityRoot, "runtime", "suspension-state.json")
+}
+
 // CityRuntimeEnv returns city runtime env vars rooted at the canonical runtime
 // directory for cityRoot.
 func CityRuntimeEnv(cityRoot string) []string {
@@ -141,6 +149,22 @@ func CityRuntimeEnvMapForRuntimeDir(cityRoot, runtimeDir string) map[string]stri
 		"GC_CITY_PATH":                        cityRoot,
 		"GC_CITY_RUNTIME_DIR":                 runtimeDir,
 		"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": ControlDispatcherTraceDefaultPathForRuntimeDir(cityRoot, runtimeDir),
+	}
+}
+
+// CityIdentityEnvMap returns the city identity anchors without dispatcher
+// trace defaults. Empty city roots return nil so callers do not inject empty
+// GC_CITY values or relative runtime paths on unanchored code paths.
+func CityIdentityEnvMap(cityRoot string) map[string]string {
+	cityRoot = strings.TrimSpace(cityRoot)
+	if cityRoot == "" {
+		return nil
+	}
+	full := CityRuntimeEnvMapForRuntimeDir(cityRoot, TrustedAmbientCityRuntimeDir(cityRoot))
+	return map[string]string{
+		"GC_CITY":             full["GC_CITY"],
+		"GC_CITY_PATH":        full["GC_CITY_PATH"],
+		"GC_CITY_RUNTIME_DIR": full["GC_CITY_RUNTIME_DIR"],
 	}
 }
 

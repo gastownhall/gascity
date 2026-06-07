@@ -24,8 +24,8 @@ stdout 'cook'
 name = "my-city"
 provider = "claude"
 
-[formulas]
-dir = "formulas"
+[providers.claude]
+base = "builtin:claude"
 
 [[agent]]
 name = "chef"

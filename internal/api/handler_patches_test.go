@@ -88,7 +88,7 @@ func TestHandleAgentPatchSet(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	h := newTestCityHandler(t, fs)
 
-	body := `{"dir":"rig1","name":"worker","suspended":true}`
+	body := `{"dir":"rig1","name":"worker","tmux_alias":"worker--{{.CityName}}","suspended":true}`
 	req := httptest.NewRequest("PUT", cityURL(fs, "/patches/agents"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
@@ -103,6 +103,9 @@ func TestHandleAgentPatchSet(t *testing.T) {
 	}
 	if fs.cfg.Patches.Agents[0].Name != "worker" {
 		t.Errorf("name = %q, want %q", fs.cfg.Patches.Agents[0].Name, "worker")
+	}
+	if fs.cfg.Patches.Agents[0].TmuxAlias == nil || *fs.cfg.Patches.Agents[0].TmuxAlias != "worker--{{.CityName}}" {
+		t.Errorf("tmux alias = %v, want %q", fs.cfg.Patches.Agents[0].TmuxAlias, "worker--{{.CityName}}")
 	}
 }
 
@@ -255,7 +258,7 @@ func TestHandleProviderPatchSet(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	h := newTestCityHandler(t, fs)
 
-	body := `{"name":"claude","command":"my-claude","acp_command":"my-claude-acp","acp_args":["serve","--stdio"]}`
+	body := `{"name":"claude","command":"my-claude","acp_command":"my-claude-acp","acp_args":["serve","--stdio"],"accept_startup_dialogs":true}`
 	req := httptest.NewRequest("PUT", cityURL(fs, "/patches/providers"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
@@ -273,6 +276,9 @@ func TestHandleProviderPatchSet(t *testing.T) {
 	}
 	if got := fs.cfg.Patches.Providers[0].ACPArgs; len(got) != 2 || got[0] != "serve" || got[1] != "--stdio" {
 		t.Fatalf("ACPArgs = %#v, want [\"serve\" \"--stdio\"]", got)
+	}
+	if got := fs.cfg.Patches.Providers[0].AcceptStartupDialogs; got == nil || !*got {
+		t.Fatalf("AcceptStartupDialogs = %v, want true", got)
 	}
 }
 

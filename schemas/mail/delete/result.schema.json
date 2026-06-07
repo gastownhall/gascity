@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "ids", "count"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "mail.delete" },
+    "action": { "const": "delete" },
+    "id": { "type": "string" },
+    "ids": { "type": "array", "items": { "type": "string" } },
+    "count": { "type": "integer", "minimum": 0 },
+    "already_done": { "type": "boolean" }
+  },
+  "additionalProperties": true
+}

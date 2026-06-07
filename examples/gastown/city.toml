@@ -16,7 +16,8 @@
 # fallback dog shape and shared dog formulas/prompts that gastown reuses.
 # Rig-scoped agents (witness, refinery, polecat) are stamped per-rig.
 #
-# The sibling pack.toml owns the Gastown import and default rig binding.
+# The sibling pack.toml owns the Gastown import. This city owns the default
+# rig binding used by `gc rig add`.
 #
 # To use: gc start examples/gastown/
 # Requires rigs to be registered: gc rig add <path>
@@ -26,13 +27,19 @@ name = "gastown"
 provider = "claude"
 global_fragments = ["command-glossary", "operational-awareness"]
 
+[providers.claude]
+base = "builtin:claude"
+
+[defaults.rig.imports.gastown]
+source = "packs/gastown"
+
 [daemon]
 patrol_interval = "30s"
 max_restarts = 5
 restart_window = "1h"
 shutdown_timeout = "5s"
-# Enable graph.v2 formulas from imported packs. Legacy molecule formulas keep
-# molecule_id attachment semantics even when their own revision is version >= 2.
+# Enable compiler-v2 formulas from imported packs. Legacy molecule formulas keep
+# molecule_id attachment semantics unless they declare a compiler-v2 requirement.
 formula_v2 = true
 
 # Register a rig to activate per-rig agents (witness, refinery, polecat):
@@ -40,21 +47,30 @@ formula_v2 = true
 # name = "myproject"
 # path = "/path/to/your/project"
 
-# Crew members are individually named, so they can't be pack-stamped:
-# [[agent]]
-# name = "wolf"
+# Crew members are persistent, individually named workers, so they can't be
+# pack-stamped. Each one is a directory agent under agents/<name>/ plus a
+# named session that keeps it alive. To add a crew member "wolf" bound to a
+# registered rig "myproject":
+#
+#   1. Create agents/wolf/agent.toml (relative paths resolve against this
+#      city directory):
+#
+#        scope = "rig"
+#        dir = "myproject"
+#        nudge = "Check your hook and mail, then act accordingly."
+#        work_dir = ".gc/worktrees/myproject/crew/wolf"
+#        idle_timeout = "4h"
+#        prompt_template = "packs/gastown/assets/prompts/crew.template.md"
+#        pre_start = ["{{.CityRoot}}/packs/gastown/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+#
+#      tmux theming comes from the gastown pack's [global] session_live hooks,
+#      so crew members need no session_setup wiring of their own.
+#
+#   2. Keep the crew session alive by declaring a named session here. The
+#      dir must match the agent's so the session resolves to "myproject/wolf":
+#
+# [[named_session]]
+# template = "wolf"
 # dir = "myproject"
-# pre_start = ["packs/gastown/assets/scripts/worktree-setup.sh /path/to/myproject /path/to/city/.gc/worktrees/myproject/wolf wolf --sync"]
-# prompt_template = "packs/gastown/assets/prompts/crew.template.md"
-# nudge = "Check your hook and mail, then act accordingly."
-# overlay_dir = "packs/gastown/agents/wolf/overlay"
-# idle_timeout = "4h"
-# session_setup_script = "packs/gastown/assets/scripts/tmux-theme.sh"
-# session_setup = [
-#     "tmux ${GC_TMUX_SOCKET:+-L $GC_TMUX_SOCKET} set-option -t {{.Session}} status-right-length 80",
-#     "tmux ${GC_TMUX_SOCKET:+-L $GC_TMUX_SOCKET} set-option -t {{.Session}} status-interval 5",
-#     "tmux ${GC_TMUX_SOCKET:+-L $GC_TMUX_SOCKET} set-option -t {{.Session}} status-right '#({{.ConfigDir}}/assets/scripts/status-line.sh {{.Agent}}) %H:%M'",
-#     "{{.ConfigDir}}/assets/scripts/bind-key.sh n \"run-shell '{{.ConfigDir}}/assets/scripts/cycle.sh next #{session_name} #{client_tty}'\"",
-#     "{{.ConfigDir}}/assets/scripts/bind-key.sh p \"run-shell '{{.ConfigDir}}/assets/scripts/cycle.sh prev #{session_name} #{client_tty}'\"",
-#     "{{.ConfigDir}}/assets/scripts/bind-key.sh g \"run-shell '{{.ConfigDir}}/assets/scripts/agent-menu.sh #{client_tty}'\"",
-# ]
+# scope = "rig"
+# mode = "always"

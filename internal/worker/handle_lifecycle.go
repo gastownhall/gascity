@@ -140,15 +140,21 @@ func (h *SessionHandle) Kill(ctx context.Context) (err error) {
 
 // Close permanently ends the worker session.
 func (h *SessionHandle) Close(ctx context.Context) (err error) {
+	_, err = h.CloseDetailed(ctx)
+	return err
+}
+
+// CloseDetailed permanently ends the worker session and reports cleanup artifacts.
+func (h *SessionHandle) CloseDetailed(ctx context.Context) (result sessionpkg.CloseResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationClose)
 	defer func() { event.finish(err) }()
 
 	id := h.currentSessionID()
 	if id == "" {
-		return nil
+		return result, nil
 	}
-	err = h.manager.Close(id)
-	return err
+	result, err = h.manager.CloseDetailed(id)
+	return result, err
 }
 
 // Rename updates the user-facing session title.
@@ -192,7 +198,7 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 	}
 
 	switch info.State {
-	case sessionpkg.StateCreating:
+	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
 		state.Phase = PhaseStarting
 		return state, nil
 	case sessionpkg.StateDraining:
@@ -419,11 +425,13 @@ func (h *SessionHandle) currentSessionID() string {
 }
 
 func (h *SessionHandle) startCommand(id string) (string, error) {
-	info, err := h.manager.Get(id)
+	info, b, err := h.manager.GetWithBead(id)
 	if err != nil {
 		return "", err
 	}
-	if info.State == sessionpkg.StateCreating && h.session.Resume.SessionIDFlag != "" && strings.TrimSpace(info.SessionKey) != "" {
+	if firstProviderSessionStart(info.State, b.Metadata) &&
+		h.session.Resume.SessionIDFlag != "" &&
+		strings.TrimSpace(info.SessionKey) != "" {
 		command := strings.TrimSpace(info.Command)
 		if command == "" {
 			command = strings.TrimSpace(h.session.Command)
@@ -456,6 +464,18 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+func firstProviderSessionStart(state sessionpkg.State, metadata map[string]string) bool {
+	switch state {
+	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+	default:
+		return false
+	}
+	if strings.TrimSpace(metadata["creation_complete_at"]) != "" {
+		return false
+	}
+	return strings.TrimSpace(metadata["started_config_hash"]) == ""
 }
 
 func (h *SessionHandle) providerLabel() string {

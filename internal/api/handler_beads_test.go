@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -249,6 +250,15 @@ func (s *prefixedAliasStore) SetMetadata(id, key, value string) error {
 
 func (s *prefixedAliasStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return s.base.SetMetadataBatch(s.aliasToBase(id), kvs)
+}
+
+func (s *prefixedAliasStore) Tx(commitMsg string, fn func(beads.Tx) error) error {
+	if fn == nil {
+		return s.base.Tx(commitMsg, nil)
+	}
+	return s.base.Tx(commitMsg, func(beads.Tx) error {
+		return fn(s)
+	})
 }
 
 func (s *prefixedAliasStore) Ping() error {
@@ -629,6 +639,66 @@ func TestBeadGetUsesRoutePrefixStore(t *testing.T) {
 	}
 }
 
+func TestBeadGetIncludesUpdatedAtWhenPopulated(t *testing.T) {
+	createdAt := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	updatedAt := createdAt.Add(5 * time.Minute)
+	state := newFakeState(t)
+	state.stores["myrig"] = beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID:        "gc-updated",
+		Title:     "Updated bead",
+		Status:    "open",
+		Type:      "task",
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+	}}, nil)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/bead/gc-updated"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode(): %v", err)
+	}
+	if got["updated_at"] != updatedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("updated_at = %v, want %q", got["updated_at"], updatedAt.Format(time.RFC3339Nano))
+	}
+}
+
+func TestBeadGetOmitsUpdatedAtWhenZero(t *testing.T) {
+	createdAt := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	state := newFakeState(t)
+	state.stores["myrig"] = beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID:        "gc-legacy",
+		Title:     "Legacy bead",
+		Status:    "open",
+		Type:      "task",
+		CreatedAt: createdAt,
+	}}, nil)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/bead/gc-legacy"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode(): %v", err)
+	}
+	if updatedAt, ok := got["updated_at"]; ok {
+		t.Fatalf("updated_at = %v, want omitted", updatedAt)
+	}
+}
+
 func TestBeadReady(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
@@ -825,6 +895,43 @@ func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
 	}
 	if got.Metadata["real_world_app.contract.role"] != "child" || got.Metadata["real_world_app.contract.run_id"] != "run-1" {
 		t.Fatalf("stored metadata = %#v, want real-world app metadata", got.Metadata)
+	}
+}
+
+func TestBeadCreatePersistsDeferUntil(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	h := newTestCityHandler(t, state)
+
+	deferUntil := time.Date(2026, 6, 1, 12, 30, 0, 0, time.UTC)
+	body := `{
+		"rig":"myrig",
+		"title":"Deferred task",
+		"type":"task",
+		"defer_until":"` + deferUntil.Format(time.RFC3339) + `"
+	}`
+	req := newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var created beads.Bead
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created bead: %v", err)
+	}
+	if created.DeferUntil == nil || !created.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("response defer_until = %v, want %s", created.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(created): %v", err)
+	}
+	if got.DeferUntil == nil || !got.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("stored defer_until = %v, want %s", got.DeferUntil, deferUntil.Format(time.RFC3339))
 	}
 }
 
@@ -1908,5 +2015,25 @@ func TestPackListEmpty(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if len(resp.Packs) != 0 {
 		t.Errorf("packs count = %d, want 0", len(resp.Packs))
+	}
+}
+
+func TestBeadPrefixAPI(t *testing.T) {
+	tests := []struct {
+		id   string
+		want string
+	}{
+		{"ga-5b8i", "ga"},
+		{"pieces-annotator-x8o", "pieces-annotator"},
+		{"pieces-cli-5b8i", "pieces-cli"},
+		{"ga-123", "ga"},
+		{"", ""},
+		{"nohyphen", ""},
+	}
+	for _, tt := range tests {
+		got := beadPrefix(tt.id)
+		if got != tt.want {
+			t.Errorf("beadPrefix(%q) = %q, want %q", tt.id, got, tt.want)
+		}
 	}
 }

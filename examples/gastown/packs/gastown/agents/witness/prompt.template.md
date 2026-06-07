@@ -154,7 +154,7 @@ Your formula: `mol-witness-patrol`
 
 ```bash
 # Step 1: Check for assigned work
-gc bd list --assignee="$GC_ALIAS" --status=in_progress
+{{ .AssignedInProgressQuery }}
 
 # Step 2: Nothing? Check mail for attached work
 gc mail inbox
@@ -166,7 +166,52 @@ gc bd update "$NEW_WISP" --assignee="$GC_ALIAS"
 # Step 4: Execute — read formula steps and work through them in order
 ```
 
-**Hook -> Read formula steps -> Follow in order -> pour next iteration.**
+**Hook -> Read formula steps -> Follow in order -> pour next iteration -> run `gc hook`.**
+
+## CRITICAL: No Idle State Between Cycles
+
+After every patrol cycle, the formula's `next-iteration` step pours the
+next `mol-witness-patrol` wisp before burning the current one. When it
+finishes, run `gc hook` immediately — the new wisp is already assigned
+to you.
+
+**Do NOT enter "Standing by for the next hook" idle state.** That phrase
+is a bug indicator. Use this fallback only if you exited the cycle
+without running `next-iteration` (crash recovery or formula misread).
+If `next-iteration` already ran, do not pour again; run `gc hook`.
+
+```bash
+CURRENT_WISP=${GC_BEAD_ID:-}
+if [ -z "$CURRENT_WISP" ]; then
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+fi
+ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then
+  NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json | jq -r '.new_epic_id // empty')
+  if [ -z "$NEXT" ]; then
+    echo "Could not pour next witness wisp; not burning."
+    exit 1
+  fi
+  if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+    echo "Could not assign next witness wisp; not burning."
+    exit 1
+  fi
+  gc bd mol burn "$CURRENT_WISP" --force
+elif [ -n "$CURRENT_WISP" ]; then
+  gc bd mol burn "$CURRENT_WISP" --force
+elif [ -z "$ASSIGNED_WISP" ]; then
+  NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json | jq -r '.new_epic_id // empty')
+  if [ -z "$NEXT" ]; then
+    echo "Could not bootstrap next witness wisp."
+    exit 1
+  fi
+  if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+    echo "Could not assign bootstrap witness wisp."
+    exit 1
+  fi
+fi
+gc hook
+```
 
 ## Context Exhaustion
 
@@ -183,14 +228,14 @@ re-reads formula steps and resumes from context.
 
 ```bash
 gc mail send mayor/ -s "Subject" -m "Message"              # Escalate to mayor
-gc mail send {{ .RigName }}/refinery -s "Subject" -m "..."  # Refinery questions
-gc session nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
-gc session peek {{ .RigName }}/<polecat-name> --lines 50     # View polecat output
+gc mail send {{ .RigName }}/{{ .BindingPrefix }}refinery -s "Subject" -m "..."  # Refinery questions
+gc session nudge {{ .RigName }}/{{ .BindingPrefix }}<polecat-suffix> "Run gc hook; it checks assigned work before routed pool work"
+gc session peek {{ .RigName }}/{{ .BindingPrefix }}<polecat-suffix> --lines 50     # View polecat output
 ```
 
-Use the concrete polecat name from `gc status` or `gc session list`;
-Gastown's default namepool yields names like `furiosa` or `nux`. There is no
-`{{ .RigName }}/polecats/<name>` address form.
+Use the bare polecat suffix after the binding prefix; Gastown's default
+namepool yields suffixes like `furiosa` or `nux`{{ if .BindingPrefix }}, not `{{ .BindingPrefix }}furiosa`{{ end }}.
+There is no `{{ .RigName }}/polecats/<name>` address form.
 
 Nudging a polecat does not assign work. It only wakes that session; actual
 work still arrives through bead assignment or pool routing.
@@ -257,5 +302,5 @@ gc mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}
-Your mail address: {{ .RigName }}/witness
+Your mail address: {{ .AgentName }}
 Formula: mol-witness-patrol

@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 11 built-in providers.
-	if len(providers) != 11 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 11", len(providers))
+	// Must have exactly 15 built-in providers.
+	if len(providers) != 15 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 15", len(providers))
 	}
-	if len(order) != 11 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 11", len(order))
+	if len(order) != 15 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 15", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -67,6 +67,31 @@ func TestBuiltinProvidersClaude(t *testing.T) {
 	}
 	if !derefBool(p.EmitsPermissionWarning) {
 		t.Error("EmitsPermissionWarning = false, want true")
+	}
+}
+
+func TestBuiltinProvidersClaudeModelChoices(t *testing.T) {
+	p := BuiltinProviders()["claude"]
+	var model OptionChoice
+	var oldOpus OptionChoice
+	for _, opt := range p.OptionsSchema {
+		if opt.Key != "model" {
+			continue
+		}
+		for _, choice := range opt.Choices {
+			switch choice.Value {
+			case "opus":
+				model = choice
+			case "opus-4-7":
+				oldOpus = choice
+			}
+		}
+	}
+	if !reflect.DeepEqual(model.FlagArgs, []string{"--model", "claude-opus-4-8"}) {
+		t.Fatalf("opus FlagArgs = %v, want Opus 4.8", model.FlagArgs)
+	}
+	if !reflect.DeepEqual(oldOpus.FlagArgs, []string{"--model", "claude-opus-4-7"}) {
+		t.Fatalf("opus-4-7 FlagArgs = %v, want Opus 4.7 preserved", oldOpus.FlagArgs)
 	}
 }
 
@@ -140,13 +165,86 @@ func TestBuiltinProvidersGemini(t *testing.T) {
 	}
 }
 
+func TestBuiltinProvidersKimi(t *testing.T) {
+	p := BuiltinProviders()["kimi"]
+	if p.Command != "kimi" {
+		t.Errorf("Command = %q, want %q", p.Command, "kimi")
+	}
+	if !reflect.DeepEqual(p.Args, []string{"--yolo", "--no-thinking"}) {
+		t.Errorf("Args = %v, want [--yolo --no-thinking]", p.Args)
+	}
+	if p.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want none", p.PromptMode)
+	}
+	if p.PromptFlag != "" {
+		t.Errorf("PromptFlag = %q, want empty", p.PromptFlag)
+	}
+	if p.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000", p.ReadyDelayMs)
+	}
+	if !reflect.DeepEqual(p.ProcessNames, []string{"kimi", "python"}) {
+		t.Errorf("ProcessNames = %v, want [kimi python]", p.ProcessNames)
+	}
+	if !derefBool(p.SupportsACP) {
+		t.Error("SupportsACP = false, want true")
+	}
+	if derefBool(p.SupportsHooks) {
+		t.Error("SupportsHooks = true, want false until Kimi hook installer exists")
+	}
+	if p.ResumeFlag != "--session" {
+		t.Errorf("ResumeFlag = %q, want --session", p.ResumeFlag)
+	}
+	if p.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q, want flag", p.ResumeStyle)
+	}
+	if p.AcceptStartupDialogs == nil || *p.AcceptStartupDialogs {
+		t.Errorf("AcceptStartupDialogs = %v, want false", p.AcceptStartupDialogs)
+	}
+	if !reflect.DeepEqual(p.ACPArgs, []string{"--yolo", "--no-thinking", "acp"}) {
+		t.Errorf("ACPArgs = %v, want [--yolo --no-thinking acp]", p.ACPArgs)
+	}
+	if !reflect.DeepEqual(p.PrintArgs, []string{"--quiet", "--prompt"}) {
+		t.Errorf("PrintArgs = %v, want [--quiet --prompt]", p.PrintArgs)
+	}
+	if p.TitleModel != "kimi-k2.6" {
+		t.Errorf("TitleModel = %q, want kimi-k2.6", p.TitleModel)
+	}
+}
+
 func TestBuiltinProvidersCursor(t *testing.T) {
 	p := BuiltinProviders()["cursor"]
 	if p.Command != "cursor-agent" {
 		t.Errorf("Command = %q, want %q", p.Command, "cursor-agent")
 	}
-	if len(p.Args) != 1 || p.Args[0] != "-f" {
+	if !reflect.DeepEqual(p.Args, []string{"-f"}) {
 		t.Errorf("Args = %v, want [-f]", p.Args)
+	}
+	rp := &ResolvedProvider{
+		Command:           p.Command,
+		Args:              p.Args,
+		OptionsSchema:     p.OptionsSchema,
+		EffectiveDefaults: ComputeEffectiveDefaults(p.OptionsSchema, p.OptionDefaults, nil),
+	}
+	if got := rp.CommandString(); got != "cursor-agent -f" {
+		t.Errorf("CommandString() = %q, want %q", got, "cursor-agent -f")
+	}
+	if got := rp.ResolveDefaultArgs(); len(got) != 0 {
+		t.Errorf("ResolveDefaultArgs() = %v, want no MCP approval args by default", got)
+	}
+	mcpApproval := findOption(p.OptionsSchema, "mcp_approval")
+	if mcpApproval == nil {
+		t.Fatal("OptionsSchema missing mcp_approval")
+	}
+	if mcpApproval.Default != "prompt" {
+		t.Errorf("mcp_approval default = %q, want prompt", mcpApproval.Default)
+	}
+	approve := findChoice(mcpApproval.Choices, "approve")
+	if approve == nil || !reflect.DeepEqual(approve.FlagArgs, []string{"--approve-mcps"}) {
+		t.Fatalf("mcp_approval approve choice = %+v, want --approve-mcps", approve)
+	}
+	rp.EffectiveDefaults = ComputeEffectiveDefaults(p.OptionsSchema, map[string]string{"mcp_approval": "approve"}, nil)
+	if got := rp.ResolveDefaultArgs(); !reflect.DeepEqual(got, []string{"--approve-mcps"}) {
+		t.Errorf("ResolveDefaultArgs(opt-in) = %v, want [--approve-mcps]", got)
 	}
 	if p.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
@@ -234,6 +332,9 @@ func TestBuiltinProvidersKiro(t *testing.T) {
 	if !derefBool(p.SupportsHooks) {
 		t.Error("SupportsHooks = false, want true")
 	}
+	if p.AcceptStartupDialogs == nil || *p.AcceptStartupDialogs {
+		t.Errorf("AcceptStartupDialogs = %v, want false (kiro launches --trust-all-tools, shows no startup dialogs)", p.AcceptStartupDialogs)
+	}
 }
 
 // TestBuiltinProvidersOpenCodePromptModeRegression guards against switching
@@ -247,6 +348,153 @@ func TestBuiltinProvidersOpenCodePromptModeRegression(t *testing.T) {
 	}
 	if p.PromptMode != "flag" || p.PromptFlag != "--prompt" {
 		t.Fatalf("OpenCode prompt delivery = %q %q, want flag --prompt", p.PromptMode, p.PromptFlag)
+	}
+}
+
+// TestBuiltinProvidersResumeFlags asserts that every builtin provider known
+// to support session resume populates ResumeFlag and ResumeStyle. The flag
+// shapes are mirrored from gastown's reference table (mayor/rig/internal/
+// config/agents.go) which has been validated against each provider's CLI.
+// session_reconciler.resolveResumeCommand short-circuits when ResumeFlag is
+// empty, silently dropping the session-id and starting a fresh process —
+// regressing one of these to "" would re-introduce that bug for the
+// provider in question.
+func TestBuiltinProvidersResumeFlags(t *testing.T) {
+	tests := []struct {
+		provider    string
+		resumeFlag  string
+		resumeStyle string
+	}{
+		{"claude", "--resume", "flag"},
+		{"codex", "resume", "subcommand"},
+		{"gemini", "--resume", "flag"},
+		{"cursor", "--resume", "flag"},
+		{"copilot", "--resume", "flag"},
+		{"amp", "threads continue", "subcommand"},
+		{"opencode", "--session", "flag"},
+		{"auggie", "--resume", "flag"},
+		{"omp", "--resume", "flag"},
+	}
+	providers := BuiltinProviders()
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			p, ok := providers[tt.provider]
+			if !ok {
+				t.Fatalf("BuiltinProviders() missing %q", tt.provider)
+			}
+			if p.ResumeFlag != tt.resumeFlag {
+				t.Errorf("ResumeFlag = %q, want %q", p.ResumeFlag, tt.resumeFlag)
+			}
+			if p.ResumeStyle != tt.resumeStyle {
+				t.Errorf("ResumeStyle = %q, want %q", p.ResumeStyle, tt.resumeStyle)
+			}
+		})
+	}
+}
+
+// TestBuiltinProvidersSessionIDFlag pins which providers populate
+// SessionIDFlag. Claude is the only provider with a documented "start a new
+// session with this id" flag (--session-id). Codex exposes session ids only
+// through `codex resume <id>` (a resume path, not a fresh-start path), so it
+// stays empty — populating it would make resolveSessionCommand emit
+// `codex --session-id <key>` on first start, which codex rejects.
+func TestBuiltinProvidersSessionIDFlag(t *testing.T) {
+	providers := BuiltinProviders()
+	if got := providers["claude"].SessionIDFlag; got != "--session-id" {
+		t.Errorf("claude SessionIDFlag = %q, want --session-id", got)
+	}
+	for _, name := range []string{"codex", "gemini", "cursor", "copilot", "amp", "opencode", "auggie", "pi", "omp"} {
+		if got := providers[name].SessionIDFlag; got != "" {
+			t.Errorf("%s SessionIDFlag = %q, want empty (no documented start-with-id flag)", name, got)
+		}
+	}
+}
+
+func TestBuiltinProvidersCerebrasOpenCodePreset(t *testing.T) {
+	p := BuiltinProviders()["cerebras"]
+	if p.Command != "opencode" {
+		t.Errorf("Command = %q, want %q", p.Command, "opencode")
+	}
+	if p.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	}
+	if p.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
+	}
+	if !derefBool(p.SupportsACP) {
+		t.Fatal("SupportsACP = false, want true")
+	}
+	if !derefBool(p.SupportsHooks) {
+		t.Fatal("SupportsHooks = false, want true")
+	}
+	if !reflect.DeepEqual(p.ACPArgs, []string{"acp"}) {
+		t.Fatalf("ACPArgs = %v, want [acp]", p.ACPArgs)
+	}
+	if p.OptionDefaults["model"] != "cerebras/gpt-oss-120b" {
+		t.Fatalf("OptionDefaults[model] = %q, want cerebras/gpt-oss-120b", p.OptionDefaults["model"])
+	}
+
+	rp := specToResolved("cerebras", &p)
+	if got := rp.ProviderSessionCreateTransport(); got != "acp" {
+		t.Fatalf("ProviderSessionCreateTransport() = %q, want acp", got)
+	}
+	if got, want := rp.ResolveDefaultArgs(), []string{"--model", "cerebras/gpt-oss-120b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveDefaultArgs() = %v, want %v", got, want)
+	}
+	if got, want := rp.TitleModelFlagArgs(), []string{"--model", "cerebras/gpt-oss-120b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("TitleModelFlagArgs() = %v, want %v", got, want)
+	}
+
+	launch, err := BuildProviderLaunchCommand("", rp, nil, "acp")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+	if want := "opencode acp --model cerebras/gpt-oss-120b"; launch.Command != want {
+		t.Fatalf("Command = %q, want %q", launch.Command, want)
+	}
+}
+
+func TestBuiltinProvidersGroqOpenCodePreset(t *testing.T) {
+	p := BuiltinProviders()["groq"]
+	if p.Command != "opencode" {
+		t.Errorf("Command = %q, want %q", p.Command, "opencode")
+	}
+	if p.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	}
+	if p.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
+	}
+	if !derefBool(p.SupportsACP) {
+		t.Fatal("SupportsACP = false, want true")
+	}
+	if !derefBool(p.SupportsHooks) {
+		t.Fatal("SupportsHooks = false, want true")
+	}
+	if !reflect.DeepEqual(p.ACPArgs, []string{"acp"}) {
+		t.Fatalf("ACPArgs = %v, want [acp]", p.ACPArgs)
+	}
+	if p.OptionDefaults["model"] != "groq/openai/gpt-oss-120b" {
+		t.Fatalf("OptionDefaults[model] = %q, want groq/openai/gpt-oss-120b", p.OptionDefaults["model"])
+	}
+
+	rp := specToResolved("groq", &p)
+	if got := rp.ProviderSessionCreateTransport(); got != "acp" {
+		t.Fatalf("ProviderSessionCreateTransport() = %q, want acp", got)
+	}
+	if got, want := rp.ResolveDefaultArgs(), []string{"--model", "groq/openai/gpt-oss-120b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveDefaultArgs() = %v, want %v", got, want)
+	}
+	if got, want := rp.TitleModelFlagArgs(), []string{"--model", "groq/openai/gpt-oss-20b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("TitleModelFlagArgs() = %v, want %v", got, want)
+	}
+
+	launch, err := BuildProviderLaunchCommand("", rp, nil, "acp")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+	if want := "opencode acp --model groq/openai/gpt-oss-120b"; launch.Command != want {
+		t.Fatalf("Command = %q, want %q", launch.Command, want)
 	}
 }
 
@@ -350,6 +598,15 @@ func TestACPCommandString(t *testing.T) {
 				ACPArgs:    []string{},
 			},
 			want: "opencode-acp",
+		},
+		{
+			name: "BuiltinKimiPreservesGlobalFlags",
+			rp: ResolvedProvider{
+				Command: "kimi",
+				Args:    []string{"--yolo", "--no-thinking"},
+				ACPArgs: []string{"--yolo", "--no-thinking", "acp"},
+			},
+			want: "kimi --yolo --no-thinking acp",
 		},
 	}
 

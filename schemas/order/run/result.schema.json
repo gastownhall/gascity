@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "order", "scoped_name", "action", "wisp_id"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "order": { "type": "string" },
+    "rig": { "type": "string" },
+    "scoped_name": { "type": "string" },
+    "action": { "const": "formula" },
+    "wisp_id": { "type": "string" },
+    "routed_to": { "type": "string" },
+    "event_cursor": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": true
+}

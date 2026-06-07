@@ -1,6 +1,9 @@
 package config
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -48,6 +51,12 @@ func TestIsRemoteInclude(t *testing.T) {
 func TestNormalizeRemoteSourceGitHubShortcut(t *testing.T) {
 	if got, want := NormalizeRemoteSource("github.com/org/repo"), "https://github.com/org/repo"; got != want {
 		t.Fatalf("NormalizeRemoteSource = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeRemoteSourceGitHubBlob(t *testing.T) {
+	if got, want := NormalizeRemoteSource("https://github.com/org/repo/blob/main/packs/base/pack.toml"), "https://github.com/org/repo.git"; got != want {
+		t.Fatalf("NormalizeRemoteSource blob = %q, want %q", got, want)
 	}
 }
 
@@ -126,6 +135,7 @@ func TestIsGitHubTreeURL(t *testing.T) {
 		// Positive cases.
 		{"https://github.com/org/repo/tree/v1.0.0/packs/base", true},
 		{"https://github.com/org/repo/tree/main", true},
+		{"https://github.com/org/repo/blob/main/packs/base/pack.toml", true},
 		{"http://github.com/org/repo/tree/v2.0/deep/path", true},
 
 		// Negative cases.
@@ -174,6 +184,14 @@ func TestParseGitHubTreeURL(t *testing.T) {
 			"https://github.com/org/infra.git",
 			"packages/topo/base",
 			"v2.0",
+		},
+		// Blob URLs address a file under the same repo ref and are normalized
+		// with the file path as the remote subpath.
+		{
+			"https://github.com/org/repo/blob/main/packs/base/pack.toml",
+			"https://github.com/org/repo.git",
+			"packs/base",
+			"main",
 		},
 		// HTTP (not HTTPS).
 		{
@@ -236,5 +254,143 @@ func TestIncludeCacheName(t *testing.T) {
 	c := includeCacheName("git@github.com:org/other.git")
 	if a == c {
 		t.Errorf("collision: %q == %q for different sources", a, c)
+	}
+}
+
+func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
+	ResetRemoteCacheValidationCache()
+	t.Cleanup(ResetRemoteCacheValidationCache)
+
+	cacheRoot := t.TempDir()
+	commit := "abcdef1234567890abcdef1234567890abcdef12"
+	cacheDir := filepath.Join(cacheRoot, "repo")
+	if err := os.MkdirAll(filepath.Join(cacheDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("idx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int
+	orig := runRepoCacheGit
+	runRepoCacheGit = func(_ string, args ...string) (string, error) {
+		calls++
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return commit + "\n", nil
+		}
+		return "", nil // status --porcelain: clean
+	}
+	t.Cleanup(func() { runRepoCacheGit = orig })
+
+	const source = "git@github.com:example/pack"
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+		t.Fatalf("first validate: %v", err)
+	}
+	first := calls
+	if first == 0 {
+		t.Fatal("first validation should run git (rev-parse + status)")
+	}
+
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+		t.Fatalf("second validate: %v", err)
+	}
+	if calls != first {
+		t.Fatalf("second validation re-ran git (%d→%d); want cached (no new git)", first, calls)
+	}
+
+	// Touching the checkout invalidates the fingerprint → revalidate.
+	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("idx2-longer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+		t.Fatalf("third validate: %v", err)
+	}
+	if calls == first {
+		t.Fatalf("changed checkout should re-run git; calls stayed %d", calls)
+	}
+}
+
+// setupLockedPackRefTest fabricates a city with a packs.lock entry for ref and
+// a valid installed repo cache for it under a temp HOME, with git stubbed out.
+func setupLockedPackRefTest(t *testing.T, ref, commit string) (cityDir, cacheDir string) {
+	t.Helper()
+	ResetRemoteCacheValidationCache()
+	t.Cleanup(ResetRemoteCacheValidationCache)
+
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	cityDir = filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+	writeTestFile(t, cityDir, "packs.lock", fmt.Sprintf(`
+schema = 1
+
+[packs.%q]
+version = "sha:%s"
+commit = %q
+fetched = "2026-06-06T00:00:00Z"
+`, ref, commit, commit))
+
+	cacheDir = filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(ref, commit))
+	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
+	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("idx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := runRepoCacheGit
+	runRepoCacheGit = func(_ string, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return commit + "\n", nil
+		}
+		return "", nil // status --porcelain: clean
+	}
+	t.Cleanup(func() { runRepoCacheGit = orig })
+	return cityDir, cacheDir
+}
+
+func TestResolvePackRefUsesLockedImportForGitHubTreeURL(t *testing.T) {
+	const ref = "https://github.com/example/packs/tree/main/gastown"
+	const commit = "abcdef1234567890abcdef1234567890abcdef12"
+	cityDir, cacheDir := setupLockedPackRefTest(t, ref, commit)
+
+	got, err := resolvePackRef(ref, cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("resolvePackRef: %v", err)
+	}
+	want := filepath.Join(cacheDir, "gastown")
+	if got != want {
+		t.Fatalf("resolvePackRef = %q, want %q", got, want)
+	}
+}
+
+func TestResolvePackRefUsesLockedImportForRefRemoteInclude(t *testing.T) {
+	const ref = "git@github.com:example/packs//gastown#main"
+	const commit = "abcdef1234567890abcdef1234567890abcdef12"
+	cityDir, cacheDir := setupLockedPackRefTest(t, ref, commit)
+
+	got, err := resolvePackRef(ref, cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("resolvePackRef: %v", err)
+	}
+	want := filepath.Join(cacheDir, "gastown")
+	if got != want {
+		t.Fatalf("resolvePackRef = %q, want %q", got, want)
+	}
+}
+
+func TestResolvePackRefFallsBackToIncludeCacheWhenUnlocked(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+
+	const ref = "https://github.com/example/packs/tree/main/gastown"
+	_, err := resolvePackRef(ref, cityDir, cityDir)
+	if err == nil {
+		t.Fatal("expected uncached include error for unlocked remote ref")
+	}
+	if !strings.Contains(err.Error(), "is not cached") {
+		t.Fatalf("error = %v, want legacy include-cache miss", err)
 	}
 }

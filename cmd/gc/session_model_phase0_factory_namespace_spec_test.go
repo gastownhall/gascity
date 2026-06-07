@@ -124,7 +124,7 @@ func TestResolveSessionTemplate_RigBindingQualifiedExactMatch(t *testing.T) {
 }
 
 func TestPhase0SessionTargeting_RejectsTemplateToken(t *testing.T) {
-	t.Setenv("GC_SESSION", "phase0")
+	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
 	cfg := &config.City{

@@ -1923,6 +1923,26 @@ func TestIsTransientSendKeysError(t *testing.T) {
 	}
 }
 
+func TestNudgeSubmitDebounceUsesKimiProviderHint(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-kimi-debounce-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+	if err := tm.NewSession(sessionName, os.TempDir()); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	if err := tm.SetEnvironment(sessionName, "GC_PROVIDER", "kimi"); err != nil {
+		t.Fatalf("SetEnvironment: %v", err)
+	}
+	if got, want := tm.nudgeSubmitDebounce(sessionName), 1500*time.Millisecond; got != want {
+		t.Fatalf("nudgeSubmitDebounce = %s, want %s", got, want)
+	}
+}
+
 func TestSendKeysLiteralWithRetry_ImmediateSuccess(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
@@ -1983,6 +2003,61 @@ func TestSendKeysLiteralWithRetry_NonTransientFailsFast(t *testing.T) {
 	// Non-transient errors should fail immediately, not wait for timeout.
 	if elapsed > 2*time.Second {
 		t.Errorf("non-transient error took %v — should have failed fast, not retried until timeout", elapsed)
+	}
+}
+
+func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testing.T) {
+	fe := &fakeExecutor{
+		errs: []error{errors.New("command too long")},
+	}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	err := tm.sendKeysLiteralWithRetry("%1", "large startup prompt", time.Second)
+	if err != nil {
+		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	if len(fe.calls) != 3 {
+		t.Fatalf("tmux calls = %d, want 3: %#v", len(fe.calls), fe.calls)
+	}
+	first := strings.Join(fe.calls[0], " ")
+	if !strings.Contains(first, "send-keys") || !strings.Contains(first, "-l") {
+		t.Fatalf("first call = %v, want literal send-keys", fe.calls[0])
+	}
+	assertTmuxCommand(t, fe.calls[1], "load-buffer")
+	assertTmuxCommand(t, fe.calls[2], "paste-buffer")
+	third := strings.Join(fe.calls[2], "\x00")
+	for _, want := range []string{"\x00-p\x00", "\x00-d\x00", "\x00-t\x00%1"} {
+		if !strings.Contains(third, want) {
+			t.Fatalf("paste-buffer call = %v, missing %q", fe.calls[2], want)
+		}
+	}
+}
+
+func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
+	fe := &fakeExecutor{}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	err := tm.sendKeysLiteralWithRetry("%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
+	if err != nil {
+		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	if len(fe.calls) != 2 {
+		t.Fatalf("tmux calls = %d, want 2: %#v", len(fe.calls), fe.calls)
+	}
+	assertTmuxCommand(t, fe.calls[0], "load-buffer")
+	assertTmuxCommand(t, fe.calls[1], "paste-buffer")
+}
+
+func assertTmuxCommand(t *testing.T, args []string, want string) {
+	t.Helper()
+
+	joined := "\x00" + strings.Join(args, "\x00") + "\x00"
+	if !strings.Contains(joined, "\x00"+want+"\x00") {
+		t.Fatalf("tmux call = %v, want command %q", args, want)
 	}
 }
 
@@ -2327,6 +2402,18 @@ func TestPaneContainsBusyIndicator(t *testing.T) {
 		{"gemini auth spinner", []string{"Waiting for authentication... (Press Esc or Ctrl+C to cancel)"}, true},
 		{"gemini shell tool panel", []string{"│ ?  Shell sleep 12 [current working directory /tmp/city] (Sleep … │"}, true},
 		{"no indicator", []string{"some output", "building..."}, false},
+		// Current Claude Code (bypass mode) shows a live spinner with an elapsed
+		// timer + token stream, not "esc to interrupt", while working.
+		{"claude busy spinner token footer", []string{"· Boogieing… (2m 28s · ↓ 10.9k tokens)"}, true},
+		{"claude busy spinner long turn", []string{"✶ Investigating… (31m 40s · ↓ 108.6k tokens)"}, true},
+		{"claude busy spinner thinking", []string{"✢ Clauding… (56s · ↓ 1.7k tokens · thinking with max effort)"}, true},
+		{"codex busy spinner bullet", []string{"◦ Working (2m 48s • esc to interrupt)"}, true},
+		// Idle/done markers and status chrome must NOT read as busy — a false
+		// positive makes WaitForIdle never return, so the agent is never nudged.
+		{"claude done marker", []string{"✻ Worked for 1m 49s", "❯ "}, false},
+		{"claude status bar time", []string{"🧠 Sonnet 4.6 | 📁 witness | ⏱️  Jun 3 20:10:09"}, false},
+		{"scrollback truncation parens", []string{"  … +9 lines (ctrl+o to expand)"}, false},
+		{"git branch in status bar", []string{"  🚀 Opus 4.8 | 📁 thriva | (main) | ⏱️  Jun 4 02:57:04"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -285,7 +285,8 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	if err != nil {
 		return "", err
 	}
-	explicitName, err := sessionExplicitNameForNewSession(agentCfg, "")
+	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	explicitName, err := sessionExplicitNameForNewSession(cityPath, cityName, cfg.Rigs, agentCfg, "")
 	if err != nil {
 		return "", err
 	}

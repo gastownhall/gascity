@@ -4,6 +4,7 @@ package overlay
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 )
@@ -11,11 +12,23 @@ import (
 // mergeablePaths is the set of relative paths that get JSON-level merge
 // instead of file-level overwrite when both base and overlay exist.
 var mergeablePaths = map[string]bool{
+	filepath.Join(".agents", "hooks.json"):            true,
 	filepath.Join(".claude", "settings.json"):         true,
 	filepath.Join(".gemini", "settings.json"):         true,
 	filepath.Join(".codex", "hooks.json"):             true,
 	filepath.Join(".cursor", "hooks.json"):            true,
 	filepath.Join(".github", "hooks", "gascity.json"): true,
+}
+
+var (
+	errBaseNotObject    = errors.New("base JSON is not an object")
+	errOverlayNotObject = errors.New("overlay JSON is not an object")
+)
+
+// IsOverlayObjectShapeError reports whether err indicates an overlay document
+// was syntactically valid JSON but not a top-level object.
+func IsOverlayObjectShapeError(err error) bool {
+	return errors.Is(err, errOverlayNotObject)
 }
 
 // IsMergeablePath reports whether relPath is a known settings/hooks file
@@ -25,6 +38,7 @@ func IsMergeablePath(relPath string) bool {
 }
 
 // MergeSettingsJSON performs a deep merge of base and overlay JSON documents.
+// Both documents must be top-level JSON objects.
 //
 // Merge semantics:
 //   - Non-hook top-level keys: last writer (overlay) wins.
@@ -35,16 +49,21 @@ func IsMergeablePath(relPath string) bool {
 //     1. "matcher" key → identity is the matcher value
 //     2. "command" key → identity is "cmd:<value>"
 //     3. "bash" key → identity is "bash:<value>"
-//     4. else → no identity, always append
+//     4. nested "hooks" array (Claude/Gemini wrapper shape with no top-level
+//     matcher/command) → identity is "inner:<canonical inner hooks>", so an
+//     overlay re-projecting an already-present command is a no-op instead of
+//     an unbounded append.
+//     5. else → no identity, always append
 //
 // Returns pretty-printed JSON.
 func MergeSettingsJSON(base, overlay []byte) ([]byte, error) {
-	var baseDoc, overDoc map[string]any
-	if err := json.Unmarshal(base, &baseDoc); err != nil {
-		return nil, fmt.Errorf("merge: parsing base: %w", err)
+	baseDoc, err := parseSettingsObject("base", base, errBaseNotObject)
+	if err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal(overlay, &overDoc); err != nil {
-		return nil, fmt.Errorf("merge: parsing overlay: %w", err)
+	overDoc, err := parseSettingsObject("overlay", overlay, errOverlayNotObject)
+	if err != nil {
+		return nil, err
 	}
 
 	// Start with a copy of base, then apply overlay on top.
@@ -69,6 +88,18 @@ func MergeSettingsJSON(base, overlay []byte) ([]byte, error) {
 		return nil, fmt.Errorf("merge: marshaling result: %w", err)
 	}
 	return out, nil
+}
+
+func parseSettingsObject(label string, data []byte, shapeErr error) (map[string]any, error) {
+	var doc any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("merge: parsing %s: %w", label, err)
+	}
+	obj, ok := doc.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("merge: parsing %s: expected JSON object: %w", label, shapeErr)
+	}
+	return obj, nil
 }
 
 // CanonicalJSON parses and re-emits a JSON document with stable formatting.
@@ -181,7 +212,34 @@ func hookEntryKey(entry map[string]any) (string, bool) {
 		}
 		return "bash:" + s, true
 	}
+	// Claude/Gemini wrapper shape: { "hooks": [ {type, command}, ... ] } with
+	// no top-level matcher/command. Pack overlays (e.g. model-advisor's
+	// Stop/SubagentStop) use this shape, and without an identity key every
+	// re-projection appended another copy — accumulating unbounded across
+	// session starts. Key on the canonicalized inner hooks so that re-merging
+	// the same command(s) is idempotent (dedup by inner command content).
+	if v, ok := entry["hooks"]; ok {
+		if key, kok := innerHooksKey(v); kok {
+			return key, true
+		}
+	}
 	return "", false
+}
+
+// innerHooksKey derives a stable identity from the inner "hooks" array of a
+// wrapper-shape entry. The key is the canonical (sorted-key, HTML-unescaped)
+// JSON of the inner array, so two entries carrying identical command(s) collapse
+// to one regardless of key ordering or whitespace. Returns false if the value
+// is not a JSON array (leave such entries to the always-append fallback).
+func innerHooksKey(inner any) (string, bool) {
+	if _, ok := inner.([]any); !ok {
+		return "", false
+	}
+	canon, err := MarshalCanonicalJSON(inner)
+	if err != nil {
+		return "", false
+	}
+	return "inner:" + string(bytes.TrimRight(canon, "\n")), true
 }
 
 // toMapStringAny attempts to convert v to map[string]any.

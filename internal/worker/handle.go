@@ -35,6 +35,7 @@ type LifecycleHandle interface {
 	Stop(context.Context) error
 	Kill(context.Context) error
 	Close(context.Context) error
+	CloseDetailed(context.Context) (sessionpkg.CloseResult, error)
 	Rename(context.Context, string) error
 	StateHandle
 }

@@ -242,8 +242,8 @@ func TestSessionHandleCreateDeferred(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get(%q): %v", info.ID, err)
 	}
-	if bead.Metadata["state"] != string(sessionpkg.StateCreating) {
-		t.Fatalf("bead state = %q, want %q", bead.Metadata["state"], sessionpkg.StateCreating)
+	if bead.Metadata["state"] != string(sessionpkg.StateStartPending) {
+		t.Fatalf("bead state = %q, want %q", bead.Metadata["state"], sessionpkg.StateStartPending)
 	}
 	if bead.Metadata["pending_create_claim"] != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", bead.Metadata["pending_create_claim"])
@@ -558,6 +558,22 @@ func TestCanonicalProfileIdentityOpenCode(t *testing.T) {
 	}
 	if identity.ProviderFamily != "opencode" {
 		t.Fatalf("ProviderFamily = %q, want opencode", identity.ProviderFamily)
+	}
+	if identity.TransportClass != "tmux-cli" {
+		t.Fatalf("TransportClass = %q, want tmux-cli", identity.TransportClass)
+	}
+	if identity.CertificationFingerprint == "" {
+		t.Fatal("CertificationFingerprint is empty")
+	}
+}
+
+func TestCanonicalProfileIdentityKimi(t *testing.T) {
+	identity, ok := CanonicalProfileIdentity(ProfileKimiTmuxCLI)
+	if !ok {
+		t.Fatal("CanonicalProfileIdentity(ProfileKimiTmuxCLI) = false, want true")
+	}
+	if identity.ProviderFamily != "kimi" {
+		t.Fatalf("ProviderFamily = %q, want kimi", identity.ProviderFamily)
 	}
 	if identity.TransportClass != "tmux-cli" {
 		t.Fatalf("TransportClass = %q, want tmux-cli", identity.TransportClass)
@@ -1254,6 +1270,32 @@ func TestRuntimeHandleExpandedWorkerSurface(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandleCloseDetailedStopsRuntimeAndReturnsZeroResult(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "stub",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.CloseDetailed(context.Background())
+	if err != nil {
+		t.Fatalf("CloseDetailed: %v", err)
+	}
+	if len(result.WaitNudgeIDs) != 0 {
+		t.Fatalf("WaitNudgeIDs = %#v, want empty", result.WaitNudgeIDs)
+	}
+	if sp.IsRunning("legacy-worker") {
+		t.Fatal("legacy-worker should be stopped after CloseDetailed")
+	}
+}
+
 func TestRuntimeHandleStateStoppedSkipsPendingProbe(t *testing.T) {
 	sp := runtime.NewFake()
 	sp.SetPendingInteraction("legacy-worker", &runtime.PendingInteraction{
@@ -1331,6 +1373,71 @@ func TestRuntimeHandleLiveObservationUsesRuntimeMetadataAndLiveness(t *testing.T
 	}
 	if obs.LastActivity == nil || !obs.LastActivity.Equal(lastActivity) {
 		t.Fatalf("LiveObservation.LastActivity = %#v, want %v", obs.LastActivity, lastActivity)
+	}
+}
+
+type falseNegativeRuntimeProvider struct {
+	*runtime.Fake
+	falseNames map[string]bool
+}
+
+func (p *falseNegativeRuntimeProvider) IsRunning(name string) bool {
+	if p.falseNames[name] {
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+func TestRuntimeHandleLiveObservationTreatsLiveProcessAsRunningWhenSessionProbeFalseNegatives(t *testing.T) {
+	base := runtime.NewFake()
+	if err := base.Start(context.Background(), "runtime-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp := &falseNegativeRuntimeProvider{
+		Fake:       base,
+		falseNames: map[string]bool{"runtime-worker": true},
+	}
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "runtime-worker",
+		ProviderName: "claude",
+		ProcessNames: []string{"claude"},
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	obs, err := handle.LiveObservation(context.Background())
+	if err != nil {
+		t.Fatalf("LiveObservation: %v", err)
+	}
+	if !obs.Running || !obs.Alive {
+		t.Fatalf("LiveObservation() = %#v, want running+alive true despite IsRunning false-negative", obs)
+	}
+}
+
+func TestRuntimeHandleLiveObservationWithoutProcessNamesTreatsRunningSessionAsAlive(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "runtime-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "runtime-worker",
+		ProviderName: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	obs, err := handle.LiveObservation(context.Background())
+	if err != nil {
+		t.Fatalf("LiveObservation: %v", err)
+	}
+	if !obs.Running || !obs.Alive {
+		t.Fatalf("LiveObservation() = %#v, want running+alive true when no process names are configured", obs)
 	}
 }
 

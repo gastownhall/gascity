@@ -183,13 +183,14 @@ func resolveOpenQualifiedAliasBasename(store beads.Store, identifier string) (st
 	if store == nil || identifier == "" || strings.Contains(identifier, "/") {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	all, err := store.List(beads.ListQuery{Label: session.LabelSession})
+	all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
 	if err != nil {
 		return "", fmt.Errorf("listing sessions: %w", err)
 	}
 	matches := make([]beads.Bead, 0, 1)
 	for _, b := range all {
-		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
+		if b.Status == "closed" {
 			continue
 		}
 		session.RepairEmptyType(store, &b)

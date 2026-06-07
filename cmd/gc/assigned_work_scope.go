@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -14,6 +15,15 @@ func assignedWorkStoreRefForAgent(cityPath string, cfg *config.City, agentCfg *c
 	return configuredRigName(cityPath, agentCfg, cfg.Rigs)
 }
 
+// agentIsCrossStoreEligible reports whether an agent may discover and serve work
+// in ANY store, not just its configured rig. City-scoped agents are cross-store
+// eligible: a city-wide singleton legitimately serves per-rig routed work
+// (vp-kvp — "scope determines discovery breadth"). Rig-scoped agents stay
+// single-store, so their reachability and all existing behavior are unchanged.
+func agentIsCrossStoreEligible(agentCfg *config.Agent) bool {
+	return agentutil.AgentIsCrossStoreEligible(agentCfg)
+}
+
 func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agentCfg *config.Agent, storeRefs []string, index int) bool {
 	if len(storeRefs) == 0 {
 		return true
@@ -21,9 +31,17 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 	if index < 0 || index >= len(storeRefs) {
 		return false
 	}
+	// City-scoped agents federate across all stores (vp-kvp): a city-wide
+	// singleton's work may live in any rig store, so gating it to its own
+	// configured rig is the cross-store dead-drop this fixes.
+	if agentIsCrossStoreEligible(agentCfg) {
+		return true
+	}
 	return storeRefs[index] == assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 }
 
+// filterAssignedWorkBeadsForPoolDemand resolves work through the routed
+// backing template because pool scale decisions are per agent template.
 func filterAssignedWorkBeadsForPoolDemand(
 	cfg *config.City,
 	cityPath string,
@@ -50,17 +68,13 @@ func filterAssignedWorkBeadsForPoolDemand(
 		if template != "" {
 			sessionBeadTemplate[sb.ID] = template
 		}
-		assigneeToSessionBeadID[sb.ID] = sb.ID
-		if sessionName := strings.TrimSpace(sb.Metadata["session_name"]); sessionName != "" {
-			assigneeToSessionBeadID[sessionName] = sb.ID
-		}
-		if identity := strings.TrimSpace(sb.Metadata["configured_named_identity"]); identity != "" {
-			assigneeToSessionBeadID[identity] = sb.ID
+		for _, id := range sessionBeadAssigneeIdentities(sb) {
+			assigneeToSessionBeadID[id] = sb.ID
 		}
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
-		template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {
 				template = sessionBeadTemplate[sessionBeadID]
@@ -83,6 +97,8 @@ func filterAssignedWorkBeadsForPoolDemand(
 	return filtered
 }
 
+// filterAssignedWorkBeadsForSessionWake resolves work through assignment
+// identities because session wake decisions are per concrete session owner.
 func filterAssignedWorkBeadsForSessionWake(
 	cfg *config.City,
 	cityPath string,
@@ -97,6 +113,9 @@ func filterAssignedWorkBeadsForSessionWake(
 		return assignedWorkBeads
 	}
 	reachableRefsByAssignee := make(map[string]map[string]struct{})
+	// crossStore identities belong to city-scoped (cross-store-eligible) agents
+	// and are reachable from ANY store (vp-kvp). They bypass the per-ref match.
+	crossStore := make(map[string]struct{})
 	add := func(identifier, storeRef string) {
 		identifier = strings.TrimSpace(identifier)
 		if identifier == "" {
@@ -116,6 +135,10 @@ func filterAssignedWorkBeadsForSessionWake(
 		if !ok {
 			continue
 		}
+		if agentIsCrossStoreEligible(spec.Agent) {
+			crossStore[strings.TrimSpace(identity)] = struct{}{}
+			continue
+		}
 		add(identity, assignedWorkStoreRefForAgent(cityPath, cfg, spec.Agent))
 	}
 	for _, sb := range sessionBeads {
@@ -130,10 +153,17 @@ func filterAssignedWorkBeadsForSessionWake(
 		if agentCfg == nil {
 			continue
 		}
+		if agentIsCrossStoreEligible(agentCfg) {
+			for _, id := range sessionBeadAssigneeIdentities(sb) {
+				crossStore[strings.TrimSpace(id)] = struct{}{}
+			}
+			crossStore[strings.TrimSpace(template)] = struct{}{}
+			continue
+		}
 		storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
-		add(sb.ID, storeRef)
-		add(sb.Metadata["session_name"], storeRef)
-		add(sb.Metadata["configured_named_identity"], storeRef)
+		for _, id := range sessionBeadAssigneeIdentities(sb) {
+			add(id, storeRef)
+		}
 		add(template, storeRef)
 	}
 
@@ -144,6 +174,11 @@ func filterAssignedWorkBeadsForSessionWake(
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
 		if assignee == "" {
+			continue
+		}
+		if _, ok := crossStore[assignee]; ok {
+			// City-scoped assignee: reachable from any store (vp-kvp).
+			filtered = append(filtered, wb)
 			continue
 		}
 		if refs := reachableRefsByAssignee[assignee]; refs != nil {

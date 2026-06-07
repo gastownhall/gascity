@@ -51,16 +51,16 @@ The bead store is a single interface with four implementations, selected
 at startup by the `[beads].provider` config key or `GC_BEADS` env var.
 
 ```
-                        beads.Store (interface)
-                       /       |        \         \
-                      /        |         \         \
-               BdStore    FileStore   MemStore   exec.Store
-             (bd CLI)   (JSON file)  (in-mem)   (user script)
-                 |            |
-                 |        embeds MemStore
-                 |
-          ExecCommandRunner
-           (with telemetry)
+                       beads.Store (interface)
+                      /       |        \      \
+                     /        |         \      \
+              BdStore    FileStore   MemStore  exec.Store
+            (bd CLI)   (JSON file)  (in-mem) (user script)
+                |            |
+                |        embeds MemStore
+                |
+         ExecCommandRunner
+          (with telemetry)
 ```
 
 **Provider resolution** (in `cmd/gc/main.go:openCityStore`):
@@ -69,8 +69,10 @@ at startup by the `[beads].provider` config key or `GC_BEADS` env var.
 2. `[beads].provider` in `city.toml`
 3. Default: `"bd"`
 
-Valid provider values: `"bd"` (BdStore), `"file"` (FileStore),
-`"exec:<script-path>"` (exec.Store).
+Valid provider values: `"bd"` (BdStore, default), `"file"` (FileStore),
+and `"exec:<script-path>"` (exec.Store). The `"sqlite"`, `"sqlite-cgo"`, and
+`"coordstore"` coordination-store providers were removed in favor of
+`"doltlite"` and now hard-error.
 
 ### Data Flow
 

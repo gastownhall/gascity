@@ -2,13 +2,16 @@ package api
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -42,11 +45,12 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
 			continue
 		}
+		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
 		expanded := expandAgent(a, cityName, tmpl, sp)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			obs := observeProviderSession(sp, sessionName, nil)
+			obs := observeProviderSession(sp, sessionName, processNames)
 			if obs.Running {
 				runningCount++
 			}
@@ -71,11 +75,16 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 	return resp
 }
 
-// rigSuspended computes effective suspended state for a rig by merging config
-// and runtime session metadata. A rig is suspended if the config says so, or
-// if all its agents are runtime-suspended via session metadata.
+// rigSuspended computes the effective suspended state for a rig. A rig
+// is suspended if the runtime state file records an explicit "suspended"
+// preference, if the rig's SuspendedOnStart applies with no overriding
+// runtime entry, or if all its agents are runtime-suspended via session
+// metadata. The deprecated `[[rig]] suspended` field in city.toml is
+// intentionally NOT consulted — `gc doctor` surfaces it as a migration
+// target.
 func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) bool {
-	if rig.Suspended {
+	if rs, err := suspensionstate.Load(fsys.OSFS{}, cityPath); err == nil &&
+		suspensionstate.EffectiveRigSuspended(rs, rig.Name, rig.EffectiveSuspendedOnStart()) {
 		return true
 	}
 	tmpl := cfg.Workspace.SessionTemplate
@@ -84,11 +93,12 @@ func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provi
 		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
 			continue
 		}
+		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
 		expanded := expandAgent(a, cityName, tmpl, sp)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			obs := observeProviderSession(sp, sessionName, nil)
+			obs := observeProviderSession(sp, sessionName, processNames)
 			if obs.Suspended {
 				suspendedCount++
 			}

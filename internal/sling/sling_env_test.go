@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -26,6 +27,17 @@ func multiSessionAgent(name string) config.Agent {
 	return config.Agent{
 		Name:          name,
 		NamepoolNames: []string{name + "-1", name + "-2"},
+	}
+}
+
+func canonicalSingletonPoolAgent() config.Agent {
+	zero := 0
+	one := 1
+	return config.Agent{
+		Name:              "worker",
+		Dir:               "rig",
+		MinActiveSessions: &zero,
+		MaxActiveSessions: &one,
 	}
 }
 
@@ -51,6 +63,25 @@ func TestResolveSlingEnv_SingleSession_NoMolecule(t *testing.T) {
 	env := ResolveSlingEnv(singleSessionAgent(), deps, bead.ID)
 	if _, ok := env["GC_SLING_TARGET"]; !ok {
 		t.Errorf("GC_SLING_TARGET missing for single-session agent, got env=%v", env)
+	}
+	if _, ok := env["GC_ARTIFACT_DIR"]; ok {
+		t.Errorf("GC_ARTIFACT_DIR should not be set for non-molecule bead, got %q", env["GC_ARTIFACT_DIR"])
+	}
+}
+
+func TestResolveSlingEnv_CanonicalSingletonPoolSetsTarget(t *testing.T) {
+	deps := slingEnvTestDeps(t, t.TempDir())
+	bead, err := deps.Store.Create(beads.Bead{Title: "standalone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := canonicalSingletonPoolAgent()
+
+	env := ResolveSlingEnv(a, deps, bead.ID)
+
+	want := agent.SessionNameFor(deps.CityName, a.QualifiedName(), deps.Cfg.Workspace.SessionTemplate)
+	if got := env["GC_SLING_TARGET"]; got != want {
+		t.Fatalf("GC_SLING_TARGET = %q, want %q", got, want)
 	}
 	if _, ok := env["GC_ARTIFACT_DIR"]; ok {
 		t.Errorf("GC_ARTIFACT_DIR should not be set for non-molecule bead, got %q", env["GC_ARTIFACT_DIR"])

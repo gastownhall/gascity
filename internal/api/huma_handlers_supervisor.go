@@ -34,6 +34,7 @@ type SupervisorHealthOutput struct {
 	Body struct {
 		Status        string             `json:"status" doc:"Health status (\"ok\")."`
 		Version       string             `json:"version" doc:"Supervisor version."`
+		BuildID       string             `json:"build_id,omitempty" doc:"Build identity (typically a short git commit hash, with \"-dirty\" suffix when built from an unclean tree). Empty when unavailable."`
 		UptimeSec     int                `json:"uptime_sec" doc:"Supervisor uptime in seconds."`
 		CitiesTotal   int                `json:"cities_total" doc:"Total managed cities."`
 		CitiesRunning int                `json:"cities_running" doc:"Cities currently running."`
@@ -269,6 +270,7 @@ func (sm *SupervisorMux) humaHandleHealth(_ context.Context, _ *struct{}) (*Supe
 	out := &SupervisorHealthOutput{}
 	out.Body.Status = "ok"
 	out.Body.Version = sm.version
+	out.Body.BuildID = sm.buildID
 	out.Body.UptimeSec = int(time.Since(sm.startedAt).Seconds())
 	out.Body.CitiesTotal = len(cities)
 	out.Body.CitiesRunning = running

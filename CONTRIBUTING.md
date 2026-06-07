@@ -108,6 +108,8 @@ When updating docs:
 - Architecture docs describe current behavior
 - Design docs describe proposed behavior
 - Archive docs keep historical notes out of the main onboarding path
+- Updating `GastownCity()`'s `Imports` or `DefaultRigImports` map requires
+  updating the auto-import table in `engdocs/design/packv2/migration.mdx`
 
 ## Make Targets
 
@@ -128,6 +130,40 @@ Run `make help` for the full list. The most useful targets are:
 | `make dashboard-dev` | Vite dev server for SPA iteration |
 | `make dashboard-check` | Typecheck + build + test the dashboard |
 | `make cover` | Coverage run |
+
+## macOS Local Development
+
+On macOS, `make build` signs `gc` with a stable local codesigning identity
+when one is available. Stable signing helps macOS TCC remember local
+permission grants, such as App Management and Apple Events, across rebuilds.
+
+The build auto-detects the first valid certificate in your keychain, in this
+order: `Apple Development:`, `Developer ID Application:`, then `GasCity Dev`.
+Override the selection with `GC_SIGN_IDENTITY=<certificate name>`.
+The signing identifier defaults to `com.gascity.gc`; override it with
+`GC_SIGN_IDENTIFIER=<identifier>` only when you intentionally want a separate
+local TCC identity. After a successful stable or opt-in ad-hoc signing pass,
+the script removes the `com.apple.provenance` extended attribute when present
+so macOS does not retain stale local-build provenance metadata.
+
+If no stable identity is available, the build leaves Go's linker-produced
+macOS signature unchanged. It does not automatically ad-hoc re-sign the
+binary, because ad-hoc signing creates a fresh identity and can cause repeated
+TCC prompts. If you need the old behavior for a local experiment, opt in with
+`GC_ADHOC_SIGN=1`.
+
+Getting a free local certificate does not require paid Apple Developer Program
+membership:
+
+- **Apple Development**: Xcode -> Settings -> Accounts -> sign in with an
+  Apple ID -> Manage Certificates -> `+` -> Apple Development.
+- **Self-signed**: Keychain Access -> Certificate Assistant -> Create a
+  Certificate. Use Identity Type **Self Signed Root** and Certificate Type
+  **Code Signing**. Name it `GasCity Dev` for auto-detection, or set
+  `GC_SIGN_IDENTITY` to its name.
+
+For official distribution, local development signing is not enough; release
+artifacts need a Developer ID certificate and notarization.
 
 ## macOS Release Verification
 
@@ -150,6 +186,37 @@ Run this after changing build/packaging scripts or upgrading the Go toolchain.
 - Use present tense
 - Keep the first line under 72 characters
 - Reference issues when relevant
+
+## Issue Triage Labels
+
+When you file an issue, automation may apply labels that indicate missing
+information. Here is what to expect.
+
+### `status/needs-repro`
+
+Applied when the issue cannot be investigated without a minimal reproduction.
+Automation will leave a request comment explaining what is needed. Please reply
+within 14 days — the 14-day window starts from that comment, not from when
+the label was applied.
+
+### `status/needs-info`
+
+Applied when additional details are required. Automation will leave a request
+comment explaining what information is needed. Please reply within 14 days of
+that comment.
+
+### What happens next
+
+- **You reply or open a PR that addresses the question**: automation removes
+  the label and the stale-close path is canceled. You can always respond even
+  after the 14 days have passed.
+- **14 days pass with no response**: the issue is closed as "not planned"
+  with a comment that references the original request. Replying to the closed
+  issue reopens the conversation; include the requested details so triage can
+  continue.
+
+Both labels are removed automatically when the original reporter comments on
+the issue or pushes a synchronizing commit to a linked pull request.
 
 ## Questions
 

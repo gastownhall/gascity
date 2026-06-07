@@ -8,6 +8,7 @@ package runtime //nolint:revive // shadows stdlib runtime; isolated to internal
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -119,8 +120,9 @@ type Provider interface {
 	// exist. Used for graceful shutdown before Stop.
 	Interrupt(name string) error
 
-	// IsRunning reports whether the named session exists and has a
-	// live process.
+	// IsRunning reports whether the named provider runtime exists. It does not
+	// prove that the configured agent process is alive; callers that need that
+	// distinction should use ObserveLiveness or ProcessAlive.
 	IsRunning(name string) bool
 
 	// IsAttached reports whether a user terminal is currently connected
@@ -139,7 +141,11 @@ type Provider interface {
 
 	// Nudge sends structured content to the named session to wake or
 	// redirect the agent. Returns nil if the session does not exist
-	// (best-effort). Use [TextContent] to wrap a plain string.
+	// and the provider can safely treat that as a best-effort no-op.
+	// Providers that can observe a live session without owning the
+	// delivery channel return [ErrSessionNotFound] so callers do not
+	// mistake a no-op for delivery. Use [TextContent] to wrap a plain
+	// string.
 	Nudge(name string, content []ContentBlock) error
 
 	// SetMeta stores a key-value pair associated with the named session.
@@ -273,6 +279,70 @@ type InterruptBoundaryWaitProvider interface {
 	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
 }
 
+// LiveRuntime identifies a single agent runtime process discovered via
+// process-table scan, independent of provider-visible artifacts.
+type LiveRuntime struct {
+	// SessionID is the GC_SESSION_ID value from the process environment.
+	SessionID string
+	// City is the GC_CITY_PATH value from the process environment (falling
+	// back to GC_CITY). Empty when neither is readable. The process-table scan
+	// is supervisor-wide (it walks all of /proc), but session beads and tmux
+	// runtime tracking are per-city. A consumer that owns only one city's
+	// store MUST filter scan results to City == its own city before reaping,
+	// or it will mistake another city's live session for an orphan and kill
+	// it.
+	City string
+	// Epoch is the GC_RUNTIME_EPOCH from the process environment, if readable.
+	// Zero if the variable is absent or unparseable.
+	Epoch int
+	// PID is the OS process ID for local providers, or a provider-specific
+	// process identifier for remote infrastructure.
+	PID int
+	// ProviderName is the session name as known to the provider. Empty means
+	// the runtime is not visible in the provider's artifact registry.
+	ProviderName string
+	// IsTracked is true when this runtime also appears in the provider's
+	// registry. False marks a live process that is invisible to the provider.
+	IsTracked bool
+}
+
+// ProcessTableScanner is an optional extension for runtimes that can discover
+// live agent root processes by GC_SESSION_ID independently of provider-visible
+// artifacts.
+//
+// Providers that cannot inspect process tables do not implement this
+// interface. Callers must use a type assertion and continue safely when the
+// provider lacks the capability.
+type ProcessTableScanner interface {
+	// FindRuntimesBySessionID returns live agent root processes carrying
+	// GC_SESSION_ID equal to id. If id is empty, it returns all live agent root
+	// processes with any GC_SESSION_ID set.
+	//
+	// Best-effort implementations may return both partial results and a non-nil
+	// error; callers should proceed with any returned results.
+	FindRuntimesBySessionID(id string) ([]LiveRuntime, error)
+
+	// TerminateRuntime stops the process or infrastructure unit identified by r.
+	// It returns nil when the runtime is already gone.
+	TerminateRuntime(r LiveRuntime) error
+}
+
+// ServerLifecycleProvider is an optional extension for providers that own
+// server-level lifecycle alongside individual session management.
+//
+// This interface must not be added to [Provider]: providers backed by
+// subprocesses, Kubernetes, fakes, or other non-server runtimes do not have a
+// shared server to configure or tear down.
+type ServerLifecycleProvider interface {
+	// ConfigureServer applies server-level configuration. Implementations must
+	// be idempotent, and callers should treat errors as best-effort warnings.
+	ConfigureServer() error
+
+	// TeardownServer terminates the shared server after all sessions have been
+	// drained. Implementations should return nil when the server is already gone.
+	TeardownServer() error
+}
+
 // CopyEntry describes a file or directory to stage in the session's
 // working directory before the agent command starts.
 type CopyEntry struct {
@@ -378,6 +448,14 @@ func hashPathContentSkipEntry(d fs.DirEntry) bool {
 	return strings.HasSuffix(base, "~")
 }
 
+// Lifecycle describes the expected lifetime of a runtime command.
+type Lifecycle string
+
+const (
+	// LifecycleOneShot marks commands that are expected to do bounded work and exit.
+	LifecycleOneShot Lifecycle = "one_shot"
+)
+
 // Config holds the parameters for starting a new session.
 type Config struct {
 	// WorkDir is the working directory for the session process.
@@ -387,12 +465,20 @@ type Config struct {
 	// If empty, a default shell is started.
 	Command string
 
+	// Lifecycle describes whether the command is long-lived or expected to
+	// exit after one turn. Empty means the default long-lived session lifecycle.
+	Lifecycle Lifecycle
+
 	// Env is additional environment variables set in the session.
 	Env map[string]string
 
 	// MCPServers is the effective ACP session/new MCP server list for this
 	// session. Non-ACP providers ignore it.
 	MCPServers []MCPServerConfig
+
+	// StartupEnvelope carries provider-specific startup metadata used by
+	// the T3 bridge path. It is excluded from the core fingerprint.
+	StartupEnvelope json.RawMessage
 
 	// Startup reliability hints (all optional — zero values skip).
 
@@ -407,6 +493,15 @@ type Config struct {
 
 	// EmitsPermissionWarning is true if the agent shows a bypass-permissions dialog.
 	EmitsPermissionWarning bool
+
+	// AcceptStartupDialogs overrides automatic startup dialog handling.
+	// Nil keeps the runtime default derived from other startup hints.
+	AcceptStartupDialogs *bool
+
+	// MouseOn reports whether tmux mouse mode should be preserved for this session.
+	// When false, tmux startup disables mouse mode and monitor-activity to keep
+	// terminal mouse escape sequences out of headless agent stdin.
+	MouseOn bool
 
 	// Nudge is text typed into the session after the agent is ready.
 	// Used for CLI agents that don't accept command-line prompts.

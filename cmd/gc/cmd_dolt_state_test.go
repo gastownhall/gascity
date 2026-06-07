@@ -264,8 +264,25 @@ func TestDoltStateRuntimeLayoutCmdHonorsProjectedOverrides(t *testing.T) {
 	}
 }
 
+func clearManagedDoltRuntimeEnvForTest(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"GC_CITY_RUNTIME_DIR",
+		"GC_PACK_STATE_DIR",
+		"GC_DOLT_DATA_DIR",
+		"GC_DOLT_LOG_FILE",
+		"GC_DOLT_STATE_FILE",
+		"GC_DOLT_PID_FILE",
+		"GC_DOLT_LOCK_FILE",
+		"GC_DOLT_CONFIG_FILE",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 func TestDoltStateAllocatePortCmdHonorsEnvOverride(t *testing.T) {
 	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
 	t.Setenv("GC_DOLT_PORT", "4406")
 
 	var stdout, stderr bytes.Buffer
@@ -275,6 +292,69 @@ func TestDoltStateAllocatePortCmdHonorsEnvOverride(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "4406" {
 		t.Fatalf("allocate-port = %q, want 4406", got)
+	}
+}
+
+func TestDoltStateAllocatePortCmdPrefersLiveProviderStateOverStaleEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	listener := listenOnRandomPort(t)
+	defer listener.Close() //nolint:errcheck // test cleanup
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "allocate-port", "--city", cityPath, "--state-file", stateFile}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != strconv.Itoa(port) {
+		t.Fatalf("allocate-port = %q, want live provider state port %d", got, port)
+	}
+}
+
+func TestChooseManagedDoltPortPrefersLiveProviderStateOverStaleEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	listener := listenOnRandomPort(t)
+	defer listener.Close() //nolint:errcheck // test cleanup
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != strconv.Itoa(port) {
+		t.Fatalf("chooseManagedDoltPort = %q, want live provider state port %d", got, port)
 	}
 }
 
@@ -373,6 +453,46 @@ func TestManagedDoltExistingStatePortReturnsPublishedPortBeforeListenerReady(t *
 	}
 	if got := managedDoltExistingStatePort(cityPath, layout, os.Getpid()); got != 43129 {
 		t.Fatalf("managedDoltExistingStatePort = %d, want 43129 before listener is reachable", got)
+	}
+}
+
+func TestAssessExistingManagedDoltIgnoresStateWhenLifecycleNotOwned(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      43129,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+
+	report, err := assessExistingManagedDolt(cityPath, "127.0.0.1", "43129", "root", 0)
+	if err != nil {
+		t.Fatalf("assessExistingManagedDolt: %v", err)
+	}
+	if report.StatePort != 0 {
+		t.Fatalf("StatePort = %d, want 0 for postgres-backed city", report.StatePort)
+	}
+	if report.Reusable {
+		t.Fatal("Reusable = true, want false for postgres-backed city")
 	}
 }
 
@@ -858,20 +978,30 @@ func TestDoltStateInspectManagedCmdDetectsDeletedInodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
 	}
+	// The child opens a file, unlinks it while the fd is still held, and
+	// blocks. inspect-managed sees the deleted inode by walking the child's
+	// open fds. The unlink must complete BEFORE inspect-managed runs, so
+	// the child signals readiness via a marker file and the parent polls
+	// for it. Without this sync the test races and sporadically observes
+	// the inode as still-linked. (ga-q42 flake.)
+	readyFile := filepath.Join(t.TempDir(), "deleted-inode.ready")
 	proc := exec.Command("python3", "-c", `
 import os, signal, sys, time
 path = sys.argv[1]
+ready_file = sys.argv[2]
 os.makedirs(path, exist_ok=True)
 stale = os.path.join(path, "stale-open.txt")
 f = open(stale, "w+")
 f.write("stale")
 f.flush()
 os.unlink(stale)
+with open(ready_file, "w", encoding="utf-8") as r:
+    r.write("ready\n")
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 while True:
     time.sleep(1)
-`, layout.DataDir)
+`, layout.DataDir, readyFile)
 	if err := proc.Start(); err != nil {
 		t.Fatalf("start python: %v", err)
 	}
@@ -879,6 +1009,16 @@ while True:
 		_ = proc.Process.Kill()
 		_, _ = proc.Process.Wait()
 	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(readyFile); err == nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if _, err := os.Stat(readyFile); err != nil {
+		t.Fatalf("python child did not signal readiness within 5s: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1150,7 +1290,7 @@ func TestDoltStateExistingManagedCmdReportsReusableOwnedServer(t *testing.T) {
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
-  *"sql -q SELECT active_branch()"*)
+  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *)
@@ -1218,7 +1358,7 @@ func TestDoltStateExistingManagedCmdFallsBackToPublishedRuntimeState(t *testing.
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
-  *"sql -q SELECT active_branch()"*)
+  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *)
@@ -1290,7 +1430,7 @@ func TestDoltStateExistingManagedCmdReportsDeletedInodes(t *testing.T) {
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
-  *"sql -q SELECT active_branch()"*)
+  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *)
@@ -1336,7 +1476,7 @@ esac
 	}
 }
 
-func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
+func TestDoltStatePreflightCleanCmdRemovesSocketsButPreservesDoltInternals(t *testing.T) {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
@@ -1346,8 +1486,8 @@ func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
 		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
 	}
 
-	phantomDir := filepath.Join(layout.DataDir, "phantom", ".dolt", "noms")
-	if err := os.MkdirAll(phantomDir, 0o755); err != nil {
+	phantomNomsDir := filepath.Join(layout.DataDir, "phantom", ".dolt", "noms")
+	if err := os.MkdirAll(phantomNomsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	staleLock := filepath.Join(layout.DataDir, "stale", ".dolt", "noms", "LOCK")
@@ -1384,17 +1524,20 @@ func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
 	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
 		t.Fatalf("socket %s still present after preflight clean, stat err = %v", socketPath, err)
 	}
-	if _, err := os.Stat(staleLock); !os.IsNotExist(err) {
-		t.Fatalf("LOCK %s still present after preflight clean, stat err = %v", staleLock, err)
+	if _, err := os.Stat(staleLock); err != nil {
+		t.Fatalf("stale LOCK removed unexpectedly: %v", err)
 	}
-	quarantined, err := filepath.Glob(filepath.Join(layout.DataDir, ".quarantine", "*-phantom*"))
+	quarantined, err := filepath.Glob(filepath.Join(layout.DataDir, ".quarantine", "*"))
 	if err != nil {
 		t.Fatalf("Glob(quarantine): %v", err)
 	}
-	if len(quarantined) != 1 {
-		t.Fatalf("quarantined phantom databases = %d, want 1 (%v)", len(quarantined), quarantined)
+	if len(quarantined) != 0 {
+		t.Fatalf("quarantine directory contains %d entries (%v), want 0", len(quarantined), quarantined)
 	}
-	if _, err := os.Stat(filepath.Join(layout.DataDir, "healthy", ".dolt", "noms", "manifest")); err != nil {
+	if _, err := os.Stat(phantomNomsDir); err != nil {
+		t.Fatalf("phantom database removed unexpectedly: %v", err)
+	}
+	if _, err := os.Stat(healthyManifest); err != nil {
 		t.Fatalf("healthy manifest removed unexpectedly: %v", err)
 	}
 }
@@ -1743,7 +1886,7 @@ func TestDoltStateQueryProbeCmdUsesDoltHelper(t *testing.T) {
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
-  *"sql -q SELECT active_branch()"*)
+  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *)
@@ -1765,7 +1908,7 @@ esac
 		t.Fatalf("ReadFile(invocation): %v", err)
 	}
 	text := string(invocation)
-	for _, want := range []string{"--host 127.0.0.1", "--port 3311", "--user root", "sql -q SELECT active_branch()"} {
+	for _, want := range []string{"--host 127.0.0.1", "--port 3311", "--user root", "sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("dolt invocation missing %q: %s", want, text)
 		}
@@ -1780,7 +1923,7 @@ set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
   *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ngascity\ninformation_schema\nmysql\ndolt_cluster\n__gc_probe\n'
+    printf 'Database\ngascity\ninformation_schema\nmysql\ndolt\ndolt_cluster\n__gc_probe\n'
     exit 0
     ;;
   *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
@@ -1854,7 +1997,7 @@ set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
   *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
     exit 0
     ;;
   *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
@@ -1991,11 +2134,11 @@ func TestDoltStateHealthCheckCmdReportsReadOnlyAndConnectionCount(t *testing.T) 
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
-  *"sql -q SELECT active_branch()"*)
+  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ngascity\ninformation_schema\nmysql\ndolt_cluster\n__gc_probe\n'
+    printf 'Database\ngascity\ninformation_schema\nmysql\ndolt\ndolt_cluster\n__gc_probe\n'
     exit 0
     ;;
   *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
@@ -2042,7 +2185,7 @@ esac
 	if !strings.Contains(text, wantWrite) {
 		t.Fatalf("health-check probe = %s, want %q", text, wantWrite)
 	}
-	for _, want := range []string{"--host 127.0.0.1", "--port 3311", "--user root", "SELECT active_branch()", "information_schema.PROCESSLIST", "SHOW DATABASES"} {
+	for _, want := range []string{"--host 127.0.0.1", "--port 3311", "--user root", "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA", "information_schema.PROCESSLIST", "SHOW DATABASES"} {
 		if strings.Contains(text, want) == false {
 			t.Fatalf("dolt invocation missing %q: %s", want, text)
 		}
@@ -2056,11 +2199,11 @@ func TestDoltStateHealthCheckCmdNoUserDatabaseReportsUnknown(t *testing.T) {
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
-  *"sql -q SELECT active_branch()"*)
+  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
     exit 0
     ;;
   *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
@@ -2111,7 +2254,7 @@ func TestDoltStateHealthCheckCmdSkipsReadOnlyAndBestEffortCount(t *testing.T) {
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
-  *"sql -q SELECT active_branch()"*)
+  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
@@ -2150,7 +2293,7 @@ esac
 		t.Fatalf("health-check unexpectedly enumerated databases without --check-read-only: %s", text)
 	}
 	assertNoManagedDoltProbeLegacyTarget(t, "health-check skip-read-only probe", text)
-	for _, want := range []string{"SELECT active_branch()", "information_schema.PROCESSLIST"} {
+	for _, want := range []string{"SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA", "information_schema.PROCESSLIST"} {
 		if strings.Contains(text, want) == false {
 			t.Fatalf("dolt invocation missing %q: %s", want, text)
 		}
@@ -2183,7 +2326,7 @@ func TestDoltStateHealthCheckCmdReturnsErrExitWhenReadOnlyProbeFails(t *testing.
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
-  *"sql -q SELECT active_branch()"*)
+  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *"sql -r csv -q SHOW DATABASES"*)
@@ -2221,7 +2364,7 @@ func TestDoltStateWaitReadyCmdReturnsReady(t *testing.T) {
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
-  *"sql -q SELECT active_branch()"*)
+  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *)
@@ -2282,7 +2425,7 @@ set -eu
 printf '%s
 ' "$*" >> "$INVOCATION_FILE"
 case "$*" in
-  *"sql -q SELECT active_branch()"*)
+  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *)
@@ -2580,7 +2723,7 @@ INNERPY
   *"SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
     printf 'cnt\n1\n'
     ;;
-  *"SELECT active_branch()"*)
+  *"SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *"sql -r csv -q SHOW DATABASES"*)
@@ -2606,7 +2749,7 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Cleanup(func() {
 		if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil && state.PID > 0 {
-			_ = terminateManagedDoltPID(state.PID)
+			_ = terminateManagedDoltPID("", state.PID)
 		}
 	})
 
@@ -2725,11 +2868,11 @@ INNERPY
   *"SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
     printf 'cnt\n0\n'
     ;;
-  *"SELECT active_branch()"*)
+  *"SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
     exit 0
     ;;
   *"CREATE TABLE IF NOT EXISTS"*)
@@ -2746,7 +2889,7 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Cleanup(func() {
 		if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil && state.PID > 0 {
-			_ = terminateManagedDoltPID(state.PID)
+			_ = terminateManagedDoltPID("", state.PID)
 		}
 	})
 
@@ -3137,7 +3280,7 @@ INNERPY
   *"SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
     printf 'cnt\n1\n'
     ;;
-  *"SELECT active_branch()"*)
+  *"SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     count=0
     if [ -f "$ACTIVE_BRANCH_COUNT" ]; then
       count=$(cat "$ACTIVE_BRANCH_COUNT")
@@ -3172,7 +3315,7 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Cleanup(func() {
 		if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil && state.PID > 0 {
-			_ = terminateManagedDoltPID(state.PID)
+			_ = terminateManagedDoltPID("", state.PID)
 		}
 	})
 

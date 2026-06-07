@@ -7,8 +7,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	gitutil "github.com/gastownhall/gascity/internal/git"
 )
 
 // CheckSeverity classifies an import state validation issue.
@@ -226,98 +228,41 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 		return "", false
 	}
 
-	gitPath := filepath.Join(cachePath, ".git")
-	if st, err := os.Stat(gitPath); err != nil {
-		if os.IsNotExist(err) {
-			s.closureIncomplete = true
-			s.addIssue(CheckIssue{
-				Code:       "missing-cache",
-				ImportName: name,
-				Source:     source,
-				Commit:     commit,
-				Path:       cachePath,
-				Message:    "locked import is missing from the local repo cache",
-				RepairHint: `run "gc import install"`,
-			})
-			return "", false
+	if builtinpacks.IsSource(source) {
+		if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+			gitInfo, gitErr := os.Stat(filepath.Join(cachePath, ".git"))
+			if gitErr == nil && !gitutil.MissingCheckoutMarker(gitInfo, gitErr) {
+				if !s.validateCachedGitCheckout(name, source, commit, cachePath) {
+					return "", false
+				}
+			} else {
+				if gitErr != nil && !gitutil.MissingCheckoutMarker(gitInfo, gitErr) {
+					s.closureIncomplete = true
+					s.addIssue(CheckIssue{
+						Code:       "unreadable-cache",
+						ImportName: name,
+						Source:     source,
+						Commit:     commit,
+						Path:       filepath.Join(cachePath, ".git"),
+						Message:    fmt.Sprintf("cannot inspect cached repository: %v; synthetic cache is invalid: %v", gitErr, err),
+						RepairHint: `run "gc import install"`,
+					})
+					return "", false
+				}
+				s.closureIncomplete = true
+				s.addIssue(CheckIssue{
+					Code:       "invalid-synthetic-cache",
+					ImportName: name,
+					Source:     source,
+					Commit:     commit,
+					Path:       cachePath,
+					Message:    fmt.Sprintf("synthetic cache is invalid: %v", err),
+					RepairHint: `run "gc import install"`,
+				})
+				return "", false
+			}
 		}
-		s.closureIncomplete = true
-		s.addIssue(CheckIssue{
-			Code:       "unreadable-cache",
-			ImportName: name,
-			Source:     source,
-			Commit:     commit,
-			Path:       gitPath,
-			Message:    fmt.Sprintf("cannot inspect cached repository: %v", err),
-			RepairHint: `run "gc import install"`,
-		})
-		return "", false
-	} else if st.IsDir() || st.Mode().IsRegular() {
-		head, err := runGit(cachePath, "rev-parse", "HEAD")
-		if err != nil {
-			s.closureIncomplete = true
-			s.addIssue(CheckIssue{
-				Code:       "unreadable-cache-git",
-				ImportName: name,
-				Source:     source,
-				Commit:     commit,
-				Path:       cachePath,
-				Message:    fmt.Sprintf("cannot read cached repository HEAD: %v", err),
-				RepairHint: `run "gc import install"`,
-			})
-			return "", false
-		}
-		if !sameCommit(head, commit) {
-			s.closureIncomplete = true
-			s.addIssue(CheckIssue{
-				Code:       "cache-checkout-mismatch",
-				ImportName: name,
-				Source:     source,
-				Commit:     commit,
-				Path:       cachePath,
-				Message:    fmt.Sprintf("cached repository is checked out at %s, expected %s", strings.TrimSpace(head), commit),
-				RepairHint: `run "gc import install"`,
-			})
-			return "", false
-		}
-		dirty, err := cachedRepoDirty(cachePath)
-		if err != nil {
-			s.closureIncomplete = true
-			s.addIssue(CheckIssue{
-				Code:       "unreadable-cache-git",
-				ImportName: name,
-				Source:     source,
-				Commit:     commit,
-				Path:       cachePath,
-				Message:    fmt.Sprintf("cannot read cached repository status: %v", err),
-				RepairHint: `run "gc import install"`,
-			})
-			return "", false
-		}
-		if dirty {
-			s.closureIncomplete = true
-			s.addIssue(CheckIssue{
-				Code:       "cache-worktree-dirty",
-				ImportName: name,
-				Source:     source,
-				Commit:     commit,
-				Path:       cachePath,
-				Message:    "cached repository has local worktree changes",
-				RepairHint: `run "gc import install"`,
-			})
-			return "", false
-		}
-	} else {
-		s.closureIncomplete = true
-		s.addIssue(CheckIssue{
-			Code:       "invalid-cache",
-			ImportName: name,
-			Source:     source,
-			Commit:     commit,
-			Path:       gitPath,
-			Message:    "cached repository .git entry is not a file or directory",
-			RepairHint: `run "gc import install"`,
-		})
+	} else if !s.validateCachedGitCheckout(name, source, commit, cachePath) {
 		return "", false
 	}
 
@@ -362,6 +307,93 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 	}
 
 	return packDir, true
+}
+
+func (s *importCheckState) validateCachedGitCheckout(name, source, commit, cachePath string) bool {
+	gitPath := filepath.Join(cachePath, ".git")
+	st, err := os.Stat(gitPath)
+	if gitutil.MissingCheckoutMarker(st, err) {
+		s.closureIncomplete = true
+		s.addIssue(CheckIssue{
+			Code:       "missing-cache",
+			ImportName: name,
+			Source:     source,
+			Commit:     commit,
+			Path:       cachePath,
+			Message:    "locked import is missing from the local repo cache",
+			RepairHint: `run "gc import install"`,
+		})
+		return false
+	}
+	if err != nil {
+		s.closureIncomplete = true
+		s.addIssue(CheckIssue{
+			Code:       "unreadable-cache",
+			ImportName: name,
+			Source:     source,
+			Commit:     commit,
+			Path:       gitPath,
+			Message:    fmt.Sprintf("cannot inspect cached repository: %v", err),
+			RepairHint: `run "gc import install"`,
+		})
+		return false
+	}
+
+	head, err := runGit(cachePath, "rev-parse", "HEAD")
+	if err != nil {
+		s.closureIncomplete = true
+		s.addIssue(CheckIssue{
+			Code:       "unreadable-cache-git",
+			ImportName: name,
+			Source:     source,
+			Commit:     commit,
+			Path:       cachePath,
+			Message:    fmt.Sprintf("cannot read cached repository HEAD: %v", err),
+			RepairHint: `run "gc import install"`,
+		})
+		return false
+	}
+	if !gitutil.SameCommit(head, commit) {
+		s.closureIncomplete = true
+		s.addIssue(CheckIssue{
+			Code:       "cache-checkout-mismatch",
+			ImportName: name,
+			Source:     source,
+			Commit:     commit,
+			Path:       cachePath,
+			Message:    fmt.Sprintf("cached repository is checked out at %s, expected %s", strings.TrimSpace(head), commit),
+			RepairHint: `run "gc import install"`,
+		})
+		return false
+	}
+	dirty, err := cachedRepoDirty(cachePath)
+	if err != nil {
+		s.closureIncomplete = true
+		s.addIssue(CheckIssue{
+			Code:       "unreadable-cache-git",
+			ImportName: name,
+			Source:     source,
+			Commit:     commit,
+			Path:       cachePath,
+			Message:    fmt.Sprintf("cannot read cached repository status: %v", err),
+			RepairHint: `run "gc import install"`,
+		})
+		return false
+	}
+	if dirty {
+		s.closureIncomplete = true
+		s.addIssue(CheckIssue{
+			Code:       "cache-worktree-dirty",
+			ImportName: name,
+			Source:     source,
+			Commit:     commit,
+			Path:       cachePath,
+			Message:    "cached repository has local worktree changes",
+			RepairHint: `run "gc import install"`,
+		})
+		return false
+	}
+	return true
 }
 
 func (s *importCheckState) reportStaleLockEntries() {
@@ -438,16 +470,4 @@ func cachedPackDir(source, cachePath string) string {
 		return filepath.Join(cachePath, subpath)
 	}
 	return cachePath
-}
-
-func sameCommit(actual, expected string) bool {
-	actual = strings.TrimSpace(actual)
-	expected = strings.TrimSpace(expected)
-	if actual == "" || expected == "" {
-		return false
-	}
-	if strings.EqualFold(actual, expected) {
-		return true
-	}
-	return len(expected) < len(actual) && strings.HasPrefix(strings.ToLower(actual), strings.ToLower(expected))
 }

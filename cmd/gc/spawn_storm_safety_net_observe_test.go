@@ -167,7 +167,7 @@ func TestObserveSessionStopped_NewStorm_SendsMail(t *testing.T) {
 	observeSessionStoppedForSafetyNet("", session, "worker-mailtest", "foundations/worker", store, nil, now, io.Discard)
 
 	// Mailer must have produced a message bead for mayor.
-	mailBeads, err := store.List(beads.ListQuery{Type: "message", Assignee: spawnStormMayorRecipient, IncludeClosed: true})
+	mailBeads, err := store.List(beads.ListQuery{Type: "message", Assignee: spawnStormMayorRecipient, IncludeClosed: true, TierMode: beads.TierBoth})
 	if err != nil {
 		t.Fatalf("list mail beads: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestObserveSessionStopped_NewStorm_MailListsAllContributors(t *testing.T) {
 		observeSessionStoppedForSafetyNet("", session, name, template, store, nil, now.Add(time.Duration(i)*30*time.Second), io.Discard)
 	}
 
-	mailBeads, err := store.List(beads.ListQuery{Type: "message", Assignee: spawnStormMayorRecipient, IncludeClosed: true})
+	mailBeads, err := store.List(beads.ListQuery{Type: "message", Assignee: spawnStormMayorRecipient, IncludeClosed: true, TierMode: beads.TierBoth})
 	if err != nil {
 		t.Fatalf("list mail: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestObserveSessionStopped_OneMailPerStormEpisode(t *testing.T) {
 		session := buildSessionBeadForSafetyNet(t, store, name, true)
 		observeSessionStoppedForSafetyNet("", session, name, "foundations/worker", store, nil, now.Add(time.Duration(i)*30*time.Second), io.Discard)
 	}
-	mailBeads, err := store.List(beads.ListQuery{Type: "message", Assignee: spawnStormMayorRecipient, IncludeClosed: true})
+	mailBeads, err := store.List(beads.ListQuery{Type: "message", Assignee: spawnStormMayorRecipient, IncludeClosed: true, TierMode: beads.TierBoth})
 	if err != nil {
 		t.Fatalf("list mail beads: %v", err)
 	}

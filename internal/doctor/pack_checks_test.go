@@ -207,6 +207,22 @@ func TestPackScriptCheckCanFixWithoutScript(t *testing.T) {
 	}
 }
 
+func TestPackScriptCheckWarmupEligibleReflectsField(t *testing.T) {
+	t.Run("default_false", func(t *testing.T) {
+		c := &PackScriptCheck{CheckName: "topo:diag-only"}
+		if c.WarmupEligible() {
+			t.Error("WarmupEligible() = true, want false")
+		}
+	})
+
+	t.Run("explicit_true", func(t *testing.T) {
+		c := &PackScriptCheck{CheckName: "topo:startup", Warmup: true}
+		if !c.WarmupEligible() {
+			t.Error("WarmupEligible() = false, want true")
+		}
+	})
+}
+
 func TestPackScriptCheckCanFixWithScript(t *testing.T) {
 	dir := t.TempDir()
 	fix := writeFixScript(t, dir, "#!/bin/sh\nexit 0\n")

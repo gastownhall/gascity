@@ -130,3 +130,70 @@ func TestLooksLikeDoltSQLServer(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDoltPSLine_DoltSQLServer(t *testing.T) {
+	line := "  78306  65392 Sun May 17 09:31:24 2026 /usr/local/bin/dolt sql-server --config /tmp/TestGcBeadsBdStartUsesRootBeadsDataDir802378814/001/.gc/runtime/packs/dolt/dolt-config.yaml --host 127.0.0.1"
+	got, ok := parseDoltPSLine(line, map[int][]int{78306: {3306}})
+	if !ok {
+		t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+	}
+	if got.PID != 78306 {
+		t.Fatalf("PID = %d, want 78306", got.PID)
+	}
+	if got.RSSBytes != 65392*1024 {
+		t.Fatalf("RSSBytes = %d, want %d", got.RSSBytes, int64(65392*1024))
+	}
+	if !reflect.DeepEqual(got.Ports, []int{3306}) {
+		t.Fatalf("Ports = %v, want [3306]", got.Ports)
+	}
+	if got.StartIdentity != "Sun May 17 09:31:24 2026" {
+		t.Fatalf("StartIdentity = %q", got.StartIdentity)
+	}
+	if cfg := extractConfigPath(got.Argv); cfg != "/tmp/TestGcBeadsBdStartUsesRootBeadsDataDir802378814/001/.gc/runtime/packs/dolt/dolt-config.yaml" {
+		t.Fatalf("config = %q", cfg)
+	}
+}
+
+func TestParseDoltPSLine_PreservesSpacedConfigPath(t *testing.T) {
+	line := "12345 1024 Sun May 17 09:31:24 2026 dolt sql-server --config /tmp/Test With Space/config.yaml --port 3306"
+	got, ok := parseDoltPSLine(line, nil)
+	if !ok {
+		t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+	}
+	if cfg := extractConfigPath(got.Argv); cfg != "/tmp/Test With Space/config.yaml" {
+		t.Fatalf("config = %q", cfg)
+	}
+}
+
+func TestParseDoltPSLine_IgnoresNonDolt(t *testing.T) {
+	line := "12345 1024 Sun May 17 09:31:24 2026 mysqld --config /tmp/TestX/config.yaml"
+	if got, ok := parseDoltPSLine(line, nil); ok {
+		t.Fatalf("parseDoltPSLine = %+v, want ignored", got)
+	}
+}
+
+func TestParseListeningPortsByPIDFromLsof(t *testing.T) {
+	output := `COMMAND   PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+dolt    78306 dbox   11u  IPv4 0x0000000000000000      0t0  TCP 127.0.0.1:3306 (LISTEN)
+dolt    78306 dbox   12u  IPv6 0x0000000000000000      0t0  TCP [::1]:3307 (LISTEN)
+dolt    99999 dbox   12u  IPv4 0x0000000000000000      0t0  TCP 127.0.0.1:70000 (LISTEN)
+`
+	got := parseListeningPortsByPIDFromLsof(output)
+	want := map[int][]int{78306: {3306, 3307}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseListeningPortsByPIDFromLsof = %v, want %v", got, want)
+	}
+}
+
+func TestSameReapProcessIdentity_UsesPSStartIdentityFallback(t *testing.T) {
+	target := ReapTarget{PID: 42, StartIdentity: "Sun May 17 09:31:24 2026"}
+	same := DoltProcInfo{PID: 42, StartIdentity: "Sun May 17 09:31:24 2026"}
+	reused := DoltProcInfo{PID: 42, StartIdentity: "Sun May 17 09:32:00 2026"}
+
+	if !sameReapProcessIdentity(target, same) {
+		t.Fatal("sameReapProcessIdentity should accept matching ps start identity")
+	}
+	if sameReapProcessIdentity(target, reused) {
+		t.Fatal("sameReapProcessIdentity should reject mismatched ps start identity")
+	}
+}

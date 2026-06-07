@@ -64,6 +64,40 @@
   "metadata": {
     "timestamp": true
   },
+  "redirects": [
+    {
+      "source": "/packv2/migration",
+      "destination": "/guides/shareable-packs"
+    },
+    {
+      "source": "/tutorials/01-cities-and-rigs.md",
+      "destination": "/tutorials/01-cities-and-rigs"
+    },
+    {
+      "source": "/tutorials/02-agents.md",
+      "destination": "/tutorials/02-agents"
+    },
+    {
+      "source": "/tutorials/03-sessions.md",
+      "destination": "/tutorials/03-sessions"
+    },
+    {
+      "source": "/tutorials/04-communication.md",
+      "destination": "/tutorials/04-communication"
+    },
+    {
+      "source": "/tutorials/05-formulas.md",
+      "destination": "/tutorials/05-formulas"
+    },
+    {
+      "source": "/tutorials/06-beads.md",
+      "destination": "/tutorials/06-beads"
+    },
+    {
+      "source": "/tutorials/07-orders.md",
+      "destination": "/tutorials/07-orders"
+    }
+  ],
   "navigation": {
     "groups": [
       {
@@ -75,6 +109,13 @@
           "getting-started/coming-from-gastown",
           "getting-started/troubleshooting",
           "getting-started/repository-map"
+        ]
+      },
+      {
+        "group": "Concepts",
+        "pages": [
+          "concepts/architecture-overview",
+          "concepts/primitives"
         ]
       },
       {
@@ -94,14 +135,21 @@
         "group": "Guides",
         "pages": [
           "guides/index",
-          "guides/migrating-to-pack-vnext",
-          "guides/shareable-packs"
+          "guides/capabilities-for-coding-agent-users",
+          "guides/understanding-packs",
+          "guides/shareable-packs",
+          "guides/gastown-config-recipes",
+          "guides/using-json-from-gc",
+          "guides/multi-agent-engineering-environment"
         ]
       },
       {
         "group": "Troubleshooting",
         "pages": [
-          "troubleshooting/dolt-bloat-recovery"
+          "troubleshooting/gc-start-walkthrough",
+          "troubleshooting/dolt-bloat-recovery",
+          "troubleshooting/bd-backup-cleanup",
+          "runbooks/managed-city-endpoints"
         ]
       },
       {
@@ -109,12 +157,14 @@
         "pages": [
           "reference/index",
           "reference/cli",
+          "reference/gastown-command-map",
           "reference/config",
           "reference/formula",
           "reference/trust-boundaries",
           "reference/api",
           "reference/events",
           "schema/index",
+          "reference/system-packs",
           "reference/exec-session-provider",
           "reference/exec-beads-provider"
         ]
@@ -124,6 +174,12 @@
         "pages": [
           "internals/index",
           "internals/beads-topology"
+        ]
+      },
+      {
+        "group": "Specifications",
+        "pages": [
+          "specs/pack-spec"
         ]
       }
     ]

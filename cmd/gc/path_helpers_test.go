@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -35,20 +38,10 @@ func shortSocketTempDir(t *testing.T, prefix string) string {
 // shutdownBeadsProvider.
 func clearInheritedBeadsEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{
-		"GC_BEADS",
-		"GC_BIN",
-		"GC_DOLT",
-		"GC_DOLT_HOST",
-		"GC_DOLT_PORT",
-		"GC_DOLT_USER",
-		"GC_DOLT_PASSWORD",
-		"BEADS_DOLT_SERVER_HOST",
-		"BEADS_DOLT_SERVER_PORT",
-		"BEADS_DOLT_SERVER_USER",
-		"BEADS_DOLT_PASSWORD",
-		"GC_BEADS_SCOPE_ROOT",
-	} {
+	for _, key := range liveEnvKeysForTests() {
+		if key == "GC_HOME" {
+			continue
+		}
 		t.Setenv(key, "")
 	}
 }
@@ -69,14 +62,272 @@ func clearInheritedBeadsEnv(t *testing.T) {
 // does not false-positive the cleanup check.
 func requireNoLeakedDoltAfterForPaths(t *testing.T, paths ...string) {
 	t.Helper()
-	requireNoLeakedDoltAfterWithFilter(t, discoverDoltProcesses, func(configPath string) bool {
+	requireNoLeakedDoltAfterWithFilterAndKiller(t, discoverDoltProcesses, func(configPath string) bool {
 		for _, path := range paths {
 			if path != "" && pathutil.PathWithin(path, configPath) {
 				return true
 			}
 		}
 		return false
+	}, killProcess)
+}
+
+type doltLeakGuardedTestingM struct {
+	m            *testing.M
+	tempRoot     string
+	cleanupPaths []string
+}
+
+func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
+	return &doltLeakGuardedTestingM{
+		m:            m,
+		tempRoot:     tempRoot,
+		cleanupPaths: cleanupPaths,
+	}
+}
+
+func (g *doltLeakGuardedTestingM) Run() int {
+	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
+}
+
+func (g *doltLeakGuardedTestingM) runWith(
+	runTests func() int,
+	enumerate func() ([]DoltProcInfo, error),
+	sweepStale func(string) bool,
+	reapRegistered func(),
+	reapLeaks func([]DoltProcInfo),
+) int {
+	_ = sweepStale("startup")
+	stopSignalHandler := g.installSignalHandler()
+	defer stopSignalHandler()
+
+	initial, initialErr := snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
+	if initialErr != nil {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: initial scan failed: %v\n", initialErr) //nolint:errcheck
+	}
+
+	code := runTests()
+
+	guardFailed := initialErr != nil
+	if initialErr == nil {
+		final, finalErr := snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
+		if finalErr != nil {
+			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
+			guardFailed = true
+		} else if leaked := diffDoltProcessSnapshots(initial, final); len(leaked) > 0 {
+			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), g.tempRoot) //nolint:errcheck
+			writeDoltLeakReport(os.Stderr, leaked)
+			reapLeaks(leaked)
+			guardFailed = true
+		}
+	}
+
+	g.cleanupTemporaryPaths()
+	reapRegistered()
+
+	if guardFailed && code == 0 {
+		return 1
+	}
+	return code
+}
+
+func (g *doltLeakGuardedTestingM) installSignalHandler() func() {
+	signals := make(chan os.Signal, 2)
+	done := make(chan struct{})
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case sig := <-signals:
+			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: received %s; sweeping test dolt processes before exit\n", sig) //nolint:errcheck
+			_ = g.reapDoltProcessesUnderRoot("signal")
+			g.cleanupTemporaryPaths()
+			signal.Stop(signals)
+			if s, ok := sig.(syscall.Signal); ok {
+				signal.Reset(s)
+				_ = syscall.Kill(os.Getpid(), s)
+			}
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(signals)
+		close(done)
+	}
+}
+
+func (g *doltLeakGuardedTestingM) cleanupTemporaryPaths() {
+	for _, path := range g.cleanupPaths {
+		if path != "" {
+			_ = os.RemoveAll(path)
+		}
+	}
+}
+
+func (g *doltLeakGuardedTestingM) reapDoltProcessesUnderRoot(label string) bool {
+	procs, err := snapshotDoltProcessesForConfigRoot(discoverDoltProcesses, g.tempRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s scan failed: %v\n", label, err) //nolint:errcheck
+		return true
+	}
+	if len(procs) == 0 {
+		return false
+	}
+	leaked := make([]DoltProcInfo, 0, len(procs))
+	for _, proc := range procs {
+		leaked = append(leaked, proc)
+	}
+	sort.Slice(leaked, func(i, j int) bool {
+		return leaked[i].PID < leaked[j].PID
 	})
+	fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s sweep reaping %d dolt sql-server process(es) under %s\n", label, len(leaked), g.tempRoot) //nolint:errcheck
+	writeDoltLeakReport(os.Stderr, leaked)
+	reapDoltLeakProcesses(leaked)
+	return true
+}
+
+func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string) bool {
+	procs, err := discoverDoltProcesses()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s stale scan failed: %v\n", label, err) //nolint:errcheck
+		return true
+	}
+	activeRoots := cmdGCTestActiveRoots(g.tempRoot)
+	tempParent := filepath.Dir(filepath.Clean(g.tempRoot))
+	var leaked []DoltProcInfo
+	for _, proc := range procs {
+		if !isStaleCmdGCTestConfigPath(extractConfigPath(proc.Argv), activeRoots, tempParent) {
+			continue
+		}
+		leaked = append(leaked, proc)
+	}
+	if len(leaked) == 0 {
+		return false
+	}
+	sort.Slice(leaked, func(i, j int) bool {
+		return leaked[i].PID < leaked[j].PID
+	})
+	fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s sweep reaping %d stale cmd/gc test dolt sql-server process(es)\n", label, len(leaked)) //nolint:errcheck
+	writeDoltLeakReport(os.Stderr, leaked)
+	reapDoltLeakProcesses(leaked)
+	return true
+}
+
+func cmdGCTestActiveRoots(currentRoot string) []string {
+	roots := discoverActiveTestRoots("", os.TempDir())
+	if currentRoot != "" {
+		roots = append(roots, currentRoot)
+	}
+	cleaned := make([]string, 0, len(roots))
+	seen := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		clean := filepath.Clean(root)
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		cleaned = append(cleaned, clean)
+	}
+	return cleaned
+}
+
+func isStaleCmdGCTestConfigPath(configPath string, activeRoots []string, tempParent string) bool {
+	return isStaleCmdGCTestConfigPathWithPIDCheck(configPath, activeRoots, tempParent, pidAlive)
+}
+
+func isStaleCmdGCTestConfigPathWithPIDCheck(configPath string, activeRoots []string, tempParent string, pidAliveFn func(int) bool) bool {
+	if configPath == "" || tempParent == "" {
+		return false
+	}
+	if configUnderActiveTestRoot(configPath, activeRoots) {
+		return false
+	}
+	ownerPID, ok := cmdGCTestConfigOwnerPID(configPath, tempParent)
+	if !ok {
+		return false
+	}
+	return !pidAliveFn(ownerPID)
+}
+
+func cmdGCTestConfigOwnerPID(configPath string, tempParent string) (int, bool) {
+	for _, prefix := range []string{testCmdGCTempRootPrefix, testCmdGCShardTempRootPrefix} {
+		root, ok := activeTestRootUnder(filepath.Clean(configPath), filepath.Clean(tempParent), []string{prefix})
+		if !ok {
+			continue
+		}
+		return pidFromPrefixedDirName(filepath.Base(root), prefix)
+	}
+	return 0, false
+}
+
+func snapshotDoltProcessesForConfigRoot(enumerate func() ([]DoltProcInfo, error), root string) (map[int]DoltProcInfo, error) {
+	procs, err := enumerate()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int]DoltProcInfo, len(procs))
+	for _, p := range procs {
+		configPath := extractConfigPath(p.Argv)
+		if root == "" || !pathutil.PathWithin(root, configPath) {
+			continue
+		}
+		out[p.PID] = p
+	}
+	return out, nil
+}
+
+func diffDoltProcessSnapshots(initial, final map[int]DoltProcInfo) []DoltProcInfo {
+	leaked := make([]DoltProcInfo, 0, len(final))
+	for pid, proc := range final {
+		if _, ok := initial[pid]; ok {
+			continue
+		}
+		leaked = append(leaked, proc)
+	}
+	sort.Slice(leaked, func(i, j int) bool {
+		return leaked[i].PID < leaked[j].PID
+	})
+	return leaked
+}
+
+func writeDoltLeakReport(w io.Writer, leaked []DoltProcInfo) {
+	for _, proc := range leaked {
+		fmt.Fprintf(w, "  pid=%d argv=%q\n", proc.PID, strings.Join(proc.Argv, " ")) //nolint:errcheck
+	}
+}
+
+func reapDoltLeakProcesses(leaked []DoltProcInfo) {
+	_ = reapDoltLeakProcessesWithKiller(leaked, killProcess)
+}
+
+func reapDoltLeakProcessesWithKiller(leaked []DoltProcInfo, killFn func(int, syscall.Signal) error) []error {
+	pids := make([]int, 0, len(leaked))
+	for _, proc := range leaked {
+		pids = append(pids, proc.PID)
+	}
+	return reapDoltLeakPIDsWithKiller(pids, killFn)
+}
+
+func reapDoltLeakPIDsWithKiller(pids []int, killFn func(int, syscall.Signal) error) []error {
+	var errs []error
+	for _, pid := range pids {
+		if err := killFn(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			errs = append(errs, fmt.Errorf("SIGTERM pid %d: %w", pid, err))
+		}
+	}
+	time.Sleep(250 * time.Millisecond)
+	for _, pid := range pids {
+		if err := killFn(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			errs = append(errs, fmt.Errorf("SIGKILL pid %d: %w", pid, err))
+		}
+	}
+	return errs
+}
+
+func ignoreProcessSignal(int, syscall.Signal) error {
+	return nil
 }
 
 // requireNoLeakedDoltAfterWith is the testReporter+injectable-enumerator
@@ -88,12 +339,16 @@ func requireNoLeakedDoltAfterWith(t testReporter, enumerate func() ([]DoltProcIn
 	t.Helper()
 	homeDir, _ := os.UserHomeDir()
 	tempDir := os.TempDir()
-	requireNoLeakedDoltAfterWithFilter(t, enumerate, func(configPath string) bool {
+	requireNoLeakedDoltAfterWithFilterAndKiller(t, enumerate, func(configPath string) bool {
 		return isTestConfigPath(configPath, homeDir, tempDir)
-	})
+	}, ignoreProcessSignal)
 }
 
 func requireNoLeakedDoltAfterWithFilter(t testReporter, enumerate func() ([]DoltProcInfo, error), includeConfigPath func(string) bool) {
+	requireNoLeakedDoltAfterWithFilterAndKiller(t, enumerate, includeConfigPath, ignoreProcessSignal)
+}
+
+func requireNoLeakedDoltAfterWithFilterAndKiller(t testReporter, enumerate func() ([]DoltProcInfo, error), includeConfigPath func(string) bool, killFn func(int, syscall.Signal) error) {
 	t.Helper()
 	initial := snapshotDoltProcessPIDsWithFilter(t, enumerate, includeConfigPath)
 	t.Cleanup(func() {
@@ -115,6 +370,9 @@ func requireNoLeakedDoltAfterWithFilter(t testReporter, enumerate func() ([]Dolt
 		}
 		t.Errorf("test leaked %d dolt sql-server process(es); ensure cleanup paths reach shutdownBeadsProvider, or call clearInheritedBeadsEnv to prevent inherited GC_BEADS=bd from triggering gc-beads-bd.sh:\n%s",
 			len(leaked), strings.Join(rep, "\n"))
+		for _, err := range reapDoltLeakPIDsWithKiller(pids, killFn) {
+			t.Errorf("test leaked dolt cleanup failed: %v", err)
+		}
 	})
 }
 
@@ -151,6 +409,7 @@ func snapshotDoltProcessPIDsWithFilter(t testReporter, enumerate func() ([]DoltP
 
 func cleanupManagedDoltTestCity(t *testing.T, cityPath string) {
 	t.Helper()
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
 	t.Cleanup(func() {
 		tryStopController(cityPath, io.Discard)
 		deadline := time.Now().Add(5 * time.Second)

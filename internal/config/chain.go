@@ -397,6 +397,7 @@ func recordScalarProvenance(spec ProviderSpec, layer string, into map[string]str
 	setBool("supports_acp", spec.SupportsACP)
 	setBool("supports_hooks", spec.SupportsHooks)
 	setBool("emits_permission_warning", spec.EmitsPermissionWarning)
+	setBool("accept_startup_dialogs", spec.AcceptStartupDialogs)
 	set("instructions_file", spec.InstructionsFile)
 	set("resume_flag", spec.ResumeFlag)
 	set("resume_style", spec.ResumeStyle)

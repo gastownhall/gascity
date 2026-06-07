@@ -27,7 +27,8 @@ type Fake struct {
 
 // Call records a single method invocation on [Fake].
 type Call struct {
-	Method string // "MkdirAll", "WriteFile", "ReadFile", "ReadRegularFile", "Stat", "ReadDir", "Rename", "Remove", or "Chmod"
+	// Method is the invoked filesystem method name.
+	Method string
 	Path   string // path argument
 }
 
@@ -197,6 +198,35 @@ func (f *Fake) Lstat(name string) (os.FileInfo, error) {
 	return nil, &os.PathError{Op: "lstat", Path: name, Err: os.ErrNotExist}
 }
 
+// Readlink records the call and returns the symlink target without following it.
+func (f *Fake) Readlink(name string) (string, error) {
+	f.Calls = append(f.Calls, Call{Method: "Readlink", Path: name})
+	if err, ok := f.Errors[name]; ok {
+		return "", err
+	}
+	if target, ok := f.Symlinks[name]; ok {
+		return target, nil
+	}
+	return "", &os.PathError{Op: "readlink", Path: name, Err: os.ErrInvalid}
+}
+
+// Symlink records the call and creates a symlink entry.
+func (f *Fake) Symlink(oldname, newname string) error {
+	f.Calls = append(f.Calls, Call{Method: "Symlink", Path: newname})
+	if err, ok := f.Errors[newname]; ok {
+		return err
+	}
+	if f.Symlinks == nil {
+		f.Symlinks = make(map[string]string)
+	}
+	f.Symlinks[newname] = oldname
+	delete(f.Files, newname)
+	delete(f.Dirs, newname)
+	delete(f.Modes, newname)
+	delete(f.ModTimes, newname)
+	return nil
+}
+
 // ReadDir records the call and returns entries from direct children.
 func (f *Fake) ReadDir(name string) ([]os.DirEntry, error) {
 	f.Calls = append(f.Calls, Call{Method: "ReadDir", Path: name})
@@ -225,6 +255,16 @@ func (f *Fake) ReadDir(name string) ([]os.DirEntry, error) {
 			if !seen[base] {
 				seen[base] = true
 				entries = append(entries, fakeDirEntry{name: base, size: int64(len(data)), mode: f.modeFor(p), id: fakeIdentity(p), hasID: true})
+			}
+		}
+	}
+	// Collect direct child symlinks.
+	for p := range f.Symlinks {
+		if filepath.Dir(p) == name {
+			base := filepath.Base(p)
+			if !seen[base] {
+				seen[base] = true
+				entries = append(entries, fakeDirEntry{name: base, symlink: true, id: fakeIdentity(p), hasID: true})
 			}
 		}
 	}
@@ -357,17 +397,21 @@ func (fi fakeFileInfo) Sys() any {
 // --- fake os.DirEntry ---
 
 type fakeDirEntry struct {
-	name  string
-	size  int64
-	mode  os.FileMode
-	id    fileIdentity
-	hasID bool
-	dir   bool
+	name    string
+	size    int64
+	mode    os.FileMode
+	id      fileIdentity
+	hasID   bool
+	dir     bool
+	symlink bool
 }
 
 func (de fakeDirEntry) Name() string { return de.name }
 func (de fakeDirEntry) IsDir() bool  { return de.dir }
 func (de fakeDirEntry) Type() fs.FileMode {
+	if de.symlink {
+		return fs.ModeSymlink
+	}
 	if de.dir {
 		return fs.ModeDir
 	}
@@ -375,7 +419,7 @@ func (de fakeDirEntry) Type() fs.FileMode {
 }
 
 func (de fakeDirEntry) Info() (fs.FileInfo, error) {
-	return fakeFileInfo{name: de.name, size: de.size, mode: de.mode, id: de.id, hasID: de.hasID, dir: de.dir}, nil
+	return fakeFileInfo{name: de.name, size: de.size, mode: de.mode, id: de.id, hasID: de.hasID, dir: de.dir, symlink: de.symlink}, nil
 }
 
 func fakeIdentity(name string) fileIdentity {

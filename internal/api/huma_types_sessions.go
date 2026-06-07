@@ -32,11 +32,27 @@ func (s *SessionListInput) Resolve(ctx huma.Context) []error {
 	return nil
 }
 
+// CityPendingInput is the Huma input for GET /v0/city/{cityName}/pending.
+type CityPendingInput struct {
+	CityScope
+}
+
+// cityPendingEntry is one active session awaiting a human decision in the
+// city-wide pending aggregate. It carries ids only; consumers fetch the full
+// interaction via the per-session GET /v0/city/{cityName}/session/{id}/pending
+// endpoint, keeping this snapshot minimal.
+type cityPendingEntry struct {
+	SessionID string `json:"session_id" doc:"Session ID awaiting a human decision."`
+	RequestID string `json:"request_id" doc:"Pending interaction request ID."`
+	Kind      string `json:"kind" doc:"Pending interaction kind (e.g. tool-approval, prompt-for-input)."`
+}
+
 // SessionGetInput is the Huma input for GET /v0/city/{cityName}/session/{id}.
 type SessionGetInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Peek bool   `query:"peek" required:"false" doc:"Include last output preview."`
+	ID        string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Peek      bool   `query:"peek" required:"false" doc:"Include last output preview."`
+	PeekLines int    `query:"peek_lines" required:"false" minimum:"0" maximum:"10000" doc:"Number of lines to include in the last output preview when peek=true. Defaults to 5."`
 }
 
 // sessionCreateBody is the request body for POST /v0/sessions.
@@ -118,6 +134,20 @@ type SessionPatchInput struct {
 	CityScope
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Body SessionPatchBody
+}
+
+// SessionPermissionModeBody is the request body for updating the
+// schema-backed permission_mode option on a session.
+type SessionPermissionModeBody struct {
+	_              struct{} `json:"-" additionalProperties:"false"`
+	PermissionMode string   `json:"permission_mode" minLength:"1" pattern:"\\S" doc:"Provider schema value for the permission_mode option."`
+}
+
+// SessionPermissionModeInput is the Huma input for POST /v0/city/{cityName}/session/{id}/permission-mode.
+type SessionPermissionModeInput struct {
+	CityScope
+	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Body SessionPermissionModeBody
 }
 
 // SessionCloseInput is the Huma input for POST /v0/city/{cityName}/session/{id}/close.

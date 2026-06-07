@@ -8,6 +8,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type v2RoutedToNamespaceCheck struct {
@@ -36,8 +38,9 @@ func (c *v2RoutedToNamespaceCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 	var skipped []string
 	c.scanScope(&findings, &skipped, aliases, "city", c.cityPath)
 	if c.cfg != nil {
+		suspState, _ := loadSuspensionState(fsys.OSFS{}, c.cityPath)
 		for _, rig := range c.cfg.Rigs {
-			if rig.Suspended || strings.TrimSpace(rig.Path) == "" {
+			if suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) || strings.TrimSpace(rig.Path) == "" {
 				continue
 			}
 			c.scanScope(&findings, &skipped, aliases, "rig "+rig.Name, rig.Path)
@@ -77,26 +80,44 @@ func (c *v2RoutedToNamespaceCheck) scanScope(findings, skipped *[]string, aliase
 		*skipped = append(*skipped, fmt.Sprintf("%s skipped: opening bead store: %v", label, err))
 		return
 	}
-	items, err := store.List(beads.ListQuery{AllowScan: true})
-	if err != nil {
-		*skipped = append(*skipped, fmt.Sprintf("%s skipped: listing beads: %v", label, err))
+	seen := make(map[string]bool)
+	routes := make([]string, 0, len(aliases))
+	for route := range aliases {
+		routes = append(routes, route)
+	}
+	sort.Strings(routes)
+	for _, route := range routes {
+		items, err := store.List(beads.ListQuery{
+			Metadata: map[string]string{"gc.routed_to": route},
+		})
+		if err != nil {
+			*skipped = append(*skipped, fmt.Sprintf("%s skipped: listing beads: %v", label, err))
+			return
+		}
+		for _, bead := range items {
+			if seen[bead.ID] {
+				continue
+			}
+			seen[bead.ID] = true
+			c.scanRoutedToBead(findings, aliases, label, bead)
+		}
+	}
+}
+
+func (c *v2RoutedToNamespaceCheck) scanRoutedToBead(findings *[]string, aliases map[string][]string, label string, bead beads.Bead) {
+	route := strings.TrimSpace(bead.Metadata["gc.routed_to"])
+	if route == "" {
 		return
 	}
-	for _, bead := range items {
-		route := strings.TrimSpace(bead.Metadata["gc.routed_to"])
-		if route == "" {
-			continue
-		}
-		canonicals, ok := aliases[route]
-		if !ok {
-			continue
-		}
-		switch len(canonicals) {
-		case 1:
-			*findings = append(*findings, fmt.Sprintf("%s bead %s has gc.routed_to=%q; use %q", label, bead.ID, route, canonicals[0]))
-		default:
-			*findings = append(*findings, fmt.Sprintf("%s bead %s has gc.routed_to=%q; use one of %s", label, bead.ID, route, strings.Join(canonicals, ", ")))
-		}
+	canonicals, ok := aliases[route]
+	if !ok {
+		return
+	}
+	switch len(canonicals) {
+	case 1:
+		*findings = append(*findings, fmt.Sprintf("%s bead %s has gc.routed_to=%q; use %q", label, bead.ID, route, canonicals[0]))
+	default:
+		*findings = append(*findings, fmt.Sprintf("%s bead %s has gc.routed_to=%q; use one of %s", label, bead.ID, route, strings.Join(canonicals, ", ")))
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 // agentBuildParams holds shared, per-city parameters for building agents.
@@ -48,6 +49,11 @@ type agentBuildParams struct {
 	// build. Pool new-tier materialization uses it to avoid treating sessions
 	// that already own work as available generic capacity.
 	assignedWorkBeads []beads.Bead
+
+	// poolSessionCreateBudget caps ordinary fresh pool session bead
+	// materialization in a single desired-state build. Existing session beads
+	// may still be reused, and dependency-floor prerequisites are exempt.
+	poolSessionCreateBudget *poolSessionCreateBudget
 
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
@@ -107,6 +113,9 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		beadNames:       make(map[string]string),
 		stderr:          stderr,
 		sessionProvider: cfg.Session.Provider,
+	}
+	if store != nil {
+		params.poolSessionCreateBudget = newPoolSessionCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
 	}
 	// Load the shared skill catalog once per build cycle. Transient load
 	// failures (filesystem race during dolt sync / heavy I/O) used to
@@ -223,10 +232,32 @@ func effectiveOverlayDirs(cityDirs []string, rigDirs map[string][]string, rigNam
 
 // templateNameFor returns the configuration template name for an agent.
 // For pool instances, this is the original template name (PoolName).
-// For regular agents, it's the qualified name.
+// For named_session expansions, the template name is cfgAgent's own
+// qualified name (e.g. "pringle/crew") — qualifiedName is the session
+// identity (e.g. "pringle/utz") and resolveAgentIdentity can't map it
+// back to the template, so `gc internal materialize-skills` exits 1.
+// For regular agents, qualifiedName already equals the template name.
 func templateNameFor(cfgAgent *config.Agent, qualifiedName string) string {
 	if cfgAgent.PoolName != "" {
 		return cfgAgent.PoolName
 	}
+	if t := cfgAgent.QualifiedName(); t != "" && t != qualifiedName {
+		return t
+	}
 	return qualifiedName
+}
+
+// resolveTmuxAliasForAgent expands the agent's tmux_alias template using the
+// build params' city/rig context. Returns "" when the agent is nil or the
+// template is empty. Template errors fail closed so pool reconciliation does
+// not silently spawn sessions under unintended fallback names.
+func (p *agentBuildParams) resolveTmuxAliasForAgent(agent *config.Agent) (string, error) {
+	if p == nil || agent == nil {
+		return "", nil
+	}
+	resolved, err := workdirutil.ResolveTmuxAlias(p.cityPath, p.cityName, *agent, p.rigs)
+	if err != nil {
+		return "", fmt.Errorf("resolving tmux_alias for %q: %w", agent.QualifiedName(), err)
+	}
+	return resolved, nil
 }

@@ -69,10 +69,7 @@ func TestConfigLoad_GastownWithRig(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	toml := c.ReadFile("city.toml")
-	toml += "\n[[rigs]]\nname = \"myrig\"\npath = \"" + rigDir + "\"\nincludes = [\"packs/gastown\"]\n"
-	c.WriteConfig(toml)
+	c.RigAdd(rigDir, "packs/gastown")
 
 	out, err := c.GC("config", "explain", "--city", c.Dir)
 	if err != nil && strings.Contains(out, "pack.toml: no such file") {
@@ -98,13 +95,14 @@ func TestConfigLoad_SwarmConfig(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	toml := c.ReadFile("city.toml")
-	toml += "\n[[rigs]]\nname = \"swarm\"\npath = \"" + rigDir + "\"\nincludes = [\"packs/swarm\"]\n"
-	c.WriteConfig(toml)
+	c.RigAdd(rigDir, "packs/swarm")
 
 	out, err := c.GC("config", "explain", "--city", c.Dir)
 	if err != nil && strings.Contains(out, "pack.toml: no such file") {
 		t.Fatalf("swarm config has missing pack references:\n%s", out)
+	}
+	if !strings.Contains(out, "dog") {
+		t.Fatalf("swarm config explain missing system maintenance dog:\n%s", out)
 	}
 }
 
@@ -127,9 +125,7 @@ func TestConfigLoad_LifecycleWithRig(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	toml := c.ReadFile("city.toml")
-	toml += "\n[[rigs]]\nname = \"lifecycle\"\npath = \"" + rigDir + "\"\nincludes = [\"packs/lifecycle\"]\n"
-	c.WriteConfig(toml)
+	c.RigAdd(rigDir, "packs/lifecycle")
 
 	out, err := c.GC("config", "explain", "--city", c.Dir)
 	if err != nil && strings.Contains(out, "pack.toml: no such file") {

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 // ResolveOpts controls the behavior of ResolveAgent.
@@ -53,6 +54,9 @@ func ResolveAgent(cfg *config.City, input string, opts ResolveOpts) (config.Agen
 	if a, ok := findAgentByQualified(cfg, input); ok {
 		return a, true
 	}
+	if a, ok := ResolveQualifiedRigScopedTemplate(cfg, input); ok {
+		return a, true
+	}
 
 	// Step 2b: qualified pool instance — "rig/polecat-2" or
 	// "binding.polecat-2" matches the corresponding pool template.
@@ -91,6 +95,9 @@ func resolveTemplate(cfg *config.City, input string) (config.Agent, bool) {
 	if a, ok := findAgentByQualified(cfg, input); ok {
 		return a, true
 	}
+	if a, ok := ResolveQualifiedRigScopedTemplate(cfg, input); ok {
+		return a, true
+	}
 	if strings.Contains(input, "/") {
 		return config.Agent{}, false
 	}
@@ -114,6 +121,44 @@ func findAgentByQualified(cfg *config.City, identity string) (config.Agent, bool
 		}
 	}
 	return config.Agent{}, false
+}
+
+// ResolveQualifiedRigScopedTemplate resolves "rig/name" against a generic
+// scope="rig" template that applies to every configured rig. It returns a
+// synthetic rig-bound copy so downstream code sees the concrete identity.
+func ResolveQualifiedRigScopedTemplate(cfg *config.City, identity string) (config.Agent, bool) {
+	if cfg == nil || !strings.Contains(identity, "/") {
+		return config.Agent{}, false
+	}
+	dir, name := config.ParseQualifiedName(identity)
+	if dir == "" || name == "" || !hasRig(cfg, dir) {
+		return config.Agent{}, false
+	}
+
+	var match *config.Agent
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Name != name || a.Dir != "" || a.Scope != "rig" {
+			continue
+		}
+		if match != nil {
+			return config.Agent{}, false
+		}
+		match = a
+	}
+	if match == nil {
+		return config.Agent{}, false
+	}
+	return DeepCopyAgent(match, match.Name, dir), true
+}
+
+func hasRig(cfg *config.City, name string) bool {
+	for _, rig := range cfg.Rigs {
+		if rig.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // resolvePoolInstanceQualified handles qualified pool instance names like
@@ -143,6 +188,99 @@ func resolvePoolInstanceQualified(cfg *config.City, input string) (config.Agent,
 	return config.Agent{}, false
 }
 
+// NormalizePoolRouteTarget collapses a slot-suffixed pool target qualified
+// name (e.g. "myrig/polecat-2") back to its base pool qualified name
+// ("myrig/polecat"). Slinging to a slot-suffixed target expresses a
+// load-balancing hint, not a hard pin: every slot in a pool shares the base
+// template, and pool work_query / nudgers key on that base via exact match.
+// Recording the slot-suffixed value in gc.routed_to therefore leaves the bead
+// structurally invisible to the pool. Normalizing at the routing write site
+// keeps slot-suffixed slings reachable by any slot.
+//
+// A target is collapsed only when it is exactly base.QualifiedName()+"-N" for
+// a configured multi-session pool agent and N is a valid slot (>=1, and within
+// the agent's max when bounded) — the inverse of resolvePoolInstanceQualified.
+// Any other target (base names, non-pool agents, out-of-range or non-numeric
+// suffixes, unknown agents) is returned unchanged.
+func NormalizePoolRouteTarget(cfg *config.City, target string) string {
+	if cfg == nil || target == "" {
+		return target
+	}
+	for i := range cfg.Agents {
+		a := cfg.Agents[i]
+		if !IsMultiSessionAgent(&a) {
+			continue
+		}
+		base := a.QualifiedName()
+		prefix := base + "-"
+		if !strings.HasPrefix(target, prefix) {
+			continue
+		}
+		suffix := target[len(prefix):]
+		n, err := strconv.Atoi(suffix)
+		if err != nil || n < 1 {
+			continue
+		}
+		if !a.HasUnlimitedSessionCapacity() {
+			maxSess := a.EffectiveMaxActiveSessions()
+			if maxSess == nil || n > *maxSess {
+				continue
+			}
+		}
+		return base
+	}
+	return target
+}
+
+// AgentReachesWorkflowStore reports whether an agent's scale_check can read
+// beads from storeRef. storeRef uses the workflow store format: "city:<name>"
+// for the HQ store and "rig:<name>" for rig stores.
+func AgentReachesWorkflowStore(storeRef string, agentCfg *config.Agent, cityPath string, cfg *config.City) bool {
+	if cfg == nil || agentCfg == nil {
+		return true
+	}
+	// City-scoped agents are cross-store eligible: a city-wide singleton
+	// legitimately serves work in ANY store (vp-kvp). Without this exemption the
+	// cross-store route guard (validateBuiltInRouteStoreReachable) would
+	// false-positive on a legitimate route to a city-scoped target and refuse
+	// it — the very dead-drop stages ii/iii exist to remove. Rig-scoped agents
+	// stay single-store, so all existing reachability is unchanged.
+	if AgentIsCrossStoreEligible(agentCfg) {
+		return true
+	}
+	agentRig := workdirutil.ConfiguredRigName(cityPath, *agentCfg, cfg.Rigs)
+	if agentRig == "" {
+		return strings.HasPrefix(storeRef, "city:")
+	}
+	return storeRef == "rig:"+agentRig
+}
+
+// AgentIsCrossStoreEligible reports whether an agent may discover and serve
+// work in ANY store, not just its configured rig. City-scoped agents are
+// cross-store eligible: a city-wide singleton legitimately serves per-rig
+// routed work (vp-kvp — "scope determines discovery breadth"). Centralized
+// here so domain packages and the CLI share one definition.
+func AgentIsCrossStoreEligible(agentCfg *config.Agent) bool {
+	return agentCfg != nil && strings.TrimSpace(agentCfg.Scope) == "city"
+}
+
+// AgentReachableStoreLabel returns the workflow store ref an agent's
+// scale_check reads, for use in cross-store routing diagnostics.
+func AgentReachableStoreLabel(agentCfg *config.Agent, cityPath, cityName string, cfg *config.City) string {
+	if cfg == nil || agentCfg == nil {
+		return ""
+	}
+	agentRig := workdirutil.ConfiguredRigName(cityPath, *agentCfg, cfg.Rigs)
+	if agentRig == "" {
+		cn := strings.TrimSpace(cityName)
+		if cn == "" {
+			cn = "city"
+		}
+		return "city:" + cn
+	}
+	return "rig:" + agentRig
+}
+
 // matchPoolInstanceBare checks if a bare input matches a multi-session
 // agent's instance pattern (e.g., "polecat-2" matches "polecat").
 func matchPoolInstanceBare(a config.Agent, input string) (config.Agent, bool) {
@@ -170,7 +308,7 @@ func matchPoolInstanceBare(a config.Agent, input string) (config.Agent, bool) {
 // IsMultiSessionAgent reports whether a config agent supports multiple
 // concurrent sessions.
 func IsMultiSessionAgent(a *config.Agent) bool {
-	return a != nil && a.SupportsInstanceExpansion()
+	return a.SupportsExpandedSessionIdentities()
 }
 
 // DeepCopyAgent creates a deep copy of a config.Agent with a new name and dir.

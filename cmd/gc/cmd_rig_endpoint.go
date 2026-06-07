@@ -39,6 +39,7 @@ var verifyRigExternalEndpoint = verifyExternalDoltEndpoint
 
 func newRigSetEndpointCmd(stdout, stderr io.Writer) *cobra.Command {
 	var opts rigEndpointOptions
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "set-endpoint <rig>",
 		Short: "Set the canonical endpoint ownership for a rig",
@@ -59,6 +60,19 @@ This command owns the rig's canonical .beads/config.yaml topology state.`,
   gc rig set-endpoint frontend --inherit --dry-run`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				if cmdRigSetEndpoint(args[0], opts, io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command:  commandName("rig", "set-endpoint"),
+					Action:   "set-endpoint",
+					Name:     args[0],
+					Rig:      args[0],
+					DryRun:   managementBoolPtr(opts.DryRun),
+					Endpoint: rigEndpointJSONFromOptions(opts),
+				})
+			}
 			if cmdRigSetEndpoint(args[0], opts, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -75,6 +89,7 @@ This command owns the rig's canonical .beads/config.yaml topology state.`,
 	cmd.Flags().StringVar(&opts.User, "user", "", "external Dolt user")
 	cmd.Flags().BoolVar(&opts.AdoptUnverified, "adopt-unverified", false, "record the endpoint without live validation")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "show the canonical changes without writing files")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
 	return cmd
 }
 
@@ -381,6 +396,15 @@ func syncRigManagedPortArtifact(cityPath, rigPath string, cityState, rigState co
 }
 
 func readManagedRuntimePublishedPort(cityPath string) (string, error) {
+	if cityUsesBdStoreContract(cityPath) {
+		owned, err := managedDoltLifecycleOwned(cityPath)
+		if err != nil {
+			return "", fmt.Errorf("determine managed dolt ownership for published port: %w", err)
+		}
+		if !owned {
+			return "", fmt.Errorf("managed dolt lifecycle is not owned by this city")
+		}
+	}
 	data, err := os.ReadFile(managedDoltStatePath(cityPath))
 	if err != nil {
 		return "", err
@@ -568,40 +592,35 @@ func verifyExternalDoltEndpoint(state contract.ConfigState, databaseScopeRoot, a
 		return fmt.Errorf("beads store not usable on external endpoint: %w", err)
 	}
 	if localProjectID == "" {
-		return fmt.Errorf("external endpoint identity unverifiable: local metadata.json is missing project_id; rerun with --adopt-unverified or repair the canonical metadata first")
+		return fmt.Errorf("external endpoint identity unverifiable: neither %s nor .beads/metadata.json carry a project_id; rerun with --adopt-unverified or seed the canonical identity first", projectIdentityDisplayPath)
 	}
 	if !ok {
 		return fmt.Errorf("external endpoint identity unverifiable: database %q is missing metadata _project_id; rerun with --adopt-unverified", strings.TrimSpace(database))
 	}
 	if localProjectID != databaseProjectID {
-		return fmt.Errorf("PROJECT IDENTITY MISMATCH — refusing to connect: local metadata.json project_id %q does not match database _project_id %q", localProjectID, databaseProjectID)
+		return fmt.Errorf(
+			"PROJECT IDENTITY MISMATCH — refusing to connect:\n"+
+				"  canonical local project_id    = %q   (from "+projectIdentityDisplayPath+" or metadata.json)\n"+
+				"  database metadata._project_id  = %q\n"+
+				"\n"+
+				"Inspect both values and resolve manually before reconnecting.",
+			localProjectID, databaseProjectID,
+		)
 	}
 	return nil
 }
 
 func readCanonicalProjectID(metadataPath string) (string, error) {
-	data, err := os.ReadFile(metadataPath)
+	scopeRoot, err := scopeRootFromMetadataPath(metadataPath)
 	if err != nil {
 		return "", err
 	}
-	var meta map[string]any
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return "", nil
-	}
-	raw, ok := meta["project_id"]
-	if !ok || raw == nil {
-		return "", nil
-	}
-	switch value := raw.(type) {
-	case string:
-		return strings.TrimSpace(value), nil
-	default:
-		projectID := strings.TrimSpace(fmt.Sprint(value))
-		if projectID == "" || projectID == "<nil>" || strings.EqualFold(projectID, "null") {
-			return "", nil
-		}
+	if projectID, ok, err := contract.ReadProjectIdentity(fsys.OSFS{}, scopeRoot); err != nil {
+		return "", err
+	} else if ok {
 		return projectID, nil
 	}
+	return readManagedMetadataProjectID(metadataPath)
 }
 
 func readDatabaseProjectID(ctx context.Context, db *sql.DB) (string, bool, error) {

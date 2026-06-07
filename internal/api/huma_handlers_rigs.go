@@ -19,6 +19,10 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
+	store := s.state.CityBeadStore()
+	if err := cacheLiveOr503(store); err != nil {
+		return nil, err
+	}
 	wantGit := input.Git
 
 	rigs := make([]rigResponse, 0, len(cfg.Rigs))
@@ -30,8 +34,9 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 		rigs = append(rigs, resp)
 	}
 	return &ListOutput[rigResponse]{
-		Index: s.latestIndex(),
-		Body:  ListBody[rigResponse]{Items: rigs, Total: len(rigs)},
+		Index:     s.latestIndex(),
+		CacheAgeS: cacheAgeSeconds(store),
+		Body:      ListBody[rigResponse]{Items: rigs, Total: len(rigs)},
 	}, nil
 }
 

@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -33,7 +32,10 @@ type sessionResponse struct {
 	SessionName string `json:"session_name"`
 	CreatedAt   string `json:"created_at"`
 	LastActive  string `json:"last_active,omitempty"`
-	Attached    bool   `json:"attached"`
+	// LastNudgeDeliveredAt is the most recent successful nudge delivery
+	// timestamp for this session.
+	LastNudgeDeliveredAt string `json:"last_nudge_delivered_at,omitempty"`
+	Attached             bool   `json:"attached"`
 
 	// Classification fields derived from config (for dashboard grouping).
 	Rig  string `json:"rig,omitempty"`
@@ -119,45 +121,59 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	if !info.LastActive.IsZero() {
 		r.LastActive = info.LastActive.Format(time.RFC3339)
 	}
+	if !info.LastNudgeDeliveredAt.IsZero() {
+		r.LastNudgeDeliveredAt = info.LastNudgeDeliveredAt.Format(time.RFC3339)
+	}
 	return r
 }
 
 // sessionResponseWithReason builds a session response that includes the
 // reason field derived from bead metadata. If the bead is nil (not found
 // in the index), the reason is omitted.
-func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.City, hasDeferredQueue bool) sessionResponse {
+func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.City, sp runtime.Provider, hasDeferredQueue bool) sessionResponse {
 	r := sessionToResponse(info, cfg)
 	// Expose effective options: provider EffectiveDefaults merged with
 	// per-session template_overrides. The dashboard uses this to display
 	// the actual permission mode and other settings.
 	if b != nil && cfg != nil {
-		rp, _ := resolveProviderForTemplate(info.Template, cfg)
-		if rp != nil && len(rp.EffectiveDefaults) > 0 {
-			merged := make(map[string]string, len(rp.EffectiveDefaults))
-			for k, v := range rp.EffectiveDefaults {
-				merged[k] = v
-			}
-			if raw := b.Metadata["template_overrides"]; raw != "" {
-				var overrides map[string]string
-				if err := json.Unmarshal([]byte(raw), &overrides); err == nil {
+		agentTemplateOK := true
+		agent, agentFound := findAgent(cfg, info.Template)
+		if session.UseAgentTemplateForProviderResolution(legacySessionKind(b.Metadata), b.Metadata, info.Provider, agent.Provider, agentFound) {
+			r.Kind = "agent"
+			agentTemplateOK = agentFound
+		} else {
+			r.Kind = "provider"
+		}
+		if agentTemplateOK {
+			rp, _ := resolveProviderForSessionOptions(info, b.Metadata, cfg)
+			if rp != nil {
+				merged := make(map[string]string, len(rp.EffectiveDefaults))
+				for k, v := range rp.EffectiveDefaults {
+					merged[k] = v
+				}
+				hasOverrides := false
+				if overrides, err := session.ParseTemplateOverrides(b.Metadata); err == nil {
 					for k, v := range overrides {
 						if k != "initial_message" {
 							merged[k] = v
+							hasOverrides = true
 						}
 					}
 				}
+				if len(rp.EffectiveDefaults) > 0 || hasOverrides {
+					r.Options = merged
+				}
 			}
-			r.Options = merged
 		}
 	}
 	if b == nil || info.Closed {
 		return r
 	}
-	// Populate kind from persisted metadata.
-	if k := b.Metadata["real_world_app_session_kind"]; k != "" {
-		r.Kind = k
+	var isRunning func(string) bool
+	if sp != nil {
+		isRunning = sp.IsRunning
 	}
-	r.Reason = session.LifecycleDisplayReason(b.Status, b.Metadata, time.Now().UTC())
+	r.Reason = session.LifecycleDisplayReasonWithLiveness(b.Status, b.Metadata, time.Now().UTC(), info.SessionName, isRunning)
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
 	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(b.Metadata, hasDeferredQueue)
 	// Expose only real_world_app_* prefixed metadata keys to API consumers.
@@ -180,6 +196,9 @@ func filterMetadata(m map[string]string) map[string]string {
 	}
 	filtered := make(map[string]string)
 	for k, v := range m {
+		if k == "real_world_app_session_kind" {
+			continue
+		}
 		if strings.HasPrefix(k, "real_world_app_") || filterMetadataAllowedKeys[k] {
 			filtered[k] = v
 		}
@@ -237,8 +256,8 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	items := make([]sessionResponse, len(sessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false)
+		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
+		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
 	pp := parsePagination(r, maxPaginationLimit)
@@ -292,10 +311,10 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	}
 	b, _ := store.Get(id)
 	wantPeek := r.URL.Query().Get("peek") == "true"
-	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
+	resp := sessionResponseWithReason(info, &b, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	handle, err := s.workerHandleForSession(store, id)
 	if err == nil {
-		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true)
+		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true, 0)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -340,16 +359,12 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	nudgeIDs, err := session.WaitNudgeIDs(store, id)
+	closeResult, err := handle.CloseDetailed(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if err := handle.Close(r.Context()); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
-	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
+	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), closeResult.WaitNudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
 	}
 
@@ -393,6 +408,25 @@ func isTransientBeadDeleteConflict(err error) bool {
 	return strings.Contains(msg, "Error 1213") ||
 		strings.Contains(msg, "40001") ||
 		strings.Contains(msg, "serialization failure")
+}
+
+func (s *Server) handleSessionPermissionMode(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(csrfHeaderName) == "" {
+		writeError(w, http.StatusForbidden, "csrf", "X-GC-Request header required on mutation endpoints")
+		return
+	}
+	var body SessionPermissionModeBody
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	resp, err := s.updateSessionPermissionMode(r.PathValue("id"), body)
+	if err != nil {
+		writeHumaStatusError(w, err)
+		return
+	}
+	w.Header().Set("X-GC-Index", fmt.Sprintf("%d", resp.Index))
+	writeJSON(w, http.StatusOK, resp.Body)
 }
 
 // handleSessionWake clears hold and quarantine on a session.
@@ -500,13 +534,21 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated, _ := store.Get(id)
-	rresp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
+	rresp := sessionResponseWithReason(info, &updated, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	writeJSON(w, http.StatusOK, rresp)
 }
 
+// defaultSessionPeekLines is the preview line count used when a caller
+// requests peek=true without specifying peek_lines. Matches the long-standing
+// 5-line dashboard preview.
+const defaultSessionPeekLines = 5
+
 // enrichSessionResponse populates runtime fields on a session response:
 // running state, active bead, peek output, and model/context metadata.
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool) {
+//
+// peekLines controls the line count for the preview when wantPeek is true.
+// Zero means "use default" (defaultSessionPeekLines).
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int) {
 	if info.State != session.StateActive {
 		return
 	}
@@ -561,9 +603,15 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
 	}
 
-	// Peek preview (opt-in, only when running).
+	// Peek preview (opt-in, only when running). peekLines=0 means "use
+	// default" so existing callers that omit the query param keep the
+	// historical 5-line preview.
 	if wantPeek && resp.Running && peekHandle != nil {
-		if output, err := peekHandle.Peek(context.Background(), 5); err == nil {
+		lines := peekLines
+		if lines <= 0 {
+			lines = defaultSessionPeekLines
+		}
+		if output, err := peekHandle.Peek(context.Background(), lines); err == nil {
 			resp.LastOutput = output
 		}
 	}
@@ -710,19 +758,35 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated, _ := store.Get(id)
-	presp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
+	presp := sessionResponseWithReason(info, &updated, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	writeJSON(w, http.StatusOK, presp)
 }
 
-// resolveProviderForTemplate resolves the provider for an agent template,
-// returning the full ResolvedProvider with EffectiveDefaults and OptionsSchema.
-func resolveProviderForTemplate(template string, cfg *config.City) (*config.ResolvedProvider, error) {
+func resolveProviderForSessionOptions(info session.Info, metadata map[string]string, cfg *config.City) (*config.ResolvedProvider, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("no config")
 	}
-	agent, ok := findAgent(cfg, template)
-	if !ok {
-		return nil, fmt.Errorf("agent %q not found", template)
+	agent, agentFound := findAgent(cfg, info.Template)
+	if session.UseAgentTemplateForProviderResolution(legacySessionKind(metadata), metadata, info.Provider, agent.Provider, agentFound) {
+		if !agentFound {
+			return nil, fmt.Errorf("agent template %q not found", info.Template)
+		}
+		return config.ResolveProvider(&agent, &cfg.Workspace, cfg.Providers, exec.LookPath)
 	}
-	return config.ResolveProvider(&agent, &cfg.Workspace, cfg.Providers, exec.LookPath)
+	var lastErr error
+	for _, providerName := range []string{info.Provider, info.Template} {
+		providerName = strings.TrimSpace(providerName)
+		if providerName == "" {
+			continue
+		}
+		rp, err := config.ResolveProvider(&config.Agent{Provider: providerName}, &cfg.Workspace, cfg.Providers, exec.LookPath)
+		if err == nil {
+			return rp, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("provider for session %q not found", info.ID)
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -211,7 +212,7 @@ func TestDoRuntimeDrain(t *testing.T) {
 
 	rec := events.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrain(dops, sp, rec, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeDrain(dops, sp, rec, "worker", "worker", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -234,7 +235,7 @@ func TestDoRuntimeDrainNotRunning(t *testing.T) {
 	sp := runtime.NewFake() // no sessions started
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrain(dops, sp, events.Discard, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeDrain(dops, sp, events.Discard, "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -252,12 +253,36 @@ func TestDoRuntimeDrainSetError(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrain(dops, sp, events.Discard, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeDrain(dops, sp, events.Discard, "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
 	if got := stderr.String(); got != "gc runtime drain: tmux borked\n" {
 		t.Errorf("stderr = %q", got)
+	}
+}
+
+func TestDoRuntimeDrainJSON(t *testing.T) {
+	dops := newFakeDrainOps()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrain(dops, sp, events.Discard, "worker", "worker", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var result runtimeActionJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.Command != "runtime drain" || result.Session != "worker" || result.Status != "draining" {
+		t.Fatalf("unexpected JSON result: %+v", result)
 	}
 }
 
@@ -275,7 +300,7 @@ func TestDoRuntimeUndrain(t *testing.T) {
 
 	rec := events.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeUndrain(dops, sp, rec, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeUndrain(dops, sp, rec, "worker", "worker", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -295,12 +320,37 @@ func TestDoRuntimeUndrainNotRunning(t *testing.T) {
 	sp := runtime.NewFake()
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeUndrain(dops, sp, events.Discard, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeUndrain(dops, sp, events.Discard, "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
 	if got := stderr.String(); got != "gc runtime undrain: session \"worker\" is not running\n" {
 		t.Errorf("stderr = %q", got)
+	}
+}
+
+func TestDoRuntimeUndrainJSON(t *testing.T) {
+	dops := newFakeDrainOps()
+	dops.draining["worker"] = true
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeUndrain(dops, sp, events.Discard, "worker", "worker", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var result runtimeActionJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.Command != "runtime undrain" || result.Session != "worker" || result.Status != "undrained" {
+		t.Fatalf("unexpected JSON result: %+v", result)
 	}
 }
 
@@ -312,7 +362,7 @@ func TestDoRuntimeDrainCheck(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.draining["worker"] = true
 
-	code := doRuntimeDrainCheck(dops, "worker")
+	code := doRuntimeDrainCheck(dops, "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
 	if code != 0 {
 		t.Errorf("code = %d, want 0 (draining)", code)
 	}
@@ -321,7 +371,7 @@ func TestDoRuntimeDrainCheck(t *testing.T) {
 func TestDoRuntimeDrainCheckNotDraining(t *testing.T) {
 	dops := newFakeDrainOps()
 
-	code := doRuntimeDrainCheck(dops, "worker")
+	code := doRuntimeDrainCheck(dops, "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
 	if code != 1 {
 		t.Errorf("code = %d, want 1 (not draining)", code)
 	}
@@ -331,10 +381,61 @@ func TestDoRuntimeDrainCheckError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux gone")
 
-	code := doRuntimeDrainCheck(dops, "worker")
+	code := doRuntimeDrainCheck(dops, "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
 	if code != 1 {
 		t.Errorf("code = %d, want 1 (error → not draining)", code)
 	}
+}
+
+func TestDoRuntimeDrainCheckJSON(t *testing.T) {
+	dops := newFakeDrainOps()
+	dops.draining["worker"] = true
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainCheck(dops, "worker", "worker", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var result runtimeDrainCheckJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" ||
+		!result.OK ||
+		result.Command != "runtime drain-check" ||
+		!result.Draining ||
+		result.Session != "worker" {
+		t.Fatalf("unexpected JSON result: %+v", result)
+	}
+	validateJSONAgainstResultSchema(t, []string{"runtime", "drain-check"}, stdout.Bytes())
+}
+
+func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
+	dops := newFakeDrainOps()
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainCheck(dops, "worker", "worker", true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 for shell-condition false; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var result runtimeDrainCheckJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" ||
+		!result.OK ||
+		result.Command != "runtime drain-check" ||
+		result.Draining ||
+		result.Session != "worker" {
+		t.Fatalf("unexpected JSON result: %+v", result)
+	}
+	validateJSONAgainstResultSchema(t, []string{"runtime", "drain-check"}, stdout.Bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -342,16 +443,20 @@ func TestDoRuntimeDrainCheckError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRuntimeDrainAck(t *testing.T) {
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error { return nil }
+	t.Cleanup(func() { drainAckPokeController = old })
+
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "worker", &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	if !dops.acked["worker"] {
 		t.Error("drain ack flag not set")
 	}
-	if got := stdout.String(); got != "Drain acknowledged. Controller will stop this session.\n" {
+	if got := stdout.String(); got != "Drain acknowledged. Controller poked for immediate stop.\n" {
 		t.Errorf("stdout = %q", got)
 	}
 }
@@ -360,12 +465,105 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "worker", &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
 	if got := stderr.String(); got != "gc runtime drain-ack: tmux borked\n" {
 		t.Errorf("stderr = %q", got)
+	}
+}
+
+func TestDoRuntimeDrainAckJSON(t *testing.T) {
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error { return nil }
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var result runtimeActionJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.Command != "runtime drain-ack" || result.Session != "worker" || result.Status != "acknowledged" {
+		t.Fatalf("unexpected JSON result: %+v", result)
+	}
+}
+
+func TestDoRuntimeDrainAckPokesController(t *testing.T) {
+	var gotCityPath string
+	calls := 0
+	old := drainAckPokeController
+	drainAckPokeController = func(cityPath string) error {
+		calls++
+		gotCityPath = cityPath
+		return nil
+	}
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	// Distinct, non-overlapping cityPath/targetName/sn catch a transposition
+	// of the three adjacent string params in the new signature.
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if calls != 1 {
+		t.Fatalf("poke called %d times, want 1", calls)
+	}
+	if gotCityPath != "/city/path" {
+		t.Errorf("poke cityPath = %q, want %q", gotCityPath, "/city/path")
+	}
+	if !dops.acked["session-name"] {
+		t.Error("drain ack flag not set")
+	}
+}
+
+func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
+	calls := 0
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error {
+		calls++
+		return nil
+	}
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	dops := newFakeDrainOps()
+	dops.err = errors.New("tmux borked")
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if calls != 0 {
+		t.Fatalf("poke called %d times, want 0 (setDrainAck failed)", calls)
+	}
+}
+
+func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error { return errors.New("dial failed") }
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 (poke failure is best-effort)", code)
+	}
+	if got, want := stderr.String(), "gc runtime drain-ack: warning: poke failed: dial failed\n"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+	if !strings.Contains(stdout.String(), "Drain acknowledged.") {
+		t.Errorf("stdout = %q, want it to contain %q", stdout.String(), "Drain acknowledged.")
 	}
 }
 
@@ -938,6 +1136,10 @@ func TestDrainAckNoArgsErrorMessage(t *testing.T) {
 }
 
 func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error { return nil }
+	t.Cleanup(func() { drainAckPokeController = old })
+
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1007,8 +1209,10 @@ func TestResolveAgentIdentity(t *testing.T) {
 		// Pool instance negative (parsed as non-numeric due to dash).
 		{"pool instance worker--1", "worker--1", false, "", false, ""},
 
-		// Max=1 pool: the guard requires Max > 1, so {name}-1 does NOT match.
-		{"singleton-1 no match", "singleton-1", false, "", false, ""},
+		// Max=1 pool-shaped agents still run through pool reconciliation, but
+		// non-namepool singleton pools use the canonical configured identity.
+		// A numeric suffix would materialize a phantom concrete agent.
+		{"singleton-1 rejected for canonical max=1 pool", "singleton-1", false, "", false, ""},
 
 		// Nonexistent agent.
 		{"nonexistent", "nobody", false, "", false, ""},
@@ -1212,16 +1416,14 @@ func TestFindAgentByNamePoolOutOfRange(t *testing.T) {
 	}
 }
 
-func TestFindAgentByNameSingletonPoolNoMatch(t *testing.T) {
+func TestFindAgentByNameSingletonPoolRejectsSuffix(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "singleton", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), ScaleCheck: "echo 1"},
 		},
 	}
-	// Max=1 pools don't get instance suffixes.
-	_, ok := findAgentByName(cfg, "singleton-1")
-	if ok {
-		t.Error("singleton-1 should not match pool with max=1")
+	if _, ok := findAgentByName(cfg, "singleton-1"); ok {
+		t.Fatal("singleton-1 should not match a canonical singleton pool agent")
 	}
 }
 

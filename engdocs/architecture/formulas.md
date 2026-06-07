@@ -67,10 +67,10 @@ Store.MolCook / Store.MolCookOn
 ### Review Quorum Formula
 
 `internal/bootstrap/packs/core/formulas/mol-review-quorum.toml` is a Gas
-City-owned review quorum formula scaffold. It is a core `graph.v2` formula,
-not a separate lifecycle controller. The graph has exactly two reviewer lanes,
-with lane IDs, providers, models, and dispatch targets supplied by formula
-variables, followed by a configured synthesis step.
+City-owned review quorum formula scaffold. It declares
+`formula_compiler = ">=2.0.0"`, not a separate lifecycle controller. The graph
+has exactly two reviewer lanes, with lane IDs, providers, models, and dispatch
+targets supplied by formula variables, followed by a configured synthesis step.
 
 The reviewer lane identity and runtime binding are intentionally configured in
 one obvious place: formula vars. `lane_one_id`, `lane_one_provider`,
@@ -203,6 +203,31 @@ Formula layers are assembled from:
 - `[formulas].dir` in `city.toml`
 - rig packs
 - `[[rigs]].formulas_dir`
+
+Rig-scoped formula var defaults live on the rig entry itself:
+
+```toml
+[[rigs]]
+name = "mo"
+path = "/home/me/projects/mo"
+
+[rigs.formula_vars]
+test_command = "make test-fast"
+lint_command = "golangci-lint run"
+```
+
+When a formula runs with an agent bound to a rig (via `dir = "mo"` or an
+absolute filesystem path), `BuildSlingFormulaVars` folds these entries into
+the final var map. Precedence (highest wins):
+
+1. Explicit `--var key=value` on the CLI
+2. `rigs.<name>.formula_vars[key]`
+3. Routing-injected defaults (`issue`, `rig_name`, `base_branch`, `target_branch`, ...)
+4. Formula-declared `[vars.<name>].default`
+
+`gc formula show --rig <name>` surfaces active rig defaults as
+`(rig default="...")` next to the var description so operators can verify
+what will actually substitute before dispatch.
 
 Wisp cleanup is configured in `city.toml`:
 

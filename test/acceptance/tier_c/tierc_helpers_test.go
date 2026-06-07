@@ -5,6 +5,7 @@ package tierc_test
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -42,6 +43,41 @@ func TestBdCmdSeparatesStdoutAndStderrOnError(t *testing.T) {
 	}
 	if out != "json payload\nwarning text" {
 		t.Fatalf("bdCmd should separate stdout and stderr on error\nwant: %q\ngot:  %q", "json payload\nwarning text", out)
+	}
+}
+
+func TestTierCClaudePreflightModelPrefersSubagentModel(t *testing.T) {
+	env := helpers.NewEnv("", t.TempDir(), t.TempDir()).
+		With("CLAUDE_CODE_SUBAGENT_MODEL", "kimi-k2.5").
+		With("ANTHROPIC_DEFAULT_SONNET_MODEL", "sonnet-fallback").
+		With("ANTHROPIC_DEFAULT_OPUS_MODEL", "opus-fallback").
+		With("ANTHROPIC_DEFAULT_HAIKU_MODEL", "haiku-fallback")
+
+	if got := tierCClaudePreflightModel(env); got != "kimi-k2.5" {
+		t.Fatalf("tierCClaudePreflightModel() = %q, want kimi-k2.5", got)
+	}
+}
+
+func TestTierCLookPathUsesProvidedEnvPath(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "claude")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+
+	got, err := tierCLookPath(dir, "claude")
+	if err != nil {
+		t.Fatalf("tierCLookPath: %v", err)
+	}
+	if got != tool {
+		t.Fatalf("tierCLookPath() = %q, want %q", got, tool)
+	}
+}
+
+func TestTierCLookPathMissing(t *testing.T) {
+	_, err := tierCLookPath(t.TempDir(), "claude")
+	if err != exec.ErrNotFound {
+		t.Fatalf("tierCLookPath missing err = %v, want %v", err, exec.ErrNotFound)
 	}
 }
 

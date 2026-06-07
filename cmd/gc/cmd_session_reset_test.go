@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,6 +13,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -104,6 +109,330 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 	if got := updated.Metadata[sessionCircuitRestartsMetadata]; got != "" {
 		t.Fatalf("persisted restart history = %q, want cleared", got)
 	}
+	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got == "" {
+		t.Fatal("persisted reset generation is empty, want explicit reset generation")
+	}
+}
+
+func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := shortSocketTempDir(t, "gc-session-kill-cb-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+
+	fakeProvider := runtime.NewFake()
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fakeProvider, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	const identity = "session-a"
+	const sessionName = "s-gc-kill-cb-test"
+	bead, err := store.Create(beads.Bead{
+		Title:  "named session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"alias":                        identity,
+			"template":                     "worker",
+			"session_name":                 sessionName,
+			"state":                        "awake",
+			namedSessionMetadataKey:        "true",
+			namedSessionIdentityMetadata:   identity,
+			sessionCircuitStateMetadata:    circuitOpen.String(),
+			sessionCircuitRestartsMetadata: `["2026-04-10T12:00:00Z"]`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+	if err := fakeProvider.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("fakeProvider.Start: %v", err)
+	}
+	if err := fakeProvider.SetMeta(sessionName, "GC_SESSION_ID", bead.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	cb := newSessionCircuitBreaker(sessionCircuitBreakerConfig{
+		Window:      30 * time.Minute,
+		MaxRestarts: 3,
+	})
+	restore := setSessionCircuitBreakerForTest(cb)
+	defer restore()
+	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 4; i++ {
+		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
+	}
+	if !cb.IsOpen(identity, now.Add(time.Minute)) {
+		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
+	}
+
+	lis, err := startControllerSocket(
+		cityDir,
+		func() {},
+		nil,
+		nil,
+		make(chan reloadRequest),
+		make(chan convergenceRequest, 1),
+		make(chan struct{}, 1),
+		make(chan struct{}, 1),
+	)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	defer lis.Close()                              //nolint:errcheck
+	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{identity}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionKill = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	if fakeProvider.IsRunning(sessionName) {
+		t.Fatalf("session %q still running after kill", sessionName)
+	}
+	if cb.IsOpen(identity, now.Add(time.Minute)) {
+		t.Fatalf("breaker still OPEN for %q after `gc session kill %s`", identity, identity)
+	}
+	updated, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(session bead): %v", err)
+	}
+	if got := updated.Metadata[sessionCircuitStateMetadata]; got != "" {
+		t.Fatalf("persisted circuit state = %q, want cleared", got)
+	}
+	if got := updated.Metadata[sessionCircuitRestartsMetadata]; got != "" {
+		t.Fatalf("persisted restart history = %q, want cleared", got)
+	}
+	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got == "" {
+		t.Fatal("persisted reset generation is empty, want explicit reset generation")
+	}
+}
+
+func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := shortSocketTempDir(t, "gc-session-kill-cb-asleep-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	const identity = "session-a"
+	bead, err := store.Create(beads.Bead{
+		Title:  "named session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"alias":                        identity,
+			"template":                     "worker",
+			"session_name":                 "s-gc-kill-cb-asleep-test",
+			"state":                        string(session.StateAsleep),
+			namedSessionMetadataKey:        "true",
+			namedSessionIdentityMetadata:   identity,
+			sessionCircuitStateMetadata:    circuitOpen.String(),
+			sessionCircuitRestartsMetadata: `["2026-04-10T12:00:00Z"]`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+
+	cb := newSessionCircuitBreaker(sessionCircuitBreakerConfig{
+		Window:      30 * time.Minute,
+		MaxRestarts: 3,
+	})
+	restore := setSessionCircuitBreakerForTest(cb)
+	defer restore()
+	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 4; i++ {
+		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
+	}
+	if !cb.IsOpen(identity, now.Add(time.Minute)) {
+		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
+	}
+
+	lis, err := startControllerSocket(
+		cityDir,
+		func() {},
+		nil,
+		nil,
+		make(chan reloadRequest),
+		make(chan convergenceRequest, 1),
+		make(chan struct{}, 1),
+		make(chan struct{}, 1),
+	)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	defer lis.Close()                              //nolint:errcheck
+	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{identity}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionKill = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	if cb.IsOpen(identity, now.Add(time.Minute)) {
+		t.Fatalf("breaker still OPEN for %q after `gc session kill %s`", identity, identity)
+	}
+	updated, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(session bead): %v", err)
+	}
+	if got := updated.Metadata[sessionCircuitStateMetadata]; got != "" {
+		t.Fatalf("persisted circuit state = %q, want cleared", got)
+	}
+	if got := updated.Metadata[sessionCircuitRestartsMetadata]; got != "" {
+		t.Fatalf("persisted restart history = %q, want cleared", got)
+	}
+	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got == "" {
+		t.Fatal("persisted reset generation is empty, want explicit reset generation")
+	}
+}
+
+func TestCmdSessionKill_RecordsStoppedWhenCircuitBreakerResetFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := shortSocketTempDir(t, "gc-session-kill-cb-reset-fails-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+
+	fakeProvider := runtime.NewFake()
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fakeProvider, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	const identity = "session-a"
+	const sessionName = "s-gc-kill-cb-reset-fails-test"
+	bead, err := store.Create(beads.Bead{
+		Title:  "named session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"alias":                        identity,
+			"template":                     "worker",
+			"session_name":                 sessionName,
+			"state":                        "awake",
+			namedSessionMetadataKey:        "true",
+			namedSessionIdentityMetadata:   identity,
+			sessionCircuitStateMetadata:    circuitOpen.String(),
+			sessionCircuitRestartsMetadata: `["2026-04-10T12:00:00Z"]`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+	if err := fakeProvider.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("fakeProvider.Start: %v", err)
+	}
+	if err := fakeProvider.SetMeta(sessionName, "GC_SESSION_ID", bead.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	lis := startFailingCircuitResetController(t, cityDir)
+	defer lis.Close()                              //nolint:errcheck
+	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{identity}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionKill = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	if fakeProvider.IsRunning(sessionName) {
+		t.Fatalf("session %q still running after kill", sessionName)
+	}
+	if got := stderr.String(); !strings.Contains(got, "warning: clearing session circuit breaker") {
+		t.Fatalf("stderr = %q, want circuit-breaker warning", got)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Session "+bead.ID+" killed.") {
+		t.Fatalf("stdout = %q, want killed message", got)
+	}
+
+	updated, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(session bead): %v", err)
+	}
+	if got := updated.Metadata[sessionCircuitStateMetadata]; got != circuitOpen.String() {
+		t.Fatalf("persisted circuit state = %q, want unchanged after clear failure", got)
+	}
+
+	rec, err := events.NewFileRecorder(filepath.Join(cityDir, ".gc", "events.jsonl"), &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("NewFileRecorder(events): %v", err)
+	}
+	defer rec.Close() //nolint:errcheck
+	recorded, err := rec.List(events.Filter{Type: events.SessionStopped, Subject: bead.ID})
+	if err != nil {
+		t.Fatalf("List(SessionStopped): %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("SessionStopped events for %s = %d, want 1", bead.ID, len(recorded))
+	}
+}
+
+func startFailingCircuitResetController(t *testing.T, cityDir string) net.Listener {
+	t.Helper()
+	sockPath := controllerSocketPath(cityDir)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll(controller socket dir): %v", err)
+	}
+	os.Remove(sockPath) //nolint:errcheck
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen(%q): %v", sockPath, err)
+	}
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close() //nolint:errcheck
+				scanner := bufio.NewScanner(conn)
+				if !scanner.Scan() {
+					return
+				}
+				line := scanner.Text()
+				switch {
+				case line == "ping":
+					fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck
+				case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
+					conn.Write([]byte(`{"outcome":"failed","error":"forced reset failure"}` + "\n")) //nolint:errcheck
+				default:
+					conn.Write([]byte("ok\n")) //nolint:errcheck
+				}
+			}(conn)
+		}
+	}()
+	return lis
 }
 
 func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
@@ -139,12 +468,13 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 		t.Fatalf("store.Create(session bead): %v", err)
 	}
 
-	sockPath := filepath.Join(cityDir, ".gc", "controller.sock")
+	sockPath := controllerSocketPath(cityDir)
 	lis, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("Listen(%q): %v", sockPath, err)
 	}
-	defer lis.Close() //nolint:errcheck
+	defer lis.Close()         //nolint:errcheck
+	defer os.Remove(sockPath) //nolint:errcheck
 
 	commands := make(chan string, 3)
 	errCh := make(chan error, 1)
@@ -266,12 +596,13 @@ func TestCmdSessionReset_ControllerClearFailureDoesNotQueueRestart(t *testing.T)
 		t.Fatalf("store.Create(session bead): %v", err)
 	}
 
-	sockPath := filepath.Join(cityDir, ".gc", "controller.sock")
+	sockPath := controllerSocketPath(cityDir)
 	lis, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("Listen(%q): %v", sockPath, err)
 	}
-	defer lis.Close() //nolint:errcheck
+	defer lis.Close()         //nolint:errcheck
+	defer os.Remove(sockPath) //nolint:errcheck
 
 	commands := make(chan string, 3)
 	errCh := make(chan error, 1)
@@ -357,12 +688,13 @@ func TestResetSessionCircuitBreakerOnControllerMalformedReply(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	sockPath := filepath.Join(cityDir, ".gc", "controller.sock")
+	sockPath := controllerSocketPath(cityDir)
 	lis, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("Listen(%q): %v", sockPath, err)
 	}
-	defer lis.Close() //nolint:errcheck
+	defer lis.Close()         //nolint:errcheck
+	defer os.Remove(sockPath) //nolint:errcheck
 
 	errCh := make(chan error, 1)
 	go func() {

@@ -43,6 +43,7 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		"GEMINI_API_KEY",
 		"GOOGLE_GENERATIVE_AI_API_KEY",
 		"GOOGLE_API_KEY",
+		"OLLAMA_API_KEY",
 		"GOOGLE_APPLICATION_CREDENTIALS",
 		"GOOGLE_CLOUD_PROJECT",
 		"GOOGLE_CLOUD_PROJECT_ID",
@@ -82,8 +83,19 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	}
 	e.vars["GC_HOME"] = gcHome
 	e.vars["XDG_RUNTIME_DIR"] = runtimeDir
+	tmuxTmpDir := filepath.Join(runtimeDir, "tmux")
+	if err := os.MkdirAll(tmuxTmpDir, 0o700); err != nil {
+		panic(fmt.Sprintf("acceptance: creating tmux socket root under %s: %v", runtimeDir, err))
+	}
+	// TestMain callers that invoke tmux in the current process must call
+	// tmuxtest.ConfigureProcessEnv with this same root before building Env.
+	e.vars["TMUX_TMPDIR"] = tmuxTmpDir
 	e.vars["GC_DOLT"] = "skip"
-	e.vars["GC_BEADS"] = "file"
+	beadsProvider := "file"
+	if override := os.Getenv("GC_ACCEPTANCE_BEADS_PROVIDER"); override != "" {
+		beadsProvider = override
+	}
+	e.vars["GC_BEADS"] = beadsProvider
 	e.vars["GC_SESSION"] = "subprocess"
 
 	return e

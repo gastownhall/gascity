@@ -19,6 +19,11 @@ import (
 // SafePATH is the fallback PATH for gate script execution.
 const SafePATH = "/usr/local/bin:/usr/bin:/bin"
 
+const (
+	textFileBusyRetryAttempts = 5
+	textFileBusyRetryDelay    = 25 * time.Millisecond
+)
+
 // conditionPATH resolves the tool directories gate scripts actually need.
 // This keeps the env narrow while ensuring gate scripts use the same bd/gc
 // binaries as the running city instead of whatever older copy happens to live
@@ -57,7 +62,8 @@ type ConditionEnv struct {
 	WorkDir              string
 	WispID               string
 	DocPath              string // from var.doc_path, may be empty
-	ArtifactDir          string
+	MoleculeDir          string // molecule.Dir(CityPath, rootID); may be empty for non-molecule beads
+	ArtifactDir          string // per-step artifact dir; GC_ARTIFACT_DIR is omitted when empty (matches the sling-time contract)
 	IterationDurationMs  int64
 	CumulativeDurationMs int64
 	MaxIterations        int
@@ -89,7 +95,6 @@ func (ce ConditionEnv) Environ() []string {
 		"GC_BEAD_ID=" + ce.BeadID,
 		"GC_ITERATION=" + strconv.Itoa(ce.Iteration),
 		"GC_WISP_ID=" + ce.WispID,
-		"GC_ARTIFACT_DIR=" + ce.ArtifactDir,
 		"GC_ITERATION_DURATION_MS=" + strconv.FormatInt(ce.IterationDurationMs, 10),
 		"GC_CUMULATIVE_DURATION_MS=" + strconv.FormatInt(ce.CumulativeDurationMs, 10),
 		"GC_MAX_ITERATIONS=" + strconv.Itoa(ce.MaxIterations),
@@ -115,6 +120,12 @@ func (ce ConditionEnv) Environ() []string {
 	if ce.StorePath != "" {
 		env = append(env, "GC_STORE_PATH="+ce.StorePath)
 	}
+	if ce.ArtifactDir != "" {
+		env = append(env, "GC_ARTIFACT_DIR="+ce.ArtifactDir)
+	}
+	if ce.MoleculeDir != "" {
+		env = append(env, "GC_MOLECULE_DIR="+ce.MoleculeDir)
+	}
 	if realBD := os.Getenv("GC_INTEGRATION_REAL_BD"); realBD != "" {
 		env = append(env, "GC_INTEGRATION_REAL_BD="+realBD)
 	}
@@ -138,34 +149,82 @@ func (ce ConditionEnv) Environ() []string {
 	return env
 }
 
+// containedIn reports whether absPath is the same as or nested under root.
+// Both arguments must already be cleaned/absolute; the comparison is lexical
+// (no further symlink resolution) and is intended to be combined with
+// pre-resolved (EvalSymlinks'd) inputs at the call site.
+func containedIn(absPath, root string) bool {
+	rel, err := filepath.Rel(root, absPath)
+	if err != nil {
+		return false
+	}
+	return !pathutil.IsOutsideDir(rel)
+}
+
 // ResolveConditionPath resolves and validates a gate condition path.
-// - Resolves relative paths against cityPath
-// - Rejects symlinks (EvalSymlinks must equal cleaned path)
-// - Returns the canonical absolute path
-func ResolveConditionPath(cityPath, conditionPath string) (string, error) {
+//
+//   - envelope: a security boundary; relative-path traversal validation
+//     accepts the resolved path if it stays under this root. For city-scoped
+//     gates pass the city path; for rig-scoped ralph checks
+//     (gastownhall/gascity#2320) pass the city path here even though `base`
+//     may point at a rig subtree. Must be non-empty — an empty envelope
+//     would silently disable the traversal check, so it is rejected.
+//   - base: the directory that relative conditionPath values are joined
+//     against, AND a second permitted security boundary used in addition
+//     to envelope: paths that stay under base are accepted even when base
+//     is not a subtree of envelope (gastownhall/gascity#2354 — sibling
+//     rig/city layouts). Callers MUST ensure base is an operator-controlled
+//     path; this function performs no validation of base itself. When
+//     empty, falls back to envelope to preserve historical single-arg
+//     behavior.
+//   - conditionPath: the path declared by the gate. May be absolute or
+//     relative to `base`.
+//
+// For relative paths, both the lexically-joined and the symlink-resolved
+// targets must land inside envelope OR base — defending against both
+// `../`-style traversal and symlinks that escape containment after
+// resolution. Absolute paths skip containment in this function because
+// imported and registry-installed packs can live outside the city/store roots.
+// Callers must only pass absolute paths from surfaces they trust. Returns the
+// canonical absolute path after symlink resolution and an exec-eligible file
+// check.
+func ResolveConditionPath(envelope, base, conditionPath string) (string, error) {
 	if conditionPath == "" {
 		return "", fmt.Errorf("resolving gate condition path: empty path")
 	}
+	if envelope == "" {
+		return "", fmt.Errorf("resolving gate condition path: empty envelope")
+	}
+	if base == "" {
+		base = envelope
+	}
 
-	// Canonicalize cityPath first so that symlinked workspace roots
-	// (e.g., /tmp → /private/tmp on macOS) don't cause false rejections.
-	canonCity, err := filepath.EvalSymlinks(cityPath)
+	// Canonicalize envelope and base first so that symlinked workspace
+	// roots (e.g., /tmp → /private/tmp on macOS) don't cause false
+	// rejections and so the post-resolution containment check below
+	// compares like with like.
+	canonEnvelope, err := filepath.EvalSymlinks(envelope)
 	if err != nil {
-		canonCity = filepath.Clean(cityPath) // best-effort if city doesn't exist yet
+		canonEnvelope = filepath.Clean(envelope) // best-effort if envelope doesn't exist yet
+	}
+	canonBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		canonBase = filepath.Clean(base) // best-effort if base doesn't exist yet
 	}
 
 	var absPath string
 	if filepath.IsAbs(conditionPath) {
 		absPath = filepath.Clean(conditionPath)
 	} else {
-		absPath = filepath.Clean(filepath.Join(canonCity, conditionPath))
+		absPath = filepath.Clean(filepath.Join(canonBase, conditionPath))
 	}
 
-	// Reject path traversal: the resolved path must be under cityPath
-	// for relative paths.
+	// Pre-resolution containment: for relative paths the lexical join
+	// must stay under envelope OR base (gastownhall/gascity#2354). This
+	// rejects `../../foo` style traversal before any filesystem access.
+	// Absolute paths skip the check here; callers vouch for them.
 	if !filepath.IsAbs(conditionPath) {
-		rel, err := filepath.Rel(canonCity, absPath)
-		if err != nil || pathutil.IsOutsideDir(rel) {
+		if !containedIn(absPath, canonEnvelope) && !containedIn(absPath, canonBase) {
 			return "", fmt.Errorf("resolving gate condition path: path traversal not allowed: %s", conditionPath)
 		}
 	}
@@ -175,6 +234,17 @@ func ResolveConditionPath(cityPath, conditionPath string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
 		return "", fmt.Errorf("resolving gate condition path: %w", err)
+	}
+
+	// Post-resolution containment: a symlink under envelope or base can
+	// point outside both trees (e.g. `base/scripts/check.sh -> /etc/passwd`).
+	// Re-validate the symlink-resolved path against the same envelope-OR-base
+	// rule to close the symlink-escape gap (gastownhall/gascity#2354 review).
+	// Absolute paths still skip — same rationale as the pre-resolution check.
+	if !filepath.IsAbs(conditionPath) {
+		if !containedIn(resolved, canonEnvelope) && !containedIn(resolved, canonBase) {
+			return "", fmt.Errorf("resolving gate condition path: symlink target outside containment: %s", conditionPath)
+		}
 	}
 
 	// Check the resolved file exists and is a regular executable.
@@ -218,6 +288,31 @@ func RunCondition(ctx context.Context, scriptPath string, env ConditionEnv, time
 
 // runOnce executes a single attempt of the gate condition script.
 func runOnce(ctx context.Context, scriptPath string, env ConditionEnv, timeout time.Duration) GateResult {
+	var result GateResult
+	for attempt := 0; attempt <= textFileBusyRetryAttempts; attempt++ {
+		result = runOnceNoPreExecRetry(ctx, scriptPath, env, timeout)
+		if !isTextFileBusyPreExecError(result) || attempt == textFileBusyRetryAttempts {
+			return result
+		}
+
+		timer := time.NewTimer(textFileBusyRetryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return result
+		case <-timer.C:
+		}
+	}
+	return result
+}
+
+func isTextFileBusyPreExecError(result GateResult) bool {
+	return result.Outcome == GateError && strings.Contains(strings.ToLower(result.Stderr), "text file busy")
+}
+
+func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env ConditionEnv, timeout time.Duration) GateResult {
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

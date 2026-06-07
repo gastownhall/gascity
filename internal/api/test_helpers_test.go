@@ -20,18 +20,22 @@ import (
 // non-default naming, use newTestSupervisorMux directly.
 func newTestCityHandler(t *testing.T, state State) http.Handler {
 	t.Helper()
-	return wrapTestSupervisorMiddleware(NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", time.Now()))
+	return wrapTestSupervisorMiddleware(NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", "", time.Now()))
 }
 
 // newTestCityHandlerReadOnly is newTestCityHandler but with readOnly=true.
 func newTestCityHandlerReadOnly(t *testing.T, state State) http.Handler {
 	t.Helper()
-	return wrapTestSupervisorMiddleware(NewSupervisorMux(&stateCityResolver{state: state}, nil, true, "test", time.Now()))
+	return wrapTestSupervisorMiddleware(NewSupervisorMux(&stateCityResolver{state: state}, nil, true, "test", "", time.Now()))
 }
 
 // wrapTestSupervisorMiddleware applies the same middleware the supervisor's
 // production Handler() does.
 func wrapTestSupervisorMiddleware(sm *SupervisorMux) http.Handler {
+	// httptest.NewRequest with a relative target uses example.com as Host.
+	// Permit that synthetic host here so production Host allowlisting stays
+	// enabled without forcing every handler test to set req.Host manually.
+	sm.WithAllowedHosts([]string{"example.com"})
 	return sm.Handler()
 }
 
@@ -71,7 +75,7 @@ func cityURL(state State, path string) string {
 // Server so handler dispatch runs against that exact instance.
 func newTestCityHandlerWith(t *testing.T, state State, srv *Server) http.Handler {
 	t.Helper()
-	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", time.Now())
+	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", "", time.Now())
 	sm.cacheMu.Lock()
 	sm.cache[state.CityName()] = cachedCityServer{state: state, srv: srv}
 	sm.cacheMu.Unlock()

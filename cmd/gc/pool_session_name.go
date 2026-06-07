@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"path"
 	"strings"
@@ -9,7 +10,38 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sling"
 )
+
+// sessionBeadAssigneeIdentities returns every identifier under which a work
+// bead could be assigned to this session: the session bead ID, session_name,
+// configured_named_identity, current alias, and any prior aliases preserved
+// in alias_history. Pool polecat aliases (e.g. "nux") are first-class
+// assignment identities, so leaving them out of orphan-detection causes
+// in-progress work to be reset under a live owner — see the
+// SkipsLiveSessionAssignedByAlias regression tests.
+func sessionBeadAssigneeIdentities(sb beads.Bead) []string {
+	identities := make([]string, 0, 5)
+	if id := strings.TrimSpace(sb.ID); id != "" {
+		identities = append(identities, id)
+	}
+	if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" {
+		identities = append(identities, sn)
+	}
+	if ni := strings.TrimSpace(sb.Metadata["configured_named_identity"]); ni != "" {
+		identities = append(identities, ni)
+	}
+	if al := strings.TrimSpace(sb.Metadata["alias"]); al != "" {
+		identities = append(identities, al)
+	}
+	for _, prior := range session.AliasHistory(sb.Metadata) {
+		if prior = strings.TrimSpace(prior); prior != "" {
+			identities = append(identities, prior)
+		}
+	}
+	return identities
+}
 
 type releasedPoolAssignment struct {
 	ID    string
@@ -37,7 +69,7 @@ func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, se
 		if sb.Status == "closed" {
 			continue
 		}
-		if !closeSessionBeadIfUnassigned(store, rigStores, sb, "gc_swept", time.Now().UTC(), nil) {
+		if !closeSessionBeadIfUnassigned(store, rigStores, nil, sb, "gc_swept", time.Now().UTC(), nil) {
 			continue
 		}
 		closed = append(closed, sb.ID)
@@ -91,19 +123,13 @@ func releaseOrphanedPoolAssignments(
 	}
 
 	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, openSessionBeads, storeRefAware)
-	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionBeads)*3)
+	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionBeads)*5)
 	for _, sb := range openSessionBeads {
 		if sb.Status == "closed" {
 			continue
 		}
-		if id := strings.TrimSpace(sb.ID); id != "" {
+		for _, id := range sessionBeadAssigneeIdentities(sb) {
 			legacyOpenIdentifiers[id] = struct{}{}
-		}
-		if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" {
-			legacyOpenIdentifiers[sn] = struct{}{}
-		}
-		if ni := strings.TrimSpace(sb.Metadata["configured_named_identity"]); ni != "" {
-			legacyOpenIdentifiers[ni] = struct{}{}
 		}
 	}
 
@@ -113,7 +139,7 @@ func releaseOrphanedPoolAssignments(
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
-		template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			continue
 		}
@@ -154,10 +180,14 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 		}
-		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, assignee) {
+		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
 			continue
 		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb.ID) {
+		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
+		if !allowsRelease {
+			continue
+		}
+		if !releaseOrphanedPoolAssignment(ownerStore, wb.ID, clearDetached) {
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
@@ -165,10 +195,56 @@ func releaseOrphanedPoolAssignments(
 	return released
 }
 
+func detachedProbeAllowsOrphanRelease(wb beads.Bead) (bool, bool) {
+	spec := strings.TrimSpace(wb.Metadata[detachedProbeMetadataKey])
+	if spec == "" {
+		clearDetachedProbeErrorCount(wb.ID)
+		return true, false
+	}
+
+	result := probeDetachedWork(context.Background(), spec)
+	switch result.Status {
+	case detachedProbeAlive:
+		clearDetachedProbeErrorCount(wb.ID)
+		log.Printf("releaseOrphanedPoolAssignments: skipping release: detached probe alive for %s: %s", wb.ID, spec)
+		return false, false
+	case detachedProbeDead:
+		clearDetachedProbeErrorCount(wb.ID)
+		log.Printf("releaseOrphanedPoolAssignments: releasing %s: detached probe dead: %s", wb.ID, spec)
+		return true, true
+	case detachedProbeError, detachedProbeTimeout:
+		count := incrementDetachedProbeErrorCount(wb.ID)
+		if count < detachedProbeErrorThreshold {
+			log.Printf("releaseOrphanedPoolAssignments: detached probe %s for %s: %v (error %d/%d)", result.Status, wb.ID, result.Err, count, detachedProbeErrorThreshold)
+			return false, false
+		}
+		clearDetachedProbeErrorCount(wb.ID)
+		log.Printf("releaseOrphanedPoolAssignments: releasing %s: detached probe %s after %d errors: %v", wb.ID, result.Status, count, result.Err)
+		return true, true
+	default:
+		count := incrementDetachedProbeErrorCount(wb.ID)
+		if count < detachedProbeErrorThreshold {
+			log.Printf("releaseOrphanedPoolAssignments: detached probe unknown result for %s: %q (error %d/%d)", wb.ID, result.Status, count, detachedProbeErrorThreshold)
+			return false, false
+		}
+		clearDetachedProbeErrorCount(wb.ID)
+		return true, true
+	}
+}
+
+func clearDetachedProbeMetadata(store beads.Store, id string) {
+	if store == nil || id == "" {
+		return
+	}
+	if err := store.SetMetadata(id, detachedProbeMetadataKey, ""); err != nil {
+		log.Printf("clearing detached probe metadata for %s: %v", id, err)
+	}
+}
+
 const unresolvedOpenSessionStoreRef = "\x00unresolved"
 
 func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSessionBeads []beads.Bead, storeRefAware bool) map[string]map[string]struct{} {
-	index := make(map[string]map[string]struct{}, len(openSessionBeads)*3)
+	index := make(map[string]map[string]struct{}, len(openSessionBeads)*5)
 	if !storeRefAware {
 		return index
 	}
@@ -180,9 +256,9 @@ func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSession
 		if !ok {
 			storeRef = unresolvedOpenSessionStoreRef
 		}
-		addOpenSessionStoreRef(index, sb.ID, storeRef)
-		addOpenSessionStoreRef(index, sb.Metadata["session_name"], storeRef)
-		addOpenSessionStoreRef(index, sb.Metadata["configured_named_identity"], storeRef)
+		for _, id := range sessionBeadAssigneeIdentities(sb) {
+			addOpenSessionStoreRef(index, id, storeRef)
+		}
 	}
 	return index
 }
@@ -220,16 +296,17 @@ func storeForPoolAssignment(cfg *config.City, cityStore beads.Store, rigStores m
 	if cfg == nil || len(rigStores) == 0 {
 		return cityStore
 	}
-	if routed := strings.TrimSpace(wb.Metadata["gc.routed_to"]); routed != "" {
+	routed := routedToOrLegacyWorkflowTarget(wb)
+	if routed != "" {
 		if slash := strings.IndexByte(routed, '/'); slash > 0 {
 			if store := rigStores[routed[:slash]]; store != nil {
 				return store
 			}
 		}
 	}
-	idPrefix := beadIDPrefix(wb.ID)
+	idPrefix := sling.BeadPrefixForCity(cfg, wb.ID)
 	for _, rig := range cfg.Rigs {
-		if idPrefix == rig.EffectivePrefix() {
+		if strings.EqualFold(idPrefix, rig.EffectivePrefix()) {
 			if store := rigStores[rig.Name]; store != nil {
 				return store
 			}
@@ -242,7 +319,7 @@ func isRecoverableUnassignedInProgressPoolWork(cfg *config.City, wb beads.Bead) 
 	if wb.Status != "in_progress" || strings.TrimSpace(wb.Assignee) != "" {
 		return false
 	}
-	template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+	template := routedToOrLegacyWorkflowTarget(wb)
 	if template == "" {
 		return false
 	}
@@ -250,15 +327,7 @@ func isRecoverableUnassignedInProgressPoolWork(cfg *config.City, wb beads.Bead) 
 	return agentCfg != nil && agentCfg.SupportsGenericEphemeralSessions()
 }
 
-func beadIDPrefix(id string) string {
-	trimmed := strings.TrimSpace(id)
-	if dash := strings.IndexByte(trimmed, '-'); dash > 0 {
-		return trimmed[:dash]
-	}
-	return ""
-}
-
-func releaseOrphanedPoolAssignment(store beads.Store, id string) bool {
+func releaseOrphanedPoolAssignment(store beads.Store, id string, clearDetached bool) bool {
 	if store == nil || id == "" {
 		return false
 	}
@@ -266,7 +335,14 @@ func releaseOrphanedPoolAssignment(store beads.Store, id string) bool {
 		Assignee: stringPtr(""),
 		Status:   stringPtr("open"),
 	}
-	return store.Update(id, opts) == nil
+	if clearDetached {
+		opts.Metadata = map[string]string{detachedProbeMetadataKey: ""}
+	}
+	if err := store.Update(id, opts); err != nil {
+		log.Printf("releaseOrphanedPoolAssignments: releasing orphaned pool assignment %s: %v", id, err)
+		return false
+	}
+	return true
 }
 
 func liveOpenSessionAssignmentExists(store beads.Store, assignee string) bool {
@@ -277,6 +353,19 @@ func liveOpenSessionAssignmentExists(store beads.Store, assignee string) bool {
 	if liveSessionBeadExistsByIdentity(store, assignee) {
 		return true
 	}
+	// NOTE: this call site intentionally keeps a label-only query — not
+	// the Type+Label union from session.ListAllSessionBeads. The
+	// orphan-release tests (TestReleaseOrphanedPoolAssignments_*) set up
+	// city session beads with Type=session but no gc:session label and
+	// assert that rig work pointing at a session_name only reachable via
+	// the typed bead IS released. Switching this query to the union
+	// would surface those typed beads as "live" and cause the work to
+	// be skipped instead of released, regressing
+	// ReopensRigStoreMissingPoolAssignee and
+	// ReleasesRigWorkAssignedToUnreachableOpenSession. The label-loss
+	// bug this PR is fixing manifests in the snapshot/list/reconciler
+	// paths; orphan release continues to treat the label as the
+	// authoritative liveness signal.
 	sessions, err := store.List(beads.ListQuery{
 		Label: sessionBeadLabel,
 		Live:  true,
@@ -289,10 +378,10 @@ func liveOpenSessionAssignmentExists(store beads.Store, assignee string) bool {
 		if sb.Status == "closed" || !isSessionBead(sb) {
 			continue
 		}
-		if assignee == strings.TrimSpace(sb.ID) ||
-			assignee == strings.TrimSpace(sb.Metadata["session_name"]) ||
-			assignee == strings.TrimSpace(sb.Metadata["configured_named_identity"]) {
-			return true
+		for _, id := range sessionBeadAssigneeIdentities(sb) {
+			if assignee == id {
+				return true
+			}
 		}
 	}
 	return false
@@ -304,11 +393,13 @@ func liveSessionBeadExistsByIdentity(store beads.Store, assignee string) bool {
 		if err != nil {
 			continue
 		}
-		if sb.Status != "closed" && isSessionBead(sb) &&
-			(assignee == strings.TrimSpace(sb.ID) ||
-				assignee == strings.TrimSpace(sb.Metadata["session_name"]) ||
-				assignee == strings.TrimSpace(sb.Metadata["configured_named_identity"])) {
-			return true
+		if sb.Status == "closed" || !isSessionBead(sb) {
+			continue
+		}
+		for _, candidate := range sessionBeadAssigneeIdentities(sb) {
+			if assignee == candidate {
+				return true
+			}
 		}
 	}
 	return false
@@ -326,14 +417,24 @@ func directSessionBeadIDCandidates(assignee string) []string {
 	return candidates
 }
 
-func liveWorkAssignmentStillReleasable(store beads.Store, id, assignee string) bool {
+// liveWorkAssignmentStillReleasable confirms the snapshot is not stale
+// before clearing assignee. The expectedStatus must match the snapshot
+// status the caller observed: if the bead has since transitioned (e.g. a
+// concurrent claim moved open→in_progress, or another release moved
+// in_progress→open) the snapshot's release decision is no longer safe.
+// Open status is required for the issue #2793 path — graph.v2 step
+// beads stuck on a dead session's long-form assignee are status=open,
+// not in_progress.
+func liveWorkAssignmentStillReleasable(store beads.Store, id, expectedStatus, assignee string) bool {
 	id = strings.TrimSpace(id)
-	if store == nil || id == "" {
+	expectedStatus = strings.TrimSpace(expectedStatus)
+	if store == nil || id == "" || expectedStatus == "" {
 		return false
 	}
 	work, err := store.List(beads.ListQuery{
-		Status: "in_progress",
-		Live:   true,
+		Status:   expectedStatus,
+		Live:     true,
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		log.Printf("releaseOrphanedPoolAssignments: live work validation failed for %q: %v", id, err)

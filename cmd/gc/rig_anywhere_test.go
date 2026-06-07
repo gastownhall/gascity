@@ -26,7 +26,7 @@ func setupCity(t *testing.T, name string) string {
 	if err := ensureCityScaffold(dir); err != nil {
 		t.Fatal(err)
 	}
-	toml := "[workspace]\nname = \"" + name + "\"\n\n[[agent]]\nname = \"mayor\"\n"
+	toml := "[workspace]\nname = \"" + name + "\"\n"
 	writeRigAnywhereCityToml(t, dir, toml)
 	return canonicalTestPath(dir)
 }
@@ -37,9 +37,27 @@ func writeRigAnywhereCityToml(t *testing.T, cityPath, toml string) {
 	if err != nil {
 		t.Fatalf("Parse(city.toml fixture): %v", err)
 	}
+	workspaceName := strings.TrimSpace(cfg.Workspace.Name)
+	if workspaceName == "" {
+		workspaceName = filepath.Base(cityPath)
+	}
+	workspacePrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	packToml := fmt.Sprintf("[pack]\nname = %q\nschema = 2\n", workspaceName)
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.PersistWorkspaceSiteBinding(fsys.OSFS{}, cityPath, workspaceName, workspacePrefix); err != nil {
+		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
+	}
 	if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityPath, cfg.Rigs); err != nil {
 		t.Fatalf("PersistRigSiteBindings: %v", err)
 	}
+	cfg.Workspace.Name = ""
+	cfg.Workspace.Prefix = ""
+	cfg.Agents = nil
 	data, err := cfg.MarshalForWrite()
 	if err != nil {
 		t.Fatalf("MarshalForWrite: %v", err)
@@ -1265,11 +1283,14 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err := os.MkdirAll(rigDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		legacy := fmt.Sprintf("[workspace]\nname = \"legacy-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"legacy-rig\"\npath = %q\n", rigDir)
+		legacy := fmt.Sprintf("[workspace]\nname = \"legacy-city\"\n\n[[rigs]]\nname = \"legacy-rig\"\npath = %q\n", rigDir)
 		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(legacy), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Remove(config.SiteBindingPath(cityPath)); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(cityPath, "pack.toml")); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
 		registerCityForRigResolution(t, gcHome, cityPath, "legacy-city")
@@ -1280,6 +1301,419 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "not registered") {
 			t.Fatalf("error = %q, want not registered", err)
+		}
+	})
+
+	// Regression for ga-gu3p / ga-9fb5: a city declared locally on disk
+	// (city.toml + .gc/site.toml) but not yet registered with the
+	// supervisor (cities.toml empty) must still resolve --rig from cwd.
+	// `gc rig list` already works in this state because it reads city.toml
+	// directly; resolveRigToContext used to only consult the supervisor
+	// registry, so `gc mcp list --rig X` reported the rig as unregistered
+	// even though it was perfectly visible to the user.
+	t.Run("local_unregistered_city_with_site_binding_resolves", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-city")
+		rigDir := filepath.Join(t.TempDir(), "local-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// writeRigAnywhereCityToml writes both city.toml AND .gc/site.toml
+		// (via PersistRigSiteBindings) — exactly the on-disk state that
+		// the user hits before `gc start` registers the city. Deliberately
+		// skip registerCityForRigResolution so cities.toml stays empty.
+		toml := fmt.Sprintf("[workspace]\nname = \"local-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-rig\"\npath = %q\n", rigDir)
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, cityPath)
+
+		ctx, err := resolveRigToContext("local-rig")
+		if err != nil {
+			t.Fatalf("resolveRigToContext: %v", err)
+		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
+		if ctx.RigName != "local-rig" {
+			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-rig")
+		}
+	})
+
+	t.Run("local_unregistered_city_ignores_unrelated_registered_load_error_by_name", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		t.Setenv("GC_CITY", "")
+		t.Setenv("GC_CITY_PATH", "")
+		t.Setenv("GC_CITY_ROOT", "")
+		t.Setenv("GC_DIR", "")
+
+		badCity := setupCity(t, "broken-registered-city")
+		if err := os.WriteFile(config.SiteBindingPath(badCity), []byte("[[rig]\nname = \"broken\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		registerCityForRigResolution(t, gcHome, badCity, "broken-registered-city")
+
+		cityPath := setupCity(t, "local-load-error-city")
+		rigDir := filepath.Join(t.TempDir(), "local-load-error-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := fmt.Sprintf("[workspace]\nname = \"local-load-error-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-load-error-rig\"\npath = %q\n", rigDir)
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, cityPath)
+
+		ctx, err := resolveRigToContext("local-load-error-rig")
+		if err != nil {
+			t.Fatalf("resolveRigToContext: %v", err)
+		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
+		if ctx.RigName != "local-load-error-rig" {
+			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-load-error-rig")
+		}
+	})
+
+	t.Run("local_unregistered_city_ignores_unrelated_registered_load_error_by_path", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		t.Setenv("GC_CITY", "")
+		t.Setenv("GC_CITY_PATH", "")
+		t.Setenv("GC_CITY_ROOT", "")
+		t.Setenv("GC_DIR", "")
+
+		badCity := setupCity(t, "broken-registered-path-city")
+		if err := os.WriteFile(config.SiteBindingPath(badCity), []byte("[[rig]\nname = \"broken\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		registerCityForRigResolution(t, gcHome, badCity, "broken-registered-path-city")
+
+		cityPath := setupCity(t, "local-load-error-path-city")
+		rigDir := filepath.Join(t.TempDir(), "local-load-error-path-rig")
+		nestedDir := filepath.Join(rigDir, "nested")
+		if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := fmt.Sprintf("[workspace]\nname = \"local-load-error-path-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-load-error-path-rig\"\npath = %q\n", rigDir)
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, cityPath)
+
+		ctx, err := resolveRigToContext(nestedDir)
+		if err != nil {
+			t.Fatalf("resolveRigToContext: %v", err)
+		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
+		if ctx.RigName != "local-load-error-path-rig" {
+			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-load-error-path-rig")
+		}
+	})
+
+	t.Run("local_unregistered_city_miss_preserves_registered_load_error", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		t.Setenv("GC_CITY", "")
+		t.Setenv("GC_CITY_PATH", "")
+		t.Setenv("GC_CITY_ROOT", "")
+		t.Setenv("GC_DIR", "")
+
+		badCity := setupCity(t, "broken-registered-miss-city")
+		if err := os.WriteFile(config.SiteBindingPath(badCity), []byte("[[rig]\nname = \"broken\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		registerCityForRigResolution(t, gcHome, badCity, "broken-registered-miss-city")
+
+		cityPath := setupCity(t, "local-miss-city")
+		rigDir := filepath.Join(t.TempDir(), "local-other-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := fmt.Sprintf("[workspace]\nname = \"local-miss-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-other-rig\"\npath = %q\n", rigDir)
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, cityPath)
+
+		_, err := resolveRigToContext("missing-rig")
+		if err == nil {
+			t.Fatal("resolveRigToContext should preserve registered load errors when local fallback misses")
+		}
+		if !strings.Contains(err.Error(), "loading registered city rig bindings") {
+			t.Fatalf("error = %q, want registered city binding load error", err)
+		}
+		if !strings.Contains(err.Error(), "broken-registered-miss-city") {
+			t.Fatalf("error = %q, want bad city name", err)
+		}
+		if strings.Contains(err.Error(), "not registered") {
+			t.Fatalf("error = %q, should preserve registered load error instead of not registered", err)
+		}
+	})
+
+	t.Run("local_unregistered_city_resolves_by_rig_path", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-path-city")
+		rigDir := filepath.Join(t.TempDir(), "local-path-rig")
+		nestedDir := filepath.Join(rigDir, "nested")
+		if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := fmt.Sprintf("[workspace]\nname = \"local-path-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-path-rig\"\npath = %q\n", rigDir)
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, t.TempDir())
+		cityFlag = cityPath
+
+		ctx, err := resolveRigToContext(nestedDir)
+		if err != nil {
+			t.Fatalf("resolveRigToContext: %v", err)
+		}
+		if ctx.CityPath != cityPath {
+			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
+		}
+		if ctx.RigName != "local-path-rig" {
+			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-path-rig")
+		}
+	})
+
+	t.Run("local_unregistered_city_picks_deepest_rig_path", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-nested-city")
+		shallowDir := filepath.Join(t.TempDir(), "workspace")
+		deepDir := filepath.Join(shallowDir, "nested")
+		targetDir := filepath.Join(deepDir, "child")
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := fmt.Sprintf("[workspace]\nname = \"local-nested-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"a-shallow\"\npath = %q\n\n[[rigs]]\nname = \"b-deep\"\npath = %q\n", shallowDir, deepDir)
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, t.TempDir())
+		cityFlag = cityPath
+
+		ctx, err := resolveRigToContext(targetDir)
+		if err != nil {
+			t.Fatalf("resolveRigToContext: %v", err)
+		}
+		if ctx.CityPath != cityPath {
+			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
+		}
+		if ctx.RigName != "b-deep" {
+			t.Errorf("RigName = %q, want %q", ctx.RigName, "b-deep")
+		}
+	})
+
+	t.Run("local_unregistered_city_resolves_relative_site_path", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-relative-city")
+		rigDir := filepath.Join(cityPath, "rigs", "relative-rig")
+		targetDir := filepath.Join(rigDir, "child")
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := "[workspace]\nname = \"local-relative-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"relative-rig\"\npath = \"rigs/relative-rig\"\n"
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, cityPath)
+		cityFlag = cityPath
+
+		ctx, err := resolveRigToContext(filepath.Join("rigs", "relative-rig", "child"))
+		if err != nil {
+			t.Fatalf("resolveRigToContext: %v", err)
+		}
+		if ctx.CityPath != cityPath {
+			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
+		}
+		if ctx.RigName != "relative-rig" {
+			t.Errorf("RigName = %q, want %q", ctx.RigName, "relative-rig")
+		}
+	})
+
+	t.Run("local_unregistered_city_rejects_stale_site_only_binding", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-stale-city")
+		staleDir := filepath.Join(t.TempDir(), "stale-rig")
+		if err := os.MkdirAll(staleDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityPath, []config.Rig{{Name: "stale-rig", Path: staleDir}}); err != nil {
+			t.Fatalf("PersistRigSiteBindings: %v", err)
+		}
+		setCwd(t, t.TempDir())
+		cityFlag = cityPath
+
+		_, err := resolveRigToContext("stale-rig")
+		if err == nil {
+			t.Fatal("resolveRigToContext should reject site-only rig bindings not declared in city.toml")
+		}
+		if !strings.Contains(err.Error(), "not registered") {
+			t.Fatalf("error = %q, want not registered", err)
+		}
+	})
+
+	t.Run("local_unregistered_city_malformed_site_binding_errors", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-malformed-city")
+		if err := os.WriteFile(config.SiteBindingPath(cityPath), []byte("[[rig]\nname = \"broken\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		setCwd(t, t.TempDir())
+		cityFlag = cityPath
+
+		_, err := resolveRigToContext("broken")
+		if err == nil {
+			t.Fatal("resolveRigToContext should surface malformed local site binding")
+		}
+		if !strings.Contains(err.Error(), "parsing site binding") {
+			t.Fatalf("error = %q, want parsing site binding", err)
+		}
+	})
+
+	t.Run("local_unregistered_city_uses_explicit_city_flag", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-flag-city")
+		rigDir := filepath.Join(t.TempDir(), "local-flag-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := fmt.Sprintf("[workspace]\nname = \"local-flag-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-flag-rig\"\npath = %q\n", rigDir)
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, t.TempDir())
+		cityFlag = cityPath
+
+		ctx, err := resolveRigToContext("local-flag-rig")
+		if err != nil {
+			t.Fatalf("resolveRigToContext: %v", err)
+		}
+		if ctx.CityPath != cityPath {
+			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
+		}
+		if ctx.RigName != "local-flag-rig" {
+			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-flag-rig")
+		}
+	})
+
+	t.Run("local_unregistered_city_preserves_explicit_city_error", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		setCwd(t, t.TempDir())
+		cityFlag = filepath.Join(t.TempDir(), "not-a-city")
+
+		_, err := resolveRigToContext("missing-rig")
+		if err == nil {
+			t.Fatal("resolveRigToContext should surface explicit local city errors")
+		}
+		if !strings.Contains(err.Error(), "not a city directory") {
+			t.Fatalf("error = %q, want not a city directory", err)
+		}
+		if strings.Contains(err.Error(), "not registered") {
+			t.Fatalf("error = %q, should preserve city error instead of falling back to not registered", err)
+		}
+	})
+
+	t.Run("local_unregistered_city_uses_GC_CITY_PATH_env", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-env-city")
+		rigDir := filepath.Join(t.TempDir(), "local-env-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := fmt.Sprintf("[workspace]\nname = \"local-env-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-env-rig\"\npath = %q\n", rigDir)
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, t.TempDir())
+		t.Setenv("GC_CITY", "")
+		t.Setenv("GC_CITY_PATH", cityPath)
+		t.Setenv("GC_CITY_ROOT", "")
+		t.Setenv("GC_DIR", "")
+
+		ctx, err := resolveRigToContext("local-env-rig")
+		if err != nil {
+			t.Fatalf("resolveRigToContext: %v", err)
+		}
+		if ctx.CityPath != cityPath {
+			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
+		}
+		if ctx.RigName != "local-env-rig" {
+			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-env-rig")
+		}
+	})
+
+	t.Run("local_unregistered_city_uses_GC_DIR_env", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-gc-dir-city")
+		rigDir := filepath.Join(cityPath, "rigs", "local-gc-dir-rig")
+		nestedDir := filepath.Join(rigDir, "nested")
+		if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := fmt.Sprintf("[workspace]\nname = \"local-gc-dir-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-gc-dir-rig\"\npath = %q\n", rigDir)
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, t.TempDir())
+		t.Setenv("GC_CITY", "")
+		t.Setenv("GC_CITY_PATH", "")
+		t.Setenv("GC_CITY_ROOT", "")
+		t.Setenv("GC_DIR", nestedDir)
+
+		ctx, err := resolveRigToContext("local-gc-dir-rig")
+		if err != nil {
+			t.Fatalf("resolveRigToContext: %v", err)
+		}
+		if ctx.CityPath != cityPath {
+			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
+		}
+		if ctx.RigName != "local-gc-dir-rig" {
+			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-gc-dir-rig")
+		}
+	})
+
+	// Companion to local_unregistered_city_uses_explicit_city_flag: the
+	// local-city fallback only fires when a real .gc/site.toml binding exists.
+	// A legacy city.toml with inline PackV1/pre-1.0 surfaces must still be
+	// rejected at the cwd-walk level too.
+	t.Run("local_unregistered_city_legacy_path_still_rejected", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-legacy")
+		rigDir := filepath.Join(t.TempDir(), "local-legacy-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		legacy := fmt.Sprintf("[workspace]\nname = \"local-legacy\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-legacy-rig\"\npath = %q\n", rigDir)
+		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(legacy), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(config.SiteBindingPath(cityPath)); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		setCwd(t, cityPath)
+
+		_, err := resolveRigToContext("local-legacy-rig")
+		if err == nil {
+			t.Fatal("resolveRigToContext should reject a legacy city.toml even via the local-city fallback")
+		}
+		if !strings.Contains(err.Error(), "PackV1 config surfaces are no longer supported") {
+			t.Fatalf("error = %q, want PackV1 surface rejection", err)
 		}
 	})
 
@@ -1449,9 +1883,6 @@ include = ["missing.toml"]
 
 [workspace]
 name = "missing-include-broken"
-
-[[agent]]
-name = "missing-include-agent"
 `), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -1470,6 +1901,64 @@ name = "missing-include-agent"
 		for _, s := range stale {
 			if strings.Contains(s.Label, "missing-include-broken") {
 				t.Fatalf("stale = %+v, missing include must not be reported as stale", stale)
+			}
+		}
+	})
+
+	t.Run("registered_city_with_legacy_order_layout_gets_migration_context", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		goodCity := setupCity(t, "legacy-order-good")
+		rigDir := filepath.Join(t.TempDir(), "legacy-order-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		registerRigBindingForResolution(t, gcHome, goodCity, "legacy-order-good", "legacy-order-rig", rigDir)
+
+		brokenCity := setupCity(t, "legacy-order-broken")
+		if err := os.Remove(filepath.Join(brokenCity, "pack.toml")); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		packDir := filepath.Join(brokenCity, "packs", "legacy")
+		if err := os.MkdirAll(filepath.Join(packDir, "orders", "heartbeat"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte("[pack]\nname = \"legacy\"\nschema = 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(packDir, "orders", "heartbeat", "order.toml"), []byte(`[order]
+exec = "scripts/heartbeat.sh"
+trigger = "cooldown"
+interval = "5m"
+`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(brokenCity, "city.toml"), []byte(`
+[workspace]
+includes = ["packs/legacy"]
+`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		registerCityForRigResolution(t, gcHome, brokenCity, "legacy-order-broken")
+
+		_, stale, err := registeredRigBindingsByPath(rigDir, true)
+		if err == nil {
+			t.Fatal("registeredRigBindingsByPath should fail closed on legacy order layout")
+		}
+		if len(stale) != 0 {
+			t.Fatalf("stale = %+v, legacy order layout must be a load error", stale)
+		}
+		errText := err.Error()
+		for _, want := range []string{
+			"loading registered city rig bindings",
+			"legacy-order-broken",
+			"unsupported PackV1 order path",
+			"registered city",
+			"gc --city legacy-order-broken doctor",
+		} {
+			if !strings.Contains(errText, want) {
+				t.Fatalf("error = %q, want substring %q", errText, want)
 			}
 		}
 	})

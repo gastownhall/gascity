@@ -13,24 +13,28 @@ import (
 // equal to "*" are rejected by config validation.
 const RigWildcard = "*"
 
-// Override modifies a scanned order's scheduling fields.
+// Override modifies a scanned order's scheduling fields and exec env.
 // Uses pointer fields to distinguish "not set" from "set to zero value."
 // Mirrors config.OrderOverride but lives in the orders package
 // to avoid a circular dependency.
 type Override struct {
-	Name     string
-	Rig      string
-	Enabled  *bool
-	Trigger  *string
-	Interval *string
-	Schedule *string
-	Check    *string
-	On       *string
-	Pool     *string
-	Timeout  *string
+	Name       string
+	Rig        string
+	Enabled    *bool
+	Trigger    *string
+	Interval   *string
+	Schedule   *string
+	Check      *string
+	On         *string
+	Pool       *string
+	Timeout    *string
+	Idempotent *bool
+	Env        map[string]string
 }
 
 // ApplyOverrides applies each override to the matching order in aa.
+// Callers that need an active-only view should call FilterEnabled after
+// applying overrides because overrides can change an order's Enabled state.
 //
 // Matching rules:
 //   - ov.Rig == "":  matches only city-level orders (those with no rig).
@@ -147,5 +151,16 @@ func applyOverride(a *Order, ov *Override) {
 	}
 	if ov.Timeout != nil {
 		a.Timeout = *ov.Timeout
+	}
+	if ov.Idempotent != nil {
+		a.Idempotent = *ov.Idempotent
+	}
+	if len(ov.Env) > 0 {
+		if a.Env == nil {
+			a.Env = make(map[string]string, len(ov.Env))
+		}
+		for k, v := range ov.Env {
+			a.Env[k] = v
+		}
 	}
 }

@@ -7,6 +7,13 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+
+	// Blank import: pgauth's init() registers PostgresCredentialResolvedPayload
+	// in the events registry. The api package never references pgauth's types
+	// directly (the payload bytes flow through events.Event.Payload as JSON),
+	// so the import exists solely to fire the registration before the registry-
+	// coverage tests run.
+	_ "github.com/gastownhall/gascity/internal/pgauth"
 )
 
 // API-layer event payload types. Every API emitter takes one of these
@@ -93,6 +100,20 @@ type SessionSubmitSucceededPayload struct {
 // IsEventPayload marks SessionSubmitSucceededPayload as an events.Payload variant.
 func (SessionSubmitSucceededPayload) IsEventPayload() {}
 
+// ProjectIdentityStampedPayload carries one layer-write event for a scope
+// identity reconcile. Source is one of generated, migrated_from_metadata,
+// migrated_from_database, or cache_repair. Layer is one of L1, L2, or L3.
+type ProjectIdentityStampedPayload struct {
+	ScopeRoot string `json:"scope_root"`
+	Source    string `json:"source"`
+	Layer     string `json:"layer"`
+	OldID     string `json:"old_id,omitempty"`
+	NewID     string `json:"new_id"`
+}
+
+// IsEventPayload marks ProjectIdentityStampedPayload as an events.Payload variant.
+func (ProjectIdentityStampedPayload) IsEventPayload() {}
+
 // RequestFailedPayload is emitted on request.failed for any async
 // operation that fails. The operation enum identifies which operation.
 type RequestFailedPayload struct {
@@ -104,6 +125,37 @@ type RequestFailedPayload struct {
 
 // IsEventPayload marks RequestFailedPayload as an events.Payload variant.
 func (RequestFailedPayload) IsEventPayload() {}
+
+// SupervisorShutdownPayload attributes a supervisor shutdown trigger so
+// operators can diagnose why the supervisor exited without scraping
+// macOS unified log or launchd state. Recorded immediately before the
+// supervisor cancels its context and begins the city-stop cascade.
+type SupervisorShutdownPayload struct {
+	Source     string `json:"source" enum:"signal,socket_stop" doc:"Which path triggered the shutdown."`
+	Signal     string `json:"signal,omitempty" doc:"For source=signal, the human-readable signal name (e.g. \"terminated\", \"interrupt\"). Empty for socket_stop."`
+	ClientAddr string `json:"client_addr,omitempty" doc:"For source=socket_stop, the address reported by the connecting client. Typically empty for unix-socket peers."`
+	Mode       string `json:"mode" enum:"destructive,preserve_sessions,unknown" doc:"Resulting shutdown mode."`
+}
+
+// IsEventPayload marks SupervisorShutdownPayload as an events.Payload variant.
+func (SupervisorShutdownPayload) IsEventPayload() {}
+
+// SupervisorRequestPayload is a bounded audit record for the machine-wide
+// supervisor API. It intentionally omits request bodies, query strings, raw
+// remote addresses, and origins.
+type SupervisorRequestPayload struct {
+	Method          string `json:"method" doc:"HTTP method."`
+	Path            string `json:"path" doc:"Request path with query string omitted and length bounded."`
+	Status          int    `json:"status" doc:"HTTP response status code. Start-phase records use 0 before the final response status is known."`
+	DurationMs      int64  `json:"duration_ms" doc:"Handler duration in milliseconds."`
+	RemoteAddrClass string `json:"remote_addr_class" enum:"loopback,private,public,unknown" doc:"Network class of the remote address, not the raw address."`
+	Host            string `json:"host,omitempty" doc:"Canonical Host header without port."`
+	OriginAllowed   bool   `json:"origin_allowed" doc:"Whether the Origin header, if present, matched CORS policy."`
+	Phase           string `json:"phase" enum:"start,complete" doc:"Audit phase. Long-lived event streams emit a start record immediately after Host validation, then a complete record when the handler returns. Non-stream requests emit complete only."`
+}
+
+// IsEventPayload marks SupervisorRequestPayload as an events.Payload variant.
+func (SupervisorRequestPayload) IsEventPayload() {}
 
 // CityLifecyclePayload is the shape of non-terminal city.created and
 // city.unregister_requested events recorded in the per-city event log
@@ -117,9 +169,9 @@ type CityLifecyclePayload struct {
 func (CityLifecyclePayload) IsEventPayload() {}
 
 // BeadEventPayload is the shape of every bead.* event payload
-// (BeadCreated, BeadUpdated, BeadClosed). The payload carries a full
-// snapshot of the bead as of the event; it is emitted by bd hooks and by
-// the beads CachingStore's reconcile loop when external changes are detected.
+// (BeadCreated, BeadUpdated, BeadClosed, BeadDeleted). The payload carries a
+// full snapshot of the bead as of the event; it is emitted by bd hooks and the
+// beads CachingStore for local writes and reconcile-detected external changes.
 type BeadEventPayload struct {
 	Bead beads.Bead `json:"bead"`
 }
@@ -282,7 +334,7 @@ type WorkerOperationEventPayload struct {
 	// best-effort. See the consumer contract on the type doc above.
 
 	// Model is the LLM model identifier observed in this operation
-	// (e.g. "claude-opus-4-7"). Sourced from session metadata.
+	// (e.g. "claude-opus-4-8"). Sourced from session metadata.
 	//
 	// Wired: TODO — follow-up will tail sessionlog at finish() to
 	// extract msg.Model.
@@ -355,6 +407,36 @@ type WorkerOperationEventPayload struct {
 // IsEventPayload marks WorkerOperationEventPayload as an events.Payload variant.
 func (WorkerOperationEventPayload) IsEventPayload() {}
 
+// SessionDrainAckedWithAssignedWorkPayload carries the bead-side context for
+// a session that drain-acked while still holding the assignee on an open or
+// in-progress work bead. The reconciler emits this as a mechanism-only
+// signal (per gastownhall/gascity#2293) so pack-level subscribers can apply
+// recovery policy without baking pack-specific knowledge into the SDK.
+type SessionDrainAckedWithAssignedWorkPayload struct {
+	SessionID  string `json:"session_id" doc:"Canonical session bead ID for the session that drain-acked."`
+	BeadID     string `json:"bead_id" doc:"ID of the work bead still holding this session as its assignee."`
+	Template   string `json:"template,omitempty" doc:"Pool template name when known at the emission site."`
+	BeadStatus string `json:"bead_status,omitempty" doc:"Status of the stranded bead at emission time (typically 'in_progress' for cap-hit, 'open' if recovery races claim)."`
+	Reason     string `json:"reason,omitempty" doc:"Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land."`
+}
+
+// IsEventPayload marks SessionDrainAckedWithAssignedWorkPayload as an events.Payload variant.
+func (SessionDrainAckedWithAssignedWorkPayload) IsEventPayload() {}
+
+// SessionDrainAckedWithAssignedWorkPayloadJSON builds the JSON wire form for
+// attachment to an events.Event.Payload field. Template, BeadStatus, and
+// Reason are emitted only when non-empty.
+func SessionDrainAckedWithAssignedWorkPayloadJSON(sessionID, beadID, template, beadStatus, reason string) json.RawMessage {
+	b, _ := json.Marshal(SessionDrainAckedWithAssignedWorkPayload{
+		SessionID:  sessionID,
+		BeadID:     beadID,
+		Template:   template,
+		BeadStatus: beadStatus,
+		Reason:     reason,
+	})
+	return b
+}
+
 func init() {
 	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
@@ -369,6 +451,7 @@ func init() {
 	events.RegisterPayload(events.BeadCreated, BeadEventPayload{})
 	events.RegisterPayload(events.BeadUpdated, BeadEventPayload{})
 	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
+	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
 
 	// session.* / convoy.* / controller.* / city.* / order.* /
 	// provider.* — these events carry no structured payload today;
@@ -386,10 +469,17 @@ func init() {
 	events.RegisterPayload(events.SessionMaxAgeKilled, events.NoPayload{})
 	events.RegisterPayload(events.SessionSuspended, events.NoPayload{})
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
+	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
+	events.RegisterPayload(events.SessionStranded, events.NoPayload{})
+	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
+	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
+	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStopped, events.NoPayload{})
+	events.RegisterPayload(events.SupervisorShutdownRequested, SupervisorShutdownPayload{})
+	events.RegisterPayload(events.SupervisorRequest, SupervisorRequestPayload{})
 	events.RegisterPayload(events.CitySuspended, events.NoPayload{})
 	events.RegisterPayload(events.CityResumed, events.NoPayload{})
 	// Typed async request result events.
@@ -409,4 +499,13 @@ func init() {
 	events.RegisterPayload(events.OrderFailed, events.NoPayload{})
 	events.RegisterPayload(events.ProviderSwapped, events.NoPayload{})
 	events.RegisterPayload(events.WorkerOperation, WorkerOperationEventPayload{})
+	events.RegisterPayload(events.ProjectIdentityStamped, ProjectIdentityStampedPayload{})
+
+	// gc.store.maintenance.* — supervisor StoreMaintenanceLoop outcomes.
+	events.RegisterPayload(events.StoreMaintenanceDone, events.StoreMaintenanceDonePayload{})
+	events.RegisterPayload(events.StoreMaintenanceFailed, events.StoreMaintenanceFailedPayload{})
+
+	// gc.store.disk_* — ENOSPC pre-flight events emitted before CALL DOLT_GC.
+	events.RegisterPayload(events.StoreDiskWarn, events.StoreDiskWarnPayload{})
+	events.RegisterPayload(events.StoreDiskCritical, events.StoreDiskCriticalPayload{})
 }

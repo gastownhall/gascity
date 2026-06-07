@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestConfigHash_Canonical(t *testing.T) {
@@ -63,6 +64,12 @@ func TestConfigHash_Behavioral(t *testing.T) {
 	envChanged.Env = map[string]string{"KEY": "different"}
 	if h := canonicalConfigHash(envChanged, nil); h == baseHash {
 		t.Error("env change should produce different hash")
+	}
+
+	lifecycleChanged := base
+	lifecycleChanged.Hints.Lifecycle = runtime.LifecycleOneShot
+	if h := canonicalConfigHash(lifecycleChanged, nil); h == baseHash {
+		t.Error("lifecycle change should produce different hash")
 	}
 }
 

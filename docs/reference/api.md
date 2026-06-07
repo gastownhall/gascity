@@ -7,13 +7,13 @@ The `gc` supervisor exposes a single, typed HTTP control plane
 described by an OpenAPI 3.1 document. Everything the CLI does, any
 third-party client can do too — there is no hidden surface.
 
-## Download the spec
+## Get the spec
 
-- **<a href="/schema/openapi.txt" download="openapi.json">Download openapi.json</a>** —
+- **<a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/schema/openapi.json" target="_blank" rel="noopener">openapi.json</a>** —
   the authoritative contract. Drop it into Stoplight, Postman,
   Swagger UI, or any OpenAPI-aware tool to browse operations
   interactively.
-- **<a href="/schema/events.txt" download="events.json">Download events.json</a>** —
+- **<a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/schema/events.json" target="_blank" rel="noopener">events.json</a>** —
   the `gc events` JSONL line schema. It references DTO components in
   `openapi.json`, so the API remains the source of truth.
 

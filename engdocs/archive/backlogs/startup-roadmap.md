@@ -107,8 +107,8 @@ These four steps are interdependent. They arrive together.
 
 ### TrackSessionPID (gastown step 15)
 
-- **What:** Captures pane PID + process start time, writes to
-  `.runtime/pids/<session>.pid`. Defense-in-depth for orphan cleanup.
+- **What:** Captures pane PID + process start time, writes to a local PID
+  file. Defense-in-depth for orphan cleanup.
 - **Gastown code:** `TrackSessionPID(townRoot, sessionID, t)` —
   `internal/session/pidtrack.go` lines 36-56.
 - **Why we need it:** If tmux itself dies or KillSession fails, the

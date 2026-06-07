@@ -178,7 +178,7 @@ func (c *ConfigRefsCheck) Run(_ *CheckContext) *CheckResult {
 			}
 		}
 		if a.SessionSetupScript != "" {
-			path := resolveConfigRefPath(c.cityPath, a.SessionSetupScript)
+			path := config.ResolveSessionSetupScriptPath(c.cityPath, a.SourceDir, a.SessionSetupScript)
 			if _, err := os.Stat(path); err != nil {
 				issues = append(issues, fmt.Sprintf("agent %q: session_setup_script %q not found", qn, path))
 			}
@@ -951,6 +951,9 @@ func validateBDStoreTarget(cityPath, scopeRoot string) (contract.DoltConnectionT
 	if !scopeUsesBDDoltStore(cityPath, scopeRoot) {
 		return contract.DoltConnectionTarget{}, "", false, nil
 	}
+	if scopeUsesBDDoltliteStore(cityPath, scopeRoot) {
+		return contract.DoltConnectionTarget{}, "", false, nil
+	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 	if err != nil {
 		return contract.DoltConnectionTarget{}, "reconcile the canonical Dolt endpoint", true, err
@@ -987,6 +990,20 @@ func providerUsesBDDoltStore(provider string) bool {
 		return true
 	}
 	return false
+}
+
+func scopeUsesBDDoltliteStore(cityPath, scopePath string) bool {
+	if backend := strings.TrimSpace(os.Getenv("GC_BEADS_BACKEND")); strings.EqualFold(backend, "doltlite") {
+		scopedRoot := strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT"))
+		if scopedRoot == "" || sameDoctorScope(resolveDoctorScopePath(cityPath, scopedRoot), resolveDoctorScopePath(cityPath, scopePath)) {
+			return true
+		}
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(cfg.Beads.Backend), "doltlite")
 }
 
 func doctorExecProviderBase(provider string) string {
@@ -1095,6 +1112,11 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "skipped (file backend or GC_DOLT=skip)"
 		return r
 	}
+	if scopeUsesBDDoltliteStore(c.cityPath, c.cityPath) {
+		r.Status = StatusOK
+		r.Message = "not required (bd backend=doltlite)"
+		return r
+	}
 
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, c.cityPath)
 	if err != nil {
@@ -1153,6 +1175,11 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 	rigPath := c.rig.Path
 	if !filepath.IsAbs(rigPath) {
 		rigPath = filepath.Join(c.cityPath, rigPath)
+	}
+	if scopeUsesBDDoltliteStore(c.cityPath, rigPath) {
+		r.Status = StatusOK
+		r.Message = "not required (bd backend=doltlite)"
+		return r
 	}
 	if err := contract.ValidateInheritedCityEndpointMirror(fsys.OSFS{}, c.cityPath, rigPath); err != nil {
 		r.Status = StatusError
@@ -2207,7 +2234,7 @@ func duDirBytes(root string) (int64, bool, error) {
 	if ctx.Err() == context.DeadlineExceeded {
 		total, exists, fallbackErr := boundedSumDirBytes(root)
 		if fallbackErr != nil {
-			return 0, true, fmt.Errorf("measure dolt data dir: du -sk timed out after %s; fallback walk: %w", doltDirMeasureTimeout, fallbackErr)
+			return 0, true, fmt.Errorf("measure directory: du -sk timed out after %s; fallback walk: %w", doltDirMeasureTimeout, fallbackErr)
 		}
 		return total, exists, nil
 	}
@@ -2215,16 +2242,16 @@ func duDirBytes(root string) (int64, bool, error) {
 		if errors.Is(err, exec.ErrNotFound) {
 			return boundedSumDirBytes(root)
 		}
-		return 0, true, fmt.Errorf("measure dolt data dir with du -sk: %w", err)
+		return 0, true, fmt.Errorf("measure directory with du -sk: %w", err)
 	}
 
 	fields := strings.Fields(string(out))
 	if len(fields) == 0 {
-		return 0, true, fmt.Errorf("measure dolt data dir with du -sk: empty output")
+		return 0, true, fmt.Errorf("measure directory with du -sk: empty output")
 	}
 	kb, err := strconv.ParseInt(fields[0], 10, 64)
 	if err != nil {
-		return 0, true, fmt.Errorf("measure dolt data dir with du -sk: parse %q: %w", fields[0], err)
+		return 0, true, fmt.Errorf("measure directory with du -sk: parse %q: %w", fields[0], err)
 	}
 	return kb * 1024, true, nil
 }
@@ -2393,17 +2420,23 @@ type DoltConfigExpectedValue struct {
 // generation. Dynamic values such as data_dir are checked by DoltConfigCheck
 // because they depend on the inspected city path.
 func DoltConfigExpectedValues() []DoltConfigExpectedValue {
+	return DoltConfigExpectedValuesForConfig(config.DoltConfig{})
+}
+
+// DoltConfigExpectedValuesForConfig returns the managed Dolt config contract
+// after applying city-level [dolt] overrides.
+func DoltConfigExpectedValuesForConfig(doltConfig config.DoltConfig) []DoltConfigExpectedValue {
 	values := []DoltConfigExpectedValue{
 		{"behavior.auto_gc_behavior.enable", false},
-		{"behavior.auto_gc_behavior.archive_level", 0},
+		{"behavior.auto_gc_behavior.archive_level", doltConfig.EffectiveArchiveLevel()},
 		{"system_variables.dolt_auto_gc_enabled", "OFF"},
 		{"system_variables.dolt_stats_enabled", "OFF"},
 		{"system_variables.dolt_stats_gc_enabled", "OFF"},
 		{"system_variables.dolt_stats_memory_only", "ON"},
 		{"system_variables.dolt_stats_paused", "ON"},
-		{"listener.read_timeout_millis", 300000},
-		{"listener.write_timeout_millis", 300000},
-		{"listener.max_connections", 1000},
+		{"listener.read_timeout_millis", doltConfig.EffectiveReadTimeoutMillis()},
+		{"listener.write_timeout_millis", doltConfig.EffectiveWriteTimeoutMillis()},
+		{"listener.max_connections", doltConfig.EffectiveMaxConnections()},
 		{"listener.back_log", 50},
 		{"listener.max_connections_timeout_millis", 5000},
 	}
@@ -2476,6 +2509,7 @@ type DoltConfigCheck struct {
 	skip            bool
 	applicableKnown bool
 	applicable      bool
+	doltConfig      config.DoltConfig
 }
 
 // NewDoltConfigCheck creates a managed Dolt config drift check.
@@ -2485,11 +2519,16 @@ func NewDoltConfigCheck(cityPath string, skip bool) *DoltConfigCheck {
 
 // NewDoltConfigCheckForConfig creates a managed Dolt config drift check using preloaded city config.
 func NewDoltConfigCheckForConfig(cityPath string, skip bool, cfg *config.City, cfgErr error) *DoltConfigCheck {
+	var doltConfig config.DoltConfig
+	if cfg != nil {
+		doltConfig = cfg.Dolt
+	}
 	return &DoltConfigCheck{
 		cityPath:        cityPath,
 		skip:            skip,
 		applicableKnown: true,
 		applicable:      ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr),
+		doltConfig:      doltConfig,
 	}
 }
 
@@ -2541,7 +2580,7 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	var drifted []string
-	for _, exp := range DoltConfigExpectedValues() {
+	for _, exp := range DoltConfigExpectedValuesForConfig(c.doltConfig) {
 		got, present := lookupYAMLPath(doc, exp.Path)
 		if !present {
 			drifted = append(drifted, exp.Path+" (missing)")

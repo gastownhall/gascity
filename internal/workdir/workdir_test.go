@@ -32,6 +32,27 @@ func TestResolveWorkDirPathUsesWorkDirTemplate(t *testing.T) {
 	}
 }
 
+func TestResolveWorkDirPathUsesWorktreesRootTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	t.Setenv("GC_WORKTREES_DIR", worktreesRoot)
+	t.Setenv("T3CODE_WORKTREES_DIR", filepath.Join(t.TempDir(), "ignored"))
+	t.Setenv("T3CODE_HOME", filepath.Join(t.TempDir(), "ignored-home"))
+
+	agent := config.Agent{
+		Name:    "worker",
+		Dir:     "demo",
+		WorkDir: "{{.WorktreesRoot}}/gascity/{{.CityName}}/{{.Rig}}/jj/agents/{{.AgentBase}}",
+	}
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+
+	got := ResolveWorkDirPath(cityPath, "gastown", "demo/worker-1", agent, rigs)
+	want := filepath.Join(worktreesRoot, "gascity", "gastown", "demo", "jj", "agents", "worker-1")
+	if got != want {
+		t.Fatalf("ResolveWorkDirPath() = %q, want %q", got, want)
+	}
+}
+
 func TestResolveWorkDirPathDefaultsRigScopedAgentsToRigRoot(t *testing.T) {
 	cityPath := t.TempDir()
 	rigRoot := filepath.Join(t.TempDir(), "demo-repo")
@@ -127,6 +148,16 @@ func TestSessionQualifiedNameKeepsSingletonTemplateIdentity(t *testing.T) {
 
 	if got := SessionQualifiedName(cityPath, agent, rigs, "demo/boot", ""); got != "demo/witness" {
 		t.Fatalf("SessionQualifiedName() = %q, want %q", got, "demo/witness")
+	}
+}
+
+func TestSessionQualifiedNameUsesSingletonExplicitNameWhenAliasEmpty(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	agent := config.Agent{Name: "witness", Dir: "demo", MaxActiveSessions: intPtr(1)}
+
+	if got := SessionQualifiedName(cityPath, agent, rigs, "", "crew--gastown"); got != "demo/crew--gastown" {
+		t.Fatalf("SessionQualifiedName() = %q, want singleton tmux_alias explicit name in work_dir identity", got)
 	}
 }
 
@@ -396,5 +427,111 @@ func TestValidateAncestorWorktreesNotStale_GitdirTargetNotDirectory(t *testing.T
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing reference %q", err.Error(), want)
 		}
+	}
+}
+
+func TestResolveTmuxAlias_EmptyWhenUnset(t *testing.T) {
+	cityPath := t.TempDir()
+	got, err := ResolveTmuxAlias(cityPath, "gastown", config.Agent{Name: "worker", Dir: "demo"}, nil)
+	if err != nil {
+		t.Fatalf("ResolveTmuxAlias: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("ResolveTmuxAlias() = %q, want empty (no template configured)", got)
+	}
+}
+
+func TestResolveTmuxAlias_ExpandsRigTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	got, err := ResolveTmuxAlias(cityPath, "gastown", config.Agent{
+		Name:      "crew-demo",
+		Dir:       "demo",
+		TmuxAlias: "crew--{{.Rig}}",
+	}, rigs)
+	if err != nil {
+		t.Fatalf("ResolveTmuxAlias: %v", err)
+	}
+	if got != "crew--demo" {
+		t.Fatalf("ResolveTmuxAlias() = %q, want %q", got, "crew--demo")
+	}
+}
+
+func TestResolveTmuxAlias_SanitizesQualifiedAgentName(t *testing.T) {
+	cityPath := t.TempDir()
+	got, err := ResolveTmuxAlias(cityPath, "gastown", config.Agent{
+		Name:        "mayor",
+		BindingName: "gastown",
+		TmuxAlias:   "{{.Agent}}",
+	}, nil)
+	if err != nil {
+		t.Fatalf("ResolveTmuxAlias: %v", err)
+	}
+	// "gastown.mayor" must be sanitized to "gastown__mayor" for tmux.
+	if got != "gastown__mayor" {
+		t.Fatalf("ResolveTmuxAlias() = %q, want %q", got, "gastown__mayor")
+	}
+}
+
+func TestResolveTmuxAlias_ReturnsErrorOnBadTemplate(t *testing.T) {
+	_, err := ResolveTmuxAlias("", "", config.Agent{
+		Name:      "worker",
+		TmuxAlias: "{{.NotAField}}",
+	}, nil)
+	if err == nil {
+		t.Fatal("ResolveTmuxAlias: want error on unknown template field, got nil")
+	}
+}
+
+// TestPathContextRigScopedAgentResolvesRigFromQualifiedNamePrefix covers
+// gascity#2070: a scope="rig" agent whose Dir is not stamped (or points
+// outside any configured rig path) must still resolve its rig — and thus
+// GC_RIG/GC_RIG_ROOT — from the qualified-name prefix. Without this, the
+// rig keys leak through as empty values.
+func TestPathContextRigScopedAgentResolvesRigFromQualifiedNamePrefix(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "thriva")
+	rigs := []config.Rig{{Name: "thriva", Path: rigPath}}
+	// No Dir stamp; the rig association lives only in the qualified name.
+	a := config.Agent{Name: "my_impl", Scope: "rig", WorkDir: ".gc/worktrees/my_impl"}
+
+	ctx := PathContextForQualifiedName(cityPath, "city", "thriva/my_impl", a, rigs)
+	if ctx.Rig != "thriva" {
+		t.Fatalf("ctx.Rig = %q, want %q", ctx.Rig, "thriva")
+	}
+	if ctx.RigRoot != rigPath {
+		t.Fatalf("ctx.RigRoot = %q, want %q", ctx.RigRoot, rigPath)
+	}
+}
+
+// TestPathContextNonRigScopedAgentDoesNotInferRig guards against false
+// positives: a non-rig-scoped agent must not be assigned a rig from a
+// coincidental qualified-name prefix.
+func TestPathContextNonRigScopedAgentDoesNotInferRig(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "thriva", Path: filepath.Join(cityPath, "rigs", "thriva")}}
+	a := config.Agent{Name: "my_impl", Scope: "city"}
+
+	ctx := PathContextForQualifiedName(cityPath, "city", "thriva/my_impl", a, rigs)
+	if ctx.Rig != "" {
+		t.Fatalf("ctx.Rig = %q, want empty for city-scoped agent", ctx.Rig)
+	}
+}
+
+// TestPathContextRigScopedAgentPrefersStampedDir confirms the existing
+// dir-based association still wins when Dir is stamped (no regression of
+// the working path).
+func TestPathContextRigScopedAgentPrefersStampedDir(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "thriva")
+	rigs := []config.Rig{{Name: "thriva", Path: rigPath}}
+	a := config.Agent{Name: "my_impl", Dir: "thriva", Scope: "rig"}
+
+	ctx := PathContextForQualifiedName(cityPath, "city", "thriva/my_impl", a, rigs)
+	if ctx.Rig != "thriva" {
+		t.Fatalf("ctx.Rig = %q, want %q", ctx.Rig, "thriva")
+	}
+	if ctx.RigRoot != rigPath {
+		t.Fatalf("ctx.RigRoot = %q, want %q", ctx.RigRoot, rigPath)
 	}
 }

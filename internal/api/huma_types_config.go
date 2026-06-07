@@ -21,6 +21,11 @@ type ConfigValidateInput struct {
 	CityScope
 }
 
+// ConfigDefaultsInput is the Huma input for GET /v0/city/{cityName}/config/defaults.
+type ConfigDefaultsInput struct {
+	CityScope
+}
+
 // ConfigValidateOutput is the response body for GET /v0/config/validate.
 type ConfigValidateOutput struct {
 	Body struct {

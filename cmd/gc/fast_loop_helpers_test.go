@@ -38,6 +38,10 @@ func sanitizedBaseEnv(extra ...string) []string {
 		}
 		filtered = append(filtered, kv)
 	}
+	filtered = append(filtered,
+		managedDoltTestModeEnv+"=1",
+		managedDoltTestParentPIDEnv+"="+strconv.Itoa(os.Getpid()),
+	)
 	return append(filtered, extra...)
 }
 

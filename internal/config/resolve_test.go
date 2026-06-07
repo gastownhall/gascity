@@ -33,10 +33,29 @@ func lookPathOnly(bins ...string) LookPathFunc {
 	}
 }
 
+func explicitBuiltins(names ...string) map[string]ProviderSpec {
+	providers := make(map[string]ProviderSpec, len(names))
+	for _, name := range names {
+		base := BasePrefixBuiltin + name
+		providers[name] = ProviderSpec{Base: &base}
+	}
+	return providers
+}
+
 // --- ResolveProvider tests ---
 
 func TestResolveProviderAgentStartCommand(t *testing.T) {
-	agent := &Agent{Name: "mayor", StartCommand: "my-custom-cli --flag"}
+	delay := 1250
+	emitsPermissionWarning := true
+	agent := &Agent{
+		Name:                   "worker",
+		StartCommand:           "my-custom-cli --flag",
+		ReadyDelayMs:           &delay,
+		ReadyPromptPrefix:      "ready> ",
+		ProcessNames:           []string{"my-custom-cli"},
+		EmitsPermissionWarning: &emitsPermissionWarning,
+		ResumeCommand:          "my-custom-cli --resume {{.SessionKey}}",
+	}
 	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
@@ -46,6 +65,21 @@ func TestResolveProviderAgentStartCommand(t *testing.T) {
 	}
 	if rp.PromptMode != "none" {
 		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "none")
+	}
+	if !reflect.DeepEqual(rp.ProcessNames, []string{"my-custom-cli"}) {
+		t.Errorf("ProcessNames = %v, want [my-custom-cli]", rp.ProcessNames)
+	}
+	if rp.ReadyDelayMs != delay {
+		t.Errorf("ReadyDelayMs = %d, want %d", rp.ReadyDelayMs, delay)
+	}
+	if rp.ReadyPromptPrefix != "ready> " {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", rp.ReadyPromptPrefix, "ready> ")
+	}
+	if !rp.EmitsPermissionWarning {
+		t.Error("EmitsPermissionWarning = false, want true")
+	}
+	if rp.ResumeCommand != "my-custom-cli --resume {{.SessionKey}}" {
+		t.Errorf("ResumeCommand = %q, want agent resume command", rp.ResumeCommand)
 	}
 }
 
@@ -70,7 +104,7 @@ func TestResolveProviderAgentStartCommandHonorsExplicitPromptMode(t *testing.T) 
 
 func TestResolveProviderAgentProvider(t *testing.T) {
 	agent := &Agent{Name: "mayor", Provider: "claude"}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -101,7 +135,7 @@ func TestResolveProviderAgentProvider(t *testing.T) {
 func TestResolveProviderWorkspaceProvider(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{Name: "city", Provider: "codex"}
-	rp, err := ResolveProvider(agent, ws, nil, lookPathOnly("codex"))
+	rp, err := ResolveProvider(agent, ws, explicitBuiltins("codex"), lookPathOnly("codex"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -138,6 +172,47 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 	}
 }
 
+func TestResolveProviderRequiresExplicitBuiltinCatalogEntry(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "claude"}
+	_, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	if err == nil {
+		t.Fatal("expected builtin provider reference to require an explicit catalog entry")
+	}
+	if !strings.Contains(err.Error(), `provider "claude" is not in the explicit provider catalog`) {
+		t.Fatalf("error = %v, want explicit catalog guidance", err)
+	}
+}
+
+func TestAgentProcessNamesResolvesExplicitProvider(t *testing.T) {
+	cfg := &City{
+		Workspace: Workspace{Name: "city", Provider: "codex"},
+		Providers: explicitBuiltins("codex"),
+	}
+
+	got := AgentProcessNames(cfg, Agent{Name: "worker"}, lookPathOnly("codex"))
+	want := []string{"codex"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AgentProcessNames() = %v, want %v", got, want)
+	}
+}
+
+func TestAgentProcessNamesPrefersAgentOverride(t *testing.T) {
+	agent := Agent{Name: "worker", ProcessNames: []string{"custom-agent"}}
+	cfg := &City{
+		Workspace: Workspace{Name: "city", Provider: "codex"},
+	}
+
+	got := AgentProcessNames(cfg, agent, lookPathNone)
+	want := []string{"custom-agent"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AgentProcessNames() = %v, want %v", got, want)
+	}
+	got[0] = "mutated"
+	if agent.ProcessNames[0] != "custom-agent" {
+		t.Fatalf("agent process name mutated to %q", agent.ProcessNames[0])
+	}
+}
+
 func TestResolveProviderWorkspaceStartCommand(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{Name: "city", StartCommand: "my-agent --flag"}
@@ -160,7 +235,7 @@ func TestResolveProviderWorkspaceStartCommand(t *testing.T) {
 func TestResolveProviderWorkspaceStartCommandWithProvider(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{Name: "city", Provider: "claude", StartCommand: "claude --auto"}
-	rp, err := ResolveProvider(agent, ws, nil, lookPathAll)
+	rp, err := ResolveProvider(agent, ws, explicitBuiltins("claude"), lookPathAll)
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -199,14 +274,29 @@ func TestResolveProviderAgentStartCommandWinsOverWorkspace(t *testing.T) {
 	}
 }
 
-func TestResolveProviderAutoDetect(t *testing.T) {
-	agent := &Agent{Name: "worker"}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("codex"))
+func TestResolveProviderAgentLifecycleSurvivesStartCommandEscapeHatch(t *testing.T) {
+	agent := &Agent{
+		Name:         "scripted",
+		StartCommand: "env GC_LOG_LEVEL=debug custom-once --work",
+		Lifecycle:    AgentLifecycleOneShot,
+	}
+	rp, err := ResolveProvider(agent, &Workspace{Name: "city", Provider: "claude"}, nil, lookPathNone)
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
-	if rp.Name != "codex" {
-		t.Errorf("Name = %q, want %q", rp.Name, "codex")
+	if got, want := rp.Lifecycle, AgentLifecycleOneShot; got != want {
+		t.Fatalf("Lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestResolveProviderAutoDetect(t *testing.T) {
+	agent := &Agent{Name: "worker"}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("codex"))
+	if err == nil {
+		t.Fatalf("ResolveProvider returned %v, want error without explicit provider", rp)
+	}
+	if !strings.Contains(err.Error(), "provider is required") {
+		t.Fatalf("error = %v, want missing provider error", err)
 	}
 }
 
@@ -221,7 +311,7 @@ func TestResolveProviderAutoDetectNone(t *testing.T) {
 func TestResolveProviderAgentOverridesWorkspace(t *testing.T) {
 	agent := &Agent{Name: "worker", Provider: "claude"}
 	ws := &Workspace{Name: "city", Provider: "codex"}
-	rp, err := ResolveProvider(agent, ws, nil, lookPathAll)
+	rp, err := ResolveProvider(agent, ws, explicitBuiltins("claude", "codex"), lookPathAll)
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -320,6 +410,52 @@ func TestResolveProviderUserDefinedProvider(t *testing.T) {
 	}
 }
 
+func TestResolveProviderKimiStartupDialogPolicyInheritedByWrapper(t *testing.T) {
+	base := "builtin:kimi"
+	agent := &Agent{Name: "scout", Provider: "wrapped-kimi"}
+	cityProviders := map[string]ProviderSpec{
+		"wrapped-kimi": {
+			Base:      &base,
+			Command:   "sh",
+			Args:      []string{"-c", "exec kimi --yolo --no-thinking"},
+			PathCheck: "kimi",
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kimi"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.BuiltinAncestor != "kimi" {
+		t.Fatalf("BuiltinAncestor = %q, want kimi", rp.BuiltinAncestor)
+	}
+	if rp.AcceptStartupDialogs == nil || *rp.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false inherited from builtin kimi", rp.AcceptStartupDialogs)
+	}
+}
+
+func TestResolveProviderKiroStartupDialogPolicyInheritedByWrapper(t *testing.T) {
+	base := "builtin:kiro"
+	agent := &Agent{Name: "scout", Provider: "wrapped-kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"wrapped-kiro": {
+			Base:      &base,
+			Command:   "sh",
+			Args:      []string{"-c", "exec kiro-cli chat --no-interactive --agent gascity --trust-all-tools"},
+			PathCheck: "kiro-cli",
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.BuiltinAncestor != "kiro" {
+		t.Fatalf("BuiltinAncestor = %q, want kiro", rp.BuiltinAncestor)
+	}
+	if rp.AcceptStartupDialogs == nil || *rp.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false inherited from builtin kiro", rp.AcceptStartupDialogs)
+	}
+}
+
 func TestResolveProviderKiroAgentArgsOverride(t *testing.T) {
 	agent := &Agent{
 		Name:     "scout",
@@ -381,7 +517,7 @@ func TestResolveProviderKiroProviderArgsOverrideOmitsTrustAllTools(t *testing.T)
 
 func TestResolveProviderBuiltinKiroACPCommand(t *testing.T) {
 	agent := &Agent{Name: "scout", Provider: "kiro"}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("kiro-cli"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("kiro"), lookPathOnly("kiro-cli"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -633,7 +769,7 @@ func TestResolveProviderUnknown(t *testing.T) {
 
 func TestResolveProviderNotInPath(t *testing.T) {
 	agent := &Agent{Name: "mayor", Provider: "claude"}
-	_, err := ResolveProvider(agent, nil, nil, lookPathNone)
+	_, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathNone)
 	if err == nil {
 		t.Fatal("expected error when provider not in PATH")
 	}
@@ -647,7 +783,7 @@ func TestResolveProviderAgentArgsOverride(t *testing.T) {
 		Provider: "claude",
 		Args:     []string{"--dangerously-skip-permissions", "--verbose"},
 	}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -664,7 +800,7 @@ func TestResolveProviderAgentReadyDelayOverride(t *testing.T) {
 		Provider:     "claude",
 		ReadyDelayMs: &delay,
 	}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -680,7 +816,7 @@ func TestResolveProviderAgentEmitsPermissionWarningOverride(t *testing.T) {
 		Provider:               "claude",
 		EmitsPermissionWarning: &f,
 	}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -739,7 +875,7 @@ func TestResolveProviderAgentEnvOverridesBase(t *testing.T) {
 func TestResolveProviderDefaultPromptMode(t *testing.T) {
 	agent := &Agent{Name: "worker", Provider: "codex"}
 	// Codex preset has prompt_mode = "arg", so it should stay "arg".
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("codex"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("codex"), lookPathOnly("codex"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -1674,6 +1810,15 @@ func TestResolveInstallHooksNilWorkspace(t *testing.T) {
 	}
 }
 
+func TestResolveInstallHooksImplicitControlDispatcherIgnoresWorkspaceHooks(t *testing.T) {
+	agent := &Agent{Name: ControlDispatcherAgentName, Implicit: true}
+	ws := &Workspace{InstallAgentHooks: []string{"gemini"}}
+	got := ResolveInstallHooks(agent, ws)
+	if len(got) != 0 {
+		t.Fatalf("ResolveInstallHooks implicit control-dispatcher = %v, want none", got)
+	}
+}
+
 func TestResolveInstallHooksNeitherSet(t *testing.T) {
 	agent := &Agent{Name: "mayor"}
 	ws := &Workspace{Name: "test"}
@@ -1784,7 +1929,7 @@ func TestResolveProviderInstructionsFileDefault(t *testing.T) {
 func TestResolveProviderInstructionsFileExplicit(t *testing.T) {
 	// Claude's explicit InstructionsFile should be preserved.
 	agent := &Agent{Name: "mayor", Provider: "claude"}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -1795,7 +1940,7 @@ func TestResolveProviderInstructionsFileExplicit(t *testing.T) {
 
 func TestResolveProviderPermissionModesDeepCopy(t *testing.T) {
 	agent := &Agent{Name: "worker", Provider: "claude"}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -1868,7 +2013,7 @@ func TestResolveProviderResumeCommandAgentOverride(t *testing.T) {
 		Provider:      "claude",
 		ResumeCommand: "claude --resume {{.SessionKey}} --custom-flag",
 	}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -1907,6 +2052,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		ReadyPromptPrefix:      "$ ",
 		ProcessNames:           []string{"custom"},
 		EmitsPermissionWarning: boolPtr(true),
+		AcceptStartupDialogs:   boolPtr(true),
 		Env:                    map[string]string{"K": "V"},
 		PathCheck:              "custom-bin",
 		SupportsACP:            boolPtr(true),
@@ -2265,13 +2411,11 @@ prompt_flag = "--message"
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test-city"
-
-[[agent]]
-name = "mayor"
+`)
+	writeTestFile(t, cityDir, filepath.Join("agents", "mayor", "agent.toml"), `
 provider = "claude"
-
-[[agent]]
-name = "worker"
+`)
+	writeTestFile(t, cityDir, filepath.Join("agents", "worker", "agent.toml"), `
 provider = "codex"
 `)
 

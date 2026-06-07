@@ -102,6 +102,31 @@ func TestCityRuntimeEnvForRuntimeDir(t *testing.T) {
 	})
 }
 
+func TestCityIdentityEnvMap(t *testing.T) {
+	cityRoot := "/city"
+	got := CityIdentityEnvMap(cityRoot)
+
+	want := map[string]string{
+		"GC_CITY":             cityRoot,
+		"GC_CITY_PATH":        cityRoot,
+		"GC_CITY_RUNTIME_DIR": "/city/.gc/runtime",
+	}
+	for key, expected := range want {
+		if got[key] != expected {
+			t.Fatalf("%s = %q, want %q", key, got[key], expected)
+		}
+	}
+	if _, ok := got["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; ok {
+		t.Fatal("GC_CONTROL_DISPATCHER_TRACE_DEFAULT present, want identity-only env")
+	}
+}
+
+func TestCityIdentityEnvMapSkipsEmptyCityRoot(t *testing.T) {
+	if got := CityIdentityEnvMap(" \t\n "); got != nil {
+		t.Fatalf("CityIdentityEnvMap(empty) = %#v, want nil", got)
+	}
+}
+
 func TestControlDispatcherTraceLogFileName(t *testing.T) {
 	cases := []struct {
 		name          string

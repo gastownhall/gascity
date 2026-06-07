@@ -119,7 +119,7 @@ func notifyMayorOfSpawnStorm(cityPath string, store beads.Store, template, sessi
 		return nil
 	}
 	nudgeMsg := fmt.Sprintf("Spawn-storm detected for pool %s — please investigate", template)
-	item := newQueuedNudge(spawnStormMayorRecipient, nudgeMsg, "spawn-storm-safety-net", time.Now())
+	item := newQueuedNudgeWithOptions(spawnStormMayorRecipient, nudgeMsg, "spawn-storm-safety-net", time.Now(), queuedNudgeOptions{})
 	if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
 		// Mail bead has been created — log but don't propagate.
 		fmt.Fprintf(stderr, "spawn-storm safety net: nudge enqueue failed: %v (mail bead created)\n", err) //nolint:errcheck

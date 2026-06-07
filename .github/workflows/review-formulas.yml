@@ -38,8 +38,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  DOLT_VERSION: "1.86.6"
-  BD_VERSION: "v1.0.3"
+  DOLT_VERSION: "2.1.0"
+  BD_VERSION: "v1.0.5"
 
 jobs:
   runner-policy:
@@ -76,7 +76,7 @@ jobs:
           repository: ${{ inputs.head_repo || github.repository }}
           ref: ${{ inputs.head_sha || github.sha }}
           persist-credentials: false
-      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
           filters: |
@@ -150,9 +150,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: basic
-            command: make test-integration-review-formulas-basic-cover
-            coverprofile: coverage.integration-review-formulas-basic.txt
+          - label: basic-1-of-2
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-basic-1-of-2.txt
+              ./scripts/test-integration-shard review-formulas-basic-1-of-2
+            coverprofile: coverage.integration-review-formulas-basic-1-of-2.txt
+          - label: basic-2-of-2
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-basic-2-of-2.txt
+              ./scripts/test-integration-shard review-formulas-basic-2-of-2
+            coverprofile: coverage.integration-review-formulas-basic-2-of-2.txt
           - label: retries-1-of-2
             command: >-
               GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-1-of-2.txt

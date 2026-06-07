@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,8 +45,31 @@ func TestBuildPrimeContextExpandsTemplateCommands(t *testing.T) {
 	if ctx.WorkQuery != "echo demo-city demo worker" {
 		t.Fatalf("WorkQuery = %q, want %q", ctx.WorkQuery, "echo demo-city demo worker")
 	}
+	if ctx.AssignedInProgressQuery != "echo demo-city demo worker" {
+		t.Fatalf("AssignedInProgressQuery = %q, want expanded custom query", ctx.AssignedInProgressQuery)
+	}
+	if ctx.AssignedReadyQuery != "echo demo-city demo worker" {
+		t.Fatalf("AssignedReadyQuery = %q, want expanded custom query", ctx.AssignedReadyQuery)
+	}
+	if ctx.RoutedPoolQuery != "echo demo-city demo worker" {
+		t.Fatalf("RoutedPoolQuery = %q, want expanded custom query", ctx.RoutedPoolQuery)
+	}
 	if ctx.SlingQuery != "dispatch {} --route=demo/worker --city=demo-city" {
 		t.Fatalf("SlingQuery = %q, want %q", ctx.SlingQuery, "dispatch {} --route=demo/worker --city=demo-city")
+	}
+}
+
+func TestBuildPrimeContextUsesBD105ReadyCompatibility(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	ctx := buildPrimeContextForBeads(cityPath, "", &config.Agent{
+		Name: "worker",
+	}, nil, config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}, nil)
+
+	if !strings.Contains(ctx.AssignedReadyQuery, `bd ready --include-ephemeral --assignee="$id"`) {
+		t.Fatalf("AssignedReadyQuery = %q, want bd-1.0.5-compatible assigned ready query", ctx.AssignedReadyQuery)
+	}
+	if !strings.Contains(ctx.WorkQuery, "bd ready --include-ephemeral") {
+		t.Fatalf("WorkQuery = %q, want bd-1.0.5-compatible ready probes", ctx.WorkQuery)
 	}
 }
 
@@ -139,6 +163,73 @@ schema = 2
 	}
 	if got := stdout.String(); got != "Agent: ada\n" {
 		t.Fatalf("stdout = %q, want %q", got, "Agent: ada\n")
+	}
+}
+
+func TestDoPrimeScopesRigPackFragmentsByCurrentRig(t *testing.T) {
+	clearGCEnv(t)
+
+	cityDir := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(cityDir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	write("pack.toml", "[pack]\nname = \"prompt-city\"\nschema = 2\n")
+	write("city.toml", `
+[workspace]
+name = "prompt-city"
+
+[[rigs]]
+name = "alpha"
+
+[rigs.imports.alpha]
+source = "./packs/alpha"
+
+[[rigs]]
+name = "bravo"
+
+[rigs.imports.bravo]
+source = "./packs/bravo"
+`)
+	write(".gc/site.toml", `
+workspace_name = "prompt-city"
+
+[[rig]]
+name = "alpha"
+path = "./rigs/alpha"
+
+[[rig]]
+name = "bravo"
+path = "./rigs/bravo"
+`)
+	write("agents/alpha-worker/agent.toml", "dir = \"alpha\"\nprompt_template = \"agents/alpha-worker/prompt.template.md\"\n")
+	write("agents/bravo-worker/agent.toml", "dir = \"bravo\"\nprompt_template = \"agents/bravo-worker/prompt.template.md\"\n")
+	write("agents/alpha-worker/prompt.template.md", `{{ template "work-query" . }}`)
+	write("agents/bravo-worker/prompt.template.md", `{{ template "work-query" . }}`)
+	write("packs/alpha/pack.toml", "[pack]\nname = \"alpha\"\nschema = 2\n")
+	write("packs/bravo/pack.toml", "[pack]\nname = \"bravo\"\nschema = 2\n")
+	write("packs/alpha/template-fragments/work-query.template.md", `{{ define "work-query" }}alpha-work-query{{ end }}`)
+	write("packs/bravo/template-fragments/work-query.template.md", `{{ define "work-query" }}bravo-work-query{{ end }}`)
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"alpha-worker"}, &stdout, &stderr, false, true)
+	if code != 0 {
+		t.Fatalf("doPrime() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got := stdout.String(); got != "alpha-work-query" {
+		t.Fatalf("stdout = %q, want alpha rig fragment; stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "bravo-work-query") {
+		t.Fatalf("stdout = %q, must not include bravo rig fragment", stdout.String())
 	}
 }
 
@@ -388,7 +479,7 @@ prompt_template = "prompts/worker.md"
 		{name: "unset source not delivered", wantPromptInHook: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			withPrimeHookStdin(t, nil)
+			withPrimeHookStdin(t)
 			t.Setenv("GC_CITY", cityDir)
 			t.Setenv("GC_AGENT", "worker")
 			t.Setenv("GC_ALIAS", "worker")
@@ -450,7 +541,7 @@ prompt_template = "prompts/worker.md"
 	t.Setenv("GC_HOOK_SOURCE", "startup")
 	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
 	t.Setenv(startupPromptDeliveredEnv, "1")
-	withPrimeHookStdin(t, nil)
+	withPrimeHookStdin(t)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatGemini, false)
@@ -479,6 +570,8 @@ func TestDoPrimeWithHookFormat_FormatsDefaultFallback(t *testing.T) {
 	t.Setenv("GC_CITY", filepath.Join(t.TempDir(), "missing-city"))
 	t.Setenv("GC_ALIAS", "")
 	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_SESSION_NAME", "")
+	t.Setenv("GC_TEMPLATE", "")
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false)
@@ -501,19 +594,205 @@ func TestDoPrimeWithHookFormat_FormatsDefaultFallback(t *testing.T) {
 	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "# Gas City Agent") {
 		t.Fatalf("additionalContext = %q, want default prime prompt", payload.HookSpecificOutput.AdditionalContext)
 	}
+	for _, want := range []string{
+		"You are an agent in a Gas City workspace. Claim available work and execute it.",
+		"`gc hook --claim --json`",
+		"`bd show <id>`",
+		"`bd close <id>`",
+		"Read the claimed bead and execute the work described in its title",
+		"Check for more work. Repeat until the queue is empty.",
+	} {
+		if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, want) {
+			t.Fatalf("additionalContext missing %q:\n%s", want, payload.HookSpecificOutput.AdditionalContext)
+		}
+	}
+	for _, stale := range []string{
+		"managed runtime session",
+		"If $GC_SESSION_NAME is empty",
+		"bd update <id> --claim",
+		"gc runtime drain-ack",
+		"bd ready",
+	} {
+		if strings.Contains(payload.HookSpecificOutput.AdditionalContext, stale) {
+			t.Fatalf("additionalContext contains stale fallback protocol %q:\n%s", stale, payload.HookSpecificOutput.AdditionalContext)
+		}
+	}
 }
 
-func withPrimeHookStdin(t *testing.T, payload map[string]string) {
+func TestDoPrimeWithHook_DeliveredStartupPromptCodexJSONHookFormat(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedBeadsEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	const promptContent = "launch-only startup prompt\n"
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_NAME", "gastown--worker")
+	t.Setenv("GC_SESSION_ID", "sess-777")
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_SOURCE", "startup")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	t.Setenv(startupPromptDeliveredEnv, "1")
+	withPrimeHookStdin(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, "codex", false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	var got struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+	}
+	if got.HookSpecificOutput.HookEventName != "SessionStart" {
+		t.Fatalf("hookEventName = %q, want SessionStart", got.HookSpecificOutput.HookEventName)
+	}
+	context := got.HookSpecificOutput.AdditionalContext
+	if strings.Contains(context, promptContent) {
+		t.Fatalf("additionalContext = %q, want no repeated startup prompt", context)
+	}
+	if !strings.Contains(context, "[gastown] worker") {
+		t.Fatalf("additionalContext = %q, want hook beacon", context)
+	}
+}
+
+func TestDoPrimeWithHook_CodexJSONFormatInfersAgentFromWorkDir(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		identity    string
+		agentDir    string
+		agentName   string
+		promptFile  string
+		promptText  string
+		beaconAgent string
+	}{
+		{
+			name:        "city scoped",
+			identity:    "mayor",
+			agentName:   "mayor",
+			promptFile:  "prompts/mayor.md",
+			promptText:  "mayor startup prompt\n",
+			beaconAgent: "mayor",
+		},
+		{
+			name:        "rig scoped",
+			identity:    "hello-world/witness",
+			agentDir:    "hello-world",
+			agentName:   "witness",
+			promptFile:  "prompts/witness.md",
+			promptText:  "witness startup prompt\n",
+			beaconAgent: "hello-world/witness",
+		},
+		{
+			name:        "workflow style",
+			identity:    "gascity/workflows.codex-max",
+			agentDir:    "gascity",
+			agentName:   "workflows.codex-max",
+			promptFile:  "prompts/codex-max.md",
+			promptText:  "codex-max startup prompt\n",
+			beaconAgent: "gascity/workflows.codex-max",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			clearInheritedBeadsEnv(t)
+			clearInheritedCityRoutingEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			t.Setenv("GC_TEMPLATE", "")
+			t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+			withPrimeHookStdin(t)
+
+			cityDir := t.TempDir()
+			cleanupManagedDoltTestCity(t, cityDir)
+			agentWorkDirParts := append([]string{cityDir, ".gc", "agents"}, strings.Split(tt.identity, "/")...)
+			agentWorkDir := filepath.Join(agentWorkDirParts...)
+			if err := os.MkdirAll(agentWorkDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll(agentWorkDir): %v", err)
+			}
+			promptPath := filepath.Join(cityDir, tt.promptFile)
+			if err := os.MkdirAll(filepath.Dir(promptPath), 0o755); err != nil {
+				t.Fatalf("MkdirAll(prompt dir): %v", err)
+			}
+			if err := os.WriteFile(promptPath, []byte(tt.promptText), 0o644); err != nil {
+				t.Fatalf("WriteFile(prompt): %v", err)
+			}
+			cityTOML := fmt.Sprintf(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = %q
+dir = %q
+prompt_template = %q
+`, tt.agentName, tt.agentDir, tt.promptFile)
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+				t.Fatalf("WriteFile(city.toml): %v", err)
+			}
+			t.Chdir(agentWorkDir)
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false)
+			if code != 0 {
+				t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+
+			var got struct {
+				HookSpecificOutput struct {
+					HookEventName     string `json:"hookEventName"`
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+			}
+			if got.HookSpecificOutput.HookEventName != "SessionStart" {
+				t.Fatalf("hookEventName = %q, want SessionStart", got.HookSpecificOutput.HookEventName)
+			}
+			context := got.HookSpecificOutput.AdditionalContext
+			if !strings.Contains(context, strings.TrimSpace(tt.promptText)) {
+				t.Fatalf("additionalContext = %q, want prompt %q", context, strings.TrimSpace(tt.promptText))
+			}
+			if !strings.Contains(context, "[gastown] "+tt.beaconAgent) {
+				t.Fatalf("additionalContext = %q, want hook beacon for %s", context, tt.beaconAgent)
+			}
+		})
+	}
+}
+
+func withPrimeHookStdin(t *testing.T) {
 	t.Helper()
 
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if payload != nil {
-		if err := json.NewEncoder(writer).Encode(payload); err != nil {
-			t.Fatal(err)
-		}
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)

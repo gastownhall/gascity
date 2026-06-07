@@ -2,7 +2,9 @@ package beads_test
 
 import (
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
@@ -36,6 +38,125 @@ func TestMemStoreSetMetadataNotFound(t *testing.T) {
 	}
 	if !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMemStoreReleaseIfCurrent(t *testing.T) {
+	s := beads.NewMemStore()
+	b, err := s.Create(beads.Bead{Title: "work", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(b.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatal(err)
+	}
+
+	released, err := s.ReleaseIfCurrent(b.ID, "worker-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released {
+		t.Fatal("ReleaseIfCurrent released a bead with the wrong assignee")
+	}
+	got, err := s.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-1" {
+		t.Fatalf("wrong-assignee release mutated bead: %+v", got)
+	}
+
+	released, err = s.ReleaseIfCurrent(b.ID, "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !released {
+		t.Fatal("ReleaseIfCurrent did not release matching in-progress assignment")
+	}
+	got, err = s.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("released bead = %+v, want open and unassigned", got)
+	}
+}
+
+func TestMemStoreReleaseIfCurrentSkipsMissingAndWrongStatus(t *testing.T) {
+	s := beads.NewMemStore()
+
+	released, err := s.ReleaseIfCurrent("missing", "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released {
+		t.Fatal("ReleaseIfCurrent released missing bead")
+	}
+
+	b, err := s.Create(beads.Bead{Title: "open work", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	released, err = s.ReleaseIfCurrent(b.ID, "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released {
+		t.Fatal("ReleaseIfCurrent released non-in-progress bead")
+	}
+	got, err := s.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "open" || got.Assignee != "worker-1" {
+		t.Fatalf("wrong-status release mutated bead: %+v", got)
+	}
+}
+
+func TestMemStoreReleaseIfCurrentDoesNotClobberConcurrentClaim(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		s := beads.NewMemStore()
+		b, err := s.Create(beads.Bead{Title: "work", Assignee: "worker-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Update(b.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+			t.Fatal(err)
+		}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var releaseErr error
+		var updateErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, releaseErr = s.ReleaseIfCurrent(b.ID, "worker-1")
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			updateErr = s.Update(b.ID, beads.UpdateOpts{
+				Status:   strPtr("in_progress"),
+				Assignee: strPtr("worker-2"),
+			})
+		}()
+		close(start)
+		wg.Wait()
+		if releaseErr != nil {
+			t.Fatalf("ReleaseIfCurrent: %v", releaseErr)
+		}
+		if updateErr != nil {
+			t.Fatalf("Update fresh claim: %v", updateErr)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "in_progress" || got.Assignee != "worker-2" {
+			t.Fatalf("concurrent release clobbered fresh claim: %+v", got)
+		}
 	}
 }
 
@@ -149,6 +270,45 @@ func TestMemStoreChildrenExcludeClosedByDefault(t *testing.T) {
 	}
 }
 
+func TestMemStoreChildrenHonorTierOptions(t *testing.T) {
+	s := beads.NewMemStore()
+
+	parent, err := s.Create(beads.Bead{Title: "parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyChild, err := s.Create(beads.Bead{Title: "history", ParentID: parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	noHistoryChild, err := s.Create(beads.Bead{Title: "no-history", ParentID: parent.ID, NoHistory: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ephemeralChild, err := s.Create(beads.Bead{Title: "ephemeral", ParentID: parent.ID, Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Children(parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMemStoreIDs(t, got, historyChild.ID, noHistoryChild.ID)
+
+	got, err = s.Children(parent.ID, beads.WithEphemeral)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMemStoreIDs(t, got, noHistoryChild.ID, ephemeralChild.ID)
+
+	got, err = s.Children(parent.ID, beads.WithBothTiers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMemStoreIDs(t, got, historyChild.ID, noHistoryChild.ID, ephemeralChild.ID)
+}
+
 func TestMemStoreListByLabelRequiresIncludeClosed(t *testing.T) {
 	s := beads.NewMemStore()
 
@@ -178,6 +338,22 @@ func TestMemStoreListByLabelRequiresIncludeClosed(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("ListByLabel(IncludeClosed) = %d items, want 2", len(got))
+	}
+}
+
+func assertMemStoreIDs(t *testing.T, got []beads.Bead, want ...string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d beads (%v), want %v", len(got), got, want)
+	}
+	seen := make(map[string]bool, len(got))
+	for _, bead := range got {
+		seen[bead.ID] = true
+	}
+	for _, id := range want {
+		if !seen[id] {
+			t.Fatalf("got %v, want id %s", got, id)
+		}
 	}
 }
 
@@ -522,6 +698,66 @@ func TestMemStoreReadyPreservesBlocksWhenParentChildSharesPair(t *testing.T) {
 	}
 }
 
+func TestMemStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
+	s := beads.NewMemStore()
+
+	ready, err := s.Create(beads.Bead{Title: "ready", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ephemeral, err := s.Create(beads.Bead{Title: "tracking", Type: "task", Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != ready.ID {
+		t.Fatalf("Ready() = %+v, want only non-ephemeral task %s", got, ready.ID)
+	}
+	for _, bead := range got {
+		if bead.ID == ephemeral.ID {
+			t.Fatalf("ephemeral bead %s leaked into Ready(): %+v", ephemeral.ID, got)
+		}
+	}
+}
+
+func TestMemStoreReadyExcludesFutureDeferredBeads(t *testing.T) {
+	s := beads.NewMemStore()
+
+	ready, err := s.Create(beads.Bead{Title: "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().UTC().Add(24 * time.Hour)
+	futureDeferred, err := s.Create(beads.Bead{Title: "future", DeferUntil: &future})
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	pastDeferred, err := s.Create(beads.Bead{Title: "past", DeferUntil: &past})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, bead := range got {
+		ids[bead.ID] = true
+	}
+	if !ids[ready.ID] || !ids[pastDeferred.ID] {
+		t.Fatalf("Ready() ids = %v, want ready and past-deferred beads", ids)
+	}
+	if ids[futureDeferred.ID] {
+		t.Fatalf("Ready() ids = %v, future-deferred bead %s must be hidden", ids, futureDeferred.ID)
+	}
+}
+
 func TestMemStoreDepListDefaultDirection(t *testing.T) {
 	s := beads.NewMemStore()
 	_ = s.DepAdd("a", "b", "blocks")
@@ -533,5 +769,50 @@ func TestMemStoreDepListDefaultDirection(t *testing.T) {
 	}
 	if len(deps) != 1 {
 		t.Errorf("DepList(a, '') = %d deps, want 1", len(deps))
+	}
+}
+
+func TestMemStoreEphemeralTierPartitioning(t *testing.T) {
+	m := beads.NewMemStore()
+	plain, err := m.Create(beads.Bead{Title: "plain", Labels: []string{"k"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wisp, err := m.Create(beads.Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !wisp.Ephemeral {
+		t.Fatalf("wisp.Ephemeral = false, want true")
+	}
+
+	cases := []struct {
+		name    string
+		tier    beads.TierMode
+		wantIDs []string
+	}{
+		{"issues only (default)", beads.TierIssues, []string{plain.ID}},
+		{"wisps only", beads.TierWisps, []string{wisp.ID}},
+		{"both tiers", beads.TierBoth, []string{plain.ID, wisp.ID}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := m.List(beads.ListQuery{Label: "k", TierMode: tc.tier})
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotIDs := make(map[string]bool, len(got))
+			for _, b := range got {
+				gotIDs[b.ID] = true
+			}
+			if len(gotIDs) != len(tc.wantIDs) {
+				t.Fatalf("got %d beads (%v), want %v", len(gotIDs), gotIDs, tc.wantIDs)
+			}
+			for _, id := range tc.wantIDs {
+				if !gotIDs[id] {
+					t.Errorf("missing %s in result", id)
+				}
+			}
+		})
 	}
 }

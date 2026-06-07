@@ -14,6 +14,7 @@ import (
 
 	workerpkg "github.com/gastownhall/gascity/internal/worker"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 var (
@@ -21,7 +22,10 @@ var (
 	liveSetup providerSetup
 )
 
-const defaultOpenCodeGeminiModel = "google/gemini-2.5-flash"
+const (
+	defaultOpenCodeGeminiModel = "google/gemini-2.5-flash"
+	defaultPiOllamaCloudModel  = "gpt-oss:20b"
+)
 
 type providerSetup struct {
 	Profile      workerpkg.Profile
@@ -56,6 +60,9 @@ func TestMain(m *testing.M) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			panic("worker-inference: " + err.Error())
 		}
+	}
+	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(runtimeDir, "tmux")); err != nil {
+		panic("worker-inference: configuring tmux test env: " + err.Error())
 	}
 	if err := helpers.WriteSupervisorConfig(gcHome); err != nil {
 		panic("worker-inference: " + err.Error())
@@ -102,9 +109,10 @@ func prepareProviderSetup(gcHome string, env *helpers.Env) providerSetup {
 		setup.SetupError = "bd not found in PATH"
 		return setup
 	}
-	binaryPath, err := exec.LookPath(setup.Provider)
+	binaryName := profileExecutable(setup.Profile, setup.Provider)
+	binaryPath, err := exec.LookPath(binaryName)
 	if err != nil {
-		setup.SetupError = fmt.Sprintf("%s CLI not found in PATH", setup.Provider)
+		setup.SetupError = fmt.Sprintf("%s CLI not found in PATH", binaryName)
 		return setup
 	}
 	setup.BinaryPath = binaryPath
@@ -125,8 +133,14 @@ func resolveProfile(raw string) workerpkg.Profile {
 		return workerpkg.ProfileCodexTmuxCLI
 	case string(workerpkg.ProfileGeminiTmuxCLI):
 		return workerpkg.ProfileGeminiTmuxCLI
+	case string(workerpkg.ProfileKimiTmuxCLI):
+		return workerpkg.ProfileKimiTmuxCLI
 	case string(workerpkg.ProfileOpenCodeTmuxCLI):
 		return workerpkg.ProfileOpenCodeTmuxCLI
+	case string(workerpkg.ProfilePiTmuxCLI):
+		return workerpkg.ProfilePiTmuxCLI
+	case string(workerpkg.ProfileAntigravityTmuxCLI):
+		return workerpkg.ProfileAntigravityTmuxCLI
 	default:
 		return workerpkg.Profile(strings.TrimSpace(raw))
 	}
@@ -140,11 +154,24 @@ func profileProvider(profile workerpkg.Profile) string {
 		return "codex"
 	case workerpkg.ProfileGeminiTmuxCLI:
 		return "gemini"
+	case workerpkg.ProfileKimiTmuxCLI:
+		return "kimi"
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return "opencode"
+	case workerpkg.ProfilePiTmuxCLI:
+		return "pi"
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return "antigravity"
 	default:
 		return ""
 	}
+}
+
+func profileExecutable(profile workerpkg.Profile, provider string) string {
+	if profile == workerpkg.ProfileAntigravityTmuxCLI {
+		return "agy"
+	}
+	return provider
 }
 
 func profileSearchPaths(gcHome string, profile workerpkg.Profile) []string {
@@ -153,8 +180,14 @@ func profileSearchPaths(gcHome string, profile workerpkg.Profile) []string {
 		return []string{filepath.Join(gcHome, ".codex", "sessions")}
 	case workerpkg.ProfileGeminiTmuxCLI:
 		return []string{filepath.Join(gcHome, ".gemini", "tmp")}
+	case workerpkg.ProfileKimiTmuxCLI:
+		return []string{filepath.Join(gcHome, ".kimi", "sessions")}
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "opencode-transcripts")}
+	case workerpkg.ProfilePiTmuxCLI:
+		return []string{filepath.Join(gcHome, ".pi", "agent", "sessions")}
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return []string{filepath.Join(gcHome, ".gemini", "antigravity-cli", "brain")}
 	default:
 		return []string{filepath.Join(gcHome, ".claude", "projects")}
 	}
@@ -168,11 +201,199 @@ func stageProviderAuth(gcHome string, env *helpers.Env, profile workerpkg.Profil
 		return stageCodexAuth(gcHome, env)
 	case workerpkg.ProfileGeminiTmuxCLI:
 		return stageGeminiAuth(gcHome, env)
+	case workerpkg.ProfileKimiTmuxCLI:
+		return stageKimiAuth(gcHome, env)
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return stageOpenCodeGeminiAuth(gcHome, env)
+	case workerpkg.ProfilePiTmuxCLI:
+		return stagePiOllamaCloudAuth(gcHome, env)
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return stageAntigravityAuth(gcHome, env)
 	default:
 		return "", fmt.Errorf("unsupported worker-inference profile %q", profile)
 	}
+}
+
+func stageAntigravityAuth(gcHome string, env *helpers.Env) (string, error) {
+	_ = env
+
+	cliDir := filepath.Join(gcHome, ".gemini", "antigravity-cli")
+	if err := os.MkdirAll(filepath.Join(cliDir, "brain"), 0o755); err != nil {
+		return "", err
+	}
+
+	token, tokenFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_ANTIGRAVITY_OAUTH_TOKEN",
+		"GC_WORKER_INFERENCE_ANTIGRAVITY_OAUTH_TOKEN_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("antigravity auth unavailable: %w", err)
+	}
+	if strings.TrimSpace(token) != "" {
+		if err := os.WriteFile(filepath.Join(cliDir, "antigravity-oauth-token"), []byte(token), 0o600); err != nil {
+			return "", err
+		}
+		if err := stageAntigravityOnboarding("", gcHome); err != nil {
+			return "", err
+		}
+		return stagedSecretSource("antigravity", tokenFromFile), nil
+	}
+
+	if sourceHome := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_ANTIGRAVITY_HOME")); sourceHome != "" {
+		if err := stageAntigravityHomeSource(sourceHome, gcHome); err != nil {
+			return "", fmt.Errorf("antigravity auth unavailable: %w", err)
+		}
+		return "env:GC_WORKER_INFERENCE_ANTIGRAVITY_HOME", nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("antigravity auth unavailable: %w", err)
+	}
+	if err := stageAntigravityHomeSource(home, gcHome); err == nil {
+		return "host-home:antigravity", nil
+	}
+	return "", fmt.Errorf("antigravity auth unavailable: set GC_WORKER_INFERENCE_ANTIGRAVITY_HOME or GC_WORKER_INFERENCE_ANTIGRAVITY_OAUTH_TOKEN")
+}
+
+func stageAntigravityHomeSource(sourceHome, gcHome string) error {
+	sourceHome = strings.TrimSpace(sourceHome)
+	if sourceHome == "" {
+		return fmt.Errorf("source home is empty")
+	}
+	srcCLI := filepath.Join(sourceHome, ".gemini", "antigravity-cli")
+	dstCLI := filepath.Join(gcHome, ".gemini", "antigravity-cli")
+	for _, name := range []string{"antigravity-oauth-token", "settings.json", "installation_id", "keybindings.json"} {
+		if err := copyFileIfExists(filepath.Join(srcCLI, name), filepath.Join(dstCLI, name), 0o600); err != nil {
+			return err
+		}
+	}
+	srcConfig := filepath.Join(sourceHome, ".gemini", "config")
+	dstConfig := filepath.Join(gcHome, ".gemini", "config")
+	for _, name := range []string{".migrated", "import_manifest.json", "mcp_config.json"} {
+		if err := copyFileIfExists(filepath.Join(srcConfig, name), filepath.Join(dstConfig, name), 0o600); err != nil {
+			return err
+		}
+	}
+	if err := stageAntigravityOnboarding(srcCLI, gcHome); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(dstCLI, "brain"), 0o755); err != nil {
+		return err
+	}
+	if !fileExists(filepath.Join(dstCLI, "antigravity-oauth-token")) {
+		return fmt.Errorf("missing %s", filepath.Join(srcCLI, "antigravity-oauth-token"))
+	}
+	return nil
+}
+
+func stageAntigravityOnboarding(srcCLI, gcHome string) error {
+	dst := filepath.Join(gcHome, ".gemini", "antigravity-cli", "cache", "onboarding.json")
+	if strings.TrimSpace(srcCLI) != "" {
+		if err := copyFileIfExists(filepath.Join(srcCLI, "cache", "onboarding.json"), dst, 0o600); err != nil {
+			return err
+		}
+		if fileExists(dst) {
+			return nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, []byte("{\n  \"consumerOnboardingComplete\": true,\n  \"enterpriseOnboardingComplete\": true,\n  \"onboardingComplete\": true\n}\n"), 0o600)
+}
+
+func stageKimiAuth(gcHome string, env *helpers.Env) (string, error) {
+	kimiDir := filepath.Join(gcHome, ".kimi")
+	if err := os.MkdirAll(kimiDir, 0o755); err != nil {
+		return "", err
+	}
+	env.With("KIMI_SHARE_DIR", kimiDir).
+		With("KIMI_CLI_NO_AUTO_UPDATE", "1")
+
+	config, configFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_KIMI_CONFIG_TOML",
+		"GC_WORKER_INFERENCE_KIMI_CONFIG_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("kimi auth unavailable: %w", err)
+	}
+	if strings.TrimSpace(config) != "" {
+		if err := os.WriteFile(filepath.Join(kimiDir, "config.toml"), []byte(config), 0o600); err != nil {
+			return "", err
+		}
+		return stagedSecretSource("kimi", configFromFile), nil
+	}
+
+	if apiKey := strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")); apiKey != "" {
+		if err := writeKimiOllamaConfig(filepath.Join(kimiDir, "config.toml"), apiKey); err != nil {
+			return "", err
+		}
+		return "env:OLLAMA_API_KEY", nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("KIMI_API_KEY")); apiKey != "" {
+		env.With("KIMI_API_KEY", apiKey)
+		if err := writeKimiNativeConfig(filepath.Join(kimiDir, "config.toml"), apiKey); err != nil {
+			return "", err
+		}
+		return "env:KIMI_API_KEY", nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("kimi auth unavailable: %w", err)
+	}
+	if err := copyFileIfExists(filepath.Join(home, ".kimi", "config.toml"), filepath.Join(kimiDir, "config.toml"), 0o600); err != nil {
+		return "", fmt.Errorf("kimi auth unavailable: %w", err)
+	}
+	if fileExists(filepath.Join(kimiDir, "config.toml")) {
+		return "host-home:kimi", nil
+	}
+	return "", fmt.Errorf("kimi auth unavailable: set OLLAMA_API_KEY, KIMI_API_KEY, or GC_WORKER_INFERENCE_KIMI_CONFIG_TOML")
+}
+
+func writeKimiOllamaConfig(path, apiKey string) error {
+	content := fmt.Sprintf(`default_model = "kimi-ollama"
+default_yolo = true
+telemetry = false
+
+[providers.ollama-cloud]
+type = "openai_legacy"
+base_url = "https://ollama.com/v1"
+api_key = %q
+
+[models.kimi-ollama]
+provider = "ollama-cloud"
+model = %q
+max_context_size = 262144
+`, apiKey, liveKimiOllamaModel())
+	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+func writeKimiNativeConfig(path, apiKey string) error {
+	content := fmt.Sprintf(`default_model = "kimi-for-coding"
+default_yolo = true
+telemetry = false
+
+[providers.kimi-for-coding]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"
+api_key = %q
+
+[models.kimi-for-coding]
+provider = "kimi-for-coding"
+model = "kimi-for-coding"
+max_context_size = 262144
+`, apiKey)
+	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+func liveKimiOllamaModel() string {
+	model := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_KIMI_MODEL"))
+	if model == "" {
+		return "kimi-k2.6"
+	}
+	return model
 }
 
 func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {
@@ -430,6 +651,66 @@ func stageOpenCodeGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
 		return "env:OPENCODE_AUTH_CONTENT", nil
 	}
 	return "", fmt.Errorf("opencode gemini auth unavailable: set GOOGLE_GENERATIVE_AI_API_KEY/GEMINI_API_KEY/GOOGLE_API_KEY or OPENCODE_AUTH_CONTENT")
+}
+
+func stagePiOllamaCloudAuth(gcHome string, env *helpers.Env) (string, error) {
+	piDir := filepath.Join(gcHome, ".pi", "agent")
+	sessionDir := filepath.Join(piDir, "sessions")
+	xdgData := filepath.Join(gcHome, ".local", "share")
+	transcriptDir := filepath.Join(xdgData, "gascity", "pi-transcripts")
+	for _, dir := range []string{piDir, sessionDir, transcriptDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+	}
+	env.With("PI_CODING_AGENT_DIR", piDir).
+		With("PI_CODING_AGENT_SESSION_DIR", sessionDir).
+		With("GC_PI_TRANSCRIPT_DIR", transcriptDir)
+
+	stagedKey, keyFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_PI_OLLAMA_API_KEY",
+		"GC_WORKER_INFERENCE_PI_OLLAMA_API_KEY_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("pi ollama cloud auth unavailable: %w", err)
+	}
+	if stagedKey != "" {
+		if err := writePiOllamaCloudAuth(piDir, stagedKey); err != nil {
+			return "", fmt.Errorf("pi ollama cloud auth unavailable: %w", err)
+		}
+		env.Without("OLLAMA_API_KEY")
+		return stagedSecretSource("pi-ollama-cloud", keyFromFile), nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")); apiKey != "" {
+		if err := writePiOllamaCloudAuth(piDir, apiKey); err != nil {
+			return "", fmt.Errorf("pi ollama cloud auth unavailable: %w", err)
+		}
+		env.Without("OLLAMA_API_KEY")
+		return "env:OLLAMA_API_KEY", nil
+	}
+	return "", fmt.Errorf("pi ollama cloud auth unavailable: set OLLAMA_API_KEY or stage GC_WORKER_INFERENCE_PI_OLLAMA_API_KEY")
+}
+
+func writePiOllamaCloudAuth(piDir, apiKey string) error {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return fmt.Errorf("empty ollama cloud api key")
+	}
+	auth := map[string]map[string]string{
+		"ollama-cloud": {
+			"type": "api_key",
+			"key":  apiKey,
+		},
+	}
+	data, err := json.MarshalIndent(auth, "", "  ")
+	if err != nil {
+		return err
+	}
+	authPath := filepath.Join(piDir, "auth.json")
+	if err := os.WriteFile(authPath, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(authPath, 0o600)
 }
 
 func copySanitizedGeminiSettingsIfExists(src, dst string) error {

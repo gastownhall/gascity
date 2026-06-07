@@ -1142,6 +1142,55 @@ func TestBuiltinProviders_GeminiHasNilArgsAndOptionDefaults(t *testing.T) {
 	}
 }
 
+func TestBuiltinProviders_OpenCodeHasModelOptions(t *testing.T) {
+	builtins := BuiltinProviders()
+	opencode := builtins["opencode"]
+
+	tests := []struct {
+		name  string
+		model string
+		args  []string
+	}{
+		{name: "Default"},
+		{name: "DeepSeek V4 Flash Free", model: "opencode/deepseek-v4-flash-free", args: []string{"--model", "opencode/deepseek-v4-flash-free"}},
+		{name: "Nemotron 3 Super Free", model: "opencode/nemotron-3-super-free", args: []string{"--model", "opencode/nemotron-3-super-free"}},
+		{name: "Big Pickle", model: "opencode/big-pickle", args: []string{"--model", "opencode/big-pickle"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !schemaHasChoice(opencode.OptionsSchema, "model", tt.model) {
+				t.Fatalf("opencode OptionsSchema missing model choice %q", tt.model)
+			}
+			args, metadata, err := ResolveOptions(opencode.OptionsSchema, map[string]string{
+				"model": tt.model,
+			}, nil)
+			if err != nil {
+				t.Fatalf("ResolveOptions(opencode model %q): %v", tt.model, err)
+			}
+			if !reflect.DeepEqual(args, tt.args) {
+				t.Fatalf("model args = %v, want %v", args, tt.args)
+			}
+			if metadata["opt_model"] != tt.model {
+				t.Fatalf("metadata[opt_model] = %q, want %q", metadata["opt_model"], tt.model)
+			}
+
+			if tt.model == "" {
+				return
+			}
+			legacy := normalizeProviderLayerArgsForSchema(ProviderSpec{
+				Args: []string{"-m", tt.model},
+			}, opencode.OptionsSchema)
+			if len(legacy.Args) != 0 {
+				t.Fatalf("normalized legacy args = %v, want empty", legacy.Args)
+			}
+			if legacy.OptionDefaults["model"] != tt.model {
+				t.Fatalf("inferred model = %q, want %q", legacy.OptionDefaults["model"], tt.model)
+			}
+		})
+	}
+}
+
 func TestValidateOptionDefaults_Valid(t *testing.T) {
 	schema := []ProviderOption{
 		{Key: "permission_mode", Choices: []OptionChoice{

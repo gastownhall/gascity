@@ -132,6 +132,14 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 				Detail: message,
 			}
 		}
+		if code == "cross_store" {
+			return nil, &huma.ErrorModel{
+				Type:   slingCrossStoreRouteProblemType,
+				Status: http.StatusBadRequest,
+				Title:  http.StatusText(http.StatusBadRequest),
+				Detail: message,
+			}
+		}
 		return nil, huma.Error400BadRequest(message)
 	}
 

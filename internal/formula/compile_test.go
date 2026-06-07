@@ -680,7 +680,7 @@ extends = ` + tc.extends + `
 	}
 }
 
-func TestCompileCheckSyntaxWithoutGraphContractKeepsMoleculeRoot(t *testing.T) {
+func TestCompileCheckSyntaxWithoutRequirementFailsClosed(t *testing.T) {
 	enableV2ForTest(t)
 
 	dir := t.TempDir()
@@ -709,24 +709,12 @@ timeout = "30s"
 		t.Fatal(err)
 	}
 
-	recipe, err := Compile(context.Background(), "ralph-demo", []string{dir}, nil)
-	if err != nil {
-		t.Fatalf("Compile: %v", err)
+	_, err := Compile(context.Background(), "ralph-demo", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile succeeded, want explicit compiler requirement error")
 	}
-
-	root := recipe.RootStep()
-	if root == nil {
-		t.Fatal("root step missing")
-	}
-	if got := root.Metadata["gc.kind"]; got != "" {
-		t.Fatalf("root gc.kind = %q, want empty", got)
-	}
-	if got := root.Metadata["gc.formula_contract"]; got != "" {
-		t.Fatalf("root gc.formula_contract = %q, want empty", got)
-	}
-	if root.Type != "molecule" {
-		t.Fatalf("root type = %q, want molecule", root.Type)
-	}
+	requireErrorContains(t, err, "graph-only constructs")
+	requireErrorContains(t, err, `[requires] formula_compiler = ">=2.0.0"`)
 }
 
 func TestCompileCheckSyntaxWithGraphContractMarksWorkflowRoot(t *testing.T) {
@@ -816,6 +804,9 @@ formula = "exp-timeout"
 version = 1
 type = "expansion"
 
+[requires]
+formula_compiler = ">=2.0.0"
+
 [vars.step_timeout]
 default = "10m"
 
@@ -867,6 +858,9 @@ func TestCompileExpansionFormulaAllowsUnresolvedTimeoutVars(t *testing.T) {
 formula = "exp-timeout"
 version = 1
 type = "expansion"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [[template]]
 id = "{target}.check"
@@ -1320,7 +1314,7 @@ func TestCompileBugReportFlowV2(t *testing.T) {
 	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
 
 	const toolingPath = "/home/ubuntu/tooling/formulas"
-	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.formula.toml")); err != nil {
+	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.toml")); err != nil {
 		t.Skipf("tooling formula not present: %v", err)
 	}
 
@@ -1458,16 +1452,15 @@ max_attempts = 3
 	}
 }
 
-func TestCompileGraphRetryWorkflowRequiresExplicitGraphContract(t *testing.T) {
+func TestCompileRetryWorkflowWithoutRequirementFailsClosed(t *testing.T) {
 	prev := IsFormulaV2Enabled()
 	SetFormulaV2Enabled(true)
 	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	formulaText := `
-formula = "implicit-v2"
+formula = "legacy-retry"
 phase = "liquid"
-version = 2
 
 [[steps]]
 id = "work"
@@ -1476,20 +1469,19 @@ title = "Do the work"
 [steps.retry]
 max_attempts = 2
 `
-	if err := os.WriteFile(filepath.Join(dir, "implicit-v2.toml"), []byte(formulaText), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "legacy-retry.toml"), []byte(formulaText), 0o644); err != nil {
 		t.Fatalf("write formula: %v", err)
 	}
 
-	_, err := Compile(context.Background(), "implicit-v2", []string{dir}, nil)
+	_, err := Compile(context.Background(), "legacy-retry", []string{dir}, nil)
 	if err == nil {
-		t.Fatal("Compile succeeded, want explicit contract error")
+		t.Fatal("Compile succeeded, want explicit compiler requirement error")
 	}
-	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
-		t.Fatalf("Compile error = %v, want graph.v2 contract guidance", err)
-	}
+	requireErrorContains(t, err, "graph-only constructs")
+	requireErrorContains(t, err, `[requires] formula_compiler = ">=2.0.0"`)
 }
 
-func TestCompileVersion1DetachedGraphMetadataRequiresExplicitGraphContract(t *testing.T) {
+func TestCompileDetachedGraphMetadataRequiresExplicitGraphContract(t *testing.T) {
 	prev := IsFormulaV2Enabled()
 	SetFormulaV2Enabled(true)
 	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
@@ -1498,7 +1490,6 @@ func TestCompileVersion1DetachedGraphMetadataRequiresExplicitGraphContract(t *te
 	formulaText := `
 formula = "implicit-v1-detached"
 phase = "liquid"
-version = 1
 
 [[steps]]
 id = "work"
@@ -1518,16 +1509,15 @@ metadata = { "gc.kind" = "retry" }
 	}
 }
 
-func TestCompileGraphOnCompleteWorkflowRequiresExplicitGraphContract(t *testing.T) {
+func TestCompileOnCompleteWithoutRequirementFailsClosed(t *testing.T) {
 	prev := IsFormulaV2Enabled()
 	SetFormulaV2Enabled(true)
 	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	formulaText := `
-formula = "implicit-v2-fanout"
+formula = "legacy-fanout"
 phase = "liquid"
-version = 2
 
 [[steps]]
 id = "survey"
@@ -1537,17 +1527,16 @@ title = "Survey"
 for_each = "output.items"
 bond = "mol-item"
 `
-	if err := os.WriteFile(filepath.Join(dir, "implicit-v2-fanout.toml"), []byte(formulaText), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "legacy-fanout.toml"), []byte(formulaText), 0o644); err != nil {
 		t.Fatalf("write formula: %v", err)
 	}
 
-	_, err := Compile(context.Background(), "implicit-v2-fanout", []string{dir}, nil)
+	_, err := Compile(context.Background(), "legacy-fanout", []string{dir}, nil)
 	if err == nil {
-		t.Fatal("Compile succeeded, want explicit contract error")
+		t.Fatal("Compile succeeded, want explicit compiler requirement error")
 	}
-	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
-		t.Fatalf("Compile error = %v, want graph.v2 contract guidance", err)
-	}
+	requireErrorContains(t, err, "graph-only constructs")
+	requireErrorContains(t, err, `[requires] formula_compiler = ">=2.0.0"`)
 }
 
 func TestCompileStandaloneExpansionRejectsDuplicateParentTemplateIDs(t *testing.T) {
@@ -1858,7 +1847,7 @@ func TestCompileReviewWorkflowSkipGeminiFiltersExpansionLane(t *testing.T) {
 	writeReviewWorkflowFixtures(t, dir)
 
 	recipe, err := Compile(context.Background(), "mol-adopt-pr-v2", []string{dir}, map[string]string{
-		"issue":       "GC-1",
+		"convoy_id":   "convoy-1",
 		"pr_ref":      "refs/heads/test",
 		"skip_gemini": "true",
 	})
@@ -1889,6 +1878,75 @@ func TestCompileReviewWorkflowSkipGeminiFiltersExpansionLane(t *testing.T) {
 	}
 }
 
+func TestCompilePersonalWorkSkipGeminiFiltersExpansionLanes(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	writeReviewWorkflowFixtures(t, dir)
+
+	recipe, err := Compile(context.Background(), "mol-personal-work-v2", []string{dir}, map[string]string{
+		"convoy_id":     "convoy-1",
+		"base_branch":   "main",
+		"skip_gemini":   "true",
+		"setup_command": "true",
+		"test_command":  "true",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, step := range recipe.Steps {
+		if strings.Contains(step.ID, "gemini") {
+			t.Fatalf("compiled recipe unexpectedly retained Gemini lane with skip_gemini=true: %s", step.ID)
+		}
+	}
+	for _, dep := range recipe.Deps {
+		if strings.Contains(dep.StepID, "gemini") || strings.Contains(dep.DependsOnID, "gemini") {
+			t.Fatalf("compiled recipe unexpectedly retained Gemini dependency with skip_gemini=true: %+v", dep)
+		}
+	}
+
+	for _, want := range []string{
+		"mol-personal-work-v2.design-review-loop.iteration.1.design-review-pipeline.persona-gen-claude",
+		"mol-personal-work-v2.design-review-loop.iteration.1.design-review-pipeline.persona-gen-codex",
+		"mol-personal-work-v2.design-review-loop.iteration.1.design-review-pipeline.persona-synthesis",
+		"mol-personal-work-v2.code-review-loop.iteration.1.review-pipeline.review-claude",
+		"mol-personal-work-v2.code-review-loop.iteration.1.review-pipeline.review-codex",
+		"mol-personal-work-v2.code-review-loop.iteration.1.review-pipeline.synthesize",
+	} {
+		if recipe.StepByID(want) == nil {
+			t.Fatalf("compiled recipe missing expected step %q", want)
+		}
+	}
+}
+
+func TestCompilePersonalWorkHappyPathDoesNotAddRetryWrappers(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	writeReviewWorkflowFixtures(t, dir)
+
+	recipe, err := Compile(context.Background(), "mol-personal-work-v2", []string{dir}, map[string]string{
+		"convoy_id":     "convoy-1",
+		"base_branch":   "main",
+		"skip_gemini":   "true",
+		"setup_command": "true",
+		"test_command":  "true",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, step := range recipe.Steps {
+		if got := step.Metadata["gc.kind"]; got == "retry" {
+			t.Fatalf("personal-work happy path should not add retry control step %q", step.ID)
+		}
+		if strings.Contains(step.ID, ".attempt.") {
+			t.Fatalf("personal-work happy path should not add retry attempt step %q", step.ID)
+		}
+	}
+}
+
 func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
 	enableV2ForTest(t)
 
@@ -1896,7 +1954,7 @@ func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
 	writeReviewWorkflowFixtures(t, dir)
 
 	recipe, err := Compile(context.Background(), "mol-adopt-pr-v2", []string{dir}, map[string]string{
-		"issue":       "GC-1",
+		"convoy_id":   "convoy-1",
 		"pr_ref":      "refs/heads/test",
 		"skip_gemini": "false",
 	})
@@ -1939,8 +1997,12 @@ func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
 func writeReviewWorkflowFixtures(t *testing.T, dir string) {
 	t.Helper()
 	for name, content := range map[string]string{
-		"expansion-review-pr.toml": reviewworkflows.ExpansionReviewPR,
-		"mol-adopt-pr-v2.toml":     reviewworkflows.AdoptPR,
+		"expansion-design-review.toml":      reviewworkflows.ExpansionDesignReview,
+		"expansion-review-pr.toml":          reviewworkflows.ExpansionReviewPR,
+		"expansion-design-review-lite.toml": reviewworkflows.ExpansionDesignReviewLite,
+		"expansion-review-pr-lite.toml":     reviewworkflows.ExpansionReviewPRLite,
+		"mol-adopt-pr-v2.toml":              reviewworkflows.AdoptPR,
+		"mol-personal-work-v2.toml":         reviewworkflows.PersonalWork,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
@@ -1965,7 +2027,7 @@ contract = "graph.v2"
 id = "work"
 title = "Do work"
 `
-		if err := os.WriteFile(filepath.Join(dir, "needs-v2.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "needs-v2.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1987,7 +2049,7 @@ version = 8
 id = "work"
 title = "Do work"
 `
-		if err := os.WriteFile(filepath.Join(dir, "legacy-v8.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "legacy-v8.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -2009,7 +2071,7 @@ version = 1
 id = "work"
 title = "Do work"
 `
-		if err := os.WriteFile(filepath.Join(dir, "still-v1.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "still-v1.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -2019,7 +2081,7 @@ title = "Do work"
 		}
 	})
 
-	t.Run("check syntax without graph contract stays on molecule contract", func(t *testing.T) {
+	t.Run("check syntax without compiler requirement fails closed", func(t *testing.T) {
 		formulaContent := `
 formula = "legacy-check"
 version = 1
@@ -2035,22 +2097,39 @@ max_attempts = 1
 mode = "exec"
 path = "check.sh"
 `
-		if err := os.WriteFile(filepath.Join(dir, "legacy-check.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "legacy-check.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		recipe, err := Compile(context.Background(), "legacy-check", []string{dir}, nil)
-		if err != nil {
-			t.Fatalf("Compile(legacy-check): %v", err)
+		_, err := Compile(context.Background(), "legacy-check", []string{dir}, nil)
+		if err == nil {
+			t.Fatal("Compile(legacy-check) succeeded, want explicit compiler requirement error")
 		}
-		root := recipe.RootStep()
-		if root == nil {
-			t.Fatal("root step missing")
-		}
-		if root.Type != "molecule" || root.Metadata["gc.kind"] != "" {
-			t.Fatalf("root = %+v, want legacy molecule root", root)
-		}
+		requireErrorContains(t, err, "graph-only constructs")
 	})
+}
+
+func TestCompileAcceptsLegacyFormulaFilename(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "legacy-name"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do work"
+`
+	if err := os.WriteFile(filepath.Join(dir, "legacy-name.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Compile(context.Background(), "legacy-name", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got.Name != "legacy-name" {
+		t.Fatalf("Name = %q, want legacy-name", got.Name)
+	}
 }
 
 func TestCompileValidatesRequiredVars(t *testing.T) {
@@ -2129,4 +2208,39 @@ description = "Review the {{feature}} implementation."
 			t.Errorf("Name = %q, want %q", recipe.Name, "repro-unresolved")
 		}
 	})
+}
+
+func TestCompile_PropagatesContentHash(t *testing.T) {
+	dir := t.TempDir()
+	content := `
+formula = "mol-hash-prop"
+description = "Hash propagation test"
+
+[[steps]]
+id = "work"
+title = "Do work"
+type = "task"
+`
+	path := filepath.Join(dir, "mol-hash-prop.toml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := Compile(context.Background(), "mol-hash-prop", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	if recipe.ContentHash == "" {
+		t.Fatal("ContentHash should propagate from Formula to Recipe")
+	}
+	if recipe.FormulaSource == "" {
+		t.Fatal("FormulaSource should propagate from Formula to Recipe")
+	}
+
+	// Verify hash matches direct computation
+	want := ContentHash([]byte(content))
+	if recipe.ContentHash != want {
+		t.Errorf("ContentHash = %q, want %q", recipe.ContentHash, want)
+	}
 }

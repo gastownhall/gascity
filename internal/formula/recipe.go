@@ -37,6 +37,13 @@ type Recipe struct {
 	// without materializing child steps. This is the default for
 	// vapor-phase formulas (patrol wisps).
 	RootOnly bool
+
+	// ContentHash is the SHA-256 hex digest of the source formula file.
+	// Propagated from Formula.ContentHash during compilation.
+	ContentHash string
+
+	// FormulaSource is the file path from which the formula was loaded.
+	FormulaSource string
 }
 
 // RecipeStep represents a single step in a compiled recipe.
@@ -105,6 +112,19 @@ func (r *Recipe) RootStep() *RecipeStep {
 		return nil
 	}
 	return &r.Steps[0]
+}
+
+// RecipeHasReadySurface reports whether instantiating recipe creates a root
+// bead that Ready queries can see and route directly.
+func RecipeHasReadySurface(recipe *Recipe) bool {
+	if recipe == nil {
+		return false
+	}
+	if recipe.RootOnly {
+		return true
+	}
+	root := recipe.RootStep()
+	return root != nil && root.Metadata["gc.kind"] == "workflow"
 }
 
 // StepByID returns the step with the given ID, or nil if not found.

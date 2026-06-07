@@ -18,7 +18,7 @@ import (
 // a resolved template, optionally merged with overlay overrides. Only fields
 // that require a session restart when changed are included:
 //
-// Included: command, prompt content hash, sorted env, work_dir, pre_start,
+// Included: command, lifecycle, prompt content hash, sorted env, work_dir, pre_start,
 // session_setup, session_setup_script, session_live, overlay_dir, effective
 // provider overlay slots, copy_files.
 //
@@ -40,6 +40,9 @@ func canonicalConfigHash(params TemplateParams, overlay map[string]string) strin
 	}
 	h.Write([]byte(command)) //nolint:errcheck
 	h.Write([]byte{0})       //nolint:errcheck
+
+	h.Write([]byte(params.Hints.Lifecycle)) //nolint:errcheck
+	h.Write([]byte{0})                      //nolint:errcheck
 
 	// Prompt — strip the beacon prefix before hashing. resolveTemplate
 	// prepends a time-stamped beacon line ("[city] agent • timestamp\n\n...").

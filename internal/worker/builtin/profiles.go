@@ -42,6 +42,7 @@ type BuiltinProviderSpec struct {
 	ReadyPromptPrefix      string
 	ProcessNames           []string
 	EmitsPermissionWarning bool
+	AcceptStartupDialogs   *bool
 	Env                    map[string]string
 	PathCheck              string
 	SupportsACP            bool
@@ -59,6 +60,8 @@ type BuiltinProviderSpec struct {
 	ACPCommand             string
 	ACPArgs                []string
 }
+
+func boolPtr(b bool) *bool { return &b }
 
 // ProfileIdentity captures the explicit production identity for a canonical
 // worker profile.
@@ -78,8 +81,8 @@ const (
 )
 
 var builtinProviderOrder = []string{
-	"claude", "codex", "gemini", "kiro", "cursor", "copilot",
-	"amp", "opencode", "auggie", "pi", "omp",
+	"claude", "codex", "gemini", "kimi", "kiro", "cursor", "copilot",
+	"amp", "opencode", "groq", "cerebras", "auggie", "pi", "omp", "antigravity",
 }
 
 var builtinProviderSpecs = map[string]BuiltinProviderSpec{
@@ -141,7 +144,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
-					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
+					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-8"}, FlagAliases: [][]string{{"-m", "claude-opus-4-8"}}},
+					{Value: "opus-4-7", Label: "Opus 4.7", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
 					{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-4-6"}, FlagAliases: [][]string{{"-m", "claude-sonnet-4-6"}}},
 					{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "claude-haiku-4-5-20251001"}, FlagAliases: [][]string{{"-m", "claude-haiku-4-5-20251001"}}},
 				},
@@ -266,17 +270,48 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			},
 		},
 	},
+	"kimi": {
+		DisplayName:          "Kimi Code CLI",
+		Command:              "kimi",
+		Args:                 []string{"--yolo", "--no-thinking"},
+		PromptMode:           "none",
+		ReadyDelayMs:         5000,
+		ProcessNames:         []string{"kimi", "python"},
+		AcceptStartupDialogs: boolPtr(false),
+		SupportsACP:          true,
+		InstructionsFile:     "AGENTS.md",
+		ResumeFlag:           "--session",
+		ResumeStyle:          "flag",
+		PrintArgs:            []string{"--quiet", "--prompt"},
+		TitleModel:           "kimi-k2.6",
+		ACPArgs:              []string{"--yolo", "--no-thinking", "acp"},
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "kimi-k2.6", Label: "Kimi K2.6", FlagArgs: []string{"--model", "kimi-k2.6"}, FlagAliases: [][]string{{"-m", "kimi-k2.6"}}},
+					{Value: "kimi-k2-thinking-turbo", Label: "Kimi K2 Thinking Turbo", FlagArgs: []string{"--model", "kimi-k2-thinking-turbo"}, FlagAliases: [][]string{{"-m", "kimi-k2-thinking-turbo"}}},
+				},
+			},
+		},
+	},
 	"kiro": {
-		DisplayName:      "Kiro",
-		Command:          "kiro-cli",
-		Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
-		PromptMode:       "arg",
-		ReadyDelayMs:     5000,
-		ProcessNames:     []string{"kiro-cli", "kiro", "node"},
-		SupportsACP:      true,
-		SupportsHooks:    true,
-		InstructionsFile: "AGENTS.md",
-		ACPArgs:          []string{"acp", "--agent", "gascity"},
+		DisplayName:  "Kiro",
+		Command:      "kiro-cli",
+		Args:         []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+		PromptMode:   "arg",
+		ReadyDelayMs: 5000,
+		ProcessNames: []string{"kiro-cli", "kiro", "node"},
+		// kiro launches with --trust-all-tools and never shows trust/permission
+		// dialogs, so skip the 7-dialog startup polling (~56s/call, run twice).
+		AcceptStartupDialogs: boolPtr(false),
+		SupportsACP:          true,
+		SupportsHooks:        true,
+		InstructionsFile:     "AGENTS.md",
+		ACPArgs:              []string{"acp", "--agent", "gascity"},
 	},
 	"cursor": {
 		DisplayName:       "Cursor Agent",
@@ -288,6 +323,20 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:      []string{"cursor-agent"},
 		SupportsHooks:     true,
 		InstructionsFile:  "AGENTS.md",
+		ResumeFlag:        "--resume",
+		ResumeStyle:       "flag",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:     "mcp_approval",
+				Label:   "MCP Approval",
+				Type:    "select",
+				Default: "prompt",
+				Choices: []BuiltinOptionChoice{
+					{Value: "prompt", Label: "Prompt for MCP approval"},
+					{Value: "approve", Label: "Approve visible MCP servers", FlagArgs: []string{"--approve-mcps"}},
+				},
+			},
+		},
 	},
 	"copilot": {
 		DisplayName: "GitHub Copilot",
@@ -307,14 +356,26 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:      []string{"copilot"},
 		SupportsHooks:     true,
 		InstructionsFile:  "AGENTS.md",
+		ResumeFlag:        "--resume",
+		ResumeStyle:       "flag",
 	},
 	"amp": {
+		// Hook mechanism: Amp CLI's plugin system (session.start,
+		// tool.call) is documented at https://ampcode.com/manual.
+		// Gas Town has not yet wired hook installation for amp —
+		// tracked as gap 4 of gastownhall/gascity#672. Nudges still
+		// drain via the supervisor dispatcher / per-session poller
+		// without requiring provider hooks; the remaining work is
+		// event-driven coordination (session-start priming,
+		// pre-compaction handoff).
 		DisplayName:      "Sourcegraph AMP",
 		Command:          "amp",
 		Args:             []string{"--dangerously-allow-all", "--no-ide"},
 		PromptMode:       "arg",
 		ProcessNames:     []string{"amp"},
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "threads continue",
+		ResumeStyle:      "subcommand",
 	},
 	"opencode": {
 		DisplayName:      "OpenCode",
@@ -331,14 +392,100 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeFlag:       "--session",
 		ResumeStyle:      "flag",
 		ACPArgs:          []string{"acp"},
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "opencode/deepseek-v4-flash-free", Label: "DeepSeek V4 Flash Free", FlagArgs: []string{"--model", "opencode/deepseek-v4-flash-free"}, FlagAliases: [][]string{{"-m", "opencode/deepseek-v4-flash-free"}}},
+					{Value: "opencode/nemotron-3-super-free", Label: "Nemotron 3 Super Free", FlagArgs: []string{"--model", "opencode/nemotron-3-super-free"}, FlagAliases: [][]string{{"-m", "opencode/nemotron-3-super-free"}}},
+					{Value: "opencode/big-pickle", Label: "Big Pickle", FlagArgs: []string{"--model", "opencode/big-pickle"}, FlagAliases: [][]string{{"-m", "opencode/big-pickle"}}},
+				},
+			},
+		},
+	},
+	"cerebras": {
+		DisplayName: "Cerebras (OpenCode)",
+		Command:     "opencode",
+		OptionDefaults: map[string]string{
+			"model": "cerebras/gpt-oss-120b",
+		},
+		PromptMode:       "none",
+		ReadyDelayMs:     8000,
+		ProcessNames:     []string{"opencode", "node", "bun"},
+		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
+		ACPArgs:          []string{"acp"},
+		TitleModel:       "cerebras/gpt-oss-120b",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "cerebras/gpt-oss-120b", Label: "GPT-OSS 120B", FlagArgs: []string{"--model", "cerebras/gpt-oss-120b"}},
+					{Value: "cerebras/zai-glm-4.7", Label: "GLM 4.7", FlagArgs: []string{"--model", "cerebras/zai-glm-4.7"}},
+					{Value: "cerebras/qwen-3-235b-a22b-instruct-2507", Label: "Qwen 3 235B A22B Instruct", FlagArgs: []string{"--model", "cerebras/qwen-3-235b-a22b-instruct-2507"}},
+				},
+			},
+		},
+	},
+	"groq": {
+		DisplayName: "Groq (OpenCode)",
+		Command:     "opencode",
+		OptionDefaults: map[string]string{
+			"model": "groq/openai/gpt-oss-120b",
+		},
+		PromptMode:       "none",
+		ReadyDelayMs:     8000,
+		ProcessNames:     []string{"opencode", "node", "bun"},
+		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
+		ACPArgs:          []string{"acp"},
+		TitleModel:       "groq/openai/gpt-oss-20b",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "groq/openai/gpt-oss-120b", Label: "GPT-OSS 120B", FlagArgs: []string{"--model", "groq/openai/gpt-oss-120b"}},
+					{Value: "groq/openai/gpt-oss-20b", Label: "GPT-OSS 20B", FlagArgs: []string{"--model", "groq/openai/gpt-oss-20b"}},
+					{Value: "groq/llama-3.3-70b-versatile", Label: "Llama 3.3 70B Versatile", FlagArgs: []string{"--model", "groq/llama-3.3-70b-versatile"}},
+					{Value: "groq/llama-3.1-8b-instant", Label: "Llama 3.1 8B Instant", FlagArgs: []string{"--model", "groq/llama-3.1-8b-instant"}},
+					{Value: "groq/qwen/qwen3-32b", Label: "Qwen 3 32B", FlagArgs: []string{"--model", "groq/qwen/qwen3-32b"}},
+					{Value: "groq/meta-llama/llama-4-scout-17b-16e-instruct", Label: "Llama 4 Scout 17B", FlagArgs: []string{"--model", "groq/meta-llama/llama-4-scout-17b-16e-instruct"}},
+				},
+			},
+		},
 	},
 	"auggie": {
+		// Hook mechanism: Auggie CLI exposes SessionStart, SessionEnd,
+		// Stop, PreToolUse, PostToolUse hooks via ~/.augment/settings.json
+		// (https://docs.augmentcode.com/cli/overview). The config is
+		// USER-global rather than project-local, which complicates Gas
+		// Town's per-workdir installation model — wiring auggie hooks
+		// requires either merging into the user's existing config or
+		// designing a per-rig override mechanism. Tracked as gap 4 of
+		// gastownhall/gascity#672. Nudges still drain via the supervisor
+		// dispatcher / per-session poller without requiring provider
+		// hooks.
 		DisplayName:      "Auggie CLI",
 		Command:          "auggie",
 		Args:             []string{"--allow-indexing"},
 		PromptMode:       "arg",
 		ProcessNames:     []string{"auggie"},
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--resume",
+		ResumeStyle:      "flag",
 	},
 	"pi": {
 		DisplayName:      "Pi Coding Agent",
@@ -349,6 +496,19 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:     []string{"pi", "node", "bun"},
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "ollama-cloud-gpt-oss-20b", Label: "Ollama Cloud GPT-OSS 20B", FlagArgs: []string{"--provider", "ollama-cloud", "--model", "gpt-oss:20b"}},
+				},
+			},
+		},
 	},
 	"omp": {
 		DisplayName:      "Oh My Pi (OMP)",
@@ -358,6 +518,49 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:     []string{"omp", "node", "bun"},
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--resume",
+		ResumeStyle:      "flag",
+	},
+	"antigravity": {
+		DisplayName: "Antigravity",
+		Command:     "agy",
+		OptionDefaults: map[string]string{
+			"permission_mode": "unrestricted",
+		},
+		PromptMode:        "flag",
+		PromptFlag:        "--prompt-interactive",
+		ReadyPromptPrefix: "> ",
+		ReadyDelayMs:      5000,
+		ProcessNames:      []string{"agy"},
+		SupportsHooks:     true,
+		InstructionsFile:  "AGENTS.md",
+		ResumeFlag:        "--conversation",
+		ResumeStyle:       "flag",
+		PrintArgs:         []string{"--print"},
+		PermissionModes: map[string]string{
+			"unrestricted": "--dangerously-skip-permissions",
+		},
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:     "permission_mode",
+				Label:   "Permission Mode",
+				Type:    "select",
+				Default: "unrestricted",
+				Choices: []BuiltinOptionChoice{
+					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
+					{Value: "standard", Label: "Standard (prompt for permissions)", FlagArgs: []string{}},
+				},
+			},
+			{
+				Key:   "sandbox",
+				Label: "Sandbox",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "enabled", Label: "Enabled", FlagArgs: []string{"--sandbox"}},
+				},
+			},
+		},
 	},
 }
 
@@ -391,8 +594,14 @@ func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 		return newProfileIdentity(profile, "codex"), true
 	case "gemini/tmux-cli":
 		return newProfileIdentity(profile, "gemini"), true
+	case "kimi/tmux-cli":
+		return newProfileIdentity(profile, "kimi"), true
 	case "opencode/tmux-cli":
 		return newProfileIdentity(profile, "opencode"), true
+	case "pi/tmux-cli":
+		return newProfileIdentity(profile, "pi"), true
+	case "antigravity/tmux-cli":
+		return newProfileIdentity(profile, "antigravity"), true
 	default:
 		return ProfileIdentity{}, false
 	}

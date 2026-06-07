@@ -15,6 +15,11 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
 
+	cityStore := s.state.CityBeadStore()
+	if err := cacheLiveOr503(cityStore); err != nil {
+		return nil, err
+	}
+
 	pp := pageParams{Limit: 50}
 	if input.Limit > 0 {
 		pp.Limit = input.Limit
@@ -46,11 +51,12 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		store := stores[rigName]
 		for _, assignee := range assigneeTerms {
 			query := beads.ListQuery{
-				Status:   input.Status,
-				Type:     input.Type,
-				Label:    input.Label,
-				Assignee: assignee,
-				Live:     input.Status == "in_progress",
+				Status:        input.Status,
+				Type:          input.Type,
+				Label:         input.Label,
+				Assignee:      assignee,
+				IncludeClosed: input.All,
+				Live:          input.Status == "in_progress",
 			}
 			if !query.HasFilter() {
 				query.AllowScan = true
@@ -89,13 +95,15 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 
 	index := s.latestIndex()
+	cacheAge := cacheAgeSeconds(cityStore)
 	if !pp.IsPaging {
 		total := len(all)
 		if pp.Limit < len(all) {
 			all = all[:pp.Limit]
 		}
 		return &ListOutput[beads.Bead]{
-			Index: index,
+			Index:     index,
+			CacheAgeS: cacheAge,
 			Body: ListBody[beads.Bead]{
 				Items:         all,
 				Total:         total,
@@ -110,7 +118,8 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		page = []beads.Bead{}
 	}
 	return &ListOutput[beads.Bead]{
-		Index: index,
+		Index:     index,
+		CacheAgeS: cacheAge,
 		Body: ListBody[beads.Bead]{
 			Items:         page,
 			Total:         total,
@@ -134,7 +143,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	var pa partialAggregator
 	for _, rigName := range rigNames {
 		pa.attempt()
-		ready, err := beads.ReadyLive(stores[rigName])
+		ready, err := beads.HandlesFor(stores[rigName]).Live.Ready()
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record("rig "+rigName, err)
@@ -221,6 +230,12 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 // humaHandleBeadGet is the Huma-typed handler for GET /v0/bead/{id}.
 func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*IndexOutput[beads.Bead], error) {
 	id := input.ID
+
+	cityStore := s.state.CityBeadStore()
+	if err := cacheLiveOr503(cityStore); err != nil {
+		return nil, err
+	}
+
 	for _, store := range s.beadStoresForID(id) {
 		b, err := store.Get(id)
 		if err != nil {
@@ -230,8 +245,9 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 			return nil, huma.Error500InternalServerError(err.Error())
 		}
 		return &IndexOutput[beads.Bead]{
-			Index: s.latestIndex(),
-			Body:  b,
+			Index:     s.latestIndex(),
+			CacheAgeS: cacheAgeSeconds(cityStore),
+			Body:      b,
 		}, nil
 	}
 	return nil, huma.Error404NotFound("bead " + id + " not found")
@@ -319,6 +335,7 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 		Labels:      input.Body.Labels,
 		ParentID:    input.Body.Parent,
 		Metadata:    input.Body.Metadata,
+		DeferUntil:  input.Body.DeferUntil,
 	})
 	if err != nil {
 		s.idem.unreserve(idemKey)

@@ -238,6 +238,7 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 		Steps: []formula.RecipeStep{
 			{ID: "wf-test.root", IsRoot: true, Metadata: map[string]string{
 				"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+				"gc.run_target": "stale-target",
 			}},
 			{ID: "wf-test.work", Metadata: map[string]string{}},
 		},
@@ -248,8 +249,16 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
 	}
 	root := r.Steps[0]
-	if root.Metadata["gc.run_target"] != "mayor" {
-		t.Errorf("root gc.run_target = %q, want mayor", root.Metadata["gc.run_target"])
+	if root.Metadata["gc.routed_to"] != "mayor" {
+		t.Errorf("root gc.routed_to = %q, want mayor", root.Metadata["gc.routed_to"])
+	}
+	if _, ok := root.Metadata["gc.run_target"]; ok {
+		t.Errorf("root still carries retired gc.run_target = %q", root.Metadata["gc.run_target"])
+	}
+	// #2843: the run root carries a durable session back-reference (the
+	// dashboard root-only snapshot reads this) for single-session agents.
+	if root.Metadata["gc.session_name"] != "test--mayor" {
+		t.Errorf("root gc.session_name = %q, want test--mayor", root.Metadata["gc.session_name"])
 	}
 	if root.Metadata["gc.source_bead_id"] != "src-1" {
 		t.Errorf("root gc.source_bead_id = %q, want src-1", root.Metadata["gc.source_bead_id"])
@@ -261,6 +270,39 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 	work := r.Steps[1]
 	if work.Metadata["gc.routed_to"] != "mayor" {
 		t.Errorf("work gc.routed_to = %q, want mayor", work.Metadata["gc.routed_to"])
+	}
+}
+
+// TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim locks in the
+// #2763 writer-side fix: a graph.v2 workflow root must persist gc.routed_to —
+// the canonical delivery key every runtime demand/claim/scale reader consults —
+// not gc.run_target alone. Before this, the root stamped only gc.run_target, so
+// a root routed to a pool was spawned-for by scale_check (which reads
+// gc.run_target) but never claimed by the worker (whose query reads
+// gc.routed_to); the work sat unclaimed and was idle-reaped silently. As part of
+// deprecating gc.run_target as a persisted routing field (ga-eld2x), the root is
+// brought onto the same key as every other bead — including its own children.
+func TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "mayor", MaxActiveSessions: intPtr(1)},
+		{Name: "control-dispatcher", MaxActiveSessions: intPtr(1)},
+	}}
+	r := &formula.Recipe{
+		Name: "wf-test",
+		Steps: []formula.RecipeStep{
+			{ID: "wf-test.root", IsRoot: true, Metadata: map[string]string{
+				"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+			}},
+			{ID: "wf-test.work", Metadata: map[string]string{}},
+		},
+	}
+	deps := Deps{Resolver: testAgentResolver{}}
+	if err := DecorateGraphWorkflowRecipe(r, nil, "src-1", "city", "test-city", "city:test", "mayor", "test--mayor", nil, "test-city", cfg, deps); err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
+	}
+	root := r.Steps[0]
+	if got := root.Metadata["gc.routed_to"]; got != "mayor" {
+		t.Errorf("root gc.routed_to = %q, want mayor (root must be claimable via the canonical routing key; #2763 / ga-eld2x)", got)
 	}
 }
 
@@ -523,6 +565,74 @@ func TestResolveGraphStepBinding_AssigneeConcreteSessionBeatsTemplateCollision(t
 	if binding.DirectSessionID != "worker" {
 		t.Fatalf("DirectSessionID = %q, want worker", binding.DirectSessionID)
 	}
+	if binding.RigContext != "frontend" {
+		t.Fatalf("RigContext = %q, want frontend", binding.RigContext)
+	}
+}
+
+func TestResolveGraphStepBinding_CanonicalSingletonPoolUsesConcreteSession(t *testing.T) {
+	zero := 0
+	one := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: &zero, MaxActiveSessions: &one},
+		},
+	}
+	stepByID := map[string]*formula.RecipeStep{
+		"demo.work": {
+			ID:       "demo.work",
+			Title:    "Work",
+			Metadata: map[string]string{"gc.run_target": "worker"},
+		},
+	}
+	cache := make(map[string]GraphRouteBinding)
+	resolving := make(map[string]bool)
+
+	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ResolveGraphStepBinding: %v", err)
+	}
+	if binding.QualifiedName != "frontend/worker" {
+		t.Fatalf("QualifiedName = %q, want frontend/worker", binding.QualifiedName)
+	}
+	if binding.SessionName != "frontend--worker" {
+		t.Fatalf("SessionName = %q, want frontend--worker", binding.SessionName)
+	}
+	if binding.MetadataOnly {
+		t.Fatal("MetadataOnly = true, want false for canonical singleton pool")
+	}
+}
+
+func TestResolveGraphStepBinding_CanonicalSingletonPoolReportsMissingSessionName(t *testing.T) {
+	zero := 0
+	one := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:            "test-city",
+			SessionTemplate: `{{""}}`,
+		},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: &zero, MaxActiveSessions: &one},
+		},
+	}
+	stepByID := map[string]*formula.RecipeStep{
+		"demo.work": {
+			ID:       "demo.work",
+			Title:    "Work",
+			Metadata: map[string]string{"gc.run_target": "worker"},
+		},
+	}
+	cache := make(map[string]GraphRouteBinding)
+	resolving := make(map[string]bool)
+
+	_, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	if err == nil {
+		t.Fatal("ResolveGraphStepBinding succeeded; want missing session-name error")
+	}
+	if !strings.Contains(err.Error(), `could not resolve session name for "frontend/worker"`) {
+		t.Fatalf("ResolveGraphStepBinding error = %q, want missing session-name guidance", err)
+	}
 }
 
 func TestControlDispatcherBinding_NilConfig(t *testing.T) {
@@ -589,6 +699,37 @@ func TestAssignGraphStepRoute_ControlBindingUsesDirectAssigneeWithoutRoutedTo(t 
 	}
 }
 
+func TestAssignGraphStepRoute_ControlBindingPreservesDirectExecutionRoute(t *testing.T) {
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.routed_to": "stale-control-route",
+		},
+	}
+	execution := GraphRouteBinding{
+		DirectSessionID: "session-123",
+		RigContext:      "frontend",
+	}
+	control := GraphRouteBinding{
+		QualifiedName: "gascity/control-dispatcher",
+		SessionName:   "gascity--control-dispatcher",
+	}
+
+	AssignGraphStepRoute(step, execution, &control)
+
+	if step.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("control assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("control gc.routed_to = %q, want empty direct assignee", got)
+	}
+	if got := step.Metadata[GraphExecutionRouteMetaKey]; got != "session-123" {
+		t.Fatalf("control execution route = %q, want direct session id", got)
+	}
+	if got := step.Metadata[GraphExecutionRigContextMetaKey]; got != "frontend" {
+		t.Fatalf("control execution rig context = %q, want frontend", got)
+	}
+}
+
 func TestWorkflowExecutionRoute(t *testing.T) {
 	b := beads.Bead{Metadata: map[string]string{"gc.routed_to": "myrig/worker"}}
 	if got := WorkflowExecutionRoute(b); got != "myrig/worker" {
@@ -603,5 +744,45 @@ func TestWorkflowExecutionRouteFromMeta_PrefersExecutionKey(t *testing.T) {
 	}
 	if got := WorkflowExecutionRouteFromMeta(meta); got != "executor" {
 		t.Errorf("got %q, want executor (execution key takes precedence)", got)
+	}
+}
+
+// TestStampLegacyRecipeRouting_RespectsPerStepRunTarget locks in the writer-side
+// invariant: a step that already declares a per-step gc.run_target must have
+// its gc.routed_to stamped to match that target, not the blanket convoy entry
+// agent. Without this, work_query-keyed readers (which still index gc.routed_to)
+// would resolve every child to the convoy entry, even after the reader-side
+// fallback honors gc.run_target. See PR #2386 + adaf6ec.
+func TestStampLegacyRecipeRouting_RespectsPerStepRunTarget(t *testing.T) {
+	recipe := &formula.Recipe{
+		Steps: []formula.RecipeStep{
+			{IsRoot: true, Metadata: map[string]string{"gc.run_target": "root-only"}},
+			{Metadata: map[string]string{"gc.run_target": "architect"}},
+			{Metadata: map[string]string{"gc.run_target": "tech-lead"}},
+			{Metadata: nil}, // no per-step target — gets blanket
+			{Metadata: map[string]string{"gc.kind": "scope"}},                   // topology — skipped
+			{Metadata: map[string]string{"gc.run_target": "  reviewer-code  "}}, // whitespace-tolerant
+		},
+	}
+	stampLegacyRecipeRouting(recipe, "product-owner")
+
+	// Root is excluded — InstantiateSlingFormula stamps the root via SlingResult.
+	if got := recipe.Steps[0].Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("root step: gc.routed_to = %q, want empty (root excluded)", got)
+	}
+	if got := recipe.Steps[1].Metadata["gc.routed_to"]; got != "architect" {
+		t.Errorf("step 1 (architect): gc.routed_to = %q, want architect (per-step target wins)", got)
+	}
+	if got := recipe.Steps[2].Metadata["gc.routed_to"]; got != "tech-lead" {
+		t.Errorf("step 2 (tech-lead): gc.routed_to = %q, want tech-lead (per-step target wins)", got)
+	}
+	if got := recipe.Steps[3].Metadata["gc.routed_to"]; got != "product-owner" {
+		t.Errorf("step 3 (no per-step): gc.routed_to = %q, want product-owner (blanket fallback)", got)
+	}
+	if got := recipe.Steps[4].Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("step 4 (topology): gc.routed_to = %q, want empty (topology excluded)", got)
+	}
+	if got := recipe.Steps[5].Metadata["gc.routed_to"]; got != "reviewer-code" {
+		t.Errorf("step 5 (whitespace target): gc.routed_to = %q, want reviewer-code (trimmed)", got)
 	}
 }

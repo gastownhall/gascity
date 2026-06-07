@@ -35,10 +35,10 @@ func TestTutorial02Agents(t *testing.T) {
 
 	var reviewTaskID string
 
-	t.Run("gc agent add --name reviewer --dir my-project", func(t *testing.T) {
-		out, err := ws.runShell("gc agent add --name reviewer --dir my-project", "")
+	t.Run("gc agent add --name reviewer", func(t *testing.T) {
+		out, err := ws.runShell("gc agent add --name reviewer", "")
 		if err != nil {
-			t.Fatalf("gc agent add --name reviewer --dir my-project: %v\n%s", err, out)
+			t.Fatalf("gc agent add --name reviewer: %v\n%s", err, out)
 		}
 		if !strings.Contains(out, "Scaffolded agent 'reviewer'") {
 			t.Fatalf("gc agent add output mismatch:\n%s", out)
@@ -60,7 +60,7 @@ EOF`
 		if err != nil {
 			t.Fatalf("gc prime: %v\n%s", err, out)
 		}
-		for _, want := range []string{"# Gas City Agent", "bd ready", "bd close <id>"} {
+		for _, want := range []string{"# Gas City Agent", "bd update <id> --claim", "gc.continuation_group", "--metadata-field gc.routed_to=\"$GC_TEMPLATE\"", "--no-assignee", "gc runtime drain-ack"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("gc prime missing %q:\n%s", want, out)
 			}
@@ -70,18 +70,22 @@ EOF`
 	t.Run("cat > agents/reviewer/prompt.template.md << 'EOF'", func(t *testing.T) {
 		cmd := `cat > agents/reviewer/prompt.template.md << 'EOF'
 # Code Reviewer Agent
-You are an agent in a Gas City workspace. Check for available work and execute it.
+You are an agent in a Gas City workspace. Claim routed work before executing it.
 
 ## Your tools
-- ` + "`bd ready`" + ` — see available work items
-- ` + "`bd show <id>`" + ` — see details of a work item
-- ` + "`bd close <id>`" + ` — mark work as done
+- ` + "`gc hook`" + ` — find routed work
+- ` + "`bd update <id> --claim`" + ` — atomically claim unassigned work
+- ` + "`bd show <id> --json`" + ` — verify assignee and metadata
+- ` + "`bd close <id>`" + ` — mark work done
+- ` + "`gc runtime drain-ack`" + ` — end the session when idle
 
 ## How to work
-1. Check for available work: ` + "`bd ready`" + `
-2. Pick a bead and execute the work described in its title
-3. When done, close it: ` + "`bd close <id>`" + `
-4. Check for more work. Repeat until the queue is empty.
+1. Check assigned work: ` + "`bd ready --assignee=\"$GC_SESSION_NAME\" --json --limit=1`" + `
+2. If none is assigned, run ` + "`gc hook`" + `
+3. Claim unassigned routed work with ` + "`bd update <id> --claim`" + `
+4. Verify ` + "`assignee`" + ` and ` + "`gc.continuation_group`" + ` metadata with ` + "`bd show <id> --json`" + `
+5. Review the code, write the requested feedback, and close the bead
+6. If no assigned continuation work is ready, run ` + "`gc runtime drain-ack && exit`" + `
 
 ## Reviewing Code
 Read the code and provide feedback on bugs, security issues, and style.

@@ -274,6 +274,18 @@ func TestDoBeadsCityUseExternalStopsManagedLocalProvider(t *testing.T) {
 		EndpointOrigin: contract.EndpointOriginManagedCity,
 		EndpointStatus: contract.EndpointStatusVerified,
 	})
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityDir), doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      33123,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: "2026-05-15T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("write managed runtime state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "dolt-server.port"), []byte("33123\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	origVerify := verifyCityExternalEndpoint
 	defer func() { verifyCityExternalEndpoint = origVerify }()
@@ -299,6 +311,12 @@ func TestDoBeadsCityUseExternalStopsManagedLocalProvider(t *testing.T) {
 	ops := strings.TrimSpace(string(data))
 	if ops != "stop||" {
 		t.Fatalf("provider call log = %q, want stop with managed env captured before external rewrite", ops)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
+		t.Fatalf("published managed runtime state still present, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("managed port mirror still present, stat err = %v", err)
 	}
 }
 
@@ -332,6 +350,70 @@ func TestDoBeadsCityUseExternalValidationFailureDoesNotStopManagedLocalProvider(
 	}
 	if _, err := os.Stat(callLog); !os.IsNotExist(err) {
 		t.Fatalf("validation failure should not stop provider, stat err = %v", err)
+	}
+}
+
+func TestSyncCityManagedPortArtifactsSkipsNonOwnedPostgresCity(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	inheritDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(inheritDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{}, []config.Rig{{Name: "frontend", Path: inheritDir, Prefix: "fe"}})
+	writePGScopeFixture(t, cityDir, "")
+	for _, dir := range []string{cityDir, inheritDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "dolt-server.port"), []byte("3311\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	plans := []cityRigEndpointPlan{{
+		Update: true,
+		Rig:    config.Rig{Name: "frontend", Path: inheritDir, Prefix: "fe"},
+		Target: contract.ConfigState{
+			EndpointOrigin: contract.EndpointOriginInheritedCity,
+		},
+	}}
+	err := syncCityManagedPortArtifacts(fsys.OSFS{}, cityDir, contract.ConfigState{
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+	}, plans)
+	if err != nil {
+		t.Fatalf("syncCityManagedPortArtifacts: %v", err)
+	}
+	for _, dir := range []string{cityDir, inheritDir} {
+		if got := strings.TrimSpace(string(mustReadFile(t, filepath.Join(dir, ".beads", "dolt-server.port")))); got != "3311" {
+			t.Fatalf("%s port file = %q, want preserved stale managed port for non-owned city", dir, got)
+		}
+	}
+}
+
+func TestSyncCityManagedPortArtifactsPropagatesOwnedPortReadError(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{}, nil)
+	writeRigEndpointMetadata(t, cityDir, "hq")
+	if err := os.MkdirAll(filepath.Dir(managedDoltStatePath(cityDir)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(managedDoltStatePath(cityDir), []byte("not-json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := syncCityManagedPortArtifacts(fsys.OSFS{}, cityDir, contract.ConfigState{
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+	}, nil)
+	if err == nil {
+		t.Fatal("syncCityManagedPortArtifacts error = nil, want malformed managed runtime state error")
+	}
+	if !strings.Contains(err.Error(), "reading managed runtime published port") {
+		t.Fatalf("syncCityManagedPortArtifacts error = %v, want published port context", err)
 	}
 }
 

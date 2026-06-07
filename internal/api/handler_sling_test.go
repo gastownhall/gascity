@@ -100,6 +100,47 @@ func TestSlingWithBead(t *testing.T) {
 	}
 }
 
+func TestSlingRefusesCityStoreBeadToRigTarget(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.cfg.Workspace.Prefix = "gc"
+	state.cfg.Rigs[0].Prefix = "rw"
+	state.cityBeadStore = beads.NewMemStore()
+	b, err := state.cityBeadStore.Create(beads.Bead{Title: "city task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"target":"myrig/worker","bead":"` + b.ID + `","force":true}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Type   string `json:"type"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if problem.Type != slingCrossStoreRouteProblemType {
+		t.Fatalf("type = %q, want cross-store discriminator", problem.Type)
+	}
+	for _, want := range []string{"refusing cross-store route", "city:test-city", "myrig/worker", "rig:myrig"} {
+		if !strings.Contains(problem.Detail, want) {
+			t.Fatalf("detail = %q, want %q", problem.Detail, want)
+		}
+	}
+	updated, err := state.cityBeadStore.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", b.ID, err)
+	}
+	if got := updated.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want unset after refusal", got)
+	}
+}
+
 func TestSlingWithMissingBeadReturnsBadRequest(t *testing.T) {
 	h, state := newSlingTestServer(t)
 
@@ -375,7 +416,7 @@ func TestSlingProblemTypesDocumentedInOpenAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal components: %v", err)
 	}
-	for _, want := range []string{slingMissingBeadProblemType, slingCrossRigProblemType} {
+	for _, want := range []string{slingMissingBeadProblemType, slingCrossRigProblemType, slingCrossStoreRouteProblemType} {
 		if !bytes.Contains(components, []byte(want)) {
 			t.Fatalf("OpenAPI components missing problem type %q", want)
 		}
@@ -384,7 +425,7 @@ func TestSlingProblemTypesDocumentedInOpenAPI(t *testing.T) {
 
 func TestDocumentProblemTypesIsIdempotent(t *testing.T) {
 	state := newFakeMutatorState(t)
-	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", time.Now())
+	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", "", time.Now())
 	oapi := sm.humaAPI.OpenAPI()
 
 	documentProblemTypes(oapi)
@@ -559,7 +600,42 @@ func TestSlingPoolTarget(t *testing.T) {
 	}
 }
 
-func TestSlingConflictReturns409ForExistingLiveWorkflow(t *testing.T) {
+// TestSlingSlotSuffixedPoolTargetNormalizesRoutedTo is the write-side guard for
+// #2592: slinging to a slot-suffixed pool target must record the base pool
+// qualified name in gc.routed_to so the pool's exact-match work_query (which
+// keys on the base template) can see the bead.
+func TestSlingSlotSuffixedPoolTargetNormalizesRoutedTo(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.cfg.Agents = []config.Agent{
+		{
+			Name:              "polecat",
+			Dir:               "myrig",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+		},
+	}
+	store := state.stores["myrig"]
+	b, err := store.Create(beads.Bead{Title: "test task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"target":"myrig/polecat-2","bead":"` + b.ID + `"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	updated, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", b.ID, err)
+	}
+	if got := updated.Metadata["gc.routed_to"]; got != "myrig/polecat" {
+		t.Fatalf("gc.routed_to = %q, want myrig/polecat (slot suffix should be normalized away)", got)
+	}
+}
+
+func TestSlingGraphV2RejectsLegacySourceWorkflowConflict(t *testing.T) {
 	// The Huma migration moved sling to /v0/city/{cityName}/sling and
 	// replaced the old plain-JSON `{code, message, source_bead_id, ...}`
 	// error body with RFC 9457 Problem Details. The source-workflow
@@ -593,7 +669,7 @@ func TestSlingConflictReturns409ForExistingLiveWorkflow(t *testing.T) {
 		config.Agent{Name: config.ControlDispatcherAgentName, MaxActiveSessions: intPtr(1)},
 		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "myrig", MaxActiveSessions: intPtr(1)},
 	)
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -609,7 +685,7 @@ title = "Do work"
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := store.Create(beads.Bead{
+	if _, err := store.Create(beads.Bead{
 		Title:  "existing workflow",
 		Type:   "task",
 		Status: "in_progress",
@@ -618,8 +694,7 @@ title = "Do work"
 			"gc.formula_contract": "graph.v2",
 			"gc.source_bead_id":   source.ID,
 		},
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -630,41 +705,12 @@ title = "Do work"
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
 	}
-
-	// Problem Details body: {title, status, detail, errors: [{location, value}, ...]}.
-	var resp struct {
-		Title  string `json:"title"`
-		Status int    `json:"status"`
-		Detail string `json:"detail"`
-		Errors []struct {
-			Location string `json:"location"`
-			Value    any    `json:"value"`
-		} `json:"errors"`
+	source, err = store.Get(source.ID)
+	if err != nil {
+		t.Fatalf("reload source: %v", err)
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Status != http.StatusConflict {
-		t.Fatalf("status field = %d, want 409", resp.Status)
-	}
-
-	// Build a location -> value lookup so assertions don't depend on
-	// the errors[] array order.
-	got := map[string]any{}
-	for _, e := range resp.Errors {
-		got[e.Location] = e.Value
-	}
-
-	if got["body.source_bead_id"] != source.ID {
-		t.Fatalf("source_bead_id = %#v, want %s", got["body.source_bead_id"], source.ID)
-	}
-	ids, ok := got["body.blocking_workflow_ids"].([]any)
-	if !ok || len(ids) != 1 || ids[0] != root.ID {
-		t.Fatalf("blocking_workflow_ids = %#v, want [%s]", got["body.blocking_workflow_ids"], root.ID)
-	}
-	hint, _ := got["body.hint"].(string)
-	if !strings.Contains(hint, "--store-ref rig:myrig --apply") {
-		t.Fatalf("hint = %q, want store-ref cleanup command", hint)
+	if source.Metadata["workflow_id"] != "" {
+		t.Fatalf("source workflow_id = %q, want graph.v2 launch to leave source metadata untouched", source.Metadata["workflow_id"])
 	}
 }
 

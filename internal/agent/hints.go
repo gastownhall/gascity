@@ -7,10 +7,15 @@ import "github.com/gastownhall/gascity/internal/runtime"
 // through to runtime.Config. All fields are optional — zero values mean
 // no special startup handling (fire-and-forget).
 type StartupHints struct {
+	// Lifecycle describes whether the command is long-lived or expected to exit.
+	Lifecycle              runtime.Lifecycle
 	ReadyPromptPrefix      string
 	ReadyDelayMs           int
 	ProcessNames           []string
 	EmitsPermissionWarning bool
+	AcceptStartupDialogs   *bool
+	// MouseOn reports whether tmux mouse mode should be preserved for this session.
+	MouseOn bool
 	// Nudge is text typed into the session after the agent is ready.
 	// Used for CLI agents that don't accept command-line prompts.
 	Nudge string

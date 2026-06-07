@@ -2,7 +2,9 @@ package orders
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -37,6 +39,13 @@ type TriggerOptions struct {
 	ConditionEnv     []string
 	ConditionTimeout time.Duration
 }
+
+var (
+	// conditionCheckPostCancelWaitDelay is os/exec's pipe-close wait after
+	// Cancel returns; the TERM and KILL waits each use conditionCheckSignalGrace.
+	conditionCheckPostCancelWaitDelay = 2 * time.Second
+	conditionCheckSignalGrace         = 2 * time.Second
+)
 
 // CheckTrigger evaluates an order's trigger condition and returns whether it's due.
 // ep is an events Provider used by event triggers to query events; may be nil for
@@ -99,7 +108,14 @@ func checkCooldown(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult 
 	}
 }
 
-// checkCron uses simple minute-granularity matching against the schedule.
+// checkCron uses minute-granularity matching against the schedule, WITH
+// catch-up. A scheduled occurrence fires if either (a) the current minute
+// matches, or (b) a scheduled minute elapsed since the last run without the
+// controller evaluating during that exact minute. Catch-up mirrors cooldown's
+// elapsed-based behavior: without it, a cron order silently drops a slot
+// whenever no evaluation lands in its matching minute, which made a
+// "0 */4 * * *" order miss every boundary (gastown td-4kziysy) because the
+// controller's eval cadence rarely coincides with a once-per-4h minute.
 // Schedule format: "minute hour day-of-month month day-of-week" (5 fields).
 func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 	fields := strings.Fields(a.Schedule)
@@ -109,24 +125,47 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 
 	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
 
-	if !cronFieldMatches(minute, now.Minute()) ||
-		!cronFieldMatches(hour, now.Hour()) ||
-		!cronFieldMatches(dom, now.Day()) ||
-		!cronFieldMatches(month, int(now.Month())) ||
-		!cronFieldMatches(dow, int(now.Weekday())) {
-		return TriggerResult{Due: false, Reason: "cron: schedule not matched"}
+	matchesAt := func(t time.Time) bool {
+		return cronFieldMatches(minute, t.Minute()) &&
+			cronFieldMatches(hour, t.Hour()) &&
+			cronFieldMatches(dom, t.Day()) &&
+			cronFieldMatches(month, int(t.Month())) &&
+			cronFieldMatches(dow, int(t.Weekday()))
 	}
 
-	// Schedule matches — check if already run this minute.
 	last, err := lastRunFn(a.ScopedName())
 	if err != nil {
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("error querying last run: %v", err)}
 	}
-	if !last.IsZero() && last.Truncate(time.Minute).Equal(now.Truncate(time.Minute)) {
-		return TriggerResult{Due: false, Reason: "cron: already run this minute", LastRun: last}
+
+	// (a) Current minute matches — fire unless already run this minute.
+	if matchesAt(now) {
+		if !last.IsZero() && last.Truncate(time.Minute).Equal(now.Truncate(time.Minute)) {
+			return TriggerResult{Due: false, Reason: "cron: already run this minute", LastRun: last}
+		}
+		return TriggerResult{Due: true, Reason: "cron: schedule matched", LastRun: last}
 	}
 
-	return TriggerResult{Due: true, Reason: "cron: schedule matched", LastRun: last}
+	// (b) Catch-up: the current minute does not match, but a scheduled minute
+	// may have elapsed since lastRun without an evaluation landing on it. Scan
+	// minute-by-minute from just after lastRun up to now; any match is a missed
+	// occurrence that is now due. Bounded lookback so a very old lastRun cannot
+	// spin (it is overdue regardless). Skipped when lastRun is zero (never run):
+	// such an order fires only on an exact match, never back-filling history.
+	if !last.IsZero() {
+		const maxCatchupLookback = 366 * 24 * time.Hour
+		start := last.Truncate(time.Minute).Add(time.Minute)
+		if floor := now.Add(-maxCatchupLookback).Truncate(time.Minute); start.Before(floor) {
+			start = floor
+		}
+		for t := start; !t.After(now); t = t.Add(time.Minute) {
+			if matchesAt(t) {
+				return TriggerResult{Due: true, Reason: "cron: caught up missed occurrence", LastRun: last}
+			}
+		}
+	}
+
+	return TriggerResult{Due: false, Reason: "cron: schedule not matched", LastRun: last}
 }
 
 // cronFieldMatches checks if a single cron field matches a value.
@@ -136,7 +175,15 @@ func cronFieldMatches(field string, value int) bool {
 		return true
 	}
 	for _, part := range strings.Split(field, ",") {
-		n, err := strconv.Atoi(strings.TrimSpace(part))
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "*/") {
+			step, err := strconv.Atoi(strings.TrimPrefix(part, "*/"))
+			if err == nil && step > 0 && value%step == 0 {
+				return true
+			}
+			continue
+		}
+		n, err := strconv.Atoi(part)
 		if err == nil && n == value {
 			return true
 		}
@@ -155,13 +202,28 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", a.Check)
+	cleanupCommand := prepareConditionCommand(cmd, conditionCheckSignalGrace)
+	cmd.WaitDelay = conditionCheckPostCancelWaitDelay
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
 	if opts.ConditionDir != "" {
 		cmd.Dir = opts.ConditionDir
 	}
 	cmd.Env = mergeConditionEnv(os.Environ(), opts.ConditionEnv)
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return TriggerResult{Due: false, Reason: fmt.Sprintf("check command timed out after %s", timeout)}
+			reason := fmt.Sprintf("check command timed out after %s", timeout)
+			if cleanupErr := cleanupCommand(); cleanupErr != nil {
+				reason = fmt.Sprintf("%s; cleanup failed: %v", reason, cleanupErr)
+			}
+			return TriggerResult{Due: false, Reason: reason}
+		}
+		if errors.Is(err, exec.ErrWaitDelay) {
+			reason := "check command cleanup exceeded post-cancel wait delay"
+			if cleanupErr := cleanupCommand(); cleanupErr != nil {
+				reason = fmt.Sprintf("%s: %v", reason, cleanupErr)
+			}
+			return TriggerResult{Due: false, Reason: reason}
 		}
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("check command failed: %v", err)}
 	}

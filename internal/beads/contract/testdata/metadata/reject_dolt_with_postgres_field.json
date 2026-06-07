@@ -1,0 +1,5 @@
+{
+  "database": "beads",
+  "backend": "dolt",
+  "postgres_host": "db.example.com"
+}

@@ -390,6 +390,7 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 	req := reloadRequest{
 		wait:       wire.Wait,
 		timeout:    timeout,
+		soft:       wire.Soft,
 		acceptedCh: make(chan reloadControlReply, 1),
 		doneCh:     make(chan reloadControlReply, 1),
 	}
@@ -1168,6 +1169,7 @@ func controllerLoop(
 		stdout:              stdout,
 		stderr:              stderr,
 	}
+	cr.setControllerState(cs)
 	cr.run(ctx)
 }
 
@@ -1312,8 +1314,9 @@ func runController(
 	cs.pokeCh = pokeCh
 	cs.configDirty = configDirty
 	cs.services = cr.svc
-	cs.startBeadEventWatcher(ctx)
 	cr.setControllerState(cs)
+	cs.startBeadEventWatcher(ctx)
+	cs.startMaintenanceLoop(ctx)
 
 	// Start API server if configured. Standalone city mode wraps the
 	// single city in a SupervisorMux so every endpoint is served at its
@@ -1331,7 +1334,8 @@ func runController(
 		// not own the supervisor registry/reconciler path required by
 		// async POST /v0/city, so leave the initializer nil and let the
 		// handler return 501 for create/unregister routes.
-		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", time.Now())
+		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", commit, time.Now())
+		apiMux.WithAnyHostAllowed()
 		addr := net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 		apiLis, apiErr := net.Listen("tcp", addr)
 		if apiErr != nil {

@@ -27,6 +27,7 @@ type phase2ProviderCase struct {
 	wantReadyPromptPrefix string
 	wantProcessNames      []string
 	wantEmitsPermission   bool
+	wantAcceptDialogs     *bool
 	wantModelOverride     string
 	wantModelOverrideArgs []string
 }
@@ -89,13 +90,37 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantModelOverrideArgs: []string{"--model", "gemini-2.5-pro"},
 		},
 		{
-			profileID:        "opencode/tmux-cli",
-			family:           "opencode",
-			wantCommand:      "opencode",
-			wantPromptMode:   "flag",
-			wantPromptFlag:   "--prompt",
-			wantReadyDelayMs: 8000,
-			wantProcessNames: []string{"opencode", "node", "bun"},
+			profileID:             "kimi/tmux-cli",
+			family:                "kimi",
+			wantCommand:           "kimi --yolo --no-thinking",
+			wantPromptMode:        "none",
+			wantReadyDelayMs:      5000,
+			wantReadyPromptPrefix: "",
+			wantProcessNames:      []string{"kimi", "python"},
+			wantAcceptDialogs:     phase2BoolPtr(false),
+			wantModelOverride:     "kimi-k2.6",
+			wantModelOverrideArgs: []string{"--model", "kimi-k2.6"},
+		},
+		{
+			profileID:             "opencode/tmux-cli",
+			family:                "opencode",
+			wantCommand:           "opencode",
+			wantPromptMode:        "flag",
+			wantPromptFlag:        "--prompt",
+			wantReadyDelayMs:      8000,
+			wantProcessNames:      []string{"opencode", "node", "bun"},
+			wantModelOverride:     "opencode/deepseek-v4-flash-free",
+			wantModelOverrideArgs: []string{"--model", "opencode/deepseek-v4-flash-free"},
+		},
+		{
+			profileID:             "antigravity/tmux-cli",
+			family:                "antigravity",
+			wantCommand:           "agy --dangerously-skip-permissions",
+			wantPromptMode:        "flag",
+			wantPromptFlag:        "--prompt-interactive",
+			wantReadyDelayMs:      5000,
+			wantReadyPromptPrefix: "> ",
+			wantProcessNames:      []string{"agy"},
 		},
 	}
 
@@ -139,6 +164,7 @@ func resolvePhase2Template(t *testing.T, tc phase2ProviderCase) TemplateParams {
 		cityName:   "phase2-city",
 		cityPath:   cityPath,
 		workspace:  &config.Workspace{Provider: tc.family},
+		providers:  builtinProviderAliasesForTest(tc.family),
 		lookPath:   func(name string) (string, error) { return filepath.Join("/usr/bin", name), nil },
 		fs:         fsys.OSFS{},
 		beaconTime: time.Unix(0, 0),

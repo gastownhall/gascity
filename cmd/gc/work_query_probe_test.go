@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 func TestPrefixedWorkQueryForProbe_UsesNamedSessionRuntimeName(t *testing.T) {
@@ -29,8 +31,21 @@ func TestPrefixedWorkQueryForProbe_UsesNamedSessionRuntimeName(t *testing.T) {
 	}
 
 	command := prefixedWorkQueryForProbe(cfg, cityPath, "test-city", nil, nil, &cfg.Agents[0], nil)
-	if !strings.Contains(command, "gc.routed_to=demo/witness") {
-		t.Fatalf("prefixedWorkQueryForProbe() = %q, want gc.routed_to=demo/witness", command)
+	if !strings.Contains(command, `bd ready --metadata-field "gc.routed_to=$target"`) || !strings.Contains(command, "-- demo/witness") {
+		t.Fatalf("prefixedWorkQueryForProbe() = %q, want demo/witness route argument", command)
+	}
+}
+
+func TestPrefixedWorkQueryForProbeUsesBD105WorkQuery(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Beads:     config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+		Agents:    []config.Agent{{Name: "worker"}},
+	}
+
+	command := prefixedWorkQueryForProbeWithEnv(nil, cfg, t.TempDir(), cfg.Workspace.Name, nil, nil, &cfg.Agents[0], nil)
+	if !strings.Contains(command, "bd ready --include-ephemeral") {
+		t.Fatalf("prefixedWorkQueryForProbeWithEnv() = %q, want bd-1.0.5 ephemeral-ready probe", command)
 	}
 }
 
@@ -43,7 +58,10 @@ func TestControllerQueryRuntimeEnvInheritedRigUsesCityStorePassword(t *testing.T
 	})
 	writeScopePassword(t, rigDir, "rig-secret")
 
-	env := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("controllerQueryRuntimeEnv() error = %v, want nil", err)
+	}
 	if got := env["GC_DOLT_PASSWORD"]; got != "city-secret" {
 		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", got, "city-secret")
 	}
@@ -52,6 +70,30 @@ func TestControllerQueryRuntimeEnvInheritedRigUsesCityStorePassword(t *testing.T
 	}
 	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want rig beads dir", got)
+	}
+}
+
+func TestControllerQueryRuntimeEnvSurfacesPostgresProjectionError(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityPath := t.TempDir()
+	writePGScopeFixture(t, cityPath, "")
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "agent"}}}
+
+	_, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	if err == nil {
+		t.Fatal("controllerQueryRuntimeEnv() error = nil, want postgres projection error")
+	}
+	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
+		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
 	}
 }
 
@@ -75,7 +117,10 @@ func TestControllerQueryRuntimeEnvExplicitRigUsesRigStorePassword(t *testing.T) 
 	}
 	writeScopePassword(t, rigDir, "rig-secret")
 
-	env := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("controllerQueryRuntimeEnv() error = %v, want nil", err)
+	}
 	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.com" {
 		t.Fatalf("GC_DOLT_HOST = %q, want %q", got, "rig-db.example.com")
 	}
@@ -106,7 +151,10 @@ func TestControllerQueryRuntimeEnvSupportsExecGcBeadsBd(t *testing.T) {
 	})
 	writeScopePassword(t, rigDir, "rig-secret")
 
-	env := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("controllerQueryRuntimeEnv() error = %v, want nil", err)
+	}
 	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.com" {
 		t.Fatalf("GC_DOLT_HOST = %q, want %q", got, "rig-db.example.com")
 	}
@@ -133,7 +181,10 @@ func TestControllerQueryEnvOmitsCredentialsFromPrefix(t *testing.T) {
 	})
 	writeScopePassword(t, rigDir, "rig-secret")
 
-	env := controllerQueryEnv(cityPath, cfg, &cfg.Agents[0])
+	env, err := controllerQueryEnv(cityPath, cfg, &cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("controllerQueryEnv() error = %v, want nil", err)
+	}
 	if got := env["GC_DOLT_PASSWORD"]; got != "" {
 		t.Fatalf("GC_DOLT_PASSWORD leaked into prefix env as %q", got)
 	}
@@ -164,11 +215,15 @@ func TestControllerQueryEnvOmitsCredentialsFromPrefix(t *testing.T) {
 func TestControllerQueryRuntimeEnvReturnsNilForNonBD(t *testing.T) {
 	cityPath := t.TempDir()
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents:    []config.Agent{{Name: "worker"}},
 	}
-	if env := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0]); env != nil {
+	if env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0]); err != nil || env != nil {
+		if err != nil {
+			t.Fatalf("controllerQueryRuntimeEnv() error = %v, want nil", err)
+		}
 		t.Fatalf("controllerQueryRuntimeEnv() = %#v, want nil for non-bd provider", env)
 	}
 }
@@ -221,7 +276,10 @@ provider = "file"
 		}},
 	}
 
-	env := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("controllerQueryRuntimeEnv() error = %v, want nil", err)
+	}
 	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.com" {
 		t.Fatalf("GC_DOLT_HOST = %q, want %q", got, "rig-db.example.com")
 	}

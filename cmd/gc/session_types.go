@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -74,13 +75,15 @@ type drainTracker struct {
 	mu              sync.Mutex
 	drains          map[string]*drainState     // session bead ID -> drain state
 	idleProbes      map[string]*idleProbeState // session bead ID -> async idle probe
+	resetStalls     map[string]bool            // session bead ID -> reset stall event emitted
 	idleProbeCursor int
 }
 
 func newDrainTracker() *drainTracker {
 	return &drainTracker{
-		drains:     make(map[string]*drainState),
-		idleProbes: make(map[string]*idleProbeState),
+		drains:      make(map[string]*drainState),
+		idleProbes:  make(map[string]*idleProbeState),
+		resetStalls: make(map[string]bool),
 	}
 }
 
@@ -179,6 +182,28 @@ func (dt *drainTracker) clearIdleProbe(beadID string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 	delete(dt.idleProbes, beadID)
+}
+
+func (dt *drainTracker) markResetStall(beadID string) bool {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return true
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.resetStalls[beadID] {
+		return false
+	}
+	dt.resetStalls[beadID] = true
+	return true
+}
+
+func (dt *drainTracker) clearResetStall(beadID string) {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	delete(dt.resetStalls, beadID)
 }
 
 // Reconciler tuning defaults.

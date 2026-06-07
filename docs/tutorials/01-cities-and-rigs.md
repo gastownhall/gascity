@@ -9,7 +9,8 @@ description: Create a city, sling work to an agent, add a rig, and configure mul
 First, you'll need to install at least one CLI coding agent (which Gas City
 calls "providers") and make sure that they're on the PATH. Gas City supports
 many providers, including but not limited to Claude Code (`claude`), Codex
-(`codex`) and Gemini (`gemini`). Make sure you've configured each of your chosen
+(`codex`), Gemini (`gemini`), OpenCode (`opencode`), Groq (`groq`), and
+Cerebras (`cerebras`). Make sure you've configured each of your chosen
 providers (the more the merrier!) with the appropriate token and/or API key so
 that they can each run and do things for you.
 
@@ -22,7 +23,7 @@ $ brew install gascity
 
 ~
 $ gc version
-0.13.4
+1.2.1
 ```
 
 > NOTE: the gascity installation is a great way to get the right dependencies in
@@ -70,10 +71,12 @@ Choose your coding agent:
   5. GitHub Copilot
   6. Sourcegraph AMP
   7. OpenCode
-  8. Auggie CLI
-  9. Pi Coding Agent
-  10. Oh My Pi (OMP)
-  11. Custom command
+  8. Groq (OpenCode)
+  9. Cerebras (OpenCode)
+  10. Auggie CLI
+  11. Pi Coding Agent
+  12. Oh My Pi (OMP)
+  13. Custom command
 Agent [1]:
 [1/8] Creating runtime scaffold
 [2/8] Installing hooks (Claude Code)
@@ -86,8 +89,6 @@ Created minimal config (Level 1) in "my-city".
 Registered city 'my-city' (/Users/csells/my-city)
 Installed launchd service: /Users/csells/Library/LaunchAgents/com.gascity.supervisor.plist
 [8/8] Waiting for supervisor to start city
-  Adopting sessions...
-  Starting agents...
 
 ~
 $ gc cities
@@ -142,10 +143,6 @@ $ cat pack.toml
 name = "my-city"
 schema = 2
 
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
-
 [[named_session]]
 template = "mayor"
 mode = "always"
@@ -156,10 +153,10 @@ the provider. The machine-local workspace identity lives in `.gc/site.toml`
 instead, which is how `gc cities`, `gc status`, and other commands still know
 this city is named `my-city`.
 
-The `[[agent]]` entry in `pack.toml` defines the built-in `mayor`, and
+The built-in `mayor` comes from the scaffolded `agents/mayor/` content, and
 `[[named_session]]` keeps a `mayor` session running so you can talk to it at
-any time. When you add more agents later, Gas City creates `agents/<name>/`, with
-`prompt.template.md` for the prompt and `agent.toml` for any per-agent
+any time. When you add more agents later, Gas City creates `agents/<name>/`,
+with `prompt.template.md` for the prompt and `agent.toml` for any per-agent
 overrides.
 
 Gas City also gives you an implicit agent for each supported provider — so
@@ -189,11 +186,21 @@ Named sessions:
   mayor                   reserved-unmaterialized (always)
 ```
 
+Depending on your version, `gc status` may list named sessions by state as
+`awake` or `active` — the two are equivalent.
+
 The `dog` pool is a background utility agent from the built-in maintenance
 pack. It handles internal housekeeping like shutdown coordination. You don't
 need to interact with it — ignore it for now.
 
 ## Adding a rig
+
+<Note>
+If another Gas City workspace is already registered (check `gc cities`),
+commands inside `~/my-city` may resolve to that city and fail. Pass `--city
+~/my-city` explicitly when that happens. These examples assume a single
+registered city.
+</Note>
 
 In Gas City, a project directory registered with a city is called a "rig."
 Rigging a project's directory lets agents work in it.

@@ -92,6 +92,15 @@ func RemoveDir(cityPath, rootID string) error {
 	return nil
 }
 
+// ValidateMemberID rejects empty or path-unsafe molecule member IDs (root
+// bead IDs, step bead IDs) using the same rules EnsureArtifactDir applies.
+// Callers that compute molecule paths from untrusted metadata should
+// validate before joining so a malformed ID cannot escape the molecules
+// root or surface a path-traversing directory.
+func ValidateMemberID(id string) error {
+	return validateIDSegment("molecule member ID", id)
+}
+
 // validateIDSegment rejects empty or path-unsafe ID segments. A valid ID
 // must be non-empty, not contain path separators, not be an absolute
 // path, and not be the literal ".." (parent directory reference).

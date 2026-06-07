@@ -47,7 +47,7 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		return r
 	}
 
-	managedPort := currentManagedDoltPort(c.cityPath)
+	managedPort := currentResolvableManagedDoltPort(c.cityPath)
 
 	var errors []string
 	var warnings []string

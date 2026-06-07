@@ -232,6 +232,28 @@ func TestHandleAgentCreate_MissingName(t *testing.T) {
 	}
 }
 
+func TestHandleAgentCreate_InvalidScope(t *testing.T) {
+	fs := newFakeMutatorState(t)
+	h := newTestCityHandler(t, fs)
+
+	body := `{"name":"coder","provider":"claude","scope":"global"}`
+	req := newPostRequest(cityURL(fs, "/agents"), strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "created") {
+		t.Fatalf("response body looks successful: %s", w.Body.String())
+	}
+	for _, a := range fs.cfg.Agents {
+		if a.Name == "coder" {
+			t.Fatalf("invalid-scope agent was persisted: %+v", a)
+		}
+	}
+}
+
 func TestHandleAgentUpdate(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	h := newTestCityHandler(t, fs)

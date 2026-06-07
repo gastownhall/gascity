@@ -32,6 +32,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 	oldRunning := supervisorCityRunningHook
 	oldError := supervisorCityErrorHook
 	oldWaitForStop := waitForSupervisorControllerStopHook
+	oldWaitForCity := waitForSupervisorCityHook
 	oldRegister := registerCityWithSupervisorTestHook
 	oldTimeout := supervisorCityReadyTimeout
 	oldPoll := supervisorCityPollInterval
@@ -42,6 +43,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 	supervisorCityRunningHook = running
 	supervisorCityErrorHook = supervisorCityError
 	waitForSupervisorControllerStopHook = waitForStandaloneControllerStop
+	waitForSupervisorCityHook = waitForSupervisorCity
 	registerCityWithSupervisorTestHook = nil
 	supervisorCityReadyTimeout = timeout
 	supervisorCityPollInterval = poll
@@ -53,6 +55,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 		supervisorCityRunningHook = oldRunning
 		supervisorCityErrorHook = oldError
 		waitForSupervisorControllerStopHook = oldWaitForStop
+		waitForSupervisorCityHook = oldWaitForCity
 		registerCityWithSupervisorTestHook = oldRegister
 		supervisorCityReadyTimeout = oldTimeout
 		supervisorCityPollInterval = oldPoll
@@ -314,7 +317,18 @@ func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *tes
 	if waitStarted.IsZero() {
 		t.Fatal("supervisor wait path was not reached")
 	}
-	if elapsed := time.Since(waitStarted); elapsed > 250*time.Millisecond {
+	// The fast-failure budget is intentionally generous (well under the test's
+	// 5s startup_timeout but well above the wait-loop's logical exit time).
+	// waitStarted is captured inside the first alive-hook callback, so the
+	// elapsed window measures everything from that point onward: the
+	// remaining ensureLegacyNamedPacksCached / MaterializeBuiltinPacks work,
+	// the wait-loop's first iteration, the error formatting, the
+	// keepRegisteredCity stderr writes, and the assertion itself. Under CPU
+	// contention or a GC pause these can balloon to several hundred ms on
+	// CI hosts (ga-q42 flake observations: up to 715ms). 2s preserves the
+	// "fails fast vs. polls until 5s startup_timeout" regression guard while
+	// no longer flaking on slow hosts.
+	if elapsed := time.Since(waitStarted); elapsed > 2*time.Second {
 		t.Fatalf("registerCityWithSupervisor took %v, want fast failure when supervisor stops", elapsed)
 	}
 	if !strings.Contains(stderr.String(), "keeping registration") {
@@ -515,6 +529,37 @@ func TestLoadStartCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *testing.
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
 		t.Fatalf("expected gastown builtin pack to be materialized before start config load: %v", err)
+	}
+}
+
+func TestLoadStartCityConfigBuiltinGastownMayorHasNoStartupNudge(t *testing.T) {
+	cityPath := writeCityWithUnmaterializedGastownImport(t)
+
+	cfg, _, err := loadStartCityConfig(cityPath)
+	if err != nil {
+		t.Fatalf("loadStartCityConfig returned error: %v", err)
+	}
+
+	var mayor *config.Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "mayor" {
+			mayor = &cfg.Agents[i]
+			break
+		}
+	}
+	if mayor == nil {
+		t.Fatal("expected builtin gastown mayor agent to be present")
+	}
+	if mayor.Nudge != "" {
+		t.Fatalf("builtin gastown mayor nudge = %q, want empty for always-on resident coordinator", mayor.Nudge)
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "agents", "mayor", "agent.toml"))
+	if err != nil {
+		t.Fatalf("read materialized mayor agent.toml: %v", err)
+	}
+	if strings.Contains(string(data), "nudge =") {
+		t.Fatalf("materialized builtin mayor agent.toml should not contain a startup nudge:\n%s", string(data))
 	}
 }
 
@@ -1002,6 +1047,65 @@ func TestUnregisterCityFromSupervisorWaitsForControllerStop(t *testing.T) {
 	}
 	if canonicalTestPath(waitedPath) != canonicalTestPath(cityPath) {
 		t.Fatalf("waited for %q, want %q", waitedPath, cityPath)
+	}
+	if waitedTimeout != supervisorCityStopTimeout(cityPath) {
+		t.Fatalf("wait timeout = %s, want %s", waitedTimeout, supervisorCityStopTimeout(cityPath))
+	}
+}
+
+func TestUnregisterCityFromSupervisorUsesStopTimeoutForSupervisorCityStopWait(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "bright-lights"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var waitedPath string
+	var waitedWantRunning bool
+	var waitedTimeout time.Duration
+	waitForSupervisorCityHook = func(path string, wantRunning bool, timeout time.Duration, _ io.Writer) error {
+		waitedPath = path
+		waitedWantRunning = wantRunning
+		waitedTimeout = timeout
+		return nil
+	}
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	handled, code := unregisterCityFromSupervisor(cityPath, &stdout, &stderr)
+	if !handled || code != 0 {
+		t.Fatalf("unregisterCityFromSupervisor = (%t, %d), want (true, 0); stderr=%q", handled, code, stderr.String())
+	}
+	if canonicalTestPath(waitedPath) != canonicalTestPath(cityPath) {
+		t.Fatalf("waited for %q, want %q", waitedPath, cityPath)
+	}
+	if waitedWantRunning {
+		t.Fatalf("waitForSupervisorCityHook wantRunning = true, want false")
 	}
 	if waitedTimeout != supervisorCityStopTimeout(cityPath) {
 		t.Fatalf("wait timeout = %s, want %s", waitedTimeout, supervisorCityStopTimeout(cityPath))
@@ -1653,8 +1757,19 @@ func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"),
-		[]byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+	cityToml := `[workspace]
+name = "test-city"
+
+[orders]
+skip = ["beads-health", "cross-rig-deps", "gate-sweep", "mol-dog-jsonl", "mol-dog-reaper", "order-tracking-sweep", "orphan-sweep", "prune-branches", "spawn-storm-detect", "wisp-compact"]
+
+[session]
+provider = "fake"
+
+[daemon]
+shutdown_timeout = "100ms"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2054,6 +2169,169 @@ func TestPublishManagedCityWaitsForInitialReconcileBeforeRunning(t *testing.T) {
 	})
 }
 
+func TestSupervisorCityStartTimeoutHonorsDaemonStartReadyTimeout(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "big-city"
+
+[daemon]
+start_ready_timeout = "9m"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := supervisorCityReadyTimeout
+	supervisorCityReadyTimeout = 60 * time.Second
+	t.Cleanup(func() { supervisorCityReadyTimeout = oldTimeout })
+
+	got := supervisorCityStartTimeout(cityPath)
+	if got != 9*time.Minute {
+		t.Errorf("supervisorCityStartTimeout = %v, want 9m (daemon.start_ready_timeout override)", got)
+	}
+}
+
+func TestSupervisorCityStartTimeoutSessionTimeoutCanExtend(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "patient-city"
+
+[session]
+startup_timeout = "12m"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := supervisorCityReadyTimeout
+	supervisorCityReadyTimeout = 60 * time.Second
+	t.Cleanup(func() { supervisorCityReadyTimeout = oldTimeout })
+
+	got := supervisorCityStartTimeout(cityPath)
+	if got != 12*time.Minute {
+		t.Errorf("supervisorCityStartTimeout = %v, want 12m (session.startup_timeout override)", got)
+	}
+}
+
+func TestSupervisorCityStartTimeoutHonorsExplicitDaemonTimeoutBelowPackageDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "small-ci-city"
+
+[daemon]
+start_ready_timeout = "30s"
+
+[session]
+startup_timeout = "1s"
+
+[[agent]]
+name = "worker"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := supervisorCityReadyTimeout
+	supervisorCityReadyTimeout = 5 * time.Minute
+	t.Cleanup(func() { supervisorCityReadyTimeout = oldTimeout })
+
+	got := supervisorCityStartTimeout(cityPath)
+	if got != 30*time.Second {
+		t.Errorf("supervisorCityStartTimeout = %v, want 30s (explicit daemon.start_ready_timeout)", got)
+	}
+}
+
+func TestSupervisorCityStartTimeoutSessionTimeoutExtendsDaemonTimeout(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "patient-big-city"
+
+[daemon]
+start_ready_timeout = "6m"
+
+[session]
+startup_timeout = "12m"
+
+[[agent]]
+name = "worker"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := supervisorCityReadyTimeout
+	supervisorCityReadyTimeout = 60 * time.Second
+	t.Cleanup(func() { supervisorCityReadyTimeout = oldTimeout })
+
+	got := supervisorCityStartTimeout(cityPath)
+	if got != 12*time.Minute {
+		t.Errorf("supervisorCityStartTimeout = %v, want 12m (session.startup_timeout extends daemon.start_ready_timeout)", got)
+	}
+}
+
+func TestSupervisorCityStartTimeoutWithoutExplicitKnobUsesPackageDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "default-city"
+
+[session]
+startup_timeout = "1s"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := supervisorCityReadyTimeout
+	supervisorCityReadyTimeout = 4 * time.Minute
+	t.Cleanup(func() { supervisorCityReadyTimeout = oldTimeout })
+
+	got := supervisorCityStartTimeout(cityPath)
+	if got != 4*time.Minute {
+		t.Errorf("supervisorCityStartTimeout = %v, want 4m (package default, no daemon override)", got)
+	}
+}
+
+func TestSupervisorCityStopTimeoutUsesStopFloorIndependentOfStartReadyDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "stop-city"
+
+[[agent]]
+name = "worker"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := supervisorCityReadyTimeout
+	supervisorCityReadyTimeout = 5 * time.Minute
+	t.Cleanup(func() { supervisorCityReadyTimeout = oldTimeout })
+
+	got := supervisorCityStopTimeout(cityPath)
+	if got != supervisorCityStopTimeoutFloor {
+		t.Errorf("supervisorCityStopTimeout = %v, want stop floor %v", got, supervisorCityStopTimeoutFloor)
+	}
+}
+
+func TestSupervisorCityReadyTimeoutDefaultMatchesConfigDefault(t *testing.T) {
+	// The package-level default must track config.DefaultStartReadyTimeout
+	// so production cities get the configured budget when no explicit
+	// override is set.
+	if supervisorCityReadyTimeout != config.DefaultStartReadyTimeout {
+		t.Errorf("supervisorCityReadyTimeout = %v, want %v (config.DefaultStartReadyTimeout)",
+			supervisorCityReadyTimeout, config.DefaultStartReadyTimeout)
+	}
+}
+
 func TestStartupSessionComputationsDoNotQueryBeadStore(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "ops.log")
 	script := writeSpyScript(t, logFile)
@@ -2095,5 +2373,350 @@ func TestStartupSessionComputationsDoNotQueryBeadStore(t *testing.T) {
 
 	if ops := readOpLog(t, logFile); len(ops) != 0 {
 		t.Fatalf("startup session computations should not touch bead store, got ops %v", ops)
+	}
+}
+
+// confirmCrossCitySupervisorImpact tests
+//
+// These tests verify the warn-and-confirm guard added to prevent
+// `gc init` / `gc register` from silently cycling the global supervisor
+// (and all other registered cities' in-flight work) without the operator's
+// explicit knowledge. See the bead for the incident that motivated this.
+
+func TestConfirmCrossCitySupervisorImpactSingleCityProceedsSilently(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "only-city")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "only-city"); err != nil {
+		t.Fatalf("seed register: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 1234 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
+		t.Errorf("single-city case should proceed; stderr=%q", stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("single-city case should emit no warning; stderr=%q", stderr.String())
+	}
+}
+
+func TestConfirmCrossCitySupervisorImpactSupervisorDeadProceedsSilently(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+	otherPath := filepath.Join(t.TempDir(), "other-city")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(otherPath, "other-city"); err != nil {
+		t.Fatalf("seed register other: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 0 } // supervisor absent
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
+		t.Errorf("supervisor-absent case should proceed; stderr=%q", stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("supervisor-absent case should emit no warning; stderr=%q", stderr.String())
+	}
+}
+
+func TestConfirmCrossCitySupervisorImpactAssumeYesProceedsWithWarning(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+	otherPath := filepath.Join(t.TempDir(), "other-city")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(otherPath, "other-city"); err != nil {
+		t.Fatalf("seed register other: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 1234 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	oldYes := assumeYesForSupervisorCycle
+	assumeYesForSupervisorCycle = true
+	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
+
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
+		t.Errorf("--yes case should proceed; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "other-city") {
+		t.Errorf("warning should list other-city; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--yes") {
+		t.Errorf("warning should note --yes was honored; stderr=%q", stderr.String())
+	}
+}
+
+func TestConfirmCrossCitySupervisorImpactPromptYProceeds(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+	otherPath := filepath.Join(t.TempDir(), "other-city")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(otherPath, "other-city"); err != nil {
+		t.Fatalf("seed register other: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 1234 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	oldYes := assumeYesForSupervisorCycle
+	assumeYesForSupervisorCycle = false
+	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
+
+	oldStdin := confirmCrossCitySupervisorImpactStdin
+	confirmCrossCitySupervisorImpactStdin = strings.NewReader("y\n")
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdin = oldStdin })
+
+	oldTerm := confirmCrossCitySupervisorImpactStdinIsTerminal
+	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
+
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
+		t.Errorf("user-entered y should proceed; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Continue?") {
+		t.Errorf("prompt should be emitted; stderr=%q", stderr.String())
+	}
+}
+
+func TestConfirmCrossCitySupervisorImpactPromptNAborts(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+	otherPath := filepath.Join(t.TempDir(), "other-city")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(otherPath, "other-city"); err != nil {
+		t.Fatalf("seed register other: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 1234 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	oldYes := assumeYesForSupervisorCycle
+	assumeYesForSupervisorCycle = false
+	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
+
+	oldStdin := confirmCrossCitySupervisorImpactStdin
+	confirmCrossCitySupervisorImpactStdin = strings.NewReader("n\n")
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdin = oldStdin })
+
+	oldTerm := confirmCrossCitySupervisorImpactStdinIsTerminal
+	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
+
+	var stderr bytes.Buffer
+	if confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
+		t.Errorf("user-entered n should abort; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Aborted") {
+		t.Errorf("abort path should emit 'Aborted'; stderr=%q", stderr.String())
+	}
+}
+
+func TestConfirmCrossCitySupervisorImpactPromptEmptyDefaultsToNo(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+	otherPath := filepath.Join(t.TempDir(), "other-city")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(otherPath, "other-city"); err != nil {
+		t.Fatalf("seed register other: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 1234 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	oldYes := assumeYesForSupervisorCycle
+	assumeYesForSupervisorCycle = false
+	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
+
+	oldStdin := confirmCrossCitySupervisorImpactStdin
+	confirmCrossCitySupervisorImpactStdin = strings.NewReader("\n")
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdin = oldStdin })
+
+	oldTerm := confirmCrossCitySupervisorImpactStdinIsTerminal
+	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
+
+	var stderr bytes.Buffer
+	if confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
+		t.Errorf("empty input should default to abort; stderr=%q", stderr.String())
+	}
+}
+
+func TestConfirmCrossCitySupervisorImpactNonTerminalStdinProceedsSilently(t *testing.T) {
+	// CI, scripts, pipes, `< /dev/null` all give a non-terminal stdin.
+	// In those contexts the guard cannot meaningfully prompt; it must
+	// warn (audit trail) and proceed, not abort. Aborting would break
+	// every scripted `gc init` / `gc register` invocation, including
+	// the acceptance test suite. See PR #2638 CI failure.
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+	otherPath := filepath.Join(t.TempDir(), "other-city")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(otherPath, "other-city"); err != nil {
+		t.Fatalf("seed register other: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 1234 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	oldTerm := confirmCrossCitySupervisorImpactStdinIsTerminal
+	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return false }
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
+
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
+		t.Errorf("non-terminal stdin should proceed silently; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "other-city") {
+		t.Errorf("warning should still be printed for audit; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stdin is not a terminal") {
+		t.Errorf("non-tty notice should be printed; stderr=%q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "Continue?") {
+		t.Errorf("prompt MUST NOT be emitted on non-tty path; stderr=%q", stderr.String())
+	}
+}
+
+func TestConfirmCrossCitySupervisorImpactWarnsAboutAllOtherCities(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	otherA := filepath.Join(t.TempDir(), "city-a")
+	otherB := filepath.Join(t.TempDir(), "city-b")
+	otherC := filepath.Join(t.TempDir(), "city-c")
+	for _, p := range []string{otherA, otherB, otherC} {
+		if err := reg.Register(p, filepath.Base(p)); err != nil {
+			t.Fatalf("seed register %s: %v", p, err)
+		}
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 1234 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	oldYes := assumeYesForSupervisorCycle
+	assumeYesForSupervisorCycle = true
+	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
+
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
+		t.Errorf("--yes should proceed; stderr=%q", stderr.String())
+	}
+	out := stderr.String()
+	for _, name := range []string{"city-a", "city-b", "city-c"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("warning should list %q; stderr=%q", name, out)
+		}
+	}
+	if !strings.Contains(out, "3 other registered cities") {
+		t.Errorf("warning should report count of 3 (plural); stderr=%q", out)
+	}
+}
+
+func TestConfirmCrossCitySupervisorImpactNoPromptWarnsAndProceeds(t *testing.T) {
+	// promptOnImpact=false models operational entry points (gc start): the
+	// warning is still printed for the audit trail, but the guard proceeds
+	// without blocking — even on an interactive terminal where it otherwise
+	// would prompt. See PR #2638 review (gc start has no --yes bypass).
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+	otherPath := filepath.Join(t.TempDir(), "other-city")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(otherPath, "other-city"); err != nil {
+		t.Fatalf("seed register other: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 1234 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	oldYes := assumeYesForSupervisorCycle
+	assumeYesForSupervisorCycle = false
+	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
+
+	// A real terminal would normally trigger the prompt; promptOnImpact=false
+	// must suppress it regardless.
+	oldTerm := confirmCrossCitySupervisorImpactStdinIsTerminal
+	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
+
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, false, &stderr) {
+		t.Errorf("non-prompting entry point should proceed; stderr=%q", stderr.String())
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "other-city") {
+		t.Errorf("warning should still list other-city for audit; stderr=%q", out)
+	}
+	if !strings.Contains(out, "does not gate on cross-city impact") {
+		t.Errorf("warn-and-proceed notice should be printed; stderr=%q", out)
+	}
+	if strings.Contains(out, "Continue?") {
+		t.Errorf("prompt MUST NOT be emitted when promptOnImpact is false; stderr=%q", out)
+	}
+}
+
+// erroringSupervisorRegistry is a test double that fails List with a fixed
+// error, used to validate the fail-open-with-warning behavior on registry
+// read errors (PR #2638 review feedback C1).
+type erroringSupervisorRegistry struct{ err error }
+
+func (e *erroringSupervisorRegistry) List() ([]supervisor.CityEntry, error) { return nil, e.err }
+func (e *erroringSupervisorRegistry) Register(_, _ string) error            { return nil }
+func (e *erroringSupervisorRegistry) Unregister(_ string) error             { return nil }
+
+func TestConfirmCrossCitySupervisorImpactRegistryReadErrorFailsOpenWithWarning(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+
+	oldRegistry := newSupervisorRegistry
+	newSupervisorRegistry = func() supervisorRegistry {
+		return &erroringSupervisorRegistry{err: errors.New("simulated registry I/O fault")}
+	}
+	t.Cleanup(func() { newSupervisorRegistry = oldRegistry })
+
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
+		t.Errorf("registry read error should fail open (proceed); stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unable to read city registry") {
+		t.Errorf("registry read error should emit warning; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "simulated registry I/O fault") {
+		t.Errorf("registry read error should include the underlying error message; stderr=%q", stderr.String())
 	}
 }

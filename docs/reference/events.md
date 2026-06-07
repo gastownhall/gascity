@@ -156,7 +156,7 @@ payload objects. For example, use
 
 ## Machine-Readable Schema
 
-The downloadable <a href="/schema/events.txt" download="events.json">events.json</a>
+The <a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/schema/events.json" target="_blank" rel="noopener">events.json</a>
 schema validates one JSON object line from list, watch, or follow mode. It
 contains only framing metadata and `$ref`s into `openapi.json`:
 

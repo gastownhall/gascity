@@ -35,8 +35,8 @@ func TestPhase1CatalogProfilesStayAligned(t *testing.T) {
 	}
 
 	profiles := Phase1Profiles()
-	if len(profiles) != 4 {
-		t.Fatalf("profiles = %d, want 4", len(profiles))
+	if len(profiles) != 7 {
+		t.Fatalf("profiles = %d, want 7", len(profiles))
 	}
 	for _, profile := range profiles {
 		if profile.Continuation.AnchorText == "" {

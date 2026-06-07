@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -85,9 +86,8 @@ type expandedAgent struct {
 // provider prefix matching — the same approach as discoverPoolInstances.
 func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []expandedAgent {
 	maxSess := a.EffectiveMaxActiveSessions()
-	isMultiSession := maxSess == nil || *maxSess != 1
 
-	if !isMultiSession {
+	if !isMultiSessionAgent(a) {
 		return []expandedAgent{{
 			qualifiedName: a.QualifiedName(),
 			rig:           a.Dir,
@@ -220,8 +220,7 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 		}
 		// Check multi-session instance members.
 		maxSess := a.EffectiveMaxActiveSessions()
-		isMultiSession := maxSess == nil || *maxSess != 1
-		if isMultiSession && a.Dir == dir {
+		if isMultiSessionAgent(a) && a.Dir == dir {
 			isUnlimited := maxSess == nil || *maxSess < 0
 			if isUnlimited {
 				// Unlimited: match "{name}-{N}" or "{binding.name}-{N}" where N >= 1.
@@ -264,6 +263,9 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 				}
 			}
 		}
+	}
+	if a, ok := agentutil.ResolveQualifiedRigScopedTemplate(cfg, name); ok {
+		return a, true
 	}
 	return config.Agent{}, false
 }
@@ -539,8 +541,7 @@ func poolQualifiedNameForSlot(a config.Agent, slot int) string {
 // isMultiSessionAgent reports whether the agent can have more than one
 // concurrent session. This is the replacement for the removed IsPool() method.
 func isMultiSessionAgent(a config.Agent) bool {
-	maxSess := a.EffectiveMaxActiveSessions()
-	return maxSess == nil || *maxSess != 1
+	return a.SupportsExpandedSessionIdentities()
 }
 
 // classifyAgentKind labels an agent so dashboards can route its sessions to
@@ -569,13 +570,16 @@ func isCrewDir(dir string) bool {
 }
 
 func poolInstanceNameForAPI(base string, slot int, a config.Agent) string {
-	maxSess := a.EffectiveMaxActiveSessions()
-	isMultiInstance := maxSess != nil && (*maxSess > 1 || *maxSess < 0)
-	if !isMultiInstance {
+	if a.UsesCanonicalSingletonPoolIdentity() {
 		return base
 	}
 	if slot >= 1 && slot <= len(a.NamepoolNames) {
 		return a.NamepoolNames[slot-1]
+	}
+	maxSess := a.EffectiveMaxActiveSessions()
+	isMultiInstance := maxSess != nil && (*maxSess > 1 || *maxSess < 0)
+	if !isMultiInstance {
+		return base
 	}
 	return fmt.Sprintf("%s-%d", base, slot)
 }

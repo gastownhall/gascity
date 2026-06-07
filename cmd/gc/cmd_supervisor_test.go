@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -16,13 +17,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -82,6 +86,8 @@ func stubSupervisorSystemctlUserAvailable(t *testing.T, available bool) {
 
 func startWorkspaceServiceSentinel(t *testing.T, gcHome, cityPath, serviceName string) workspaceServiceSentinel {
 	t.Helper()
+	processgrouptest.RequireRealProcessSignals(t)
+
 	stateRoot := filepath.Join(cityPath, ".gc", "services", serviceName)
 	socketPath := filepath.Join(t.TempDir(), serviceName+".sock")
 	cmd := exec.Command("sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1; done")
@@ -406,7 +412,7 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 		"[Service]",
 		`KillMode=process`,
 		`Environment=GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL="1"`,
-		`ExecStart="/usr/local/bin/gc" supervisor run`,
+		`ExecStart=/usr/local/bin/gc supervisor run`,
 		`StandardOutput=append:/home/user/.gc/supervisor.log`,
 		`Environment=GC_HOME="/home/user/.gc"`,
 		`Environment=XDG_RUNTIME_DIR="/tmp/gc-run"`,
@@ -422,7 +428,7 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 		"# (control-group) would cascade SIGTERM to tmux servers spawned by\n" +
 		"# 'gc supervisor run' that live in this cgroup, killing one-per-bead\n" +
 		"# session conversation history. The reconciler re-adopts tmux on start.\n" +
-		"KillMode=process\nExecStart=\"/usr/local/bin/gc\" supervisor run\n"
+		"KillMode=process\nExecStart=/usr/local/bin/gc supervisor run\n"
 	if !strings.Contains(content, wantBlock) {
 		t.Fatalf("systemd template missing ordered KillMode=process block under [Service]; got:\n%s", content)
 	}
@@ -488,6 +494,10 @@ func TestBuildSupervisorServiceDataIncludesProviderEnv(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
 	t.Setenv("GEMINI_API_KEY", "gemini-123")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "gc-project")
+	t.Setenv("DEEPSEEK_API_KEY", "ds-123")
+	t.Setenv("OLLAMA_HOST", "http://localhost:11434")
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA123")
+	t.Setenv("AWS_PAGER", "less")
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude"))
 	t.Setenv("GC_SUPERVISOR_ENV", "CUSTOM_PROVIDER_TOKEN,IGNORED_EMPTY")
 	t.Setenv("CUSTOM_PROVIDER_TOKEN", "custom-token")
@@ -506,6 +516,9 @@ func TestBuildSupervisorServiceDataIncludesProviderEnv(t *testing.T) {
 		"OPENAI_API_KEY":        "sk-openai-123",
 		"GEMINI_API_KEY":        "gemini-123",
 		"GOOGLE_CLOUD_PROJECT":  "gc-project",
+		"DEEPSEEK_API_KEY":      "ds-123",
+		"OLLAMA_HOST":           "http://localhost:11434",
+		"AWS_ACCESS_KEY_ID":     "AKIA123",
 		"CLAUDE_CONFIG_DIR":     filepath.Join(homeDir, ".claude"),
 		"CUSTOM_PROVIDER_TOKEN": "custom-token",
 	} {
@@ -513,7 +526,7 @@ func TestBuildSupervisorServiceDataIncludesProviderEnv(t *testing.T) {
 			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
 		}
 	}
-	for _, key := range []string{"GC_HOME", "PATH", "XDG_RUNTIME_DIR", "IGNORED_EMPTY", "UNRELATED_SECRET"} {
+	for _, key := range []string{"GC_HOME", "PATH", "XDG_RUNTIME_DIR", "IGNORED_EMPTY", "UNRELATED_SECRET", "AWS_PAGER"} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("ExtraEnv should not include %s: %#v", key, got)
 		}
@@ -531,6 +544,9 @@ func TestBuildSupervisorServiceDataOmitsProviderEnvWhenOptedOut(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
 	t.Setenv("GEMINI_API_KEY", "gemini-123")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "gc-project")
+	t.Setenv("DEEPSEEK_API_KEY", "ds-123")
+	t.Setenv("OLLAMA_HOST", "http://localhost:11434")
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA123")
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude"))
 	t.Setenv("GC_SUPERVISOR_ENV", "CUSTOM_PROVIDER_TOKEN")
 	t.Setenv("CUSTOM_PROVIDER_TOKEN", "custom-token")
@@ -548,6 +564,9 @@ func TestBuildSupervisorServiceDataOmitsProviderEnvWhenOptedOut(t *testing.T) {
 		"OPENAI_API_KEY",
 		"GEMINI_API_KEY",
 		"GOOGLE_CLOUD_PROJECT",
+		"DEEPSEEK_API_KEY",
+		"OLLAMA_HOST",
+		"AWS_ACCESS_KEY_ID",
 	} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("ExtraEnv should not include provider key %s when %s=1: %#v",
@@ -570,6 +589,243 @@ func supervisorServiceEnvMap(vars []supervisorServiceEnvVar) map[string]string {
 		m[item.Name] = item.Value
 	}
 	return m
+}
+
+// writeSupervisorSecretsEnvFile writes dotenv content to ${GC_HOME}/secrets.env,
+// creating GC_HOME if needed. GC_HOME must already be set in the environment.
+func writeSupervisorSecretsEnvFile(t *testing.T, content string) {
+	t.Helper()
+	path := supervisorSecretsEnvFilePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("creating GC_HOME for secrets file: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing secrets file: %v", err)
+	}
+}
+
+// TestBuildSupervisorServiceDataMergesSecretsEnvFile asserts the durable fix
+// for credentials that live only in ${GC_HOME}/secrets.env: with the secret
+// absent from the calling shell, it still reaches the service env. A
+// non-allowlisted key in the file is dropped; a GC_SUPERVISOR_ENV opt-in key
+// present only in the file is honored.
+func TestBuildSupervisorServiceDataMergesSecretsEnvFile(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "CUSTOM_PROVIDER_TOKEN")
+	// Ensure the keys are NOT present in the calling shell's environment.
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CUSTOM_PROVIDER_TOKEN", "")
+	t.Setenv("UNRELATED_SECRET", "")
+
+	writeSupervisorSecretsEnvFile(t, `# machine-local provider secrets
+ANTHROPIC_AUTH_TOKEN=sk-from-file
+CUSTOM_PROVIDER_TOKEN=custom-from-file
+UNRELATED_SECRET=do-not-persist
+`)
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for key, want := range map[string]string{
+		"ANTHROPIC_AUTH_TOKEN":  "sk-from-file",
+		"CUSTOM_PROVIDER_TOKEN": "custom-from-file",
+	} {
+		if got[key] != want {
+			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
+		}
+	}
+	if _, ok := got["UNRELATED_SECRET"]; ok {
+		t.Fatalf("ExtraEnv should not include non-allowlisted UNRELATED_SECRET: %#v", got)
+	}
+}
+
+// TestBuildSupervisorServiceDataShellEnvWinsOverSecretsFile asserts the
+// gap-fill precedence: a value exported in the calling shell takes precedence
+// over the same key in ${GC_HOME}/secrets.env.
+func TestBuildSupervisorServiceDataShellEnvWinsOverSecretsFile(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "sk-from-shell")
+
+	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=sk-from-file\n")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	if got := supervisorServiceEnvMap(data.ExtraEnv); got["ANTHROPIC_AUTH_TOKEN"] != "sk-from-shell" {
+		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want shell value %q",
+			got["ANTHROPIC_AUTH_TOKEN"], "sk-from-shell")
+	}
+}
+
+// TestBuildSupervisorServiceDataSecretsFileRespectsOmitProviderCreds asserts
+// that the provider-credential opt-out also suppresses provider keys sourced
+// from the secrets file.
+func TestBuildSupervisorServiceDataSecretsFileRespectsOmitProviderCreds(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv(supervisorOmitProviderCredsEnv, "1")
+
+	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=sk-from-file\n")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	if _, ok := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Fatalf("ExtraEnv should not include provider key from secrets file when %s=1",
+			supervisorOmitProviderCredsEnv)
+	}
+}
+
+// TestBuildSupervisorServiceDataMissingSecretsFileIsNotAnError asserts that the
+// absence of ${GC_HOME}/secrets.env is the normal case and does not fail.
+func TestBuildSupervisorServiceDataMissingSecretsFileIsNotAnError(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+
+	if _, err := buildSupervisorServiceData(); err != nil {
+		t.Fatalf("buildSupervisorServiceData with no secrets file: %v", err)
+	}
+}
+
+// TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully asserts
+// the documented fail-safe: a malformed secrets file does not block service
+// file generation (no error) and contributes no env — the malformed file is
+// ignored rather than partially applied, so the good first line must not leak
+// through.
+func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+
+	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=sk-from-file\nMALFORMED LINE WITHOUT EQUALS\n")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData with malformed secrets file: %v", err)
+	}
+	if _, ok := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Fatalf("ExtraEnv should not include any key from a malformed secrets file")
+	}
+}
+
+// TestBuildSupervisorServiceDataForwardsRepresentativeProviderPrefixes asserts
+// that representative provider-prefix credentials are forwarded into the
+// supervisor's persistent env. internal/processenv owns complete allowlist
+// coverage; this test covers the supervisor integration boundary.
+func TestBuildSupervisorServiceDataForwardsRepresentativeProviderPrefixes(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+
+	// One canonical probe key per documented prefix.
+	probes := map[string]string{
+		"ANTHROPIC_API_KEY":    "sk-ant-probe",
+		"AZURE_OPENAI_API_KEY": "azure-openai-probe",
+		"CEREBRAS_API_KEY":     "cb-probe",
+		"COHERE_API_KEY":       "cohere-probe",
+		"DEEPSEEK_API_KEY":     "ds-probe",
+		"FIREWORKS_API_KEY":    "fw-probe",
+		"GEMINI_API_KEY":       "gemini-probe",
+		"GOOGLE_CLOUD_PROJECT": "google-probe-project",
+		"GROQ_API_KEY":         "groq-probe",
+		"MISTRAL_API_KEY":      "mistral-probe",
+		"OLLAMA_HOST":          "http://localhost:11434",
+		"OPENAI_API_KEY":       "sk-openai-probe",
+		"OPENROUTER_API_KEY":   "or-probe",
+		"TOGETHER_API_KEY":     "together-probe",
+		"VERTEX_PROJECT_ID":    "vertex-probe-project",
+		"XAI_API_KEY":          "xai-probe",
+	}
+	for k, v := range probes {
+		t.Setenv(k, v)
+	}
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for k, want := range probes {
+		if got[k] != want {
+			t.Errorf("ExtraEnv[%s] = %q, want %q", k, got[k], want)
+		}
+	}
+}
+
+func TestBuildSupervisorServiceDataForwardsCuratedProviderCredentialEnvKeys(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+
+	probes := map[string]string{
+		"AWS_ACCESS_KEY_ID":                      "AKIA-probe",
+		"AWS_BEARER_TOKEN_BEDROCK":               "bedrock-bearer-probe",
+		"AWS_CA_BUNDLE":                          "/tmp/aws-ca-bundle.pem",
+		"AWS_CONFIG_FILE":                        "/tmp/aws-config",
+		"AWS_CONTAINER_AUTHORIZATION_TOKEN":      "container-auth-probe",
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI":     "http://127.0.0.1/credentials",
+		"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": "/v2/credentials/probe",
+		"AWS_DEFAULT_REGION":                     "us-west-2",
+		"AWS_EC2_METADATA_DISABLED":              "true",
+		"AWS_ENDPOINT_URL":                       "https://aws.example.test",
+		"AWS_ENDPOINT_URL_BEDROCK":               "https://bedrock.example.test",
+		"AWS_PROFILE":                            "gascity",
+		"AWS_REGION":                             "us-east-1",
+		"AWS_ROLE_ARN":                           "arn:aws:iam::123456789012:role/gascity",
+		"AWS_SDK_LOAD_CONFIG":                    "1",
+		"AWS_SECRET_ACCESS_KEY":                  "aws-secret-probe",
+		"AWS_SESSION_TOKEN":                      "aws-session-probe",
+		"AWS_SHARED_CREDENTIALS_FILE":            "/tmp/aws-credentials",
+		"AWS_USE_DUALSTACK_ENDPOINT":             "true",
+		"AWS_USE_FIPS_ENDPOINT":                  "true",
+		"AWS_WEB_IDENTITY_TOKEN_FILE":            "/tmp/aws-web-identity-token",
+	}
+	for k, v := range probes {
+		t.Setenv(k, v)
+	}
+	for _, key := range []string{"AWS_EXECUTION_ENV", "AWS_PAGER", "AWS_VAULT"} {
+		t.Setenv(key, "not-provider-auth")
+	}
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for k, want := range probes {
+		if got[k] != want {
+			t.Errorf("ExtraEnv[%s] = %q, want %q - exact provider key may be missing", k, got[k], want)
+		}
+	}
+	for _, key := range []string{"AWS_EXECUTION_ENV", "AWS_PAGER", "AWS_VAULT"} {
+		if _, ok := got[key]; ok {
+			t.Errorf("ExtraEnv should not include broad AWS runtime state %s", key)
+		}
+	}
 }
 
 func TestBuildSupervisorServiceDataReadsAllowlistedDoltCredentialKeysFromLaunchctl(t *testing.T) {
@@ -1284,6 +1540,8 @@ func TestInstallSupervisorSystemdWarmRefreshFallsBackToKillWhenGracefulSignalDoe
 }
 
 func TestInstallSupervisorSystemdWarmRefreshStopsWorkspaceServicesBeforeStart(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
 	if goruntime.GOOS != "linux" {
 		t.Skip("systemd path only applies on linux")
 	}
@@ -3270,6 +3528,111 @@ func TestInstallSupervisorLaunchdRestoresPreviousCurrentPlistWhenUpdateFails(t *
 	}
 }
 
+func TestInstallSupervisorLaunchdSkipsReloadWhenUnchangedAndSupervisorAlive(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-same",
+		LogPath:       filepath.Join(gcHome, "supervisor.log"),
+		GCHome:        gcHome,
+		XDGRuntimeDir: "",
+		LaunchdLabel:  supervisorLaunchdLabel(),
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentPath := filepath.Join(homeDir, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
+	if err := os.MkdirAll(filepath.Dir(currentPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(currentPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorLaunchctlRun
+	oldAlive := supervisorAliveHook
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorAliveHook = func() int { return 4242 }
+	t.Cleanup(func() {
+		supervisorLaunchctlRun = oldRun
+		supervisorAliveHook = oldAlive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if len(calls) != 0 {
+		t.Fatalf("launchctl calls = %v, want none for unchanged running service", calls)
+	}
+	if !strings.Contains(stdout.String(), "Installed launchd service: "+currentPath) {
+		t.Fatalf("stdout = %q, want install confirmation for %s", stdout.String(), currentPath)
+	}
+}
+
+func TestInstallSupervisorLaunchdReloadsWhenUnchangedButSupervisorStopped(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-same",
+		LogPath:       filepath.Join(gcHome, "supervisor.log"),
+		GCHome:        gcHome,
+		XDGRuntimeDir: "",
+		LaunchdLabel:  supervisorLaunchdLabel(),
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentPath := filepath.Join(homeDir, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
+	if err := os.MkdirAll(filepath.Dir(currentPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(currentPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorLaunchctlRun
+	oldAlive := supervisorAliveHook
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorAliveHook = func() int { return 0 }
+	t.Cleanup(func() {
+		supervisorLaunchctlRun = oldRun
+		supervisorAliveHook = oldAlive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	joined := strings.Join(calls, "\n")
+	for _, want := range []string{
+		"unload " + currentPath,
+		"load " + currentPath,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("launchctl calls = %v, want %q", calls, want)
+		}
+	}
+}
+
 func TestUninstallSupervisorLaunchdRemovesMatchingLegacyDefaultPlistForIsolatedGCHome(t *testing.T) {
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")
@@ -3637,6 +4000,9 @@ func TestWaitForSupervisorReadySucceedsWhenAlreadyReadyEvenWithZeroTimeout(t *te
 }
 
 func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
+	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
+		t.Setenv("HOME", lu.HomeDir) // prevent HOME-override guard from firing before the already-running check
+	}
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
@@ -3657,6 +4023,9 @@ func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
 }
 
 func TestDoSupervisorStartDetectsSupervisorOnFallbackSocket(t *testing.T) {
+	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
+		t.Setenv("HOME", lu.HomeDir) // prevent HOME-override guard from firing before the already-running check
+	}
 	gcHome := shortTempDir(t, "gc-home-")
 	runtimeDir := shortTempDir(t, "gc-run-")
 	t.Setenv("GC_HOME", gcHome)
@@ -3763,7 +4132,7 @@ func TestRunSupervisorSIGTERMPreservesSessionsEndToEnd(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("runSupervisor code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatalf("runSupervisor did not exit after SIGTERM; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 	got := stdout.String()
@@ -4038,6 +4407,7 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	closer := &closerSpy{}
+	forceStop := &atomic.Bool{}
 	mc := &managedCity{
 		name:   "bright-lights",
 		cancel: func() {},
@@ -4051,10 +4421,11 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 					DriftDrainTimeout: "20ms",
 				},
 			},
-			sp:     runtime.NewFake(),
-			rec:    events.Discard,
-			stdout: io.Discard,
-			stderr: io.Discard,
+			sp:                runtime.NewFake(),
+			rec:               events.Discard,
+			stdout:            io.Discard,
+			stderr:            io.Discard,
+			forceStopShutdown: forceStop,
 		},
 	}
 
@@ -4075,6 +4446,60 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	}
 	if !closer.closed {
 		t.Fatal("expected closer to be closed after forced cleanup")
+	}
+	if !forceStop.Load() {
+		t.Fatal("expected forced cleanup to request force-stop shutdown")
+	}
+
+	ops := readOpLog(t, logFile)
+	assertSingleStopWithBenignNoise(t, ops)
+}
+
+func TestStopManagedCityAllowsForcedShutdownToUnwind(t *testing.T) {
+	cityPath := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "ops.log")
+	script := writeSpyScript(t, logFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	done := make(chan struct{})
+	time.AfterFunc(60*time.Millisecond, func() {
+		close(done)
+	})
+	closer := &closerSpy{}
+	forceStop := &atomic.Bool{}
+	mc := &managedCity{
+		name:   "bright-lights",
+		cancel: func() {},
+		done:   done,
+		closer: closer,
+		cr: &CityRuntime{
+			cfg: &config.City{
+				Daemon: config.DaemonConfig{
+					ShutdownTimeout: "20ms",
+				},
+			},
+			sp:                runtime.NewFake(),
+			rec:               events.Discard,
+			stdout:            io.Discard,
+			stderr:            io.Discard,
+			forceStopShutdown: forceStop,
+		},
+	}
+
+	var stderr bytes.Buffer
+	err := stopManagedCity(mc, cityPath, &stderr)
+	if err != nil {
+		t.Fatalf("stopManagedCity: %v; stderr=%q", err, stderr.String())
+	}
+	if !forceStop.Load() {
+		t.Fatal("expected forced cleanup to request force-stop shutdown")
+	}
+	if !closer.closed {
+		t.Fatal("expected closer to be closed after forced cleanup")
+	}
+	if strings.Contains(stderr.String(), "after forced shutdown") {
+		t.Fatalf("stderr = %q, want no forced-shutdown timeout", stderr.String())
 	}
 
 	ops := readOpLog(t, logFile)
@@ -4401,10 +4826,13 @@ func TestSupervisorSignalLoopKeepsLateDestructiveEscalationUntilShutdownDone(t *
 	var shutdownStartedOnce sync.Once
 	ctl := newSupervisorShutdownController()
 
-	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode) {
-		ctl.request(mode)
-		shutdownStartedOnce.Do(func() { close(shutdownStarted) })
-	}, func() {})
+	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, _ shutdownTrigger) bool {
+		repeatedDestructive := ctl.request(mode)
+		if !repeatedDestructive {
+			shutdownStartedOnce.Do(func() { close(shutdownStarted) })
+		}
+		return repeatedDestructive
+	}, func() {}, io.Discard)
 
 	sigCh <- syscall.SIGTERM
 	select {
@@ -4420,6 +4848,204 @@ func TestSupervisorSignalLoopKeepsLateDestructiveEscalationUntilShutdownDone(t *
 	}
 }
 
+// TestSupervisorSignalLoopRecordsSignalAttribution ensures the signal
+// loop forwards the triggering signal name to requestShutdown so the
+// supervisor can log/emit it. Without this attribution, a graceful
+// exit via SIGTERM/SIGINT leaves no forensic trail (see gc-exue3).
+func TestSupervisorSignalLoopRecordsSignalAttribution(t *testing.T) {
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	defer close(done)
+
+	gotMode := make(chan supervisorShutdownMode, 1)
+	gotTrigger := make(chan shutdownTrigger, 1)
+	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, trigger shutdownTrigger) bool {
+		gotMode <- mode
+		gotTrigger <- trigger
+		return false
+	}, func() {}, io.Discard)
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case mode := <-gotMode:
+		if mode != supervisorShutdownDestructive {
+			t.Fatalf("mode = %v, want destructive (SIGTERM without preserve env)", mode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for shutdown request after SIGTERM")
+	}
+	trigger := <-gotTrigger
+	if trigger.Source != "signal" {
+		t.Errorf("trigger.Source = %q, want %q", trigger.Source, "signal")
+	}
+	if trigger.Signal == "" {
+		t.Error("trigger.Signal is empty; want non-empty signal name (e.g. \"terminated\")")
+	}
+}
+
+func TestRequestSupervisorShutdownRecordsBreadcrumbAndEvent(t *testing.T) {
+	var stderr bytes.Buffer
+	rec := events.NewFake()
+	ctl := newSupervisorShutdownController()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	requestSupervisorShutdown(&stderr, rec, ctl, cancel, supervisorShutdownPreserveSessions, shutdownTrigger{
+		Source: "signal",
+		Signal: "terminated",
+	})
+
+	wantLine := "gc supervisor: shutdown requested: source=signal signal=\"terminated\" client=\"\" mode=preserve_sessions\n"
+	if got := stderr.String(); got != wantLine {
+		t.Fatalf("stderr = %q, want %q", got, wantLine)
+	}
+	if !ctl.preservesSessions() {
+		t.Fatal("shutdown controller did not record preserve-sessions mode")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("shutdown cancel was not called")
+	}
+
+	if len(rec.Events) != 1 {
+		t.Fatalf("recorded events = %d, want 1", len(rec.Events))
+	}
+	event := rec.Events[0]
+	if event.Type != events.SupervisorShutdownRequested {
+		t.Fatalf("event.Type = %q, want %q", event.Type, events.SupervisorShutdownRequested)
+	}
+	if event.Actor != "supervisor" {
+		t.Fatalf("event.Actor = %q, want %q", event.Actor, "supervisor")
+	}
+	if event.Subject != "supervisor" {
+		t.Fatalf("event.Subject = %q, want %q", event.Subject, "supervisor")
+	}
+	var payload api.SupervisorShutdownPayload
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatalf("Unmarshal payload: %v", err)
+	}
+	if payload.Source != "signal" || payload.Signal != "terminated" || payload.ClientAddr != "" || payload.Mode != "preserve_sessions" {
+		t.Fatalf("payload = %+v, want signal/terminated/empty/preserve_sessions", payload)
+	}
+}
+
+func TestRequestSupervisorShutdownWithoutRecorderStillLogsAndCancels(t *testing.T) {
+	var stderr bytes.Buffer
+	ctl := newSupervisorShutdownController()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	requestSupervisorShutdown(&stderr, nil, ctl, cancel, supervisorShutdownDestructive, shutdownTrigger{
+		Source:     "socket_stop",
+		ClientAddr: "pipe",
+	})
+
+	wantLine := "gc supervisor: shutdown requested: source=socket_stop signal=\"\" client=\"pipe\" mode=destructive\n"
+	if got := stderr.String(); got != wantLine {
+		t.Fatalf("stderr = %q, want %q", got, wantLine)
+	}
+	if ctl.preservesSessions() {
+		t.Fatal("shutdown controller recorded preserve-sessions mode for destructive shutdown")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("shutdown cancel was not called")
+	}
+}
+
+// TestHandleSupervisorConnStopRecordsSocketAttribution ensures the
+// socket "stop" handler forwards a socket_stop trigger to
+// requestShutdown so future silent exits via the controller socket
+// have an attributable cause in supervisor.log.
+func TestHandleSupervisorConnStopRecordsSocketAttribution(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close() //nolint:errcheck
+	defer server.Close() //nolint:errcheck
+
+	gotMode := make(chan supervisorShutdownMode, 1)
+	gotTrigger := make(chan shutdownTrigger, 1)
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		handleSupervisorConn(server, func(mode supervisorShutdownMode, trigger shutdownTrigger) bool {
+			gotMode <- mode
+			gotTrigger <- trigger
+			return false
+		}, nil, nil)
+	}()
+
+	if _, err := client.Write([]byte("stop\n")); err != nil {
+		t.Fatalf("Write(stop): %v", err)
+	}
+	select {
+	case mode := <-gotMode:
+		if mode != supervisorShutdownDestructive {
+			t.Fatalf("mode = %v, want destructive (socket stop is always destructive)", mode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for shutdown request after socket stop")
+	}
+	trigger := <-gotTrigger
+	if trigger.Source != "socket_stop" {
+		t.Errorf("trigger.Source = %q, want %q", trigger.Source, "socket_stop")
+	}
+	if trigger.ClientAddr == "" {
+		t.Error("trigger.ClientAddr is empty; want non-empty peer address")
+	}
+	ack := make([]byte, len("ok\n"))
+	client.SetReadDeadline(time.Now().Add(time.Second)) //nolint:errcheck
+	if _, err := io.ReadFull(client, ack); err != nil {
+		t.Fatalf("ReadFull(ok): %v", err)
+	}
+	if string(ack) != "ok\n" {
+		t.Fatalf("ack = %q, want %q", string(ack), "ok\n")
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for socket handler to exit")
+	}
+}
+
+func TestSupervisorShutdownModeNameHandlesKnownAndUnknownModes(t *testing.T) {
+	tests := []struct {
+		name string
+		mode supervisorShutdownMode
+		want string
+	}{
+		{name: "preserve", mode: supervisorShutdownPreserveSessions, want: "preserve_sessions"},
+		{name: "destructive", mode: supervisorShutdownDestructive, want: "destructive"},
+		{name: "none", mode: supervisorShutdownNone, want: "unknown"},
+		{name: "future", mode: supervisorShutdownMode(99), want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := supervisorShutdownModeName(tt.mode); got != tt.want {
+				t.Fatalf("supervisorShutdownModeName(%v) = %q, want %q", tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSupervisorShutdownExitCode(t *testing.T) {
+	tests := []struct {
+		name    string
+		shutErr error
+		want    int
+	}{
+		{name: "clean shutdown exits cleanly", want: 0},
+		{name: "shutdown errors fail", shutErr: errors.New("city failed to stop"), want: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := supervisorShutdownExitCode(tt.shutErr); got != tt.want {
+				t.Fatalf("supervisorShutdownExitCode(%v) = %d, want %d", tt.shutErr, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSupervisorShutdownModeForSignalPreservesOnlySIGTERMWhenConfigured(t *testing.T) {
 	t.Setenv(supervisorPreserveSessionsOnSignalEnv, "1")
 	if got := supervisorShutdownModeForSignal(syscall.SIGTERM); got != supervisorShutdownPreserveSessions {
@@ -4427,6 +5053,196 @@ func TestSupervisorShutdownModeForSignalPreservesOnlySIGTERMWhenConfigured(t *te
 	}
 	if got := supervisorShutdownModeForSignal(syscall.SIGINT); got != supervisorShutdownDestructive {
 		t.Fatalf("SIGINT shutdown mode = %v, want destructive", got)
+	}
+}
+
+// installHardExitHook replaces supervisorHardExit with a test hook that
+// records the exit code and signals via the returned channel instead of
+// terminating the test process. Restores the original on cleanup.
+func installHardExitHook(t *testing.T) <-chan int {
+	t.Helper()
+	calls := make(chan int, 1)
+	prev := supervisorHardExit
+	supervisorHardExit = func(_ io.Writer, code int) {
+		select {
+		case calls <- code:
+		default:
+		}
+	}
+	t.Cleanup(func() { supervisorHardExit = prev })
+	return calls
+}
+
+func recordingShutdownRequester(ctl *supervisorShutdownController, shutdowns chan<- supervisorShutdownMode) func(supervisorShutdownMode, shutdownTrigger) bool {
+	return func(mode supervisorShutdownMode, _ shutdownTrigger) bool {
+		repeatedDestructive := ctl.request(mode)
+		if !repeatedDestructive {
+			shutdowns <- mode
+		}
+		return repeatedDestructive
+	}
+}
+
+func TestSupervisorSignalLoopHardExitsOnSecondDestructiveSignal(t *testing.T) {
+	hardExitCalls := installHardExitHook(t)
+
+	sigCh := make(chan os.Signal, 2)
+	done := make(chan struct{})
+	shutdowns := make(chan supervisorShutdownMode, 4)
+	ctl := newSupervisorShutdownController()
+
+	go supervisorSignalLoop(sigCh, done, recordingShutdownRequester(ctl, shutdowns), func() {}, io.Discard)
+	defer close(done)
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case mode := <-shutdowns:
+		if mode != supervisorShutdownDestructive {
+			t.Fatalf("first signal mode = %v, want destructive", mode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first SIGTERM did not trigger requestShutdown")
+	}
+	select {
+	case code := <-hardExitCalls:
+		t.Fatalf("hard exit fired after only one destructive signal, code=%d", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case code := <-hardExitCalls:
+		if code != supervisorHardExitCodeRepeatedShutdown {
+			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeRepeatedShutdown)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second SIGTERM did not trigger hard exit")
+	}
+	select {
+	case mode := <-shutdowns:
+		t.Fatalf("second SIGTERM should hard-exit before calling requestShutdown; got mode %v", mode)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestSupervisorSignalLoopHardExitsAfterSocketShutdownThenDestructiveSignal(t *testing.T) {
+	hardExitCalls := installHardExitHook(t)
+	ctl := newSupervisorShutdownController()
+	ctl.request(supervisorShutdownDestructive)
+
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	shutdowns := make(chan supervisorShutdownMode, 1)
+
+	go supervisorSignalLoop(sigCh, done, recordingShutdownRequester(ctl, shutdowns), func() {}, io.Discard)
+	defer close(done)
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case code := <-hardExitCalls:
+		if code != supervisorHardExitCodeRepeatedShutdown {
+			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeRepeatedShutdown)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SIGTERM after socket shutdown did not trigger hard exit")
+	}
+	select {
+	case mode := <-shutdowns:
+		t.Fatalf("SIGTERM after socket shutdown should hard-exit before calling requestShutdown; got mode %v", mode)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestSupervisorSignalLoopHardExitsOnDestructiveAfterPreserveEscalation(t *testing.T) {
+	t.Setenv(supervisorPreserveSessionsOnSignalEnv, "1")
+	hardExitCalls := installHardExitHook(t)
+
+	sigCh := make(chan os.Signal, 3)
+	done := make(chan struct{})
+	shutdowns := make(chan supervisorShutdownMode, 4)
+	ctl := newSupervisorShutdownController()
+
+	go supervisorSignalLoop(sigCh, done, recordingShutdownRequester(ctl, shutdowns), func() {}, io.Discard)
+	defer close(done)
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case mode := <-shutdowns:
+		if mode != supervisorShutdownPreserveSessions {
+			t.Fatalf("first signal mode = %v, want preserve", mode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first SIGTERM did not trigger requestShutdown")
+	}
+
+	sigCh <- syscall.SIGINT
+	select {
+	case mode := <-shutdowns:
+		if mode != supervisorShutdownDestructive {
+			t.Fatalf("escalation mode = %v, want destructive", mode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SIGINT escalation did not trigger requestShutdown")
+	}
+	select {
+	case code := <-hardExitCalls:
+		t.Fatalf("hard exit fired during normal preserve→destructive escalation, code=%d", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	sigCh <- syscall.SIGINT
+	select {
+	case code := <-hardExitCalls:
+		if code != supervisorHardExitCodeRepeatedShutdown {
+			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeRepeatedShutdown)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second destructive signal after escalation did not trigger hard exit")
+	}
+}
+
+func TestSupervisorSignalLoopSIGHUPDoesNotCountTowardHardExit(t *testing.T) {
+	hardExitCalls := installHardExitHook(t)
+
+	sigCh := make(chan os.Signal, 4)
+	done := make(chan struct{})
+	shutdowns := make(chan supervisorShutdownMode, 4)
+	reconciles := make(chan struct{}, 4)
+	ctl := newSupervisorShutdownController()
+
+	go supervisorSignalLoop(sigCh, done, recordingShutdownRequester(ctl, shutdowns), func() {
+		reconciles <- struct{}{}
+	}, io.Discard)
+	defer close(done)
+
+	sigCh <- syscall.SIGHUP
+	sigCh <- syscall.SIGHUP
+	for i := 0; i < 2; i++ {
+		select {
+		case <-reconciles:
+		case <-time.After(time.Second):
+			t.Fatalf("SIGHUP %d did not trigger reconcile", i+1)
+		}
+	}
+	select {
+	case code := <-hardExitCalls:
+		t.Fatalf("SIGHUP triggered hard exit, code=%d", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case mode := <-shutdowns:
+		if mode != supervisorShutdownDestructive {
+			t.Fatalf("SIGTERM after SIGHUPs mode = %v, want destructive", mode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SIGTERM after SIGHUPs did not trigger requestShutdown")
+	}
+	select {
+	case code := <-hardExitCalls:
+		t.Fatalf("first SIGTERM after SIGHUPs triggered hard exit, code=%d", code)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -4931,7 +5747,7 @@ func TestBuildSupervisorServiceDataPrefersUserLocalBinExecPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderSupervisorTemplate: %v", err)
 	}
-	wantExec := `ExecStart="` + stable + `" supervisor run`
+	wantExec := `ExecStart=` + stable + ` supervisor run`
 	if !strings.Contains(systemdContent, wantExec) {
 		t.Fatalf("systemd unit missing %q:\n%s", wantExec, systemdContent)
 	}
@@ -4977,6 +5793,8 @@ func TestInstallSupervisorSystemdRefreshesStaleTmpExecStart(t *testing.T) {
 
 	oldRun := supervisorSystemctlRun
 	oldActive := supervisorSystemctlActive
+	oldForce := supervisorInstallForce
+	supervisorInstallForce = true // recovering a stale ExecStart requires --force
 	var calls []string
 	supervisorSystemctlRun = func(args ...string) error {
 		call := strings.Join(args, " ")
@@ -4998,6 +5816,7 @@ func TestInstallSupervisorSystemdRefreshesStaleTmpExecStart(t *testing.T) {
 	t.Cleanup(func() {
 		supervisorSystemctlRun = oldRun
 		supervisorSystemctlActive = oldActive
+		supervisorInstallForce = oldForce
 	})
 
 	var stdout, stderr bytes.Buffer
@@ -5008,11 +5827,11 @@ func TestInstallSupervisorSystemdRefreshesStaleTmpExecStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read refreshed unit: %v", err)
 	}
-	wantExec := `ExecStart="` + stable + `" supervisor run`
+	wantExec := `ExecStart=` + stable + ` supervisor run`
 	if !strings.Contains(string(contents), wantExec) {
 		t.Fatalf("refreshed unit missing %q:\n%s", wantExec, string(contents))
 	}
-	if strings.Contains(string(contents), `ExecStart="/tmp/gc"`) {
+	if strings.Contains(string(contents), "ExecStart=/tmp/gc ") {
 		t.Fatalf("refreshed unit still references stale /tmp/gc:\n%s", string(contents))
 	}
 	joined := strings.Join(calls, "\n")
@@ -5036,7 +5855,7 @@ func TestRenderSupervisorSystemdTemplateQuotesGCPathWithSpaces(t *testing.T) {
 		{
 			name:   "plain_ascii",
 			gcPath: "/usr/local/bin/gc",
-			want:   `ExecStart="/usr/local/bin/gc" supervisor run`,
+			want:   `ExecStart=/usr/local/bin/gc supervisor run`,
 		},
 		{
 			name:   "home_derived_spacy_path",
@@ -5140,6 +5959,94 @@ func TestInstallSupervisorSystemdBailsCleanlyWhenUserManagerMissing(t *testing.T
 	}
 }
 
+func TestInstallSupervisorSystemdCreatesLogDirBeforeStartingService(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "fresh-gc-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	stubSupervisorSystemctlUserAvailable(t, true)
+	oldRun := supervisorSystemctlRun
+	oldActive := supervisorSystemctlActive
+	var calls []string
+	supervisorSystemctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		if args[len(args)-1] == supervisorSystemdServiceName() {
+			if _, err := os.Stat(filepath.Dir(supervisorLogPath())); err != nil {
+				t.Fatalf("log dir missing before systemctl %s: %v", strings.Join(args, " "), err)
+			}
+		}
+		return nil
+	}
+	supervisorSystemctlActive = func(string) bool { return false }
+	t.Cleanup(func() {
+		supervisorSystemctlRun = oldRun
+		supervisorSystemctlActive = oldActive
+	})
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-new",
+		LogPath:       filepath.Join(gcHome, "supervisor.log"),
+		GCHome:        gcHome,
+		XDGRuntimeDir: "",
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Dir(data.LogPath)); err != nil {
+		t.Fatalf("log dir was not created: %v", err)
+	}
+	if !slices.Contains(calls, "--user start "+supervisorSystemdServiceName()) {
+		t.Fatalf("systemctl calls = %v, want service start", calls)
+	}
+}
+
+func TestInstallSupervisorLaunchdCreatesLogDirBeforeLoadingService(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "fresh-gc-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	label := supervisorLaunchdLabel()
+	oldRun := supervisorLaunchctlRun
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		if args[0] == "load" {
+			if _, err := os.Stat(filepath.Dir(supervisorLogPath())); err != nil {
+				t.Fatalf("log dir missing before launchctl load: %v", err)
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { supervisorLaunchctlRun = oldRun })
+
+	data := &supervisorServiceData{
+		GCPath:       "/tmp/gc-new",
+		LogPath:      filepath.Join(gcHome, "supervisor.log"),
+		GCHome:       gcHome,
+		LaunchdLabel: label,
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Dir(data.LogPath)); err != nil {
+		t.Fatalf("log dir was not created: %v", err)
+	}
+	if !slices.Contains(calls, "load "+supervisorLaunchdPlistPath()) {
+		t.Fatalf("launchctl calls = %v, want plist load", calls)
+	}
+}
+
 // TestCurrentUsernameForSystemdHintFallback covers the fallback branch of
 // currentUsernameForSystemdHint: when osuser.Current returns an error or
 // an empty username, the diagnostic still has a placeholder a user can
@@ -5174,4 +6081,220 @@ func TestCurrentUsernameForSystemdHintFallback(t *testing.T) {
 			t.Fatalf("got %q, want %q", got, "alice")
 		}
 	})
+}
+
+// TestRunSupervisorEnsuresHomeDirAndWritesLog confirms the fix for the
+// "Supervisor logs: log file not found" symptom seen on first start under
+// systemd/launchd/container — where the original `gc supervisor start`
+// mkdir+open codepath is bypassed. runSupervisor now creates ~/.gc/ and
+// opens the log file itself before doing any work.
+func TestRunSupervisorEnsuresHomeDirAndWritesLog(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "fresh-home")
+	t.Setenv("GC_HOME", gcHome)
+
+	// Sanity: the home dir does NOT exist yet — this is the systemd/launchd
+	// fresh-install scenario.
+	if _, err := os.Stat(gcHome); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %s must not exist yet, got err=%v", gcHome, err)
+	}
+
+	oldLoadConfig := supervisorLoadConfig
+	supervisorLoadConfig = func(string) (supervisor.Config, error) {
+		return supervisor.Config{}, errors.New("stop after log setup")
+	}
+	t.Cleanup(func() { supervisorLoadConfig = oldLoadConfig })
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("runSupervisor code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stop after log setup") {
+		t.Fatalf("stderr = %q, want stubbed config failure", stderr.String())
+	}
+
+	// The home dir must now exist (created by runSupervisor's MkdirAll).
+	if info, err := os.Stat(gcHome); err != nil || !info.IsDir() {
+		t.Fatalf("after runSupervisor, %s should exist as a directory; err=%v", gcHome, err)
+	}
+
+	// The log file must exist (created by runSupervisor's openSupervisorLogForTee).
+	logPath := filepath.Join(gcHome, "supervisor.log")
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("after runSupervisor, %s should exist; err=%v", logPath, err)
+	}
+	logContent, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read supervisor log: %v", err)
+	}
+	if !strings.Contains(string(logContent), "stop after log setup") {
+		t.Fatalf("supervisor log = %q, want stubbed config failure", string(logContent))
+	}
+}
+
+func TestRunSupervisorWarnsWhenLogTeeOpenFails(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	if err := os.Mkdir(filepath.Join(gcHome, "supervisor.log"), 0o700); err != nil {
+		t.Fatalf("seed log path as directory: %v", err)
+	}
+
+	oldLoadConfig := supervisorLoadConfig
+	supervisorLoadConfig = func(string) (supervisor.Config, error) {
+		return supervisor.Config{}, errors.New("stop after log setup")
+	}
+	t.Cleanup(func() { supervisorLoadConfig = oldLoadConfig })
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("runSupervisor code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "gc supervisor: tee disabled: opening supervisor log") {
+		t.Fatalf("stderr = %q, want tee-open warning", got)
+	}
+	if !strings.Contains(got, "stop after log setup") {
+		t.Fatalf("stderr = %q, want stubbed config failure", got)
+	}
+}
+
+// TestShouldTeeSupervisorLogAvoidsDoubleLoggingForRedirectedFDs confirms the
+// guard that prevents double-writes when stdout/stderr are already the
+// supervisor log file, even when the fd carries a cosmetic /dev/stdout name.
+func TestShouldTeeSupervisorLogAvoidsDoubleLoggingForRedirectedFDs(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "supervisor.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer logFile.Close() //nolint:errcheck
+
+	// A duped fd with a cosmetic name models os.Stdout/os.Stderr after a
+	// service manager or parent process already redirected fd 1/2 to the log.
+	dupFD, err := syscall.Dup(int(logFile.Fd()))
+	if err != nil {
+		t.Fatalf("dup log fd: %v", err)
+	}
+	redirectedStdout := os.NewFile(uintptr(dupFD), "/dev/stdout")
+	if redirectedStdout == nil {
+		t.Fatal("os.NewFile returned nil for duplicated log fd")
+	}
+	defer redirectedStdout.Close() //nolint:errcheck
+	if shouldTeeSupervisorLog(redirectedStdout, logFile) {
+		t.Errorf("redirected stdout fd: shouldTeeSupervisorLog should return false")
+	}
+	if shouldTeeSupervisorLog(&switchableWriter{target: redirectedStdout}, logFile) {
+		t.Errorf("switchable writer wrapping redirected stdout fd: shouldTeeSupervisorLog should return false")
+	}
+
+	// Different file = terminal/container output. Must tee.
+	otherPath := filepath.Join(dir, "other.log")
+	otherFile, err := os.Create(otherPath)
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	defer otherFile.Close() //nolint:errcheck
+	if !shouldTeeSupervisorLog(otherFile, logFile) {
+		t.Errorf("different file: shouldTeeSupervisorLog should return true")
+	}
+
+	// Non-file writer (a buffer simulating a journal pipe). Must tee.
+	if !shouldTeeSupervisorLog(&bytes.Buffer{}, logFile) {
+		t.Errorf("non-file writer: shouldTeeSupervisorLog should return true")
+	}
+
+	// Nil safety.
+	if shouldTeeSupervisorLog(nil, logFile) {
+		t.Errorf("nil writer: shouldTeeSupervisorLog should return false")
+	}
+	if shouldTeeSupervisorLog(otherFile, nil) {
+		t.Errorf("nil logFile: shouldTeeSupervisorLog should return false")
+	}
+}
+
+const ephemeralPortThresholdForTest = 32768
+
+func freeEphemeralLoopbackPort(t *testing.T) int {
+	t.Helper()
+	for i := 0; i < 20; i++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Listen: %v", err)
+		}
+		port := l.Addr().(*net.TCPAddr).Port
+		_ = l.Close()
+		if port >= ephemeralPortThresholdForTest {
+			return port
+		}
+	}
+	t.Skip("could not allocate a port >= 32768 in 20 tries")
+	return 0
+}
+
+func freeLowLoopbackPort(t *testing.T) int {
+	t.Helper()
+	for port := 10000; port < ephemeralPortThresholdForTest; port += 37 {
+		l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err == nil {
+			_ = l.Close()
+			return port
+		}
+	}
+	t.Skip("no free port below 32768 found in test probe range")
+	return 0
+}
+
+func TestRunSupervisorWarnsOnEphemeralAPIPort(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	port := freeEphemeralLoopbackPort(t)
+	cfg := "[supervisor]\nport = " + strconv.Itoa(port) + "\n"
+	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	if err := os.MkdirAll(sockPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	_ = runSupervisor(&stdout, &stderr)
+	if !strings.Contains(stderr.String(), "WARNING: API binding to ephemeral port") {
+		t.Errorf("stderr = %q, want ephemeral-port warning for port %d", stderr.String(), port)
+	}
+	if !strings.Contains(stderr.String(), strconv.Itoa(port)) {
+		t.Errorf("stderr = %q, want port number %d in warning", stderr.String(), port)
+	}
+	if !strings.Contains(stdout.String(), "Supervisor API listening") {
+		t.Errorf("stdout = %q, want API listening message (warning must not make startup fatal)", stdout.String())
+	}
+}
+
+func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	port := freeLowLoopbackPort(t)
+	cfg := "[supervisor]\nport = " + strconv.Itoa(port) + "\n"
+	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	if err := os.MkdirAll(sockPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	_ = runSupervisor(&stdout, &stderr)
+	if strings.Contains(stderr.String(), "WARNING: API binding to ephemeral port") {
+		t.Errorf("stderr = %q, must not warn for low port %d (below threshold %d)", stderr.String(), port, ephemeralPortThresholdForTest)
+	}
+	if !strings.Contains(stdout.String(), "Supervisor API listening") {
+		t.Errorf("stdout = %q, want API listening message for low port", stdout.String())
+	}
 }

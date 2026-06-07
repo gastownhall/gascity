@@ -34,10 +34,10 @@ and verifying the result.
 - **Free disk space.** Dolt GC rewrites chunks into a new store before
   swapping; budget at least **2× the current `.dolt/` size** in free space
   on the same filesystem.
-- **Final Dolt 1.86.2 or newer.** This matches the floor enforced by Gas
-  City's managed Dolt tooling and avoids the upstream GC/writer deadlock fixed
-  in dolthub/dolt commit `ccf7bde206`, which can hang `dolt_backup sync` under
-  heavy write load. Check with
+- **Final Dolt 2.1.0 or newer.** This matches the floor enforced by Gas
+  City's managed Dolt tooling. Releases before 1.86.2 also have the upstream
+  GC/writer deadlock fixed in dolthub/dolt commit `ccf7bde206`, which can hang
+  `dolt_backup sync` under heavy write load. Check with
   `dolt version`. If your binary rejects `--archive-level=1` (rare on
   modern releases), drop the flag and run plain
   `dolt gc` — archive compression is default-on in 1.75+ so the flag is
@@ -82,7 +82,7 @@ If GC finishes but the size barely moves, the chunks are nearly all live
 
 ## Prevention
 
-- **Keep Dolt at a final 1.86.2 or newer.** This matches Gas City's
+- **Keep Dolt at a final 2.1.0 or newer.** This matches Gas City's
   managed-Dolt floor; newer releases ship improved auto-GC heuristics and
   default archive compression.
 - **Let the dolt pack's `mol-dog-compactor` order run continuously.**
@@ -103,6 +103,29 @@ If GC finishes but the size barely moves, the chunks are nearly all live
   `dolt-noms-size` check gives early warning well before users notice.
 - **Avoid long-lived `dolt sql` sessions from outside Gas City.** External
   clients hold open transactions that can block GC.
+
+## Compact Quarantine Reasons
+
+`gc dolt compact` writes exact reason strings into
+`.gc/runtime/packs/dolt/compact-quarantine/<database>` when it detects
+possible writer interference before full GC. Operator dashboards and runbooks
+should treat these strings as the current vocabulary:
+
+| Reason | Meaning |
+|--------|---------|
+| `post-flatten HEAD probe failed` | The compactor could not read the database HEAD after flatten. |
+| `post-flatten integrity check failed` | A post-flatten integrity check failed before recording a more specific reason. |
+| `post-flatten row count decreased` | A table lost rows after flatten. |
+| `post-flatten row count probe failed` | The post-flatten row-count query failed or returned a non-number. |
+| `post-flatten table value hash probe failed` | A post-flatten table hash query failed or returned empty. |
+| `post-flatten table value hash changed with row-count increase` | A table gained rows and its value hash changed. |
+| `post-flatten table value hash changed without row-count increase` | A table's value hash changed without a row-count gain. |
+| `post-flatten table list changed` | A table appeared or an invalid table name was observed after preflight. |
+| `post-flatten table list probe failed` | The post-flatten `information_schema.tables` query failed. |
+| `post-flatten value hash probe failed` | The database hash query failed after flatten. |
+| `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
+| `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. |
+| `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. |
 
 ## When to Escalate
 

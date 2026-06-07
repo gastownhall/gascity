@@ -383,6 +383,7 @@ func TestSendControllerCommandWithTimeoutsTimesOutOnRead(t *testing.T) {
 func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...string) string {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, dir)
 	tomlPath := filepath.Join(dir, "city.toml")
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
@@ -400,6 +401,7 @@ func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...stri
 func writeControllerNamedSessionCityTOML(t *testing.T, dir, cityName, mode, idleTimeout string) string {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, dir)
 	tomlPath := filepath.Join(dir, "city.toml")
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
@@ -608,10 +610,22 @@ func TestBuildIdleTracker_SkipsAlwaysNamedSessionIdleTimeout(t *testing.T) {
 	}
 
 	sp := runtime.NewFake()
-	sp.SetActivity("mayor", time.Now().Add(-10*time.Minute))
+	startFakeSession(t, sp, "mayor")
+	now := time.Now()
+	sp.SetActivity("mayor", now.Add(-10*time.Minute))
 
-	if tracker := buildIdleTracker(cfg, "test", dir, sp); tracker != nil {
-		t.Fatalf("buildIdleTracker(cfg) = %#v, want nil for always-named singleton", tracker)
+	tracker, ok := buildIdleTracker(cfg, "test", dir, sp).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker(cfg) = %T, want *memoryIdleTracker with named fallback exemption", tracker)
+	}
+	if _, ok := tracker.templateTimeouts["mayor"]; !ok {
+		t.Fatalf("templateTimeouts = %v, want mayor fallback registered", tracker.templateTimeouts)
+	}
+	if !tracker.templateFallbackExemptions["mayor"] {
+		t.Fatalf("templateFallbackExemptions = %v, want mayor exempt", tracker.templateFallbackExemptions)
+	}
+	if tracker.checkIdle("mayor", "mayor", sp, now) {
+		t.Fatalf("always-named session inherited template idle timeout")
 	}
 }
 
@@ -1247,7 +1261,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	if !ok || tracker == nil {
 		t.Fatal("buildIdleTracker(parsedCfg) = nil, want tracker")
 	}
-	if !tracker.checkIdle("mayor", sp, time.Now()) {
+	if !tracker.checkIdle("mayor", "", sp, time.Now()) {
 		t.Fatalf("fresh idle tracker did not consider mayor idle; activity=%v timeouts=%v", sp.Activity["mayor"], tracker.timeouts)
 	}
 
@@ -1792,8 +1806,9 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 	t.Cleanup(func() { debounceDelay = old })
 
 	dir := shortSocketTempDir(t, "gc-reload-invalid-")
-	cleanupManagedDoltTestCity(t, dir)
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
+	disableManagedDoltRecoveryForTest(t)
+	cleanupManagedDoltTestCity(t, dir)
 
 	cfg, err := config.Load(osFS{}, tomlPath)
 	if err != nil {
@@ -1819,8 +1834,12 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 
-	go controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, nil,
-		buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
+	done := make(chan struct{})
+	go func() {
+		controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, nil,
+			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
+		close(done)
+	}()
 
 	// Wait for initial reconcile.
 	for reconcileCount.Load() < 1 {
@@ -1844,7 +1863,11 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 	}
 
 	cancel()
-	time.Sleep(50 * time.Millisecond) // let controllerLoop goroutine exit before TempDir cleanup
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for controllerLoop to exit")
+	}
 
 	if !strings.Contains(stderr.String(), "config reload") {
 		t.Errorf("expected config reload error in stderr, got: %s", stderr.String())

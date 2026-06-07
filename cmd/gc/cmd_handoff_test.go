@@ -13,9 +13,60 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+func listOpenMessagesBothTiers(t *testing.T, store beads.Store) []beads.Bead {
+	t.Helper()
+	all, err := store.List(beads.ListQuery{
+		Type:      "message",
+		Status:    "open",
+		TierMode:  beads.TierBoth,
+		AllowScan: true,
+	})
+	if err != nil {
+		t.Fatalf("List messages: %v", err)
+	}
+	return all
+}
+
+func listOpenMessagesInTier(t *testing.T, store beads.Store, tier beads.TierMode) []beads.Bead {
+	t.Helper()
+	all, err := store.List(beads.ListQuery{
+		Type:      "message",
+		Status:    "open",
+		TierMode:  tier,
+		AllowScan: true,
+	})
+	if err != nil {
+		t.Fatalf("List messages in tier %v: %v", tier, err)
+	}
+	return all
+}
+
+func hasString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func listOpenBeadsBothTiers(t *testing.T, store beads.Store) []beads.Bead {
+	t.Helper()
+	all, err := store.List(beads.ListQuery{
+		Status:    "open",
+		TierMode:  beads.TierBoth,
+		AllowScan: true,
+	})
+	if err != nil {
+		t.Fatalf("List open beads: %v", err)
+	}
+	return all
+}
 
 func TestHandoffSuccess(t *testing.T) {
 	store := beads.NewMemStore()
@@ -30,7 +81,7 @@ func TestHandoffSuccess(t *testing.T) {
 	}
 
 	// Verify mail bead created.
-	all, _ := store.ListOpen()
+	all := listOpenMessagesBothTiers(t, store)
 	if len(all) != 1 {
 		t.Fatalf("got %d beads, want 1", len(all))
 	}
@@ -49,6 +100,12 @@ func TestHandoffSuccess(t *testing.T) {
 	}
 	if b.Description != "" {
 		t.Errorf("Description = %q, want empty", b.Description)
+	}
+	if !b.Ephemeral {
+		t.Errorf("Ephemeral = false, want true")
+	}
+	if issueMessages := listOpenMessagesInTier(t, store, beads.TierIssues); len(issueMessages) != 0 {
+		t.Fatalf("issue-tier messages = %#v, want none", issueMessages)
 	}
 
 	// Verify restart-requested flag set.
@@ -193,10 +250,7 @@ func TestCmdHandoffAutoSendsMailWithoutBlocking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
-	all, err := store.ListOpen()
-	if err != nil {
-		t.Fatalf("ListOpen: %v", err)
-	}
+	all := listOpenMessagesBothTiers(t, store)
 	if len(all) != 1 {
 		t.Fatalf("got %d open beads, want 1", len(all))
 	}
@@ -205,6 +259,11 @@ func TestCmdHandoffAutoSendsMailWithoutBlocking(t *testing.T) {
 	}
 	if got := all[0].Type; got != "message" {
 		t.Fatalf("mail type = %q, want message", got)
+	}
+	for _, want := range []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel} {
+		if !hasString(all[0].Labels, want) {
+			t.Fatalf("auto handoff mail labels = %#v, want %q", all[0].Labels, want)
+		}
 	}
 	if strings.Contains(stdout.String(), "requesting restart") {
 		t.Fatalf("stdout = %q, --auto must not request restart", stdout.String())
@@ -250,6 +309,17 @@ func TestCmdHandoffAutoHookFormatCodex(t *testing.T) {
 	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "Handoff: sent auto mail") {
 		t.Fatalf("additionalContext = %q, want handoff confirmation", payload.HookSpecificOutput.AdditionalContext)
 	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	all := listOpenMessagesBothTiers(t, store)
+	if len(all) != 1 {
+		t.Fatalf("open beads = %d, want handoff mail", len(all))
+	}
+	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, all[0].ID) {
+		t.Fatalf("additionalContext = %q, want handoff mail id %s", payload.HookSpecificOutput.AdditionalContext, all[0].ID)
+	}
 }
 
 func TestDoHandoffAutoReportsHookOutputWriteError(t *testing.T) {
@@ -264,10 +334,7 @@ func TestDoHandoffAutoReportsHookOutputWriteError(t *testing.T) {
 	if !strings.Contains(stderr.String(), "writing hook output") {
 		t.Fatalf("stderr = %q, want hook output write error", stderr.String())
 	}
-	all, err := store.ListOpen()
-	if err != nil {
-		t.Fatalf("ListOpen: %v", err)
-	}
+	all := listOpenMessagesBothTiers(t, store)
 	if len(all) != 1 {
 		t.Fatalf("open beads = %d, want handoff mail still created", len(all))
 	}
@@ -298,10 +365,7 @@ func TestCmdHandoffAutoUsesDefaultSubject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
-	all, err := store.ListOpen()
-	if err != nil {
-		t.Fatalf("ListOpen: %v", err)
-	}
+	all := listOpenMessagesBothTiers(t, store)
 	if len(all) != 1 {
 		t.Fatalf("got %d open beads, want 1", len(all))
 	}
@@ -376,7 +440,7 @@ func TestDoHandoff_Regression744_NamedSessionSkipsRestart(t *testing.T) {
 	}
 
 	mailFound := false
-	all, _ := store.ListOpen()
+	all := listOpenMessagesBothTiers(t, store)
 	for _, got := range all {
 		if got.Title == "HANDOFF: context full" && got.Type == "message" {
 			mailFound = true
@@ -514,7 +578,7 @@ func TestHandoffWithMessage(t *testing.T) {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	all, _ := store.ListOpen()
+	all := listOpenMessagesBothTiers(t, store)
 	if len(all) != 1 {
 		t.Fatalf("got %d beads, want 1", len(all))
 	}
@@ -594,7 +658,7 @@ func TestHandoffMissingSubject(t *testing.T) {
 	}
 
 	// Verify no side effects.
-	all, _ := store.ListOpen()
+	all := listOpenBeadsBothTiers(t, store)
 	if len(all) != 0 {
 		t.Errorf("got %d beads, want 0", len(all))
 	}
@@ -640,7 +704,7 @@ func TestHandoffRemoteRunning(t *testing.T) {
 	}
 
 	// Verify mail sent to target.
-	all, _ := store.ListOpen()
+	all := listOpenMessagesBothTiers(t, store)
 	if len(all) != 1 {
 		t.Fatalf("got %d beads, want 1", len(all))
 	}
@@ -758,7 +822,7 @@ func TestHandoffRemoteNotRunning(t *testing.T) {
 	}
 
 	// Mail still sent even if session not running.
-	all, _ := store.ListOpen()
+	all := listOpenMessagesBothTiers(t, store)
 	if len(all) != 1 {
 		t.Fatalf("got %d beads, want 1", len(all))
 	}
@@ -825,10 +889,7 @@ func TestCmdHandoffRemoteDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *
 	if err != nil {
 		t.Fatalf("openCityStoreAt after handoff: %v", err)
 	}
-	all, err := storeAfter.ListOpen()
-	if err != nil {
-		t.Fatalf("ListOpen: %v", err)
-	}
+	all := listOpenMessagesBothTiers(t, storeAfter)
 	var msg beads.Bead
 	found := false
 	for _, b := range all {

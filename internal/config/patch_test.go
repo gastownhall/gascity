@@ -407,6 +407,64 @@ func TestApplyPatches_RigSuspend(t *testing.T) {
 	}
 }
 
+func TestApplyRigPatchFormulaVars(t *testing.T) {
+	t.Run("adds keys to a rig with no existing formula_vars", func(t *testing.T) {
+		cfg := &City{Rigs: []Rig{{Name: "mo", Path: "/mo"}}}
+		err := ApplyPatches(cfg, Patches{
+			Rigs: []RigPatch{{
+				Name:        "mo",
+				FormulaVars: map[string]string{"test_command": "make test-fast"},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("ApplyPatches: %v", err)
+		}
+		if got := cfg.Rigs[0].FormulaVars["test_command"]; got != "make test-fast" {
+			t.Errorf("FormulaVars[test_command] = %q, want %q", got, "make test-fast")
+		}
+	})
+
+	t.Run("patch keys win over existing rig keys", func(t *testing.T) {
+		cfg := &City{Rigs: []Rig{{
+			Name:        "mo",
+			Path:        "/mo",
+			FormulaVars: map[string]string{"test_command": "go test ./...", "lint_command": "golangci-lint"},
+		}}}
+		err := ApplyPatches(cfg, Patches{
+			Rigs: []RigPatch{{
+				Name:        "mo",
+				FormulaVars: map[string]string{"test_command": "make test-fast"},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("ApplyPatches: %v", err)
+		}
+		if got := cfg.Rigs[0].FormulaVars["test_command"]; got != "make test-fast" {
+			t.Errorf("FormulaVars[test_command] = %q, want %q (patch overrides)", got, "make test-fast")
+		}
+		if got := cfg.Rigs[0].FormulaVars["lint_command"]; got != "golangci-lint" {
+			t.Errorf("FormulaVars[lint_command] = %q, want %q (untouched)", got, "golangci-lint")
+		}
+	})
+
+	t.Run("empty patch leaves existing formula_vars unchanged", func(t *testing.T) {
+		cfg := &City{Rigs: []Rig{{
+			Name:        "mo",
+			Path:        "/mo",
+			FormulaVars: map[string]string{"test_command": "go test ./..."},
+		}}}
+		err := ApplyPatches(cfg, Patches{
+			Rigs: []RigPatch{{Name: "mo", Suspended: ptrBool(true)}},
+		})
+		if err != nil {
+			t.Fatalf("ApplyPatches: %v", err)
+		}
+		if got := cfg.Rigs[0].FormulaVars["test_command"]; got != "go test ./..." {
+			t.Errorf("FormulaVars[test_command] = %q, want %q (untouched)", got, "go test ./...")
+		}
+	})
+}
+
 func TestApplyPatches_RigNotFound(t *testing.T) {
 	cfg := &City{
 		Rigs: []Rig{{Name: "hw", Path: "/path"}},
@@ -639,6 +697,111 @@ func TestPatchesIsEmpty(t *testing.T) {
 	}
 	if (&Patches{Agents: []AgentPatch{{Name: "x"}}}).IsEmpty() {
 		t.Error("Patches with agents should not be empty")
+	}
+	if (&Patches{NamedSessions: []NamedSessionPatch{{Template: "mayor"}}}).IsEmpty() {
+		t.Error("Patches with named sessions should not be empty")
+	}
+}
+
+func TestLoadWithIncludes_PatchesNamedSession(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[[agent]]
+name = "mayor"
+
+[[named_session]]
+template = "mayor"
+mode = "on_demand"
+
+[[patches.named_session]]
+template = "mayor"
+mode = "always"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	sessions := userNamedSessions(cfg.NamedSessions)
+	if len(sessions) != 1 {
+		t.Fatalf("len(user NamedSessions) = %d, want 1", len(sessions))
+	}
+	if got := sessions[0].Template; got != "mayor" {
+		t.Errorf("Template = %q, want mayor", got)
+	}
+	if got := sessions[0].Mode; got != "always" {
+		t.Errorf("Mode = %q, want always", got)
+	}
+}
+
+func TestLoadWithIncludes_PatchesNamedSessionByNameWhenTemplateAmbiguous(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[[agent]]
+name = "coder"
+max_active_sessions = 2
+
+[[named_session]]
+name = "alice"
+template = "coder"
+mode = "on_demand"
+
+[[named_session]]
+name = "bob"
+template = "coder"
+mode = "on_demand"
+
+[[patches.named_session]]
+name = "bob"
+mode = "always"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.NamedSessions[0].Mode; got != "on_demand" {
+		t.Fatalf("alice mode = %q, want on_demand", got)
+	}
+	if got := cfg.NamedSessions[1].Mode; got != "always" {
+		t.Fatalf("bob mode = %q, want always", got)
+	}
+}
+
+func TestLoadWithIncludes_PatchNamedSessionTemplateAmbiguous(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[[agent]]
+name = "coder"
+max_active_sessions = 2
+
+[[named_session]]
+name = "alice"
+template = "coder"
+mode = "on_demand"
+
+[[named_session]]
+name = "bob"
+template = "coder"
+mode = "on_demand"
+
+[[patches.named_session]]
+template = "coder"
+mode = "always"
+`)
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("expected ambiguous named_session patch error")
+	}
+	if !strings.Contains(err.Error(), "ambiguous") || !strings.Contains(err.Error(), "coder") {
+		t.Fatalf("error = %q, want ambiguous coder target", err)
 	}
 }
 
