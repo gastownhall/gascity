@@ -50,6 +50,10 @@ func (s *Server) computeStoreHealth() *StatusStoreHealth {
 	if cityPath == "" {
 		return nil
 	}
+	// WalkSize is a synchronous, uncancellable disk walk; the
+	// storeHealthCacheTTL cache bounds how often it runs. Plumbing
+	// context/timeout through WalkSize is deferred until it shows up
+	// in profiles.
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
 	rows := countBeadStoreRows(s.state.CityBeadStore())
 	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider())
