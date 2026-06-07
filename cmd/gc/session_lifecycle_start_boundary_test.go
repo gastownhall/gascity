@@ -89,6 +89,7 @@ func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *te
 		nil,
 		sp,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("startPreparedStartCandidate: %v", err)

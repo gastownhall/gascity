@@ -65,7 +65,7 @@ func TestBuildStatusBodyIncludesComponentVersions(t *testing.T) {
 		return componentVersions{Dolt: "2.0.7", Beads: "1.0.4"}
 	}}
 
-	body := s.buildStatusBody()
+	body := s.buildStatusBody(false)
 	if body.DoltVersion != "2.0.7" {
 		t.Errorf("DoltVersion = %q, want 2.0.7", body.DoltVersion)
 	}

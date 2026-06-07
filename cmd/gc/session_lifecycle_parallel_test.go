@@ -5406,6 +5406,7 @@ func TestExecutePreparedStartWave_SkipsStaleKeyProbeWhenSessionAlreadyRunning(t 
 }
 
 func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T) {
+	skipSlowCmdGCTest(t, "waits through stale session-key detection; run make test-cmd-gc-process for full coverage")
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
 		t.Fatalf("Start existing session: %v", err)
@@ -5444,11 +5445,139 @@ func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
 	r := results[0]
+	// The dead agent process must not be silently adopted as alive: the
+	// stale session is recycled (stop + fresh start), and because the
+	// recycled start dies again with the same stale resume key, the
+	// post-start probe still reports the death so recordWakeFailure can
+	// clear the key for the next attempt.
+	if got := fakeRuntimeCallCount(sp.Fake, "Stop"); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1 (zombie recycle)", got)
+	}
+	if got := fakeRuntimeCallCount(sp.Fake, "Start"); got != 2 {
+		t.Fatalf("Start calls = %d, want 2 (setup + recycled start)", got)
+	}
 	if r.err == nil {
-		t.Fatal("expected already-running dead agent process to fail liveness validation")
+		t.Fatal("expected recycled start that dies again to fail liveness validation")
 	}
 	if !strings.Contains(r.err.Error(), "died during startup") {
 		t.Fatalf("unexpected error: %v", r.err)
+	}
+}
+
+func TestExecutePreparedStartWave_RecyclesZombieSession(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	// Simulate a session that survived a supervisor restart with its pane
+	// alive but its agent process gone (e.g. the CLI exited to the shell).
+	sp.Zombies["test-agent"] = true
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-102",
+				Metadata: map[string]string{
+					"session_name": "test-agent",
+					"template":     "worker",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		10*time.Second,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err != nil {
+		t.Fatalf("zombie session should be recycled, not wedge the start: %v", r.err)
+	}
+	if r.outcome != "success" {
+		t.Fatalf("outcome = %q, want success", r.outcome)
+	}
+	if got := fakeRuntimeCallCount(sp, "Stop"); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1 (zombie recycle)", got)
+	}
+	if got := fakeRuntimeCallCount(sp, "Start"); got != 2 {
+		t.Fatalf("Start calls = %d, want 2 (setup + recycled start)", got)
+	}
+}
+
+func TestExecutePreparedStartWave_RecyclesZombieSessionDespitePendingCreateMismatch(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	// The surviving session carries a previous incarnation's identity and
+	// its agent process is dead. Identity mismatch must not preempt the
+	// recycle: rolling the pending create back would just recreate the
+	// bead next tick and hit the same zombie forever.
+	if err := sp.SetMeta("test-agent", "GC_SESSION_ID", "gc-previous-incarnation"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	sp.Zombies["test-agent"] = true
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-103",
+				Metadata: map[string]string{
+					"session_name":         "test-agent",
+					"template":             "worker",
+					"pending_create_claim": "true",
+					"instance_token":       "tok-current",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		10*time.Second,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err != nil {
+		t.Fatalf("zombie session should be recycled despite identity mismatch: %v", r.err)
+	}
+	if r.outcome != "success" {
+		t.Fatalf("outcome = %q, want success", r.outcome)
+	}
+	if got := fakeRuntimeCallCount(sp, "Stop"); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1 (zombie recycle)", got)
+	}
+	if got := fakeRuntimeCallCount(sp, "Start"); got != 2 {
+		t.Fatalf("Start calls = %d, want 2 (setup + recycled start)", got)
 	}
 }
 

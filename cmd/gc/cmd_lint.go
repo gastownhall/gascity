@@ -14,6 +14,7 @@ import (
 	"text/template"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/promptmeta"
 	"github.com/spf13/cobra"
@@ -184,6 +185,7 @@ func lintPack(packDir string) lintPackReport {
 	for _, warning := range loaded.Warnings {
 		out.Diagnostics = append(out.Diagnostics, diagnosticFromWarning(filepath.Join(packDir, "pack.toml"), warning))
 	}
+	out.Diagnostics = append(out.Diagnostics, lintFormulaFiles(packDir)...)
 	targets, diagnostics := collectLintPromptTargets(packDir, loaded)
 	out.Diagnostics = append(out.Diagnostics, diagnostics...)
 	for _, target := range targets {
@@ -389,6 +391,32 @@ func lintFirstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// lintFormulaFiles checks all formula TOML files in the packDir/formulas/
+// directory for graph.v2 steps that use gc.output_json instead of drain.
+func lintFormulaFiles(packDir string) []lintDiagnostic {
+	formulaDir := filepath.Join(packDir, "formulas")
+	entries, err := os.ReadDir(formulaDir)
+	if err != nil {
+		return nil // no formulas/ dir is normal
+	}
+	parser := formula.NewParser(formulaDir)
+	var diagnostics []lintDiagnostic
+	for _, entry := range entries {
+		if entry.IsDir() || !formula.IsTOMLFilename(entry.Name()) {
+			continue
+		}
+		filePath := filepath.Join(formulaDir, entry.Name())
+		f, err := parser.ParseFile(filePath)
+		if err != nil {
+			continue // parse errors are not this check's responsibility
+		}
+		for _, msg := range formula.GraphV2OutputJSONWarnings(f) {
+			diagnostics = append(diagnostics, diagnosticFromWarning(filePath, msg))
+		}
+	}
+	return diagnostics
 }
 
 func diagnosticFromError(path string, err error) lintDiagnostic {

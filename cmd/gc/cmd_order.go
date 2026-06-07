@@ -678,6 +678,9 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if warning := poolOrderRouteVisibilityWarning(a, recipe); warning != "" {
+		fmt.Fprintf(stderr, "gc order run: %s\n", warning) //nolint:errcheck // best-effort stderr
+	}
 
 	var pool string
 	if a.Pool != "" {
@@ -713,21 +716,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		)
 	}
 	if a.Pool != "" {
-		// poolDemandMetadataPair() returns the explicit, type-independent
-		// signal that this wisp counts as scale_check demand for the
-		// routed pool — see internal/sling/pool_demand.go for the
-		// value-choice rationale (bd's --set-metadata write path infers
-		// JSON type from the string, so a numeric-looking value would
-		// round-trip as an integer and silently miss the supervisor's
-		// metadata equality match). The same pair is written by
-		// memoryOrderDispatcher.dispatchOne in order_dispatch.go and by
-		// slingFormula in internal/sling, so the CLI (gc order run),
-		// supervisor cron, and gc sling --formula paths land matching
-		// beads.
 		update.Metadata = map[string]string{"gc.routed_to": pool}
-		for k, v := range poolDemandMetadataPair() {
-			update.Metadata[k] = v
-		}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr

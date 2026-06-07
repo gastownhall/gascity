@@ -76,6 +76,14 @@ const (
 	orderTrackingHistoryIndexLimit   = 2048
 	defaultMaxOrderDispatchesPerTick = 4
 	orderTrackingSweepCloseBudget    = 4
+
+	// orderTrackingRetentionWatchdogInterval is the minimum time between
+	// controller-driven closed-bead retention sweeps. 15 minutes balances
+	// effective cleanup against per-tick overhead.
+	orderTrackingRetentionWatchdogInterval = 15 * time.Minute
+	// orderTrackingRetentionWatchdogDeleteBudget bounds the number of
+	// closed order-tracking beads deleted per watchdog invocation.
+	orderTrackingRetentionWatchdogDeleteBudget = 100
 )
 
 var (
@@ -409,12 +417,25 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	}
 
 	stores := make(map[string]beads.Store)
+	// inFlight counts the dispatchOne goroutines launched by THIS tick that
+	// still hold handles from `stores`. The per-tick handles must not be closed
+	// until those goroutines finish using them: on a native store, CloseStore is
+	// a one-way latch (internal/beads/native_dolt_store.go) and the goroutine's
+	// post-tick tracking-bead writes would hit a closed handle (gascity#3157).
+	// drain() only waits at controller exit/reload, not at end of tick, so the
+	// close is handed to a detached closer scoped to this tick's launches. The
+	// closer never blocks the tick; when nothing was launched it closes
+	// immediately (Wait returns at once on a zero count).
+	var inFlight sync.WaitGroup
 	defer func() {
-		for _, st := range stores {
-			if err := closeBeadStoreHandle(st); err != nil {
-				logDispatchError(m.stderr, "gc: order dispatch: closing store: %v", err)
+		go func() {
+			inFlight.Wait()
+			for _, st := range stores {
+				if err := closeBeadStoreHandle(st); err != nil {
+					logDispatchError(m.stderr, "gc: order dispatch: closing store: %v", err)
+				}
 			}
-		}
+		}()
 	}()
 	trackingIndex := newOrderDispatchTrackingIndex()
 	budgetSpent := 0
@@ -595,7 +616,8 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// drain can wait for tracking-bead outcome persistence before
 		// controller exit or config reload.
 		m.addInflight()
-		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID)
+		inFlight.Add(1)
+		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID, inFlight.Done)
 		if spendDispatchBudget(idx) {
 			return
 		}
@@ -606,15 +628,28 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 // EITHER the caller's tick ctx OR m.dispatchCtx is done — required so
 // cancel() reaches goroutines whose tick ctx was context.Background().
 // Falls back to the bare caller ctx when m.dispatchCtx is nil (test
-// sites that don't initialize the cancel fields).
-func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+// sites that don't initialize the cancel fields). onDone is invoked exactly
+// once after dispatchOne returns — i.e. after this goroutine's final store
+// call — so the caller can hold per-tick store handles open until the
+// goroutine releases them (gascity#3157). A nil onDone is treated as a no-op.
+func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, onDone func()) {
+	if onDone == nil {
+		onDone = func() {}
+	}
 	if m.dispatchCtx == nil {
-		go m.dispatchOne(ctx, store, target, a, cityPath, trackingID)
+		go func() {
+			defer onDone()
+			m.dispatchOne(ctx, store, target, a, cityPath, trackingID)
+		}()
 		return
 	}
 	mergedCtx, cancelMerged := context.WithCancel(ctx)
 	stopAfter := context.AfterFunc(m.dispatchCtx, cancelMerged)
 	go func() {
+		// onDone runs last (registered first → LIFO), after dispatchOne has
+		// returned, so the per-tick store-close barrier only fires once this
+		// goroutine has made its final store call (gascity#3157).
+		defer onDone()
 		defer stopAfter()
 		defer cancelMerged()
 		m.dispatchOne(mergedCtx, store, target, a, cityPath, trackingID)
@@ -1165,6 +1200,13 @@ func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Ord
 	return formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
 }
 
+func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) string {
+	if strings.TrimSpace(a.Pool) == "" || formula.RecipeHasReadySurface(recipe) {
+		return ""
+	}
+	return fmt.Sprintf("warning: pool order %q uses formula %q whose root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or graph.v2 before routing it to a pool.", a.ScopedName(), a.Formula)
+}
+
 func redactOrderEnvError(err error, env []string) string {
 	if err == nil {
 		return ""
@@ -1232,6 +1274,9 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
+	if warning := poolOrderRouteVisibilityWarning(a, recipe); warning != "" {
+		logDispatchError(m.stderr, "gc: order %s: %s", scoped, warning)
+	}
 
 	var pool string
 	if a.Pool != "" {
@@ -1281,18 +1326,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		)
 	}
 	if a.Pool != "" {
-		// Same metadata-pair the CLI path (cmd_order.go:doOrderRunWithJSON)
-		// writes — gc.routed_to so the worker's Tier-3 work_query and bd
-		// CLI tooling see the routing, plus poolDemandMetadataPair() so
-		// the supervisor's defaultScaleCheckCounts can count the wisp as
-		// scale_check demand. Without the second pair, supervisor-cron
-		// dispatched orders silently never spawn a pool worker because
-		// the molecule wisp is filtered out of Ready() by
-		// readyExcludeTypes (per PR #1154). See cmd/gc/pool_demand.go.
 		update.Metadata = map[string]string{"gc.routed_to": pool}
-		for k, v := range poolDemandMetadataPair() {
-			update.Metadata[k] = v
-		}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		// Label failure is critical for duplicate-dispatch prevention.
@@ -2005,6 +2039,38 @@ func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now tim
 	return result, errors.Join(errs...)
 }
 
+// sweepClosedOrderTrackingRetentionAcrossStoresBounded is the watchdog variant
+// of sweepClosedOrderTrackingRetentionAcrossStores. It stops once the total
+// deletion count across all stores reaches limit, returning the partial deleted
+// count with a nil error on budget exhaustion. Store errors are returned as
+// normal; deletion errors within budget are propagated.
+func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) { //nolint:unparam // onlyOrders is nil at all current call sites; preserved for API parity with the unbounded variant
+	if limit <= 0 {
+		return 0, nil
+	}
+	deleted := 0
+	var errs []error
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		remaining := limit - deleted
+		if remaining <= 0 {
+			break
+		}
+		// Borrow the per-store function but cap via a patched policy that limits
+		// the deleteAfterClose so the store-level function returns early once
+		// the budget is spent. We implement budget enforcement by limiting via
+		// a bounded wrapper around the per-store call.
+		n, err := sweepClosedOrderTrackingRetentionBounded(store, now, policy, onlyOrders, remaining)
+		deleted += n
+		if err != nil {
+			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
+		}
+	}
+	return deleted, errors.Join(errs...)
+}
+
 func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("bead store unavailable")
@@ -2057,6 +2123,79 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 			continue
 		}
 		for _, entry := range entries[policy.retainLast:] {
+			if !orderTrackingClosedReferenceTime(entry).Before(cutoff) {
+				continue
+			}
+			if err := deleteWorkflowBead(store, entry.ID); err != nil {
+				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", entry.ID, err))
+				continue
+			}
+			deleted++
+		}
+	}
+	return deleted, deleteErr
+}
+
+// sweepClosedOrderTrackingRetentionBounded is the per-store bounded variant of
+// sweepClosedOrderTrackingRetention. It stops deleting once limit deletions have
+// occurred within this store call. On budget exhaustion it returns the partial
+// count with a nil error; delete errors are still propagated.
+func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("bead store unavailable")
+	}
+	if policy.deleteAfterClose <= 0 || limit <= 0 {
+		return 0, nil
+	}
+	if policy.retainLast < minClosedOrderTrackingRetained {
+		policy.retainLast = minClosedOrderTrackingRetained
+	}
+	entries, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Status:   "closed",
+		Label:    labelOrderTracking,
+		Sort:     beads.SortCreatedDesc,
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
+	}
+
+	byOrder := make(map[string][]beads.Bead)
+	for _, entry := range entries {
+		scopedName, ok := orderTrackingRetentionBucket(entry, onlyOrders)
+		if len(onlyOrders) > 0 {
+			if !ok {
+				continue
+			}
+		}
+		if !ok {
+			scopedName = legacyOrderTrackingRetentionBucket
+		}
+		byOrder[scopedName] = append(byOrder[scopedName], entry)
+	}
+
+	cutoff := now.Add(-policy.deleteAfterClose)
+	deleted := 0
+	var deleteErr error
+	for _, entries := range byOrder {
+		if deleted >= limit {
+			break
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			left := orderTrackingClosedReferenceTime(entries[i])
+			right := orderTrackingClosedReferenceTime(entries[j])
+			if left.Equal(right) {
+				return entries[i].ID > entries[j].ID
+			}
+			return left.After(right)
+		})
+		if len(entries) <= policy.retainLast {
+			continue
+		}
+		for _, entry := range entries[policy.retainLast:] {
+			if deleted >= limit {
+				break
+			}
 			if !orderTrackingClosedReferenceTime(entry).Before(cutoff) {
 				continue
 			}

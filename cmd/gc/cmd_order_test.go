@@ -1587,18 +1587,133 @@ func TestOrderRunResolvesPackBindingForPool(t *testing.T) {
 	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
 		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
 	}
-	if got := results[0].Metadata[poolDemandMetadataKey]; got != poolDemandMetadataValue {
-		t.Fatalf("%s = %q, want %q (cron pool orders need this flag so defaultScaleCheckCounts can count the molecule wisp despite readyExcludeTypes filtering molecules out of Ready() — see cmd/gc/pool_demand.go for the non-numeric-value rationale)", poolDemandMetadataKey, got, poolDemandMetadataValue)
-	}
+	assertNoDeprecatedPoolDemandMetadata(t, results[0].Metadata)
 	if !strings.Contains(stdout.String(), "gc.routed_to=maintenance.dog") {
 		t.Fatalf("stdout = %q, want binding-qualified route", stdout.String())
 	}
 }
 
-// TestOrderRunNonPoolDoesNotSetPoolDemand asserts the symmetric: orders
-// without a pool field do NOT get gc.pool_demand stamped. The flag is
-// strictly a cron-pool-order signal.
-func TestOrderRunNonPoolDoesNotSetPoolDemand(t *testing.T) {
+func TestOrderRunDogVaporFormulaCreatesSelfInstructingReadyWisp(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeFile(t, filepath.Join(formulaDir, "mol-dog-cleanup.toml"), `
+description = """
+Dog cleanup recipe.
+
+After claiming this vapor wisp, run:
+
+gc bd formula show mol-dog-cleanup --json
+
+Follow the step descriptions in order. When finished, close this bead, then run:
+
+gc runtime drain-ack
+
+The drain-ack tells the controller this session is done.
+"""
+formula = "mol-dog-cleanup"
+version = 1
+phase = "vapor"
+
+[[steps]]
+id = "work"
+title = "Do dog cleanup"
+description = "Do the cleanup."
+`)
+
+	aa := []orders.Order{
+		{Name: "dog-cleanup", Formula: "mol-dog-cleanup", Trigger: "cron", Schedule: "0 3 * * *", Pool: "dog", FormulaLayer: formulaDir},
+	}
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "dog-cleanup", "", "/city", store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:dog-cleanup", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	wisp := results[0]
+	if wisp.Type != "task" {
+		t.Fatalf("wisp Type = %q, want task", wisp.Type)
+	}
+	if wisp.Ref != "mol-dog-cleanup" {
+		t.Fatalf("wisp Ref = %q, want mol-dog-cleanup", wisp.Ref)
+	}
+	if got := wisp.Metadata["gc.kind"]; got != "wisp" {
+		t.Fatalf("gc.kind = %q, want wisp", got)
+	}
+	if got := wisp.Metadata["gc.routed_to"]; got != "dog" {
+		t.Fatalf("gc.routed_to = %q, want dog", got)
+	}
+	assertNoDeprecatedPoolDemandMetadata(t, wisp.Metadata)
+	if !strings.Contains(wisp.Description, "Dog cleanup recipe.") {
+		t.Fatalf("wisp description missing formula description:\n%s", wisp.Description)
+	}
+	if !strings.Contains(wisp.Description, "gc bd formula show mol-dog-cleanup --json") {
+		t.Fatalf("wisp description missing self-instruction:\n%s", wisp.Description)
+	}
+	if !strings.Contains(wisp.Description, "gc runtime drain-ack") {
+		t.Fatalf("wisp description missing explicit drain-ack:\n%s", wisp.Description)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("store.Ready(): %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != wisp.ID {
+		t.Fatalf("Ready() = %#v, want only %s", ready, wisp.ID)
+	}
+}
+
+func TestOrderRunPoolLegacyFormulaWarnsWhenRootIsNotReadyVisible(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeFile(t, filepath.Join(formulaDir, "mol-legacy-cleanup.toml"), `
+formula = "mol-legacy-cleanup"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do legacy cleanup"
+description = "Do the cleanup."
+`)
+
+	aa := []orders.Order{
+		{Name: "legacy-cleanup", Formula: "mol-legacy-cleanup", Trigger: "cron", Schedule: "0 3 * * *", Pool: "dog", FormulaLayer: formulaDir},
+	}
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "legacy-cleanup", "", "/city", store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "scale-from-zero pools will not wake") {
+		t.Fatalf("stderr = %q, want pool visibility warning", stderr.String())
+	}
+	results, err := store.ListByLabel("order-run:legacy-cleanup", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if results[0].Type != "molecule" {
+		t.Fatalf("legacy root Type = %q, want molecule", results[0].Type)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("store.Ready(): %v", err)
+	}
+	if len(ready) != 0 {
+		t.Fatalf("Ready() = %#v, want no Ready-visible root for legacy molecule formula", ready)
+	}
+}
+
+func TestOrderRunNonPoolDoesNotSetRouteMetadata(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron", Schedule: "0 3 * * *", FormulaLayer: sharedTestFormulaDir},
 	}
@@ -1617,11 +1732,16 @@ func TestOrderRunNonPoolDoesNotSetPoolDemand(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
 	}
-	if got := results[0].Metadata[poolDemandMetadataKey]; got != "" {
-		t.Fatalf("%s = %q, want empty (only pool orders should carry the flag)", poolDemandMetadataKey, got)
-	}
 	if got := results[0].Metadata["gc.routed_to"]; got != "" {
 		t.Fatalf("gc.routed_to = %q, want empty for unrouted order", got)
+	}
+	assertNoDeprecatedPoolDemandMetadata(t, results[0].Metadata)
+}
+
+func assertNoDeprecatedPoolDemandMetadata(t *testing.T, metadata map[string]string) {
+	t.Helper()
+	if got := metadata["gc.pool_demand"]; got != "" {
+		t.Fatalf("gc.pool_demand = %q, want empty", got)
 	}
 }
 

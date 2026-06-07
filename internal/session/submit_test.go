@@ -962,6 +962,60 @@ func TestSubmissionCapabilitiesRemainEnabledForPoolManagedSessions(t *testing.T)
 	}
 }
 
+func TestSubmissionCapabilitiesDisableInterruptNowForAntigravity(t *testing.T) {
+	caps := SubmissionCapabilitiesForMetadata(
+		map[string]string{
+			"provider_kind": "antigravity",
+			"provider":      "antigravity",
+		},
+		true,
+	)
+	if !caps.SupportsFollowUp {
+		t.Fatal("SupportsFollowUp = false, want true")
+	}
+	if caps.SupportsInterruptNow {
+		t.Fatal("SupportsInterruptNow = true, want false for Antigravity")
+	}
+}
+
+func TestSubmissionCapabilitiesDisableInterruptNowForWrappedAntigravity(t *testing.T) {
+	caps := SubmissionCapabilitiesForMetadata(
+		map[string]string{
+			"builtin_ancestor": "antigravity",
+			"provider":         "custom-antigravity",
+		},
+		true,
+	)
+	if caps.SupportsInterruptNow {
+		t.Fatal("SupportsInterruptNow = true, want false for wrapped Antigravity")
+	}
+}
+
+func TestSubmitInterruptNowRejectsAntigravitySession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "antigravity", t.TempDir(), "antigravity", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	callsBefore := len(sp.Calls)
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if !errors.Is(err, ErrInteractionUnsupported) {
+		t.Fatalf("Submit(interrupt_now) error = %v, want ErrInteractionUnsupported", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+	for _, call := range sp.Calls[callsBefore:] {
+		if call.Method == "Interrupt" || call.Method == "NudgeNow" || call.Method == "SendKeys" || call.Method == "Stop" {
+			t.Fatalf("unexpected runtime call after unsupported interrupt_now: %#v", call)
+		}
+	}
+}
+
 func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

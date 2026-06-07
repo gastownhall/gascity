@@ -19,6 +19,8 @@ type MemStore struct {
 	seq   int
 }
 
+var _ ConditionalAssignmentReleaser = (*MemStore)(nil)
+
 // NewMemStore returns a new empty MemStore.
 func NewMemStore() *MemStore {
 	return &MemStore{}
@@ -161,6 +163,26 @@ func (m *MemStore) Update(id string, opts UpdateOpts) error {
 		}
 	}
 	return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
+}
+
+// ReleaseIfCurrent clears an in-progress assignment only when the bead still
+// has the expected assignee.
+func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.beads {
+		if m.beads[i].ID != id {
+			continue
+		}
+		if m.beads[i].Status != "in_progress" || m.beads[i].Assignee != expectedAssignee {
+			return false, nil
+		}
+		m.beads[i].Status = "open"
+		m.beads[i].Assignee = ""
+		m.beads[i].UpdatedAt = time.Now()
+		return true, nil
+	}
+	return false, nil
 }
 
 // Close sets a bead's status to "closed". Returns a wrapped ErrNotFound if

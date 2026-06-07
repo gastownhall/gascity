@@ -46,10 +46,13 @@ func TestReadinessRegistrySync(t *testing.T) {
 		}
 	}
 
-	wantProviders := slices.Clone(defaultProviderReadinessItems)
-	slices.Sort(wantProviders)
-	if got := slices.Sorted(maps.Keys(supportedProviderReadiness)); !slices.Equal(got, wantProviders) {
-		t.Fatalf("supportedProviderReadiness keys = %v, want %v", got, wantProviders)
+	wantProviderKeys := []string{"antigravity", "claude", "codex", "gemini"}
+	if got := slices.Sorted(maps.Keys(supportedProviderReadiness)); !slices.Equal(got, wantProviderKeys) {
+		t.Fatalf("supportedProviderReadiness keys = %v, want %v", got, wantProviderKeys)
+	}
+	wantProviderOrder := []string{"claude", "codex", "gemini", "antigravity"}
+	if got := ProviderReadinessNames(); !slices.Equal(got, wantProviderOrder) {
+		t.Fatalf("ProviderReadinessNames() = %v, want %v", got, wantProviderOrder)
 	}
 }
 
@@ -802,6 +805,54 @@ func TestHandleProviderReadinessReturnsNotInstalledWhenBinaryMissing(t *testing.
 			t.Errorf("%s status = %q, want %q", provider, got, probeStatusNotInstalled)
 		}
 	}
+}
+
+func TestHandleProviderReadinessReturnsConfiguredForAntigravityOAuthToken(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "agy", "#!/bin/sh\nexit 0\n")
+
+	tokenPath := filepath.Join(homeDir, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o755); err != nil {
+		t.Fatalf("mkdir antigravity dir: %v", err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("oauth-token\n"), 0o600); err != nil {
+		t.Fatalf("write antigravity token: %v", err)
+	}
+
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	providerProbePathEnv = binDir
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	assertProviderStatus(t, h, state, "/provider-readiness?providers=antigravity&fresh=1", "antigravity", probeStatusConfigured)
+}
+
+func TestHandleProviderReadinessReturnsNeedsAuthForAntigravityWithoutToken(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "agy", "#!/bin/sh\nexit 0\n")
+
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	providerProbePathEnv = binDir
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	assertProviderStatus(t, h, state, "/provider-readiness?providers=antigravity&fresh=1", "antigravity", probeStatusNeedsAuth)
 }
 
 func TestHandleProviderReadinessReturnsInvalidConfigurationForUnsupportedAuthModes(t *testing.T) {

@@ -217,6 +217,82 @@ func TestDiscoverPathPiPrefersProviderSessionID(t *testing.T) {
 	}
 }
 
+func TestDiscoverPathAntigravityFallsBackForProvisionalGCSessionID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	fixtureRoot := t.TempDir()
+	brainRoot := filepath.Join(fixtureRoot, "brain")
+	workDir := filepath.Join(t.TempDir(), "antigravity-project")
+	convID := "750fa972-4c56-4215-99b9-893382aee2b4"
+	transcriptPath := filepath.Join(brainRoot, convID, ".system_generated", "logs", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript: %v", err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte(`{"step_index":0,"type":"USER_INPUT","content":"hello"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	cachePath := filepath.Join(fixtureRoot, "cache", "last_conversations.json")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+	cache, err := json.Marshal(map[string]string{workDir: convID})
+	if err != nil {
+		t.Fatalf("marshal cache: %v", err)
+	}
+	if err := os.WriteFile(cachePath, cache, 0o644); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+
+	got := DiscoverPath([]string{brainRoot}, "antigravity/tmux-cli", workDir, "gc-1")
+	if got != transcriptPath {
+		t.Fatalf("DiscoverPath() = %q, want %q", got, transcriptPath)
+	}
+	gotFallback := DiscoverFallbackPath([]string{brainRoot}, "antigravity/tmux-cli", workDir, "gc-1")
+	if gotFallback != transcriptPath {
+		t.Fatalf("DiscoverFallbackPath() = %q, want %q", gotFallback, transcriptPath)
+	}
+	gotExplicitMiss := DiscoverPath([]string{brainRoot}, "antigravity/tmux-cli", workDir, "missing-provider-conversation")
+	if gotExplicitMiss != "" {
+		t.Fatalf("DiscoverPath() explicit miss = %q, want empty", gotExplicitMiss)
+	}
+}
+
+func TestDiscoverPathAntigravityPrefersProviderConversationID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	fixtureRoot := t.TempDir()
+	brainRoot := filepath.Join(fixtureRoot, "brain")
+	workDir := filepath.Join(t.TempDir(), "antigravity-project")
+	targetID := "750fa972-4c56-4215-99b9-893382aee2b4"
+	fallbackID := "18e4eb9f-1b1d-4dbc-966b-c06e3646f3c4"
+	targetPath := filepath.Join(brainRoot, targetID, ".system_generated", "logs", "transcript.jsonl")
+	fallbackPath := filepath.Join(brainRoot, fallbackID, ".system_generated", "logs", "transcript.jsonl")
+	for _, path := range []string{targetPath, fallbackPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir transcript: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(`{"step_index":0,"type":"USER_INPUT","content":"hello"}`+"\n"), 0o644); err != nil {
+			t.Fatalf("write transcript: %v", err)
+		}
+	}
+	cachePath := filepath.Join(fixtureRoot, "cache", "last_conversations.json")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+	cache, err := json.Marshal(map[string]string{workDir: fallbackID})
+	if err != nil {
+		t.Fatalf("marshal cache: %v", err)
+	}
+	if err := os.WriteFile(cachePath, cache, 0o644); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+
+	got := DiscoverPath([]string{brainRoot}, "antigravity/tmux-cli", workDir, targetID)
+	if got != targetPath {
+		t.Fatalf("DiscoverPath() = %q, want provider conversation path %q", got, targetPath)
+	}
+}
+
 func TestDiscoverPathClaudeDoesNotScanCodexFallback(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "claude-project")
@@ -256,6 +332,7 @@ func TestSupportsIDLookup(t *testing.T) {
 		{provider: "kimi/tmux-cli", want: true},
 		{provider: "opencode/tmux-cli", want: false},
 		{provider: "pi/tmux-cli", want: true},
+		{provider: "antigravity/tmux-cli", want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.provider, func(t *testing.T) {
@@ -308,6 +385,33 @@ func TestHasKeyedTranscript(t *testing.T) {
 			if _, probeable := HasKeyedTranscript([]string{base}, p, workDir, "gc-present"); probeable {
 				t.Fatalf("HasKeyedTranscript(%q) probeable = true, want false", p)
 			}
+		}
+	})
+
+	t.Run("antigravity present", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		brainRoot := filepath.Join(t.TempDir(), "brain")
+		sessionID := "750fa972-4c56-4215-99b9-893382aee2b4"
+		targetPath := filepath.Join(brainRoot, sessionID, ".system_generated", "logs", "transcript.jsonl")
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(targetPath, []byte(`{}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		exists, probeable := HasKeyedTranscript([]string{brainRoot}, "antigravity/tmux-cli", "some-workdir", sessionID)
+		if !probeable || !exists {
+			t.Fatalf("HasKeyedTranscript() = (exists=%v, probeable=%v), want (true, true)", exists, probeable)
+		}
+	})
+
+	t.Run("antigravity missing", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		brainRoot := filepath.Join(t.TempDir(), "brain")
+		sessionID := "750fa972-4c56-4215-99b9-893382aee2b4"
+		exists, probeable := HasKeyedTranscript([]string{brainRoot}, "antigravity/tmux-cli", "some-workdir", sessionID)
+		if !probeable || exists {
+			t.Fatalf("HasKeyedTranscript() = (exists=%v, probeable=%v), want (false, true)", exists, probeable)
 		}
 	})
 

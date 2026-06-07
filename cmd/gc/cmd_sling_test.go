@@ -4109,6 +4109,13 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	if b.Ref != "code-review" {
 		t.Errorf("wisp Ref = %q, want %q", b.Ref, "code-review")
 	}
+	// Attached wisps route the source bead, not the molecule root: the wisp
+	// root must stay unrouted so it is not independently claimed. Moving
+	// routed_to onto the molecule (gastownhall/gascity#2848) would orphan the
+	// work, since the attached root is privatized out of Ready().
+	if got := b.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("wisp root gc.routed_to = %q, want empty (attached wisp routes the source, not the molecule)", got)
+	}
 }
 
 func TestOnRootOnlyFormulaKeepsAttachedWispPrivate(t *testing.T) {
@@ -7289,7 +7296,7 @@ func TestDoSlingCrossRigFormulaExempt(t *testing.T) {
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs:      []config.Rig{{Name: "hello-world", Path: "/tmp/hw"}},
 	}
-	a := config.Agent{Name: "polecat", Dir: "hello-world"}
+	a := config.Agent{Name: "polecat", Dir: "hello-world", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.StoreRef = "rig:hello-world"
@@ -7598,11 +7605,26 @@ func TestDefaultFormulaExplicitOnOverrides(t *testing.T) {
 func TestDefaultFormulaExplicitFormulaOverrides(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	dir := testFormulaDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "explicit-root-only.toml"), []byte(`
+formula = "explicit-root-only"
+version = 1
+phase = "vapor"
+
+[[steps]]
+id = "work"
+title = "Work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{dir}},
+	}
 	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	opts := testOpts(a, "code-review")
+	opts := testOpts(a, "explicit-root-only")
 	opts.IsFormula = true
 	code := doSling(opts, deps, nil, stdout, stderr)
 
@@ -7617,8 +7639,8 @@ func TestDefaultFormulaExplicitFormulaOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get(gc-1): %v", err)
 	}
-	if b.Ref != "code-review" {
-		t.Errorf("bead Ref = %q, want explicit code-review", b.Ref)
+	if b.Ref != "explicit-root-only" {
+		t.Errorf("bead Ref = %q, want explicit-root-only", b.Ref)
 	}
 }
 

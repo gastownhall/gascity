@@ -1,8 +1,10 @@
 vulnerabilities:
-  # Go stdlib CVEs disclosed 2026-05-12 (Go 1.26.2). Fixed in Go 1.25.10
-  # and 1.26.3 upstream. Our own gc binary builds against Go 1.26.3 (see
-  # go.mod), but the upstream gh and dolt distributions still ship a
-  # 1.26.2 stdlib until cli/cli and dolthub/dolt cut new releases.
+  # Go stdlib CVEs disclosed 2026-05-12. Fixed in Go 1.25.10 / 1.26.3 for
+  # the first batch; Go 1.26.4 / 1.25.11 for CVE-2026-42504. As of
+  # 2026-06-07: cli/cli v2.93.0 specifies toolchain go1.26.3; dolthub/dolt
+  # v2.1.4 uses go 1.26.2. Neither meets the Go 1.26.4+ bar for 42504.
+  # gc itself builds against Go 1.26.3 (go.mod). Durable fix tracked in
+  # ga-frh27v; remove entries once all binaries are rebuilt against 1.26.4+.
   - id: CVE-2026-33811
     paths:
       - "usr/bin/gh"
@@ -10,7 +12,7 @@ vulnerabilities:
       - "usr/local/bin/br"
       - "usr/local/bin/dolt"
       - "usr/local/bin/kubectl"
-    expired_at: 2026-06-12
+    expired_at: 2026-07-07
     statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-33814
     paths:
@@ -19,7 +21,7 @@ vulnerabilities:
       - "usr/local/bin/br"
       - "usr/local/bin/dolt"
       - "usr/local/bin/kubectl"
-    expired_at: 2026-06-12
+    expired_at: 2026-07-07
     statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-39820
     paths:
@@ -28,7 +30,7 @@ vulnerabilities:
       - "usr/local/bin/br"
       - "usr/local/bin/dolt"
       - "usr/local/bin/kubectl"
-    expired_at: 2026-06-12
+    expired_at: 2026-07-07
     statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-39823
     paths:
@@ -37,7 +39,7 @@ vulnerabilities:
       - "usr/local/bin/br"
       - "usr/local/bin/dolt"
       - "usr/local/bin/kubectl"
-    expired_at: 2026-06-12
+    expired_at: 2026-07-07
     statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-39825
     paths:
@@ -46,7 +48,7 @@ vulnerabilities:
       - "usr/local/bin/br"
       - "usr/local/bin/dolt"
       - "usr/local/bin/kubectl"
-    expired_at: 2026-06-12
+    expired_at: 2026-07-07
     statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-39826
     paths:
@@ -55,7 +57,7 @@ vulnerabilities:
       - "usr/local/bin/br"
       - "usr/local/bin/dolt"
       - "usr/local/bin/kubectl"
-    expired_at: 2026-06-12
+    expired_at: 2026-07-07
     statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-39836
     paths:
@@ -64,7 +66,7 @@ vulnerabilities:
       - "usr/local/bin/br"
       - "usr/local/bin/dolt"
       - "usr/local/bin/kubectl"
-    expired_at: 2026-06-12
+    expired_at: 2026-07-07
     statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-42499
     paths:
@@ -73,7 +75,7 @@ vulnerabilities:
       - "usr/local/bin/br"
       - "usr/local/bin/dolt"
       - "usr/local/bin/kubectl"
-    expired_at: 2026-06-12
+    expired_at: 2026-07-07
     statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-42504
     paths:
@@ -83,7 +85,7 @@ vulnerabilities:
       - "usr/local/bin/dolt"
       - "usr/local/bin/gc"
       - "usr/local/bin/kubectl"
-    expired_at: 2026-06-12
+    expired_at: 2026-07-07
     statement: Go stdlib MIME-header DoS (CVE-2026-42504), fixed in Go 1.26.4 / 1.25.11. Upstream gh, bd, br, dolt, and kubectl still embed an older Go stdlib; gc is our own binary (built with Go 1.26.3) and will be addressed by bumping to Go 1.26.4+ (tracked separately); remove entry once all binaries are rebuilt.
   - id: CVE-2026-41602
     paths:

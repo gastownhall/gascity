@@ -26,6 +26,12 @@ import (
 
 func intPtrNudge(n int) *int { return &n }
 
+func claimDueWorkerNudges(cityPath string) ([]queuedNudge, error) {
+	return claimDueQueuedNudgesMatching(cityPath, time.Now(), func(item queuedNudge) bool {
+		return item.Agent == "worker"
+	})
+}
+
 func writeCorruptNudgeQueueState(t *testing.T, cityPath string) {
 	t.Helper()
 	statePath := nudgequeue.StatePath(cityPath)
@@ -2592,6 +2598,288 @@ func TestTryDeliverQueuedNudgesByPollerKeepsACPProviderMissRecoverable(t *testin
 	}
 }
 
+type failingTerminalNudgeStore struct {
+	*beads.MemStore
+	failID string
+}
+
+func (s *failingTerminalNudgeStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if id != "" && id == s.failID {
+		return fmt.Errorf("setting metadata on %q: dolt connection refused", id)
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenDeliveryDeclined(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	// The session stops between the poller's observation and its delivery
+	// attempt — the restart-churn race. The live-only nudge then reports
+	// Delivered=false without an error.
+	if err := fake.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true, want false when the runtime declined delivery")
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0 (declined delivery must release the claim, not strand it in-flight)",
+			len(pending), len(inFlight), len(dead))
+	}
+	if pending[0].Attempts != 0 {
+		t.Fatalf("attempts = %d, want 0 for a declined delivery", pending[0].Attempts)
+	}
+}
+
+func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+
+	store := &failingTerminalNudgeStore{MemStore: beads.NewMemStore()}
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+
+	stale := newQueuedNudgeWithOptions("worker", "stale fenced reminder", "session", now, queuedNudgeOptions{
+		SessionID:         info.ID,
+		ContinuationEpoch: "1",
+	})
+	if err := enqueueQueuedNudgeWithStore(dir, store, stale); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore(stale): %v", err)
+	}
+	fresh := newQueuedNudgeWithOptions("worker", "wake up and resume your wisp", "session", now, queuedNudgeOptions{
+		SessionID:         info.ID,
+		ContinuationEpoch: "2",
+	})
+	if err := enqueueQueuedNudgeWithStore(dir, store, fresh); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore(fresh): %v", err)
+	}
+	staleBead, ok, err := findQueuedNudgeBead(store, stale.ID)
+	if err != nil || !ok {
+		t.Fatalf("findQueuedNudgeBead(stale) = %v, ok=%v", err, ok)
+	}
+	// Terminal-marking the stale item's backing bead fails (store flake).
+	// Dead-lettering bookkeeping for stale items must not block delivery
+	// of the fence-matching item.
+	store.failID = staleBead.ID
+
+	var warnings bytes.Buffer
+	origWarn := nudgeWarningWriter
+	nudgeWarningWriter = &warnings
+	defer func() { nudgeWarningWriter = origWarn }()
+
+	target := nudgeTarget{
+		cityPath:          dir,
+		agent:             config.Agent{Name: "worker"},
+		sessionID:         info.ID,
+		continuationEpoch: "2",
+		resolved:          &config.ResolvedProvider{Name: "codex"},
+		sessionName:       info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want the fence-matching nudge delivered despite stale-item bead-mark failure")
+	}
+
+	var nudgeCalls []runtime.Call
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			nudgeCalls = append(nudgeCalls, call)
+		}
+	}
+	if len(nudgeCalls) != 1 {
+		t.Fatalf("nudge calls = %d, want 1", len(nudgeCalls))
+	}
+	if !strings.Contains(nudgeCalls[0].Message, "wake up and resume your wisp") {
+		t.Fatalf("nudge message = %q, want fence-matching reminder", nudgeCalls[0].Message)
+	}
+	if strings.Contains(nudgeCalls[0].Message, "stale fenced reminder") {
+		t.Fatalf("nudge message = %q, must not deliver the fence-mismatched reminder", nudgeCalls[0].Message)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 {
+		t.Fatalf("pending/inFlight = %d/%d, want 0/0", len(pending), len(inFlight))
+	}
+	if len(dead) != 1 || dead[0].ID != stale.ID {
+		t.Fatalf("dead = %+v, want exactly the stale fence-mismatched item", dead)
+	}
+	if !strings.Contains(warnings.String(), stale.ID) {
+		t.Fatalf("warnings = %q, want bead-mark failure surfaced for %s", warnings.String(), stale.ID)
+	}
+}
+
+func TestRecordQueuedNudgeFailureDeadLettersWhenTerminalBeadMarkFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+
+	store := &failingTerminalNudgeStore{MemStore: beads.NewMemStore()}
+	item := newQueuedNudgeWithOptions("worker", "stale fenced reminder", "session", now, queuedNudgeOptions{
+		SessionID:         "sess-1",
+		ContinuationEpoch: "1",
+	})
+	if err := enqueueQueuedNudgeWithStore(dir, store, item); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+	itemBead, ok, err := findQueuedNudgeBead(store, item.ID)
+	if err != nil || !ok {
+		t.Fatalf("findQueuedNudgeBead = %v, ok=%v", err, ok)
+	}
+	store.failID = itemBead.ID
+
+	claimed, err := claimDueWorkerNudges(dir)
+	if err != nil {
+		t.Fatalf("claimDueQueuedNudges: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("claimed = %d, want 1", len(claimed))
+	}
+
+	var warnings bytes.Buffer
+	origWarn := nudgeWarningWriter
+	nudgeWarningWriter = &warnings
+	defer func() { nudgeWarningWriter = origWarn }()
+
+	if err := recordQueuedNudgeFailureWithStore(dir, store, []string{item.ID}, errNudgeSessionFenceMismatch, time.Now()); err != nil {
+		t.Fatalf("recordQueuedNudgeFailureWithStore: %v (queue transition must commit despite bead-mark failure)", err)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 1 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 0/0/1", len(pending), len(inFlight), len(dead))
+	}
+	if !strings.Contains(warnings.String(), item.ID) {
+		t.Fatalf("warnings = %q, want bead-mark failure surfaced for %s", warnings.String(), item.ID)
+	}
+
+	// The backing bead missed its terminal state; the dead-letter repair
+	// pass owns convergence from here (see pruneDeadQueuedNudges).
+	b, err := store.Get(itemBead.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", itemBead.ID, err)
+	}
+	if b.Metadata["state"] != "queued" {
+		t.Fatalf("bead state = %q, want still queued after failed terminal mark", b.Metadata["state"])
+	}
+}
+
+func TestCmdNudgePollSurvivesTransientObserveErrors(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+	item := newQueuedNudgeWithOptions("worker", "resume your patrol wisp", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{
+		SessionID: created.ID,
+	})
+	if err := enqueueQueuedNudgeWithStore(cityDir, store, item); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+
+	observeCalls := 0
+	origObserve := nudgeObserveTarget
+	nudgeObserveTarget = func(_ nudgeTarget, _ beads.Store, _ runtime.Provider) (worker.LiveObservation, error) {
+		observeCalls++
+		if observeCalls == 1 {
+			return worker.LiveObservation{}, fmt.Errorf("transient store hiccup")
+		}
+		// Queued work has drained; report the session gone so the poller exits.
+		if err := ackQueuedNudges(cityDir, []string{item.ID}); err != nil {
+			t.Errorf("ackQueuedNudges: %v", err)
+		}
+		return worker.LiveObservation{Running: false}, nil
+	}
+	defer func() { nudgeObserveTarget = origObserve }()
+
+	var stdout, stderr bytes.Buffer
+	code := cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, 0, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdNudgePoll = %d, want 0 (transient observe error with queued work pending must not kill the poller); stderr=%s", code, stderr.String())
+	}
+	if observeCalls < 2 {
+		t.Fatalf("observe calls = %d, want the poller to retry past the transient error", observeCalls)
+	}
+}
+
 func TestCmdNudgeDrainStampsLastNudgeDeliveredAt(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -2790,7 +3078,7 @@ func TestClaimDueQueuedNudgesClaimsOnceUntilAck(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	claimed, err := claimDueQueuedNudges(dir, "worker", time.Now())
+	claimed, err := claimDueWorkerNudges(dir)
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudges: %v", err)
 	}
@@ -2798,7 +3086,7 @@ func TestClaimDueQueuedNudgesClaimsOnceUntilAck(t *testing.T) {
 		t.Fatalf("claimed = %d, want 1", len(claimed))
 	}
 
-	claimedAgain, err := claimDueQueuedNudges(dir, "worker", time.Now())
+	claimedAgain, err := claimDueWorkerNudges(dir)
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudges second pass: %v", err)
 	}
@@ -2953,7 +3241,7 @@ func TestRecordQueuedNudgeFailureRequeuesClaimedNudge(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	claimed, err := claimDueQueuedNudges(dir, "worker", time.Now())
+	claimed, err := claimDueWorkerNudges(dir)
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudges: %v", err)
 	}

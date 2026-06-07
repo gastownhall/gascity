@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -15,6 +16,7 @@ type countingBackingStore struct {
 	setMetadataBatchCalls int
 	updateCalls           int
 	closeCalls            int
+	releaseIfCurrentCalls int
 }
 
 func (c *countingBackingStore) SetMetadata(id, key, value string) error {
@@ -37,6 +39,15 @@ func (c *countingBackingStore) Close(id string) error {
 	return c.Store.Close(id)
 }
 
+func (c *countingBackingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	c.releaseIfCurrentCalls++
+	releaser, ok := c.Store.(ConditionalAssignmentReleaser)
+	if !ok {
+		return false, ErrConditionalReleaseUnsupported
+	}
+	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+}
+
 type txPreservingBackingStore struct {
 	Store
 	txCalls     int
@@ -47,6 +58,31 @@ type cacheWriteNotification struct {
 	eventType string
 	beadID    string
 	payload   json.RawMessage
+}
+
+type releaseRefreshFailOnceStore struct {
+	Store
+	failNextGet bool
+}
+
+func (s *releaseRefreshFailOnceStore) Get(id string) (Bead, error) {
+	if s.failNextGet {
+		s.failNextGet = false
+		return Bead{}, errors.New("injected refresh failure")
+	}
+	return s.Store.Get(id)
+}
+
+func (s *releaseRefreshFailOnceStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	releaser, ok := s.Store.(ConditionalAssignmentReleaser)
+	if !ok {
+		return false, ErrConditionalReleaseUnsupported
+	}
+	released, err := releaser.ReleaseIfCurrent(id, expectedAssignee)
+	if released && err == nil {
+		s.failNextGet = true
+	}
+	return released, err
 }
 
 func (s *txPreservingBackingStore) Update(id string, opts UpdateOpts) error {
@@ -173,6 +209,91 @@ func TestCachingStoreSetMetadataBatchNotifiesBeadUpdated(t *testing.T) {
 	}
 	if updated.Metadata["review"] != "fixed" {
 		t.Fatalf("notification metadata = %#v, want review=fixed", updated.Metadata)
+	}
+}
+
+func TestCachingStoreReleaseIfCurrentDelegatesAndRefreshesCache(t *testing.T) {
+	t.Parallel()
+
+	status := "in_progress"
+	backing := &countingBackingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "task", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backing.Update(bead.ID, UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+
+	var events []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	events = nil
+
+	released, err := cache.ReleaseIfCurrent(bead.ID, "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseIfCurrent released = false, want true")
+	}
+	if backing.releaseIfCurrentCalls != 1 {
+		t.Fatalf("backing ReleaseIfCurrent calls = %d, want 1", backing.releaseIfCurrentCalls)
+	}
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("cache Get: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("cached bead = %+v, want open and unassigned", got)
+	}
+	if !stringSliceContains(events, "bead.updated:"+bead.ID) {
+		t.Fatalf("events = %v, want bead.updated for released bead", events)
+	}
+}
+
+func TestCachingStoreReleaseIfCurrentKeepsDirtyWhenRefreshFails(t *testing.T) {
+	t.Parallel()
+
+	status := "in_progress"
+	backing := &releaseRefreshFailOnceStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "task", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backing.Update(bead.ID, UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	released, err := cache.ReleaseIfCurrent(bead.ID, "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseIfCurrent released = false, want true")
+	}
+	cache.mu.Lock()
+	_, dirty := cache.dirty[bead.ID]
+	cache.mu.Unlock()
+	if !dirty {
+		t.Fatal("released bead was not kept dirty after refresh failure")
+	}
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("cache Get after dirty refresh: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("cached bead after dirty refresh = %+v, want open and unassigned", got)
 	}
 }
 

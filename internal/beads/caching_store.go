@@ -80,6 +80,8 @@ type CachingStore struct {
 	applyEventBeforeCommitForTest func()
 }
 
+var _ ConditionalAssignmentReleaser = (*CachingStore)(nil)
+
 type cacheState int
 
 const (
@@ -257,6 +259,13 @@ func NewCachingStoreForTest(backing Store, onChange func(eventType, beadID strin
 // production-style bead ID ownership filtering.
 func NewCachingStoreForTestWithPrefix(backing Store, idPrefix string, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	return newCachingStore(backing, idPrefix, onChange)
+}
+
+// SetPrimeRetryDelayForTest overrides the inter-attempt backoff Prime
+// uses when the backing store's full scan fails, so tests can exercise
+// prime-failure paths without real multi-second sleeps. Test-only.
+func (c *CachingStore) SetPrimeRetryDelayForTest(fn func(attempt int) time.Duration) {
+	c.primeRetryDelay = fn
 }
 
 func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {

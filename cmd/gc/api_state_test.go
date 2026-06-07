@@ -3389,3 +3389,118 @@ var _ interface {
 	SuspendRig(string) error
 	ResumeRig(string) error
 } = (*controllerState)(nil)
+
+// fullScanFailingStore fails full-scan List calls (the async full-prime
+// path) while letting status-filtered List calls (PrimeActive) through,
+// modeling a backing store whose full prime fails at controller startup.
+type fullScanFailingStore struct {
+	beads.Store
+}
+
+func (s *fullScanFailingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.AllowScan {
+		return nil, fmt.Errorf("full scan unavailable")
+	}
+	return s.Store.List(query)
+}
+
+// TestPrimeThenStartReconcilerArmsReconcilerOnPrimeFailure asserts the
+// watchdog reconciler is started even when the async full prime fails.
+// Before this contract, a single failed prime at controller startup
+// permanently disabled reconciliation for that store: the cache served
+// its PrimeActive-era snapshot for the life of the supervisor, kept
+// fresh only by event-bus writes, so storage-level state created before
+// the restart (e.g. routed pool work) stayed invisible indefinitely.
+func TestPrimeThenStartReconcilerArmsReconcilerOnPrimeFailure(t *testing.T) {
+	backing := &fullScanFailingStore{Store: beads.NewMemStore()}
+	cs := beads.NewCachingStore(backing, nil)
+	cs.SetPrimeRetryDelayForTest(func(int) time.Duration { return 0 })
+	if err := cs.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// "armed" is the FNV stagger for this agent ID; a non-zero value can
+	// only have been written by StartReconciler.
+	primeThenStartReconciler(ctx, cs, "armed")
+
+	if got := cs.Stats().StaggerOffsetMs; got <= 0 {
+		t.Fatalf("StaggerOffsetMs = %d, want > 0 (reconciler must arm after failed prime)", got)
+	}
+}
+
+// TestPrimeThenStartReconcilerSkipsReconcilerOnShutdown asserts a
+// canceled context (controller shutdown mid-prime) does NOT arm the
+// reconciler — prime failure is recoverable, shutdown is not.
+func TestPrimeThenStartReconcilerSkipsReconcilerOnShutdown(t *testing.T) {
+	backing := &fullScanFailingStore{Store: beads.NewMemStore()}
+	cs := beads.NewCachingStore(backing, nil)
+	cs.SetPrimeRetryDelayForTest(func(int) time.Duration { return 0 })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	primeThenStartReconciler(ctx, cs, "armed")
+
+	if got := cs.Stats().StaggerOffsetMs; got != 0 {
+		t.Fatalf("StaggerOffsetMs = %d, want 0 (reconciler must not arm after shutdown)", got)
+	}
+}
+
+// TestRigStoreBackgroundRefreshUsesEffectiveSuspension asserts the
+// background-refresh gate consults the EFFECTIVE rig suspension — the
+// runtime suspend/resume override layered over the rig's committable
+// suspended_on_start default — not the deprecated raw [[rigs]] suspended
+// field. A rig resumed at runtime must keep its cache reconciler across
+// supervisor restarts, and a suspended_on_start rig must actually get
+// the suspended-rig reconcile skip.
+func TestRigStoreBackgroundRefreshUsesEffectiveSuspension(t *testing.T) {
+	boolPtr := func(v bool) *bool { return &v }
+	cases := []struct {
+		name     string
+		rig      config.Rig
+		override *bool // runtime suspension override; nil = no entry
+		want     bool
+	}{
+		{name: "active rig refreshes", rig: config.Rig{Name: "r"}, want: true},
+		{name: "suspended_on_start skips refresh", rig: config.Rig{Name: "r", SuspendedOnStart: true}, want: false},
+		{name: "deprecated suspended field skips refresh", rig: config.Rig{Name: "r", Suspended: true}, want: false},
+		{name: "suspended_on_start with runtime resume refreshes", rig: config.Rig{Name: "r", SuspendedOnStart: true}, override: boolPtr(false), want: true},
+		{name: "deprecated suspended with runtime resume refreshes", rig: config.Rig{Name: "r", Suspended: true}, override: boolPtr(false), want: true},
+		{name: "active rig with runtime suspend skips refresh", rig: config.Rig{Name: "r"}, override: boolPtr(true), want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var st suspensionstate.State
+			if tc.override != nil {
+				suspensionstate.SetRig(&st, tc.rig.Name, tc.override)
+			}
+			if got := rigStoreBackgroundRefresh(st, tc.rig); got != tc.want {
+				t.Fatalf("rigStoreBackgroundRefresh = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStoreMetadataSignatureChangesOnRigSuspensionFlip asserts the store
+// signature reflects effective rig suspension, so a runtime
+// suspend/resume flip invalidates runtimeUpdateCanReuseCurrentStores and
+// the next config reload rebuilds stores with the correct
+// background-refresh gate.
+func TestStoreMetadataSignatureChangesOnRigSuspensionFlip(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	cfg := &config.City{Rigs: []config.Rig{{Name: "rig1", Path: rigDir, SuspendedOnStart: true}}}
+
+	before := storeMetadataSignature(cityDir, cfg)
+
+	resumed := false
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, "rig1", &resumed); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+
+	after := storeMetadataSignature(cityDir, cfg)
+	if before == after {
+		t.Fatalf("signature unchanged across rig suspension flip:\n%s", before)
+	}
+}

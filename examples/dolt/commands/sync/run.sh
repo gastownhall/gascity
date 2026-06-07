@@ -46,13 +46,26 @@ while [ $# -gt 0 ]; do
     -h|--help)
       echo "Usage: gc dolt sync [--dry-run] [--force] [--gc] [--db NAME]"
       echo ""
-      echo "Push Dolt databases to their configured remotes."
+      echo "Fast-forward-push Dolt databases to their configured remotes."
+      echo "Each database is fetched and classified against its remote; only"
+      echo "fast-forward (ahead-only or first) pushes proceed. A behind or"
+      echo "diverged database is refused with an actionable status and is never"
+      echo "force-pushed. This keeps shared multi-writer databases safe."
       echo ""
       echo "Flags:"
-      echo "  --dry-run   Show what would be pushed without pushing"
-      echo "  --force     Force-push to remotes"
+      echo "  --dry-run   Show the per-database classification without pushing"
+      echo "              (fetches read-only to classify; makes no other change)"
+      echo "  --force     Force-push to remotes (bypasses the fast-forward check)"
       echo "  --gc        Purge closed ephemeral beads before sync"
       echo "  --db NAME   Sync only the named database"
+      echo ""
+      echo "Policy:"
+      echo "  Create .no-sync in a database's .beads/dolt/<db>/ directory to"
+      echo "  exclude it from sync (reported as 'skipped (.no-sync)')."
+      echo ""
+      echo "Environment:"
+      echo "  GC_DOLT_SYNC_FETCH_TIMEOUT_SECS  pre-push fetch bound (default 60)"
+      echo "  GC_DOLT_SYNC_PUSH_TIMEOUT_SECS   push bound (default 1800)"
       exit 0
       ;;
     *) echo "gc dolt sync: unknown flag: $1" >&2; exit 1 ;;
@@ -97,6 +110,23 @@ esac
 if [ "$push_timeout_valid" != true ]; then
   printf 'gc dolt sync: invalid GC_DOLT_SYNC_PUSH_TIMEOUT_SECS=%s (must be a positive integer)\n' \
     "$push_timeout" >&2
+  exit 2
+fi
+
+# Wall-clock bound for the SQL-mode pre-push fetch (seconds). Defaults to 60s.
+# A hung fetch against a sick remote must not stall the whole patrol, so the
+# fetch is bounded and a timeout skips that database without pushing. Validated
+# with the same rules as the push timeout (reject empty / non-numeric /
+# all-zero — GNU `timeout 0` disables the timeout, i.e. unbounded).
+fetch_timeout="${GC_DOLT_SYNC_FETCH_TIMEOUT_SECS-60}"
+case "$fetch_timeout" in
+  ''|*[!0-9]*) fetch_timeout_valid=false ;;
+  *[1-9]*)     fetch_timeout_valid=true ;;
+  *)           fetch_timeout_valid=false ;;
+esac
+if [ "$fetch_timeout_valid" != true ]; then
+  printf 'gc dolt sync: invalid GC_DOLT_SYNC_FETCH_TIMEOUT_SECS=%s (must be a positive integer)\n' \
+    "$fetch_timeout" >&2
   exit 2
 fi
 
@@ -210,6 +240,20 @@ dolt_sql() {
   export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
   run_bounded "$tmo" dolt --host "$host" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls \
     sql --result-format csv -q "$query"
+}
+
+# classify_count <db> <revrange> — emit the dolt_log commit count for a revision
+# range (e.g. "remotes/origin/main..main" = commits on the remote-tracking ref
+# not on the local branch). Returns non-zero when the range cannot be resolved —
+# notably when the remote-tracking ref does not exist yet (Dolt errors
+# "branch not found: remotes/..."), which the caller treats as a first push.
+# Read-only; bounded by the metadata ceiling. Verified against Dolt 2.1.0:
+#   dolt_log('A..B') counts commits reachable from B but not A.
+classify_count() {
+  cc_db="$1"
+  cc_range="$2"
+  cc_out=$(dolt_sql "USE \`$cc_db\`; SELECT COUNT(*) AS n FROM dolt_log('$cc_range')") || return 1
+  printf '%s\n' "$cc_out" | awk -F, 'NR == 2 { gsub(/^"|"$/, "", $1); print $1; exit }'
 }
 
 find_remote_sql() {
@@ -329,9 +373,89 @@ sync_database_sql() {
   local_branch=$(printf '%s\n' "$refspec_pair" | sed -n '1p')
   remote_branch=$(printf '%s\n' "$refspec_pair" | sed -n '2p')
 
+  # gc-6ommo: fast-forward-only-or-refuse. Unless --force, fetch the remote and
+  # classify local vs remotes/<remote>/<remote_branch>. Push only on a
+  # fast-forward (ahead-only, or a first push where the remote branch does not
+  # exist yet). behind / diverged refuse with an actionable status; a fetch
+  # timeout or error skips WITHOUT pushing. A patrol never auto-merges (ZFC):
+  # it surfaces state + the owning command and lets a human/agent reconcile.
+  ff_decision="push"   # push | skip
+  ff_status="force"    # human-readable classification (for dry-run / output)
+  ff_rc=0              # return code when skipping
+  if [ "$force" != true ]; then
+    remote_tracking="remotes/$remote_name/$remote_branch"
+    fetch_err_tmp=$(mktemp) || {
+      echo "  $name: ERROR: cannot create temp file for fetch diagnostics" >&2
+      return 1
+    }
+    fetch_rc=0
+    dolt_sql "USE \`$name\`; CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" \
+      >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
+    if [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
+      # The remote has no such branch: an empty remote ("no branches found in
+      # remote") or a brand-new branch on a populated remote ("invalid ref
+      # spec" — both verified on Dolt 2.1.0). The first push creates the branch
+      # and is necessarily a fast-forward.
+      ff_status="first-push"
+      rm -f "$fetch_err_tmp"
+    elif [ "$fetch_rc" -eq 124 ]; then
+      rm -f "$fetch_err_tmp"
+      echo "  $name: fetch timed out after ${fetch_timeout}s — skipped (NOT pushed)" >&2
+      return 1
+    elif [ "$fetch_rc" -ne 0 ]; then
+      echo "  $name: fetch failed (exit $fetch_rc) — skipped (NOT pushed)" >&2
+      if [ -s "$fetch_err_tmp" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+          printf '  %s: %s\n' "$name" "$line" >&2
+        done < "$fetch_err_tmp"
+      fi
+      rm -f "$fetch_err_tmp"
+      return 1
+    else
+      rm -f "$fetch_err_tmp"
+      # Remote reachable and the branch exists (fetch succeeded) -> classify by
+      # ancestry. BOTH range queries must succeed; if either fails, fail closed
+      # (skip without pushing) rather than guessing a count and risking a push.
+      if ahead=$(classify_count "$name" "$remote_tracking..$local_branch") &&
+        behind=$(classify_count "$name" "$local_branch..$remote_tracking"); then
+        [ -n "$ahead" ] || ahead=0
+        [ -n "$behind" ] || behind=0
+        # diverged returns non-zero (needs human action); behind alone is a
+        # benign "nothing to push, pull needed" state and returns success.
+        if [ "$ahead" = 0 ] && [ "$behind" = 0 ]; then
+          ff_decision="skip"; ff_status="up-to-date"; ff_rc=0
+        elif [ "$behind" = 0 ]; then
+          ff_status="ahead $ahead"
+        elif [ "$ahead" = 0 ]; then
+          ff_decision="skip"; ff_status="behind $behind"; ff_rc=0
+        else
+          ff_decision="skip"; ff_status="diverged ($ahead ahead / $behind behind)"; ff_rc=1
+        fi
+      else
+        ff_decision="skip"; ff_status="classify failed"; ff_rc=1
+      fi
+    fi
+  fi
+
   if [ "$dry_run" = true ]; then
-    echo "  $name: would push $local_branch -> $remote_name:$remote_branch ($remote_url)"
+    if [ "$ff_decision" = "skip" ]; then
+      echo "  $name: would skip $local_branch -> $remote_name:$remote_branch ($remote_url) [$ff_status]"
+    elif [ "$force" = true ]; then
+      echo "  $name: would force-push $local_branch -> $remote_name:$remote_branch ($remote_url)"
+    else
+      echo "  $name: would push $local_branch -> $remote_name:$remote_branch ($remote_url) [$ff_status]"
+    fi
     return 0
+  fi
+
+  if [ "$ff_decision" = "skip" ]; then
+    case "$ff_status" in
+      up-to-date) echo "  $name: up-to-date with $remote_name:$remote_branch" ;;
+      behind*)    echo "  $name: $ff_status — pull needed (gc dolt pull)" ;;
+      diverged*)  echo "  $name: $ff_status — manual reconcile" >&2 ;;
+      *)          echo "  $name: skipped [$ff_status]" ;;
+    esac
+    return "$ff_rc"
   fi
 
   if [ "$local_branch" = "$remote_branch" ]; then

@@ -226,6 +226,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))))
 		register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
+		register(newBeadsProxiedCapabilityCheck(cfg))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
@@ -282,6 +283,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 		register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
 		register(newBacklogDepthCheck(cityPath, storeFactory))
+		register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
 		register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))

@@ -27,7 +27,7 @@ func syncFilteredEnv() []string {
 	return filteredEnv(
 		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
 		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS", "GC_DOLT_SYNC_FETCH_TIMEOUT_SECS",
 	)
 }
 
@@ -64,6 +64,15 @@ case "$*" in
   *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
     printf 'name,url\norigin,https://example.invalid/repo\n'
     ;;
+  *"CALL DOLT_FETCH("*)
+    :
+    ;;
+  *"..remotes/origin/"*)
+    printf 'n\n0\n'
+    ;;
+  *"dolt_log('remotes/origin/"*)
+    printf 'n\n1\n'
+    ;;
 esac
 exit 0
 `
@@ -81,6 +90,15 @@ printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
   *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
     printf 'name,url\norigin,https://example.invalid/repo\n'
+    ;;
+  *"CALL DOLT_FETCH("*)
+    :
+    ;;
+  *"..remotes/origin/"*)
+    printf 'n\n0\n'
+    ;;
+  *"dolt_log('remotes/origin/"*)
+    printf 'n\n1\n'
     ;;
   *"SELECT active_branch()"*)
     printf 'active_branch()\n` + activeBranch + `\n'
@@ -102,6 +120,15 @@ printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
   *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
     printf 'name,url\norigin,https://example.invalid/repo\n'
+    ;;
+  *"CALL DOLT_FETCH("*)
+    :
+    ;;
+  *"..remotes/origin/"*)
+    printf 'n\n0\n'
+    ;;
+  *"dolt_log('remotes/origin/"*)
+    printf 'n\n1\n'
     ;;
   *"SELECT active_branch()"*)
     printf 'active_branch()\n--force\n'
@@ -158,6 +185,15 @@ case "$*" in
     printf 'name,url\norigin,https://example.invalid/repo\n'
     exit 0
     ;;
+  *"CALL DOLT_FETCH("*)
+    :
+    ;;
+  *"..remotes/origin/"*)
+    printf 'n\n0\n'
+    ;;
+  *"dolt_log('remotes/origin/"*)
+    printf 'n\n1\n'
+    ;;
   *"SELECT active_branch()"*)
     printf 'active_branch()\nmain\n'
     exit 0
@@ -190,6 +226,15 @@ case "$*" in
   *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
     printf 'name,url\norigin,https://example.invalid/repo\n'
     exit 0
+    ;;
+  *"CALL DOLT_FETCH("*)
+    :
+    ;;
+  *"..remotes/origin/"*)
+    printf 'n\n0\n'
+    ;;
+  *"dolt_log('remotes/origin/"*)
+    printf 'n\n1\n'
     ;;
   *"SELECT active_branch()"*)
     printf 'active_branch()\nmain\n'
@@ -246,6 +291,15 @@ case "$*" in
   *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
     printf 'name,url\norigin,https://example.invalid/repo\n'
     exit 0
+    ;;
+  *"CALL DOLT_FETCH("*)
+    :
+    ;;
+  *"..remotes/origin/"*)
+    printf 'n\n0\n'
+    ;;
+  *"dolt_log('remotes/origin/"*)
+    printf 'n\n1\n'
     ;;
   *"SELECT active_branch()"*)
     printf 'active_branch()\nmain\n'

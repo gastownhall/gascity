@@ -380,8 +380,50 @@ func TestOrderDispatchResolvesPackBindingForPool(t *testing.T) {
 	if got := work.Metadata["gc.routed_to"]; got != "maintenance.dog" {
 		t.Errorf("gc.routed_to = %q, want %q (pack binding must qualify pool target)", got, "maintenance.dog")
 	}
-	if got := work.Metadata[poolDemandMetadataKey]; got != poolDemandMetadataValue {
-		t.Errorf("%s = %q, want %q (supervisor-cron-dispatched pool orders must carry the demand sentinel so defaultScaleCheckCounts can count the wisp despite readyExcludeTypes filtering molecules out of Ready() — see cmd/gc/pool_demand.go)", poolDemandMetadataKey, got, poolDemandMetadataValue)
+	assertNoDeprecatedPoolDemandMetadata(t, work.Metadata)
+}
+
+func TestOrderDispatchPoolLegacyFormulaWarnsWhenRootIsNotReadyVisible(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeFile(t, filepath.Join(formulaDir, "mol-legacy-cleanup.toml"), `
+formula = "mol-legacy-cleanup"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do legacy cleanup"
+description = "Do the cleanup."
+`)
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "legacy-cleanup",
+			Trigger:      "cooldown",
+			Interval:     "5m",
+			Formula:      "mol-legacy-cleanup",
+			Pool:         "dog",
+			FormulaLayer: formulaDir,
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) {
+			return store, nil
+		},
+		execRun: shellExecRunner,
+		rec:     events.Discard,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	if !strings.Contains(stderr.String(), "scale-from-zero pools will not wake") {
+		t.Fatalf("stderr = %q, want pool visibility warning", stderr.String())
+	}
+	work := workBeadByOrderLabel(t, store, "order-run:legacy-cleanup")
+	if work.Type != "molecule" {
+		t.Fatalf("legacy root Type = %q, want molecule", work.Type)
 	}
 }
 
@@ -8211,18 +8253,35 @@ func TestOrderDispatchSingleFlightLockFailsClosedOnPartialTierError(t *testing.T
 //
 // dispatch() must close every store handle it opens each pass via
 // closeBeadStoreHandle, which type-asserts for interface{ CloseStore() error }.
+// The close is deferred to a detached closer goroutine that runs once the
+// in-flight dispatchOne goroutines launched that tick have released the handles
+// (gascity#3157) — closing inline would race those goroutines on a native
+// store's one-way close latch. These tests therefore drain and then poll for
+// the close rather than asserting it synchronously at dispatch() return.
 
-// dispatchCloseStoreSpy wraps MemStore and counts CloseStore() calls. The
-// method is invoked by dispatch()'s deferred cleanup; not called concurrently.
+// dispatchCloseStoreSpy wraps MemStore and counts CloseStore() calls. CloseStore
+// runs on dispatch()'s detached closer goroutine, so access to the counter is
+// serialized through closeCount.
 type dispatchCloseStoreSpy struct {
 	*beads.MemStore
+	mu       sync.Mutex
 	closed   int
 	closeErr error
 }
 
 func (s *dispatchCloseStoreSpy) CloseStore() error {
+	s.mu.Lock()
 	s.closed++
+	s.mu.Unlock()
 	return s.closeErr
+}
+
+// closeCount returns how many times CloseStore has been called, synchronized
+// against the detached closer goroutine.
+func (s *dispatchCloseStoreSpy) closeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 // newDispatchCloseStoreSpyFn returns an orderStoreFunc that appends a fresh
@@ -8232,6 +8291,38 @@ func newDispatchCloseStoreSpyFn(spies *[]*dispatchCloseStoreSpy) orderStoreFunc 
 		spy := &dispatchCloseStoreSpy{MemStore: beads.NewMemStore()}
 		*spies = append(*spies, spy)
 		return spy, nil
+	}
+}
+
+// waitForDispatchCloseCounts drains the in-flight dispatchOne goroutines, then
+// waits for dispatch()'s detached closer to close every spied handle exactly
+// `want` times. The close lands shortly after drain() returns (gascity#3157),
+// so this polls with a deadline rather than asserting synchronously.
+func waitForDispatchCloseCounts(t *testing.T, m *memoryOrderDispatcher, spies []*dispatchCloseStoreSpy, want int) {
+	t.Helper()
+	drainCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if !m.drain(drainCtx) {
+		t.Fatal("drain timed out waiting for in-flight dispatchOne to finish")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		reached := true
+		for _, spy := range spies {
+			if spy.closeCount() < want {
+				reached = false
+				break
+			}
+		}
+		if reached || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for i, spy := range spies {
+		if got := spy.closeCount(); got != want {
+			t.Errorf("store[%d]: CloseStore() called %d times, want %d", i, got, want)
+		}
 	}
 }
 
@@ -8256,12 +8347,7 @@ func TestDispatchClosesEveryOpenedStoreHandle(t *testing.T) {
 	if len(spies) == 0 {
 		t.Fatal("storeFn never called: expected at least one store to be opened")
 	}
-	for i, spy := range spies {
-		if spy.closed != 1 {
-			t.Errorf("store[%d]: CloseStore() called %d times, want 1", i, spy.closed)
-		}
-	}
-	time.Sleep(50 * time.Millisecond) // let dispatchOne goroutines finish
+	waitForDispatchCloseCounts(t, m, spies, 1)
 }
 
 func TestDispatchClosesRigAndLegacyCityStoreHandles(t *testing.T) {
@@ -8291,12 +8377,7 @@ func TestDispatchClosesRigAndLegacyCityStoreHandles(t *testing.T) {
 	if len(spies) != 2 {
 		t.Fatalf("storeFn called %d times, want 2 (rig + legacy city fallback)", len(spies))
 	}
-	for i, spy := range spies {
-		if spy.closed != 1 {
-			t.Errorf("store[%d]: CloseStore() called %d times, want 1", i, spy.closed)
-		}
-	}
-	time.Sleep(50 * time.Millisecond)
+	waitForDispatchCloseCounts(t, m, spies, 1)
 }
 
 func TestDispatchDeduplicatesStoreHandlesAcrossOrders(t *testing.T) {
@@ -8318,10 +8399,7 @@ func TestDispatchDeduplicatesStoreHandlesAcrossOrders(t *testing.T) {
 	if len(spies) != 1 {
 		t.Fatalf("storeFn called %d times, want 1 (same target deduped across orders)", len(spies))
 	}
-	if spies[0].closed != 1 {
-		t.Errorf("CloseStore() called %d times, want 1", spies[0].closed)
-	}
-	time.Sleep(50 * time.Millisecond)
+	waitForDispatchCloseCounts(t, m, spies, 1)
 }
 
 func TestDispatchClosesNoStoresWhenCitySuspended(t *testing.T) {
@@ -8344,5 +8422,133 @@ func TestDispatchClosesNoStoresWhenCitySuspended(t *testing.T) {
 
 	if len(spies) != 0 {
 		t.Errorf("storeFn called %d times, want 0 when city is suspended", len(spies))
+	}
+}
+
+func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_HonorsBudgetAcrossStores(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	policy := orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}
+	// Each store gets minClosedOrderTrackingRetained+3 beads (48h old, past 24h TTL), so 3 are eligible per store.
+	makeStore := func(prefix string) *beads.MemStore {
+		seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+3)
+		for i := range minClosedOrderTrackingRetained + 3 {
+			seed = append(seed, beads.Bead{
+				ID:        fmt.Sprintf("%s-%02d", prefix, i),
+				Title:     "order:" + prefix,
+				Status:    "closed",
+				Type:      "task",
+				CreatedAt: now.Add(-48*time.Hour + time.Duration(i)*time.Minute),
+				Labels:    []string{"order-run:" + prefix, labelOrderTracking},
+				Ephemeral: true,
+			})
+		}
+		return beads.NewMemStoreFrom(100, seed, nil)
+	}
+	storeA := makeStore("alpha")
+	storeB := makeStore("beta")
+
+	// limit=4: budget spans both stores (3 eligible each = 6 total), stops at 4.
+	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
+		[]beads.Store{storeA, storeB}, now, policy, nil, 4)
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetentionAcrossStoresBounded: %v", err)
+	}
+	if deleted != 4 {
+		t.Fatalf("deleted = %d, want 4 (budget limit)", deleted)
+	}
+}
+
+func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ReturnsPartialCountWithNilErrorOnBudgetExhaustion(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	policy := orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+5)
+	for i := range minClosedOrderTrackingRetained + 5 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("ga-%02d", i),
+			Title:     "order:ga",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-48*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:ga", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	// limit=2, 5 eligible: returns 2 with nil error.
+	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
+		[]beads.Store{store}, now, policy, nil, 2)
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetentionAcrossStoresBounded: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("deleted = %d, want 2 (budget limit)", deleted)
+	}
+}
+
+func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_DoesNotBypassRetainFloor(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	policy := orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}
+	// Exactly minClosedOrderTrackingRetained beads — all at the floor, none eligible.
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained)
+	for i := range minClosedOrderTrackingRetained {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("floor-%02d", i),
+			Title:     "order:floor",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-48*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:floor", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
+		[]beads.Store{store}, now, policy, nil, 100)
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetentionAcrossStoresBounded: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("deleted = %d, want 0 (retain-10 floor must hold)", deleted)
+	}
+}
+
+func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ZeroLimitDeletesNothing(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	policy := orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+3)
+	for i := range minClosedOrderTrackingRetained + 3 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("zero-%02d", i),
+			Title:     "order:zero",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-48*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:zero", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
+		[]beads.Store{store}, now, policy, nil, 0)
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetentionAcrossStoresBounded: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("deleted = %d, want 0 (limit=0 means no budget)", deleted)
 	}
 }

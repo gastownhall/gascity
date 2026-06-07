@@ -145,6 +145,137 @@ func TestFindAntigravitySessionFile(t *testing.T) {
 	}
 }
 
+func TestFindAntigravitySessionFileUsesLastConversationsCache(t *testing.T) {
+	// Point HOME at an empty dir so only the configured search path can match.
+	t.Setenv("HOME", t.TempDir())
+
+	fixtureRoot := t.TempDir()
+	brainRoot := filepath.Join(fixtureRoot, "brain")
+	convID := "18e4eb9f-1b1d-4dbc-966b-c06e3646f3c4"
+	logDir := filepath.Join(brainRoot, convID, ".system_generated", "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir setup: %v", err)
+	}
+	transcriptPath := filepath.Join(logDir, "transcript.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte("turns\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	workDir := "/tmp/gascity/phase1/antigravity"
+	cachePath := filepath.Join(fixtureRoot, "cache", "last_conversations.json")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+	cache, err := json.Marshal(map[string]string{workDir: convID})
+	if err != nil {
+		t.Fatalf("marshal cache: %v", err)
+	}
+	if err := os.WriteFile(cachePath, cache, 0o644); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+
+	// Current agy writes history rows with workspace/timestamp but no
+	// conversationId; those rows must not block the cache mapping.
+	historyRow := []byte(`{"workspace":"/tmp/gascity/phase1/antigravity","timestamp":1770000300}` + "\n")
+	if err := os.WriteFile(filepath.Join(fixtureRoot, "history.jsonl"), historyRow, 0o644); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+
+	got := FindAntigravitySessionFile([]string{brainRoot}, workDir)
+	if got != transcriptPath {
+		t.Fatalf("FindAntigravitySessionFile() = %q, want %q", got, transcriptPath)
+	}
+}
+
+func TestFindAntigravitySessionFileUsesSingleConfiguredBrainTranscriptWhenIndexesLag(t *testing.T) {
+	// Point HOME at an empty dir so only the configured search path can match.
+	t.Setenv("HOME", t.TempDir())
+
+	fixtureRoot := t.TempDir()
+	brainRoot := filepath.Join(fixtureRoot, "brain")
+	convID := "18e4eb9f-1b1d-4dbc-966b-c06e3646f3c4"
+	transcriptPath := filepath.Join(brainRoot, convID, ".system_generated", "logs", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir setup: %v", err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte("turns\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	workDir := "/tmp/gascity/phase1/antigravity"
+	historyRow := []byte(`{"workspace":"/tmp/gascity/phase1/antigravity","timestamp":1770000300}` + "\n")
+	if err := os.WriteFile(filepath.Join(fixtureRoot, "history.jsonl"), historyRow, 0o644); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+
+	got := FindAntigravitySessionFile([]string{brainRoot}, workDir)
+	if got != transcriptPath {
+		t.Fatalf("FindAntigravitySessionFile() = %q, want single configured transcript %q", got, transcriptPath)
+	}
+
+	other := filepath.Join(brainRoot, "750fa972-4c56-4215-99b9-893382aee2b4", ".system_generated", "logs", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+		t.Fatalf("mkdir other transcript: %v", err)
+	}
+	if err := os.WriteFile(other, []byte("turns\n"), 0o644); err != nil {
+		t.Fatalf("write other transcript: %v", err)
+	}
+	if got := FindAntigravitySessionFile([]string{brainRoot}, workDir); got != "" {
+		t.Fatalf("FindAntigravitySessionFile() with multiple configured transcripts = %q, want empty", got)
+	}
+}
+
+func TestFindAntigravitySessionFileRequiresWorkspaceEvidenceForSingleTranscriptFallback(t *testing.T) {
+	// Point HOME at an empty dir so only the configured search path can match.
+	t.Setenv("HOME", t.TempDir())
+
+	fixtureRoot := t.TempDir()
+	brainRoot := filepath.Join(fixtureRoot, "brain")
+	convID := "18e4eb9f-1b1d-4dbc-966b-c06e3646f3c4"
+	transcriptPath := filepath.Join(brainRoot, convID, ".system_generated", "logs", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir setup: %v", err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte("turns\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	workDir := "/tmp/gascity/phase1/antigravity"
+	otherRow := []byte(`{"workspace":"/tmp/other/project","timestamp":1770000300}` + "\n")
+	if err := os.WriteFile(filepath.Join(fixtureRoot, "history.jsonl"), otherRow, 0o644); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+
+	if got := FindAntigravitySessionFile([]string{brainRoot}, workDir); got != "" {
+		t.Fatalf("FindAntigravitySessionFile() without matching workspace evidence = %q, want empty", got)
+	}
+}
+
+func TestFindAntigravitySessionFileSingleTranscriptFallbackIsBrainRootBounded(t *testing.T) {
+	// Point HOME at an empty dir so only the configured search path can match.
+	t.Setenv("HOME", t.TempDir())
+
+	fixtureRoot := t.TempDir()
+	brainRoot := filepath.Join(fixtureRoot, "brain")
+	transcriptPath := filepath.Join(brainRoot, "nested", "too-deep", "18e4eb9f-1b1d-4dbc-966b-c06e3646f3c4", ".system_generated", "logs", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir setup: %v", err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte("turns\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	workDir := "/tmp/gascity/phase1/antigravity"
+	historyRow := []byte(`{"workspace":"/tmp/gascity/phase1/antigravity","timestamp":1770000300}` + "\n")
+	if err := os.WriteFile(filepath.Join(fixtureRoot, "history.jsonl"), historyRow, 0o644); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+
+	if got := FindAntigravitySessionFile([]string{brainRoot}, workDir); got != "" {
+		t.Fatalf("FindAntigravitySessionFile() for nested non-brain-layout transcript = %q, want empty", got)
+	}
+}
+
 func TestFindAntigravitySessionFileScansPastLargeHistoryRows(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)

@@ -3,9 +3,11 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type reconcileRaceStore struct {
@@ -461,5 +463,169 @@ func TestRunReconciliationLogEmitsAgainAfterWindow(t *testing.T) {
 	count := strings.Count(out, "beads cache: reconciled")
 	if count != 2 {
 		t.Errorf("expected 2 reconciled lines after window elapsed, got %d:\n%s", count, out)
+	}
+}
+
+// failingScanStore fails full-scan List calls (the Prime path) while
+// letting status-filtered List calls (the PrimeActive path) through, so
+// tests can model a store whose initial full prime fails.
+type failingScanStore struct {
+	Store
+
+	mu       sync.Mutex
+	failScan bool
+}
+
+func (s *failingScanStore) setFailScan(fail bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failScan = fail
+}
+
+func (s *failingScanStore) List(query ListQuery) ([]Bead, error) {
+	if query.AllowScan {
+		s.mu.Lock()
+		fail := s.failScan
+		s.mu.Unlock()
+		if fail {
+			return nil, errors.New("full scan unavailable")
+		}
+	}
+	return s.Store.List(query)
+}
+
+// TestRunReconciliationPromotesPartialCacheToLive asserts that a clean
+// full-scan reconciliation promotes a PrimeActive-only (cachePartial)
+// cache to live. A reconcile loads the same complete active snapshot a
+// successful Prime would, so a store whose initial full prime failed must
+// converge to live through reconciliation instead of serving its
+// PrimeActive-era snapshot indefinitely.
+func TestRunReconciliationPromotesPartialCacheToLive(t *testing.T) {
+	mem := NewMemStore()
+	primed, err := mem.Create(Bead{Title: "present at prime-active"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := NewCachingStoreForTest(mem, nil)
+	if err := cs.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	if cs.IsLive() {
+		t.Fatal("cache live after PrimeActive alone, want partial")
+	}
+
+	// A bead created behind the cache's back (no event delivered) models
+	// storage-level state the partial snapshot missed.
+	missed, err := mem.Create(Bead{Title: "missed by prime-active"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cs.runReconciliation()
+
+	if !cs.IsLive() {
+		t.Fatal("cache not live after clean reconcile, want promoted to live")
+	}
+	got, ok := cs.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady not servable after reconcile promotion")
+	}
+	ids := make(map[string]bool, len(got))
+	for _, b := range got {
+		ids[b.ID] = true
+	}
+	if !ids[primed.ID] || !ids[missed.ID] {
+		t.Fatalf("CachedReady = %v, want both %s and %s", ids, primed.ID, missed.ID)
+	}
+}
+
+// TestRunReconciliationPromotesUnprimedCacheToLive asserts reconciliation
+// also converges a cache whose PrimeActive never succeeded
+// (cacheUninitialized), mirroring Prime's unconditional promotion.
+func TestRunReconciliationPromotesUnprimedCacheToLive(t *testing.T) {
+	mem := NewMemStore()
+	bead, err := mem.Create(Bead{Title: "storage-level work"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := NewCachingStoreForTest(mem, nil)
+
+	cs.runReconciliation()
+
+	if !cs.IsLive() {
+		t.Fatal("cache not live after clean reconcile from uninitialized state")
+	}
+	got, ok := cs.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady not servable after reconcile promotion")
+	}
+	if len(got) != 1 || got[0].ID != bead.ID {
+		t.Fatalf("CachedReady = %#v, want only %s", got, bead.ID)
+	}
+}
+
+// TestRunReconciliationDoesNotPromoteOnFailure asserts a failed reconcile
+// leaves a partial cache partial — promotion requires a clean full scan.
+func TestRunReconciliationDoesNotPromoteOnFailure(t *testing.T) {
+	mem := NewMemStore()
+	if _, err := mem.Create(Bead{Title: "present at prime-active"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &failingScanStore{Store: mem}
+	cs := NewCachingStoreForTest(backing, nil)
+	if err := cs.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	backing.setFailScan(true)
+
+	cs.runReconciliation()
+
+	if cs.IsLive() {
+		t.Fatal("cache promoted to live by a FAILED reconcile")
+	}
+}
+
+// TestPrimeFailureThenReconcileConverges is the end-to-end shape of the
+// recovery path: PrimeActive succeeds, the full Prime fails, and a later
+// clean reconciliation converges the cache to storage and promotes it
+// live so cached readers stop falling back.
+func TestPrimeFailureThenReconcileConverges(t *testing.T) {
+	mem := NewMemStore()
+	if _, err := mem.Create(Bead{Title: "present at prime-active"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &failingScanStore{Store: mem, failScan: true}
+	cs := NewCachingStoreForTest(backing, nil)
+	cs.primeRetryDelay = func(int) time.Duration { return 0 }
+	if err := cs.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	if err := cs.Prime(context.Background()); err == nil {
+		t.Fatal("Prime succeeded against failing scan store, want error")
+	}
+
+	missed, err := mem.Create(Bead{Title: "created while prime was failing"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	backing.setFailScan(false)
+	cs.runReconciliation()
+
+	if !cs.IsLive() {
+		t.Fatal("cache not live after reconcile recovered from failed prime")
+	}
+	got, err := cs.cachedReadyOnly(ReadyQuery{TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("cachedReadyOnly: %v", err)
+	}
+	found := false
+	for _, b := range got {
+		if b.ID == missed.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("cachedReadyOnly = %#v, want to include %s", got, missed.ID)
 	}
 }
