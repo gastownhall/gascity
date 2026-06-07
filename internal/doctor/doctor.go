@@ -129,7 +129,11 @@ func printResult(w io.Writer, r *CheckResult, verbose bool) {
 	if r.Fixed {
 		suffix = " (fixed)"
 	}
-	fmt.Fprintf(w, "  %s %s — %s%s\n", icon, r.Name, r.Message, suffix) //nolint:errcheck // best-effort output
+	advisorySuffix := ""
+	if r.Status != StatusOK && !r.Fixed && r.Severity == SeverityAdvisory {
+		advisorySuffix = " (advisory)"
+	}
+	fmt.Fprintf(w, "  %s %s — %s%s%s\n", icon, r.Name, r.Message, advisorySuffix, suffix) //nolint:errcheck // best-effort output
 	if verbose {
 		for _, d := range r.Details {
 			fmt.Fprintf(w, "      %s\n", d) //nolint:errcheck // best-effort output
