@@ -76,6 +76,7 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 	if err != nil {
 		return nil, err
 	}
+	applyLiveProviderRuntimeEnv(gcHome, env, liveSetup.Profile)
 	if err := seedLiveProviderStateFor(liveSetup.Profile, gcHome, root); err != nil {
 		return nil, err
 	}
@@ -151,6 +152,8 @@ func installLiveHandleProviderHooks(workDir string, profile workerpkg.Profile) e
 		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"opencode"})
 	case workerpkg.ProfilePiTmuxCLI:
 		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"pi"})
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"antigravity"})
 	default:
 		return nil
 	}

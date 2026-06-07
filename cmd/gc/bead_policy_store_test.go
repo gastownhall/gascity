@@ -42,6 +42,38 @@ func underlyingPolicyStoreForTest(store beads.Store) beads.Store {
 	return base
 }
 
+func TestBeadPolicyStorePreservesConditionalAssignmentReleaser(t *testing.T) {
+	backing := beads.NewMemStore()
+	wrapped := wrapStoreWithBeadPolicies(backing, nil)
+	releaser, ok := wrapped.(beads.ConditionalAssignmentReleaser)
+	if !ok {
+		t.Fatalf("wrapped store implements ConditionalAssignmentReleaser = false")
+	}
+	bead, err := wrapped.Create(beads.Bead{Title: "work", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	status := "in_progress"
+	if err := wrapped.Update(bead.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+
+	released, err := releaser.ReleaseIfCurrent(bead.ID, "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseIfCurrent released = false, want true")
+	}
+	got, err := wrapped.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("released bead = %+v, want open and unassigned", got)
+	}
+}
+
 func (s *captureGraphStore) ApplyGraphPlan(_ context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
 	next := *plan
 	s.plan = &next

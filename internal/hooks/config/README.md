@@ -27,12 +27,12 @@ materializing the per-provider files into each agent's working directory.
 ✓ = wired today. — = not wired (either the provider does not expose
 the event, or it does but Gas City has not opted in yet).
 
-| Canonical event | claude | codex | cursor | copilot | gemini | opencode | omp | pi |
-|---|---|---|---|---|---|---|---|---|
-| session start    | `SessionStart` ✓ | `SessionStart` ✓ | `sessionStart` ✓ | `sessionStart` ✓ | `SessionStart` ✓ | `session.created` ✓ | `session_start` ✓ | `session_start` ✓ |
-| pre-compaction   | `PreCompact` ✓   | `PreCompact` ✓   | `preCompact` ✓   | `preCompact` ✓   | `PreCompress` ✓  | `session.compacted` ✓ | `session_compact` ✓ | `session_compact` ✓ |
-| user prompt submit | `UserPromptSubmit` ✓ | `UserPromptSubmit` ✓ | `beforeSubmitPrompt` ✓ | `userPromptSubmitted` ✓ | — | — | — | — |
-| before agent run | —                | —                | —                | —                | `BeforeAgent` ✓  | —                | `before_agent_start` ✓ | `before_agent_start` ✓ |
+| Canonical event | claude | codex | cursor | copilot | gemini | antigravity | opencode | omp | pi |
+|---|---|---|---|---|---|---|---|---|---|
+| session start    | `SessionStart` ✓ | `SessionStart` ✓ | `sessionStart` ✓ | `sessionStart` ✓ | `SessionStart` ✓ | `PreInvocation` ✓ | `session.created` ✓ | `session_start` ✓ | `session_start` ✓ |
+| pre-compaction   | `PreCompact` ✓   | `PreCompact` ✓   | `preCompact` ✓   | `preCompact` ✓   | `PreCompress` ✓  | — | `session.compacted` ✓ | `session_compact` ✓ | `session_compact` ✓ |
+| user prompt submit | `UserPromptSubmit` ✓ | `UserPromptSubmit` ✓ | `beforeSubmitPrompt` ✓ | `userPromptSubmitted` ✓ | — | — | — | — | — |
+| before agent run | —                | —                | —                | —                | `BeforeAgent` ✓  | `PreInvocation` ✓ | —                | `before_agent_start` ✓ | `before_agent_start` ✓ |
 
 ### Gas City command bindings
 
@@ -48,6 +48,11 @@ For each provider where a row above is ✓, the wired command is one of:
 Some providers fold both injection commands into a single hook entry;
 others split them. The exact wiring lives in the per-provider config —
 this README only documents the event vocabulary, not the command shape.
+
+Antigravity currently exposes `PreInvocation` for before-model-call
+injection. Gas City wires prime, nudge-drain, and mail-check through
+separate named `PreInvocation` hooks in `.agents/hooks.json`; no
+pre-compaction hook is installed because Antigravity does not expose one.
 
 ## Adding a new provider hook
 

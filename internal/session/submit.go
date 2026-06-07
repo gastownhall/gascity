@@ -62,8 +62,12 @@ func SubmissionCapabilitiesForMetadata(metadata map[string]string, hasDeferredQu
 	transport := transportFromMetadata(beads.Bead{Metadata: metadata})
 	return SubmissionCapabilities{
 		SupportsFollowUp:     hasDeferredQueue && transport != "acp",
-		SupportsInterruptNow: true,
+		SupportsInterruptNow: supportsInterruptNowForMetadata(metadata),
 	}
+}
+
+func supportsInterruptNowForMetadata(metadata map[string]string) bool {
+	return ProviderFamilyFromMetadata(metadata, "") != "antigravity"
 }
 
 // SubmissionCapabilities reports which semantic submit intents the session can
@@ -110,6 +114,9 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			outcome.Queued = true
 			return nil
 		case SubmitIntentInterruptNow:
+			if !supportsInterruptNowForMetadata(b.Metadata) {
+				return ErrInteractionUnsupported
+			}
 			return m.interruptAndSubmitLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 		default:
 			running := m.sp.IsRunning(sessName)

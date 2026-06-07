@@ -33,6 +33,8 @@ type beadPolicyGraphStore struct {
 	applier beads.GraphApplyStore
 }
 
+var _ beads.ConditionalAssignmentReleaser = (*beadPolicyStore)(nil)
+
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
 	if store == nil {
 		return nil
@@ -153,6 +155,14 @@ func (s *beadPolicyStore) ListOpen(status ...string) ([]beads.Bead, error) {
 		AllowScan: true,
 		TierMode:  beads.TierBoth,
 	})
+}
+
+func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	releaser, ok := s.Store.(beads.ConditionalAssignmentReleaser)
+	if !ok {
+		return false, beads.ErrConditionalReleaseUnsupported
+	}
+	return releaser.ReleaseIfCurrent(id, expectedAssignee)
 }
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {

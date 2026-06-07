@@ -589,6 +589,102 @@ func TestMintNavigationPagesExist(t *testing.T) {
 	}
 }
 
+// docsPublishExemptions lists markdown files under docs/ that are allowed to
+// exist without a docs.json navigation entry. The docs/ tree publishes to
+// docs.gascityhall.com via Mintlify, so every other .md/.mdx must appear in
+// the navigation. Keep this list tiny: a file belongs here only if it is
+// docs-workspace meta (not a published page and not an engineering doc).
+// Engineering docs (plans, design notes, internal runbooks) do NOT belong in
+// docs/ at all — move them under engdocs/ instead of adding an exemption.
+var docsPublishExemptions = map[string]bool{
+	"README.md": true, // contributor README for the docs workspace itself
+}
+
+// collectDocsMarkdownFiles returns every .md/.mdx file under docs/, as paths
+// relative to docs/ with forward slashes (e.g. "guides/index.md").
+func collectDocsMarkdownFiles(docsRoot string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(docsRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if ext := filepath.Ext(path); ext != ".md" && ext != ".mdx" {
+			return nil
+		}
+		rel, err := filepath.Rel(docsRoot, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+// TestEveryDocsPageIsPublished enforces that docs/ holds only published docs:
+// every markdown file under docs/ must be referenced by docs.json navigation
+// (the source of truth for what ships to docs.gascityhall.com), except for the
+// small docsPublishExemptions allowlist. This is the reverse of
+// TestMintNavigationPagesExist (which checks nav entries point at real files);
+// together they keep docs/ and the published nav in exact correspondence and
+// keep engineering docs (plans, design notes) out of the published tree.
+func TestEveryDocsPageIsPublished(t *testing.T) {
+	root := repoRoot()
+	docsRoot := filepath.Join(root, "docs")
+
+	data, err := os.ReadFile(filepath.Join(docsRoot, "docs.json"))
+	if err != nil {
+		t.Fatalf("reading docs.json: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("parsing docs.json: %v", err)
+	}
+
+	// Build the set of page-form references (no extension, slash-separated)
+	// that docs.json navigation declares, e.g. "guides/index".
+	var pages []string
+	collectMintPages(decoded, &pages)
+	navPages := make(map[string]bool, len(pages))
+	for _, p := range pages {
+		navPages[strings.TrimSuffix(filepath.ToSlash(p), filepath.Ext(p))] = true
+	}
+
+	files, err := collectDocsMarkdownFiles(docsRoot)
+	if err != nil {
+		t.Fatalf("collecting docs markdown: %v", err)
+	}
+
+	var orphans []string
+	for _, rel := range files {
+		if docsPublishExemptions[rel] {
+			continue
+		}
+		pageForm := strings.TrimSuffix(rel, filepath.Ext(rel))
+		if !navPages[pageForm] {
+			orphans = append(orphans, rel)
+		}
+	}
+
+	if len(orphans) > 0 {
+		sort.Strings(orphans)
+		t.Errorf("docs/ markdown files not referenced in docs.json navigation.\n" +
+			"docs/ publishes to docs.gascityhall.com, so every page must be in the nav.\n" +
+			"Fix each file by either adding it to docs/docs.json navigation (if it is a\n" +
+			"published page) or moving it under engdocs/ (if it is an engineering doc):")
+		for _, o := range orphans {
+			t.Errorf("  docs/%s", o)
+		}
+	}
+}
+
 func TestNoKnownStaleDocReferences(t *testing.T) {
 	root := repoRoot()
 	files, err := publicSurfaceMarkdownFiles(root)

@@ -8,19 +8,18 @@ import (
 )
 
 const (
-	hookOutputFormatCodex  = "codex"
-	hookOutputFormatGemini = "gemini"
+	hookOutputFormatAntigravity = "antigravity"
+	hookOutputFormatCodex       = "codex"
+	hookOutputFormatGemini      = "gemini"
 )
-
-func writeProviderHookContext(stdout io.Writer, format, content string) error {
-	return writeProviderHookContextForEvent(stdout, format, "", content)
-}
 
 func writeProviderHookContextForEvent(stdout io.Writer, format, eventName, content string) error {
 	if content == "" {
 		return nil
 	}
 	switch strings.ToLower(strings.TrimSpace(format)) {
+	case hookOutputFormatAntigravity:
+		return json.NewEncoder(stdout).Encode(antigravityHookAdditionalContext(content))
 	case hookOutputFormatCodex:
 		return json.NewEncoder(stdout).Encode(codexHookOutput(eventName, content))
 	case hookOutputFormatGemini:
@@ -28,6 +27,14 @@ func writeProviderHookContextForEvent(stdout io.Writer, format, eventName, conte
 	}
 	_, err := io.WriteString(stdout, content)
 	return err
+}
+
+func antigravityHookAdditionalContext(content string) map[string]any {
+	return map[string]any{
+		"injectSteps": []map[string]any{
+			{"ephemeralMessage": strings.TrimRight(content, "\n")},
+		},
+	}
 }
 
 func codexHookOutput(eventName, content string) map[string]any {

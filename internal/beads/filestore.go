@@ -30,6 +30,8 @@ type FileStore struct {
 	freshness fileFreshness
 }
 
+var _ ConditionalAssignmentReleaser = (*FileStore)(nil)
+
 type fileFreshness struct {
 	known   bool
 	exists  bool
@@ -223,6 +225,30 @@ func (fs *FileStore) Update(id string, opts UpdateOpts) error {
 		return err
 	}
 	return nil
+}
+
+// ReleaseIfCurrent clears an in-progress assignment only when the bead still
+// has the expected assignee, while holding the file-store write lock.
+func (fs *FileStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return false, err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.reloadFromDisk(); err != nil {
+		return false, err
+	}
+	snap := fs.snapshotLocked()
+	released, err := fs.MemStore.ReleaseIfCurrent(id, expectedAssignee)
+	if err != nil || !released {
+		return released, err
+	}
+	if err := fs.save(); err != nil {
+		fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+		return false, err
+	}
+	return true, nil
 }
 
 // Close delegates to MemStore.Close and flushes to disk.

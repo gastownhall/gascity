@@ -97,28 +97,25 @@ func parseGitHubTreeURL(s string) (source, subpath, ref string) {
 // resolvePackRef resolves a pack reference to a local directory.
 // Handles local paths, GitHub tree URLs, and git source//sub#ref URLs.
 func resolvePackRef(ref, declDir, cityRoot string) (string, error) {
-	if isGitHubTreeURL(ref) {
-		source, subpath, gitRef := parseGitHubTreeURL(ref)
-		cacheDir, err := fetchRemoteInclude(source, gitRef, cityRoot)
-		if err != nil {
-			return "", err
-		}
-		if subpath != "" {
-			return filepath.Join(cacheDir, subpath), nil
-		}
-		return cacheDir, nil
-	}
-	if isRemoteInclude(ref) {
+	if isGitHubTreeURL(ref) || isRemoteInclude(ref) {
+		// parseRemoteInclude handles GitHub tree/blob URLs too
+		// (remotesource.Parse short-circuits to ParseGitHubTreeOrBlob),
+		// so a single parse covers both remote forms.
 		source, subpath, gitRef := parseRemoteInclude(ref)
-		if gitRef == "" {
-			if cacheDir, ok, err := resolveLockedRemoteImport(ref, cityRoot); err != nil {
-				return "", err
-			} else if ok {
-				if subpath != "" {
-					return filepath.Join(cacheDir, subpath), nil
-				}
-				return cacheDir, nil
+		// packs.lock is authoritative for any remote source string it
+		// records, with or without an embedded ref: gc import install /
+		// upgrade already resolved the authored source to a commit and
+		// populated the repo cache. Consulting the lock first keeps
+		// locked imports (including registry-recommended GitHub tree
+		// URLs) resolvable without the legacy include cache, which has
+		// no remaining writer.
+		if cacheDir, ok, err := resolveLockedRemoteImport(ref, cityRoot); err != nil {
+			return "", err
+		} else if ok {
+			if subpath != "" {
+				return filepath.Join(cacheDir, subpath), nil
 			}
+			return cacheDir, nil
 		}
 		cacheDir, err := fetchRemoteInclude(source, gitRef, cityRoot)
 		if err != nil {

@@ -185,6 +185,37 @@ prefix = "mc"
 	}
 }
 
+func TestBdStoreForCityEnablesSkipLabelsFromBD105Compatibility(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "Metro City"
+
+[beads]
+bd_compatibility = "bd-1.0.5"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := bdStoreForCity(cityDir, cityDir)
+	if !store.ListSkipLabelsEnabled() {
+		t.Fatal("bdStoreForCity did not enable bd list --skip-labels for bd-1.0.5 compatibility")
+	}
+}
+
+func TestBdStoreForCityLeavesSkipLabelsDisabledByDefault(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "Metro City"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := bdStoreForCity(cityDir, cityDir)
+	if store.ListSkipLabelsEnabled() {
+		t.Fatal("bdStoreForCity enabled bd list --skip-labels without bd-1.0.5 compatibility")
+	}
+}
+
 func TestBdStoreForRigResolvesIDPrefixFromScopeConfig(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "rigs", "repo")
@@ -199,6 +230,23 @@ func TestBdStoreForRigResolvesIDPrefixFromScopeConfig(t *testing.T) {
 	store := bdStoreForRig(rigDir, cityDir, cfg)
 	if got := store.IDPrefix(); got != "repo" {
 		t.Fatalf("IDPrefix() = %q, want repo", got)
+	}
+}
+
+func TestBdStoreForRigEnablesSkipLabelsFromBD105Compatibility(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "repo")
+	if err := os.MkdirAll(rigDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+		Rigs:  []config.Rig{{Name: "repo", Path: "rigs/repo", Prefix: "ga"}},
+	}
+
+	store := bdStoreForRig(rigDir, cityDir, cfg)
+	if !store.ListSkipLabelsEnabled() {
+		t.Fatal("bdStoreForRig did not enable bd list --skip-labels for bd-1.0.5 compatibility")
 	}
 }
 

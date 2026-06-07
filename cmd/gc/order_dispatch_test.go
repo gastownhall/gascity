@@ -380,8 +380,50 @@ func TestOrderDispatchResolvesPackBindingForPool(t *testing.T) {
 	if got := work.Metadata["gc.routed_to"]; got != "maintenance.dog" {
 		t.Errorf("gc.routed_to = %q, want %q (pack binding must qualify pool target)", got, "maintenance.dog")
 	}
-	if got := work.Metadata[poolDemandMetadataKey]; got != poolDemandMetadataValue {
-		t.Errorf("%s = %q, want %q (supervisor-cron-dispatched pool orders must carry the demand sentinel so defaultScaleCheckCounts can count the wisp despite readyExcludeTypes filtering molecules out of Ready() — see cmd/gc/pool_demand.go)", poolDemandMetadataKey, got, poolDemandMetadataValue)
+	assertNoDeprecatedPoolDemandMetadata(t, work.Metadata)
+}
+
+func TestOrderDispatchPoolLegacyFormulaWarnsWhenRootIsNotReadyVisible(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeFile(t, filepath.Join(formulaDir, "mol-legacy-cleanup.toml"), `
+formula = "mol-legacy-cleanup"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do legacy cleanup"
+description = "Do the cleanup."
+`)
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "legacy-cleanup",
+			Trigger:      "cooldown",
+			Interval:     "5m",
+			Formula:      "mol-legacy-cleanup",
+			Pool:         "dog",
+			FormulaLayer: formulaDir,
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) {
+			return store, nil
+		},
+		execRun: shellExecRunner,
+		rec:     events.Discard,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	if !strings.Contains(stderr.String(), "scale-from-zero pools will not wake") {
+		t.Fatalf("stderr = %q, want pool visibility warning", stderr.String())
+	}
+	work := workBeadByOrderLabel(t, store, "order-run:legacy-cleanup")
+	if work.Type != "molecule" {
+		t.Fatalf("legacy root Type = %q, want molecule", work.Type)
 	}
 }
 

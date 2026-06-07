@@ -21,6 +21,8 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
+unique_words = $(if $1,$(firstword $1) $(call unique_words,$(filter-out $(firstword $1),$1)))
+
 # macOS: icu4c (a transitive Dolt / go-icu-regex CGO build dependency) is
 # keg-only under Homebrew, so its headers/libs are not on the default CGO
 # search path. Point CGO at them when icu4c is present. This is a no-op on
@@ -39,7 +41,11 @@ endif
 # Linux: some non-system compilers (Nix, Flox, etc.) don't search /usr/include
 # or /usr/lib by default. If system ICU headers exist but the compiler doesn't
 # see them, intentionally let system paths participate in the whole CGO build.
+# Set SYS_USR_CGO_FALLBACK=0 to disable this fallback for hermetic or cross-CGO
+# builds.
 ifeq ($(shell uname),Linux)
+SYS_USR_CGO_FALLBACK ?= 1
+ifneq ($(SYS_USR_CGO_FALLBACK),0)
 SYS_USR_INCLUDE ?= /usr/include
 SYS_USR_LIB_ROOT ?= /usr/lib
 SYS_USR_LIB64_ROOT ?= /usr/lib64
@@ -47,11 +53,13 @@ ifneq ($(wildcard $(SYS_USR_INCLUDE)/unicode/uregex.h),)
 ifeq ($(shell $(CC) -E -Wp,-v -x c /dev/null 2>&1 | sed 's/^[[:space:]]*//' | grep -F -x -q "$(SYS_USR_INCLUDE)" && echo yes),)
 SYS_USR_MULTIARCH_CANDIDATES := $(strip $(shell dpkg-architecture -q DEB_HOST_MULTIARCH 2>/dev/null) $(shell $(CC) -print-multiarch 2>/dev/null))
 SYS_USR_LIB_CANDIDATES := $(foreach arch,$(SYS_USR_MULTIARCH_CANDIDATES),$(SYS_USR_LIB_ROOT)/$(arch)) $(SYS_USR_LIB64_ROOT) $(SYS_USR_LIB_ROOT)
-SYS_USR_LIB_DIRS := $(strip $(foreach dir,$(SYS_USR_LIB_CANDIDATES),$(if $(wildcard $(dir)),$(dir))))
+SYS_USR_LIB_DIRS := $(strip $(call unique_words,$(strip $(foreach dir,$(SYS_USR_LIB_CANDIDATES),$(if $(wildcard $(dir)),$(dir))))))
+$(info Linux system CGO fallback active: adding -I$(SYS_USR_INCLUDE) $(addprefix -L,$(SYS_USR_LIB_DIRS)); set SYS_USR_CGO_FALLBACK=0 to disable)
 CGO_CPPFLAGS += -I$(SYS_USR_INCLUDE)
 CGO_LDFLAGS += $(addprefix -L,$(SYS_USR_LIB_DIRS))
 export CGO_CPPFLAGS
 export CGO_LDFLAGS
+endif
 endif
 endif
 endif

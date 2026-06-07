@@ -1162,7 +1162,8 @@ type Workspace struct {
 	// InstallAgentHooks lists provider names whose hooks should be installed
 	// into agent working directories. Agent-level overrides workspace-level
 	// (replace, not additive). Supported: "claude", "codex", "gemini",
-	// "kiro", "opencode", "groq", "copilot", "cursor", "pi", "omp".
+	// "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot",
+	// "cursor", "pi", "omp".
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// GlobalFragments lists named template fragments injected into every
 	// agent's rendered prompt. Applied before per-agent InjectFragments.
@@ -1240,7 +1241,8 @@ type BeadsConfig struct {
 	EventHooks *bool `toml:"event_hooks,omitempty" jsonschema:"default=true"`
 	// BDCompatibility selects the bd CLI semantics Gas City may rely on.
 	// Empty defaults to "bd-1.0.4", which keeps claimable work history-backed
-	// and avoids ready flags whose filtering is incomplete in bd 1.0.4.
+	// and avoids bd ready/list flags that are unavailable or incomplete in bd
+	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
@@ -1258,7 +1260,7 @@ const (
 	// BeadsBDCompatibility104 preserves behavior supported by installed bd
 	// 1.0.4, where ready filtering is reliable only for history-backed rows.
 	BeadsBDCompatibility104 = "bd-1.0.4"
-	// BeadsBDCompatibility105 opts into bd 1.0.5 ready/storage semantics.
+	// BeadsBDCompatibility105 opts into bd 1.0.5 CLI/storage semantics.
 	BeadsBDCompatibility105 = "bd-1.0.5"
 )
 
@@ -1276,10 +1278,16 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 	}
 }
 
+// UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
+// command-line behavior.
+func (b BeadsConfig) UsesBD105CLISemantics() bool {
+	return b.NormalizedBDCompatibility() == BeadsBDCompatibility105
+}
+
 // UsesBD105ReadySemantics reports whether generated bd ready commands may use
 // flags whose complete filter semantics require bd 1.0.5 or newer.
 func (b BeadsConfig) UsesBD105ReadySemantics() bool {
-	return b.NormalizedBDCompatibility() == BeadsBDCompatibility105
+	return b.UsesBD105CLISemantics()
 }
 
 // BeadPolicyConfig holds storage and retention defaults for a named bead use.

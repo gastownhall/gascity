@@ -1941,6 +1941,26 @@ func TestGcBdSurfacesSilentFallbackAsLoudError_ClosePath(t *testing.T) {
 	}
 }
 
+func TestGcBdSurfacesSilentFallbackAsLoudError_ReleaseIfCurrentPath(t *testing.T) {
+	silentFallbackTestSetup(t, silentFallbackFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"release-if-current", "demo-abc", "worker-1"}, &stdout, &stderr)
+	if got != bdSilentFallbackExitCode {
+		t.Fatalf("doBd(release-if-current) = %d, want %d (silent-fallback exit code); stderr=%q stdout=%q",
+			got, bdSilentFallbackExitCode, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "managed Dolt unreachable") {
+		t.Fatalf("stderr missing loud-fail message; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "auto-importing") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "released") {
+		t.Fatalf("release-if-current reported success despite silent fallback; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 // TestGcBdHappyPathExitsZeroWithoutFallbackMarker is the inverse: a clean
 // bd run that produces no auto-import marker must NOT be converted into the
 // loud-fail. This guards against false positives where bd's stderr happens
@@ -2154,4 +2174,160 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 			t.Fatalf("rewriteBdHeartbeatArgs(%q) = %q, want passthrough", in, out)
 		}
 	})
+}
+
+func TestParseBdReleaseIfCurrentArgs(t *testing.T) {
+	id, assignee, ok, err := parseBdReleaseIfCurrentArgs([]string{"release-if-current", "gc-abc", "worker-1"})
+	if err != nil {
+		t.Fatalf("parseBdReleaseIfCurrentArgs unexpected error: %v", err)
+	}
+	if !ok || id != "gc-abc" || assignee != "worker-1" {
+		t.Fatalf("parseBdReleaseIfCurrentArgs = (%q, %q, %v), want gc-abc worker-1 true", id, assignee, ok)
+	}
+	if _, _, ok, err := parseBdReleaseIfCurrentArgs([]string{"list"}); ok || err != nil {
+		t.Fatalf("non-release command parsed as release: ok=%v err=%v", ok, err)
+	}
+	for _, args := range [][]string{
+		{"release-if-current"},
+		{"release-if-current", "gc-abc"},
+		{"release-if-current", "gc-abc", "worker-1", "extra"},
+		{"release-if-current", "", "worker-1"},
+		{"release-if-current", "gc abc", "worker-1"},
+		{"release-if-current", "gc-abc", "worker 1"},
+	} {
+		if _, _, ok, err := parseBdReleaseIfCurrentArgs(args); !ok || err == nil {
+			t.Fatalf("parseBdReleaseIfCurrentArgs(%q) = ok=%v err=%v, want release usage error", args, ok, err)
+		}
+	}
+}
+
+func TestDoBdReleaseIfCurrentUpdatesOnlyMatchingAssignment(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	created, err := store.Create(beads.Bead{Title: "work", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Update(created.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "gc"}
+	var stdout, stderr bytes.Buffer
+	if got := doBdReleaseIfCurrent(cityDir, target, created.ID, "worker-2", &stdout, &stderr); got != 0 {
+		t.Fatalf("doBdReleaseIfCurrent wrong assignee = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "skipped" {
+		t.Fatalf("wrong-assignee output = %q, want skipped", stdout.String())
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after skipped release: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-1" {
+		t.Fatalf("skipped release mutated bead: %+v", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if got := doBdReleaseIfCurrent(cityDir, target, created.ID, "worker-1", &stdout, &stderr); got != 0 {
+		t.Fatalf("doBdReleaseIfCurrent matching assignee = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "released" {
+		t.Fatalf("matching-assignee output = %q, want released", stdout.String())
+	}
+	got, err = store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after release: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("released bead = %+v, want open and unassigned", got)
+	}
+}
+
+func TestDoBdReleaseIfCurrentWorksForBdStoreFallback(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir rig .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatalf("write rig metadata: %v", err)
+	}
+	fakeBin := t.TempDir()
+	sqlLog := filepath.Join(fakeBin, "sql.log")
+	fakeBD := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"sql\" ] && [ \"$2\" = \"--json\" ]; then\n" +
+		"  printf '%s\\n' \"$3\" > " + strconv.Quote(sqlLog) + "\n" +
+		"  printf '{\"rows_affected\":1,\"schema_version\":1}\\n'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"printf 'unexpected bd args:' >&2\n" +
+		"printf ' %s' \"$@\" >&2\n" +
+		"printf '\\n' >&2\n" +
+		"exit 2\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(fakeBD), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	setCwd(t, cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
+
+	store, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	if _, ok := underlyingPolicyStoreForTest(store).(*beads.BdStore); !ok {
+		t.Fatalf("openStoreAtForCity returned %T, want policy-wrapped *beads.BdStore", underlyingPolicyStoreForTest(store))
+	}
+
+	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "fe"}
+	var stdout, stderr bytes.Buffer
+	if got := doBdReleaseIfCurrent(cityDir, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
+		t.Fatalf("doBdReleaseIfCurrent = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "released" {
+		t.Fatalf("output = %q, want released", stdout.String())
+	}
+	query, err := os.ReadFile(sqlLog)
+	if err != nil {
+		t.Fatalf("read SQL log: %v", err)
+	}
+	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'"
+	if strings.TrimSpace(string(query)) != wantQuery {
+		t.Fatalf("SQL query = %q, want %q", strings.TrimSpace(string(query)), wantQuery)
+	}
 }

@@ -3643,6 +3643,34 @@ func TestInitWizardConfigRejectsUnknownProvider(t *testing.T) {
 	}
 }
 
+func TestCmdInitProviderAcceptsAntigravity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	cityPath := filepath.Join(t.TempDir(), "antigravity-city")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init", "--provider", "antigravity", "--skip-provider-readiness", cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run init --provider antigravity = %d; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing city.toml: %v", err)
+	}
+	if cfg.Workspace.Provider != "antigravity" {
+		t.Errorf("Workspace.Provider = %q, want antigravity", cfg.Workspace.Provider)
+	}
+	if _, ok := cfg.Providers["antigravity"]; !ok {
+		t.Fatalf("Providers = %v, want explicit antigravity alias", cfg.Providers)
+	}
+}
+
 func TestInitWizardConfigFromFlagsRejectsUnknownTemplate(t *testing.T) {
 	cmd := newInitCmd(io.Discard, io.Discard)
 	if err := cmd.Flags().Set("template", "not-a-template"); err != nil {

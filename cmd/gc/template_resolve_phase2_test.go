@@ -112,6 +112,16 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantModelOverride:     "opencode/deepseek-v4-flash-free",
 			wantModelOverrideArgs: []string{"--model", "opencode/deepseek-v4-flash-free"},
 		},
+		{
+			profileID:             "antigravity/tmux-cli",
+			family:                "antigravity",
+			wantCommand:           "agy --dangerously-skip-permissions",
+			wantPromptMode:        "flag",
+			wantPromptFlag:        "--prompt-interactive",
+			wantReadyDelayMs:      5000,
+			wantReadyPromptPrefix: "> ",
+			wantProcessNames:      []string{"agy"},
+		},
 	}
 
 	filter := strings.TrimSpace(os.Getenv("PROFILE"))

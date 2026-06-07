@@ -23,10 +23,11 @@ func DiscoverPath(searchPaths []string, provider, workDir, gcSessionID string) s
 	if path := DiscoverKeyedPath(searchPaths, provider, workDir, gcSessionID); path != "" {
 		return path
 	}
-	if strings.TrimSpace(gcSessionID) != "" && SupportsIDLookup(provider) {
+	family := sessionlog.ProviderFamily(provider)
+	if strings.TrimSpace(gcSessionID) != "" && SupportsIDLookup(provider) && (family != "antigravity" || !isProvisionalGCSessionID(gcSessionID)) {
 		return ""
 	}
-	if sessionlog.ProviderFamily(provider) == "kimi" {
+	if family == "kimi" {
 		return sessionlog.FindKimiSessionFileIfUnambiguous(searchPaths, workDir)
 	}
 	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
@@ -51,19 +52,37 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 // DiscoverFallbackPath resolves the narrow provider-specific fallback path to
 // use when a keyed transcript lookup misses.
 func DiscoverFallbackPath(searchPaths []string, provider, workDir, gcSessionID string) string {
-	if strings.TrimSpace(gcSessionID) != "" && (sessionlog.ProviderFamily(provider) == "pi" || sessionlog.ProviderFamily(provider) == "antigravity") {
+	sessionID := strings.TrimSpace(gcSessionID)
+	family := sessionlog.ProviderFamily(provider)
+	if sessionID != "" && family == "pi" {
 		return ""
 	}
-	if strings.TrimSpace(gcSessionID) != "" && SupportsIDLookup(provider) {
-		if sessionlog.ProviderFamily(provider) == "kimi" {
+	if sessionID != "" && family == "antigravity" && !isProvisionalGCSessionID(sessionID) {
+		return ""
+	}
+	if sessionID != "" && SupportsIDLookup(provider) {
+		if family == "kimi" {
 			return ""
 		}
 		return sessionlog.FindProviderFallbackSessionFile(searchPaths, provider, workDir)
 	}
-	if sessionlog.ProviderFamily(provider) == "kimi" {
+	if family == "kimi" {
 		return sessionlog.FindKimiSessionFileIfUnambiguous(searchPaths, workDir)
 	}
 	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
+}
+
+func isProvisionalGCSessionID(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if !strings.HasPrefix(sessionID, "gc-") || len(sessionID) <= len("gc-") {
+		return false
+	}
+	for _, r := range sessionID[len("gc-"):] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // HasKeyedTranscript reports whether the per-session ("keyed") transcript that
@@ -96,7 +115,7 @@ func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey stri
 // never clears a resume key for a provider whose transcript we cannot verify.
 func providerHasKeyedTranscript(provider string) bool {
 	switch sessionlog.ProviderFamily(provider) {
-	case "kimi", "pi":
+	case "kimi", "pi", "antigravity":
 		return true
 	}
 	// claude and claude-eco fall through ProviderFamily unchanged; match them

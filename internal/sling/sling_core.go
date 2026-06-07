@@ -239,6 +239,7 @@ func validateExistingBeadInQuerier(beadID, storeRef string, querier BeadQuerier)
 func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	a := opts.Target
 	method := "formula"
+	searchPaths := SlingFormulaSearchPaths(deps, a)
 	inv, isGraph, err := prepareGraphV2FormulaInvocation(context.Background(), opts.BeadOrFormula, "", opts, deps, a)
 	if err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
@@ -247,7 +248,14 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if isGraph {
 		formulaVars = inv.Vars
 	}
-	mResult, err := InstantiateSlingFormula(context.Background(), opts.BeadOrFormula, SlingFormulaSearchPaths(deps, a), molecule.Options{
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), opts.BeadOrFormula, searchPaths, formulaVars)
+	if err != nil {
+		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
+	}
+	if a.SupportsMultipleSessions() && !formula.RecipeHasReadySurface(recipe) {
+		return SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula, Deprecations: inv.Deprecations}, fmt.Errorf("formula %q root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or graph.v2 before routing it to a pool", opts.BeadOrFormula)
+	}
+	mResult, err := InstantiateSlingFormula(context.Background(), opts.BeadOrFormula, searchPaths, molecule.Options{
 		Title: opts.Title,
 		Vars:  formulaVars,
 	}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
@@ -259,20 +267,6 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 		wfResult.FormulaName = opts.BeadOrFormula
 		wfResult.Deprecations = append(wfResult.Deprecations, inv.Deprecations...)
 		return wfResult, wfErr
-	}
-	// Pool targets discover work through the supervisor's scale_check, but
-	// the wisp root is a molecule that readyExcludeTypes filters out of
-	// Ready() (per PR #1154). Stamp PoolDemandMetadataPair() — the same
-	// sentinel the gc order run writers use — so defaultScaleCheckCounts
-	// counts the wisp and spawns a pool worker. Failure is fatal: a routed
-	// wisp without the sentinel sits unserved forever (issue #2986).
-	if agentutil.IsMultiSessionAgent(&a) {
-		for k, v := range PoolDemandMetadataPair() {
-			if err := deps.Store.SetMetadata(mResult.RootID, k, v); err != nil {
-				return SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula},
-					fmt.Errorf("setting %s on wisp %s: %w", k, mResult.RootID, err)
-			}
-		}
 	}
 	result := SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula, Deprecations: inv.Deprecations}
 	return finalize(opts, deps, mResult.RootID, method, result)

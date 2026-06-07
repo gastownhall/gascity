@@ -56,18 +56,35 @@ jobs:
                   per_page: 100,
                 });
 
+                const visibleRequest = comments.find(c => {
+                  if (c.user?.login === issue.user?.login) return false;
+                  const lower = (c.body || '').toLowerCase();
+                  if (lower.includes('closing')) return false;
+                  if (!/14\s*-?\s*days?/.test(lower)) return false;
+                  if (!lower.includes('reply') && !lower.includes('respond')) return false;
+                  if (label === 'status/needs-repro') return lower.includes('repro') || lower.includes('reproduction');
+                  return lower.includes('info') || lower.includes('information') || lower.includes('details');
+                });
+
+                if (!visibleRequest) {
+                  console.log(`No visible request for #${issue.number} (${label}), skipping.`);
+                  continue;
+                }
+
+                const requestAt = new Date(visibleRequest.created_at);
+                if (requestAt > cutoff) continue;
+
                 const authorReplied = comments.some(c =>
                   c.user?.login === issue.user?.login &&
-                  new Date(c.created_at) > labeledAt
+                  new Date(c.created_at) > requestAt
                 );
                 if (authorReplied) continue;
-                if (labeledAt > cutoff) continue;
 
                 await github.rest.issues.createComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: issue.number,
-                  body: `Closing — this was marked \`${label}\` 14 days ago with no response.\n\nIf this is still relevant, please reply with the requested details and we'll reopen.`,
+                  body: `Closing — this was marked \`${label}\` and a response was requested 14 or more days ago with no reply.\n\nIf this is still relevant, please reply with the requested details and we'll reopen.`,
                 });
 
                 await github.rest.issues.update({
@@ -77,6 +94,6 @@ jobs:
                   state: 'closed',
                   state_reason: 'not_planned',
                 });
-                console.log(`Closed #${issue.number} (${label}, labeled ${labeledAt.toISOString()})`);
+                console.log(`Closed #${issue.number} (${label}, requested ${requestAt.toISOString()})`);
               }
             }

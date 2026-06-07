@@ -148,6 +148,7 @@
         "pages": [
           "troubleshooting/gc-start-walkthrough",
           "troubleshooting/dolt-bloat-recovery",
+          "troubleshooting/bd-backup-cleanup",
           "runbooks/managed-city-endpoints"
         ]
       },

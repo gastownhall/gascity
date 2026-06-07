@@ -54,6 +54,7 @@ func TestSupportedProviders(t *testing.T) {
 	want := map[string]bool{
 		"claude": true, "codex": true, "gemini": true, "kiro": true, "opencode": true,
 		"groq": true, "cerebras": true, "copilot": true, "cursor": true, "pi": true, "omp": true,
+		"antigravity": true,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("SupportedProviders() = %v, want %d entries", got, len(want))
@@ -66,8 +67,8 @@ func TestSupportedProviders(t *testing.T) {
 }
 
 func TestValidateAcceptsSupported(t *testing.T) {
-	if err := Validate([]string{"claude", "codex", "gemini"}); err != nil {
-		t.Errorf("Validate([claude codex gemini]) = %v, want nil", err)
+	if err := Validate([]string{"claude", "codex", "gemini", "antigravity"}); err != nil {
+		t.Errorf("Validate([claude codex gemini antigravity]) = %v, want nil", err)
 	}
 }
 
@@ -1435,7 +1436,7 @@ func TestInstallClaudeSurfacesNonObjectOverride(t *testing.T) {
 // are materialized from the embedded core pack overlay into the workdir.
 func TestInstallOverlayManagedProviders(t *testing.T) {
 	fs := fsys.NewFake()
-	providers := []string{"codex", "gemini", "opencode", "copilot", "cursor", "kiro", "pi", "omp"}
+	providers := []string{"codex", "gemini", "opencode", "copilot", "cursor", "kiro", "pi", "omp", "antigravity"}
 	if err := Install(fs, "/city", "/work", providers); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -1450,6 +1451,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"/work/AGENTS.md",
 		"/work/.pi/extensions/gc-hooks.js",
 		"/work/.omp/hooks/gc-hook.ts",
+		"/work/.agents/hooks.json",
 	} {
 		if _, ok := fs.Files[rel]; !ok {
 			t.Errorf("expected overlay-managed provider file %s to be written", rel)
@@ -1484,6 +1486,22 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	if !strings.Contains(copilotHooks, `gc handoff --auto \"context cycle\"`) {
 		t.Error("copilot preCompact should use auto handoff")
 	}
+	antigravityHooks := string(fs.Files["/work/.agents/hooks.json"])
+	for hookName, wantCommand := range map[string]string{
+		"gascity-prime":       "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity",
+		"gascity-nudge-drain": "gc nudge drain --inject --hook-format antigravity",
+		"gascity-mail-check":  "gc mail check --inject --hook-format antigravity",
+	} {
+		if !strings.Contains(antigravityHooks, `"`+hookName+`"`) {
+			t.Errorf("Antigravity hooks missing hook %q:\n%s", hookName, antigravityHooks)
+		}
+		if !strings.Contains(antigravityHooks, wantCommand) {
+			t.Errorf("Antigravity hook %q missing command %q:\n%s", hookName, wantCommand, antigravityHooks)
+		}
+	}
+	if strings.Contains(antigravityHooks, "PreCompact") {
+		t.Error("Antigravity hooks should not install unsupported compaction hooks")
+	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
 		"const GC_OPENCODE_HOOK_VERSION = 2",
@@ -1517,6 +1535,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"/work/.kiro/agents/gascity.json",
 		"/work/AGENTS.md",
 		"/work/.omp/hooks/gc-hook.ts",
+		"/work/.agents/hooks.json",
 	} {
 		if strings.Contains(string(fs.Files[rel]), "gc hook --inject") {
 			t.Errorf("fresh overlay-managed provider file %s should not install no-op gc hook --inject", rel)
@@ -1564,6 +1583,37 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	if strings.Contains(string(fs.Files["/work/.kiro/agents/gascity.json"]), "gc handoff") {
 		t.Error("Kiro agent config should not install unsupported compaction handoff hooks")
+	}
+}
+
+func TestInstallAntigravityMergesExistingHooks(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.agents/hooks.json"] = []byte(`{
+  "custom-reminder": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "echo custom"
+      }
+    ]
+  }
+}
+`)
+
+	if err := Install(fs, "/city", "/work", []string{"antigravity"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := string(fs.Files["/work/.agents/hooks.json"])
+	for _, want := range []string{
+		`"custom-reminder"`,
+		`"command": "echo custom"`,
+		`"gascity-prime"`,
+		`gc prime --hook --hook-format antigravity`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Errorf("merged Antigravity hooks missing %q:\n%s", want, data)
+		}
 	}
 }
 

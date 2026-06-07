@@ -165,6 +165,42 @@ func TestSessionStateCountsAsRunning(t *testing.T) {
 	require.False(t, sessionStateCountsAsRunning("creating"))
 }
 
+func TestAntigravityProfileSetupUsesAgyBinaryAndBrainSearchPath(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	profile := resolveProfile(string(workerpkg.ProfileAntigravityTmuxCLI))
+
+	require.Equal(t, workerpkg.ProfileAntigravityTmuxCLI, profile)
+	require.Equal(t, "antigravity", profileProvider(profile))
+	require.Equal(t, "agy", profileExecutable(profile, profileProvider(profile)))
+	require.Equal(t, []string{filepath.Join(gcHome, ".gemini", "antigravity-cli", "brain")}, profileSearchPaths(gcHome, profile))
+}
+
+func TestFreshWorkerTaskTimeoutAntigravity(t *testing.T) {
+	require.Equal(t, 12*time.Minute, freshWorkerTaskTimeout("antigravity"))
+	require.Equal(t, 6*time.Minute, freshWorkerTaskTimeout("gemini"))
+}
+
+func TestChecksResetHistorySubsequenceSkipsAntigravity(t *testing.T) {
+	require.False(t, checksResetHistorySubsequence(workerpkg.ProfileAntigravityTmuxCLI))
+	require.True(t, checksResetHistorySubsequence(workerpkg.ProfileGeminiTmuxCLI))
+}
+
+func TestAntigravityTranscriptCandidatePathsSortsNewestFirst(t *testing.T) {
+	brainRoot := filepath.Join(t.TempDir(), "brain")
+	older := filepath.Join(brainRoot, "older", ".system_generated", "logs", "transcript.jsonl")
+	newer := filepath.Join(brainRoot, "newer", ".system_generated", "logs", "transcript.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(older), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(newer), 0o755))
+	require.NoError(t, os.WriteFile(older, []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(newer, []byte("{}\n"), 0o644))
+
+	baseTime := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, os.Chtimes(older, baseTime, baseTime))
+	require.NoError(t, os.Chtimes(newer, baseTime.Add(time.Minute), baseTime.Add(time.Minute)))
+
+	require.Equal(t, []string{newer, older}, antigravityTranscriptCandidatePaths([]string{brainRoot}))
+}
+
 func TestSelectInferenceSpawnedSessionAcceptsLiveProbeSession(t *testing.T) {
 	session := sessionJSON{
 		Template:    inferenceSlingTarget,
@@ -556,6 +592,40 @@ func TestStagePiOllamaCloudAuthFromEnv(t *testing.T) {
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
 
+func TestStageAntigravityAuthFromSourceHome(t *testing.T) {
+	sourceHome := t.TempDir()
+	sourceCLI := filepath.Join(sourceHome, ".gemini", "antigravity-cli")
+	sourceCache := filepath.Join(sourceCLI, "cache")
+	sourceConfig := filepath.Join(sourceHome, ".gemini", "config")
+	require.NoError(t, os.MkdirAll(sourceCLI, 0o755))
+	require.NoError(t, os.MkdirAll(sourceCache, 0o755))
+	require.NoError(t, os.MkdirAll(sourceConfig, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceCLI, "antigravity-oauth-token"), []byte("token"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceCLI, "settings.json"), []byte(`{"enableTelemetry":false}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceCLI, "installation_id"), []byte("installation-id"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceCLI, "history.jsonl"), []byte(`{"conversationId":"old"}`+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceCache, "onboarding.json"), []byte(`{"enterpriseOnboardingComplete":true}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceConfig, "import_manifest.json"), []byte(`{"imports":[]}`), 0o600))
+
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("GC_WORKER_INFERENCE_ANTIGRAVITY_HOME", sourceHome)
+
+	source, err := stageAntigravityAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:GC_WORKER_INFERENCE_ANTIGRAVITY_HOME", source)
+	require.NotEqual(t, gcHome, env.Get("HOME"))
+	applyLiveProviderRuntimeEnv(gcHome, env, workerpkg.ProfileAntigravityTmuxCLI)
+	require.Equal(t, gcHome, env.Get("HOME"))
+	require.FileExists(t, filepath.Join(gcHome, ".gemini", "antigravity-cli", "antigravity-oauth-token"))
+	require.FileExists(t, filepath.Join(gcHome, ".gemini", "antigravity-cli", "settings.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".gemini", "antigravity-cli", "installation_id"))
+	require.FileExists(t, filepath.Join(gcHome, ".gemini", "antigravity-cli", "cache", "onboarding.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".gemini", "config", "import_manifest.json"))
+	require.NoFileExists(t, filepath.Join(gcHome, ".gemini", "antigravity-cli", "history.jsonl"))
+	require.DirExists(t, filepath.Join(gcHome, ".gemini", "antigravity-cli", "brain"))
+}
+
 func TestWaitForBusyTurnStartPiUsesAssistantTranscriptSignal(t *testing.T) {
 	gcHome := t.TempDir()
 	sessionDir := filepath.Join(gcHome, ".pi", "agent", "sessions")
@@ -873,8 +943,6 @@ mode = "always"
 	data, err := os.ReadFile(cityToml)
 	require.NoError(t, err)
 	text := string(data)
-	require.Contains(t, text, `[[agent]]
-name = "probe"`)
 	require.Contains(t, text, `[[named_session]]
 template = "probe"`)
 	require.Contains(t, text, "[orders]")
@@ -883,6 +951,13 @@ template = "probe"`)
 	for _, name := range inferenceDisabledOrders {
 		require.Contains(t, text, `"`+name+`"`)
 	}
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+	require.NoError(t, err)
+	agentText := string(agentData)
+	require.Contains(t, agentText, `prompt_template = "agents/probe/prompt.template.md"`)
+	require.Contains(t, agentText, `max_active_sessions = 1`)
+	require.FileExists(t, filepath.Join(cityDir, "agents", "probe", "prompt.template.md"))
 }
 
 func TestInstallInferenceProbeAgentEnablesGeminiHooks(t *testing.T) {
@@ -934,10 +1009,11 @@ prompt_template = "prompts/mayor.md"
 name = "worker-inference-test"
 provider = "opencode"
 install_agent_hooks = ["opencode"]`)
-	require.Contains(t, text, `[[agent]]
-name = "probe"
-session = "tmux"`)
 	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["opencode"]`))
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(agentData), `session = "tmux"`)
 }
 
 func TestInstallInferenceProbeAgentEnablesPiHooks(t *testing.T) {
@@ -963,10 +1039,52 @@ prompt_template = "prompts/mayor.md"
 name = "worker-inference-test"
 provider = "pi"
 install_agent_hooks = ["pi"]`)
-	require.Contains(t, text, `[[agent]]
-name = "probe"
-session = "tmux"`)
 	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["pi"]`))
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(agentData), `session = "tmux"`)
+}
+
+func TestInstallInferenceProbeAgentEnablesAntigravityHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "antigravity"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[workspace]
+name = "worker-inference-test"
+provider = "antigravity"
+install_agent_hooks = ["antigravity"]`)
+	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["antigravity"]`))
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(agentData), `session = "tmux"`)
+}
+
+func TestInstallLiveHandleProviderHooksAntigravity(t *testing.T) {
+	workDir := t.TempDir()
+
+	require.NoError(t, installLiveHandleProviderHooks(workDir, workerpkg.ProfileAntigravityTmuxCLI))
+
+	data, err := os.ReadFile(filepath.Join(workDir, ".agents", "hooks.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(data), `"gascity-prime"`)
+	require.Contains(t, string(data), `--hook-format antigravity`)
 }
 
 func TestInstallLiveProviderCommandOverride(t *testing.T) {
@@ -1023,6 +1141,86 @@ provider = "opencode"
 	require.Contains(t, text, `command = "/tmp/provider-bin/opencode"`)
 	require.Contains(t, text, `process_names = ["opencode", "node", "bun"]`)
 	require.Contains(t, text, `args_append = ["--model", "google/gemini-2.5-flash"]`)
+}
+
+func TestInstallLiveProviderCommandOverridePatchesExistingAntigravityEnv(t *testing.T) {
+	gcHome := t.TempDir()
+	prevEnv := liveEnv
+	liveEnv = helpers.NewEnv("", gcHome, t.TempDir())
+	t.Cleanup(func() {
+		liveEnv = prevEnv
+	})
+
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "antigravity"
+
+[providers.antigravity]
+command = "agy --dangerously-skip-permissions"
+`), 0o644))
+
+	require.NoError(t, installLiveProviderCommandOverrideWithArgs(cityDir, "antigravity", "/tmp/provider-bin/agy", []string{"agy"}, nil))
+	require.NoError(t, installLiveProviderCommandOverrideWithArgs(cityDir, "antigravity", "/tmp/provider-bin/agy", []string{"agy"}, nil))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Equal(t, 1, strings.Count(text, `[providers.antigravity]`))
+	require.Equal(t, 1, strings.Count(text, `[providers.antigravity.env]`))
+	require.Contains(t, text, `HOME = `+strconv.Quote(gcHome))
+	require.Contains(t, text, `command = "agy --dangerously-skip-permissions"`)
+	require.NotContains(t, text, `path_check = "/tmp/provider-bin/agy"`)
+}
+
+func TestInstallDefaultPoolInferenceAgentUsesAgentFile(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "antigravity"
+`), 0o644))
+
+	require.NoError(t, installDefaultPoolInferenceAgent(cityDir, "default-pool", "antigravity-default-pool-no-skills"))
+	require.NoError(t, installDefaultPoolInferenceAgent(cityDir, "default-pool", "antigravity-default-pool-no-skills"))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), `[[agent]]`)
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "default-pool", "agent.toml"))
+	require.NoError(t, err)
+	agentText := string(agentData)
+	require.Contains(t, agentText, `provider = "antigravity-default-pool-no-skills"`)
+	require.Contains(t, agentText, `prompt_template = ".gc/system/packs/core/assets/prompts/pool-worker.md"`)
+	require.Contains(t, agentText, `default_sling_formula = "mol-do-work"`)
+	require.Contains(t, agentText, `min_active_sessions = 0`)
+	require.Contains(t, agentText, `max_active_sessions = 2`)
+}
+
+func TestParseSessionListJSONSkipsStructuredLogPreamble(t *testing.T) {
+	out := strings.Join([]string{
+		`2026/06/07 01:45:13 WARN native_store_unavailable gate=preflight_unavailable`,
+		`{"schema_version":"1","level":"error","code":"session_list_failed","message":"log-only preamble"}`,
+		`{"schema_version":"1","ok":true,"sessions":[{"id":"s1","template":"probe","state":"running","session_name":"probe"}]}`,
+	}, "\n")
+
+	sessions, err := parseSessionListJSON(out)
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	require.Equal(t, "s1", sessions[0].ID)
+	require.Equal(t, "probe", sessions[0].Template)
+}
+
+func TestParseSessionListJSONReportsBootstrapSessionListError(t *testing.T) {
+	out := `{"schema_version":"1","ok":false,"error":{"code":"session_list_failed","message":"bd list: invalid issue type \"session\" (valid: bug, feature, task)","exit_code":1}}`
+
+	_, err := parseSessionListJSON(out)
+	require.Error(t, err)
+	require.True(t, isBootstrapSessionListError(err), "err = %v", err)
 }
 
 func TestSetNamedSessionMode(t *testing.T) {
@@ -1106,14 +1304,13 @@ mode = "always"
 	require.Contains(t, text, `[providers.codex]`)
 	require.Contains(t, text, `command = "/tmp/provider-bin/codex"`)
 	require.Contains(t, text, `process_names = ["codex", "node"]`)
-	require.Contains(t, text, `[[agent]]
-name = "probe"`)
 	require.Contains(t, text, `[[named_session]]
 template = "probe"
 mode = "on_demand"`)
 	require.Contains(t, text, `[orders]`)
 	require.Contains(t, text, `[session]`)
 	require.Contains(t, text, `suspended = true`)
+	require.FileExists(t, filepath.Join(cityDir, "agents", "probe", "agent.toml"))
 }
 
 func TestEnrichLiveFailureEvidencePrefersSessionKeyTranscript(t *testing.T) {

@@ -40,6 +40,8 @@ type SQLiteStoreOptions struct {
 	disableRetentionSweeper bool
 }
 
+var _ ConditionalAssignmentReleaser = (*SQLiteStore)(nil)
+
 // SQLiteStoreOption customizes OpenSQLiteStore.
 type SQLiteStoreOption func(*SQLiteStoreOptions)
 
@@ -535,6 +537,42 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 		}
 		return tx.Commit()
 	})
+}
+
+// ReleaseIfCurrent clears an in-progress assignment only when the bead still
+// has the expected assignee.
+func (s *SQLiteStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	var released bool
+	err := retryOnBusy(func() error {
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite release-if-current: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		b, err := s.getTx(ctx, tx, id)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil
+			}
+			return err
+		}
+		if b.Status != "in_progress" || b.Assignee != expectedAssignee {
+			return nil
+		}
+		b.Status = "open"
+		b.Assignee = ""
+		b.UpdatedAt = time.Now()
+		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		released = true
+		return nil
+	})
+	return released, err
 }
 
 func (s *SQLiteStore) getTx(ctx context.Context, tx *sql.Tx, id string) (Bead, error) {

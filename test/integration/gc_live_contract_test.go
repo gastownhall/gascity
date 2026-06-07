@@ -403,8 +403,13 @@ description = "Read and complete {{issue}}."
 		Items []beads.Bead `json:"items"`
 		Total int          `json:"total"`
 	}](t, baseURL, validator, http.MethodGet, cityBase+"/beads?label=real-world-app-contract&limit=50&all=true&rig="+url.QueryEscape(rigName), nil, http.StatusOK)
-	if list.Total < 3 || !beadListContains(list.Items, rootBead.ID) || !beadListContains(list.Items, siblingBead.ID) {
-		t.Fatalf("filtered beads = %+v, want root and sibling", list)
+	if list.Total < 3 || !beadListContains(list.Items, rootBead.ID) || !beadListContains(list.Items, childBead.ID) || !beadListContains(list.Items, siblingBead.ID) {
+		t.Fatalf("filtered beads = %+v, want root, child, and sibling", list)
+	}
+	if listedChild, ok := findLiveContractBead(list.Items, childBead.ID); !ok {
+		t.Fatalf("filtered beads = %+v, want child %s", list, childBead.ID)
+	} else if listedChild.Status != "in_progress" {
+		t.Fatalf("filtered child status = %q, want in_progress", listedChild.Status)
 	}
 	if listedSibling, ok := findLiveContractBead(list.Items, siblingBead.ID); ok && listedSibling.ParentID != rootBead.ID {
 		t.Fatalf("filtered sibling parent = %q, want %q", listedSibling.ParentID, rootBead.ID)

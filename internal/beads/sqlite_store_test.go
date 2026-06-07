@@ -40,6 +40,78 @@ func TestSQLiteStoreCreatesAndGets(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreReleaseIfCurrent(t *testing.T) {
+	s, err := OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() {
+		if c, ok := s.(interface{ CloseStore() error }); ok {
+			c.CloseStore() //nolint:errcheck
+		}
+	}()
+
+	created, err := s.Create(Bead{Title: "work", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	status := "in_progress"
+	if err := s.Update(created.ID, UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+
+	releaser := s.(ConditionalAssignmentReleaser)
+	released, err := releaser.ReleaseIfCurrent(created.ID, "worker-2")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent wrong assignee: %v", err)
+	}
+	if released {
+		t.Fatal("ReleaseIfCurrent released a bead with the wrong assignee")
+	}
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after skipped release: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-1" {
+		t.Fatalf("skipped release mutated bead: %+v", got)
+	}
+
+	released, err = releaser.ReleaseIfCurrent("missing", "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent missing id: %v", err)
+	}
+	if released {
+		t.Fatal("ReleaseIfCurrent released missing bead")
+	}
+
+	openBead, err := s.Create(Bead{Title: "open work", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("Create open bead: %v", err)
+	}
+	released, err = releaser.ReleaseIfCurrent(openBead.ID, "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent wrong status: %v", err)
+	}
+	if released {
+		t.Fatal("ReleaseIfCurrent released non-in-progress bead")
+	}
+
+	released, err = releaser.ReleaseIfCurrent(created.ID, "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent matching assignee: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseIfCurrent did not release matching in-progress assignment")
+	}
+	got, err = s.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after release: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("released bead = %+v, want open and unassigned", got)
+	}
+}
+
 func TestSQLiteStoreReady(t *testing.T) {
 	s, err := OpenSQLiteStore(t.TempDir())
 	if err != nil {

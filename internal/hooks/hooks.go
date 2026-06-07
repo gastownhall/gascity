@@ -1,5 +1,5 @@
 // Package hooks installs provider-specific agent hook files into working
-// directories. Each provider (Claude, Codex, Gemini, OpenCode, Copilot, etc.)
+// directories. Each provider (Claude, Codex, Gemini, Antigravity, OpenCode, Copilot, etc.)
 // has its own file format and install location. Hook files are embedded at build time
 // and written idempotently — existing files are never overwritten.
 package hooks
@@ -29,7 +29,7 @@ var configFS embed.FS
 
 // supported lists provider names that have hook support wired into
 // Gas Town's installer.
-var supported = []string{"claude", "codex", "gemini", "kiro", "opencode", "groq", "cerebras", "copilot", "cursor", "pi", "omp"}
+var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot", "cursor", "pi", "omp"}
 
 const (
 	managedPiHookVersion       = 4
@@ -154,7 +154,7 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 		switch family {
 		case "claude":
 			err = installClaude(fs, cityDir)
-		case "codex", "gemini", "kiro", "opencode", "copilot", "cursor", "pi", "omp":
+		case "codex", "gemini", "antigravity", "kiro", "opencode", "copilot", "cursor", "pi", "omp":
 			err = installOverlayManaged(fs, workDir, family)
 		case "groq", "cerebras":
 			err = installOverlayManaged(fs, workDir, "opencode")
@@ -189,6 +189,9 @@ func installOverlayManaged(fs fsys.FS, workDir, provider string) error {
 			return fmt.Errorf("reading %s: %w", name, err)
 		}
 		dst := filepath.Join(workDir, filepath.FromSlash(rel))
+		if provider == "antigravity" && rel == path.Join(".agents", "hooks.json") {
+			return writeJSONOverlayManaged(fs, dst, data)
+		}
 		if provider == "codex" && rel == path.Join(".codex", "hooks.json") {
 			return writeCodexHooksManaged(fs, dst, data)
 		}
@@ -199,6 +202,25 @@ func installOverlayManaged(fs fsys.FS, workDir, provider string) error {
 		}
 		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel))
 	})
+}
+
+func writeJSONOverlayManaged(fs fsys.FS, dst string, data []byte) error {
+	if existing, err := fs.ReadFile(dst); err == nil {
+		merged, mergeErr := overlay.MergeSettingsJSON(existing, data)
+		if mergeErr != nil {
+			return fmt.Errorf("merging %s: %w", dst, mergeErr)
+		}
+		if bytes.Equal(merged, existing) {
+			return nil
+		}
+		return writeManagedData(fs, dst, merged)
+	} else if _, statErr := fs.Stat(dst); statErr == nil {
+		return nil
+	}
+	if normalized, err := overlay.CanonicalJSON(data); err == nil {
+		data = normalized
+	}
+	return writeManagedData(fs, dst, data)
 }
 
 func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {

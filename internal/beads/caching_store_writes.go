@@ -126,6 +126,51 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
+// ReleaseIfCurrent clears an in-progress assignment through the backing store
+// and refreshes the cache only when the conditional release succeeds.
+func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	releaser, ok := c.backing.(ConditionalAssignmentReleaser)
+	if !ok {
+		return false, ErrConditionalReleaseUnsupported
+	}
+	released, err := releaser.ReleaseIfCurrent(id, expectedAssignee)
+	if err != nil || !released {
+		return released, err
+	}
+
+	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after release-if-current")
+	var updated Bead
+	notify := false
+	c.mu.Lock()
+	c.noteLocalMutationLocked(id)
+	if refreshed {
+		c.beads[id] = cloneBead(fresh)
+		c.deps[id] = depsFromBeadFields(fresh)
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+		updated = cloneBead(fresh)
+		notify = true
+	} else if b, ok := c.beads[id]; ok {
+		b.Status = "open"
+		b.Assignee = ""
+		b.UpdatedAt = time.Now()
+		c.beads[id] = b
+		c.dirty[id] = struct{}{}
+		delete(c.deletedSeq, id)
+		updated = cloneBead(b)
+		notify = true
+	} else {
+		c.dirty[id] = struct{}{}
+	}
+	c.markFreshLocked(time.Now())
+	c.updateStatsLocked()
+	c.mu.Unlock()
+	if notify {
+		c.notifyChange("bead.updated", updated)
+	}
+	return true, nil
+}
+
 // Close marks a bead as closed in the backing store and cache.
 func (c *CachingStore) Close(id string) error {
 	// Idempotence: if the cached bead status is already "closed" AND the

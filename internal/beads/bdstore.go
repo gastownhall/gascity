@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -38,6 +37,14 @@ var (
 	// bdGraphApplyCommandTimeout bounds atomic graph creation below callers'
 	// outer command budgets so transient Dolt stalls can retry or fall back.
 	bdGraphApplyCommandTimeout = 45 * time.Second
+	// bdQueryCommandTimeout bounds the `bd query` subcommand, which reads the
+	// ephemeral (wisp) tier. gc reload and gc doctor run a sequence of these
+	// ephemeral/order-run reads; under the 120s general timeout an
+	// intermittently slow child blocked those commands for minutes (#3191).
+	// A bound well below that lets the runner kill the slow child quickly so
+	// the tier-merge degrades to the durable tier and the lookups continue
+	// instead of blocking. Normal ephemeral reads return in ~2s.
+	bdQueryCommandTimeout = 30 * time.Second
 	// bdSlowTelemetryThreshold is fixed in production via telemetry.BDSlowThreshold:
 	// high enough to avoid normal bd list calls, but below the wrapper timeout.
 	bdSlowTelemetryThreshold = telemetry.BDSlowThreshold
@@ -127,6 +134,11 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 				args, float64(time.Since(start).Milliseconds()),
 				err, out, stderr.String())
 		}
+		if err == nil && name == "bd" && bdOutputIndicatesSilentFallback(stderr.String()) {
+			fallbackErr := fmt.Errorf("%w: %s", ErrBDSilentFallback, strings.TrimSpace(stderr.String()))
+			trace("error", fallbackErr)
+			return out, fallbackErr
+		}
 		if ctx.Err() == context.DeadlineExceeded {
 			timeoutErr := fmt.Errorf("timed out after %s", timeout)
 			trace("timeout", timeoutErr)
@@ -178,6 +190,8 @@ func bdCommandTimeoutFor(name string, args []string) time.Duration {
 	switch args[0] {
 	case "count", "list", "ready", "show", "stats":
 		return bdReadCommandTimeout
+	case "query":
+		return bdQueryCommandTimeout
 	default:
 		return bdCommandTimeout
 	}
@@ -202,6 +216,17 @@ func bdStdoutErrorDetail(out []byte) string {
 	return strings.TrimSpace(env.Error)
 }
 
+const (
+	bdSilentFallbackMarkerImport  = "auto-importing"
+	bdSilentFallbackMarkerEmptyDB = "into empty database"
+)
+
+func bdOutputIndicatesSilentFallback(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, bdSilentFallbackMarkerImport) &&
+		strings.Contains(lower, bdSilentFallbackMarkerEmptyDB)
+}
+
 // PurgeRunnerFunc executes a bd purge command with custom dir and env.
 // Unlike CommandRunner, this supports environment variable manipulation
 // needed by bd purge (BEADS_DIR override).
@@ -220,20 +245,39 @@ type BdStore struct {
 	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
 
-	skipLabelsOnce      sync.Once // guards the one-time bd version probe below
-	skipLabelsSupported bool      // whether bd accepts `bd list --skip-labels` (bd 1.0.5+)
+	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 }
 
 const bdTransientWriteAttempts = 3
 
+var _ ConditionalAssignmentReleaser = (*BdStore)(nil)
+
+// BdStoreOption configures optional bd CLI behavior for a BdStore.
+type BdStoreOption func(*BdStore)
+
+// WithBdStoreListSkipLabels controls whether List may pass --skip-labels to bd.
+// Keep disabled unless the caller has opted into bd 1.0.5-compatible CLI
+// semantics; bd 1.0.4 rejects the flag.
+func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
+	return func(s *BdStore) {
+		s.listSkipLabelsEnabled = enabled
+	}
+}
+
 // NewBdStore creates a BdStore rooted at dir using the given runner.
-func NewBdStore(dir string, runner CommandRunner) *BdStore {
-	return NewBdStoreWithPrefix(dir, runner, "")
+func NewBdStore(dir string, runner CommandRunner, opts ...BdStoreOption) *BdStore {
+	return NewBdStoreWithPrefix(dir, runner, "", opts...)
 }
 
 // NewBdStoreWithPrefix creates a BdStore with an explicit owned bead ID prefix.
-func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string) *BdStore {
-	return &BdStore{dir: dir, runner: runner, idPrefix: normalizeIDPrefix(idPrefix)}
+func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string, opts ...BdStoreOption) *BdStore {
+	s := &BdStore{dir: dir, runner: runner, idPrefix: normalizeIDPrefix(idPrefix)}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 // IDPrefix returns the bead ID prefix owned by this store, without trailing "-".
@@ -242,6 +286,12 @@ func (s *BdStore) IDPrefix() string {
 		return ""
 	}
 	return s.idPrefix
+}
+
+// ListSkipLabelsEnabled reports whether this store may ask bd list to skip
+// label hydration.
+func (s *BdStore) ListSkipLabelsEnabled() bool {
+	return s != nil && s.listSkipLabelsEnabled
 }
 
 func (s *BdStore) listIncludesCompleteDependencies() bool {
@@ -875,6 +925,180 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 		return fmt.Errorf("updating bead %q: %w", id, err)
 	}
 	return nil
+}
+
+// ReleaseIfCurrent clears an in-progress assignment only when the bead still
+// has the expected assignee.
+func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND status = 'in_progress'" +
+		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
+	out, err := s.runBDTransientWriteOutput("sql", "--json", query)
+	if err != nil {
+		if isBdSQLUnsupportedInEmbeddedMode(err) {
+			return s.releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee)
+		}
+		return false, fmt.Errorf("bd release-if-current: %w", err)
+	}
+	var result struct {
+		RowsAffected int `json:"rows_affected"`
+	}
+	if err := json.Unmarshal(extractJSON(out), &result); err != nil {
+		return false, fmt.Errorf("bd release-if-current: parsing SQL result: %w", err)
+	}
+	return result.RowsAffected > 0, nil
+}
+
+func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string) (bool, error) {
+	doltDir, ok, err := s.embeddedDoltDir()
+	if err != nil {
+		return false, fmt.Errorf("bd release-if-current embedded fallback: %w", err)
+	}
+	if !ok {
+		return false, fmt.Errorf("bd release-if-current embedded fallback: %w", ErrConditionalReleaseUnsupported)
+	}
+	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND status = 'in_progress'" +
+		" AND assignee = " + bdSQLStringLiteral(expectedAssignee) +
+		"; SELECT ROW_COUNT() AS rows_affected"
+	out, err := s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", query)
+	if err != nil {
+		return false, fmt.Errorf("bd release-if-current embedded fallback: dolt sql: %w", err)
+	}
+	rowsAffected, err := parseDoltRowsAffected(out)
+	if err != nil {
+		return false, fmt.Errorf("bd release-if-current embedded fallback: parsing SQL result: %w", err)
+	}
+	return rowsAffected > 0, nil
+}
+
+func (s *BdStore) embeddedDoltDir() (string, bool, error) {
+	metaPath := filepath.Join(s.dir, ".beads", "metadata.json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var meta struct {
+		Backend      string `json:"backend"`
+		Database     string `json:"database"`
+		DoltMode     string `json:"dolt_mode"`
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false, fmt.Errorf("parsing metadata.json: %w", err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(meta.Backend), "dolt") &&
+		!strings.EqualFold(strings.TrimSpace(meta.Database), "dolt") {
+		return "", false, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(meta.DoltMode), "embedded") {
+		return "", false, nil
+	}
+	database := strings.TrimSpace(meta.DoltDatabase)
+	if database == "" {
+		return "", false, errors.New("metadata.json missing dolt_database")
+	}
+	if database != filepath.Base(database) {
+		return "", false, fmt.Errorf("metadata.json dolt_database %q must be a database name, not a path", database)
+	}
+	return filepath.Join(s.dir, ".beads", "embeddeddolt", database), true, nil
+}
+
+func parseDoltRowsAffected(out []byte) (int, error) {
+	data := bytes.TrimSpace(extractJSON(out))
+	found := false
+	rowsAffected := 0
+	for len(data) > 0 {
+		start := bytes.IndexAny(data, "{[")
+		if start < 0 {
+			break
+		}
+		data = data[start:]
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return 0, err
+		}
+		if got, ok, err := doltRowsAffectedFromJSON(raw); err != nil {
+			return 0, err
+		} else if ok {
+			rowsAffected = got
+			found = true
+		}
+		consumed := decoder.InputOffset()
+		if consumed <= 0 || int(consumed) > len(data) {
+			return 0, errors.New("could not advance through dolt JSON output")
+		}
+		data = data[consumed:]
+	}
+	if !found {
+		return 0, errors.New("missing rows_affected row")
+	}
+	return rowsAffected, nil
+}
+
+func doltRowsAffectedFromJSON(raw json.RawMessage) (int, bool, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return 0, false, nil
+	}
+	if trimmed[0] == '[' {
+		var results []doltRowsAffectedResult
+		if err := json.Unmarshal(trimmed, &results); err != nil {
+			return 0, false, err
+		}
+		found := false
+		rowsAffected := 0
+		for _, result := range results {
+			if got, ok := result.rowsAffected(); ok {
+				rowsAffected = got
+				found = true
+			}
+		}
+		return rowsAffected, found, nil
+	}
+	var result doltRowsAffectedResult
+	if err := json.Unmarshal(trimmed, &result); err != nil {
+		return 0, false, err
+	}
+	rowsAffected, ok := result.rowsAffected()
+	return rowsAffected, ok, nil
+}
+
+type doltRowsAffectedResult struct {
+	Rows []struct {
+		RowsAffected *int `json:"rows_affected"`
+	} `json:"rows"`
+}
+
+func (r doltRowsAffectedResult) rowsAffected() (int, bool) {
+	for _, row := range r.Rows {
+		if row.RowsAffected != nil {
+			return *row.RowsAffected, true
+		}
+	}
+	return 0, false
+}
+
+func isBdSQLUnsupportedInEmbeddedMode(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "bd sql") &&
+		strings.Contains(msg, "not yet supported") &&
+		strings.Contains(msg, "embedded mode")
+}
+
+func bdSQLStringLiteral(value string) string {
+	// bd sql runs against Dolt/MySQL string-literal semantics.
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 // Claim atomically claims an open bead through bd update --claim.
@@ -1711,7 +1935,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 			args = append(args, "--metadata-field", k+"="+serverQuery.Metadata[k])
 		}
 	}
-	if query.SkipLabels && serverQuery.Label == "" && s.supportsSkipLabels() {
+	if query.SkipLabels && serverQuery.Label == "" && s.listSkipLabelsEnabled {
 		args = append(args, "--skip-labels")
 	}
 
@@ -1737,31 +1961,6 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		return filtered, &PartialResultError{Op: "bd list", Err: parseErr}
 	}
 	return filtered, nil
-}
-
-// bdSkipLabelsMinVersion is the first bd release whose `bd list` accepts
-// --skip-labels (be-w3n-1). bd 1.0.4 — the supported floor — rejects the
-// flag and fails the entire list call (see 29d457fe9).
-const bdSkipLabelsMinVersion = "1.0.5"
-
-// supportsSkipLabels reports whether the bd binary backing this store accepts
-// `bd list --skip-labels`. The version probe runs through the store's runner
-// once and is cached for the store's lifetime; any probe or parse failure
-// degrades to false so listing falls back to normal label hydration instead
-// of a hard bd CLI error.
-func (s *BdStore) supportsSkipLabels() bool {
-	s.skipLabelsOnce.Do(func() {
-		out, err := s.runner(s.dir, "bd", "version")
-		if err != nil {
-			return
-		}
-		ver, err := parseBDVersion(string(out))
-		if err != nil {
-			return
-		}
-		s.skipLabelsSupported = bdVersionAtLeast(ver, bdSkipLabelsMinVersion)
-	})
-	return s.skipLabelsSupported
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {

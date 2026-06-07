@@ -32,6 +32,10 @@ DRY_RUN="${GC_REAPER_DRY_RUN:-}"
 # purge protection may include it because that only prevents deletion.
 WISP_CLOSE_EDGE_PREDICATE="(d.type = 'parent-child' OR (d.type = 'tracks' AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_bead_id\"')) = d.depends_on_id))"
 WISP_PURGE_PROTECT_EDGE_TYPES="'parent-child', 'tracks', 'blocks'"
+WORKFLOW_ROOT_CLOSE_STATUSES="'open', 'hooked', 'in_progress'"
+WORKFLOW_ROOT_LIVE_STATUSES="'open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing'"
+WORKFLOW_ROOT_DESCENDANT_DEP_TYPES="'parent-child', 'tracks', 'blocks'"
+WORKFLOW_ROOT_CLOSE_REASON="stale inactive workflow root auto-closed by reaper"
 
 # Convert Go durations to SQL INTERVAL hours for Dolt.
 duration_to_hours() {
@@ -44,12 +48,12 @@ MAX_AGE_H=$(duration_to_hours "$MAX_AGE")
 PURGE_AGE_H=$(duration_to_hours "$PURGE_AGE")
 STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE")
 
-CITY_DB_METADATA_RESULT=""
+METADATA_DB_RESULT=""
 
-city_database_name() {
-    local metadata="$CITY_BEADS_DIR/metadata.json"
+metadata_dolt_database() {
+    local metadata="$1"
     local db=""
-    CITY_DB_METADATA_RESULT=""
+    METADATA_DB_RESULT=""
 
     if [ -f "$metadata" ]; then
         if command -v jq >/dev/null 2>&1; then
@@ -81,8 +85,15 @@ PY
     fi
 
     if [ -n "$db" ]; then
-        CITY_DB_METADATA_RESULT="$db"
+        METADATA_DB_RESULT="$db"
     fi
+}
+
+CITY_DB_METADATA_RESULT=""
+
+city_database_name() {
+    metadata_dolt_database "$CITY_BEADS_DIR/metadata.json"
+    CITY_DB_METADATA_RESULT="$METADATA_DB_RESULT"
 }
 
 is_user_database() {
@@ -128,6 +139,10 @@ TOTAL_WOULD_CLOSE_WISPS=0
 TOTAL_WOULD_EXPIRE=0
 TOTAL_PURGED=0
 TOTAL_MAIL_WISPS=0
+TOTAL_WORKFLOW_ROOTS_CLOSED=0
+TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=0
+TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=0
+TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
 TOTAL_EXPIRED_ISSUES_CLOSED=0
@@ -176,6 +191,201 @@ EOF
     return 1
 }
 
+sql_string_literal() {
+    local value="$1"
+    local escaped
+
+    escaped=$(printf '%s' "$value" | sed "s/'/''/g")
+    printf "'%s'" "$escaped"
+}
+
+toml_rig_bindings() {
+    local file="$1"
+
+    [ -f "$file" ] || return 0
+    awk '
+    function trim(s) {
+        sub(/^[ \t\r\n]+/, "", s)
+        sub(/[ \t\r\n]+$/, "", s)
+        return s
+    }
+    function toml_value(line, v) {
+        sub(/^[^=]*=/, "", line)
+        v = trim(line)
+        if (substr(v, 1, 1) == "\"") {
+            sub(/^"/, "", v)
+            sub(/"[ \t]*(#.*)?$/, "", v)
+            gsub(/\\"/, "\"", v)
+            return v
+        }
+        sub(/[ \t]*#.*/, "", v)
+        return trim(v)
+    }
+    function emit() {
+        if (name != "" && rig_path != "") {
+            print name "|" rig_path
+        }
+    }
+    /^[ \t]*\[\[[ \t]*rigs?[ \t]*\]\][ \t]*$/ {
+        emit()
+        in_rig = 1
+        name = ""
+        rig_path = ""
+        next
+    }
+    /^[ \t]*\[/ {
+        emit()
+        in_rig = 0
+        name = ""
+        rig_path = ""
+        next
+    }
+    in_rig && /^[ \t]*name[ \t]*=/ {
+        name = toml_value($0)
+        next
+    }
+    in_rig && /^[ \t]*path[ \t]*=/ {
+        rig_path = toml_value($0)
+        next
+    }
+    END {
+        emit()
+    }
+    ' "$file"
+}
+
+resolve_scope_path() {
+    local scope_path="$1"
+
+    case "$scope_path" in
+        /*)
+            printf '%s\n' "$scope_path"
+            ;;
+        *)
+            printf '%s\n' "$CITY_ABS/$scope_path"
+            ;;
+    esac
+}
+
+RIG_STORE_REFS_BY_DB=""
+
+append_rig_store_ref_for_db() {
+    local db="$1"
+    local store_ref="$2"
+    local entry
+
+    [ -n "$db" ] && [ -n "$store_ref" ] || return 0
+    valid_database_identifier "$db" || return 0
+    database_list_contains "$db" || return 0
+
+    entry="$db|$store_ref"
+    case "
+$RIG_STORE_REFS_BY_DB
+" in
+        *"
+$entry
+"*)
+            return 0
+            ;;
+    esac
+    RIG_STORE_REFS_BY_DB="${RIG_STORE_REFS_BY_DB}${entry}
+"
+}
+
+add_rig_store_ref_from_scope() {
+    local rig_name="$1"
+    local rig_path="$2"
+    local scope_abs
+    local db
+
+    [ -n "$rig_name" ] && [ -n "$rig_path" ] || return 0
+    scope_abs=$(resolve_scope_path "$rig_path")
+    metadata_dolt_database "$scope_abs/.beads/metadata.json"
+    db="$METADATA_DB_RESULT"
+    append_rig_store_ref_for_db "$db" "rig:$rig_name"
+}
+
+load_rig_store_refs_from_file() {
+    local file="$1"
+    local rig_name
+    local rig_path
+
+    while IFS='|' read -r rig_name rig_path; do
+        add_rig_store_ref_from_scope "$rig_name" "$rig_path"
+    done < <(toml_rig_bindings "$file")
+}
+
+load_rig_store_refs_from_env() {
+    local raw="${GC_REAPER_RIG_DATABASES:-}"
+    local item
+    local rig_name
+    local db
+
+    [ -n "$raw" ] || return 0
+    for item in ${raw//,/ }; do
+        case "$item" in
+            *=*) ;;
+            *) continue ;;
+        esac
+        rig_name="${item%%=*}"
+        db="${item#*=}"
+        rig_name="${rig_name#rig:}"
+        append_rig_store_ref_for_db "$db" "rig:$rig_name"
+    done
+}
+
+discover_rig_store_refs() {
+    load_rig_store_refs_from_file "$CITY_ABS/.gc/site.toml"
+    load_rig_store_refs_from_file "$CITY_ABS/city.toml"
+    load_rig_store_refs_from_env
+}
+
+rig_store_ref_sql_list() {
+    local db="$1"
+    local entry
+    local entry_db
+    local store_ref
+    local refs=""
+
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        entry_db="${entry%%|*}"
+        store_ref="${entry#*|}"
+        [ "$entry_db" = "$db" ] || continue
+        if [ -z "$refs" ]; then
+            refs="$(sql_string_literal "$store_ref")"
+        else
+            refs="$refs, $(sql_string_literal "$store_ref")"
+        fi
+    done <<EOF
+$RIG_STORE_REFS_BY_DB
+EOF
+
+    printf '%s\n' "$refs"
+}
+
+workflow_root_store_ref_local_condition() {
+    local db="$1"
+    local alias="$2"
+    local rig_refs
+
+    rig_refs="$(rig_store_ref_sql_list "$db")"
+    cat <<SQL
+                COALESCE(JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.root_store_ref"')), '') = ''
+                OR JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.root_store_ref"')) = '$db'
+                OR (
+                    '$CITY_DB' != ''
+                    AND '$db' = '$CITY_DB'
+                    AND JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.root_store_ref"')) LIKE 'city:%'
+                )
+SQL
+    if [ -n "$rig_refs" ]; then
+        cat <<SQL
+                OR JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.root_store_ref"')) IN ($rig_refs)
+SQL
+    fi
+}
+
 CITY_DB=""
 CITY_DB_SOURCE="$CITY_BEADS_DIR/metadata.json"
 city_database_name
@@ -205,6 +415,8 @@ elif [ -n "$CITY_DB" ] && ! database_list_contains "$CITY_DB"; then
     CITY_DB=""
     CITY_DB_ANOMALY_RECORDED=1
 fi
+
+discover_rig_store_refs
 
 SQL_COUNT_RESULT=0
 get_sql_count() {
@@ -280,6 +492,168 @@ has_dependency_target_column() {
 
     printf '%s\n' "$fields" | grep -qx 'issue_id' || return 1
     printf '%s\n' "$fields" | grep -qx 'depends_on_id' || return 1
+}
+
+workflow_root_candidates_cte() {
+    local db="$1"
+    local candidate_cte="$2"
+    local table="$3"
+    local alias="$4"
+    local issue_type_exclusions="$5"
+
+    cat <<SQL
+        WITH RECURSIVE ${candidate_cte}_base(id) AS (
+            SELECT $alias.id FROM \`$db\`.$table $alias
+            WHERE $alias.status IN ($WORKFLOW_ROOT_CLOSE_STATUSES)
+            AND $alias.issue_type NOT IN ($issue_type_exclusions)
+            AND COALESCE($alias.assignee, '') = ''
+            AND $alias.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+            AND COALESCE($alias.updated_at, $alias.created_at) < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+            AND (
+                JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.kind"')) = 'workflow'
+                OR JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.formula_contract"')) = 'graph.v2'
+            )
+            AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.root_bead_id"')), '') IN ('', $alias.id)
+        ),
+        $candidate_cte(id) AS (
+            SELECT base.id
+            FROM ${candidate_cte}_base base
+            INNER JOIN \`$db\`.$table $alias ON $alias.id = base.id
+            WHERE (
+$(workflow_root_store_ref_local_condition "$db" "$alias")
+            )
+        ),
+        workflow_descendants(root_id, id) AS (
+            SELECT root.id, child_wisp.id
+            FROM $candidate_cte root
+            INNER JOIN \`$db\`.wisps child_wisp
+                ON child_wisp.id != root.id
+                AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
+            UNION
+            SELECT root.id, child_issue.id
+            FROM $candidate_cte root
+            INNER JOIN \`$db\`.issues child_issue
+                ON child_issue.id != root.id
+                AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
+            UNION
+            SELECT root.id, child_dep.issue_id
+            FROM $candidate_cte root
+            INNER JOIN \`$db\`.wisp_dependencies child_dep
+                ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
+                AND child_dep.depends_on_id = root.id
+                AND child_dep.issue_id != root.id
+            UNION
+            SELECT root.id, child_dep.issue_id
+            FROM $candidate_cte root
+            INNER JOIN \`$db\`.dependencies child_dep
+                ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
+                AND child_dep.depends_on_id = root.id
+                AND child_dep.issue_id != root.id
+            UNION
+            SELECT parent.root_id, child_dep.issue_id
+            FROM workflow_descendants parent
+            INNER JOIN \`$db\`.wisp_dependencies child_dep
+                ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
+                AND child_dep.depends_on_id = parent.id
+                AND child_dep.issue_id != parent.id
+            UNION
+            SELECT parent.root_id, child_dep.issue_id
+            FROM workflow_descendants parent
+            INNER JOIN \`$db\`.dependencies child_dep
+                ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
+                AND child_dep.depends_on_id = parent.id
+                AND child_dep.issue_id != parent.id
+        ),
+        roots_with_live_descendants AS (
+            SELECT DISTINCT descendant.root_id
+            FROM workflow_descendants descendant
+            LEFT JOIN \`$db\`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+            LEFT JOIN \`$db\`.issues descendant_issue ON descendant_issue.id = descendant.id
+            WHERE COALESCE(descendant_wisp.status, descendant_issue.status) IN ($WORKFLOW_ROOT_LIVE_STATUSES)
+        ),
+        roots_with_recent_descendants AS (
+            SELECT DISTINCT descendant.root_id
+            FROM workflow_descendants descendant
+            LEFT JOIN \`$db\`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+            LEFT JOIN \`$db\`.issues descendant_issue ON descendant_issue.id = descendant.id
+            WHERE COALESCE(
+                descendant_wisp.updated_at,
+                descendant_wisp.created_at,
+                descendant_issue.updated_at,
+                descendant_issue.created_at
+            ) >= DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+        )
+SQL
+}
+
+workflow_root_store_ref_skipped_count_query() {
+    local db="$1"
+    local candidate_cte="$2"
+    local table="$3"
+    local alias="$4"
+    local issue_type_exclusions="$5"
+
+    cat <<SQL
+$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+        SELECT COUNT(*) FROM ${candidate_cte}_base base
+        LEFT JOIN $candidate_cte candidate ON candidate.id = base.id
+        WHERE candidate.id IS NULL
+SQL
+}
+
+workflow_root_closeable_select() {
+    local candidate_cte="$1"
+
+    cat <<SQL
+        SELECT DISTINCT root.id
+        FROM $candidate_cte root
+        LEFT JOIN roots_with_live_descendants live ON live.root_id = root.id
+        LEFT JOIN roots_with_recent_descendants recent ON recent.root_id = root.id
+        WHERE live.root_id IS NULL
+        AND recent.root_id IS NULL
+SQL
+}
+
+workflow_root_count_query() {
+    local db="$1"
+    local candidate_cte="$2"
+    local table="$3"
+    local alias="$4"
+    local issue_type_exclusions="$5"
+
+    cat <<SQL
+$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+        SELECT COUNT(*) FROM (
+$(workflow_root_closeable_select "$candidate_cte")
+        ) closeable_workflow_roots
+SQL
+}
+
+workflow_root_ids_query() {
+    local db="$1"
+    local candidate_cte="$2"
+    local table="$3"
+    local alias="$4"
+    local issue_type_exclusions="$5"
+
+    cat <<SQL
+$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+$(workflow_root_closeable_select "$candidate_cte")
+SQL
+}
+
+workflow_wisp_root_update_query() {
+    local db="$1"
+
+    cat <<SQL
+$(workflow_root_candidates_cte "$db" "workflow_wisp_root_candidates" "wisps" "w" "'message'")
+        ,
+        closeable_workflow_wisp_roots AS (
+$(workflow_root_closeable_select "workflow_wisp_root_candidates")
+        )
+        UPDATE \`$db\`.wisps SET status='closed', closed_at=NOW(), metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT()), '$."gc.outcome"', 'skipped', '$."close_reason"', '$WORKFLOW_ROOT_CLOSE_REASON')
+        WHERE id IN (SELECT id FROM closeable_workflow_wisp_roots)
+SQL
 }
 
 SQL_CHANGE_ROWS_RESULT=0
@@ -378,6 +752,7 @@ while IFS= read -r DB; do
     CLOSE_WISP_COUNT=0
     DB_CLOSED_WISPS=0
     DB_PURGED=0
+    DB_WORKFLOW_ROOTS_CLOSED=0
     while [ "$STALE_WISP_COUNT" -gt 0 ] && [ "$CLOSE_WISP_COUNT" -lt "$STALE_WISP_COUNT" ]; do
         get_sql_count "$DB" "schema-safe stale wisp" "
             SELECT COUNT(DISTINCT w.id) FROM \`$DB\`.wisps w
@@ -436,7 +811,62 @@ while IFS= read -r DB; do
         fi
     done
 
-    # Step 2: Purge — delete closed wisps past purge_age.
+    # Step 2: Close stale inactive workflow roots. This is the
+    # finalize-crash safety net: it only reaps old, unassigned topology roots
+    # whose stamped and parent-child subtree has no live descendants. Workflow
+    # subtrees are assumed to be co-located in the current bead store. Roots
+    # stamped with gc.root_store_ref for another store are skipped; cross-store
+    # subtrees require cross-store traversal before reaping can be safe.
+    # Wisp roots can be closed in every bead store. Issue roots are city issues,
+    # so their city-store close path uses bd close below.
+    get_sql_count "$DB" "workflow wisp roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"
+    TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
+
+    get_sql_count "$DB" "stale inactive workflow wisp root" "$(workflow_root_count_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"
+    WORKFLOW_WISP_ROOT_COUNT=$SQL_COUNT_RESULT
+    if [ "$WORKFLOW_WISP_ROOT_COUNT" -gt 0 ]; then
+        if [ -n "$DRY_RUN" ]; then
+            TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + WORKFLOW_WISP_ROOT_COUNT))
+        elif run_sql_change "$DB" "closing stale inactive workflow wisp roots" "$(workflow_wisp_root_update_query "$DB")"; then
+            WORKFLOW_WISP_ROOT_ROWS=$SQL_CHANGE_ROWS_RESULT
+            DB_WORKFLOW_ROOTS_CLOSED=$((DB_WORKFLOW_ROOTS_CLOSED + WORKFLOW_WISP_ROOT_ROWS))
+            TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + WORKFLOW_WISP_ROOT_ROWS))
+            DB_MUTATIONS=$((DB_MUTATIONS + WORKFLOW_WISP_ROOT_ROWS))
+        fi
+    fi
+
+    get_sql_count "$DB" "workflow issue roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"
+    TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
+
+    get_sql_rows "$DB" "stale inactive workflow issue root" "$(workflow_root_ids_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"
+    WORKFLOW_ISSUE_ROOT_IDS=$SQL_ROWS_RESULT
+    WORKFLOW_ISSUE_ROOT_COUNT=$(printf '%s\n' "$WORKFLOW_ISSUE_ROOT_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+    if [ "$WORKFLOW_ISSUE_ROOT_COUNT" -gt 0 ]; then
+        if [ -z "$CITY_DB" ]; then
+            if [ "$CITY_DB_ANOMALY_RECORDED" -eq 0 ]; then
+                record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or $CITY/.beads/metadata.json; workflow issue-root close disabled"
+                CITY_DB_ANOMALY_RECORDED=1
+            fi
+            TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=$((TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED + WORKFLOW_ISSUE_ROOT_COUNT))
+        elif [ "$DB" != "$CITY_DB" ]; then
+            TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=$((TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED + WORKFLOW_ISSUE_ROOT_COUNT))
+        elif [ -n "$DRY_RUN" ]; then
+            TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + WORKFLOW_ISSUE_ROOT_COUNT))
+        else
+            while IFS= read -r issue_id; do
+                [ -z "$issue_id" ] && continue
+                if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "$WORKFLOW_ROOT_CLOSE_REASON" 2>&1); then
+                    DB_WORKFLOW_ROOTS_CLOSED=$((DB_WORKFLOW_ROOTS_CLOSED + 1))
+                    TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + 1))
+                    DB_MUTATIONS=$((DB_MUTATIONS + 1))
+                else
+                    record_anomaly "$DB" "closing stale inactive workflow issue root $issue_id failed for $DB: $(sanitize_output "$CLOSE_OUTPUT")"
+                fi
+            done <<< "$WORKFLOW_ISSUE_ROOT_IDS"
+        fi
+    fi
+
+    # Step 3: Purge — delete closed wisps past purge_age.
     get_sql_count "$DB" "closed wisp purge" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status = 'closed'
@@ -469,7 +899,7 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 3: Close nudge beads whose metadata.expires_at is in the past.
+    # Step 4: Close nudge beads whose metadata.expires_at is in the past.
     # Only beads labelled gc:nudge are candidates — other bead types that stamp
     # expires_at (e.g. gc:extmsg-binding session bindings) must not be closed
     # here.  The COALESCE handles whole-second RFC3339+Z, microsecond-width
@@ -543,7 +973,7 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 4: Auto-close stale issues (exclude P0/P1, epics, active deps).
+    # Step 5: Auto-close stale issues (exclude P0/P1, epics, active deps).
     DB_ISSUES_CLOSED=0
     get_sql_rows "$DB" "stale issue" "
         SELECT id FROM \`$DB\`.issues
@@ -592,7 +1022,7 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 5a: Anomaly check — stale open wisp count. Fresh workflow load can
+    # Step 6a: Anomaly check — stale open wisp count. Fresh workflow load can
     # legitimately exceed the threshold on busy cities; only old non-message
     # rows indicate a reaper leak.
     get_sql_count "$DB" "stale open wisp anomaly" "
@@ -607,7 +1037,7 @@ while IFS= read -r DB; do
         ANOMALIES="${ANOMALIES}$DB: $REAPABLE_WISPS stale open wisps (threshold: $ALERT_THRESHOLD, age: ${MAX_AGE})\n"
     fi
 
-    # Step 5b: Mail-wisp backlog count, observed separately from reapable wisps.
+    # Step 6b: Mail-wisp backlog count, observed separately from reapable wisps.
     get_sql_count "$DB" "open mail wisp" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
@@ -627,7 +1057,7 @@ while IFS= read -r DB; do
     if [ -z "$DRY_RUN" ] && [ "$DB_MUTATIONS" -gt 0 ]; then
         if ! COMMIT_OUTPUT=$(dolt_sql -q "
             USE \`$DB\`;
-            CALL DOLT_COMMIT('-Am', 'reaper: stale_wisps=$STALE_WISP_COUNT closed_wisps=$DB_CLOSED_WISPS purged=$DB_PURGED stale_issues=$DB_ISSUES_CLOSED expired_issues=$DB_EXPIRED_ISSUES_CLOSED', '--author', 'reaper <reaper@gastown.local>')
+            CALL DOLT_COMMIT('-Am', 'reaper: stale_wisps=$STALE_WISP_COUNT closed_wisps=$DB_CLOSED_WISPS workflow_roots=$DB_WORKFLOW_ROOTS_CLOSED purged=$DB_PURGED stale_issues=$DB_ISSUES_CLOSED expired_issues=$DB_EXPIRED_ISSUES_CLOSED', '--author', 'reaper <reaper@gastown.local>')
         " 2>&1); then
             case "$COMMIT_OUTPUT" in
                 *"nothing to commit"*|*"Nothing to commit"*)
@@ -652,7 +1082,7 @@ if [ -d "$CITY_BEADS_DIR" ] && command -v bd >/dev/null 2>&1; then
     fi
     BD_PRUNE_ARGS+=(--json)
 
-    if PRUNE_JSON=$((
+    if PRUNE_JSON=$( (
         cd "$CITY_ABS" && BEADS_DIR="$CITY_BEADS_DIR" bd "${BD_PRUNE_ARGS[@]}"
     ) 2>/dev/null); then
         :
@@ -669,7 +1099,7 @@ fi
 
 if [ -d "$CITY_BEADS_DIR" ] && [ -z "$DRY_RUN" ] && command -v gc >/dev/null 2>&1; then
     SESSION_PRUNE_ATTEMPTED=1
-    if SESSION_STATE_PRUNE_JSON=$((
+    if SESSION_STATE_PRUNE_JSON=$( (
         cd "$CITY_ABS" && BEADS_DIR="$CITY_BEADS_DIR" gc session prune --state drained --before "$SESSION_STATE_PRUNE_AGE" --json
     ) 2>&1); then
         :
@@ -695,9 +1125,9 @@ if [ -n "$ANOMALIES" ]; then
         -m "$ANOMALIES" 2>/dev/null || true
 fi
 
-SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
-    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
+    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi
 
 gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true

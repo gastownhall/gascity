@@ -55,12 +55,161 @@ printf '%s\n' '#include <...> search starts here:' ' /nix/store/include' 'End of
 	assertContains(t, out, "-L"+filepath.Join(sysLib, "riscv64-linux-gnu"))
 	assertContains(t, out, "-L"+sysLib64)
 	assertContains(t, out, "-L"+sysLib)
+	assertContains(t, out, "Linux system CGO fallback active:")
 	if strings.Contains(out, "x86_64-linux-gnu") {
 		t.Fatalf("CGO paths should not hardcode the x86_64 Debian fallback:\n%s", out)
 	}
 	if strings.Contains(out, "ambient") {
-		t.Fatalf("Makefile CGO tests should not inherit ambient CGO flags:\n%s", out)
+		t.Fatalf("Makefile CGO test helper should filter ambient CGO flags:\n%s", out)
 	}
+}
+
+func TestMakefileLinuxCGOPathsCanBeDisabled(t *testing.T) {
+	repoRoot := repoRoot(t)
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	sysInclude := filepath.Join(tmp, "sysinclude")
+	if err := os.MkdirAll(filepath.Join(sysInclude, "unicode"), 0o755); err != nil {
+		t.Fatalf("mkdir unicode include: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sysInclude, "unicode", "uregex.h"), []byte(""), 0o644); err != nil {
+		t.Fatalf("write ICU header: %v", err)
+	}
+	sysLib := filepath.Join(tmp, "syslib")
+	if err := os.MkdirAll(sysLib, 0o755); err != nil {
+		t.Fatalf("mkdir syslib: %v", err)
+	}
+
+	writeExecutable(t, filepath.Join(binDir, "uname"), "#!/usr/bin/env sh\necho Linux\n")
+	writeExecutable(t, filepath.Join(binDir, "dpkg-architecture"), "#!/usr/bin/env sh\necho x86_64-linux-gnu\n")
+	writeExecutable(t, filepath.Join(binDir, "cc"), `#!/usr/bin/env sh
+case " $* " in
+  *" -print-multiarch "*)
+    echo x86_64-linux-gnu
+    exit 0
+    ;;
+esac
+printf '%s\n' '#include <...> search starts here:' ' /nix/store/include' 'End of search list.' >&2
+`)
+
+	out := runMakefileCGOPrintTarget(t, repoRoot, tmp, binDir,
+		"SYS_USR_INCLUDE="+sysInclude,
+		"SYS_USR_LIB_ROOT="+sysLib,
+		"SYS_USR_LIB64_ROOT="+filepath.Join(tmp, "syslib64"),
+		"SYS_USR_CGO_FALLBACK=0",
+		"CC=cc",
+	)
+	if out != "CGO_CPPFLAGS=\nCGO_LDFLAGS=\n" {
+		t.Fatalf("CGO flags should stay empty when the Linux system fallback is disabled:\n%s", out)
+	}
+	assertNotContains(t, out, "Linux system CGO fallback active:")
+}
+
+func TestMakefileLinuxCGOPathsStayEmptyWhenCompilerSeesSystemRoot(t *testing.T) {
+	repoRoot := repoRoot(t)
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	sysInclude := filepath.Join(tmp, "sysinclude")
+	if err := os.MkdirAll(filepath.Join(sysInclude, "unicode"), 0o755); err != nil {
+		t.Fatalf("mkdir unicode include: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sysInclude, "unicode", "uregex.h"), []byte(""), 0o644); err != nil {
+		t.Fatalf("write ICU header: %v", err)
+	}
+	sysLib := filepath.Join(tmp, "syslib")
+	if err := os.MkdirAll(sysLib, 0o755); err != nil {
+		t.Fatalf("mkdir syslib: %v", err)
+	}
+
+	writeExecutable(t, filepath.Join(binDir, "uname"), "#!/usr/bin/env sh\necho Linux\n")
+	writeExecutable(t, filepath.Join(binDir, "dpkg-architecture"), `#!/usr/bin/env sh
+touch "$(dirname "$0")/dpkg.ran"
+echo x86_64-linux-gnu
+`)
+	writeExecutable(t, filepath.Join(binDir, "cc"), `#!/usr/bin/env sh
+case " $* " in
+  *" -print-multiarch "*)
+    touch "$(dirname "$0")/cc-multiarch.ran"
+    echo x86_64-linux-gnu
+    exit 0
+    ;;
+esac
+printf '%s\n' '#include <...> search starts here:' ' `+sysInclude+`' 'End of search list.' >&2
+`)
+
+	out := runMakefileCGOPrintTarget(t, repoRoot, tmp, binDir,
+		"SYS_USR_INCLUDE="+sysInclude,
+		"SYS_USR_LIB_ROOT="+sysLib,
+		"SYS_USR_LIB64_ROOT="+filepath.Join(tmp, "syslib64"),
+		"CC=cc",
+	)
+	if out != "CGO_CPPFLAGS=\nCGO_LDFLAGS=\n" {
+		t.Fatalf("CGO flags should stay empty when the compiler already sees the system include root:\n%s", out)
+	}
+	for _, name := range []string{"dpkg.ran", "cc-multiarch.ran"} {
+		if _, err := os.Stat(filepath.Join(binDir, name)); err == nil {
+			t.Fatalf("Makefile should not run %s when the compiler already sees the system include root", strings.TrimSuffix(name, ".ran"))
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+	}
+	assertNotContains(t, out, "Linux system CGO fallback active:")
+}
+
+func TestMakefileLinuxCGOPathsDeduplicateSystemLibDirs(t *testing.T) {
+	repoRoot := repoRoot(t)
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	sysInclude := filepath.Join(tmp, "sysinclude")
+	if err := os.MkdirAll(filepath.Join(sysInclude, "unicode"), 0o755); err != nil {
+		t.Fatalf("mkdir unicode include: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sysInclude, "unicode", "uregex.h"), []byte(""), 0o644); err != nil {
+		t.Fatalf("write ICU header: %v", err)
+	}
+	sysLib := filepath.Join(tmp, "syslib")
+	multiarchLib := filepath.Join(sysLib, "x86_64-linux-gnu")
+	for _, dir := range []string{multiarchLib, sysLib} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	writeExecutable(t, filepath.Join(binDir, "uname"), "#!/usr/bin/env sh\necho Linux\n")
+	writeExecutable(t, filepath.Join(binDir, "dpkg-architecture"), "#!/usr/bin/env sh\necho x86_64-linux-gnu\n")
+	writeExecutable(t, filepath.Join(binDir, "cc"), `#!/usr/bin/env sh
+case " $* " in
+  *" -print-multiarch "*)
+    echo x86_64-linux-gnu
+    exit 0
+    ;;
+esac
+printf '%s\n' '#include <...> search starts here:' ' /nix/store/include' 'End of search list.' >&2
+`)
+
+	out := runMakefileCGOPrintTarget(t, repoRoot, tmp, binDir,
+		"SYS_USR_INCLUDE="+sysInclude,
+		"SYS_USR_LIB_ROOT="+sysLib,
+		"SYS_USR_LIB64_ROOT="+sysLib,
+		"CC=cc",
+	)
+	ldflags := strings.TrimPrefix(lineWithPrefix(t, out, "CGO_LDFLAGS="), "CGO_LDFLAGS=")
+	if count := countExactField(ldflags, "-L"+multiarchLib); count != 1 {
+		t.Fatalf("multiarch lib dir appears %d times, want 1:\n%s", count, out)
+	}
+	if count := countExactField(ldflags, "-L"+sysLib); count != 1 {
+		t.Fatalf("system lib dir appears %d times, want 1:\n%s", count, out)
+	}
+	assertFieldsInOrder(t, ldflags, "-L"+multiarchLib, "-L"+sysLib)
 }
 
 func TestMakefileLinuxCGOPathsTreatNestedIncludeAsMissingSystemRoot(t *testing.T) {
@@ -190,4 +339,47 @@ func assertContains(t *testing.T, haystack, needle string) {
 	if !strings.Contains(haystack, needle) {
 		t.Fatalf("output missing %q:\n%s", needle, haystack)
 	}
+}
+
+func assertNotContains(t *testing.T, haystack, needle string) {
+	t.Helper()
+	if strings.Contains(haystack, needle) {
+		t.Fatalf("output contains %q:\n%s", needle, haystack)
+	}
+}
+
+func lineWithPrefix(t *testing.T, output, prefix string) string {
+	t.Helper()
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	t.Fatalf("output missing line prefix %q:\n%s", prefix, output)
+	return ""
+}
+
+func countExactField(fields, want string) int {
+	count := 0
+	for _, field := range strings.Fields(fields) {
+		if field == want {
+			count++
+		}
+	}
+	return count
+}
+
+func assertFieldsInOrder(t *testing.T, fields string, want ...string) {
+	t.Helper()
+	allFields := strings.Fields(fields)
+	next := 0
+	for _, field := range allFields {
+		if field == want[next] {
+			next++
+			if next == len(want) {
+				return
+			}
+		}
+	}
+	t.Fatalf("fields are not in required order %v:\n%s", want, fields)
 }

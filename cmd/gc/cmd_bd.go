@@ -37,6 +37,8 @@ var bdHeartbeatNow = time.Now
 // (gastownhall/gascity#2079) because both subcommands flow through doBd.
 const bdSilentFallbackExitCode = 4
 
+const bdSilentFallbackUserMessage = "gc bd: managed Dolt unreachable; bd fell back to on-disk auto-import mode. If this command wrote data, that write was NOT persisted. Restart the managed Dolt server (or check connectivity) and retry. (See gastownhall/gascity#2080.)"
+
 // bdStderrScanLimit caps how much of bd's stderr gc retains to scan for the
 // silent-fallback marker. bd emits the marker pair while opening the store —
 // before it runs the subcommand — so the marker, when present, always lands
@@ -79,7 +81,9 @@ in the arguments.
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat <issue-id>" subcommand, which rewrites to
 "update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC now>"
-so long-running workers can signal liveness to the dashboard.
+so long-running workers can signal liveness to the dashboard, and
+"release-if-current <issue-id> <assignee>", which conditionally resets an
+in-progress assignment only when the bead still has that assignee.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -88,7 +92,8 @@ auto-export behavior, invoke bd directly.`,
   gc bd --rig my-project create "New task"
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
-  gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now`,
+  gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+  gc bd release-if-current my-project-abc worker-1`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
 			// Plumb doBd's numeric exit code through exitForCode so the
@@ -211,6 +216,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return doBdReleaseIfCurrent(cityPath, target, id, expectedAssignee, stdout, stderr)
+	}
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {
@@ -280,10 +292,53 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// mask it. (Root cause fixed upstream in beads post-#3691; this surfaces
 	// the symptom for deployments still on stable bd builds.)
 	if bdOutputIndicatesSilentFallback(stderrScan.String()) {
-		fmt.Fprintln(stderr, "gc bd: managed Dolt unreachable; bd fell back to on-disk auto-import mode. If this command wrote data, that write was NOT persisted. Restart the managed Dolt server (or check connectivity) and retry. (See gastownhall/gascity#2080.)") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, bdSilentFallbackUserMessage) //nolint:errcheck // best-effort stderr
 		return bdSilentFallbackExitCode
 	}
 
+	return 0
+}
+
+func parseBdReleaseIfCurrentArgs(args []string) (id, expectedAssignee string, ok bool, err error) {
+	if len(args) == 0 || args[0] != "release-if-current" {
+		return "", "", false, nil
+	}
+	if len(args) != 3 || invalidBdReleaseIfCurrentArg(args[1]) || invalidBdReleaseIfCurrentArg(args[2]) {
+		return "", "", true, fmt.Errorf("usage: gc bd release-if-current <issue-id> <assignee>")
+	}
+	return args[1], args[2], true, nil
+}
+
+func invalidBdReleaseIfCurrentArg(value string) bool {
+	return value == "" || strings.IndexFunc(value, unicode.IsSpace) >= 0
+}
+
+func doBdReleaseIfCurrent(cityPath string, target execStoreTarget, id, expectedAssignee string, stdout, stderr io.Writer) int {
+	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd release-if-current: opening store: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	releaser, ok := store.(beads.ConditionalAssignmentReleaser)
+	if !ok {
+		fmt.Fprintf(stderr, "gc bd release-if-current: %v for %T\n", beads.ErrConditionalReleaseUnsupported, store) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	released, err := releaser.ReleaseIfCurrent(id, expectedAssignee)
+	if err != nil {
+		if errors.Is(err, beads.ErrBDSilentFallback) {
+			fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, bdSilentFallbackUserMessage)          //nolint:errcheck // best-effort stderr
+			return bdSilentFallbackExitCode
+		}
+		fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if released {
+		fmt.Fprintln(stdout, "released") //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	fmt.Fprintln(stdout, "skipped") //nolint:errcheck // best-effort stdout
 	return 0
 }
 
