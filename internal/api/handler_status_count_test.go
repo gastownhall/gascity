@@ -1,0 +1,166 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
+)
+
+// counterBeadStore is a Store + Counter fake for the status work-count path.
+// listForbidden makes List fail the test, proving the count path was taken.
+type counterBeadStore struct {
+	beads.Store
+	t             *testing.T
+	counts        map[string]int // status → count
+	countErr      error
+	listForbidden bool
+}
+
+func (s *counterBeadStore) Count(_ context.Context, query beads.ListQuery, _ ...string) (int, error) {
+	if s.countErr != nil {
+		return 0, s.countErr
+	}
+	return s.counts[query.Status], nil
+}
+
+func (s *counterBeadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if s.listForbidden {
+		s.t.Error("List called on Counter-capable store, want Count path")
+		return nil, nil
+	}
+	return s.Store.List(q)
+}
+
+func getStatus(t *testing.T, state *fakeState) statusResponse {
+	t.Helper()
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp statusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return resp
+}
+
+func TestHandleStatusWorkCountsUseCounterStores(t *testing.T) {
+	state := newFakeState(t)
+	state.stores["myrig"] = &counterBeadStore{
+		Store:         beads.NewMemStore(),
+		t:             t,
+		counts:        map[string]int{"open": 2, "in_progress": 1, "ready": 0},
+		listForbidden: true,
+	}
+
+	resp := getStatus(t, state)
+
+	if resp.Work.Open != 2 || resp.Work.InProgress != 1 || resp.Work.Ready != 0 {
+		t.Fatalf("Work = %+v, want open=2 in_progress=1 ready=0", resp.Work)
+	}
+	if resp.Partial {
+		t.Fatalf("Partial = true, want false; errors: %v", resp.PartialErrors)
+	}
+}
+
+func TestHandleStatusCounterUnsupportedFallsBackToList(t *testing.T) {
+	state := newFakeState(t)
+	mem := beads.NewMemStore()
+	created, err := mem.Create(beads.Bead{Type: "task", Title: "open work"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	_ = created
+	state.stores["myrig"] = &counterBeadStore{
+		Store:    mem,
+		t:        t,
+		countErr: beads.ErrCountUnsupported,
+	}
+
+	resp := getStatus(t, state)
+
+	if resp.Work.Open != 1 {
+		t.Fatalf("Work.Open = %d, want 1 from List fallback", resp.Work.Open)
+	}
+	if resp.Partial {
+		t.Fatalf("Partial = true, want false; errors: %v", resp.PartialErrors)
+	}
+}
+
+func TestHandleStatusCounterFailureReportsPartialWithoutListRetry(t *testing.T) {
+	state := newFakeState(t)
+	state.stores["myrig"] = &counterBeadStore{
+		Store:         beads.NewMemStore(),
+		t:             t,
+		countErr:      errors.New("dolt connection refused"),
+		listForbidden: true, // operational failures must not pay a second 1s timeout on List
+	}
+
+	resp := getStatus(t, state)
+
+	if !resp.Partial {
+		t.Fatal("Partial = false, want true for count failure")
+	}
+	found := false
+	for _, e := range resp.PartialErrors {
+		if strings.Contains(e, "myrig") && strings.Contains(e, "work") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("PartialErrors = %v, want rig work error", resp.PartialErrors)
+	}
+}
+
+func TestHandleStatusServesRecentResponseDespiteIndexAdvance(t *testing.T) {
+	state := newFakeState(t)
+	counter := &counterBeadStore{
+		Store:         beads.NewMemStore(),
+		t:             t,
+		counts:        map[string]int{"open": 2},
+		listForbidden: true,
+	}
+	state.stores["myrig"] = counter
+	h := newTestCityHandler(t, state)
+
+	get := func() statusResponse {
+		t.Helper()
+		req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		var resp statusResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp
+	}
+
+	first := get()
+	if first.Work.Open != 2 {
+		t.Fatalf("Work.Open = %d, want 2", first.Work.Open)
+	}
+
+	// Advance the event index and change the underlying counts. A
+	// non-blocking request inside the TTL floor must serve the recent
+	// cached body instead of paying a full rebuild (#1896).
+	state.eventProv.(*events.Fake).Record(events.Event{Type: "test.event", Actor: "test"})
+	counter.counts["open"] = 7
+
+	second := get()
+	if second.Work.Open != 2 {
+		t.Fatalf("Work.Open = %d, want 2 (cached within TTL floor)", second.Work.Open)
+	}
+}

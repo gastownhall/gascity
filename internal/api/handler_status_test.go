@@ -611,7 +611,7 @@ func TestBuildStatusBodyFullIncludesExpensiveBlocks(t *testing.T) {
 	state := seedStatusBodyState(t)
 	s := &Server{state: state}
 
-	body := s.buildStatusBody(false)
+	body := s.buildStatusBody(context.Background(), false)
 	if body.StoreHealth == nil {
 		t.Error("full body StoreHealth = nil, want populated")
 	}
@@ -632,7 +632,7 @@ func TestBuildStatusBodyLiteOmitsExpensiveBlocks(t *testing.T) {
 	state := seedStatusBodyState(t)
 	s := &Server{state: state}
 
-	body := s.buildStatusBody(true)
+	body := s.buildStatusBody(context.Background(), true)
 	if body.StoreHealth != nil {
 		t.Errorf("lite body StoreHealth = %+v, want nil (omitted)", body.StoreHealth)
 	}

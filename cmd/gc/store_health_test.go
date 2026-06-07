@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -170,5 +172,37 @@ func TestCollectStoreHealthReadsEvents(t *testing.T) {
 	}
 	if h.Path != storehealth.StorePath("/c") {
 		t.Errorf("Path = %q, want %q", h.Path, storehealth.StorePath("/c"))
+	}
+}
+
+type liveRowCounterStore struct {
+	beads.Store
+	t        *testing.T
+	countErr error
+}
+
+func (s *liveRowCounterStore) Count(_ context.Context, query beads.ListQuery, _ ...string) (int, error) {
+	if !query.IncludeClosed {
+		s.t.Error("Count query missing IncludeClosed; row footprint includes closed beads")
+	}
+	return 23, s.countErr
+}
+
+func (s *liveRowCounterStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	s.t.Error("List called on Counter-capable store, want Count path")
+	return nil, nil
+}
+
+func TestLiveRowCountPrefersCounter(t *testing.T) {
+	store := &liveRowCounterStore{Store: beads.NewMemStore(), t: t}
+	if got := liveRowCount(store); got != 23 {
+		t.Fatalf("liveRowCount = %d, want 23 from Counter", got)
+	}
+}
+
+func TestLiveRowCountCounterFailureReturnsZero(t *testing.T) {
+	store := &liveRowCounterStore{Store: beads.NewMemStore(), t: t, countErr: errors.New("dolt down")}
+	if got := liveRowCount(store); got != 0 {
+		t.Fatalf("liveRowCount = %d, want 0 on count failure", got)
 	}
 }

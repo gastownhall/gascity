@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -43,12 +45,23 @@ func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) 
 }
 
 // liveRowCount returns the number of beads known to store, or 0 when
-// store is nil or the list fails. Counts all statuses (including
+// store is nil or the lookup fails. Counts all statuses (including
 // closed) because the ratio is about on-disk row footprint, not
-// actionable work.
+// actionable work. Stores exposing beads.Counter answer via a backend
+// COUNT instead of hydrating the full history (#1896); only
+// ErrCountUnsupported falls back to List.
 func liveRowCount(store beads.Store) int {
 	if store == nil {
 		return 0
+	}
+	if counter, ok := store.(beads.Counter); ok {
+		n, err := counter.Count(context.Background(), beads.ListQuery{AllowScan: true, IncludeClosed: true})
+		if err == nil {
+			return n
+		}
+		if !errors.Is(err, beads.ErrCountUnsupported) {
+			return 0
+		}
 	}
 	list, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err != nil {
