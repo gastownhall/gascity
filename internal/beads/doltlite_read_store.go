@@ -672,6 +672,18 @@ func (s *DoltliteReadStore) DepListBatch(ids []string) (map[string][]Dep, error)
 	return result, nil
 }
 
+func (s *DoltliteReadStore) dependencySnapshotForCache(ids []string) (map[string][]Dep, bool, error) {
+	deps, err := s.DepListBatch(ids)
+	if err != nil {
+		return deps, false, err
+	}
+	return deps, true, nil
+}
+
+func (s *DoltliteReadStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
+	return items, nil
+}
+
 func (s *DoltliteReadStore) queryDeps(where, value string) ([]Dep, error) {
 	var deps []Dep
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {

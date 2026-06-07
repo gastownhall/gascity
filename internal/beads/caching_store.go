@@ -874,6 +874,10 @@ type listDependencyCompletenessStore interface {
 	listIncludesCompleteDependencies() bool
 }
 
+type cacheDependencySnapshotStore interface {
+	dependencySnapshotForCache(ids []string) (map[string][]Dep, bool, error)
+}
+
 type readyProjectionEnrichmentStore interface {
 	enrichReadyProjectionForCache([]Bead) ([]Bead, error)
 }
@@ -886,10 +890,14 @@ func (c *CachingStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, erro
 }
 
 func (c *CachingStore) fetchDepsForBeads(beadMap map[string]Bead) (map[string][]Dep, bool, error) {
+	ids := beadIDs(beadMap)
+	if backing, ok := c.backing.(cacheDependencySnapshotStore); ok {
+		return backing.dependencySnapshotForCache(ids)
+	}
 	if backing, ok := c.backing.(listDependencyCompletenessStore); ok {
 		return depsFromBeads(beadMap, nil, false), backing.listIncludesCompleteDependencies(), nil
 	}
-	return c.fetchDepsForIDs(beadIDs(beadMap))
+	return c.fetchDepsForIDs(ids)
 }
 
 func (c *CachingStore) fetchDepsForIDs(ids []string) (map[string][]Dep, bool, error) {
