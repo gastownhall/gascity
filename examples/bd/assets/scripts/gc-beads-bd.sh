@@ -1283,11 +1283,21 @@ graceful_stop_owned_pid() {
 # Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections
 # accumulate and the server enters unrecoverable read-only mode.
 write_config_yaml() {
-    local archive_level gc_bin raw_wait_timeout wait_timeout_line max_connections read_timeout_millis write_timeout_millis
+    local archive_level auto_gc_enabled auto_gc_sysvar gc_bin raw_wait_timeout wait_timeout_line max_connections read_timeout_millis write_timeout_millis
     archive_level=${GC_DOLT_ARCHIVE_LEVEL:-0}
     case "$archive_level" in
         ''|*[!0-9]*)
             archive_level=0
+            ;;
+    esac
+    # Incremental auto-GC defaults to ON; only explicit false-y overrides
+    # disable it. Mirrors parseEnvAutoGCEnabled in cmd/gc/dolt_start_managed.go.
+    auto_gc_enabled=true
+    auto_gc_sysvar=ON
+    case "${GC_DOLT_AUTO_GC_ENABLED:-}" in
+        0|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff])
+            auto_gc_enabled=false
+            auto_gc_sysvar=OFF
             ;;
     esac
     max_connections=${GC_DOLT_MAX_CONNECTIONS:-256}
@@ -1317,6 +1327,7 @@ write_config_yaml() {
             --data-dir "$DATA_DIR" \
             --log-level "$DOLT_LOGLEVEL" \
             --archive-level "$archive_level" \
+            --auto-gc-enabled="$auto_gc_enabled" \
             --max-connections "$max_connections" \
             --read-timeout-millis "$read_timeout_millis" \
             --write-timeout-millis "$write_timeout_millis" || die "failed to write managed dolt config via gc helper $gc_bin"
@@ -1362,11 +1373,16 @@ listener:
 
 data_dir: "$DATA_DIR"
 
-# auto_gc is disabled — dolt#10944 load-avg gating means upstream auto-GC effectively never fires.
-# Compaction-driven scheduled GC replaces it. See gastownhall/gascity#1918, #1200, #1977 for context.
+# Incremental auto-GC bounds the noms journal so it never reaches GB scale,
+# shrinking both the unclean-stop corruption window and the recovery blast
+# radius (#3176). Historically OFF to work around dolt#10944 (load-avg gating
+# that never fired); fixed upstream in dolt 2.0.3 and the managed floor is
+# 2.1.0+. Scheduled compaction (gc dolt compact) still handles history
+# flattening — see #1918, #1200 for that lineage. Override via city.toml
+# [dolt] auto_gc_enabled or GC_DOLT_AUTO_GC_ENABLED.
 behavior:
   auto_gc_behavior:
-    enable: false
+    enable: $auto_gc_enabled
     archive_level: $archive_level
 
 # Managed Gas City workloads generate short-lived probe and metadata queries.
@@ -1375,7 +1391,7 @@ behavior:
 # Keep stats disabled for managed servers; use explicit gc dolt maintenance
 # commands for storage cleanup instead of background workers.
 system_variables:
-  dolt_auto_gc_enabled: "OFF"
+  dolt_auto_gc_enabled: "$auto_gc_sysvar"
   dolt_stats_enabled: "OFF"
   dolt_stats_gc_enabled: "OFF"
   dolt_stats_memory_only: "ON"

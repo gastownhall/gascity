@@ -3108,12 +3108,12 @@ func writeDoctorManagedDoltConfig(t *testing.T, cityPath string, overrides map[s
 		"data_dir": filepath.Join(cityPath, ".beads", "dolt"),
 		"behavior": map[string]any{
 			"auto_gc_behavior": map[string]any{
-				"enable":        false,
+				"enable":        true,
 				"archive_level": 0,
 			},
 		},
 		"system_variables": map[string]any{
-			"dolt_auto_gc_enabled":   "OFF",
+			"dolt_auto_gc_enabled":   "ON",
 			"dolt_stats_enabled":     "OFF",
 			"dolt_stats_gc_enabled":  "OFF",
 			"dolt_stats_memory_only": "ON",
@@ -3418,10 +3418,11 @@ func TestDoltConfigCheck_WrongDataDir(t *testing.T) {
 	}
 }
 
-func TestDoltConfigCheck_AutoGCEnabled(t *testing.T) {
+func TestDoltConfigCheck_AutoGCDisabledDrifts(t *testing.T) {
 	dir := setupManagedDoltCity(t)
 	writeDoctorManagedDoltConfig(t, dir, map[string]any{
-		"behavior.auto_gc_behavior.enable": true,
+		"behavior.auto_gc_behavior.enable":      false,
+		"system_variables.dolt_auto_gc_enabled": "OFF",
 	})
 	c := NewDoltConfigCheck(dir, false)
 	r := c.Run(&CheckContext{})
@@ -3430,6 +3431,9 @@ func TestDoltConfigCheck_AutoGCEnabled(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "auto_gc_behavior.enable") {
 		t.Errorf("message = %q, want auto_gc_behavior.enable mention", r.Message)
+	}
+	if !strings.Contains(r.Message, "dolt_auto_gc_enabled") {
+		t.Errorf("message = %q, want dolt_auto_gc_enabled mention", r.Message)
 	}
 }
 

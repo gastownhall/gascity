@@ -792,6 +792,11 @@ func resolveManagedDoltConfigForStart(cityPath string, explicitArchiveLevel int)
 			}
 		}
 	}
+	if doltConfig.AutoGCEnabled == nil {
+		if parsed, ok := parseEnvAutoGCEnabled(os.Getenv("GC_DOLT_AUTO_GC_ENABLED")); ok {
+			doltConfig.AutoGCEnabled = &parsed
+		}
+	}
 	if doltConfig.MaxConnections <= 0 {
 		doltConfig.MaxConnections = positiveEnvInt("GC_DOLT_MAX_CONNECTIONS")
 	}
@@ -802,6 +807,27 @@ func resolveManagedDoltConfigForStart(cityPath string, explicitArchiveLevel int)
 		doltConfig.WriteTimeoutMillis = positiveEnvInt("GC_DOLT_WRITE_TIMEOUT_MILLIS")
 	}
 	return doltConfig, nil
+}
+
+// parseEnvAutoGCEnabled parses the GC_DOLT_AUTO_GC_ENABLED override.
+// Accepts Go bool spellings (strconv.ParseBool) plus Dolt's ON/OFF.
+// Unset or unparseable values report ok=false so callers keep the default.
+func parseEnvAutoGCEnabled(raw string) (value, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, false
+	}
+	switch strings.ToUpper(raw) {
+	case "ON":
+		return true, true
+	case "OFF":
+		return false, true
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, false
+	}
+	return parsed, true
 }
 
 func positiveEnvInt(key string) int {

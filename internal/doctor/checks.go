@@ -2426,10 +2426,14 @@ func DoltConfigExpectedValues() []DoltConfigExpectedValue {
 // DoltConfigExpectedValuesForConfig returns the managed Dolt config contract
 // after applying city-level [dolt] overrides.
 func DoltConfigExpectedValuesForConfig(doltConfig config.DoltConfig) []DoltConfigExpectedValue {
+	autoGCSysVar := "ON"
+	if !doltConfig.EffectiveAutoGCEnabled() {
+		autoGCSysVar = "OFF"
+	}
 	values := []DoltConfigExpectedValue{
-		{"behavior.auto_gc_behavior.enable", false},
+		{"behavior.auto_gc_behavior.enable", doltConfig.EffectiveAutoGCEnabled()},
 		{"behavior.auto_gc_behavior.archive_level", doltConfig.EffectiveArchiveLevel()},
-		{"system_variables.dolt_auto_gc_enabled", "OFF"},
+		{"system_variables.dolt_auto_gc_enabled", autoGCSysVar},
 		{"system_variables.dolt_stats_enabled", "OFF"},
 		{"system_variables.dolt_stats_gc_enabled", "OFF"},
 		{"system_variables.dolt_stats_memory_only", "ON"},

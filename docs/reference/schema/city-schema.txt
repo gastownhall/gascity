@@ -1351,6 +1351,11 @@
           "description": "ArchiveLevel controls Dolt's auto_gc archive aggressiveness.\n0 disables archive compaction (lower CPU on startup).\n1 enables archive compaction (higher CPU on startup).\nnil (omitted) defaults to 0.",
           "default": 0
         },
+        "auto_gc_enabled": {
+          "type": "boolean",
+          "description": "AutoGCEnabled toggles Dolt's incremental auto-GC on the managed\nsql-server. Auto-GC bounds the noms journal so it never reaches\nGB scale, which shrinks both the unclean-stop corruption window\nand the recovery blast radius. nil (omitted) defaults to true.",
+          "default": true
+        },
         "max_connections": {
           "type": "integer",
           "description": "MaxConnections overrides the managed Dolt listener max_connections.\n0 means use the managed default.",

@@ -1727,6 +1727,11 @@ type DoltConfig struct {
 	// 1 enables archive compaction (higher CPU on startup).
 	// nil (omitted) defaults to 0.
 	ArchiveLevel *int `toml:"archive_level,omitempty" jsonschema:"default=0"`
+	// AutoGCEnabled toggles Dolt's incremental auto-GC on the managed
+	// sql-server. Auto-GC bounds the noms journal so it never reaches
+	// GB scale, which shrinks both the unclean-stop corruption window
+	// and the recovery blast radius. nil (omitted) defaults to true.
+	AutoGCEnabled *bool `toml:"auto_gc_enabled,omitempty" jsonschema:"default=true"`
 	// MaxConnections overrides the managed Dolt listener max_connections.
 	// 0 means use the managed default.
 	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
@@ -1763,6 +1768,15 @@ func (d DoltConfig) EffectiveArchiveLevel() int {
 		return *d.ArchiveLevel
 	}
 	return 0
+}
+
+// EffectiveAutoGCEnabled returns whether Dolt incremental auto-GC is enabled
+// for the managed sql-server, defaulting omitted values to true.
+func (d DoltConfig) EffectiveAutoGCEnabled() bool {
+	if d.AutoGCEnabled != nil {
+		return *d.AutoGCEnabled
+	}
+	return true
 }
 
 // EffectiveMaxConnections returns the managed Dolt listener max_connections.
