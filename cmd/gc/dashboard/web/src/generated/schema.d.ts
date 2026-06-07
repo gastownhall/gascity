@@ -2229,6 +2229,7 @@ export interface components {
             ephemeral?: boolean;
             from?: string;
             id: string;
+            is_blocked?: boolean;
             issue_type: string;
             labels?: string[] | null;
             metadata?: {

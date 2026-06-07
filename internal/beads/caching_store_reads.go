@@ -473,7 +473,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 
 		var result []Bead
 		for _, b := range openBeads {
-			if cachedBeadReady(statusByID, depsByID[b.ID]) {
+			if cachedBeadReady(b, statusByID, depsByID[b.ID]) {
 				result = append(result, cloneBead(b))
 			}
 		}
@@ -521,7 +521,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 		default:
 			return nil, false
 		}
-		if cachedBeadReady(statusByID, deps) {
+		if cachedBeadReady(b, statusByID, deps) {
 			result = append(result, cloneBead(b))
 		}
 	}
@@ -531,7 +531,10 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	return result, true
 }
 
-func cachedBeadReady(statusByID map[string]string, deps []Dep) bool {
+func cachedBeadReady(b Bead, statusByID map[string]string, deps []Dep) bool {
+	if b.IsBlocked != nil {
+		return !*b.IsBlocked
+	}
 	for _, dep := range deps {
 		if !isReadyBlockingDependencyType(dep.Type) {
 			continue

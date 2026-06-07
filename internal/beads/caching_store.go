@@ -370,6 +370,12 @@ func (c *CachingStore) PrimeActive() error {
 		}
 		all = append(all, beads...)
 	}
+	if enriched, err := c.enrichReadyProjectionForCache(all); err != nil {
+		partialErr = errors.Join(partialErr, err)
+		c.recordProblem("prime active ready projection", err)
+	} else {
+		all = enriched
+	}
 
 	beadMap := make(map[string]Bead, len(all))
 	for _, b := range all {
@@ -482,6 +488,12 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	}
 	if err != nil {
 		return fmt.Errorf("prime list: %w", err)
+	}
+	if enriched, enrichErr := c.enrichReadyProjectionForCache(all); enrichErr != nil {
+		c.recordProblem("prime ready projection", enrichErr)
+		partialErr = errors.Join(partialErr, enrichErr)
+	} else {
+		all = enriched
 	}
 	if err := c.cacheContextErr(ctx); err != nil {
 		return err
@@ -860,6 +872,17 @@ func beadIDs(beadMap map[string]Bead) []string {
 
 type listDependencyCompletenessStore interface {
 	listIncludesCompleteDependencies() bool
+}
+
+type readyProjectionEnrichmentStore interface {
+	enrichReadyProjectionForCache([]Bead) ([]Bead, error)
+}
+
+func (c *CachingStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
+	if backing, ok := c.backing.(readyProjectionEnrichmentStore); ok {
+		return backing.enrichReadyProjectionForCache(items)
+	}
+	return items, nil
 }
 
 func (c *CachingStore) fetchDepsForBeads(beadMap map[string]Bead) (map[string][]Dep, bool, error) {

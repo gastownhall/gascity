@@ -842,6 +842,9 @@
           "id": {
             "type": "string"
           },
+          "is_blocked": {
+            "type": "boolean"
+          },
           "issue_type": {
             "type": "string"
           },

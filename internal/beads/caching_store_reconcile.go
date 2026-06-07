@@ -271,6 +271,21 @@ func (c *CachingStore) runReconciliation() {
 		c.mu.Unlock()
 		return
 	}
+	enriched, enrichErr := c.enrichReadyProjectionForCache(fresh)
+	if enrichErr != nil {
+		c.mu.Lock()
+		c.syncFailures++
+		if c.syncFailures >= maxCacheSyncFailures && (c.state == cacheLive || c.state == cachePartial) {
+			c.state = cacheDegraded
+		}
+		c.recordProblemLocked("reconcile ready projection", enrichErr)
+		c.recordReconcileLatencyLocked(bdLatency)
+		c.recomputeCadenceLocked()
+		c.updateStatsLocked()
+		c.mu.Unlock()
+		return
+	}
+	fresh = enriched
 
 	freshByID := make(map[string]Bead, len(fresh))
 	for _, b := range fresh {

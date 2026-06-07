@@ -48,6 +48,12 @@ func TestBDCommandTimeoutForReadCommands(t *testing.T) {
 	if got := bdCommandTimeoutFor("bd", []string{"ready", "--json"}); got != bdReadCommandTimeout {
 		t.Fatalf("bd ready timeout = %s, want %s", got, bdReadCommandTimeout)
 	}
+	if got := bdCommandTimeoutFor("bd", []string{"sql", "select 1", "--json"}); got != bdReadCommandTimeout {
+		t.Fatalf("bd sql timeout = %s, want %s", got, bdReadCommandTimeout)
+	}
+	if got := bdCommandTimeoutFor("bd", []string{"version"}); got != bdReadCommandTimeout {
+		t.Fatalf("bd version timeout = %s, want %s", got, bdReadCommandTimeout)
+	}
 	if got := bdCommandTimeoutFor("bd", []string{"update", "gc-1", "--status", "open"}); got != bdCommandTimeout {
 		t.Fatalf("bd update timeout = %s, want %s", got, bdCommandTimeout)
 	}

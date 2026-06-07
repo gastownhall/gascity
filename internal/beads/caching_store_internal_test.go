@@ -2902,6 +2902,12 @@ func TestCachingStoreBdPrimeAndReconcileSkipFullDepScan(t *testing.T) {
 			readyCalls++
 			return issueJSON, nil
 		}
+		if len(args) > 0 && args[0] == "version" {
+			return []byte("bd version 1.0.4\n"), nil
+		}
+		if len(args) > 0 && args[0] == "sql" {
+			t.Fatalf("unexpected ready projection SQL under bd 1.0.4: %v", args)
+		}
 		if len(args) > 0 && args[0] == "list" {
 			return issueJSON, nil
 		}
@@ -2935,6 +2941,12 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 			depListCalls++
 			t.Fatalf("unexpected dep scan command: %v", args)
 		}
+		if len(args) > 0 && args[0] == "version" {
+			return []byte("bd version 1.0.4\n"), nil
+		}
+		if len(args) > 0 && args[0] == "sql" {
+			t.Fatalf("unexpected ready projection SQL under bd 1.0.4: %v", args)
+		}
 		if len(args) > 0 && args[0] == "list" {
 			argLine := strings.Join(args, " ")
 			if strings.Contains(argLine, "--status=open") {
@@ -2967,6 +2979,125 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 	}
 	if depListCalls != 0 {
 		t.Fatalf("dep list calls = %d, want 0", depListCalls)
+	}
+}
+
+func TestCachingStoreCachedReadyHonorsProjectedIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	blocked := true
+	backing := &completeEmbeddedDepsStore{
+		beads: []Bead{
+			{ID: "bd-ready", Title: "ready", Status: "open", Type: "task"},
+			{ID: "bd-blocked", Title: "blocked", Status: "open", Type: "task", IsBlocked: &blocked},
+		},
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if !readyByID["bd-ready"] || readyByID["bd-blocked"] {
+		t.Fatalf("CachedReady ids = %v, want ready included and projected blocked excluded", readyByID)
+	}
+}
+
+func TestCachingStoreCachedReadyFallsBackToLegacyDepsWhenProjectionMissing(t *testing.T) {
+	t.Parallel()
+
+	backing := &completeEmbeddedDepsStore{
+		beads: []Bead{{
+			ID:     "bd-waiting",
+			Title:  "waiting",
+			Status: "open",
+			Type:   "task",
+			Dependencies: []Dep{{
+				IssueID:     "bd-waiting",
+				DependsOnID: "bd-closed-or-missing",
+				Type:        "blocks",
+			}},
+		}},
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(ready) != 1 || ready[0].ID != "bd-waiting" {
+		t.Fatalf("CachedReady = %+v, want legacy missing/closed blocker treated as non-blocking", ready)
+	}
+}
+
+func TestCachingStoreBdPrimeActiveUsesReadyProjectionForBD105(t *testing.T) {
+	t.Parallel()
+
+	var sqlCalls int
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			sqlCalls++
+			query := args[1]
+			if !strings.Contains(query, "'bd-ready'") || !strings.Contains(query, "'bd-blocked'") {
+				t.Fatalf("ready projection SQL = %q, want both active ids", query)
+			}
+			return []byte(`[
+				{"id":"bd-ready","is_blocked":0},
+				{"id":"bd-blocked","is_blocked":1}
+			]`), nil
+		case "list":
+			argLine := strings.Join(args, " ")
+			if strings.Contains(argLine, "--status=open") {
+				return []byte(`[
+					{"id":"bd-ready","title":"ready","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}},
+					{"id":"bd-blocked","title":"blocked","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:01Z","labels":["task"],"metadata":{}}
+				]`), nil
+			}
+			return []byte(`[]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if !readyByID["bd-ready"] || readyByID["bd-blocked"] {
+		t.Fatalf("CachedReady ids = %v, want bd-ready only", readyByID)
+	}
+	if sqlCalls != 1 {
+		t.Fatalf("bd sql calls = %d, want 1", sqlCalls)
 	}
 }
 
@@ -3252,6 +3383,11 @@ func (r *cachingStoreBdDepRunner) run(_, name string, args ...string) ([]byte, e
 		return r.listOutput(), nil
 	case "ready":
 		return []byte(`[]`), nil
+	case "version":
+		return []byte("bd version 1.0.4\n"), nil
+	case "sql":
+		r.t.Fatalf("unexpected ready projection SQL under bd 1.0.4: %v", args)
+		return nil, nil
 	case "dep":
 		return r.runDep(args[1:]...)
 	default:

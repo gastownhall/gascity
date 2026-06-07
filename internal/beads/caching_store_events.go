@@ -610,7 +610,8 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		old.Ref != fresh.Ref ||
 		old.Description != fresh.Description ||
 		old.Ephemeral != fresh.Ephemeral ||
-		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) {
+		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) ||
+		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {
 		return true
 	}
 	if !maps.Equal(old.Metadata, fresh.Metadata) {
@@ -630,6 +631,17 @@ func depsChanged(old, fresh []Dep) bool {
 }
 
 func intPtrEqual(left, right *int) bool {
+	switch {
+	case left == nil && right == nil:
+		return true
+	case left == nil || right == nil:
+		return false
+	default:
+		return *left == *right
+	}
+}
+
+func boolPtrEqual(left, right *bool) bool {
 	switch {
 	case left == nil && right == nil:
 		return true

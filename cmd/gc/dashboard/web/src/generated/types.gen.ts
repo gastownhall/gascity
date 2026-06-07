@@ -262,6 +262,7 @@ export type Bead = {
     ephemeral?: boolean;
     from?: string;
     id: string;
+    is_blocked?: boolean;
     issue_type: string;
     labels?: Array<string> | null;
     metadata?: {
