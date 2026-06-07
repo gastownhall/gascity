@@ -155,8 +155,8 @@ than the freshness window. The default window is 24 hours. Set
 Pass `--refresh` to `gc pack registry search` or `gc pack registry show` when
 you want that command to fetch the latest catalog before reading it.
 
-See [Public Registry Packs](/guides/registry-showcase) for the first-party
-packs currently advertised through the public registry.
+See [Public Registry Packs](/guides/registry-showcase) for the
+Gas City-maintained packs currently advertised through the public registry.
 
 ## City Usage
 

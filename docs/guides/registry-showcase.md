@@ -1,17 +1,16 @@
 ---
-title: "First-Party Registry Packs"
-description: Find and import the first-party packs published through the public Gas City registry.
+title: "Public Registry Packs"
+description: Find and import Gas City-maintained packs published through the public registry.
 ---
 
-# First-Party Registry Packs
+# Public Registry Packs
 
-Gas City publishes first-party reusable packs through the public
-`gascity-packs` registry. This is Gas City's first-party, or 1P, registry:
-the entries are owned by Gas City and reviewed in the `gascity-packs` repo.
-The registry is a catalog for discovery; your checked-in `pack.toml` still
-records durable GitHub tree URLs and optional version constraints.
+Gas City maintains the public `gascity-packs` registry for reusable packs it
+publishes and reviews in the `gascity-packs` repo. The registry is a catalog
+for discovery; your checked-in `pack.toml` still records durable GitHub tree
+URLs and optional version constraints.
 
-## Use The First-Party Registry
+## Use The Gas City Registry
 
 1. Add the public registry locally:
 
@@ -45,7 +44,7 @@ When you decide to use a pack, prefer the exact command printed by
 `gc pack registry show`. It writes a durable `source` URL and optional
 `version`; it does not write the local registry handle into `pack.toml`.
 
-## First-Party Registry Packs
+## Published Packs
 
 | Pack | Use it for | Registry source |
 |---|---|---|
@@ -71,7 +70,7 @@ gc pack registry refresh team
 gc pack registry show team:example-pack
 ```
 
-Use the first-party `gascity-packs` registry as the reference shape for catalog
+Use the public `gascity-packs` registry as the reference shape for catalog
 entries, release pins, and pack source URLs.
 
 ## Freshness
@@ -105,7 +104,7 @@ its catalog, inspect an entry, and import the GitHub tree URL it advertises.
 A marketplace would add a separate curation layer, such as submission policies,
 moderation, ownership signals, ranking, and discovery across many publishers.
 
-This page only advertises Gas City's first-party entries and the mechanics for
-adding registry repos. Publishing a new first-party entry is still a
+This page only advertises Gas City-maintained entries and the mechanics for
+adding registry repos. Publishing a new Gas City-maintained entry is still a
 `gascity-packs` repo change: update the catalog, review the change, merge it,
 then refresh local registry caches before searching or showing the new entry.

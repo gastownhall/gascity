@@ -101,8 +101,7 @@ pack name, summary, version metadata, and source.
 A registry handle is a short command argument for a pack record. In
 `main:gascity`, `main` is the local registry name on this machine and
 `gascity` is the pack name inside that registry. `main` is not a keyword in
-`pack.toml`; another machine could call the same registry `first-party` or
-`work`.
+`pack.toml`; another machine could call the same registry `team` or `work`.
 
 A source is the durable location written into checked-in TOML. Durable means
 the import does not depend on this machine's registry name or cache layout. The
@@ -296,8 +295,8 @@ mean.
 Use registry search when you know the kind of capability you want but not the
 exact pack name.
 
-If the public first-party registry is not configured on this machine yet, add
-and refresh it first:
+If the public Gas City registry is not configured on this machine yet, add and
+refresh it first:
 
 ```text
 $ gc pack registry add main https://github.com/gastownhall/gascity-packs.git
@@ -347,8 +346,8 @@ command pins exactly the shown release. Both commands write durable import TOML
 using the `Source` line and the selected `version`; the registry handle stays
 out of the file.
 
-For the short community-facing registry path and the current first-party pack
-list, see [Public Registry Packs](/guides/registry-showcase).
+For the short community-facing registry path and the current
+Gas City-maintained pack list, see [Public Registry Packs](/guides/registry-showcase).
 
 ### Install Or Check Imports
 
@@ -425,7 +424,7 @@ state.
 
 | Task | Command or file |
 |---|---|
-| Add the public first-party registry | `gc pack registry add main https://github.com/gastownhall/gascity-packs.git` |
+| Add the public Gas City registry | `gc pack registry add main https://github.com/gastownhall/gascity-packs.git` |
 | See configured catalogs | `gc pack registry list` |
 | Refresh cached catalog records | `gc pack registry refresh` |
 | Search for a reusable pack | `gc pack registry search` |
