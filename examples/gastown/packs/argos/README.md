@@ -10,10 +10,12 @@ It is modeled on the in-tree `boot` agent
 named session that the controller re-wakes each patrol tick, runs a single
 pass of triage with a fresh provider context, then drain-acks and exits.
 
-## Status: detection + recovery
+## Status: wired, tested, documented
 
-Argos now **detects, classifies, and recovers**. Each wake runs one
-single-pass triage:
+Argos **detects, classifies, and recovers**, is **composed into the example
+city** (it comes up as a city agent the same way `boot` and `dog` do), and is
+covered by a regression suite that pins the patrol-scenario contract. Each wake
+runs one single-pass triage:
 
 1. wake (fresh context, single pass),
 2. enumerate `gc session list --json` and pre-filter candidates
@@ -55,10 +57,89 @@ All of this judgment lives in the **prompt**, not in Go (Zero Framework
 Cognition: the model reads the pane and decides; no Go string-matcher, no
 per-provider format zoo).
 
-Roadmap after this recovery stage:
+The patrol-scenario contract — which live state maps to which verdict and which
+action — is pinned in the prompt's **"Patrol scenarios (the contract)"** table
+and regression-tested in `examples/gastown/argos_test.go`
+(`TestArgosPatrolScenarioContract`, `TestArgosWiredIntoCity`).
 
-- **City wiring + tests + docs** — promote from the example city to the
-  target deployment, integration test across several patrol ticks.
+Remaining roadmap (optional):
+
+- **`.6` heartbeat adoption + `session.recovered` event** — teach worker
+  prompts to call `gc bd heartbeat` so a clean liveness signal can replace the
+  polluted `last_active` advisory (see the staleness-gate note below), and add
+  an optional role-free `session.recovered` observability event.
+
+## Design notes
+
+### Why `last_active` is a loose advisory, not a staleness gate (v1)
+
+The obvious way to find a stalled session is "it has been quiet too long" — gate
+on `last_active` age past a threshold. Argos deliberately does **not** do that.
+`last_active` is bumped by *any* pane I/O, including the controller's own
+`nudge`/`wake` send-keys and the rate-limit wall's own countdown redraw, so a
+genuinely stalled session keeps looking freshly active. The pollution runs in
+the **false-negative** direction: a staleness gate would *suppress* recovery on
+exactly the sessions that need it.
+
+So v1 demotes `last_active` to a **loose advisory pre-filter** — it only bounds
+how many panes Argos peeks (peek the least-recently-active candidates first) and
+never suppresses a verdict. The authoritative signals are the two fire-gate
+clauses Argos reads directly: the **rate-limit marker on the live pane** and a
+**claimed `in_progress` bead**. A clean liveness signal — `gc bd heartbeat` —
+exists but has zero adoption today (it reads null for every session), so it is
+useless as a v1 gate; promoting heartbeat to the primary staleness signal is the
+optional `.6` follow-up.
+
+### Threshold tuning (pack env)
+
+Argos has **no Go thresholds and no config flags** — by Zero Framework Cognition
+every judgment (is this a wall? has the reset passed? which backoff tier am I
+on?) lives in the prompt, where the model decides from live state. Two
+consequences for an operator who wants to tune behavior:
+
+- **The backoff ladder and the reset-window rule are prose in the prompt.** The
+  escalating wait (immediate → 15m → 30m → 1h → 2h → 4h) is a table in
+  `agents/argos/prompt.template.md`; change the cadence by editing that table,
+  not a Go constant.
+- **Patrol cadence is a city/controller setting, not a pack knob.** How often
+  the always-resident `argos` session is re-woken is the controller's patrol
+  tick, configured where the city configures reconciliation — independent of
+  this pack.
+
+If a very large deployment ever needs an operator-set numeric knob (say, a
+minimum `last_active` age before a pane is even worth peeking, to bound peek
+volume), expose it as a **pack env var** on the argos agent — an `[env]` table in
+`agents/argos/agent.toml` — and reference it as `$VAR` in the prompt's shell
+commands. That is the pack-env path the `#2194` design anticipated ("threshold …
+pack env, not Go"), and it keeps the knob out of Go. v1 ships **no** such knob:
+the loose `last_active` advisory already bounds peek volume, and adding a flag
+before a deployment needs one would violate "no capability flags."
+
+### How Argos relates to the rest of the city's recovery story
+
+Argos owns one narrow gap and is bounded on every side by existing machinery:
+
+- **vs. `#1411` (rate-limit detection for *exited* sessions).** The reconciler
+  already peeks the pane and, when a session has **exited** into a recognized
+  rate-limit screen, parks it asleep with a 30-minute quarantine that
+  auto-clears. That path is gated on the session having *exited* and on a
+  dialog-style screen. Claude's **inline** "You've hit your session limit ·
+  resets …" wall leaves the session **alive**, so it slips both gates. That
+  alive-and-inline case is precisely Argos's domain — the slice `#1411` cannot
+  see.
+- **vs. orphan-sweep (`packs/maintenance/orders/orphan-sweep.toml`).** The
+  orphan sweep reclaims a bead whose owner is **dead** — it resets `in_progress`
+  beads assigned to non-existent agents back to the pool on a 5-minute cooldown.
+  Argos handles the **alive** stall and never touches a work bead; the two are
+  complementary with a clean dead-vs-alive boundary. This is why Argos
+  deliberately does not unclaim: if a nudge never takes and the owner truly
+  dies, orphan-sweep collects the bead.
+- **vs. `#571` (controller-level non-LLM stuck-sweep).** `#571` is the
+  complement, not a competitor: a core, non-LLM controller sweep is the
+  **backstop** for when the LLM watchdog itself wedges or is rate-limited — the
+  "who watches the watchman" gap. The mature architecture is the LLM watchdog
+  (Argos / `#2194`) as the judgment-rich primary recoverer and a non-LLM sweep
+  (`#571`) as the dumb-but-reliable backstop. They are layered, not redundant.
 
 ## Why Argos is its own pack (pack-home decision)
 

@@ -204,6 +204,159 @@ func TestArgosPromptRecovers(t *testing.T) {
 	}
 }
 
+// TestArgosWiredIntoCity is the .5 city-wiring regression: the example city
+// must import the argos pack and expand it into a runnable, always-resident
+// city agent, so the watchdog actually comes up when the city does. It pins
+// the whole edge — the [imports.argos] line in the city's root pack.toml, the
+// always-resident named session, the agent it resolves to, and the prompt file
+// on disk — so a future refactor cannot silently drop the watchdog from the
+// roster.
+func TestArgosWiredIntoCity(t *testing.T) {
+	dir := exampleDir()
+
+	// 1. The city's root pack.toml imports the argos pack — the single line
+	//    that wires the watchdog into the deployment.
+	data, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading city pack.toml: %v", err)
+	}
+	var tc packFileConfig
+	if _, err := toml.Decode(string(data), &tc); err != nil {
+		t.Fatalf("parsing city pack.toml: %v", err)
+	}
+	argosImp, ok := tc.Imports["argos"]
+	if !ok {
+		t.Fatalf("city pack.toml imports = %v, want an entry for \"argos\" so the watchdog is wired in", tc.Imports)
+	}
+	if argosImp.Source != "packs/argos" {
+		t.Errorf("city pack.toml imports[\"argos\"].Source = %q, want %q", argosImp.Source, "packs/argos")
+	}
+
+	// 2. The expanded city keeps argos resident and resolves it to a real
+	//    agent whose prompt template exists on disk — i.e. it would actually
+	//    run, not just parse.
+	cfg := loadExpanded(t)
+	session := config.FindNamedSession(cfg, "argos")
+	if session == nil {
+		t.Fatal("expanded city has no argos named_session; the import did not bring the watchdog up")
+	}
+	if got := session.ModeOrDefault(); got != "always" {
+		t.Errorf("argos named_session mode = %q, want %q so the reconciler re-wakes it each patrol tick", got, "always")
+	}
+	agent := config.FindAgent(cfg, session.TemplateQualifiedName())
+	if agent == nil {
+		t.Fatalf("argos named_session resolves to no agent (%q)", session.TemplateQualifiedName())
+	}
+	if agent.Scope != "city" {
+		t.Errorf("argos agent scope = %q, want %q", agent.Scope, "city")
+	}
+	if agent.PromptTemplate == "" {
+		t.Fatal("argos agent has no prompt_template")
+	}
+	if _, err := os.Stat(resolveExamplePath(dir, agent.PromptTemplate)); err != nil {
+		t.Errorf("argos prompt_template %q not on disk: %v", agent.PromptTemplate, err)
+	}
+}
+
+// TestArgosPatrolScenarioContract is the .5 integration/regression test. It
+// pins the canonical patrol scenarios from the #2194 watchdog design — the
+// four cases the bead enumerates plus their two rate-limit shapes — to the
+// verdict the prompt assigns and the action it takes, read straight off the
+// pack/CLI surface (the rendered prompt). Each case is anchored by a live-state
+// description, never a role name: ZFC keeps the judgment in the prompt, and
+// this Go only checks that the prompt's contract table binds each observable
+// situation to the right verdict and the right gc command. If a later edit
+// re-wires a verdict to the wrong action, drops a leave-it-alone case, or
+// forgets the wake-before-nudge order for a suspended holder, this matrix
+// breaks loudly.
+func TestArgosPatrolScenarioContract(t *testing.T) {
+	body := renderArgosPrompt(t)
+	table := sectionBetween(t, body, "## Patrol scenarios (the contract)", "\n## ")
+
+	cases := []struct {
+		name string
+		// anchor uniquely identifies one scenario row by the live state it
+		// describes (no role name).
+		anchor string
+		// verdict and actions must all appear on that same row, so the
+		// situation→verdict→action binding cannot drift apart.
+		verdict string
+		actions []string
+	}{
+		{
+			name:    "active rate-limit wall over claimed work recovers with continue",
+			anchor:  "**active**",
+			verdict: "`rate-limit-stalled`",
+			actions: []string{"continue"},
+		},
+		{
+			name:    "suspended holder is woken before the continue nudge",
+			anchor:  "**suspended**",
+			verdict: "`rate-limit-stalled`",
+			actions: []string{"gc session wake", "continue"},
+		},
+		{
+			name:    "healthy advancing pane is left alone",
+			anchor:  "advancing",
+			verdict: "`healthy`",
+			actions: []string{"leave it alone"},
+		},
+		{
+			name:    "idle holder with no claimed work is left alone",
+			anchor:  "**no** claimed",
+			verdict: "`idle-no-work`",
+			actions: []string{"leave it alone"},
+		},
+		{
+			name:    "frozen context over claimed work recovers with compact",
+			anchor:  "wedged context",
+			verdict: "`context-frozen`",
+			actions: []string{"/compact"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			row := scenarioRow(t, table, c.anchor)
+			if !strings.Contains(row, c.verdict) {
+				t.Errorf("scenario %q row does not assign verdict %q:\n%s", c.anchor, c.verdict, row)
+			}
+			for _, action := range c.actions {
+				if !strings.Contains(row, action) {
+					t.Errorf("scenario %q row (verdict %q) does not bind action %q:\n%s", c.anchor, c.verdict, action, row)
+				}
+			}
+		})
+	}
+
+	// The two leave-it-alone verdicts must never carry a nudge/wake verb on
+	// their row, so a future edit cannot quietly start poking a healthy or
+	// idle session.
+	for _, leave := range []string{"advancing", "**no** claimed"} {
+		row := scenarioRow(t, table, leave)
+		for _, forbidden := range []string{"nudge", "gc session wake", "continue", "/compact"} {
+			if strings.Contains(row, forbidden) {
+				t.Errorf("leave-it-alone scenario %q row must not act, found %q:\n%s", leave, forbidden, row)
+			}
+		}
+	}
+}
+
+// scenarioRow returns the single line of the patrol-scenario table that
+// contains anchor, failing if anchor does not identify exactly one row.
+func scenarioRow(t *testing.T, table, anchor string) string {
+	t.Helper()
+	var matches []string
+	for _, line := range strings.Split(table, "\n") {
+		if strings.Contains(line, anchor) {
+			matches = append(matches, line)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("anchor %q matched %d scenario rows, want exactly 1:\n%s", anchor, len(matches), table)
+	}
+	return matches[0]
+}
+
 // renderArgosPrompt renders the argos prompt template with the same funcs
 // and context the gastown agent prompts use.
 func renderArgosPrompt(t *testing.T) string {

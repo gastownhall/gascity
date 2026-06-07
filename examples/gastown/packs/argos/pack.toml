@@ -11,10 +11,11 @@
 # the watchdog is not a Gas Town role, it is a reusable capability a city
 # opts into.
 #
-# This pack is at the RECOVERY stage: each wake the agent enumerates every
-# session, cross-references claimed in-progress work, peeks the pane, and
-# classifies each session (healthy / idle-no-work / rate-limit-stalled /
-# context-frozen). For a candidate the fire gate clears it then recovers —
+# This pack is WIRED INTO THE CITY (detect + recover, composed + tested):
+# each wake the agent enumerates every session, cross-references claimed
+# in-progress work, peeks the pane, and classifies each session (healthy /
+# idle-no-work / rate-limit-stalled / context-frozen). For a candidate the
+# fire gate clears it then recovers —
 # nudges a rate-limit wall with "continue" (waking a suspended holder
 # first), "/compact"s a frozen context — timed to the wall's reset window
 # and rate-limited by an anti-storm backoff derived from the session bead's

@@ -282,6 +282,32 @@ fresh provider context on the next patrol tick.
 
 ---
 
+## Patrol scenarios (the contract)
+
+Every patrol tick resolves the same handful of cases. This table is the
+**contract** the steps above implement — each case is decided from live state
+alone (no role name, no status file, no memory of a prior wake). If a row here
+disagrees with a step above, the step is the bug. Read it as
+"live state I observe → the verdict I assign → the action I take this wake":
+
+| Live state I observe this wake                                                                          | Verdict              | Action this wake                                            |
+| ------------------------------------------------------------------------------------------------------- | -------------------- | ---------------------------------------------------------- |
+| An **active** Claude pane at a rate-limit wall, **and** the session holds a claimed `in_progress` bead   | `rate-limit-stalled` | nudge `continue` (timed to the reset window, anti-storm backed off) |
+| A **suspended** session at a rate-limit wall, **and** it holds a claimed `in_progress` bead              | `rate-limit-stalled` | `gc session wake` first, then nudge `continue`             |
+| A pane that is advancing — tool calls, command output, a turn in flight                                 | `healthy`            | leave it alone — observe only                              |
+| Any session that holds **no** claimed `in_progress` bead, whatever its pane shows                       | `idle-no-work`       | leave it alone — observe only                              |
+| A wedged context — a hung prompt or a `tool_use` error frozen on screen — over claimed work             | `context-frozen`     | nudge `/compact`                                           |
+
+The two `rate-limit-stalled` rows are one verdict with two session states: an
+`active` holder is nudged in place; a `suspended` holder is woken first so the
+nudge can land. The two "leave it alone" rows are the cost bound — a healthy
+session is working, and a session with no claimed work has nothing to recover —
+so the watchdog observes and exits without poking either. Timing and anti-storm
+backoff (above) still gate every nudge: a row that says "nudge `continue`" still
+waits for the reset window and honors the escalating backoff.
+
+---
+
 ## What Argos does NOT do
 
 Argos recovers an **alive, walled** session with a nudge — nothing heavier.
