@@ -38,7 +38,7 @@ func responseCacheTimeBucket(now time.Time) uint64 {
 // responseCacheMaxEntries caps the in-memory cache. Query-parameter
 // combinations (Rig, Pool, blocking index, etc.) produce a wide but
 // bounded key space; a hostile or buggy client could still exhaust
-// memory without a ceiling. Eviction is oldest-by-expiry, so the most
+// memory without a ceiling. Eviction is oldest-stored-first, so the most
 // recently warmed entries stay hot.
 const responseCacheMaxEntries = 256
 
@@ -184,7 +184,7 @@ func (s *Server) storeResponse(key string, index uint64, v any) {
 }
 
 // evictResponseCache drops expired entries, and — if the cache is still
-// over cap — the single oldest-by-expiry remaining entry. Called under
+// over cap — the single oldest-stored remaining entry. Called under
 // the cache mutex.
 func (s *Server) evictResponseCache(now time.Time) {
 	for k, entry := range s.responseCacheEntries {
