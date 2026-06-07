@@ -2052,6 +2052,133 @@ ensure_dolt_identity() {
     fi
 }
 
+# journal_corruption_signature filters stdin for the dolt startup errors that
+# indicate a corrupted noms journal ("possible data loss detected in journal
+# file at offset N: corrupted journal", "journal index is malformed"). Used on
+# captured startup output, the managed log tail, and per-database offline
+# probe output.
+journal_corruption_signature() {
+    grep -qiE 'corrupted journal|journal index is malformed|possible data loss detected in journal file'
+}
+
+# log_tail_has_journal_corruption reports whether the recent managed dolt log
+# contains a journal-corruption startup error. Bounded to the log tail so a
+# huge log cannot stall start; stale matches from earlier incidents are
+# harmless because recovery re-verifies each database with an offline probe
+# before touching anything.
+log_tail_has_journal_corruption() {
+    [ -f "$LOG_FILE" ] || return 1
+    tail -c 65536 "$LOG_FILE" 2>/dev/null | journal_corruption_signature
+}
+
+# database_journal_corrupt probes one database directory offline and reports
+# whether dolt refuses to load it with a journal-corruption error. Only safe
+# while the managed server is down — offline dolt commands contend with a
+# running server's file locks. Probe output is spooled to a temp file rather
+# than captured via command substitution: the run_with_timeout watchdog's
+# sleep child inherits a substitution pipe and would hold it open for the
+# full timeout, turning every healthy-database probe into a 30s stall.
+database_journal_corrupt() {
+    local probe_db_dir="$1" probe_out probe_hit=1
+    probe_out=$(mktemp) || return 1
+    (cd "$probe_db_dir" && run_with_timeout 30 dolt status) > "$probe_out" 2>&1 || true
+    if journal_corruption_signature < "$probe_out"; then
+        probe_hit=0
+    fi
+    rm -f "$probe_out"
+    return "$probe_hit"
+}
+
+# backup_remote_url_for_recovery prints the <db>-backup remote URL recorded in
+# a database's repo_state.json. The file is plain JSON, so the URL is readable
+# even when the noms store itself can no longer be opened. Handles both the
+# object form ("backups": {"db-backup": {"url": "..."}}) and the legacy plain
+# string form.
+backup_remote_url_for_recovery() {
+    local recovery_db="$1" recovery_db_dir="$2" repo_state url
+    repo_state="$recovery_db_dir/.dolt/repo_state.json"
+    [ -f "$repo_state" ] || return 1
+    if command -v jq >/dev/null 2>&1; then
+        url=$(jq -r --arg name "${recovery_db}-backup" '.backups[$name].url // .backups[$name] // empty' "$repo_state" 2>/dev/null)
+    else
+        url=$(tr -d '\n' < "$repo_state" | sed -n "s/.*\"${recovery_db}-backup\"[^}]*\"url\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+        if [ -z "$url" ]; then
+            url=$(tr -d '\n' < "$repo_state" | sed -n "s/.*\"${recovery_db}-backup\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+        fi
+    fi
+    [ -n "$url" ] || return 1
+    printf '%s\n' "$url"
+}
+
+# backup_restore_source_usable reports whether url points at a local backup
+# that actually has content to restore from. Only file:// remotes qualify:
+# remote backups cannot be cheaply verified, and restoring from an unverified
+# source is exactly the kind of silent data movement auto-recovery must not do.
+backup_restore_source_usable() {
+    local usable_url="$1" usable_path
+    case "$usable_url" in
+        file://*) usable_path="${usable_url#file://}" ;;
+        *) return 1 ;;
+    esac
+    [ -d "$usable_path" ] || return 1
+    [ -n "$(ls -A "$usable_path" 2>/dev/null)" ]
+}
+
+# attempt_journal_corruption_recovery scans the data dir for databases whose
+# noms journal dolt refuses to load, preserves each corrupt store under
+# $PACK_STATE_DIR/corrupt-aside/ (never deleted), and restores the database
+# from its local <db>-backup remote (#3176). Fail-closed: when any corrupt
+# database has no usable backup or the restore fails, its store is moved back
+# so the server cannot come up silently missing a database, and the function
+# returns 1. Returns 0 only when at least one database was restored and none
+# were left unrecoverable. Everything is logged loudly — restored copies are
+# missing all writes since the last backup sync, and operators must know that.
+attempt_journal_corruption_recovery() {
+    local aside_root="$PACK_STATE_DIR/corrupt-aside"
+    local ts db_dir db aside url recovered=0
+    ts=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%s)
+    echo "gc-beads-bd: journal corruption reported at startup; probing databases in $DATA_DIR" >&2
+    for db_dir in "$DATA_DIR"/*/; do
+        [ -d "$db_dir/.dolt" ] || continue
+        db=$(basename "$db_dir")
+        database_journal_corrupt "$db_dir" || continue
+        echo "gc-beads-bd: journal corruption confirmed in database '$db'" >&2
+        url=$(backup_remote_url_for_recovery "$db" "$db_dir") || url=""
+        if [ -z "$url" ] || ! backup_restore_source_usable "$url"; then
+            echo "gc-beads-bd: NOT auto-recovering '$db': no usable local backup (remote url: ${url:-none})" >&2
+            echo "gc-beads-bd: manual recovery required: move $DATA_DIR/$db aside, then run 'dolt backup restore <url> $db' from $DATA_DIR" >&2
+            return 1
+        fi
+        mkdir -p "$aside_root" || return 1
+        aside="$aside_root/$db.$ts"
+        if ! mv "$DATA_DIR/$db" "$aside"; then
+            echo "gc-beads-bd: could not move corrupt store $DATA_DIR/$db aside to $aside; aborting recovery" >&2
+            return 1
+        fi
+        echo "gc-beads-bd: preserved corrupt store at $aside" >&2
+        if (cd "$DATA_DIR" && run_with_timeout 600 dolt backup restore "$url" "$db") >> "$LOG_FILE" 2>&1; then
+            recovered=$((recovered + 1))
+            echo "gc-beads-bd: RESTORED '$db' from backup $url — writes since the last backup sync are NOT in the restored copy; pre-corruption store kept at $aside" >&2
+        else
+            # Fail closed: put the corrupt store back so the server cannot
+            # start without this database and silently drop it from the
+            # control plane. The partial restore output (if any) is fresh
+            # data written by the failed restore, not original state.
+            rm -rf "${DATA_DIR:?}/${db:?}" 2>/dev/null || true
+            if ! mv "$aside" "$DATA_DIR/$db"; then
+                echo "gc-beads-bd: CRITICAL: restore failed AND corrupt store could not be moved back; original data is at $aside" >&2
+            fi
+            echo "gc-beads-bd: backup restore failed for '$db' (see $LOG_FILE); not retrying" >&2
+            return 1
+        fi
+    done
+    if [ "$recovered" -eq 0 ]; then
+        echo "gc-beads-bd: no corrupt database confirmed by offline probe; not recovering" >&2
+        return 1
+    fi
+    return 0
+}
+
 # op_start starts the dolt server if not already running.
 op_start() {
     if is_remote; then
@@ -2209,15 +2336,29 @@ op_start() {
         fi
     fi
 
-    if load_start_managed_from_gc; then
-        DOLT_PORT="$GC_START_PORT"
-        return 0
-    elif [ "$GC_START_MANAGED_USED" = "true" ]; then
-        DOLT_PORT="$GC_START_PORT"
-        rm -f "$PID_FILE"
-        save_state 0 false
-        die "dolt server could not start via gc helper (check $LOG_FILE)"
-    fi
+    local journal_recovery_attempted=false
+    while :; do
+        if load_start_managed_from_gc; then
+            DOLT_PORT="$GC_START_PORT"
+            return 0
+        elif [ "$GC_START_MANAGED_USED" = "true" ]; then
+            # Auto-recover from a corrupted noms journal before failing the
+            # whole control plane (#3176). One attempt per start invocation;
+            # the offline probe inside recovery confirms actual corruption
+            # before any store is touched.
+            if [ "$journal_recovery_attempted" != "true" ] && log_tail_has_journal_corruption; then
+                journal_recovery_attempted=true
+                if attempt_journal_corruption_recovery; then
+                    continue
+                fi
+            fi
+            DOLT_PORT="$GC_START_PORT"
+            rm -f "$PID_FILE"
+            save_state 0 false
+            die "dolt server could not start via gc helper (check $LOG_FILE)"
+        fi
+        break
+    done
 
     local launch_attempt=0
     while [ "$launch_attempt" -lt 5 ]; do
@@ -2299,6 +2440,21 @@ op_start() {
             launch_attempt=$((launch_attempt + 1))
             DOLT_PORT=$(next_available_port $((DOLT_PORT + 1)))
             continue
+        fi
+
+        # Auto-recover from a corrupted noms journal before failing the whole
+        # control plane (#3176). One attempt per start invocation; the offline
+        # probe inside recovery confirms actual corruption before any store is
+        # touched.
+        if printf '%s' "$startup_output" | journal_corruption_signature; then
+            if [ "$journal_recovery_attempted" != "true" ]; then
+                journal_recovery_attempted=true
+                if attempt_journal_corruption_recovery; then
+                    launch_attempt=$((launch_attempt + 1))
+                    continue
+                fi
+            fi
+            die "dolt server exited during startup: noms journal corruption (check $LOG_FILE; corrupt stores are preserved under $PACK_STATE_DIR/corrupt-aside)"
         fi
 
         die "dolt server exited during startup (check $LOG_FILE)"
