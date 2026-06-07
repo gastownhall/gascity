@@ -9,8 +9,9 @@ import (
 )
 
 // benchCounterStore answers work counts from precomputed totals, modeling a
-// backend COUNT query: the per-status answer is produced server-side and no
-// rows cross the store boundary.
+// hydration-free Counter (in production, the caching layer's in-memory
+// count): the per-status answer is produced without rows crossing the
+// store boundary.
 type benchCounterStore struct {
 	beads.Store
 	counts map[string]int
@@ -74,7 +75,7 @@ func BenchmarkBuildStatusBodyListPath(b *testing.B) {
 }
 
 // BenchmarkBuildStatusBodyCounterPath measures the #1896 fix: per-store
-// COUNT answers with zero row hydration.
+// Counter answers with zero row hydration.
 func BenchmarkBuildStatusBodyCounterPath(b *testing.B) {
 	benchmarkBuildStatusBody(b, true)
 }
