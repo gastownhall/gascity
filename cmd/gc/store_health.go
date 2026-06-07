@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -11,10 +9,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
-
-// storeHealthCountTimeout bounds the Counter row-count query for the CLI
-// store-health block, mirroring the API side's per-store read timeout.
-const storeHealthCountTimeout = time.Second
 
 // storeHealthFromInputs assembles a CLI-facing *StoreHealth from the raw
 // measurements. LastGCAt is serialized as RFC3339 UTC when present;
@@ -49,25 +43,12 @@ func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) 
 }
 
 // liveRowCount returns the number of beads known to store, or 0 when
-// store is nil or the lookup fails. Counts all statuses (including
+// store is nil or the list fails. Counts all statuses (including
 // closed) because the ratio is about on-disk row footprint, not
-// actionable work. Stores whose beads.Counter can answer the
-// closed-inclusive query do so without hydrating the full history
-// (#1896); ErrCountUnsupported falls back to the hydrating List.
+// actionable work.
 func liveRowCount(store beads.Store) int {
 	if store == nil {
 		return 0
-	}
-	if counter, ok := store.(beads.Counter); ok {
-		ctx, cancel := context.WithTimeout(context.Background(), storeHealthCountTimeout)
-		defer cancel()
-		n, err := counter.Count(ctx, beads.ListQuery{AllowScan: true, IncludeClosed: true})
-		if err == nil {
-			return n
-		}
-		if !errors.Is(err, beads.ErrCountUnsupported) {
-			return 0
-		}
 	}
 	list, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err != nil {

@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -224,37 +223,5 @@ func TestBuildStatusBodyIncludesBeadsDiagnostic(t *testing.T) {
 	}
 	if body.Beads.PreflightReason == "" {
 		t.Fatal("preflight_reason = empty, want fallback reason")
-	}
-}
-
-type rowCounterStore struct {
-	beads.Store
-	t        *testing.T
-	countErr error
-}
-
-func (s *rowCounterStore) Count(_ context.Context, query beads.ListQuery, _ ...string) (int, error) {
-	if !query.IncludeClosed {
-		s.t.Error("Count query missing IncludeClosed; row footprint includes closed beads")
-	}
-	return 17, s.countErr
-}
-
-func (s *rowCounterStore) List(beads.ListQuery) ([]beads.Bead, error) {
-	s.t.Error("List called on Counter-capable store, want Count path")
-	return nil, nil
-}
-
-func TestCountBeadStoreRowsPrefersCounter(t *testing.T) {
-	store := &rowCounterStore{Store: beads.NewMemStore(), t: t}
-	if got := countBeadStoreRows(store); got != 17 {
-		t.Fatalf("countBeadStoreRows = %d, want 17 from Counter", got)
-	}
-}
-
-func TestCountBeadStoreRowsCounterFailureReturnsZero(t *testing.T) {
-	store := &rowCounterStore{Store: beads.NewMemStore(), t: t, countErr: errors.New("dolt down")}
-	if got := countBeadStoreRows(store); got != 0 {
-		t.Fatalf("countBeadStoreRows = %d, want 0 on count failure", got)
 	}
 }

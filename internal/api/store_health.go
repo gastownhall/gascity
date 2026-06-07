@@ -1,8 +1,6 @@
 package api
 
 import (
-	"context"
-	"errors"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -80,24 +78,13 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 }
 
 // countBeadStoreRows returns the number of beads in store. Zero when
-// store is nil or the scan fails — the ratio is best-effort. Stores
-// whose beads.Counter can answer the closed-inclusive query do so
-// without hydrating the full history (#1896); ErrCountUnsupported
-// falls back to the hydrating List.
+// store is nil or the scan fails — the ratio is best-effort. The
+// closed-inclusive query is never answerable from the in-memory cache,
+// so this path always hydrates; counting closed history without
+// hydration needs backend support (#1896 follow-up).
 func countBeadStoreRows(store beads.Store) int {
 	if store == nil {
 		return 0
-	}
-	if counter, ok := store.(beads.Counter); ok {
-		ctx, cancel := context.WithTimeout(context.Background(), statusStoreReadTimeout)
-		defer cancel()
-		n, err := counter.Count(ctx, beads.ListQuery{AllowScan: true, IncludeClosed: true})
-		if err == nil {
-			return n
-		}
-		if !errors.Is(err, beads.ErrCountUnsupported) {
-			return 0
-		}
 	}
 	list, err := statusListStoreWithTimeout(store, beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err != nil {
