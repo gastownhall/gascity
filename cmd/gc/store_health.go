@@ -51,9 +51,9 @@ func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) 
 // liveRowCount returns the number of beads known to store, or 0 when
 // store is nil or the lookup fails. Counts all statuses (including
 // closed) because the ratio is about on-disk row footprint, not
-// actionable work. Stores exposing beads.Counter answer via a backend
-// COUNT instead of hydrating the full history (#1896); only
-// ErrCountUnsupported falls back to List.
+// actionable work. Stores whose beads.Counter can answer the
+// closed-inclusive query do so without hydrating the full history
+// (#1896); ErrCountUnsupported falls back to the hydrating List.
 func liveRowCount(store beads.Store) int {
 	if store == nil {
 		return 0

@@ -514,9 +514,10 @@ type statusWorkResult struct {
 }
 
 // statusWorkCounts tallies open/ready/in_progress work across all rig
-// stores. Stores exposing beads.Counter answer via backend COUNT queries —
-// no row hydration — with the per-store timeout canceling the backing
-// query instead of leaking a goroutine that pins a connection (#1896).
+// stores. Stores exposing beads.Counter answer without hydrating rows —
+// the caching layer counts matches in memory when its cache is clean
+// (#1896) — with the per-store timeout canceling any delegated backing
+// query instead of leaking a goroutine that pins a connection.
 // Stores without a Counter (or whose Counter cannot answer the query
 // shape) keep the legacy hydrating List path. Stores are queried
 // concurrently; results aggregate in deterministic rig order.

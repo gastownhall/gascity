@@ -81,8 +81,9 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 
 // countBeadStoreRows returns the number of beads in store. Zero when
 // store is nil or the scan fails — the ratio is best-effort. Stores
-// exposing beads.Counter answer via a backend COUNT instead of hydrating
-// the full history (#1896); only ErrCountUnsupported falls back to List.
+// whose beads.Counter can answer the closed-inclusive query do so
+// without hydrating the full history (#1896); ErrCountUnsupported
+// falls back to the hydrating List.
 func countBeadStoreRows(store beads.Store) int {
 	if store == nil {
 		return 0
