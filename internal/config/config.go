@@ -1356,7 +1356,8 @@ type BeadPolicyConfig struct {
 	Storage string `toml:"storage,omitempty" jsonschema:"enum=history,enum=no_history,enum=ephemeral"`
 	// DeleteAfterClose deletes matching GC-owned beads after they have been
 	// closed for this duration. Accepts Go duration syntax plus whole-day "d"
-	// units, e.g. "7d" or "1d12h". Empty means the policy is not GC-managed.
+	// units, e.g. "7d" or "1d12h". Empty defers to any controller-managed
+	// default for the policy type (e.g. order_tracking defaults to 7d).
 	DeleteAfterClose string `toml:"delete_after_close,omitempty"`
 }
 
