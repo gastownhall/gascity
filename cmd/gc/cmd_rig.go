@@ -219,12 +219,6 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	}
 	includes = cleaned
 
-	// Canonicalize --include tokens that name a materialized builtin pack so the
-	// flag honors its --help promise of "canonical rig imports". Done before the
-	// imports are built (and before the re-add comparison below) so both the
-	// written city.toml and that comparison use the resolvable path (gascity#3137).
-	includes = canonicalizeBuiltinPackIncludes(fs, cityPath, includes)
-
 	rigPathExists := false
 	if fi, err := fs.Stat(rigPath); err != nil {
 		if adopt {
@@ -261,6 +255,14 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return config.Rig{}, 1
 	}
+
+	// Canonicalize --include tokens that name a materialized builtin pack so the
+	// flag honors its --help promise of "canonical rig imports". Done after the
+	// config load (so [packs] references are honored) but before the imports are
+	// built and the re-add comparison below, so both the written city.toml and
+	// that comparison use the resolvable path (gascity#3137).
+	includes = canonicalizeBuiltinPackIncludes(fs, cityPath, includes, cfg.Packs)
+
 	explicitRigImports := boundImportsFromLegacySources(includes, cfg.Packs)
 	if cityUsesBdStoreContract(cityPath) && cityDoltConfigHasLifecycleFields(cfg.Dolt) {
 		registerCityDoltConfig(cityPath, cfg.Dolt)
@@ -623,8 +625,10 @@ func formatBoundImports(imports []config.BoundImport) string {
 // "./<token>", breaking pack expansion citywide (gascity#3137). Only tokens whose
 // pack is actually materialized (.gc/system/packs/<name>/pack.toml exists) are
 // rewritten; everything else is returned unchanged so genuine local-path imports
-// and [packs] references are preserved.
-func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []string) []string {
+// are preserved. A token whose raw form or derived single-segment name is a key
+// in packs is left unchanged so an explicitly configured [packs] reference keeps
+// its configured source rather than being shadowed by the builtin.
+func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []string, packs map[string]config.PackSource) []string {
 	out := make([]string, len(includes))
 	for i, inc := range includes {
 		out[i] = inc
@@ -636,6 +640,14 @@ func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []str
 		// Only accept a single-segment pack name; arbitrary nested paths are
 		// treated as real local imports, not builtin-pack references.
 		if name == "" || strings.Contains(name, "/") {
+			continue
+		}
+		// Don't shadow an explicitly configured [packs] reference: a token
+		// that names a registered pack keeps its configured source.
+		if _, ok := packs[tok]; ok {
+			continue
+		}
+		if _, ok := packs[name]; ok {
 			continue
 		}
 		packToml := filepath.Join(cityPath, filepath.FromSlash(citylayout.SystemPacksRoot), name, "pack.toml")
