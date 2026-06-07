@@ -669,6 +669,110 @@ func TestValidateGraphV2RecipeRejectsDrainWithGate(t *testing.T) {
 	}
 }
 
+func TestGraphV2OutputJSONWarnings(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	defer SetFormulaV2Enabled(prev)
+
+	tests := []struct {
+		name      string
+		toml      string
+		wantCount int
+		wantMsg   string
+	}{
+		{
+			name: "graph.v2 step with output_json_required warns",
+			toml: `
+formula = "legacy-fanout"
+version = 1
+contract = "graph.v2"
+[[steps]]
+id = "worker"
+prompt = "do work"
+[steps.metadata]
+"gc.output_json_required" = "true"
+`,
+			wantCount: 1,
+			wantMsg:   "gc.output_json is legacy; use drain in graph.v2 formulas",
+		},
+		{
+			name: "graph.v1 step with output_json_required does not warn",
+			toml: `
+formula = "v1-fanout"
+version = 1
+[[steps]]
+id = "worker"
+prompt = "do work"
+[steps.metadata]
+"gc.output_json_required" = "true"
+`,
+			wantCount: 0,
+		},
+		{
+			name: "graph.v2 step using drain does not warn",
+			toml: `
+formula = "drain-fanout"
+version = 1
+contract = "graph.v2"
+[[steps]]
+id = "worker"
+prompt = "do work"
+[steps.drain]
+context = "separate"
+formula = "mol-do-work"
+member_access = "exclusive"
+`,
+			wantCount: 0,
+		},
+		{
+			name: "graph.v2 step with no fan-out does not warn",
+			toml: `
+formula = "no-fanout"
+version = 1
+contract = "graph.v2"
+[[steps]]
+id = "worker"
+prompt = "do work"
+`,
+			wantCount: 0,
+		},
+		{
+			name: "warning includes step id and formula name",
+			toml: `
+formula = "my-formula"
+version = 1
+contract = "graph.v2"
+[[steps]]
+id = "my-step"
+prompt = "do work"
+[steps.metadata]
+"gc.output_json_required" = "true"
+`,
+			wantCount: 1,
+			wantMsg:   "formula my-formula step my-step",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGraphV2Formula(t, dir, "f.formula.toml", tt.toml)
+			p := NewParser(dir)
+			f, err := p.ParseFile(filepath.Join(dir, "f.formula.toml"))
+			if err != nil {
+				t.Fatalf("ParseFile: %v", err)
+			}
+			got := GraphV2OutputJSONWarnings(f)
+			if len(got) != tt.wantCount {
+				t.Errorf("warnings count = %d, want %d; got: %v", len(got), tt.wantCount, got)
+			}
+			if tt.wantMsg != "" && len(got) > 0 && !strings.Contains(got[0], tt.wantMsg) {
+				t.Errorf("warning = %q, want to contain %q", got[0], tt.wantMsg)
+			}
+		})
+	}
+}
+
 func writeGraphV2Formula(t *testing.T, dir, name, contents string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(strings.TrimSpace(contents)+"\n"), 0o644); err != nil {
