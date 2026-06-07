@@ -1,0 +1,29 @@
+{
+  "gascity-prime": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity",
+        "timeout": 30
+      }
+    ]
+  },
+  "gascity-nudge-drain": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\" && gc nudge drain --inject --hook-format antigravity",
+        "timeout": 30
+      }
+    ]
+  },
+  "gascity-mail-check": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\" && gc mail check --inject --hook-format antigravity",
+        "timeout": 30
+      }
+    ]
+  }
+}

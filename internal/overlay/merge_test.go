@@ -11,6 +11,7 @@ func TestIsMergeablePath(t *testing.T) {
 		path string
 		want bool
 	}{
+		{".agents/hooks.json", true},
 		{".claude/settings.json", true},
 		{".gemini/settings.json", true},
 		{".codex/hooks.json", true},
