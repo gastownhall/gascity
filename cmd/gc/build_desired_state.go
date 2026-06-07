@@ -1551,6 +1551,11 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 		rows = nil
 	}
 	liveRows, liveErr := handles.Live.Ready(query)
+	if liveErr == nil {
+		// A complete live read is authoritative; cached rows only preserve
+		// demand when the live freshness read is partial or unavailable.
+		return liveRows, nil
+	}
 	if liveErr != nil && !beads.IsPartialResult(liveErr) {
 		liveRows = nil
 	}
@@ -1578,14 +1583,14 @@ func mergeReadyRowsByID(primary, secondary []beads.Bead) []beads.Bead {
 	}
 	seen := make(map[string]struct{}, len(primary)+len(secondary))
 	out := make([]beads.Bead, 0, len(primary)+len(secondary))
-	for _, row := range primary {
+	for _, row := range secondary {
 		if row.ID == "" {
 			continue
 		}
 		seen[row.ID] = struct{}{}
 		out = append(out, row)
 	}
-	for _, row := range secondary {
+	for _, row := range primary {
 		if row.ID == "" {
 			continue
 		}

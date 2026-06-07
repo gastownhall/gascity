@@ -25,7 +25,6 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/sling"
 )
 
 type listFailStore struct {
@@ -57,6 +56,15 @@ func (s *readyStaticStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
 	out := make([]beads.Bead, len(s.ready))
 	copy(out, s.ready)
 	return out, nil
+}
+
+type controllerDemandHandlesStore struct {
+	beads.Store
+	handles beads.StoreHandles
+}
+
+func (s controllerDemandHandlesStore) Handles() beads.StoreHandles {
+	return s.handles
 }
 
 type readyQueryRecordingStore struct {
@@ -615,6 +623,228 @@ func TestDefaultScaleCheckCountsSeesExternalRoutedWorkAfterCachePrime(t *testing
 	}
 	if got := counts[template]; got != 1 {
 		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 for post-prime external routed work", template, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsUsesLiveReadyWhenCachedRowWasAssigned(t *testing.T) {
+	const template = "gascity/workflows.codex-min"
+	backing := beads.NewMemStore()
+	work, err := backing.Create(beads.Bead{
+		Title:  "routed pool work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	assignee := "worker-session"
+	if err := backing.Update(work.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		t.Fatalf("assign live bead: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 after live row was assigned", template, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsUsesLiveReadyWhenCachedRowWasClosed(t *testing.T) {
+	const template = "gascity/workflows.codex-min"
+	backing := beads.NewMemStore()
+	work, err := backing.Create(beads.Bead{
+		Title:  "routed pool work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	if err := backing.Close(work.ID); err != nil {
+		t.Fatalf("close live bead: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 after live row was closed", template, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsUsesLiveReadyWhenCachedRowWasRerouted(t *testing.T) {
+	const (
+		staleTemplate = "gascity/workflows.codex-min"
+		liveTemplate  = "gascity/workflows.claude-min"
+	)
+	backing := beads.NewMemStore()
+	work, err := backing.Create(beads.Bead{
+		Title:  "routed pool work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": staleTemplate,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	if err := backing.Update(work.ID, beads.UpdateOpts{Metadata: map[string]string{"gc.routed_to": liveTemplate}}); err != nil {
+		t.Fatalf("reroute live bead: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		{template: staleTemplate, storeKey: "rig:gascity", store: cache},
+		{template: liveTemplate, storeKey: "rig:gascity", store: cache},
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[staleTemplate]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 after live row was rerouted", staleTemplate, got)
+	}
+	if got := counts[liveTemplate]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 after live row was rerouted", liveTemplate, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsTreatsCompleteLiveReadyAsAuthoritative(t *testing.T) {
+	const (
+		staleTemplate = "gascity/workflows.codex-min"
+		liveTemplate  = "gascity/workflows.claude-min"
+	)
+	routed := func(id, route, assignee string) beads.Bead {
+		return beads.Bead{
+			ID:       id,
+			Title:    "routed pool work",
+			Type:     "task",
+			Status:   "open",
+			Assignee: assignee,
+			Metadata: map[string]string{
+				"gc.routed_to": route,
+			},
+		}
+	}
+
+	tests := []struct {
+		name       string
+		cachedRows []beads.Bead
+		liveRows   []beads.Bead
+		wantStale  int
+		wantLive   int
+	}{
+		{
+			name:       "assigned live row overrides cached unassigned demand",
+			cachedRows: []beads.Bead{routed("bd-1", staleTemplate, "")},
+			liveRows:   []beads.Bead{routed("bd-1", staleTemplate, "worker-session")},
+		},
+		{
+			name:       "closed live row removes cached demand",
+			cachedRows: []beads.Bead{routed("bd-1", staleTemplate, "")},
+			liveRows:   nil,
+		},
+		{
+			name:       "rerouted live row overrides cached route metadata",
+			cachedRows: []beads.Bead{routed("bd-1", staleTemplate, "")},
+			liveRows:   []beads.Bead{routed("bd-1", liveTemplate, "")},
+			wantLive:   1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := controllerDemandHandlesStore{
+				Store: beads.NewMemStore(),
+				handles: beads.StoreHandles{
+					Cached: &readyStaticStore{ready: tt.cachedRows},
+					Live:   &readyStaticStore{ready: tt.liveRows},
+				},
+			}
+
+			counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+				{template: staleTemplate, storeKey: "rig:gascity", store: store},
+				{template: liveTemplate, storeKey: "rig:gascity", store: store},
+			})
+			if len(errs) != 0 {
+				t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+			}
+			if got := counts[staleTemplate]; got != tt.wantStale {
+				t.Fatalf("defaultScaleCheckCounts[%q] = %d, want %d", staleTemplate, got, tt.wantStale)
+			}
+			if got := counts[liveTemplate]; got != tt.wantLive {
+				t.Fatalf("defaultScaleCheckCounts[%q] = %d, want %d", liveTemplate, got, tt.wantLive)
+			}
+		})
+	}
+}
+
+func TestMergeReadyRowsByIDPrefersSecondaryRows(t *testing.T) {
+	tests := []struct {
+		name      string
+		primary   []beads.Bead
+		secondary []beads.Bead
+		wantIDs   []string
+		wantRoute string
+	}{
+		{
+			name:      "secondary duplicate replaces primary",
+			primary:   []beads.Bead{{ID: "bd-1", Metadata: map[string]string{"gc.routed_to": "stale"}}},
+			secondary: []beads.Bead{{ID: "bd-1", Metadata: map[string]string{"gc.routed_to": "live"}}},
+			wantIDs:   []string{"bd-1"},
+			wantRoute: "live",
+		},
+		{
+			name:      "primary-only row survives",
+			primary:   []beads.Bead{{ID: "bd-1"}, {ID: ""}},
+			secondary: []beads.Bead{{ID: "bd-2"}},
+			wantIDs:   []string{"bd-2", "bd-1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeReadyRowsByID(tt.primary, tt.secondary)
+			if len(got) != len(tt.wantIDs) {
+				t.Fatalf("mergeReadyRowsByID returned %d rows, want %d: %#v", len(got), len(tt.wantIDs), got)
+			}
+			for i, wantID := range tt.wantIDs {
+				if got[i].ID != wantID {
+					t.Fatalf("mergeReadyRowsByID row %d ID = %q, want %q: %#v", i, got[i].ID, wantID, got)
+				}
+			}
+			if tt.wantRoute != "" && got[0].Metadata["gc.routed_to"] != tt.wantRoute {
+				t.Fatalf("mergeReadyRowsByID route = %q, want %q", got[0].Metadata["gc.routed_to"], tt.wantRoute)
+			}
+		})
 	}
 }
 
