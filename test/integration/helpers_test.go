@@ -34,13 +34,7 @@ func uniqueCityName() string {
 	if _, err := rand.Read(b); err != nil {
 		panic("generating random city name: " + err.Error())
 	}
-	hex := fmt.Sprintf("%x", b)
-	parts := make([]string, 0, len(hex)+1)
-	parts = append(parts, "gctest")
-	for _, r := range hex {
-		parts = append(parts, string(r))
-	}
-	return strings.Join(parts, "-")
+	return fmt.Sprintf("gctest-%x", b)
 }
 
 // setupCity creates a city directory, initializes it, writes a city.toml

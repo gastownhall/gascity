@@ -70,7 +70,7 @@ func RequireTmux(t testing.TB) {
 // sessions matching that city via t.Cleanup.
 type Guard struct {
 	t          testing.TB
-	cityName   string // "gctest-<nibble>-<nibble>-..."
+	cityName   string // "gctest-<8hex>"
 	socketName string // tmux socket for isolation (defaults to cityName)
 }
 
@@ -89,13 +89,7 @@ func NewGuardWithSocket(t testing.TB, socketName string) *Guard {
 	if _, err := rand.Read(b); err != nil {
 		t.Fatalf("tmuxtest: generating random city name: %v", err)
 	}
-	hex := fmt.Sprintf("%x", b)
-	parts := make([]string, 0, len(hex)+1)
-	parts = append(parts, "gctest")
-	for _, r := range hex {
-		parts = append(parts, string(r))
-	}
-	cityName := strings.Join(parts, "-")
+	cityName := fmt.Sprintf("gctest-%x", b)
 	if socketName == "" {
 		socketName = cityName
 	}
