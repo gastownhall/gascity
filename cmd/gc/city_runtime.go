@@ -1004,7 +1004,7 @@ func (cr *CityRuntime) tick(
 			// reloads still reply after applySoftReloadAcceptance. This
 			// condition is the exact negation of the soft-acceptance guard
 			// below.
-			if !(manualReload.soft &&
+			if !(manualReload.soft && //nolint:staticcheck // QF1001: explicit negation of the soft-acceptance guard below, kept for readability
 				(manualReply.Outcome == reloadOutcomeApplied || manualReply.Outcome == reloadOutcomeNoChange)) {
 				completeManualReload()
 			}
