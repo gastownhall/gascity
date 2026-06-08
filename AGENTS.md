@@ -481,3 +481,11 @@ These apply to all code in this project — frontend and server:
   Take advantage of that feedback to fix those errors!
 - **Use Centralized Semantic Constant Values** using enums and constants instead
   of spreading magic numbers throughout the code.
+
+### Automation must never merge to the fork's `main`
+
+This is a fork. The refinery, polecats, and any automation MUST NOT merge or push
+to `origin/main`. Every change ships as a pull request to `upstream` from a
+dedicated branch created off `upstream/main` (see `CONTRIBUTING.md`, "Never open a
+PR from your fork's `main` branch"). Automation that merges to the fork's `main` is
+a defect — open a PR instead.
