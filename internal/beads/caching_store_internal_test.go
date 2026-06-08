@@ -3060,8 +3060,8 @@ func TestCachingStoreBdPrimeActiveUsesReadyProjectionForBD105(t *testing.T) {
 			if strings.Contains(query, " in ('bd-ready'") || strings.Contains(query, " in (\"bd-ready\"") {
 				t.Fatalf("ready projection SQL = %q, must not use per-id IN list", query)
 			}
-			if !strings.Contains(query, "status <> 'closed'") {
-				t.Fatalf("ready projection SQL = %q, want non-closed active projection", query)
+			if strings.Contains(query, "status") || !strings.Contains(query, "from issues union all") {
+				t.Fatalf("ready projection SQL = %q, want unfiltered row projection", query)
 			}
 			return []byte(`[
 				{"id":"bd-ready","is_blocked":0},
@@ -3104,7 +3104,7 @@ func TestCachingStoreBdPrimeActiveUsesReadyProjectionForBD105(t *testing.T) {
 	}
 }
 
-func TestCachingStoreBdPrimeProjectsIsBlockedForAllNonClosedBD105(t *testing.T) {
+func TestCachingStoreBdPrimeProjectsIsBlockedForAllBDRowsBD105(t *testing.T) {
 	t.Parallel()
 
 	var sqlCalls int
@@ -3124,8 +3124,8 @@ func TestCachingStoreBdPrimeProjectsIsBlockedForAllNonClosedBD105(t *testing.T) 
 			if strings.Contains(query, " in ('bd-ready'") || strings.Contains(query, " in (\"bd-ready\"") {
 				t.Fatalf("ready projection SQL = %q, must not use per-id IN list", query)
 			}
-			if strings.Contains(query, "status in ('open','in_progress')") || !strings.Contains(query, "status <> 'closed'") {
-				t.Fatalf("ready projection SQL = %q, want every non-closed row", query)
+			if strings.Contains(query, "status") || !strings.Contains(query, "from issues union all") {
+				t.Fatalf("ready projection SQL = %q, want every row", query)
 			}
 			return []byte(`[
 				{"id":"bd-ready","is_blocked":0},

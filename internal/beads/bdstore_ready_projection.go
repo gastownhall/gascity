@@ -117,6 +117,5 @@ func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {
 }
 
 func readyProjectionSQL() string {
-	return "select id,is_blocked from issues where status <> 'closed' " +
-		"union all select id,is_blocked from wisps where status <> 'closed'"
+	return "select id,is_blocked from issues union all select id,is_blocked from wisps"
 }
