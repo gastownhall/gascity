@@ -1,15 +1,19 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestWorkOptionMetadataMigrationCheckFixesLegacyTaskMetadata(t *testing.T) {
@@ -150,6 +154,101 @@ func TestWorkOptionMetadataMigrationCheckCleanStore(t *testing.T) {
 	}
 }
 
+func TestWorkOptionMetadataMigrationClearsStaleSessionAutoStampedModel(t *testing.T) {
+	cityDir := t.TempDir()
+	store := beads.NewMemStore()
+	candidate := newOptionSessionCandidate(
+		t,
+		store,
+		map[string]string{"model": "opus"},
+		map[string]string{"model": "sonnet", "effort": "high"},
+	)
+	if err := store.SetMetadata(candidate.session.ID, "gc.per_dispatch_model", "sonnet"); err != nil {
+		t.Fatalf("SetMetadata(gc.per_dispatch_model): %v", err)
+	}
+	check := newWorkOptionMetadataMigrationCheck(nil, cityDir, func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	})
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	for _, want := range []string{candidate.session.ID, "gc.per_dispatch_model", "template_overrides.model"} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q:\n%s", want, details)
+		}
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if res2 := check.Run(&doctor.CheckContext{}); res2.Status != doctor.StatusOK {
+		t.Fatalf("post-fix Run status = %v, want OK: %#v", res2.Status, res2)
+	}
+	session, err := store.Get(candidate.session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got := strings.TrimSpace(session.Metadata["gc.per_dispatch_model"]); got != "" {
+		t.Fatalf("gc.per_dispatch_model = %q, want tombstone", got)
+	}
+	wantOverrides := map[string]string{"effort": "high"}
+	if got := storedSessionOverrides(t, store, candidate.session.ID); !reflect.DeepEqual(got, wantOverrides) {
+		t.Fatalf("template_overrides = %v, want %v", got, wantOverrides)
+	}
+
+	candidate.session = &session
+	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	if err != nil {
+		t.Fatalf("buildPreparedStart: %v", err)
+	}
+	if !strings.Contains(prepared.cfg.Command, "--model claude-opus-4-8") {
+		t.Fatalf("prepared command = %q, want work opt_model opus after stale session cleanup", prepared.cfg.Command)
+	}
+	if strings.Contains(prepared.cfg.Command, "claude-sonnet-4-6") {
+		t.Fatalf("prepared command = %q, stale session model should not win", prepared.cfg.Command)
+	}
+}
+
+func TestWorkOptionMetadataMigrationPreservesExplicitSessionModelWhenMarkerDiffers(t *testing.T) {
+	cityDir := t.TempDir()
+	raw, err := json.Marshal(map[string]string{"model": "sonnet"})
+	if err != nil {
+		t.Fatalf("Marshal(template_overrides): %v", err)
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "SESSION-1", Title: "worker", Type: sessionBeadType, Status: "open", Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+			"template_overrides":    string(raw),
+			"gc.per_dispatch_model": "opus",
+		}},
+	}, nil)
+	check := newWorkOptionMetadataMigrationCheck(nil, cityDir, func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	})
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	got, err := store.Get("SESSION-1")
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got.Metadata["template_overrides"] != string(raw) {
+		t.Fatalf("template_overrides = %q, want preserved %q", got.Metadata["template_overrides"], string(raw))
+	}
+	if got.Metadata["gc.per_dispatch_model"] != "" {
+		t.Fatalf("gc.per_dispatch_model = %q, want tombstone", got.Metadata["gc.per_dispatch_model"])
+	}
+}
+
 func TestWorkOptionMetadataMigrationFixReportsSkippedScopes(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := t.TempDir()
@@ -179,6 +278,51 @@ func TestWorkOptionMetadataMigrationFixReportsSkippedScopes(t *testing.T) {
 	}
 	if got.Metadata["opt_model"] != "gpt-5" || got.Metadata["gc.model"] != "" {
 		t.Fatalf("city fix was not applied before reporting skipped rig: metadata=%+v", got.Metadata)
+	}
+}
+
+func TestWorkOptionMetadataMigrationSkipsEffectivelySuspendedRigs(t *testing.T) {
+	cityDir := t.TempDir()
+	startSuspendedDir := t.TempDir()
+	runtimeSuspendedDir := t.TempDir()
+	activeDir := t.TempDir()
+	suspend := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, "runtime-suspended", &suspend); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "start-suspended", Path: startSuspendedDir, SuspendedOnStart: true},
+		{Name: "runtime-suspended", Path: runtimeSuspendedDir},
+		{Name: "active", Path: activeDir},
+	}}
+	cityStore := beads.NewMemStore()
+	activeStore := beads.NewMemStore()
+	stores := map[string]beads.Store{
+		cityDir:   cityStore,
+		activeDir: activeStore,
+	}
+	var opened []string
+	check := newWorkOptionMetadataMigrationCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		opened = append(opened, path)
+		store, ok := stores[path]
+		if !ok {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	})
+
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Fatalf("Run status = %v, want OK: %#v", res.Status, res)
+	}
+	for _, notWant := range []string{startSuspendedDir, runtimeSuspendedDir} {
+		if containsString(opened, notWant) {
+			t.Fatalf("opened suspended rig store %q; opened=%v", notWant, opened)
+		}
+	}
+	for _, want := range []string{cityDir, activeDir} {
+		if !containsString(opened, want) {
+			t.Fatalf("did not open active scope %q; opened=%v", want, opened)
+		}
 	}
 }
 

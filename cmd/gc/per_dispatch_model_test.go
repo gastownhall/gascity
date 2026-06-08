@@ -8,6 +8,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // optionSchemaProvider returns a ResolvedProvider with two OptionsSchema keys.
@@ -211,5 +213,30 @@ func TestBuildPreparedStartAppliesWorkBeadOptionsToCommand(t *testing.T) {
 	}
 	if got := strings.TrimSpace(metadata["opt_model"]); got != "" {
 		t.Fatalf("opt_model persisted on session from work option: %q", got)
+	}
+}
+
+func TestBuildPreparedStartInitialMessageOnlyMatchesDriftHash(t *testing.T) {
+	store := beads.NewMemStore()
+	candidate := newOptionSessionCandidate(t, store, nil, map[string]string{"initial_message": "hello"})
+	resolved := claudeEffortResolvedProvider()
+	defaultArgs := resolved.ResolveDefaultArgs()
+	if len(defaultArgs) == 0 {
+		t.Fatal("claude provider default args are empty")
+	}
+	candidate.tp.ResolvedProvider = resolved
+	candidate.tp.Command = "claude " + shellquote.Join(defaultArgs) + " --settings /tmp/city/.gc/settings.json"
+
+	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	if err != nil {
+		t.Fatalf("buildPreparedStart: %v", err)
+	}
+	want := runtime.CoreFingerprint(sessionCoreConfigForHash(candidate.tp, *candidate.session))
+	if prepared.coreHash != want {
+		t.Fatalf("prepared coreHash = %s, want drift hash %s\nprepared command: %q\ndrift command:    %q",
+			prepared.coreHash,
+			want,
+			prepared.cfg.Command,
+			sessionCoreConfigForHash(candidate.tp, *candidate.session).Command)
 	}
 }
