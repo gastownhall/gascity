@@ -74,6 +74,25 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 
 	var all []beads.Bead
 	dedupe := len(assigneeTerms) > 1
+
+	// all=true reads materialize closed history per rig, so the build is
+	// O(history) even though the caller only wants a recency-bounded page
+	// (gascity#3253). When every store can Count the query exactly, push the
+	// page bound down so each store returns only the rows this page needs and
+	// source Total from a hydration-free Count instead of len(full history) —
+	// the build collapses to O(limit) at the store boundary while the response
+	// shape (a created_at-desc prefix plus an accurate Total and next_cursor)
+	// is unchanged. Scoped to the single-assignee all=true hot path; if any
+	// store cannot Count the query, keep the full-scan path so Total and
+	// ordering stay correct (the Count fallback contract from #3211).
+	boundedMode := false
+	boundedFetch := 0
+	boundedTotal := 0
+	if input.All && !dedupe && len(assigneeTerms) == 1 {
+		boundedFetch = pp.Offset + pp.Limit
+		boundedMode, boundedTotal = beadListBoundedTotal(ctx, stores, rigNames, assigneeTerms[0], input)
+	}
+
 	seen := map[string]bool{}
 	var pa partialAggregator
 	for _, rigName := range rigNames {
@@ -93,6 +112,11 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			}
 			if !query.HasFilter() {
 				query.AllowScan = true
+			}
+			if boundedMode {
+				// Each store need only return enough rows to cover this page;
+				// the cross-rig merge below cuts the exact global prefix.
+				query.Limit = boundedFetch
 			}
 			pa.attempt()
 			list, err := store.List(query)
@@ -140,7 +164,26 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	// A non-cursor request is offset-0 paging: a truncated first page carries
 	// the continuation cursor too, otherwise the remainder of a limit-bounded
 	// read is unfetchable by design (#3208).
-	page, total, nextCursor := paginate(all, pp)
+	var page []beads.Bead
+	var total int
+	var nextCursor string
+	if boundedMode {
+		// Total comes from the exact Count, not len(all) (which holds only the
+		// bounded prefix), so next_cursor still points at the real remainder.
+		total = boundedTotal
+		if pp.Offset < len(all) {
+			end := pp.Offset + pp.Limit
+			if end > len(all) {
+				end = len(all)
+			}
+			page = all[pp.Offset:end]
+		}
+		if pp.Offset+pp.Limit < total {
+			nextCursor = encodeCursor(pp.Offset + pp.Limit)
+		}
+	} else {
+		page, total, nextCursor = paginate(all, pp)
+	}
 	if page == nil {
 		page = []beads.Bead{}
 	}
@@ -159,6 +202,46 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		CacheAgeS: cacheAge,
 		Body:      body,
 	}, nil
+}
+
+// beadListBoundedTotal returns the exact total bead count for the all=true
+// list query across rigNames, sourced from each store's hydration-free Count.
+// The first return value reports whether bounding is safe: it is false (and
+// the caller keeps the full-scan path) if any store does not implement Counter
+// or cannot count the query exactly (ErrCountUnsupported), so Total and the
+// recency-ordered prefix stay correct on backends without a cheap count.
+func beadListBoundedTotal(ctx context.Context, stores map[string]beads.Store, rigNames []string, assignee string, input *BeadListInput) (bool, int) {
+	total := 0
+	for _, rigName := range rigNames {
+		counter, ok := stores[rigName].(beads.Counter)
+		if !ok {
+			return false, 0
+		}
+		n, err := counter.Count(ctx, beadListCountQuery(assignee, input))
+		if err != nil {
+			return false, 0
+		}
+		total += n
+	}
+	return true, total
+}
+
+// beadListCountQuery builds the count query for the all=true list path. It
+// carries the same filters as the list query so the count matches exactly;
+// Sort and Limit are omitted because they do not affect a count.
+func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
+	q := beads.ListQuery{
+		Status:        input.Status,
+		Type:          input.Type,
+		Label:         input.Label,
+		Assignee:      assignee,
+		IncludeClosed: input.All,
+		Live:          input.Status == "in_progress",
+	}
+	if !q.HasFilter() {
+		q.AllowScan = true
+	}
+	return q
 }
 
 // humaHandleBeadReady is the Huma-typed handler for GET /v0/beads/ready.
