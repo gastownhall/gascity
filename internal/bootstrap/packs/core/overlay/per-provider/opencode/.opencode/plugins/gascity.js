@@ -20,7 +20,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 3;
+const GC_OPENCODE_HOOK_VERSION = 5;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
@@ -29,7 +29,7 @@ const PATH_PREFIX =
 
 async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
   try {
-    const { stdout } = await execFileAsync(GC_BIN, args, {
+    const { stdout, stderr } = await execFileAsync(GC_BIN, args, {
       cwd: directory,
       encoding: "utf-8",
       timeout: 30000,
@@ -39,6 +39,7 @@ async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
         PATH: PATH_PREFIX + (process.env.PATH || ""),
       },
     });
+    logRunStderr(stderr);
     return stdout.trim();
   } catch (err) {
     if (warnOnFailure) {
@@ -73,6 +74,17 @@ function logRunFailure(args, directory, err) {
   }
 }
 
+function logRunStderr(stderr) {
+  try {
+    const detail = String(stderr || "").trim();
+    if (detail) {
+      console.warn("gascity opencode plugin:", detail);
+    }
+  } catch {
+    return;
+  }
+}
+
 function unwrapData(result) {
   if (result && typeof result === "object" && "data" in result) {
     return result.data;
@@ -95,10 +107,12 @@ function sessionIDFromEvent(event) {
 
 function providerSessionEnv(sessionID) {
   sessionID = String(sessionID || "");
+  const env = { GC_PROVIDER_SESSION_ID_REQUIRED: "opencode" };
   if (!sessionID) {
-    return {};
+    return env;
   }
-  return { GC_PROVIDER_SESSION_ID: sessionID };
+  env.GC_PROVIDER_SESSION_ID = sessionID;
+  return env;
 }
 
 async function mirrorTranscript(directory, client, sessionID) {

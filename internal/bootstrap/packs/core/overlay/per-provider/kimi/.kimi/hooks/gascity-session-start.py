@@ -19,6 +19,7 @@ def main() -> int:
     env["PATH"] = f"{home}/go/bin:{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "")
     env["GC_MANAGED_SESSION_HOOK"] = "1"
     env["GC_HOOK_EVENT_NAME"] = "SessionStart"
+    env["GC_PROVIDER_SESSION_ID_REQUIRED"] = "kimi"
     if session_id:
         env["GC_PROVIDER_SESSION_ID"] = session_id
 

@@ -16,7 +16,7 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const GC_PI_HOOK_VERSION = 5;
+const GC_PI_HOOK_VERSION = 7;
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 let mirrorTempCounter = 0;
@@ -27,6 +27,7 @@ function run(args, cwd, extraEnv = {}) {
       cwd: cwd || process.cwd(),
       encoding: "utf-8",
       timeout: 30000,
+      stdio: ["ignore", "pipe", "inherit"],
       env: {
         ...process.env,
         ...extraEnv,
@@ -87,10 +88,12 @@ function sessionManagerHeader(manager, cwd) {
 
 function providerSessionEnv(ctx) {
   const sessionID = ctx?.sessionManager?.getSessionId?.() || "";
+  const env = { GC_PROVIDER_SESSION_ID_REQUIRED: "pi" };
   if (!sessionID) {
-    return {};
+    return env;
   }
-  return { GC_PROVIDER_SESSION_ID: String(sessionID) };
+  env.GC_PROVIDER_SESSION_ID = String(sessionID);
+  return env;
 }
 
 function mirrorTranscript(ctx) {

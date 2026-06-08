@@ -4606,7 +4606,7 @@ func DefaultCity(name string) City {
 
 func defaultInstallAgentHooksForProvider(provider string) []string {
 	switch strings.TrimSpace(provider) {
-	case "kiro", "opencode", "groq":
+	case "kiro", "opencode", "groq", "kimi":
 		return []string{strings.TrimSpace(provider)}
 	default:
 		return nil

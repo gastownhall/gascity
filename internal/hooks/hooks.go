@@ -32,9 +32,9 @@ var configFS embed.FS
 var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot", "cursor", "pi", "omp", "kimi"}
 
 const (
-	managedPiHookVersion       = 5
-	managedOpenCodeHookVersion = 3
-	managedOmpHookVersion      = 1
+	managedPiHookVersion       = 7
+	managedOpenCodeHookVersion = 5
+	managedOmpHookVersion      = 2
 )
 
 var (
@@ -246,7 +246,9 @@ func piHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "gc hook --inject") ||
 		!strings.Contains(content, "gc handoff --auto") ||
 		!strings.Contains(content, "mirrorTempCounter") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") {
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}
 	for _, marker := range []string{
@@ -287,7 +289,9 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, `runWithWarning(directory, "handoff", "--auto", "context cycle")`) ||
 		!strings.Contains(content, "output.context.push(handoff)") ||
 		!strings.Contains(content, "logRunFailure") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") {
+		!strings.Contains(content, "logRunStderr(stderr);") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") {
 		return true
 	}
 	for _, marker := range []string{
@@ -322,10 +326,12 @@ func ompHookNeedsUpgrade(existing []byte) bool {
 	if ompHookVersion(content) < managedOmpHookVersion ||
 		!strings.Contains(content, "gascityOmpExtension") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
 		!strings.Contains(content, `pi.on("session_start"`) ||
 		!strings.Contains(content, `pi.on("session_compact"`) ||
 		!strings.Contains(content, `pi.on("before_agent_start"`) ||
-		!strings.Contains(content, "logRunFailure") {
+		!strings.Contains(content, "logRunFailure") ||
+		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}
 	for _, marker := range []string{
