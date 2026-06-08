@@ -120,6 +120,9 @@ func TestMain(m *testing.M) {
 	if !subprocess {
 		if _, err := exec.LookPath("tmux"); err != nil {
 			_ = os.RemoveAll(tmpDir)
+			if tmuxSocketParent != "" {
+				_ = os.RemoveAll(tmuxSocketParent)
+			}
 			os.Exit(0)
 		}
 		// Pre-sweep: kill this run's root plus stale sibling orphans.
@@ -171,6 +174,10 @@ func TestMain(m *testing.M) {
 		realBDBinary, err = exec.LookPath("bd")
 		if err != nil {
 			// bd not available — skip all integration tests.
+			_ = os.RemoveAll(tmpDir)
+			if tmuxSocketParent != "" {
+				_ = os.RemoveAll(tmuxSocketParent)
+			}
 			os.Exit(0)
 		}
 	}
