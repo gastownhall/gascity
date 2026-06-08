@@ -303,25 +303,27 @@ func TestHandleStatusDegradesWhenReadModelStoreStalls(t *testing.T) {
 	statusStoreReadTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
 
-	const stallDelay = 750 * time.Millisecond
+	// The store stays blocked for the whole assertion, so the handler can only
+	// produce a response by honoring its degrade timeout — proven by Partial +
+	// the timeout diagnostic, with no fragile wall-clock bound (#3204).
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
 	state := newFakeState(t)
-	stallingStore := &delayedListStore{
-		Store: beads.NewMemStore(),
-		delay: stallDelay,
-	}
+	stallingStore := &blockingListStore{Store: beads.NewMemStore(), release: release}
 	state.cityBeadStore = stallingStore
 	state.stores["myrig"] = stallingStore
 	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
 	rec := httptest.NewRecorder()
-	start := time.Now()
-	h.ServeHTTP(rec, req)
-	elapsed := time.Since(start)
-
-	if elapsed > stallDelay {
-		t.Fatalf("status handler took %s, want bounded degraded response (< stall %s)", elapsed, stallDelay)
+	served := make(chan struct{})
+	go func() { h.ServeHTTP(rec, req); close(served) }()
+	select {
+	case <-served:
+	case <-time.After(10 * time.Second): // hang guard (~500x the degrade timeout), not a timing bound
+		t.Fatal("status handler did not return while the read model was stalled; degrade timeout not honored")
 	}
+
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -342,23 +344,25 @@ func TestHandleStatusDegradesWhenMailCountStalls(t *testing.T) {
 	statusStoreReadTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
 
-	const stallDelay = 750 * time.Millisecond
+	// The provider stays blocked for the whole assertion, so the handler can
+	// only produce a response by honoring its degrade timeout — proven by
+	// Partial + the timeout diagnostic, with no fragile wall-clock bound (#3204).
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
 	state := newFakeState(t)
-	state.cityMailProv = &delayedMailCountProvider{
-		Provider: state.cityMailProv,
-		delay:    stallDelay,
-	}
+	state.cityMailProv = &blockingMailCountProvider{Provider: state.cityMailProv, release: release}
 	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
 	rec := httptest.NewRecorder()
-	start := time.Now()
-	h.ServeHTTP(rec, req)
-	elapsed := time.Since(start)
-
-	if elapsed > stallDelay {
-		t.Fatalf("status handler took %s, want bounded degraded response (< stall %s)", elapsed, stallDelay)
+	served := make(chan struct{})
+	go func() { h.ServeHTTP(rec, req); close(served) }()
+	select {
+	case <-served:
+	case <-time.After(10 * time.Second): // hang guard (~500x the degrade timeout), not a timing bound
+		t.Fatal("status handler did not return while the mail count was stalled; degrade timeout not honored")
 	}
+
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -713,23 +717,28 @@ func TestHandleStatusLiteSkipsWorkScanAndCachesSeparately(t *testing.T) {
 	}
 }
 
-type delayedListStore struct {
+// blockingListStore blocks List until release is closed, then delegates. Used
+// to hold a read "stalled" for the entire degrade assertion via a
+// synchronization signal instead of a fragile wall-clock sleep (#3204).
+type blockingListStore struct {
 	beads.Store
-	delay time.Duration
+	release <-chan struct{}
 }
 
-func (s *delayedListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	time.Sleep(s.delay)
+func (s *blockingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	<-s.release
 	return s.Store.List(query)
 }
 
-type delayedMailCountProvider struct {
+// blockingMailCountProvider blocks Count until release is closed, then
+// delegates (#3204).
+type blockingMailCountProvider struct {
 	mail.Provider
-	delay time.Duration
+	release <-chan struct{}
 }
 
-func (p *delayedMailCountProvider) Count(recipient string) (int, int, error) {
-	time.Sleep(p.delay)
+func (p *blockingMailCountProvider) Count(recipient string) (int, int, error) {
+	<-p.release
 	return p.Provider.Count(recipient)
 }
 
