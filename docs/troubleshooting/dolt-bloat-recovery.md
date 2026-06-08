@@ -68,6 +68,39 @@ If `gc doctor` reports a clean `dolt-noms-size` and agents come back up
 cleanly, the recovery is complete. You may delete the `.dolt.bak-*`
 directory at your leisure once you are confident in the new store.
 
+## Reclaiming a database stranded below the compaction threshold
+
+`gc dolt compact` skips any database with fewer commits than the threshold
+(default 2000, `GC_DOLT_COMPACT_THRESHOLD_COMMITS`). A database can fall *below*
+that threshold yet still carry orphaned chunks — most commonly after a prior
+flatten squashed its history but the post-flatten full GC was deferred (a
+concurrent writer raced the flatten), quarantined and later cleared, or
+otherwise never completed. Scheduled compaction then skips the database forever
+and the space is never reclaimed. The skip is visible in the compactor log as:
+
+```
+compact: db=<database> commits=<n> below_threshold=<t> oldgen_archives=present pending_gc=absent — skip ...
+```
+
+Use the operator-invoked reclaim path to recover such a database without waiting
+for its commit count to climb back over the threshold:
+
+```bash
+# Reclaim one stranded database. Runs CALL DOLT_GC('--full') with no flatten,
+# bypassing the commit-count threshold.
+gc dolt compact --gc-only --only-db <database>
+
+# Preview first, mutating nothing.
+gc dolt compact --gc-only --only-db <database> --dry-run
+```
+
+`--gc-only` refuses any database under an integrity-quarantine marker; resolve
+the underlying reason (see **Compact Quarantine Reasons** below) before
+reclaiming. Unlike the full `dolt gc --archive-level=1` procedure above,
+`--gc-only` runs against the live managed server and does not require stopping
+the city — though quiescing writers still makes the GC faster and more
+thorough.
+
 ## Expected Outcome
 
 DoltHub's archive format typically delivers ~30% compression on top of
