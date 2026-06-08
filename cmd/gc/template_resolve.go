@@ -186,9 +186,19 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		command = command + " " + sa
 		settingsFile, relDst := claudeSettingsSource(p.cityPath)
 		if settingsFile != "" {
+			// .gc/settings.json is managed by gc (regenerated on binary upgrade).
+			// Using path-only fingerprinting prevents content changes from
+			// cascading stale-session drains to unrelated productive sessions.
+			// The legacy hooks/claude.json path is user-authored, so it uses
+			// content hashing to detect intentional changes. (ga-zfm)
+			probed := relDst != path.Join(".gc", "settings.json")
+			var contentHash string
+			if probed {
+				contentHash = runtime.HashPathContent(settingsFile)
+			}
 			copyFiles = append(copyFiles, runtime.CopyEntry{
 				Src: settingsFile, RelDst: relDst,
-				Probed: true, ContentHash: runtime.HashPathContent(settingsFile),
+				Probed: probed, ContentHash: contentHash,
 			})
 		}
 	}

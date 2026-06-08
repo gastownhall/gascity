@@ -1134,9 +1134,18 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 			}
 		}
 		if !alreadyStaged {
+			// .gc/settings.json uses path-only fingerprinting (Probed: false) so
+			// that binary-upgrade rewrites of the managed settings file do not
+			// cascade stale-session drains. The legacy hooks/claude.json path is
+			// user-authored and uses content hashing. (ga-zfm)
+			probed := settingsRel != path.Join(".gc", "settings.json")
+			var contentHash string
+			if probed {
+				contentHash = runtime.HashPathContent(settingsAbs)
+			}
 			copyFiles = append(copyFiles, runtime.CopyEntry{
 				Src: settingsAbs, RelDst: settingsRel,
-				Probed: true, ContentHash: runtime.HashPathContent(settingsAbs),
+				Probed: probed, ContentHash: contentHash,
 			})
 		}
 	}

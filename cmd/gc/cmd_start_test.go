@@ -1001,11 +1001,13 @@ func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
 			if entry.Src != settingsPath {
 				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, settingsPath)
 			}
-			if !entry.Probed {
-				t.Fatal("stageHookFiles() .gc/settings.json not marked Probed")
+			// .gc/settings.json must NOT be probed: binary-upgrade rewrites of the
+			// managed settings file must not cascade stale-session drains. (ga-zfm)
+			if entry.Probed {
+				t.Fatal("stageHookFiles() .gc/settings.json must not be marked Probed; content changes are ambient")
 			}
-			if entry.ContentHash == "" {
-				t.Fatal("stageHookFiles() .gc/settings.json has empty ContentHash")
+			if entry.ContentHash != "" {
+				t.Fatal("stageHookFiles() .gc/settings.json must have empty ContentHash when not probed")
 			}
 			return
 		}
@@ -1040,6 +1042,57 @@ func TestStageHookFilesFallsBackToLegacyClaudeHook(t *testing.T) {
 		}
 	}
 	t.Fatal("stageHookFiles() did not stage hooks/claude.json")
+}
+
+// TestRuntimeSettingsContentChangeDoesNotCascadeStaleSession is a regression
+// test for ga-zfm: a gc binary upgrade rewrites .gc/settings.json, which must
+// not produce a different CopyFiles fingerprint for previously-started sessions.
+// The fix marks .gc/settings.json as Probed:false so only the path is hashed.
+func TestRuntimeSettingsContentChangeDoesNotCascadeStaleSession(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	settingsPath := filepath.Join(cityDir, ".gc", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	// Write settings with "v1" content (before binary upgrade).
+	if err := os.WriteFile(settingsPath, []byte(`{"hooks":{"v1":true}}`), 0o644); err != nil {
+		t.Fatalf("WriteFile v1: %v", err)
+	}
+	before := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
+
+	// Simulate binary upgrade: rewrite settings with new embedded defaults.
+	if err := os.WriteFile(settingsPath, []byte(`{"hooks":{"v2":true}}`), 0o644); err != nil {
+		t.Fatalf("WriteFile v2: %v", err)
+	}
+	after := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
+
+	// Locate the settings entry in both results.
+	settingsRel := path.Join(".gc", "settings.json")
+	find := func(entries []runtime.CopyEntry) runtime.CopyEntry {
+		for _, e := range entries {
+			if e.RelDst == settingsRel {
+				return e
+			}
+		}
+		t.Fatalf("stageHookFiles: .gc/settings.json not staged")
+		return runtime.CopyEntry{}
+	}
+	eBefore := find(before)
+	eAfter := find(after)
+
+	// Content hash must be empty (not probed) and must be identical before/after
+	// so that CoreFingerprint produces the same hash regardless of file content.
+	if eBefore.Probed || eAfter.Probed {
+		t.Error(".gc/settings.json must not be marked Probed; content changes are ambient")
+	}
+	if eBefore.ContentHash != "" || eAfter.ContentHash != "" {
+		t.Error(".gc/settings.json ContentHash must be empty when not probed")
+	}
+	if eBefore.Src != eAfter.Src || eBefore.RelDst != eAfter.RelDst {
+		t.Errorf("Src/RelDst changed: before={%q %q} after={%q %q}", eBefore.Src, eBefore.RelDst, eAfter.Src, eAfter.RelDst)
+	}
 }
 
 func TestStageHookFilesDoesNotStageClaudeSkillsDir(t *testing.T) {
