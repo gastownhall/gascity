@@ -481,3 +481,12 @@ These apply to all code in this project — frontend and server:
   Take advantage of that feedback to fix those errors!
 - **Use Centralized Semantic Constant Values** using enums and constants instead
   of spreading magic numbers throughout the code.
+
+## Worker Routing — Polekittens vs Polecats
+
+If this city has a **polekitten** pool present (the `koolkats` pack imported on this rig), route work by size to keep cost and latency low:
+
+- **Small / well-scoped (S)** — pure config, a single-function change, wiring an existing API, doc/fact fixes -> dispatch to `<rig>/koolkats.polekitten` (Sonnet).
+- **Medium-large / complex / correctness-sensitive (M/L)** — multi-file work, new subsystems, risk/correctness logic -> dispatch to `<rig>/gastown.polecat` (Opus).
+
+A polekitten escalates oversized or stuck work up to the polecat pool. If no polekitten pool is present in the city, route everything to `<rig>/gastown.polecat`.
