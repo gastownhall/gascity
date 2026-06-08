@@ -20,20 +20,24 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 2;
+const GC_OPENCODE_HOOK_VERSION = 3;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 
-async function runCommand(directory, args, warnOnFailure) {
+async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
   try {
     const { stdout } = await execFileAsync(GC_BIN, args, {
       cwd: directory,
       encoding: "utf-8",
       timeout: 30000,
-      env: { ...process.env, PATH: PATH_PREFIX + (process.env.PATH || "") },
+      env: {
+        ...process.env,
+        ...extraEnv,
+        PATH: PATH_PREFIX + (process.env.PATH || ""),
+      },
     });
     return stdout.trim();
   } catch (err) {
@@ -89,6 +93,14 @@ function sessionIDFromEvent(event) {
   );
 }
 
+function providerSessionEnv(sessionID) {
+  sessionID = String(sessionID || "");
+  if (!sessionID) {
+    return {};
+  }
+  return { GC_PROVIDER_SESSION_ID: sessionID };
+}
+
 async function mirrorTranscript(directory, client, sessionID) {
   const exportDir = process.env.GC_OPENCODE_TRANSCRIPT_DIR || "";
   const safeID = safeSessionID(sessionID);
@@ -119,9 +131,9 @@ async function mirrorTranscript(directory, client, sessionID) {
 export default async function gascityPlugin({ directory, client }) {
   let cachedPrime = null;
 
-  async function readPrime(force = false) {
+  async function readPrime(force = false, extraEnv = {}) {
     if (force || cachedPrime === null) {
-      cachedPrime = await run(directory, "prime", "--hook");
+      cachedPrime = await runCommand(directory, ["prime", "--hook"], false, extraEnv);
     }
     return cachedPrime;
   }
@@ -142,8 +154,11 @@ export default async function gascityPlugin({ directory, client }) {
       switch (event.type) {
         case "session.created":
         case "session.compacted":
-          await readPrime(true);
-          await mirrorTranscript(directory, client, sessionIDFromEvent(event));
+          {
+            const sessionID = sessionIDFromEvent(event);
+            await readPrime(true, providerSessionEnv(sessionID));
+            await mirrorTranscript(directory, client, sessionID);
+          }
           return;
         case "session.idle":
         case "message.updated":

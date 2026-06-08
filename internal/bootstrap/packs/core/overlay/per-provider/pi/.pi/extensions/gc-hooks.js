@@ -16,18 +16,22 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const GC_PI_HOOK_VERSION = 4;
+const GC_PI_HOOK_VERSION = 5;
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 let mirrorTempCounter = 0;
 
-function run(args, cwd) {
+function run(args, cwd, extraEnv = {}) {
   try {
     return execFileSync("gc", args, {
       cwd: cwd || process.cwd(),
       encoding: "utf-8",
       timeout: 30000,
-      env: { ...process.env, PATH: PATH_PREFIX + (process.env.PATH || "") },
+      env: {
+        ...process.env,
+        ...extraEnv,
+        PATH: PATH_PREFIX + (process.env.PATH || ""),
+      },
     }).trim();
   } catch (err) {
     logRunFailure(args, cwd, err);
@@ -79,6 +83,14 @@ function sessionManagerHeader(manager, cwd) {
     timestamp: new Date().toISOString(),
     cwd,
   };
+}
+
+function providerSessionEnv(ctx) {
+  const sessionID = ctx?.sessionManager?.getSessionId?.() || "";
+  if (!sessionID) {
+    return {};
+  }
+  return { GC_PROVIDER_SESSION_ID: String(sessionID) };
 }
 
 function mirrorTranscript(ctx) {
@@ -137,12 +149,12 @@ function appendSystemPrompt(systemPrompt, additions) {
 
 module.exports = function gascityPiExtension(pi) {
   pi.on("session_start", (_event, ctx) => {
-    run(["prime", "--hook"], ctx.cwd);
+    run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx));
     mirrorTranscript(ctx);
   });
 
   pi.on("session_compact", (_event, ctx) => {
-    run(["prime", "--hook"], ctx.cwd);
+    run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx));
     run(["handoff", "--auto", "context cycle"], ctx.cwd);
     mirrorTranscript(ctx);
   });

@@ -1100,7 +1100,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 	}
 
 	providerSet := hookProviderSet(hookProviders)
-	// workDir-based hooks: gemini, codex, antigravity, opencode, copilot, cursor, pi, omp.
+	// workDir-based hooks: gemini, codex, antigravity, opencode, copilot, cursor, pi, omp, kimi.
 	for _, provider := range orderedWorkDirHookProviders {
 		if !providerSet[provider.name] {
 			continue
@@ -1169,6 +1169,10 @@ var orderedWorkDirHookProviders = []workDirHookProvider{
 	{name: "cursor", relPaths: []string{path.Join(".cursor", "hooks.json")}},
 	{name: "pi", relPaths: []string{path.Join(".pi", "extensions", "gc-hooks.js")}},
 	{name: "omp", relPaths: []string{path.Join(".omp", "hooks", "gc-hook.ts")}},
+	{name: "kimi", relPaths: []string{
+		path.Join(".kimi", "config.toml"),
+		path.Join(".kimi", "hooks", "gascity-session-start.py"),
+	}},
 }
 
 func hookFileProvidersForResolved(resolved *config.ResolvedProvider, installHooks []string, providers map[string]config.ProviderSpec) []string {

@@ -1164,6 +1164,76 @@ func TestStageHookFilesIncludesAntigravityHooks(t *testing.T) {
 	t.Fatal("stageHookFiles() did not stage Antigravity .agents/hooks.json")
 }
 
+func TestStageHookFilesIncludesKimiHooks(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	configPath := filepath.Join(workDir, ".kimi", "config.toml")
+	scriptPath := filepath.Join(workDir, ".kimi", "hooks", "gascity-session-start.py")
+	for _, item := range []string{configPath, scriptPath} {
+		if err := os.MkdirAll(filepath.Dir(item), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", item, err)
+		}
+		if err := os.WriteFile(item, []byte("hook"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", item, err)
+		}
+	}
+
+	got := stageHookFiles(nil, cityDir, workDir, []string{"kimi"})
+	want := map[string]string{
+		path.Join("worker", ".kimi", "config.toml"):                       configPath,
+		path.Join("worker", ".kimi", "hooks", "gascity-session-start.py"): scriptPath,
+	}
+	for _, entry := range got {
+		wantSrc, ok := want[entry.RelDst]
+		if !ok {
+			continue
+		}
+		if entry.Src != wantSrc {
+			t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, wantSrc)
+		}
+		if !entry.Probed {
+			t.Fatalf("stageHookFiles() %s not marked Probed", entry.RelDst)
+		}
+		if entry.ContentHash == "" {
+			t.Fatalf("stageHookFiles() %s has empty ContentHash", entry.RelDst)
+		}
+		delete(want, entry.RelDst)
+	}
+	if len(want) > 0 {
+		t.Fatalf("stageHookFiles() missing Kimi hook entries: %v", want)
+	}
+}
+
+func TestResolveTemplateAddsKimiHookConfigArgWhenHooksInstalled(t *testing.T) {
+	cityDir := t.TempDir()
+	cfgAgent := &config.Agent{
+		Name:              "worker",
+		Provider:          "kimi",
+		InstallAgentHooks: []string{"kimi"},
+	}
+	bp := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityDir,
+		workspace:  &config.Workspace{Provider: "kimi"},
+		providers:  config.BuiltinProviders(),
+		lookPath:   func(name string) (string, error) { return "/bin/" + name, nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	tp, err := resolveTemplate(bp, cfgAgent, "worker", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if !strings.Contains(tp.Command, "kimi --yolo --no-thinking --config-file .kimi/config.toml") {
+		t.Fatalf("Command = %q, want Kimi hook config arg only when hooks are installed", tp.Command)
+	}
+}
+
 func TestConfiguredRigNameMatchesRigByPathWithoutCreatingDirs(t *testing.T) {
 	cityPath := t.TempDir()
 	rigRoot := filepath.Join(cityPath, "repos", "demo")

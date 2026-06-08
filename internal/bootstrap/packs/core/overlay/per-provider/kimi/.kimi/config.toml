@@ -1,0 +1,4 @@
+[[hooks]]
+event = "SessionStart"
+command = "python3 .kimi/hooks/gascity-session-start.py"
+timeout = 30
