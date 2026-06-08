@@ -47,20 +47,15 @@ func (s *BdStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 	}
 	enriched := make([]Bead, len(items))
 	copy(enriched, items)
-	var missing []string
 	for i := range enriched {
 		if enriched[i].ID == "" || enriched[i].Status == "closed" || enriched[i].IsBlocked != nil {
 			continue
 		}
 		blocked, ok := projection[enriched[i].ID]
 		if !ok {
-			missing = append(missing, enriched[i].ID)
 			continue
 		}
 		enriched[i].IsBlocked = cloneBoolPtr(&blocked)
-	}
-	if len(missing) > 0 {
-		return items, fmt.Errorf("bd ready projection missing is_blocked for %d active beads (first %s)", len(missing), missing[0])
 	}
 	return enriched, nil
 }
@@ -68,6 +63,8 @@ func (s *BdStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
 	s.readyProjectionMu.Lock()
 	defer s.readyProjectionMu.Unlock()
+	// Probe the bd version once per process. Operators must restart gc after
+	// changing bd versions to re-evaluate ready-projection support.
 	if s.readyProjectionChecked {
 		return s.readyProjectionEnabled, nil
 	}
@@ -96,6 +93,8 @@ func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {
 		return result, nil
 	}
 
+	// bd exposes this as a full active-row projection. The ids argument is a
+	// cache-side allow-list so callers can keep their requested surface bounded.
 	out, err := s.runner(s.dir, "bd", "sql", readyProjectionSQL(), "--json")
 	if err != nil {
 		return nil, fmt.Errorf("bd sql ready projection: %w", err)
@@ -117,5 +116,5 @@ func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {
 }
 
 func readyProjectionSQL() string {
-	return "select id,is_blocked from issues union all select id,is_blocked from wisps"
+	return "select id,is_blocked from issues where status <> 'closed' union all select id,is_blocked from wisps where status <> 'closed'"
 }

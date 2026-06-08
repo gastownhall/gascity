@@ -681,6 +681,8 @@ func (s *DoltliteReadStore) dependencySnapshotForCache(ids []string) (map[string
 }
 
 func (s *DoltliteReadStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
+	// Native DoltLite snapshots do not carry bd's denormalized is_blocked
+	// projection, so cached ready intentionally keeps the nil fallback.
 	return items, nil
 }
 

@@ -85,6 +85,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 			delete(c.beadSeq, id)
 			delete(c.localBeadAt, id)
 			c.deletedSeq[id] = seq
+			c.clearDependentReadyProjectionsLocked(id)
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()
@@ -97,6 +98,9 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 			fresh = applyUpdateOptsToBead(current, opts)
 			c.beads[id] = cloneBead(fresh)
 			c.deps[id] = depsFromBeadFields(fresh)
+			if opts.Status != nil {
+				c.clearDependentReadyProjectionsLocked(id)
+			}
 			c.dirty[id] = struct{}{}
 			delete(c.deletedSeq, id)
 			c.updateStatsLocked()
@@ -116,6 +120,9 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	c.noteLocalMutationLocked(id)
 	c.beads[id] = cloneBead(fresh)
 	c.deps[id] = depsFromBeadFields(fresh)
+	if opts.Status != nil {
+		c.clearDependentReadyProjectionsLocked(id)
+	}
 	delete(c.dirty, id)
 	delete(c.deletedSeq, id)
 	c.markFreshLocked(time.Now())
@@ -162,6 +169,7 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	} else {
 		c.dirty[id] = struct{}{}
 	}
+	c.clearDependentReadyProjectionsLocked(id)
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 	c.mu.Unlock()
@@ -203,12 +211,13 @@ func (c *CachingStore) Close(id string) error {
 		delete(c.deletedSeq, id)
 		closed = cloneBead(b)
 		found = true
-		c.markFreshLocked(time.Now())
-		c.updateStatsLocked()
 	} else if found {
 		c.beads[id] = cloneBead(closed)
 		delete(c.dirty, id)
 		delete(c.deletedSeq, id)
+	}
+	dependentProjectionCleared := c.clearDependentReadyProjectionsLocked(id)
+	if found || dependentProjectionCleared {
 		c.markFreshLocked(time.Now())
 		c.updateStatsLocked()
 	}
@@ -245,12 +254,13 @@ func (c *CachingStore) Reopen(id string) error {
 		delete(c.deletedSeq, id)
 		reopened = cloneBead(b)
 		found = true
-		c.markFreshLocked(time.Now())
-		c.updateStatsLocked()
 	} else if found {
 		c.beads[id] = cloneBead(reopened)
 		delete(c.dirty, id)
 		delete(c.deletedSeq, id)
+	}
+	dependentProjectionCleared := c.clearDependentReadyProjectionsLocked(id)
+	if found || dependentProjectionCleared {
 		c.markFreshLocked(time.Now())
 		c.updateStatsLocked()
 	}
@@ -302,6 +312,7 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 		delete(c.deletedSeq, item.id)
 		if item.bead.Status == "closed" {
 			delete(c.deps, item.id)
+			c.clearDependentReadyProjectionsLocked(item.id)
 		}
 		if hadPrevious && previous.Status != "closed" && item.bead.Status == "closed" {
 			notifications = append(notifications, cacheNotification{
@@ -557,10 +568,17 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 		if item.found {
 			previous, hadPrevious := c.beads[item.id]
 			fresh := cloneBead(item.bead)
+			statusChanged := item.closed || fresh.Status == "closed"
+			if hadPrevious && previous.Status != fresh.Status {
+				statusChanged = true
+			}
 			c.beads[item.id] = fresh
 			c.deps[item.id] = depsFromBeadFields(fresh)
 			delete(c.dirty, item.id)
 			delete(c.deletedSeq, item.id)
+			if statusChanged {
+				c.clearDependentReadyProjectionsLocked(item.id)
+			}
 			eventType := "bead.updated"
 			if fresh.Status == "closed" {
 				eventType = "bead.closed"
@@ -579,6 +597,7 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 				c.beads[item.id] = b
 				delete(c.dirty, item.id)
 				delete(c.deletedSeq, item.id)
+				c.clearDependentReadyProjectionsLocked(item.id)
 				notifications = append(notifications, cacheNotification{
 					eventType: "bead.closed",
 					bead:      cloneBead(b),
@@ -762,6 +781,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 	if refreshed {
 		c.beads[issueID] = cloneBead(fresh)
 		c.deps[issueID] = cloneDeps(deps)
+		c.clearReadyProjectionLocked(issueID)
 		delete(c.dirty, issueID)
 		delete(c.deletedSeq, issueID)
 		c.markFreshLocked(time.Now())
@@ -785,6 +805,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 		if d.DependsOnID == dependsOnID {
 			cachedDeps[i].Type = depType
 			c.deps[issueID] = cachedDeps
+			c.clearReadyProjectionLocked(issueID)
 			delete(c.dirty, issueID)
 			delete(c.deletedSeq, issueID)
 			c.markFreshLocked(time.Now())
@@ -794,6 +815,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 		}
 	}
 	c.deps[issueID] = append(cachedDeps, Dep{IssueID: issueID, DependsOnID: dependsOnID, Type: depType})
+	c.clearReadyProjectionLocked(issueID)
 	delete(c.dirty, issueID)
 	delete(c.deletedSeq, issueID)
 	c.markFreshLocked(time.Now())
@@ -814,6 +836,7 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 	if refreshed {
 		c.beads[issueID] = cloneBead(fresh)
 		c.deps[issueID] = cloneDeps(deps)
+		c.clearReadyProjectionLocked(issueID)
 		delete(c.dirty, issueID)
 		delete(c.deletedSeq, issueID)
 		c.markFreshLocked(time.Now())
@@ -836,6 +859,7 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 	for i, d := range cachedDeps {
 		if d.DependsOnID == dependsOnID {
 			c.deps[issueID] = append(cachedDeps[:i], cachedDeps[i+1:]...)
+			c.clearReadyProjectionLocked(issueID)
 			delete(c.dirty, issueID)
 			delete(c.deletedSeq, issueID)
 			break
@@ -862,6 +886,7 @@ func (c *CachingStore) Delete(id string) error {
 	delete(c.beadSeq, id)
 	delete(c.localBeadAt, id)
 	c.deletedSeq[id] = seq
+	c.clearDependentReadyProjectionsLocked(id)
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 	c.mu.Unlock()
