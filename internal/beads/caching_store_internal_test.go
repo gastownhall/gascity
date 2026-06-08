@@ -3060,8 +3060,8 @@ func TestCachingStoreBdPrimeActiveUsesReadyProjectionForBD105(t *testing.T) {
 			if strings.Contains(query, " in ('bd-ready'") || strings.Contains(query, " in (\"bd-ready\"") {
 				t.Fatalf("ready projection SQL = %q, must not use per-id IN list", query)
 			}
-			if !strings.Contains(query, "status in ('open','in_progress')") {
-				t.Fatalf("ready projection SQL = %q, want active status projection", query)
+			if !strings.Contains(query, "status <> 'closed'") {
+				t.Fatalf("ready projection SQL = %q, want non-closed active projection", query)
 			}
 			return []byte(`[
 				{"id":"bd-ready","is_blocked":0},
@@ -3101,6 +3101,74 @@ func TestCachingStoreBdPrimeActiveUsesReadyProjectionForBD105(t *testing.T) {
 	}
 	if sqlCalls != 1 {
 		t.Fatalf("bd sql calls = %d, want 1", sqlCalls)
+	}
+}
+
+func TestCachingStoreBdPrimeProjectsIsBlockedForAllNonClosedBD105(t *testing.T) {
+	t.Parallel()
+
+	var sqlCalls int
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			sqlCalls++
+			query := args[1]
+			if strings.Contains(query, " in ('bd-ready'") || strings.Contains(query, " in (\"bd-ready\"") {
+				t.Fatalf("ready projection SQL = %q, must not use per-id IN list", query)
+			}
+			if strings.Contains(query, "status in ('open','in_progress')") || !strings.Contains(query, "status <> 'closed'") {
+				t.Fatalf("ready projection SQL = %q, want every non-closed row", query)
+			}
+			return []byte(`[
+				{"id":"bd-ready","is_blocked":0},
+				{"id":"bd-blocked-status","is_blocked":0},
+				{"id":"bd-deferred-status","is_blocked":1}
+			]`), nil
+		case "list":
+			return []byte(`[
+				{"id":"bd-ready","title":"ready","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}},
+				{"id":"bd-blocked-status","title":"blocked status","status":"blocked","issue_type":"task","created_at":"2026-01-01T00:00:01Z","labels":["task"],"metadata":{}},
+				{"id":"bd-deferred-status","title":"deferred status","status":"deferred","issue_type":"task","created_at":"2026-01-01T00:00:02Z","ephemeral":true,"labels":["task"],"metadata":{}}
+			]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if sqlCalls != 1 {
+		t.Fatalf("bd sql calls = %d, want 1", sqlCalls)
+	}
+	if stats := cache.Stats(); stats.ProblemCount != 0 {
+		t.Fatalf("cache problem count = %d, want 0", stats.ProblemCount)
+	}
+	blocked, err := cache.Get("bd-blocked-status")
+	if err != nil {
+		t.Fatalf("Get(blocked status): %v", err)
+	}
+	if blocked.IsBlocked == nil || *blocked.IsBlocked {
+		t.Fatalf("blocked-status IsBlocked = %v, want false projection", blocked.IsBlocked)
+	}
+	deferred, err := cache.Get("bd-deferred-status")
+	if err != nil {
+		t.Fatalf("Get(deferred status): %v", err)
+	}
+	if deferred.IsBlocked == nil || !*deferred.IsBlocked {
+		t.Fatalf("deferred-status IsBlocked = %v, want true projection", deferred.IsBlocked)
 	}
 }
 

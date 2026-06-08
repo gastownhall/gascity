@@ -346,8 +346,8 @@ func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
 	return seq
 }
 
-// PrimeActive loads all non-closed beads (open + in_progress) across both
-// persistent issues and ephemeral wisps into the cache. These are fast indexed
+// PrimeActive loads the common active bead statuses (open + in_progress) across
+// both persistent issues and ephemeral wisps into the cache. These are fast indexed
 // queries that populate enough data for
 // startup paths without waiting for a full scan. The cache enters
 // cachePartial state: filtered active queries and Get hit cache for primed
