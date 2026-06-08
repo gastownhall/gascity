@@ -228,6 +228,9 @@ func TestMain(m *testing.M) {
 	}
 
 	_ = os.RemoveAll(tmpDir)
+	if tmuxSocketParent != "" {
+		_ = os.RemoveAll(tmuxSocketParent)
+	}
 	os.Exit(code)
 }
 

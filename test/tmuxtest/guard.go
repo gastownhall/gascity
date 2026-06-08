@@ -101,7 +101,7 @@ func NewGuardWithSocket(t testing.TB, socketName string) *Guard {
 	return g
 }
 
-// CityName returns the unique city name (e.g., "gctest-a-1-b-2-c-3-d-4").
+// CityName returns the unique city name (e.g., "gctest-<8hex>").
 func (g *Guard) CityName() string {
 	return g.cityName
 }
