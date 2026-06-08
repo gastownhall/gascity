@@ -96,7 +96,7 @@ retryable infrastructure issue occurs, close with `gc.outcome=fail`,
 `gc.failure_class=transient`, and a stable `gc.failure_reason`. For
 non-retryable input or contract failures, use `gc.failure_class=hard`.
 """
-metadata = { "gc.run_target" = "{{lane_one_target}}", "gc.provider" = "{{lane_one_provider}}", "gc.model" = "{{lane_one_model}}", "gc.review_quorum_lane" = "{{lane_one_id}}", "gc.reviewer_model" = "{{lane_one_model}}", "gc.output_json_schema" = "review-quorum.lane.v1", "gc.output_json_required" = "true" }
+metadata = { "gc.run_target" = "{{lane_one_target}}", "gc.provider" = "{{lane_one_provider}}", "opt_model" = "{{lane_one_model}}", "gc.review_quorum_lane" = "{{lane_one_id}}", "gc.reviewer_model" = "{{lane_one_model}}", "gc.output_json_schema" = "review-quorum.lane.v1", "gc.output_json_required" = "true" }
 
 [steps.retry]
 max_attempts = 3
@@ -142,7 +142,7 @@ retryable infrastructure issue occurs, close with `gc.outcome=fail`,
 `gc.failure_class=transient`, and a stable `gc.failure_reason`. For
 non-retryable input or contract failures, use `gc.failure_class=hard`.
 """
-metadata = { "gc.run_target" = "{{lane_two_target}}", "gc.provider" = "{{lane_two_provider}}", "gc.model" = "{{lane_two_model}}", "gc.review_quorum_lane" = "{{lane_two_id}}", "gc.reviewer_model" = "{{lane_two_model}}", "gc.output_json_schema" = "review-quorum.lane.v1", "gc.output_json_required" = "true" }
+metadata = { "gc.run_target" = "{{lane_two_target}}", "gc.provider" = "{{lane_two_provider}}", "opt_model" = "{{lane_two_model}}", "gc.review_quorum_lane" = "{{lane_two_id}}", "gc.reviewer_model" = "{{lane_two_model}}", "gc.output_json_schema" = "review-quorum.lane.v1", "gc.output_json_required" = "true" }
 
 [steps.retry]
 max_attempts = 3

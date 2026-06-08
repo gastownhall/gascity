@@ -1277,8 +1277,8 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 		if got := attempt.Metadata["gc.provider"]; !strings.HasPrefix(got, "{{lane_") {
 			t.Fatalf("%s attempt gc.provider = %q, want lane provider placeholder", stepID, got)
 		}
-		if got := attempt.Metadata["gc.model"]; !strings.HasPrefix(got, "{{lane_") {
-			t.Fatalf("%s attempt gc.model = %q, want lane model placeholder", stepID, got)
+		if got := attempt.Metadata["opt_model"]; !strings.HasPrefix(got, "{{lane_") {
+			t.Fatalf("%s attempt opt_model = %q, want lane model placeholder", stepID, got)
 		}
 		if !strings.Contains(attempt.Description, "{{base_ref}}") {
 			t.Fatalf("%s attempt description missing base_ref prompt placeholder", stepID)
