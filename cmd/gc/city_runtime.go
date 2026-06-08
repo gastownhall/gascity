@@ -86,6 +86,7 @@ type CityRuntime struct {
 	orderSweepWatchdogLast             time.Time
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
+	wispIndexMigrationApplied          bool
 
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
@@ -1242,6 +1243,10 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 		return
 	}
 	now := time.Now()
+	if !cr.wispIndexMigrationApplied {
+		cr.wispIndexMigrationApplied = true
+		cr.applyWispQueryIndexes(ctx)
+	}
 	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, now)
 	cr.runOrderTrackingSweepWatchdog(now)
 	cr.runOrderTrackingRetentionWatchdog(now)
