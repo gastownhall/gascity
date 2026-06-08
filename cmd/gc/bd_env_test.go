@@ -407,6 +407,96 @@ func TestRecoverManagedBDCommandDisablesCLIRemoteSync(t *testing.T) {
 	}
 }
 
+// The auto-backup opt-out tests mirror the CLI-remote-sync opt-out tests
+// above. They guard against recurrence of the 2026-06-08 town-wide Dolt
+// wedge (ga-0eq), whose root cause was bd's PersistentPostRun auto-backup
+// (the hardcoded "backup_export" Dolt remote) stuck-looping and saturating
+// the commit path. gc-managed bd invocations must force BD_BACKUP_ENABLED
+// off at every env-projection site, overriding any ambient/config value so
+// a fresh or drifted rig scope cannot re-enable it.
+
+func TestBdRuntimeEnvDisablesAutoBackup(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BEADS_BACKUP_ENABLED", "true")
+
+	env := mustBdRuntimeEnv(t, t.TempDir())
+	if got := env["BD_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BD_BACKUP_ENABLED = %q, want false", got)
+	}
+	if got := env["BEADS_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BEADS_BACKUP_ENABLED = %q, want false", got)
+	}
+}
+
+func TestCityRuntimeProcessEnvDisablesAutoBackup(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BEADS_BACKUP_ENABLED", "true")
+
+	values := envEntriesMap(mustCityRuntimeProcessEnv(t, t.TempDir()))
+	if got := values["BD_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BD_BACKUP_ENABLED = %q, want false", got)
+	}
+	if got := values["BEADS_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BEADS_BACKUP_ENABLED = %q, want false", got)
+	}
+}
+
+func TestSessionBackendEnvDisablesAutoBackup(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BEADS_BACKUP_ENABLED", "true")
+
+	env := mustSessionBackendEnv(t, t.TempDir(), "", nil)
+	if got := env["BD_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BD_BACKUP_ENABLED = %q, want false", got)
+	}
+	if got := env["BEADS_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BEADS_BACKUP_ENABLED = %q, want false", got)
+	}
+}
+
+func TestRecoverManagedBDCommandDisablesAutoBackup(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BEADS_BACKUP_ENABLED", "true")
+
+	cityPath := t.TempDir()
+	envFile := filepath.Join(cityPath, "recover-env.txt")
+	scriptPath := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"printf 'BD_BACKUP_ENABLED=%s\\n' \"$BD_BACKUP_ENABLED\" > \"" + envFile + "\"\n" +
+		"printf 'BEADS_BACKUP_ENABLED=%s\\n' \"$BEADS_BACKUP_ENABLED\" >> \"" + envFile + "\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recoverManagedBDCommand(cityPath); err != nil {
+		t.Fatalf("recoverManagedBDCommand() error = %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	if got := values["BD_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BD_BACKUP_ENABLED = %q, want false", got)
+	}
+	if got := values["BEADS_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BEADS_BACKUP_ENABLED = %q, want false", got)
+	}
+}
+
 func TestBdRuntimeEnvExternalHostSkipsLocalState(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT_HOST", "remote.example.com")
@@ -4952,6 +5042,11 @@ func TestProjectedKeysCoverage(t *testing.T) {
 	for _, key := range bdCLIRemoteSyncOptOutEnvKeys {
 		if !projectedKeyStripped(key) {
 			t.Errorf("bdCLIRemoteSyncOptOutEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
+		}
+	}
+	for _, key := range bdAutoBackupOptOutEnvKeys {
+		if !projectedKeyStripped(key) {
+			t.Errorf("bdAutoBackupOptOutEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
 		}
 	}
 }

@@ -485,6 +485,12 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	// datasets. BD_EXPORT_AUTO env-var suppression only covers gc's own calls,
 	// so bake it into the on-disk config too.
 	changed = setBool(root, "export.auto", false) || changed
+	// Managed scopes back up through mol-dog-backup; bd's PersistentPostRun
+	// auto-backup (the "backup_export" Dolt remote) is redundant and, when its
+	// remote state breaks, stuck-loops and saturates the commit path — the
+	// root cause of the 2026-06-08 town-wide wedge (ga-0eq). BD_BACKUP_ENABLED
+	// env-var suppression only covers gc's own calls, so bake it in too.
+	changed = setBool(root, "backup.enabled", false) || changed
 	if state.EndpointOrigin != "" {
 		changed = setString(root, "gc.endpoint_origin", string(state.EndpointOrigin)) || changed
 	}
@@ -610,6 +616,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	replacements := map[string]string{
 		"dolt.auto-start": "dolt.auto-start: false",
 		"export.auto":     "export.auto: false",
+		"backup.enabled":  "backup.enabled: false",
 	}
 	if prefix != "" {
 		replacements["issue_prefix"] = "issue_prefix: " + prefix
@@ -695,6 +702,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		"issue-prefix",
 		"dolt.auto-start",
 		"export.auto",
+		"backup.enabled",
 		"gc.endpoint_origin",
 		"gc.endpoint_status",
 		"dolt.host",
