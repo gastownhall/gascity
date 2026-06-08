@@ -3925,6 +3925,7 @@ export interface components {
             /** Format: int64 */
             SchemaVersion: number;
             SessionID: string;
+            SessionName: string;
             Status: components["schemas"]["BindingStatus"];
         };
         SessionCreateBody: {

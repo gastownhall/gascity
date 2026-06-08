@@ -2528,6 +2528,7 @@ export type SessionBindingRecord = {
     };
     SchemaVersion: number;
     SessionID: string;
+    SessionName: string;
     Status: BindingStatus;
 };
 

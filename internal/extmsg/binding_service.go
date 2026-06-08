@@ -94,6 +94,9 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 	if sessionID == "" {
 		return SessionBindingRecord{}, fmt.Errorf("%w: session_id required", ErrInvalidInput)
 	}
+	// Capture the target's stable session name so the binding survives respawn.
+	// Best-effort: empty when the selector resolves to no session bead.
+	sessionName := sessionNameForSelector(s.store, sessionID)
 	now := zeroNow(input.Now)
 
 	var out SessionBindingRecord
@@ -112,6 +115,14 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 		if active != nil {
 			if active.SessionID != sessionID {
 				return fmt.Errorf("%w: conversation already bound to %s", ErrBindingConflict, active.SessionID)
+			}
+			if active.SessionName == "" && sessionName != "" {
+				if err := s.store.Update(active.ID, beads.UpdateOpts{
+					Labels:   []string{bindingSessionNameLabel(sessionName)},
+					Metadata: map[string]string{"session_name": sessionName},
+				}); err != nil {
+					return fmt.Errorf("backfill session name on binding %s: %w", active.ID, err)
+				}
 			}
 			if err := s.updateBindingMetadata(*active, input.Metadata, input.ExpiresAt, now); err != nil {
 				return err
@@ -136,10 +147,14 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 			return nil
 		}
 		nextGeneration := nextBindingGeneration(history)
+		labels := []string{"gc:extmsg-binding", labelBindingBase, bindingConversationLabel(ref), bindingSessionLabel(sessionID)}
+		if sessionName != "" {
+			labels = append(labels, bindingSessionNameLabel(sessionName))
+		}
 		b, err := s.store.Create(beads.Bead{
 			Title:  conversationTitle(ref),
 			Type:   "task",
-			Labels: []string{"gc:extmsg-binding", labelBindingBase, bindingConversationLabel(ref), bindingSessionLabel(sessionID)},
+			Labels: labels,
 			Metadata: encodeMetadataFields(input.Metadata, map[string]string{
 				"schema_version":         strconv.Itoa(schemaVersion),
 				"scope_id":               ref.ScopeID,
@@ -149,6 +164,7 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 				"parent_conversation_id": ref.ParentConversationID,
 				"conversation_kind":      string(ref.Kind),
 				"session_id":             sessionID,
+				"session_name":           sessionName,
 				"binding_generation":     strconv.FormatInt(nextGeneration, 10),
 				"bound_at":               formatTime(now),
 				"expires_at":             formatTimePtr(input.ExpiresAt),
@@ -192,7 +208,28 @@ func (s *bindingService) ResolveByConversation(ctx context.Context, ref Conversa
 	if err != nil {
 		return nil, err
 	}
-	return resolveActiveBinding(ctx, s.locks, s.store, s.delivery, s.transcript, ref, timeNow())
+	record, err := resolveActiveBinding(ctx, s.locks, s.store, s.delivery, s.transcript, ref, timeNow())
+	if err != nil || record == nil {
+		return record, err
+	}
+	overlayLiveSession(s.store, record)
+	return record, nil
+}
+
+// overlayLiveSession re-points a binding record at its session's current live
+// bead when the stored session_id has gone stale across a respawn. It mutates
+// only the in-memory copy — persistent healing is the binding reaper's job —
+// and is a no-op when the binding has no recorded session name or the name has
+// no live owner (a genuinely dead session, which the reaper clears).
+func overlayLiveSession(store beads.Store, record *SessionBindingRecord) {
+	if record.SessionName == "" {
+		return
+	}
+	liveID, err := resolveLiveSessionID(store, record.SessionName)
+	if err != nil || liveID == "" {
+		return
+	}
+	record.SessionID = liveID
 }
 
 func (s *bindingService) ListBySession(ctx context.Context, sessionID string) ([]SessionBindingRecord, error) {
@@ -752,6 +789,7 @@ func decodeBindingBead(b beads.Bead) (SessionBindingRecord, error) {
 		SchemaVersion:     parseInt(b.Metadata, "schema_version"),
 		Conversation:      ref,
 		SessionID:         strings.TrimSpace(b.Metadata["session_id"]),
+		SessionName:       strings.TrimSpace(b.Metadata["session_name"]),
 		Status:            recordStatus(b),
 		BoundAt:           boundAt,
 		ExpiresAt:         expiresAt,

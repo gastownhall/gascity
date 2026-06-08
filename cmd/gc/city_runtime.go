@@ -1156,6 +1156,11 @@ func (cr *CityRuntime) tick(
 	phaseStart = time.Now()
 	sessionBeads = cr.loadSessionBeadSnapshot()
 	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_sync", phaseStart, traceSessionSnapshotFields(sessionBeads))
+	// Re-point external-message bindings at respawned sessions (and clear
+	// bindings whose session is gone) now that replacement beads are visible.
+	phaseStart = time.Now()
+	reapStaleExtmsgBindings(ctx, cr.cityBeadStore(), time.Now(), cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_bindings", phaseStart, nil)
 	phaseStart = time.Now()
 	result = refreshDesiredStateWithSessionBeads(
 		result,

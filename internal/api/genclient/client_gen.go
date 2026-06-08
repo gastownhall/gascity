@@ -2523,6 +2523,7 @@ type SessionBindingRecord struct {
 	Metadata          map[string]string `json:"Metadata"`
 	SchemaVersion     int64             `json:"SchemaVersion"`
 	SessionID         string            `json:"SessionID"`
+	SessionName       string            `json:"SessionName"`
 
 	// Status Lifecycle state of a session binding.
 	Status BindingStatus `json:"Status"`

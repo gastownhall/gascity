@@ -19,6 +19,7 @@ const (
 
 	labelBindingConversationPrefix = "extmsg:binding:conv:v1:"
 	labelBindingSessionPrefix      = "extmsg:binding:session:v1:"
+	labelBindingSessionNamePrefix  = "extmsg:binding:sessionname:v1:"
 	labelDeliveryRoutePrefix       = "extmsg:delivery:route:v1:"
 	labelDeliverySessionPrefix     = "extmsg:delivery:session:v1:"
 	labelGroupRootPrefix           = "extmsg:group:root:v1:"
@@ -47,6 +48,14 @@ func bindingConversationLabel(ref ConversationRef) string {
 
 func bindingSessionLabel(sessionID string) string {
 	return labelBindingSessionPrefix + strings.TrimSpace(sessionID)
+}
+
+// bindingSessionNameLabel labels a binding by the stable session name its
+// target session was created under. Unlike bindingSessionLabel (which keys on
+// the volatile session bead ID), this label survives respawn, so the reaper
+// can find every binding owned by a name even after the original bead closes.
+func bindingSessionNameLabel(sessionName string) string {
+	return labelBindingSessionNamePrefix + strings.TrimSpace(sessionName)
 }
 
 func deliveryRouteLabel(ref ConversationRef, sessionID string) string {

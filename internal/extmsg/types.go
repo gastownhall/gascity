@@ -97,11 +97,18 @@ const (
 )
 
 // SessionBindingRecord links a conversation to a session.
+//
+// SessionID is the session bead ID this binding currently resolves to. It is
+// volatile: a session that crashes and respawns under the same name gets a
+// fresh bead ID. SessionName is the stable identity the binding was created
+// under; it survives respawn and lets ResolveByConversation and the binding
+// reaper re-point the binding at the session's current live bead.
 type SessionBindingRecord struct {
 	ID                string
 	SchemaVersion     int
 	Conversation      ConversationRef
 	SessionID         string
+	SessionName       string
 	Status            BindingStatus
 	BoundAt           time.Time
 	ExpiresAt         *time.Time
