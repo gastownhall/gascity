@@ -223,6 +223,9 @@ func (p *Provider) ensureRunning() {
 //
 // Exit code 2 is treated as success (unknown operation — forward compatible).
 // Any other non-zero exit code returns an error wrapping stderr.
+//
+// Stdin is always explicitly set so the script never inherits the caller's
+// stdin (which would break shell loops over gc mail archive / delete).
 func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 	defer cancel()
@@ -233,10 +236,7 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-
-	if stdinData != nil {
-		cmd.Stdin = bytes.NewReader(stdinData)
-	}
+	cmd.Stdin = bytes.NewReader(stdinData) // nil → empty reader → script reads EOF
 
 	err := cmd.Run()
 	if err != nil {
