@@ -4571,7 +4571,12 @@ func TestCityRuntimeReloadKeepsRegisteredAliasForEffectiveIdentity(t *testing.T)
 	}
 }
 
-func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
+// TestCityRuntimeManualHardReloadRepliesBeforeDispatch pins #3206: a manual
+// hard reload's reply is sent BEFORE dispatchOrders and the session-reconcile
+// phases, so reload-reply latency is independent of order count. (Soft
+// Applied/NoChange reloads still reply after applySoftReloadAcceptance — see
+// TestCityRuntimeSoftReloadAcceptsDriftForAppliedAndNoChange.)
+func TestCityRuntimeManualHardReloadRepliesBeforeDispatch(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
@@ -4583,6 +4588,16 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 	dirty.Store(true)
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
+
+	// recordingOrderDispatcher is a pure in-process fake (no order subprocesses),
+	// so it carries none of the tempdir-cleanup races the real dispatcher would.
+	od := &recordingOrderDispatcher{
+		onDispatch: func(context.Context, string, time.Time) {
+			if len(doneCh) == 0 {
+				t.Error("dispatchOrders ran before the manual hard-reload reply was sent (#3206)")
+			}
+		},
+	}
 	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:    cityPath,
 		CityName:    "test-city",
@@ -4592,10 +4607,8 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 		Cfg:         cfg,
 		SP:          sp,
 		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
-			select {
-			case reply := <-doneCh:
-				t.Fatalf("manual reload replied before desired-state rebuild: %+v", reply)
-			default:
+			if len(doneCh) == 0 {
+				t.Error("desired-state rebuild ran before the manual hard-reload reply was sent (#3206)")
 			}
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
@@ -4604,22 +4617,23 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: io.Discard,
 	})
-	// This test asserts reload reply timing only; order subprocesses add
-	// unrelated tempdir cleanup races after the tick has completed.
-	cr.od = nil
-	cr.activeReload = &reloadRequest{doneCh: doneCh}
+	cr.od = od
+	cr.activeReload = &reloadRequest{doneCh: doneCh} // hard reload (soft=false)
 	lastProviderName := "fake"
 	var prevPoolRunning map[string]bool
 
 	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
 
+	if !od.called.Load() {
+		t.Fatal("order dispatcher was not called")
+	}
 	select {
 	case reply := <-doneCh:
 		if reply.Outcome != reloadOutcomeNoChange {
 			t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeNoChange)
 		}
 	default:
-		t.Fatal("manual reload did not reply after tick completion")
+		t.Fatal("manual reload did not reply")
 	}
 	if cr.activeReload != nil {
 		t.Fatal("activeReload was not cleared")

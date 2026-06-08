@@ -558,10 +558,12 @@ func TestCityRuntimeManualReloadBypassesFSPressureSkipUntilDemandRefresh(t *test
 		SP:          sp,
 		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
 			buildCalls.Add(1)
-			select {
-			case reply := <-doneCh:
-				t.Fatalf("manual reload replied before desired-state rebuild under FS pressure: %+v", reply)
-			default:
+			// #3206: a manual hard reload replies before the desired-state
+			// rebuild — reply latency is independent of the reconcile phases.
+			// The FS-pressure bypass itself (the rebuild still runs) is asserted
+			// by buildCalls==1 + the absence of a skip event below.
+			if len(doneCh) == 0 {
+				t.Error("manual hard reload reply was not sent before the desired-state rebuild (#3206)")
 			}
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
