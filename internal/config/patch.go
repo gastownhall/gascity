@@ -51,6 +51,10 @@ type AgentPatch struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Args overrides the provider's default arguments. Leave unset to keep
+	// the pack-defined args; set to an empty list to clear them; set to a
+	// populated list to replace them entirely (full replace, not append).
+	Args *[]string `toml:"args,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
 	// Lifecycle overrides the runtime lifecycle ("one_shot" or empty).
@@ -446,6 +450,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.Provider != nil {
 		a.Provider = *p.Provider
+	}
+	if p.Args != nil {
+		a.Args = append([]string(nil), (*p.Args)...)
 	}
 	if p.StartCommand != nil {
 		a.StartCommand = *p.StartCommand

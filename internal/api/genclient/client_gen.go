@@ -390,6 +390,7 @@ type AgentOutputResponse struct {
 // AgentPatch defines model for AgentPatch.
 type AgentPatch struct {
 	AppendFragments         *[]string         `json:"AppendFragments"`
+	Args                    *[]string         `json:"Args"`
 	Attach                  *bool             `json:"Attach"`
 	DefaultSlingFormula     *string           `json:"DefaultSlingFormula"`
 	DependsOn               *[]string         `json:"DependsOn"`

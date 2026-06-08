@@ -159,6 +159,15 @@
               "null"
             ]
           },
+          "Args": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "Attach": {
             "type": [
               "boolean",
@@ -497,6 +506,7 @@
           "PromptTemplate",
           "Session",
           "Provider",
+          "Args",
           "StartCommand",
           "Lifecycle",
           "Nudge",

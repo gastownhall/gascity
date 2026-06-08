@@ -2065,6 +2065,7 @@ export interface components {
         };
         AgentPatch: {
             AppendFragments: string[] | null;
+            Args: string[] | null;
             Attach: boolean | null;
             DefaultSlingFormula: string | null;
             DependsOn: string[] | null;

@@ -156,6 +156,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
 | `lifecycle` | string |  |  | Lifecycle overrides the runtime lifecycle ("one_shot" or empty). Enum: `one_shot` |
 | `nudge` | string |  |  | Nudge overrides the nudge text. |
@@ -211,6 +212,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp" or "tmux"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
 | `lifecycle` | string |  |  | Lifecycle overrides the runtime lifecycle ("one_shot" or empty). Enum: `one_shot` |
 | `nudge` | string |  |  | Nudge overrides the nudge text. |

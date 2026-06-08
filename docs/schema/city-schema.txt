@@ -460,6 +460,13 @@
           "type": "string",
           "description": "Provider overrides the provider name."
         },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Args overrides the provider's default arguments. Leave unset to keep\nthe pack-defined args; set to an empty list to clear them; set to a\npopulated list to replace them entirely (full replace, not append)."
+        },
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the start command."
@@ -729,6 +736,13 @@
         "provider": {
           "type": "string",
           "description": "Provider overrides the provider name."
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Args overrides the provider's default arguments. Leave unset to keep\nthe pack-defined args; set to an empty list to clear them; set to a\npopulated list to replace them entirely (full replace, not append)."
         },
         "start_command": {
           "type": "string",
