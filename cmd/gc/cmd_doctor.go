@@ -287,6 +287,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
+	// Host-level fork-rate watch: surfaces the per-command data-plane fork storm
+	// (gc -> bd.real -> dolt) that operators routinely misread as CPU saturation.
+	// Advisory + read-only (/proc/stat); no config needed.
+	register(newForkRateCheck())
 	if cfgErr == nil && doctorWorkspaceHasPostgresScope(cityPath, cfg) {
 		register(doctor.NewPostgresAuthCheck(cityPath, cfg))
 	}
