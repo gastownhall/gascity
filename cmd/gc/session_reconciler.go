@@ -219,9 +219,12 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// closes it on a subsequent tick. Poke the controller so finalize +
 		// pool respawn runs on the next event-driven tick instead of waiting up
 		// to a full patrol interval (ga-ryhnhd). Mirrors the drain-ack CLI poke.
-		if perr := drainAckAsyncStopPokeController(cityPath); perr != nil {
-			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: poke failed: %v\n", name, perr) //nolint:errcheck
-		}
+		// Poke is best-effort: a failure is not logged because the goroutine may
+		// outlive its reconcile invocation and write to stderr concurrently with
+		// the caller's subsequent writes on the same writer (data race on
+		// non-goroutine-safe buffers). The controller reconciles on the next
+		// patrol tick regardless.
+		_ = drainAckAsyncStopPokeController(cityPath)
 	}()
 }
 
