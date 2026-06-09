@@ -27,6 +27,9 @@ func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*confi
 }
 
 func cityConfigIncludesWithBuiltinPacks(cityPath string, includes ...string) ([]string, error) {
+	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
+		return nil, err
+	}
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		return nil, fmt.Errorf("materializing builtin packs: %w", err)
 	}

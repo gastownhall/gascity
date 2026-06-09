@@ -1,8 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
@@ -16,6 +20,34 @@ func ensureLegacyNamedPacksCached(cityPath string) error {
 	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
 		if err := config.FetchPacks(quickCfg.Packs, cityPath); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func ensureBundledLockedRemoteImportsCached(cityPath string) error {
+	lock, err := readImportLockfile(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return err
+	}
+	if len(lock.Packs) == 0 {
+		return nil
+	}
+
+	sources := make([]string, 0, len(lock.Packs))
+	for source := range lock.Packs {
+		if builtinpacks.IsSource(source) {
+			sources = append(sources, source)
+		}
+	}
+	sort.Strings(sources)
+	for _, source := range sources {
+		pack := lock.Packs[source]
+		if strings.TrimSpace(pack.Commit) == "" {
+			return fmt.Errorf("lock entry %q is missing commit", source)
+		}
+		if _, err := packman.EnsureRepoInCache(source, pack.Commit); err != nil {
+			return fmt.Errorf("caching bundled import %q from packs.lock: %w", source, err)
 		}
 	}
 	return nil
