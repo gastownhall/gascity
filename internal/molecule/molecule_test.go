@@ -2888,6 +2888,71 @@ func TestBuildRecipeApplyPlan_PreserveRootTypeKeepsTaskRoot(t *testing.T) {
 	}
 }
 
+func TestBuildRecipeApplyPlanStampsFormulaHash(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name:          "mol-hash-check",
+		Description:   "Test hash stamping",
+		ContentHash:   "abc123def456",
+		FormulaSource: "/path/to/mol-hash-check.toml",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-hash-check", Title: "Root", Type: "molecule", IsRoot: true},
+			{ID: "mol-hash-check.step-a", Title: "Step A", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-hash-check.step-a", DependsOnID: "mol-hash-check", Type: "parent-child"},
+		},
+	}
+
+	plan, _, rootKey, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	if rootKey != "mol-hash-check" {
+		t.Fatalf("rootKey = %q, want mol-hash-check", rootKey)
+	}
+
+	root := nodeByKey(plan.Nodes, "mol-hash-check")
+	if root == nil {
+		t.Fatal("root node missing")
+	}
+	if got := root.Metadata["gc.formula_hash"]; got != "abc123def456" {
+		t.Errorf("gc.formula_hash = %q, want %q", got, "abc123def456")
+	}
+	if got := root.Metadata["gc.formula_source"]; got != "/path/to/mol-hash-check.toml" {
+		t.Errorf("gc.formula_source = %q, want %q", got, "/path/to/mol-hash-check.toml")
+	}
+
+	stepA := nodeByKey(plan.Nodes, "mol-hash-check.step-a")
+	if stepA == nil {
+		t.Fatal("step-a node missing")
+	}
+	if _, ok := stepA.Metadata["gc.formula_hash"]; ok {
+		t.Error("non-root node should not have gc.formula_hash")
+	}
+}
+
+func TestBuildRecipeApplyPlanNoHashWhenEmpty(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "mol-no-hash",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-no-hash", Title: "Root", Type: "molecule", IsRoot: true},
+		},
+	}
+
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+
+	root := nodeByKey(plan.Nodes, "mol-no-hash")
+	if root == nil {
+		t.Fatal("root node missing")
+	}
+	if _, ok := root.Metadata["gc.formula_hash"]; ok {
+		t.Error("gc.formula_hash should not be set when ContentHash is empty")
+	}
+}
+
 func TestInstantiateStampsFormulaHash(t *testing.T) {
 	store := beads.NewMemStore()
 	recipe := &formula.Recipe{
