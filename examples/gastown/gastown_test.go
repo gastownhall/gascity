@@ -1815,12 +1815,7 @@ func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
 		rel     string
 		formula string
 	}{
-		{"../dolt/formulas/mol-dog-backup.toml", "mol-dog-backup"},
-		{"../dolt/formulas/mol-dog-doctor.toml", "mol-dog-doctor"},
-		{"../dolt/formulas/mol-dog-phantom-db.toml", "mol-dog-phantom-db"},
-		{"../dolt/formulas/mol-dog-stale-db.toml", "mol-dog-stale-db"},
-		{"packs/maintenance/formulas/mol-dog-jsonl.toml", "mol-dog-jsonl"},
-		{"packs/maintenance/formulas/mol-dog-reaper.toml", "mol-dog-reaper"},
+		{"../bd/dolt/formulas/mol-dog-stale-db.toml", "mol-dog-stale-db"},
 		{"packs/maintenance/formulas/mol-shutdown-dance.toml", "mol-shutdown-dance"},
 		{"packs/gastown/formulas/mol-digest-generate.toml", "mol-digest-generate"},
 	}
@@ -3782,15 +3777,14 @@ func TestMaintenanceFormulasExist(t *testing.T) {
 		count++
 	}
 
-	// 3 formulas: mol-shutdown-dance + mol-dog-jsonl + mol-dog-reaper
-	if count != 3 {
-		t.Errorf("found %d formula files, want 3", count)
+	if count != 1 {
+		t.Errorf("found %d formula files, want 1", count)
 	}
 }
 
 func TestDoltHealthFormulasExist(t *testing.T) {
 	dir := exampleDir()
-	formulaDir := filepath.Join(dir, "..", "dolt", "formulas")
+	formulaDir := filepath.Join(dir, "..", "bd", "dolt", "formulas")
 
 	entries, err := os.ReadDir(formulaDir)
 	if err != nil {

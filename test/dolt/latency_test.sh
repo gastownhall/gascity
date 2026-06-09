@@ -1,5 +1,5 @@
 #!/bin/sh
-# Unit test for examples/dolt/assets/scripts/latency.sh.
+# Unit test for examples/bd/dolt/assets/scripts/latency.sh.
 #
 # Proves the fix for the whole-second latency bug in mol-dog-doctor.sh:
 # (a) now_ms has sub-second resolution, (b) the warn decision does not
@@ -8,7 +8,7 @@
 # Run: sh test/dolt/latency_test.sh
 set -u
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-LATENCY_LIB="${LATENCY_LIB:-$HERE/../../examples/dolt/assets/scripts/latency.sh}"
+LATENCY_LIB="${LATENCY_LIB:-$HERE/../../examples/bd/dolt/assets/scripts/latency.sh}"
 
 if [ ! -f "$LATENCY_LIB" ]; then
   echo "FAIL: latency helper not found at $LATENCY_LIB"

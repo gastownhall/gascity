@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # reaper — close stale wisps with closed parents/roots, purge old closed data, auto-close stale and TTL-expired issues.
 #
-# Replaces mol-dog-reaper formula. All operations are deterministic:
-# SQL queries with age thresholds, bd close/update commands, count
-# comparisons against alert thresholds.
+# Core exec order. All operations are deterministic: SQL queries with age
+# thresholds, bd close/update commands, count comparisons against alert
+# thresholds.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -18,6 +18,35 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/dolt-target.sh"
 CITY_ABS="$(cd "$CITY" 2>/dev/null && pwd -P || printf '%s\n' "$CITY")"
 CITY_BEADS_DIR="$CITY_ABS/.beads"
+
+resolve_escalate_script() {
+    local candidate
+    local pack
+    local system_packs="${GC_SYSTEM_PACKS_DIR:-$CITY/.gc/system/packs}"
+
+    if [ -n "${GC_ESCALATE_SCRIPT:-}" ]; then
+        printf '%s\n' "$GC_ESCALATE_SCRIPT"
+        return
+    fi
+    for pack in ${GC_ESCALATE_SEARCH_PACKS:-gastown maintenance bd core}; do
+        candidate="$system_packs/$pack/assets/scripts/escalate.sh"
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    printf '%s\n' "$SCRIPT_DIR/escalate.sh"
+}
+
+ESCALATE_SCRIPT="$(resolve_escalate_script)"
+
+maintenance_done() {
+    local summary="$1"
+    local target="${GC_MAINTENANCE_DONE_TARGET:-}"
+
+    [ -n "$target" ] || return 0
+    gc session nudge "$target" "MAINTENANCE_DONE: $summary" 2>/dev/null || true
+}
 
 # Configurable thresholds.
 MAX_AGE="${GC_REAPER_MAX_AGE:-24h}"
@@ -1123,8 +1152,9 @@ fi
 
 # Report.
 if [ -n "$ANOMALIES" ]; then
-    gc mail send mayor/ -s "ESCALATION: Reaper anomalies detected [MEDIUM]" \
-        -m "$ANOMALIES" 2>/dev/null || true
+    "$ESCALATE_SCRIPT" \
+        --subject "ESCALATION: Reaper anomalies detected [MEDIUM]" \
+        --message "$ANOMALIES" 2>/dev/null || true
 fi
 
 SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
@@ -1132,5 +1162,5 @@ if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi
 
-gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+maintenance_done "$SUMMARY"
 echo "reaper: $SUMMARY"

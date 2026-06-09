@@ -4291,12 +4291,17 @@ func configuredProviderOrder(providers map[string]ProviderSpec) []string {
 	return order
 }
 
+// validationAgentKey identifies the canonical route template for an agent.
+type validationAgentKey struct{ dir, binding, name string }
+
 // ValidateAgents checks agent configurations for errors. It returns an error
-// if any agent is missing required fields, has duplicate identities, or has
-// invalid pool bounds. Uniqueness is keyed on (dir, name) — the same name
-// in different dirs is allowed.
+// if any agent is missing required fields, has duplicate canonical identities,
+// or has invalid pool bounds. Uniqueness is keyed on (dir, binding, name), so
+// the same bare name may exist in the same scope when imports qualify it under
+// different bindings.
 func ValidateAgents(agents []Agent) error {
-	seen := make(map[agentKey]int, len(agents))
+	seen := make(map[validationAgentKey]int, len(agents))
+	layoutSeen := make(map[agentKey][]int, len(agents))
 	for i, a := range agents {
 		if a.Name == "" {
 			return fmt.Errorf("agent[%d]: name is required", i)
@@ -4304,7 +4309,15 @@ func ValidateAgents(agents []Agent) error {
 		if !validAgentName.MatchString(a.Name) {
 			return fmt.Errorf("agent %q: name must match [a-zA-Z0-9][a-zA-Z0-9_-]* (no spaces, slashes, or dots)", a.Name)
 		}
-		key := agentKey{dir: a.Dir, name: a.Name}
+		layoutKey := agentKey{dir: a.Dir, name: a.Name}
+		for _, priorIdx := range layoutSeen[layoutKey] {
+			if _, _, ok := orderV1V2(agents[priorIdx], a); ok {
+				return formatDuplicateAgentError(agents[priorIdx], a)
+			}
+		}
+		layoutSeen[layoutKey] = append(layoutSeen[layoutKey], i)
+
+		key := validationAgentKey{dir: a.Dir, binding: a.BindingName, name: a.Name}
 		if priorIdx, dup := seen[key]; dup {
 			return formatDuplicateAgentError(agents[priorIdx], a)
 		}

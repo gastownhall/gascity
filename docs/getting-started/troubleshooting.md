@@ -294,7 +294,7 @@ gc service restart     # restarts the launchd/systemd service
 
 ## JSONL Archive Push Failures
 
-The maintenance pack runs `jsonl-export` every 15 minutes to dump each bead
+The core pack runs `jsonl-export` every 15 minutes to dump each bead
 database to a text-diffable JSONL snapshot inside a local git repository
 (the "JSONL archive"). The archive serves as a disaster-recovery backup:
 if the live Dolt server loses data, the last-known-good bead graph can be
@@ -328,7 +328,7 @@ bead content and should not be shared across cities). Then:
 gh repo create my-city-jsonl-archive --private
 
 # Point the archive at it (run from anywhere inside your city)
-ARCHIVE="$(gc status --json | jq -r '.city_path')/.gc/runtime/packs/maintenance/jsonl-archive"
+ARCHIVE="$(gc status --json | jq -r '.city_path')/.gc/runtime/packs/core/jsonl-archive"
 git -C "$ARCHIVE" remote add origin git@github.com:<you>/my-city-jsonl-archive.git
 
 # Seed the remote with the existing local history
@@ -356,11 +356,11 @@ retaining `pending_archive_push` so deferred commits are still pushed if
 ### Reading a `JSONL push failed [HIGH]` escalation
 
 When push mode is active and `git push` fails `GC_JSONL_MAX_PUSH_FAILURES`
-times in a row (default: 3), the mayor's inbox receives an
+times in a row (default: 3), the default human escalation mailbox receives an
 `ESCALATION: JSONL push failed [HIGH]` message with a body shaped like:
 
 ```
-Order: mol-dog-jsonl
+Order: jsonl-export
 Archive: /path/to/archive
 Consecutive failures: 3 (threshold: 3)
 

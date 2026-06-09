@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # mol-dog-backup — sync Dolt databases to backup remotes and offsite storage.
 #
-# Replaces mol-dog-backup formula. All operations are deterministic:
+# Converted from the former mol-dog-backup formula. All operations are deterministic:
 # dolt backup sync per DB, rsync backup artifacts to offsite path. No LLM judgment needed.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
@@ -9,6 +9,7 @@ set -euo pipefail
 
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
+. "$PACK_DIR/assets/scripts/_notify.sh"
 
 PORT="$GC_DOLT_PORT"
 HOST="${GC_DOLT_HOST:-127.0.0.1}"
@@ -78,11 +79,11 @@ acquire_backup_lock() {
     esac
     if ! command -v flock >/dev/null 2>&1; then
         SUMMARY="backup — flock-missing"
-        gc mail send mayor/ --from controller \
-            -s "Backup dog: flock missing for backup sync [HIGH]" \
-            -m "Skipping backup sync because flock is unavailable; concurrent dolt backup sync can overload the shared sql-server." \
+        dolt_escalate \
+            "Dolt backup: flock missing for backup sync [HIGH]" \
+            "Skipping backup sync because flock is unavailable; concurrent dolt backup sync can overload the shared sql-server." \
             2>/dev/null || true
-        gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+        dolt_notify_done "$SUMMARY"
         echo "backup: $SUMMARY"
         exit 1
     fi
@@ -91,7 +92,7 @@ acquire_backup_lock() {
     exec 9>"$BACKUP_LOCK_FILE"
     if ! flock -w "$BACKUP_LOCK_WAIT_SECONDS" 9; then
         SUMMARY="backup — skipped: already running"
-        gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+        dolt_notify_done "$SUMMARY"
         echo "backup: $SUMMARY"
         exit 0
     fi
@@ -101,12 +102,12 @@ acquire_backup_lock() {
 
 DOLT_VERSION="$(dolt version 2>/dev/null | awk 'NR == 1 {print $NF}' || true)"
 if ! dolt_version_at_least "$DOLT_VERSION" "$MIN_DOLT_BACKUP_VERSION"; then
-    gc mail send mayor/ --from controller \
-        -s "Backup dog: dolt-too-old for backup sync [HIGH]" \
-        -m "Skipping backup sync: dolt version ${DOLT_VERSION:-unknown} is below required ${MIN_DOLT_BACKUP_VERSION}. Gas City requires this managed Dolt floor before backup sync." \
+    dolt_escalate \
+        "Dolt backup: dolt-too-old for backup sync [HIGH]" \
+        "Skipping backup sync: dolt version ${DOLT_VERSION:-unknown} is below required ${MIN_DOLT_BACKUP_VERSION}. Gas City requires this managed Dolt floor before backup sync." \
         2>/dev/null || true
     SUMMARY="backup — dolt-too-old: ${DOLT_VERSION:-unknown}, required: $MIN_DOLT_BACKUP_VERSION"
-    gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+    dolt_notify_done "$SUMMARY"
     echo "backup: $SUMMARY"
     exit 1
 fi
@@ -178,12 +179,12 @@ fi
 # --- Step 4: Report ---
 
 if [ "$FAILED_COUNT" -gt 0 ]; then
-    gc mail send mayor/ --from controller \
-        -s "Backup dog: $FAILED_COUNT/$TOTAL databases failed to sync [MEDIUM]" \
-        -m "Failed databases:$FAILED_DBS" \
+    dolt_escalate \
+        "Dolt backup: $FAILED_COUNT/$TOTAL databases failed to sync [MEDIUM]" \
+        "Failed databases:$FAILED_DBS" \
         2>/dev/null || true
 fi
 
 SUMMARY="backup — synced: $SYNCED/$TOTAL, offsite: $OFFSITE_STATUS"
-gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+dolt_notify_done "$SUMMARY"
 echo "backup: $SUMMARY"

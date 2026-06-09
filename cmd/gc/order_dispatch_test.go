@@ -1142,9 +1142,9 @@ schema = 2
 name = "dog"
 scope = "city"
 `)
-	doltDir, err := filepath.Abs(filepath.Join("..", "..", "examples", "dolt"))
+	doltDir, err := filepath.Abs(filepath.Join("..", "..", "examples", "bd", "dolt"))
 	if err != nil {
-		t.Fatalf("Abs(examples/dolt): %v", err)
+		t.Fatalf("Abs(examples/bd/dolt): %v", err)
 	}
 	writeFile(t, filepath.Join(cityDir, "pack.toml"), `
 [pack]
@@ -1172,9 +1172,7 @@ source = "`+doltDir+`"
 		"mol-dog-backup":     "$PACK_DIR/assets/scripts/mol-dog-backup.sh",
 		"mol-dog-compactor":  "gc dolt compact",
 		"mol-dog-doctor":     "$PACK_DIR/assets/scripts/mol-dog-doctor.sh",
-		"mol-dog-jsonl":      "$PACK_DIR/assets/scripts/jsonl-export.sh",
 		"mol-dog-phantom-db": "$PACK_DIR/assets/scripts/mol-dog-phantom-db.sh",
-		"mol-dog-reaper":     "$PACK_DIR/assets/scripts/reaper.sh",
 	}
 	gotExecDogOrders := map[string]bool{}
 	const wantFormulaDogOrders = 1
@@ -1221,8 +1219,8 @@ source = "`+doltDir+`"
 		if err != nil {
 			t.Fatalf("qualifyOrderPool(%s): %v", a.Name, err)
 		}
-		if got != "dog" {
-			t.Fatalf("qualifyOrderPool(%s) = %q, want local maintenance dog", a.Name, got)
+		if got != "dolt.dog" {
+			t.Fatalf("qualifyOrderPool(%s) = %q, want Dolt-local dog", a.Name, got)
 		}
 	}
 	if gotFormulaDogOrders != wantFormulaDogOrders {
@@ -5445,6 +5443,19 @@ func TestQualifyPool(t *testing.T) {
 		{Name: "dog", BindingName: "maintenance", SourceDir: "/city/packs/maintenance"},
 		{Name: "dog", BindingName: "gastown", SourceDir: "/city/packs/gastown"},
 	}}
+	materializedPackCfg := &config.City{Agents: []config.Agent{
+		{Name: "dog"},
+		{Name: "dog", BindingName: "dolt", PackName: "dolt", SourceDir: "/city/.gc/system/packs/bd/dolt"},
+	}}
+	transitiveNestedPackCfg := &config.City{Agents: []config.Agent{
+		{Name: "dog", BindingName: "wrapper", PackName: "gastown", SourceDir: "/repo/examples/gastown/packs/gastown"},
+		{Name: "dog", BindingName: "dolt", PackName: "dolt", SourceDir: "/city/.gc/system/packs/bd/dolt"},
+	}}
+	transitiveClosureCfg := &config.City{Agents: []config.Agent{
+		{Name: "mayor", BindingName: "wrapper", PackName: "gastown", SourceDir: "/repo/examples/gastown/packs/gastown"},
+		{Name: "dog", BindingName: "wrapper", PackName: "maintenance", SourceDir: "/repo/examples/gastown/packs/maintenance"},
+		{Name: "dog", BindingName: "dolt", PackName: "dolt", SourceDir: "/city/.gc/system/packs/bd/dolt"},
+	}}
 	rigWithCityFallbackCfg := &config.City{Agents: []config.Agent{
 		{Name: "dog", BindingName: "maintenance"},
 	}}
@@ -5480,6 +5491,9 @@ func TestQualifyPool(t *testing.T) {
 		{"no hint stays ambiguous", importedOnlyCollisionCfg, "dog", "", "", "", `ambiguous pool "dog" for city order: matches maintenance.dog, gastown.dog`},
 		{"source hint beats city shadow", importedShadowCfg, "dog", "", "/city/packs/maintenance", "maintenance.dog", ""},
 		{"source hint beats sibling import collision", importedShadowCfg, "dog", "", "/city/packs/gastown", "gastown.dog", ""},
+		{"source checkout hint matches materialized same pack", materializedPackCfg, "dog", "", "/repo/examples/bd/dolt", "dolt.dog", ""},
+		{"source hint ignores unrelated nested materialized pack", transitiveNestedPackCfg, "dog", "", "/repo/examples/gastown/packs/gastown", "wrapper.dog", ""},
+		{"source hint carries transitive import binding context", transitiveClosureCfg, "dog", "", "/repo/examples/gastown/packs/gastown", "wrapper.dog", ""},
 
 		// Rig-order binding lookup.
 		{"rig order resolves binding", rigBindingCfg, "dog", "api", "", "api/foo.dog", ""},

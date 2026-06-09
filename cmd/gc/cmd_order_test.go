@@ -1564,11 +1564,21 @@ func TestOrderRunEventFormulaLatestSeqErrorDoesNotInstantiate(t *testing.T) {
 }
 
 func TestOrderRunResolvesPackBindingForPool(t *testing.T) {
-	aa := []orders.Order{
-		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
-	}
 	cityDir := t.TempDir()
 	writeOrderRunImportFixture(t, cityDir, "maintenance")
+	formulaLayer := filepath.Join(cityDir, "packs", "maintenance", "formulas")
+	if err := os.MkdirAll(formulaLayer, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "mol-digest.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(formulaLayer, "mol-digest.toml"), string(formulaText))
+
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: formulaLayer},
+	}
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer

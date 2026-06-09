@@ -93,9 +93,9 @@ dep-update      formula  cooldown  1h              worker
 release-notes   formula  cooldown  24h             worker
 ```
 
-Your output will also include a handful of built-in `mol-*` orders that ship
-with the tutorial template (`beads-health`, `gate-sweep`, `mol-dog-jsonl`,
-`mol-dog-reaper`, `orphan-sweep`, `prune-branches`, `spawn-storm-detect`,
+Your output will also include built-in housekeeping orders that ship
+with the tutorial template (`beads-health`, `gate-sweep`, `jsonl-export`,
+`reaper`, `orphan-sweep`, `prune-branches`, `spawn-storm-detect`,
 `wisp-compact`, etc.). They're the city's housekeeping orders — you can leave
 them alone.
 

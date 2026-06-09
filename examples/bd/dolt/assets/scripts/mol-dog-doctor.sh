@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # mol-dog-doctor — probe Dolt server health and report findings.
 #
-# Replaces mol-dog-doctor formula. All checks are read-only: SQL probe,
+# Converted from the former mol-dog-doctor formula. All checks are read-only: SQL probe,
 # PROCESSLIST count, disk usage, orphan DB detection, backup artifact freshness.
 # No LLM judgment needed — runs inline in the controller.
 #
@@ -11,6 +11,7 @@ set -euo pipefail
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
 . "$PACK_DIR/assets/scripts/latency.sh"
+. "$PACK_DIR/assets/scripts/_notify.sh"
 
 PORT="$GC_DOLT_PORT"
 HOST="${GC_DOLT_HOST:-127.0.0.1}"
@@ -75,13 +76,15 @@ append_backup_stale() {
     fi
 }
 
-send_mayor_mail() {
-    local mail_err
-    if ! mail_err=$(gc mail send mayor/ --from controller "$@" 2>&1 >/dev/null); then
-        if [ -n "$mail_err" ]; then
-            echo "doctor: mail send failed: $mail_err" >&2
+send_escalation() {
+    local subject="$1"
+    local message="$2"
+    local err
+    if ! err=$(dolt_escalate "$subject" "$message" 2>&1 >/dev/null); then
+        if [ -n "$err" ]; then
+            echo "doctor: escalation failed: $err" >&2
         else
-            echo "doctor: mail send failed" >&2
+            echo "doctor: escalation failed" >&2
         fi
         return 1
     fi
@@ -91,14 +94,14 @@ send_mayor_mail() {
 
 PROBE_START_MS=$(now_ms)
 if ! dolt_sql -q "SELECT active_branch()" >/dev/null 2>&1; then
-    if send_mayor_mail \
-        -s "ESCALATION: Dolt server unreachable on port $PORT [CRITICAL]" \
-        -m "Doctor probe failed: server did not respond to active_branch() query."; then
-        gc session nudge deacon/ "DOG_DONE: doctor — server: UNREACHABLE (escalated)" 2>/dev/null || true
+    if send_escalation \
+        "ESCALATION: Dolt server unreachable on port $PORT [CRITICAL]" \
+        "Doctor probe failed: server did not respond to active_branch() query."; then
+        dolt_notify_done "doctor — server: UNREACHABLE (escalated)"
         echo "doctor: server unreachable on port $PORT (escalated)"
     else
-        gc session nudge deacon/ "DOG_DONE: doctor — server: UNREACHABLE (mail failed)" 2>/dev/null || true
-        echo "doctor: server unreachable on port $PORT (mail failed)"
+        dolt_notify_done "doctor — server: UNREACHABLE (escalation failed)"
+        echo "doctor: server unreachable on port $PORT (escalation failed)"
     fi
     exit 0
 fi
@@ -177,9 +180,9 @@ fi
 
 WARNINGS="${LATENCY_WARN}${CONN_WARN}${ORPHAN_WARN}${BACKUP_STALE}"
 if [ -n "$WARNINGS" ]; then
-    if ! send_mayor_mail \
-        -s "Dolt health advisory [MEDIUM]" \
-        -m "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
+    if ! send_escalation \
+        "Dolt health advisory [MEDIUM]" \
+        "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
 Connections: ${CONN_COUNT}/${CONN_MAX}${CONN_WARN}
 Disk: ${DISK_USAGE}
 Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
@@ -188,5 +191,5 @@ Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
 fi
 
 SUMMARY="doctor — server: ok, latency: ${LATENCY_MS}ms, conns: ${CONN_COUNT}/${CONN_MAX}, disk: ${DISK_USAGE}, orphans: ${ORPHAN_COUNT}"
-gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+dolt_notify_done "$SUMMARY"
 echo "doctor: $SUMMARY"

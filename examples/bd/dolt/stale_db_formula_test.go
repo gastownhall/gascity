@@ -11,6 +11,17 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
+func staleDBFilteredEnv(keys ...string) []string {
+	keys = append(keys,
+		"GC_ESCALATE_SCRIPT",
+		"GC_ESCALATE_SEARCH_PACKS",
+		"GC_ESCALATION_RECIPIENT",
+		"GC_SYSTEM_PACKS_DIR",
+		"GC_MAINTENANCE_DONE_TARGET",
+	)
+	return filteredEnv(keys...)
+}
+
 func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 	root := repoRoot(t)
 	f, err := formula.NewParser().ParseFile(filepath.Join(root, "formulas", "mol-dog-stale-db.toml"))
@@ -43,8 +54,8 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`gc event emit mol-dog-stale-db.escalate`,
 		`if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then`,
 		`leaving work bead open`,
-		`gc session nudge deacon "WARN: $ORPHAN_TOTAL Dolt orphan(s) seen this scan`,
-		`gc session nudge deacon "DOG_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}" || true`,
+		`maintenance_notice "MAINTENANCE_WARN: $ORPHAN_TOTAL Dolt orphan(s) seen this scan`,
+		`maintenance_notice "MAINTENANCE_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}"`,
 		`escalated=${ESCALATED}`,
 	} {
 		if !strings.Contains(desc, want) {
@@ -54,6 +65,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 	for _, bad := range []string{
 		`/tmp/dolt-cleanup`,
 		`gc nudge deacon`,
+		`gc session nudge deacon`,
 		`GC_BEAD_ID:-<work-bead>`,
 		`Dolt orphan(s) detected`,
 	} {
@@ -138,7 +150,7 @@ esac
 
 	cmd := exec.Command("bash", "-s")
 	cmd.Stdin = strings.NewReader(script)
-	cmd.Env = append(filteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
 		"GC_BEAD_ID=bead-1",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
@@ -236,7 +248,7 @@ esac
 
 	cmd := exec.Command("bash", "-s")
 	cmd.Stdin = strings.NewReader(script)
-	cmd.Env = append(filteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
 		"GC_BEAD_ID=bead-1",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
@@ -310,7 +322,7 @@ esac
 
 	cmd := exec.Command("bash", "-s")
 	cmd.Stdin = strings.NewReader(script)
-	cmd.Env = append(filteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON"),
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON"),
 		"GC_BEAD_ID=bead-1",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
@@ -388,7 +400,7 @@ esac
 
 	cmd := exec.Command("bash", "-s")
 	cmd.Stdin = strings.NewReader(script)
-	cmd.Env = append(filteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
 		"GC_BEAD_ID=bead-1",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
@@ -473,7 +485,7 @@ esac
 
 	cmd := exec.Command("bash", "-s")
 	cmd.Stdin = strings.NewReader(script)
-	cmd.Env = append(filteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
 		"GC_BEAD_ID=bead-1",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
@@ -561,7 +573,7 @@ esac
 
 	cmd := exec.Command("bash", "-s")
 	cmd.Stdin = strings.NewReader(script)
-	cmd.Env = append(filteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
 		"GC_BEAD_ID=bead-1",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
@@ -649,7 +661,7 @@ func TestStaleDBFormulaDryRunForceBlockersLeaveWorkOpenBeforeApply(t *testing.T)
 	}
 	for _, want := range []string{
 		"gc event emit mol-dog-stale-db.escalate",
-		"gc mail send mayor",
+		"gc mail send human/",
 		"gc runtime drain-ack",
 	} {
 		if !strings.Contains(log, want) {
@@ -901,7 +913,7 @@ esac
 
 	cmd := exec.Command("bash", "-s")
 	cmd.Stdin = strings.NewReader(script)
-	cmd.Env = append(filteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_SCAN_EXIT", "GC_TEST_APPLY_JSON", "GC_TEST_APPLY_EXIT", "GC_TEST_FAIL_CONTAINS"),
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_SCAN_EXIT", "GC_TEST_APPLY_JSON", "GC_TEST_APPLY_EXIT", "GC_TEST_FAIL_CONTAINS"),
 		"GC_BEAD_ID=bead-1",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,

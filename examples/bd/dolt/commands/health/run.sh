@@ -59,7 +59,7 @@ while [ $# -gt 0 ]; do
       echo "Lightweight Dolt data-plane health report for patrol cycles."
       echo ""
       echo "Flags:"
-      echo "  --json    Output as JSON (consumed by deacon patrol)"
+      echo "  --json    Output as JSON (consumed by health patrol automation)"
       exit 0
       ;;
     *) echo "gc dolt health: unknown flag: $1" >&2; exit 1 ;;
@@ -163,7 +163,7 @@ if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
     commits_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
       -q "USE \`$name\`; SELECT COUNT(*) FROM dolt_log;" 2>/dev/null || true)
     commits=$(printf '%s\n' "$commits_csv" | grep -E '^[0-9]+$' | head -1)
-    # JSON consumers (deacon patrol) require a number; use 0 on failure.
+    # JSON consumers require a number; use 0 on failure.
     case "$commits" in
       ''|*[!0-9]*) commits=0 ;;
     esac
@@ -211,7 +211,7 @@ fi
 # via city config, so a live rig DB is never listed. The previous
 # metadata-only scan flagged every live rig DB as an orphan whenever a rig's
 # metadata.json was sparse or unreachable (e.g. externally-pathed rigs) — a
-# false positive the deacon patrol could act on destructively (#3200). Reuse
+# false positive automation could act on destructively (#3200). Reuse
 # the cleanup authority; fall back to the metadata scan only when gc/jq are
 # unavailable (gc itself may be the failure this patrol is detecting).
 orphan_list=""
@@ -286,7 +286,7 @@ fi
 # Externally-managed Dolt servers (launchd- or manually-started servers
 # for unrelated apps, on their own datadir and port) also carry an
 # explicit `--config` but have NO sibling dolt.pid; they are not town
-# strays and must not be flagged, or the deacon patrol would kill a
+# strays and must not be flagged, or health patrol automation could kill a
 # healthy, unrelated server. Without these exclusions, every patrol in
 # every city flags the others (and unrelated apps) as zombies on shared
 # dev hosts. The `--config` parse happens inside the single bounded
@@ -379,8 +379,8 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
     #     recorded server died or was replaced -> still a zombie.
     #   - absent -> the process is NOT gc-managed (e.g. a launchd-managed
     #     or manually-started server for an unrelated app on its own
-    #     datadir/port) -> not a town stray; exclude it so the deacon
-    #     patrol does not kill a healthy, unrelated Dolt server.
+    #     datadir/port) -> not a town stray; exclude it so automation
+    #     does not kill a healthy, unrelated Dolt server.
     if [ -n "$config_path" ]; then
       foreign_pid_file="$(dirname "$config_path")/dolt.pid"
       if [ -f "$foreign_pid_file" ]; then
@@ -401,7 +401,7 @@ timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 if [ "$json_output" = true ]; then
   # Build JSON output. `server.reachable` reports whether the SQL
   # handshake actually succeeded (port listening AND server answering
-  # SELECT 1). Consumers (deacon patrol) should key health off
+  # SELECT 1). Consumers should key health off
   # `server.reachable`, not `server.running`, because a process can
   # hold the port while its goroutines are wedged.
   cat <<JSONEOF
@@ -449,8 +449,8 @@ JSONEOF
 JSONEOF
   # JSON mode always exits 0 when the payload is well-formed. Health
   # state is signalled in-band via `server.reachable` (and the rest of
-  # the document). Automation that parses the JSON — notably the deacon
-  # patrol formula — must not fail before stdout is parsed just because
+  # the document). Automation that parses the JSON must not fail before
+  # stdout is parsed just because
   # the server is down; that's exactly the condition the patrol is
   # supposed to detect and react to. Callers that want exit-code
   # signalling should use the human-readable form.

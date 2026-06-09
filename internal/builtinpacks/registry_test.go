@@ -22,7 +22,7 @@ func TestAllAndSourceAreDeterministic(t *testing.T) {
 	want := []string{
 		"core=internal/bootstrap/packs/core",
 		"bd=examples/bd",
-		"dolt=examples/dolt",
+		"dolt=examples/bd/dolt",
 		"maintenance=examples/gastown/packs/maintenance",
 		"gastown=examples/gastown/packs/gastown",
 	}
@@ -55,6 +55,7 @@ func TestSourceRecognitionVariants(t *testing.T) {
 		{name: "with ref", src: coreSource + "#main", want: true},
 		{name: "github tree form", src: "https://github.com/gastownhall/gascity/tree/main/internal/bootstrap/packs/core", want: true},
 		{name: "github blob form", src: "https://github.com/gastownhall/gascity/blob/main/internal/bootstrap/packs/core/pack.toml", want: true},
+		{name: "legacy dolt subpath", src: Repository + "//examples/dolt", want: true},
 		{name: "different repo", src: "https://github.com/example/gascity.git//internal/bootstrap/packs/core", want: false},
 		{name: "unknown subpath", src: Repository + "//internal/bootstrap/packs/missing", want: false},
 	}

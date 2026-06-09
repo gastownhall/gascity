@@ -15,7 +15,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/examples/bd"
-	"github.com/gastownhall/gascity/examples/dolt"
+	"github.com/gastownhall/gascity/examples/bd/dolt"
 	"github.com/gastownhall/gascity/examples/gastown/packs/gastown"
 	"github.com/gastownhall/gascity/examples/gastown/packs/maintenance"
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
@@ -53,7 +53,7 @@ func All() []Pack {
 	return []Pack{
 		{Name: "core", Subpath: "internal/bootstrap/packs/core", FS: core.PackFS},
 		{Name: "bd", Subpath: "examples/bd", FS: bd.PackFS},
-		{Name: "dolt", Subpath: "examples/dolt", FS: dolt.PackFS},
+		{Name: "dolt", Subpath: "examples/bd/dolt", FS: dolt.PackFS},
 		{Name: "maintenance", Subpath: "examples/gastown/packs/maintenance", FS: maintenance.PackFS},
 		{Name: "gastown", Subpath: "examples/gastown/packs/gastown", FS: gastown.PackFS},
 	}
@@ -106,13 +106,20 @@ type syntheticPackLayout struct {
 
 func syntheticPackLayouts() []syntheticPackLayout {
 	packs := All()
-	layouts := make([]syntheticPackLayout, 0, len(packs)+2)
+	layouts := make([]syntheticPackLayout, 0, len(packs)+3)
 	for _, pack := range packs {
 		layouts = append(layouts, syntheticPackLayout{
 			Repository: Repository,
 			Subpath:    pack.Subpath,
 			Pack:       pack,
 		})
+		for _, legacySubpath := range legacySubpathsForPack(pack.Name) {
+			layouts = append(layouts, syntheticPackLayout{
+				Repository: Repository,
+				Subpath:    legacySubpath,
+				Pack:       pack,
+			})
+		}
 		if publicSubpath, ok := publicSubpathForPack(pack.Name); ok {
 			layouts = append(layouts, syntheticPackLayout{
 				Repository: PublicRepository,
@@ -122,6 +129,15 @@ func syntheticPackLayouts() []syntheticPackLayout {
 		}
 	}
 	return layouts
+}
+
+func legacySubpathsForPack(name string) []string {
+	switch name {
+	case "dolt":
+		return []string{"examples/dolt"}
+	default:
+		return nil
+	}
 }
 
 func publicSubpathForPack(name string) (string, bool) {

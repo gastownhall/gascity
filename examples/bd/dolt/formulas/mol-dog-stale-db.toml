@@ -27,7 +27,7 @@ This is infrastructure work. You:
 1. Run a dry-run `gc dolt-cleanup --json --probe` scan.
 2. Decide: no work -> report, at/below stale-DB threshold -> apply, above threshold -> escalate.
 3. Apply with `gc dolt-cleanup --json --probe --force` only when safe.
-4. Report findings, nudge deacon if past warn threshold, exit.
+4. Report findings, send optional maintenance notices if configured, exit.
 5. Return to kennel.
 
 ## Variables
@@ -35,7 +35,7 @@ This is infrastructure work. You:
 | Variable | Source | Description |
 |----------|--------|-------------|
 | max_orphans_for_sql | formula default | Max stale dropped databases before escalating instead of forcing (default 20) |
-| warn_threshold | formula default | Orphan count that triggers a warning to deacon (default 5) |
+| warn_threshold | formula default | Orphan count that triggers a warning maintenance notice (default 5) |
 
 ## Safety
 
@@ -73,7 +73,7 @@ description = "Maximum stale dropped database count the formula auto-applies; ab
 default = "20"
 
 [vars.warn_threshold]
-description = "Orphan count that triggers a warning nudge to deacon"
+description = "Orphan count that triggers a warning maintenance notice"
 default = "5"
 
 [[steps]]
@@ -116,6 +116,44 @@ run_or_warn() {
   if ! "$@"; then
     echo "${label} failed; continuing to drain-ack" >&2
   fi
+}
+
+resolve_escalate_script() {
+  local candidate
+  local pack
+  local city_path="${GC_CITY_PATH:-${GC_CITY:-.}}"
+  local system_packs="${GC_SYSTEM_PACKS_DIR:-$city_path/.gc/system/packs}"
+  if [ -n "${GC_ESCALATE_SCRIPT:-}" ]; then
+    printf '%s\n' "$GC_ESCALATE_SCRIPT"
+    return
+  fi
+  for pack in ${GC_ESCALATE_SEARCH_PACKS:-gastown maintenance bd core}; do
+    candidate="$system_packs/$pack/assets/scripts/escalate.sh"
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  printf '%s\n' ""
+}
+
+ESCALATE_SCRIPT="$(resolve_escalate_script)"
+
+send_escalation() {
+  local subject="$1"
+  local message="$2"
+  if [ -n "$ESCALATE_SCRIPT" ] && [ -x "$ESCALATE_SCRIPT" ]; then
+    "$ESCALATE_SCRIPT" --subject "$subject" --message "$message"
+    return
+  fi
+  gc mail send "${GC_ESCALATION_RECIPIENT:-human/}" -s "$subject" -m "$message"
+}
+
+maintenance_notice() {
+  local message="$1"
+  local target="${GC_MAINTENANCE_DONE_TARGET:-}"
+  [ -n "$target" ] || return 0
+  gc session nudge "$target" "$message" || true
 }
 
 drain_ack_once() {
@@ -173,7 +211,7 @@ REAP_TOTAL="$ORPHAN_PROCS"
 
 if [ "$SCAN_ERRS" -gt 0 ] || [ "$INVALID_DROP_SKIPS" -gt 0 ] || [ "$SCAN_FORCE_BLOCKERS" -gt 0 ]; then
   ESCALATED=1
-  run_or_warn "send dry-run error escalation mail" gc mail send mayor \
+  run_or_warn "send dry-run error escalation" send_escalation \
     "ESCALATION: Dolt cleanup dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s), ${SCAN_FORCE_BLOCKERS} force blocker(s)" \
     "Dry-run report attached to work bead. Operator review required before forcing cleanup."
   run_or_warn "emit dry-run error escalation" gc event emit mol-dog-stale-db.escalate \
@@ -184,16 +222,16 @@ elif [ "$ORPHAN_TOTAL" -eq 0 ] && [ "$DISK_BYTES" -le 0 ]; then
 elif [ "$ORPHAN_DBS" -gt "{{max_orphans_for_sql}}" ]; then
   ESCALATED=1
   DONE_BYTES=$((DISK_BYTES + RSS_BYTES))
-  run_or_warn "send max-orphan escalation mail" gc mail send mayor \
+  run_or_warn "send max-orphan escalation" send_escalation \
     "ESCALATION: $ORPHAN_DBS stale Dolt databases exceed max_orphans_for_sql={{max_orphans_for_sql}}" \
     "Dry-run report attached to work bead. Operator review required before forcing cleanup."
   run_or_warn "emit max-orphan escalation" gc event emit mol-dog-stale-db.escalate \
-    --message "$ORPHAN_DBS stale databases > max_orphans_for_sql={{max_orphans_for_sql}} -> mail sent to mayor"
+    --message "$ORPHAN_DBS stale databases > max_orphans_for_sql={{max_orphans_for_sql}} -> escalation sent"
 else
   if ! gc dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"; then
     ESCALATED=1
     append_report_note "apply (--force, failed)" "$APPLY_FILE"
-    run_or_warn "send apply refusal escalation mail" gc mail send mayor \
+    run_or_warn "send apply refusal escalation" send_escalation \
       "ESCALATION: gc dolt-cleanup apply refused [HIGH]" \
       "gc dolt-cleanup --probe --force refused. Do not retry from an agent. Operator must confirm dolt is stopped (process gone AND port closed), then use the separate gc dolt cleanup --server-down-ok fallback if appropriate."
     run_or_warn "emit apply refusal escalation" gc event emit mol-dog-stale-db.escalate \
@@ -216,7 +254,7 @@ else
       APPLY_REFUSAL_MESSAGE="apply refused by max-orphan safety guard; leaving work bead open"
     fi
     append_report_note "apply (--force, refused)" "$APPLY_FILE"
-    run_or_warn "send apply refusal escalation mail" gc mail send mayor \
+    run_or_warn "send apply refusal escalation" send_escalation \
       "ESCALATION: gc dolt-cleanup apply refused [HIGH]" \
       "gc dolt-cleanup --probe --force refused or reported ${APPLY_ERRS} error(s). Do not retry from an agent. Operator must inspect the attached apply report before deciding whether any manual cleanup is appropriate."
     run_or_warn "emit apply refusal escalation" gc event emit mol-dog-stale-db.escalate \
@@ -269,10 +307,10 @@ if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
 fi
 
 if [ "$ORPHAN_TOTAL" -ge "{{warn_threshold}}" ]; then
-  gc session nudge deacon "WARN: $ORPHAN_TOTAL Dolt orphan(s) seen this scan (warn_threshold={{warn_threshold}})" || true
+  maintenance_notice "MAINTENANCE_WARN: $ORPHAN_TOTAL Dolt orphan(s) seen this scan (warn_threshold={{warn_threshold}})"
 fi
 
-gc session nudge deacon "DOG_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}" || true
+maintenance_notice "MAINTENANCE_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}"
 
 if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
   fail_open_after_drain "gc dolt-cleanup apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
@@ -284,5 +322,5 @@ exit
 ```
 
 **Exit criteria:** JSON schema validated, scan JSON attached, apply JSON
-attached when forced, stage events emitted, deacon nudged through
-`gc session nudge`, work bead closed, dog returned to kennel."""
+attached when forced, stage events emitted, optional maintenance notice sent
+when configured, work bead closed, dog returned to kennel."""

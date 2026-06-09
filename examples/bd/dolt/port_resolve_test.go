@@ -144,8 +144,8 @@ func TestRuntimeShUsesPortResolve(t *testing.T) {
 }
 
 func TestDoltTargetShUsesPortResolve(t *testing.T) {
-	root := filepath.Dir(repoRoot(t))
-	assertScriptSourcesPortResolveOnce(t, filepath.Join(root, "gastown", "packs", "maintenance", "assets", "scripts", "dolt-target.sh"))
+	root := repoRoot(t)
+	assertScriptSourcesPortResolveOnce(t, filepath.Join(root, "..", "..", "..", "internal", "bootstrap", "packs", "core", "assets", "scripts", "dolt-target.sh"))
 }
 
 type portResolveCase struct {

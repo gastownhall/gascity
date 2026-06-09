@@ -19,11 +19,7 @@ import (
 
 var rawDoltSQLCallRe = regexp.MustCompile(`(?m)(^|[^A-Za-z0-9_-])dolt(?:[ \t]+|[ \t]*\\[ \t]*\r?\n[ \t]*)+sql([ \t]|$)`)
 
-var (
-	sqlFenceRe            = regexp.MustCompile("(?s)```sql\\s*\\n(.*?)```")
-	mailTableRe           = regexp.MustCompile(`(?i)(?:FROM|UPDATE|INTO|JOIN|DELETE\s+FROM)\s+(?:\x60?[\w-]+\x60?\.)?\x60?mail\x60?\b`)
-	rawDurationIntervalRe = regexp.MustCompile(`(?i)\bINTERVAL\s+\{\{(?:max_age|purge_age|stale_issue_age)\}\}`)
-)
+var mailTableRe = regexp.MustCompile(`(?i)(?:FROM|UPDATE|INTO|JOIN|DELETE\s+FROM)\s+(?:\x60?[\w-]+\x60?\.)?\x60?mail\x60?\b`)
 
 const (
 	reaperCloseCleanupEdgeSQL   = "(d.type = 'parent-child' OR (d.type = 'tracks' AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_bead_id\"')) = COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)))"
@@ -31,6 +27,21 @@ const (
 	reaperCloseCleanupPredicate = "WISP_CLOSE_EDGE_PREDICATE="
 	reaperPurgeProtectTypes     = "WISP_PURGE_PROTECT_EDGE_TYPES="
 )
+
+func corePackDir() string {
+	return filepath.Clean(filepath.Join(exampleDir(), "..", "..", "internal", "bootstrap", "packs", "core"))
+}
+
+func coreScriptPath(name string) string {
+	return filepath.Join(corePackDir(), "assets", "scripts", name)
+}
+
+func scriptPath(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(exampleDir(), path)
+}
 
 func containsReaperCloseCleanupEdgePredicate(text string) bool {
 	if containsSQLFragment(text, reaperCloseCleanupEdgeSQL) {
@@ -86,14 +97,14 @@ func TestMaintenanceDoltScriptsUseProjectedConnectionTarget(t *testing.T) {
 	}{
 		{
 			name:   "reaper",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			script: coreScriptPath("reaper.sh"),
 			env: map[string]string{
 				"GC_REAPER_DRY_RUN": "1",
 			},
 		},
 		{
 			name:   "jsonl export",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			script: coreScriptPath("jsonl-export.sh"),
 			env: map[string]string{
 				"GC_JSONL_ARCHIVE_REPO":      "archive",
 				"GC_JSONL_MAX_PUSH_FAILURES": "99",
@@ -136,7 +147,7 @@ exit 0
 				env[key] = value
 			}
 
-			runScript(t, filepath.Join(exampleDir(), tt.script), env)
+			runScript(t, scriptPath(tt.script), env)
 
 			logData, err := os.ReadFile(doltLog)
 			if err != nil {
@@ -1983,14 +1994,14 @@ func TestMaintenanceDoltScriptsUseManagedRuntimePorts(t *testing.T) {
 	}{
 		{
 			name:   "reaper",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			script: coreScriptPath("reaper.sh"),
 			env: map[string]string{
 				"GC_REAPER_DRY_RUN": "1",
 			},
 		},
 		{
 			name:   "jsonl export",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			script: coreScriptPath("jsonl-export.sh"),
 			env: map[string]string{
 				"GC_JSONL_ARCHIVE_REPO":      "archive",
 				"GC_JSONL_MAX_PUSH_FAILURES": "99",
@@ -2103,7 +2114,7 @@ exit 0
 					env[key] = value
 				}
 
-				script := filepath.Join(exampleDir(), tt.script)
+				script := scriptPath(tt.script)
 				if fb.wantExit78 {
 					out, err := runScriptResult(t, script, env)
 					assertMaintenanceScriptExit78(t, err, out)
@@ -2138,14 +2149,14 @@ func TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof
 	}{
 		{
 			name:   "reaper",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			script: coreScriptPath("reaper.sh"),
 			env: map[string]string{
 				"GC_REAPER_DRY_RUN": "1",
 			},
 		},
 		{
 			name:   "jsonl export",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			script: coreScriptPath("jsonl-export.sh"),
 			env: map[string]string{
 				"GC_JSONL_ARCHIVE_REPO":      "archive",
 				"GC_JSONL_MAX_PUSH_FAILURES": "99",
@@ -2235,7 +2246,7 @@ exit 0
 					env[key] = value
 				}
 
-				script := filepath.Join(exampleDir(), tt.script)
+				script := scriptPath(tt.script)
 				if tc.wantExit78 {
 					out, err := runScriptResult(t, script, env)
 					assertMaintenanceScriptExit78(t, err, out)
@@ -2288,14 +2299,14 @@ func TestMaintenanceDoltScriptsUsePsConfirmedManagedRuntimePorts(t *testing.T) {
 	}{
 		{
 			name:   "reaper",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			script: coreScriptPath("reaper.sh"),
 			env: map[string]string{
 				"GC_REAPER_DRY_RUN": "1",
 			},
 		},
 		{
 			name:   "jsonl export",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			script: coreScriptPath("jsonl-export.sh"),
 			env: map[string]string{
 				"GC_JSONL_ARCHIVE_REPO":      "archive",
 				"GC_JSONL_MAX_PUSH_FAILURES": "99",
@@ -2377,7 +2388,7 @@ exit 1
 					env[key] = value
 				}
 
-				runScript(t, filepath.Join(exampleDir(), tt.script), env)
+				runScript(t, scriptPath(tt.script), env)
 
 				logData, err := os.ReadFile(doltLog)
 				if err != nil {
@@ -2411,14 +2422,14 @@ func TestMaintenanceDoltScriptsParseManagedRuntimeStateWithPortableSed(t *testin
 	}{
 		{
 			name:   "reaper",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			script: coreScriptPath("reaper.sh"),
 			env: map[string]string{
 				"GC_REAPER_DRY_RUN": "1",
 			},
 		},
 		{
 			name:   "jsonl export",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			script: coreScriptPath("jsonl-export.sh"),
 			env: map[string]string{
 				"GC_JSONL_ARCHIVE_REPO":      "archive",
 				"GC_JSONL_MAX_PUSH_FAILURES": "99",
@@ -2468,7 +2479,7 @@ exec %q "$@"
 				env[key] = value
 			}
 
-			runScript(t, filepath.Join(exampleDir(), tt.script), env)
+			runScript(t, scriptPath(tt.script), env)
 
 			logData, err := os.ReadFile(doltLog)
 			if err != nil {
@@ -2504,7 +2515,7 @@ func TestMaintenanceDoltScriptsRejectInvalidManagedPort(t *testing.T) {
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh")
+	script := coreScriptPath("reaper.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -2573,7 +2584,7 @@ exit 0
 		"PATH":                      binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -2651,7 +2662,7 @@ exit 0
 		"PATH":                      binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -2723,7 +2734,7 @@ exit 0
 		"PATH":                      binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -2793,7 +2804,7 @@ exit 0
 		"PATH":                           binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -2836,7 +2847,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -2856,14 +2867,14 @@ func TestMaintenanceDoltScriptsSkipTestPatternDatabases(t *testing.T) {
 	}{
 		{
 			name:   "reaper",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			script: coreScriptPath("reaper.sh"),
 			env: map[string]string{
 				"GC_REAPER_DRY_RUN": "1",
 			},
 		},
 		{
 			name:   "jsonl export",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			script: coreScriptPath("jsonl-export.sh"),
 			env: map[string]string{
 				"GC_JSONL_ARCHIVE_REPO":      "archive",
 				"GC_JSONL_MAX_PUSH_FAILURES": "99",
@@ -2931,7 +2942,7 @@ exit 0
 				env[key] = value
 			}
 
-			runScript(t, filepath.Join(exampleDir(), tt.script), env)
+			runScript(t, scriptPath(tt.script), env)
 
 			logData, err := os.ReadFile(doltLog)
 			if err != nil {
@@ -2960,14 +2971,14 @@ func TestMaintenanceDoltScriptsSkipUnsafeDatabaseIdentifiers(t *testing.T) {
 	}{
 		{
 			name:   "reaper",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			script: coreScriptPath("reaper.sh"),
 			env: map[string]string{
 				"GC_REAPER_DRY_RUN": "1",
 			},
 		},
 		{
 			name:   "jsonl export",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			script: coreScriptPath("jsonl-export.sh"),
 			env: map[string]string{
 				"GC_JSONL_ARCHIVE_REPO":      "archive",
 				"GC_JSONL_MAX_PUSH_FAILURES": "99",
@@ -3030,7 +3041,7 @@ exit 0
 				env[key] = value
 			}
 
-			runScript(t, filepath.Join(exampleDir(), tt.script), env)
+			runScript(t, scriptPath(tt.script), env)
 
 			logData, err := os.ReadFile(doltLog)
 			if err != nil {
@@ -3049,64 +3060,49 @@ exit 0
 	}
 }
 
-func TestReaperFormulaSQLReflectsCurrentSchema(t *testing.T) {
-	path := filepath.Join(exampleDir(), "packs", "maintenance", "formulas", "mol-dog-reaper.toml")
+func TestReaperScriptSQLReflectsCurrentSchema(t *testing.T) {
+	path := coreScriptPath("reaper.sh")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile(%s): %v", path, err)
 	}
-	formula := string(data)
+	script := string(data)
 
 	for _, stalePhrase := range []string{
 		"Total open wisps (for alert threshold)",
 		"If total open wisps",
 		"Open wisp count exceeding",
 	} {
-		if strings.Contains(formula, stalePhrase) {
-			t.Errorf("formula still describes total-open-wisp alerting with %q; reaper alerts on stale non-message open wisps", stalePhrase)
+		if strings.Contains(script, stalePhrase) {
+			t.Errorf("reaper script still describes total-open-wisp alerting with %q; reaper alerts on stale non-message open wisps", stalePhrase)
 		}
 	}
 	for _, required := range []string{
-		"Stale non-message open wisps (for alert threshold)",
 		"issue_type NOT IN ('message')",
-		"created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR)",
+		"created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)",
 	} {
-		if !strings.Contains(formula, required) {
-			t.Errorf("formula is missing stale-only alert text/query fragment %q", required)
+		if !strings.Contains(script, required) {
+			t.Errorf("reaper script is missing stale-only query fragment %q", required)
 		}
 	}
 
-	// Extract every ```sql ... ``` fence body and scan only those — prose
-	// warnings about the deprecated patterns are intentional and must not
-	// trip this guard.
-	matches := sqlFenceRe.FindAllSubmatch(data, -1)
-	if len(matches) == 0 {
-		t.Fatalf("no ```sql fences found in %s; test is no-op", filepath.Base(path))
+	if strings.Contains(script, "parent_id") {
+		t.Errorf("reaper script references parent_id (column does not exist in wisps):\n%s", script)
 	}
-
-	for i, m := range matches {
-		fence := string(m[1])
-		if strings.Contains(fence, "parent_id") {
-			t.Errorf("formula sql fence %d references parent_id (column does not exist in wisps):\n%s", i, fence)
-		}
-		if strings.Contains(fence, "depends_on_id") && !strings.Contains(fence, "depends_on_issue_id") && !strings.Contains(fence, "depends_on_wisp_id") {
-			t.Errorf("formula sql fence %d references removed depends_on_id column; schema uses typed split columns:\n%s", i, fence)
-		}
-		if strings.Contains(fence, "LEFT JOIN wisps parent ON") {
-			t.Errorf("formula sql fence %d still has the broken parent self-join:\n%s", i, fence)
-		}
-		if mailTableRe.MatchString(fence) {
-			t.Errorf("formula sql fence %d treats `mail` as a SQL table; mail messages are beads with Type=message:\n%s", i, fence)
-		}
-		if rawDurationIntervalRe.MatchString(fence) {
-			t.Errorf("formula sql fence %d uses raw Go duration values in SQL INTERVAL; reaper.sh normalizes durations to integer hours:\n%s", i, fence)
-		}
+	if strings.Contains(script, "depends_on_id") && !strings.Contains(script, "depends_on_issue_id") && !strings.Contains(script, "depends_on_wisp_id") {
+		t.Errorf("reaper script references removed depends_on_id column; schema uses typed split columns:\n%s", script)
 	}
-	if !containsReaperCloseCleanupEdgePredicate(formula) {
-		t.Fatalf("formula does not document the reaper close ownership predicate:\n%s", formula)
+	if strings.Contains(script, "LEFT JOIN wisps parent ON") {
+		t.Errorf("reaper script still has the broken parent self-join:\n%s", script)
 	}
-	if !containsReaperPurgeProtectEdgePredicate(formula) {
-		t.Fatalf("formula does not document the reaper purge-protection predicate:\n%s", formula)
+	if mailTableRe.MatchString(script) {
+		t.Errorf("reaper script treats `mail` as a SQL table; mail messages are beads with Type=message:\n%s", script)
+	}
+	if !containsReaperCloseCleanupEdgePredicate(script) {
+		t.Fatalf("reaper script does not include the close ownership predicate:\n%s", script)
+	}
+	if !containsReaperPurgeProtectEdgePredicate(script) {
+		t.Fatalf("reaper script does not include the purge-protection predicate:\n%s", script)
 	}
 }
 
@@ -3145,7 +3141,7 @@ func TestReaperParentIDIsParentChildDependencyProjection(t *testing.T) {
 		t.Fatalf("ParentID = %q, want dependency-projected parent ga-parent", got[0].ParentID)
 	}
 
-	scriptPath := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh")
+	scriptPath := coreScriptPath("reaper.sh")
 	scriptData, err := os.ReadFile(scriptPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s): %v", scriptPath, err)
@@ -3186,7 +3182,7 @@ exit 0
 		// No GC_REAPER_DRY_RUN — allow DOLT_COMMIT to fire.
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -3252,7 +3248,7 @@ exit 0
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	if strings.Contains(string(gcData), "mail:") {
-		t.Errorf("reaper DOG_DONE still reports removed mail cleanup:\n%s", gcData)
+		t.Errorf("reaper MAINTENANCE_DONE still reports removed mail cleanup:\n%s", gcData)
 	}
 }
 
@@ -3282,7 +3278,7 @@ exit 0
 		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -3333,7 +3329,7 @@ exit 0
 		"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -3384,7 +3380,7 @@ exit 0
 		"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -3459,7 +3455,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -3527,7 +3523,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -3578,14 +3574,14 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	gcLogText := string(gcData)
-	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+	if !strings.Contains(gcLogText, "mail send human/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
 		t.Fatalf("reaper did not send escalation mail for session-state prune failure:\n%s", gcLogText)
 	}
 	if !strings.Contains(gcLogText, "gm: terminal session-state prune failed: session prune exploded") {
@@ -3628,7 +3624,7 @@ exit 0
 		"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -3686,14 +3682,14 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	gcLogText := string(gcData)
-	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+	if !strings.Contains(gcLogText, "mail send human/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
 		t.Fatalf("reaper did not send escalation mail for session-prune anomaly:\n%s", gcLogText)
 	}
 	if !strings.Contains(gcLogText, "gm: 1500 closed session beads pruned in one run (threshold: 1000)") {
@@ -3730,7 +3726,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + "/usr/bin:/bin",
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -3783,7 +3779,7 @@ exit 0
 		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -3870,7 +3866,7 @@ exit 0
 		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -3945,7 +3941,7 @@ exit 0
 		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -4016,7 +4012,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	doltData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -4092,7 +4088,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -4169,7 +4165,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -4250,7 +4246,7 @@ exit 0
 		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -4404,7 +4400,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -4473,7 +4469,7 @@ exit 0
 }
 
 func TestReaperWorkflowRootPredicateIsGeneratedFromOneHelper(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"))
+	data, err := os.ReadFile(coreScriptPath("reaper.sh"))
 	if err != nil {
 		t.Fatalf("ReadFile(reaper.sh): %v", err)
 	}
@@ -4549,7 +4545,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -4645,7 +4641,7 @@ exit 0
 		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -4719,7 +4715,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -4734,7 +4730,7 @@ exit 0
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	gcLogText := string(gcData)
-	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+	if !strings.Contains(gcLogText, "mail send human/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
 		t.Fatalf("reaper did not escalate Dolt commit failure:\n%s", gcLogText)
 	}
 	if !strings.Contains(gcLogText, "Dolt commit failed for beads") {
@@ -4790,7 +4786,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -4857,7 +4853,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -4940,7 +4936,7 @@ exit 0
 		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	logData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -5022,7 +5018,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -5091,7 +5087,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -5113,7 +5109,7 @@ exit 0
 	if !strings.Contains(gcLogText, "closed:1") || !strings.Contains(gcLogText, "skipped_non_city_issues:1") {
 		t.Fatalf("reaper summary did not report city close and non-city skip:\n%s", gcLogText)
 	}
-	if strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION") || strings.Contains(gcLogText, "non-city database") {
+	if strings.Contains(gcLogText, "mail send human/ -s ESCALATION") || strings.Contains(gcLogText, "non-city database") {
 		t.Fatalf("reaper escalated expected non-city stale issue skips:\n%s", gcLogText)
 	}
 }
@@ -5176,7 +5172,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil && !os.IsNotExist(err) {
@@ -5255,7 +5251,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -5343,7 +5339,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil && !os.IsNotExist(err) {
@@ -5414,7 +5410,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -5501,7 +5497,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -5577,7 +5573,7 @@ exit 0
 		"PATH":                    binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil && !os.IsNotExist(err) {
@@ -5660,7 +5656,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil && !os.IsNotExist(err) {
@@ -5737,7 +5733,7 @@ exit 0
 		"PATH":             binDir,
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -5817,7 +5813,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil && !os.IsNotExist(err) {
@@ -5890,7 +5886,7 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil && !os.IsNotExist(err) {
@@ -5964,45 +5960,48 @@ exit 0
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	gcLogText := string(gcData)
-	if strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION") || strings.Contains(gcLogText, "Dolt commit found nothing to commit") {
+	if strings.Contains(gcLogText, "mail send human/ -s ESCALATION") || strings.Contains(gcLogText, "Dolt commit found nothing to commit") {
 		t.Fatalf("reaper escalated benign nothing-to-commit race:\n%s", gcLogText)
 	}
 }
 
-func TestReaperFormulaMatchesScriptDefaults(t *testing.T) {
-	scriptPath := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh")
+func TestReaperOrderAndScriptDefaults(t *testing.T) {
+	scriptPath := coreScriptPath("reaper.sh")
 	scriptData, err := os.ReadFile(scriptPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s): %v", scriptPath, err)
 	}
-	formulaPath := filepath.Join(exampleDir(), "packs", "maintenance", "formulas", "mol-dog-reaper.toml")
-	formulaData, err := os.ReadFile(formulaPath)
+	orderPath := filepath.Join(corePackDir(), "orders", "reaper.toml")
+	orderData, err := os.ReadFile(orderPath)
 	if err != nil {
-		t.Fatalf("ReadFile(%s): %v", formulaPath, err)
+		t.Fatalf("ReadFile(%s): %v", orderPath, err)
 	}
 
 	script := string(scriptData)
-	formula := string(formulaData)
 	for _, check := range []struct {
-		scriptEnv string
-		formVar   string
+		envName string
+		want    string
 	}{
-		{scriptEnv: "GC_REAPER_MAX_AGE", formVar: "max_age"},
-		{scriptEnv: "GC_REAPER_PURGE_AGE", formVar: "purge_age"},
-		{scriptEnv: "GC_REAPER_STALE_ISSUE_AGE", formVar: "stale_issue_age"},
+		{envName: "GC_REAPER_MAX_AGE", want: "24h"},
+		{envName: "GC_REAPER_PURGE_AGE", want: "168h"},
+		{envName: "GC_REAPER_STALE_ISSUE_AGE", want: "720h"},
 	} {
-		scriptDefault := extractShellDefault(t, script, check.scriptEnv)
-		formulaDefault := extractFormulaDefault(t, formula, check.formVar)
-		if scriptDefault != formulaDefault {
-			t.Errorf("%s default mismatch: script=%q formula=%q", check.formVar, scriptDefault, formulaDefault)
+		if got := extractShellDefault(t, script, check.envName); got != check.want {
+			t.Errorf("%s default = %q, want %q", check.envName, got, check.want)
 		}
+	}
+	if !strings.Contains(string(orderData), `exec = "$PACK_DIR/assets/scripts/reaper.sh"`) {
+		t.Fatalf("reaper order does not execute the Core reaper script:\n%s", orderData)
+	}
+	if !strings.Contains(string(orderData), `interval = "30m"`) {
+		t.Fatalf("reaper order interval changed unexpectedly:\n%s", orderData)
 	}
 }
 
@@ -6012,16 +6011,6 @@ func extractShellDefault(t *testing.T, script, envName string) string {
 	m := re.FindStringSubmatch(script)
 	if len(m) != 2 {
 		t.Fatalf("default for %s not found in script", envName)
-	}
-	return m[1]
-}
-
-func extractFormulaDefault(t *testing.T, formula, varName string) string {
-	t.Helper()
-	re := regexp.MustCompile(`(?s)\[vars\.` + regexp.QuoteMeta(varName) + `\].*?default = "([^"]+)"`)
-	m := re.FindStringSubmatch(formula)
-	if len(m) != 2 {
-		t.Fatalf("default for %s not found in formula", varName)
 	}
 	return m[1]
 }
@@ -6092,7 +6081,7 @@ func TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable(t *testing.T) {
 	}{
 		{
 			name:   "reaper",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			script: coreScriptPath("reaper.sh"),
 			env:    map[string]string{"GC_REAPER_DRY_RUN": "1"},
 			forbiddenLogs: []string{
 				"`empty_db`.wisps",
@@ -6103,7 +6092,7 @@ func TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable(t *testing.T) {
 		},
 		{
 			name:   "jsonl export",
-			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			script: coreScriptPath("jsonl-export.sh"),
 			env: map[string]string{
 				"GC_JSONL_ARCHIVE_REPO":      "archive",
 				"GC_JSONL_MAX_PUSH_FAILURES": "99",
@@ -6111,7 +6100,7 @@ func TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable(t *testing.T) {
 			forbiddenLogs: []string{
 				"`empty_db`.issues",
 			},
-			// jsonl-export reports failures via DOG_DONE summary line in
+			// jsonl-export reports failures via MAINTENANCE_DONE summary line in
 			// the gc nudge — empty_db must not show up there.
 			gcLogForbidden: "empty_db",
 		},
@@ -6154,7 +6143,7 @@ exit 0
 				env[k] = v
 			}
 
-			runScript(t, filepath.Join(exampleDir(), tt.script), env)
+			runScript(t, scriptPath(tt.script), env)
 
 			logData, err := os.ReadFile(doltLog)
 			if err != nil {
@@ -6189,11 +6178,10 @@ exit 0
 	}
 }
 
-func TestFormulaDoltSQLExamplesUseExplicitTarget(t *testing.T) {
+func TestDoltDoctorScriptUsesExplicitSQLTarget(t *testing.T) {
 	examplesDir := filepath.Dir(exampleDir())
 	paths := []string{
-		filepath.Join(examplesDir, "dolt", "formulas", "mol-dog-doctor.toml"),
-		filepath.Join(exampleDir(), "packs", "maintenance", "formulas", "mol-dog-jsonl.toml"),
+		filepath.Join(examplesDir, "bd", "dolt", "assets", "scripts", "mol-dog-doctor.sh"),
 	}
 	for _, path := range paths {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -6202,7 +6190,7 @@ func TestFormulaDoltSQLExamplesUseExplicitTarget(t *testing.T) {
 				t.Fatalf("ReadFile(%s): %v", path, err)
 			}
 			if match := rawDoltSQLCallRe.Find(data); match != nil {
-				t.Fatalf("formula contains unqualified Dolt SQL command %q; include host, port, user, and no-tls args", match)
+				t.Fatalf("script contains unqualified Dolt SQL command %q; include host, port, user, and no-tls args", match)
 			}
 		})
 	}
@@ -6539,7 +6527,7 @@ exit 0
 		"PATH":                 binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 	return doltLog, gcLog
 }
 
@@ -6746,6 +6734,9 @@ exit 0
 }
 
 func mergeTestEnv(overrides map[string]string) []string {
+	if _, ok := overrides["GC_MAINTENANCE_DONE_TARGET"]; !ok {
+		overrides["GC_MAINTENANCE_DONE_TARGET"] = "deacon/"
+	}
 	env := os.Environ()
 	for key := range overrides {
 		prefix := key + "="
@@ -7265,7 +7256,7 @@ func TestJsonlExportCountsRecordsViaJq(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -7273,7 +7264,7 @@ func TestJsonlExportCountsRecordsViaJq(t *testing.T) {
 	}
 	log := string(gcData)
 	if !strings.Contains(log, "records: 3") {
-		t.Fatalf("expected DOG_DONE summary to report records: 3 (jq counted .rows length); got:\n%s", log)
+		t.Fatalf("expected MAINTENANCE_DONE summary to report records: 3 (jq counted .rows length); got:\n%s", log)
 	}
 }
 
@@ -7295,7 +7286,7 @@ func TestJsonlExportSkipsSpikeCheckBelowMinPrev(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	mailData, err := os.ReadFile(mailLog)
 	if err != nil && !os.IsNotExist(err) {
@@ -7320,7 +7311,7 @@ func TestJsonlExportSuppressesDropSpikeWhenDoltSourceCountHealthy(t *testing.T) 
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	mailData, err := os.ReadFile(mailLog)
 	if err != nil && !os.IsNotExist(err) {
@@ -7337,7 +7328,7 @@ func TestJsonlExportSuppressesDropSpikeWhenDoltSourceCountHealthy(t *testing.T) 
 	if strings.Contains(string(gcData), "HALTED on spike detection") {
 		t.Fatalf("healthy Dolt source-of-truth count should suppress HALT; gc log:\n%s", gcData)
 	}
-	if !strings.Contains(string(gcData), "DOG_DONE: jsonl — exported") {
+	if !strings.Contains(string(gcData), "MAINTENANCE_DONE: jsonl — exported") {
 		t.Fatalf("expected normal export summary after source-of-truth suppression; gc log:\n%s", gcData)
 	}
 }
@@ -7356,7 +7347,7 @@ func TestJsonlExportPreservesDropSpikeWhenDoltSourceCountAlsoShrank(t *testing.T
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	mailData, err := os.ReadFile(mailLog)
 	if err != nil && !os.IsNotExist(err) {
@@ -7393,7 +7384,7 @@ func TestJsonlExportCommitsOnHaltToAdvanceBaseline(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	// Sanity: the spike (90% drop, prev=100, current=10) was escalated.
 	mailData, err := os.ReadFile(mailLog)
@@ -7425,7 +7416,7 @@ func TestJsonlExportCommitsOnHaltToAdvanceBaseline(t *testing.T) {
 		t.Fatalf("HALT-baseline commit must include HALT marker; got: %q", headMsg)
 	}
 
-	// The DOG_DONE summary on HALT should be the spike-halt nudge, not the
+	// The MAINTENANCE_DONE summary on HALT should be the spike-halt nudge, not the
 	// regular exported/records/push summary line.
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -7434,7 +7425,7 @@ func TestJsonlExportCommitsOnHaltToAdvanceBaseline(t *testing.T) {
 	if !strings.Contains(string(gcData), "HALTED on spike detection") {
 		t.Fatalf("expected HALT nudge in gc log:\n%s", gcData)
 	}
-	if strings.Contains(string(gcData), "DOG_DONE: jsonl — exported") {
+	if strings.Contains(string(gcData), "MAINTENANCE_DONE: jsonl — exported") {
 		t.Fatalf("HALT path must not emit the success summary nudge; gc log:\n%s", gcData)
 	}
 }
@@ -7459,7 +7450,7 @@ func TestJsonlExportFirstRunWithDisabledFloorSkipsSpikeCheck(t *testing.T) {
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	env["GC_JSONL_MIN_PREV_FOR_SPIKE"] = "0"
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	// Should not have escalated (no prior baseline).
 	if mailData, _ := os.ReadFile(mailLog); strings.Contains(string(mailData), "ESCALATION: JSONL spike") {
@@ -7470,8 +7461,8 @@ func TestJsonlExportFirstRunWithDisabledFloorSkipsSpikeCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
-	if !strings.Contains(string(gcData), "DOG_DONE: jsonl") {
-		t.Fatalf("expected DOG_DONE nudge in gc log:\n%s", gcData)
+	if !strings.Contains(string(gcData), "MAINTENANCE_DONE: jsonl") {
+		t.Fatalf("expected MAINTENANCE_DONE nudge in gc log:\n%s", gcData)
 	}
 }
 
@@ -7515,7 +7506,7 @@ func TestJsonlExportScrubTrueFiltersRowsWithoutDroppingWholePayload(t *testing.T
 	env["GC_JSONL_SCRUB"] = "true"
 	env["DOLT_ARGS_LOG"] = doltLog
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	doltData, err := os.ReadFile(doltLog)
 	if err != nil {
@@ -7606,7 +7597,7 @@ func TestJsonlExportScrubTrueFiltersRowsWithoutDroppingWholePayload(t *testing.T
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	if !strings.Contains(string(gcData), "records: 12") {
-		t.Fatalf("expected DOG_DONE summary to report the scrubbed record count, got:\n%s", gcData)
+		t.Fatalf("expected MAINTENANCE_DONE summary to report the scrubbed record count, got:\n%s", gcData)
 	}
 }
 
@@ -7624,7 +7615,7 @@ func TestJsonlExportHaltCommitAdvancesBaselineWithoutLocalGitIdentity(t *testing
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	revOut, revErr := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if revErr != nil {
@@ -7668,7 +7659,7 @@ func TestJsonlExportDeletedHeadBaselineSkipsPreviousCountLookup(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	if mailData, _ := os.ReadFile(mailLog); strings.Contains(string(mailData), "ESCALATION: JSONL spike") {
 		t.Fatalf("deleted HEAD baseline should behave like no baseline; mail log:\n%s", mailData)
@@ -7677,8 +7668,8 @@ func TestJsonlExportDeletedHeadBaselineSkipsPreviousCountLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
-	if !strings.Contains(string(gcData), "DOG_DONE: jsonl") {
-		t.Fatalf("expected DOG_DONE summary after deleted HEAD baseline, got:\n%s", gcData)
+	if !strings.Contains(string(gcData), "MAINTENANCE_DONE: jsonl") {
+		t.Fatalf("expected MAINTENANCE_DONE summary after deleted HEAD baseline, got:\n%s", gcData)
 	}
 }
 
@@ -7697,7 +7688,7 @@ func TestJsonlExportScrubFailureDoesNotCommitBrokenOutputs(t *testing.T) {
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	env["GC_JSONL_SCRUB"] = "true"
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	revOut, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -7739,7 +7730,7 @@ func TestJsonlExportMalformedPayloadWithoutScrubDoesNotCommitBrokenOutputs(t *te
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	env["GC_JSONL_SCRUB"] = "false"
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	revOut, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -7786,7 +7777,7 @@ func TestJsonlExportHaltStagingFailureExitsWithoutAdvancingBaseline(t *testing.T
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	out, runErr := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, runErr := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if runErr == nil {
 		t.Fatalf("expected script to fail when git add fails on HALT path; output:\n%s", out)
 	}
@@ -7831,7 +7822,7 @@ func TestJsonlExportHaltCommitFailureLeavesArchiveClean(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	out, runErr := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, runErr := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if runErr == nil {
 		t.Fatalf("expected script to fail when git commit fails on HALT path; output:\n%s", out)
 	}
@@ -7871,7 +7862,7 @@ func TestJsonlExportHaltMailFailurePersistsPendingAlertAndRetriesNextRun(t *test
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	stateData, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -7900,7 +7891,7 @@ func TestJsonlExportHaltMailFailurePersistsPendingAlertAndRetriesNextRun(t *test
 	writeMultiRecordDoltStub(t, binDir, 10)
 	writeJsonlExportGCStub(t, binDir)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	stateData, err = os.ReadFile(stateFile)
 	if err != nil {
@@ -7934,7 +7925,7 @@ func TestJsonlExportNoChangePushesPendingArchiveCommitAfterHalt(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	localHead, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -7961,7 +7952,7 @@ func TestJsonlExportNoChangePushesPendingArchiveCommitAfterHalt(t *testing.T) {
 		t.Fatalf("expected pending_archive_push after HALT, got:\n%s", stateData)
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	remoteHeadOut, err = exec.Command("git", "--git-dir", remoteRepo, "rev-parse", "refs/heads/main").CombinedOutput()
 	if err != nil {
@@ -7995,7 +7986,7 @@ func TestJsonlExportNoChangePushesPendingArchiveCommitWithoutPendingState(t *tes
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	localHead, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -8010,7 +8001,7 @@ func TestJsonlExportNoChangePushesPendingArchiveCommitWithoutPendingState(t *tes
 		t.Fatalf("WriteFile(state file): %v", err)
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	remoteHeadOut, err := exec.Command("git", "--git-dir", remoteRepo, "rev-parse", "refs/heads/main").CombinedOutput()
 	if err != nil {
@@ -8036,7 +8027,7 @@ func TestJsonlExportNoUserDatabasesPushesPendingArchiveCommit(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	localHeadOut, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -8049,7 +8040,7 @@ func TestJsonlExportNoUserDatabasesPushesPendingArchiveCommit(t *testing.T) {
 
 	writeNoUserDatabasesDoltStub(t, binDir)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	remoteHeadOut, err := exec.Command("git", "--git-dir", remoteRepo, "rev-parse", "refs/heads/main").CombinedOutput()
 	if err != nil {
@@ -8082,7 +8073,7 @@ func TestJsonlExportNoChangeRebasesPendingArchiveCommitOntoAdvancedRemote(t *tes
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	localHeadBeforeReplay, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -8095,7 +8086,7 @@ func TestJsonlExportNoChangeRebasesPendingArchiveCommitOntoAdvancedRemote(t *tes
 		t.Fatalf("remote advance must create a new remote commit")
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	localHeadAfterReplay, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -8139,7 +8130,7 @@ func TestJsonlExportNoChangePushFailureWithMalformedStateUsesTrackingRef(t *test
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	localHeadOut, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -8160,7 +8151,7 @@ func TestJsonlExportNoChangePushFailureWithMalformedStateUsesTrackingRef(t *test
 	}
 	writeGitSubcommandFailureStub(t, binDir, realGit, "fetch")
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	stateData, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -8209,7 +8200,7 @@ func TestJsonlExportExportFailureDoesNotBlockPendingArchiveReplay(t *testing.T) 
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	localHeadBeforeReplay, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -8227,7 +8218,7 @@ func TestJsonlExportExportFailureDoesNotBlockPendingArchiveReplay(t *testing.T) 
 
 	writeIssuesExportFailureDoltStub(t, binDir)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	localHeadAfterReplay, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -8278,7 +8269,7 @@ func TestJsonlExportPushBootstrapCreatesRemoteMainWhenMissing(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	localHeadOut, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -8325,7 +8316,7 @@ func TestJsonlExportLegacyStateBackupRecoversPendingArchiveReplay(t *testing.T) 
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	localHeadOut, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -8350,7 +8341,7 @@ func TestJsonlExportLegacyStateBackupRecoversPendingArchiveReplay(t *testing.T) 
 
 	writeNoUserDatabasesDoltStub(t, binDir)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	remoteHeadOut, err := exec.Command("git", "--git-dir", remoteRepo, "rev-parse", "refs/heads/main").CombinedOutput()
 	if err != nil {
@@ -8384,7 +8375,7 @@ func TestJsonlExportEmptyIssuesPayloadDoesNotCommitBrokenOutputs(t *testing.T) {
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	env["GC_JSONL_SCRUB"] = "false"
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	revOut, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
@@ -8434,7 +8425,7 @@ func TestJsonlExportEmptyDatabaseDoesNotAppearInFailedSummary(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
@@ -8444,7 +8435,7 @@ func TestJsonlExportEmptyDatabaseDoesNotAppearInFailedSummary(t *testing.T) {
 	if strings.Contains(log, "failed: beads") {
 		t.Fatalf("empty issues table must not land in failed: summary; gc log:\n%s", log)
 	}
-	if !strings.Contains(log, "DOG_DONE: jsonl — exported 1/1") {
+	if !strings.Contains(log, "MAINTENANCE_DONE: jsonl — exported 1/1") {
 		t.Fatalf("expected success summary `exported 1/1`, got:\n%s", log)
 	}
 
@@ -8478,7 +8469,7 @@ func TestJsonlExportPushFailureRecoversFromMalformedState(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	stateData, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -8512,7 +8503,7 @@ func TestJsonlExportPushFailureRecoversFromWrongShapeState(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	stateData, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -8542,7 +8533,7 @@ func TestJsonlExportPushSuccessWritesLastPushAt(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	stateData, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -8588,7 +8579,7 @@ func TestJsonlExportPushFailureWritesLastPushStderr(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if err != nil {
 		t.Fatalf("jsonl-export.sh should report push failure in summary without exiting non-zero: %v\n%s", err, out)
 	}
@@ -8646,7 +8637,7 @@ func TestJsonlExportPushRetriesAndRecordsSuccessAfterTransientFailure(t *testing
 	env["GC_JSONL_PUSH_RETRY_DELAY_MIN"] = "0"
 	env["GC_JSONL_PUSH_RETRY_DELAY_SPAN"] = "0"
 
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if err != nil {
 		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
 	}
@@ -8722,7 +8713,7 @@ func TestJsonlExportPushRetryRebasesAfterRemoteAdvanceRace(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if err != nil {
 		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
 	}
@@ -8809,7 +8800,7 @@ func TestJsonlExportPushRetriesThreeTimesBeforeRecordingFailure(t *testing.T) {
 	env["GC_JSONL_PUSH_RETRY_DELAY_MIN"] = "0"
 	env["GC_JSONL_PUSH_RETRY_DELAY_SPAN"] = "0"
 
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if err != nil {
 		t.Fatalf("jsonl-export.sh should report push failure in summary without exiting non-zero: %v\n%s", err, out)
 	}
@@ -8882,7 +8873,7 @@ func TestJsonlExportPushSuccessAfterFailureClearsLastPushStderr(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	stateData, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -8922,7 +8913,7 @@ func TestJsonlExportHaltMailFailureRecoversFromMalformedState(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	stateData, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -8960,7 +8951,7 @@ func TestJsonlExportRetriesPendingAlertFromBackupAfterPrimaryCorruption(t *testi
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	backupData, err := os.ReadFile(stateFile + ".bak")
 	if err != nil {
@@ -8976,7 +8967,7 @@ func TestJsonlExportRetriesPendingAlertFromBackupAfterPrimaryCorruption(t *testi
 	writeNoUserDatabasesDoltStub(t, binDir)
 	writeJsonlExportGCStub(t, binDir)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	mailData, err := os.ReadFile(mailLog)
 	if err != nil {
@@ -9013,7 +9004,7 @@ func TestJsonlExportRetriesPendingAlertWithoutUserDatabases(t *testing.T) {
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	mailData, err := os.ReadFile(mailLog)
 	if err != nil {
@@ -9050,7 +9041,7 @@ func TestJsonlExportRetriesMultiplePendingAlertsWithoutUserDatabases(t *testing.
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	mailData, err := os.ReadFile(mailLog)
 	if err != nil {
@@ -9091,7 +9082,7 @@ func TestJsonlExportHaltMailFailurePreservesExistingPendingAlerts(t *testing.T) 
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	stateData, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -9132,7 +9123,7 @@ func TestJsonlExportLocalOnlyModeSkipsPushAndLogsMode(t *testing.T) {
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
 
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if err != nil {
 		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
 	}
@@ -9192,7 +9183,7 @@ func TestJsonlExportPushModeAttemptsPushWhenOriginConfigured(t *testing.T) {
 	// above 100 so the percent check is skipped here.
 	env["GC_JSONL_MIN_PREV_FOR_SPIKE"] = "1000"
 
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if err != nil {
 		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
 	}
@@ -9241,7 +9232,7 @@ func TestJsonlExportPushModeMemoizesOriginForRun(t *testing.T) {
 	env["GC_JSONL_MIN_PREV_FOR_SPIKE"] = "1000"
 	env["DOLT_REMOVE_ORIGIN_FLAG"] = originRemovedFlag
 
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if err != nil {
 		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
 	}
@@ -9297,7 +9288,7 @@ func TestJsonlExportModeRelogIntervalOverrideRelogsSameMode(t *testing.T) {
 	env["GC_JSONL_MODE_RELOG_INTERVAL"] = "1"
 	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
 
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if err != nil {
 		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
 	}
@@ -9357,7 +9348,7 @@ func TestJsonlExportLocalOnlyTransitionClearsStalePushFailureState(t *testing.T)
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
 
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if err != nil {
 		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
 	}
@@ -9419,7 +9410,7 @@ func TestJsonlExportLocalOnlyModeClearsStalePushFailureState(t *testing.T) {
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
 
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if err != nil {
 		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
 	}
@@ -9475,7 +9466,7 @@ func TestJsonlExportLocalOnlyModeClearsStalePushEscalationMarker(t *testing.T) {
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
 
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if err != nil {
 		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
 	}
@@ -9524,7 +9515,7 @@ func TestJsonlExportModeTransitionFromPushToLocalOnlyRelogs(t *testing.T) {
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
 
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 	if err != nil {
 		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
 	}
@@ -9573,7 +9564,7 @@ func TestJsonlExportPushFailureEscalationBodyIncludesStderrAndRemediation(t *tes
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	env["GC_JSONL_MAX_PUSH_FAILURES"] = "1"
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
 	mailData, err := os.ReadFile(mailLog)
 	if err != nil {
@@ -9582,7 +9573,7 @@ func TestJsonlExportPushFailureEscalationBodyIncludesStderrAndRemediation(t *tes
 	body := string(mailData)
 	wants := []string{
 		"ESCALATION: JSONL push failed",
-		"Order: mol-dog-jsonl",
+		"Order: jsonl-export",
 		"Archive: " + archiveRepo,
 		"Consecutive failures: 1 (threshold: 1)",
 		"Last git push stderr:",
@@ -9612,7 +9603,7 @@ func TestJsonlExportPushFailureEscalatesOncePerUnresolvedFailure(t *testing.T) {
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	env["GC_JSONL_MAX_PUSH_FAILURES"] = "1"
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh")
+	script := coreScriptPath("jsonl-export.sh")
 	runScript(t, script, env)
 	runScript(t, script, env)
 	runScript(t, script, env)

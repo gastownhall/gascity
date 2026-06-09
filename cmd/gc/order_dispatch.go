@@ -2593,6 +2593,10 @@ func qualifyPoolInDir(pool, dir, scope string, cfg *config.City, cleanHint strin
 	var sourceScopedMatches []string
 	var localBareMatches []string
 	var bareMatches []string
+	sourceScopedBindings := map[string]bool(nil)
+	if cleanHint != "" {
+		sourceScopedBindings = sourceBindingsForOrderHint(cfg, dir, cleanHint)
+	}
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		if a.Dir != dir {
@@ -2606,7 +2610,7 @@ func qualifyPoolInDir(pool, dir, scope string, cfg *config.City, cleanHint strin
 			if a.BindingName == "" {
 				localBareMatches = appendUniquePoolTarget(localBareMatches, a.BindingQualifiedName())
 			}
-			if cleanHint != "" && filepath.Clean(a.SourceDir) == cleanHint {
+			if cleanHint != "" && (agentMatchesOrderSourceHint(*a, cleanHint) || sourceScopedBindings[a.BindingName]) {
 				sourceScopedMatches = appendUniquePoolTarget(sourceScopedMatches, a.BindingQualifiedName())
 			}
 		}
@@ -2631,6 +2635,61 @@ func qualifyPoolInDir(pool, dir, scope string, cfg *config.City, cleanHint strin
 		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(bareMatches, ", "))
 	}
 	return pool, false, nil
+}
+
+func sourceBindingsForOrderHint(cfg *config.City, dir, cleanHint string) map[string]bool {
+	bindings := make(map[string]bool)
+	for i := range cfg.Agents {
+		a := cfg.Agents[i]
+		if a.Dir != dir {
+			continue
+		}
+		if agentMatchesOrderSourceHint(a, cleanHint) {
+			bindings[a.BindingName] = true
+		}
+	}
+	return bindings
+}
+
+func agentMatchesOrderSourceHint(a config.Agent, cleanHint string) bool {
+	if a.SourceDir == "" {
+		return false
+	}
+	cleanSource := filepath.Clean(a.SourceDir)
+	if cleanSource == cleanHint {
+		return true
+	}
+	return packSourceTailMatches(cleanSource, cleanHint)
+}
+
+func packSourceTailMatches(source, hint string) bool {
+	sourceTail := lastPathComponents(source, 2)
+	hintTail := lastPathComponents(hint, 2)
+	if len(sourceTail) != 2 || len(hintTail) != 2 {
+		return false
+	}
+	for i := range sourceTail {
+		if sourceTail[i] != hintTail[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func lastPathComponents(path string, n int) []string {
+	clean := filepath.ToSlash(filepath.Clean(path))
+	parts := strings.Split(clean, "/")
+	compact := parts[:0]
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		compact = append(compact, part)
+	}
+	if len(compact) < n {
+		return nil
+	}
+	return compact[len(compact)-n:]
 }
 
 func appendUniquePoolTarget(values []string, want string) []string {

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # jsonl-export — export Dolt databases to JSONL and push to git archive.
 #
-# Replaces mol-dog-jsonl formula. All operations are deterministic:
-# dolt sql exports, jq record-count comparisons against spike threshold,
-# git add/commit/push. No LLM judgment needed.
+# Core exec order. All operations are deterministic: dolt sql exports, jq
+# record-count comparisons against spike threshold, git add/commit/push. No
+# LLM judgment needed.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -19,7 +19,8 @@ if ! command -v jq >/dev/null 2>&1; then
     echo "jsonl-export: jq is required but not found in PATH" >&2
     exit 1
 fi
-PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance}"
+PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/core}"
+LEGACY_PACK_STATE_DIR="${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance"
 LEGACY_ARCHIVE_REPO="$CITY/.gc/jsonl-archive"
 LEGACY_STATE_FILE="$CITY/.gc/jsonl-export-state.json"
 
@@ -46,6 +47,35 @@ MODE_RELOG_INTERVAL_SECONDS="${GC_JSONL_MODE_RELOG_INTERVAL:-604800}"
 # single run sees a consistent value even if an operator adds or removes the
 # origin remote mid-run.
 ARCHIVE_MODE=""
+
+resolve_escalate_script() {
+    local candidate
+    local pack
+    local system_packs="${GC_SYSTEM_PACKS_DIR:-$CITY/.gc/system/packs}"
+
+    if [ -n "${GC_ESCALATE_SCRIPT:-}" ]; then
+        printf '%s\n' "$GC_ESCALATE_SCRIPT"
+        return
+    fi
+    for pack in ${GC_ESCALATE_SEARCH_PACKS:-gastown maintenance bd core}; do
+        candidate="$system_packs/$pack/assets/scripts/escalate.sh"
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    printf '%s\n' "$SCRIPT_DIR/escalate.sh"
+}
+
+ESCALATE_SCRIPT="$(resolve_escalate_script)"
+
+maintenance_done() {
+    local summary="$1"
+    local target="${GC_MAINTENANCE_DONE_TARGET:-}"
+
+    [ -n "$target" ] || return 0
+    gc session nudge "$target" "MAINTENANCE_DONE: $summary" 2>/dev/null || true
+}
 
 # Count records in a `dolt sql -r json` payload. The output is `{"rows":[...]}`
 # on (typically) a single physical line, so `wc -l` measures formatting, not
@@ -438,8 +468,9 @@ send_spike_alert() {
     local delta="$4"
     local threshold="$5"
 
-    gc mail send mayor/ -s "ESCALATION: JSONL spike detected [HIGH]" \
-        -m "Database: $db, prev: $prev_count, current: $current_count, delta: ${delta}%, threshold: ${threshold}%" \
+    "$ESCALATE_SCRIPT" \
+        --subject "ESCALATION: JSONL spike detected [HIGH]" \
+        --message "Database: $db, prev: $prev_count, current: $current_count, delta: ${delta}%, threshold: ${threshold}%" \
         2>/dev/null
 }
 
@@ -549,7 +580,7 @@ push_archive_main() {
                 stderr_display="(no stderr captured)"
             fi
             body=$(cat <<ESCALATION
-Order: mol-dog-jsonl
+Order: jsonl-export
 Archive: $ARCHIVE_REPO
 Consecutive failures: $consecutive (threshold: $MAX_PUSH_FAILURES)
 
@@ -563,8 +594,9 @@ Remediation:
 - See docs/getting-started/troubleshooting.md#jsonl-archive-push-failures
 ESCALATION
 )
-            if gc mail send mayor/ -s "ESCALATION: JSONL push failed [HIGH]" \
-                -m "$body" \
+            if "$ESCALATE_SCRIPT" \
+                --subject "ESCALATION: JSONL push failed [HIGH]" \
+                --message "$body" \
                 2>/dev/null; then
                 mark_push_failure_escalated
             fi
@@ -700,11 +732,14 @@ discard_staged_archive_outputs() {
 
 # State file for tracking consecutive push failures.
 STATE_FILE="$PACK_STATE_DIR/jsonl-export-state.json"
+LEGACY_PACK_STATE_FILE="$LEGACY_PACK_STATE_DIR/jsonl-export-state.json"
 
 if [ -z "${GC_JSONL_ARCHIVE_REPO:-}" ] && [ ! -d "$ARCHIVE_REPO/.git" ] && [ -d "$LEGACY_ARCHIVE_REPO/.git" ]; then
     ARCHIVE_REPO="$LEGACY_ARCHIVE_REPO"
 fi
-if [ ! -e "$STATE_FILE" ] && [ -e "$LEGACY_STATE_FILE" ]; then
+if [ ! -e "$STATE_FILE" ] && [ -e "$LEGACY_PACK_STATE_FILE" ]; then
+    STATE_FILE="$LEGACY_PACK_STATE_FILE"
+elif [ ! -e "$STATE_FILE" ] && [ -e "$LEGACY_STATE_FILE" ]; then
     STATE_FILE="$LEGACY_STATE_FILE"
 fi
 STATE_FILE_BACKUP="${STATE_FILE}.bak"
@@ -756,7 +791,7 @@ if [ -z "$DATABASES" ]; then
                 PUSH_STATUS="skipped (local-only)"
             fi
             SUMMARY="jsonl — no user databases, push: $PUSH_STATUS"
-            gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+            maintenance_done "$SUMMARY"
             echo "jsonl-export: $SUMMARY"
         fi
     fi
@@ -944,7 +979,7 @@ while IFS= read -r DB; do
     fi
 
     # Count records from the final persisted payload (post-scrub / post-
-    # validation) so commit messages and DOG_DONE summaries reflect what was
+    # validation) so commit messages and maintenance summaries reflect what was
     # actually archived, not the pre-scrub raw export.
     CURRENT_COUNT=$(count_jsonl_rows < "$DB_DIR/issues.jsonl")
     TOTAL_EXPORTED=$((TOTAL_EXPORTED + CURRENT_COUNT))
@@ -1012,7 +1047,7 @@ if [ "$HALTED" -eq 1 ]; then
     else
         echo "jsonl-export: spike alert delivery failed; will retry from state" >&2
     fi
-    gc session nudge deacon/ "DOG_DONE: jsonl — HALTED on spike detection" 2>/dev/null || true
+    maintenance_done "jsonl — HALTED on spike detection"
     exit 0
 fi
 
@@ -1032,19 +1067,19 @@ if git diff --cached --quiet 2>/dev/null; then
         else
             SUMMARY="jsonl — no changes, push: $PUSH_STATUS"
         fi
-        gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+        maintenance_done "$SUMMARY"
         echo "jsonl-export: $SUMMARY"
         exit 0
     fi
     if [ -n "$FAILED_DBS" ]; then
         EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
         SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: skipped, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
-        gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+        maintenance_done "$SUMMARY"
         echo "jsonl-export: $SUMMARY"
         exit 0
     fi
     # No changes.
-    gc session nudge deacon/ "DOG_DONE: jsonl — no changes" 2>/dev/null || true
+    maintenance_done "jsonl — no changes"
     exit 0
 fi
 
@@ -1071,5 +1106,5 @@ if [ -n "$FAILED_DBS" ]; then
     SUMMARY="$SUMMARY, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
 fi
 
-gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+maintenance_done "$SUMMARY"
 echo "jsonl-export: $SUMMARY"

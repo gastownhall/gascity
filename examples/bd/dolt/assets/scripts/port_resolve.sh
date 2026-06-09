@@ -3,7 +3,8 @@
 #
 # Sourced by:
 #   .gc/system/packs/dolt/assets/scripts/runtime.sh
-#   .gc/system/packs/maintenance/assets/scripts/dolt-target.sh
+#   .gc/system/packs/core/assets/scripts/dolt-target.sh
+#   .gc/system/packs/bd/dolt/assets/scripts/runtime.sh
 #
 # Defines:
 #   resolve_dolt_port_or_die  state_file  [provider_state_file]  data_dir  city_path

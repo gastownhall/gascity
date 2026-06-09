@@ -29,6 +29,12 @@ func runDogScriptCommand(t *testing.T, scriptName, binDir, cityPath, dataDir str
 		"GC_BACKUP_OFFSITE_PATH",
 		"GC_BACKUP_ARTIFACT_DIR",
 		"GC_PHANTOM_DATA_DIR",
+		"GC_ESCALATE_SCRIPT",
+		"GC_ESCALATE_SEARCH_PACKS",
+		"GC_ESCALATION_RECIPIENT",
+		"GC_SYSTEM_PACKS_DIR",
+		"DOLT_ESCALATE_SCRIPT",
+		"GC_MAINTENANCE_DONE_TARGET",
 	),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
@@ -69,6 +75,7 @@ func TestDogExecScriptsAreBashSyntaxValid(t *testing.T) {
 	}
 	root := repoRoot(t)
 	for _, scriptName := range []string{
+		"_notify.sh",
 		"mol-dog-backup.sh",
 		"mol-dog-doctor.sh",
 		"mol-dog-phantom-db.sh",
@@ -3328,8 +3335,8 @@ func TestPhantomDBScriptEscalatesAndPreservesAllDatabases(t *testing.T) {
 	if !strings.Contains(gcLog, "Retired replacement directories: 1 orders.replaced-20260509T010203Z") {
 		t.Fatalf("escalation should report retired replacements separately:\n%s", gcLog)
 	}
-	if !strings.Contains(gcLog, "--from controller") {
-		t.Fatalf("phantom-db escalation mail must pass --from controller so it is not attributed to 'human':\n%s", gcLog)
+	if !strings.Contains(gcLog, "mail send human/ -s ESCALATION: Unservable Dolt databases detected [HIGH]") {
+		t.Fatalf("phantom-db escalation must use the generic default recipient:\n%s", gcLog)
 	}
 	if strings.Contains(gcLog, "phantom database(s)") {
 		t.Fatalf("escalation should not label all unservables as phantoms:\n%s", gcLog)
@@ -3429,8 +3436,8 @@ func TestBackupScriptSkipsOldDoltBeforeSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read gc log: %v", err)
 	}
-	if !strings.Contains(string(gcLog), "--from controller") {
-		t.Fatalf("old-Dolt backup escalation mail must pass --from controller so it is not attributed to 'human':\n%s", gcLog)
+	if !strings.Contains(string(gcLog), "mail send human/ -s Dolt backup: dolt-too-old for backup sync [HIGH]") {
+		t.Fatalf("old-Dolt backup escalation must use the generic default recipient:\n%s", gcLog)
 	}
 }
 
@@ -3653,11 +3660,11 @@ func TestBackupScriptCountsFailedDatabasesByDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read gc log: %v", err)
 	}
-	if !strings.Contains(string(gcLog), "Backup dog: 1/1 databases failed to sync") {
+	if !strings.Contains(string(gcLog), "Dolt backup: 1/1 databases failed to sync") {
 		t.Fatalf("failure mail should count databases, log:\n%s", gcLog)
 	}
-	if !strings.Contains(string(gcLog), "--from controller") {
-		t.Fatalf("backup failure mail must pass --from controller so it is not attributed to 'human':\n%s", gcLog)
+	if !strings.Contains(string(gcLog), "mail send human/ -s Dolt backup: 1/1 databases failed to sync [MEDIUM]") {
+		t.Fatalf("backup failure escalation must use the generic default recipient:\n%s", gcLog)
 	}
 }
 
@@ -3767,7 +3774,7 @@ exit 0
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}
 	gcLog, err := os.ReadFile(gcLogPath)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("read gc log: %v", err)
 	}
 	for _, systemDB := range []string{"performance_schema", "sys"} {
@@ -3942,12 +3949,9 @@ exit 0
 	}
 }
 
-// TestDoctorScriptAdvisoryMailCarriesExplicitSenderIdentity asserts the
-// latency-WARN advisory mail path passes `--from controller` so the message
-// is attributed to the controller-spawned exec order instead of falling
-// back to "human" (the documented default when $GC_ALIAS / $GC_AGENT are
-// unset, which is the case for controller-spawned exec orders).
-func TestDoctorScriptAdvisoryMailCarriesExplicitSenderIdentity(t *testing.T) {
+// TestDoctorScriptAdvisoryMailUsesGenericEscalation asserts the latency-WARN
+// advisory path goes through the generic escalation recipient.
+func TestDoctorScriptAdvisoryMailUsesGenericEscalation(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -3989,17 +3993,14 @@ exit 0
 	if !strings.Contains(string(gcLog), "Dolt health advisory") {
 		t.Fatalf("advisory mail did not fire; latency-WARN should have triggered, log:\n%s", gcLog)
 	}
-	if !strings.Contains(string(gcLog), "--from controller") {
-		t.Fatalf("advisory mail must pass --from controller so it is not attributed to 'human', log:\n%s", gcLog)
+	if !strings.Contains(string(gcLog), "mail send human/ -s Dolt health advisory [MEDIUM]") {
+		t.Fatalf("advisory escalation must use the generic default recipient, log:\n%s", gcLog)
 	}
 }
 
-// TestDoctorScriptUnreachableEscalationCarriesExplicitSenderIdentity asserts
-// the server-unreachable ESCALATION mail path also passes `--from controller`.
-// Both advisory call sites share the same failure mode (defaulting to "human")
-// when the controller-spawned script runs without $GC_ALIAS / $GC_AGENT set,
-// so both need the regression check.
-func TestDoctorScriptUnreachableEscalationCarriesExplicitSenderIdentity(t *testing.T) {
+// TestDoctorScriptUnreachableEscalationUsesGenericEscalation asserts the
+// server-unreachable path goes through the generic escalation recipient.
+func TestDoctorScriptUnreachableEscalationUsesGenericEscalation(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -4025,8 +4026,8 @@ exit 1
 	if !strings.Contains(string(gcLog), "ESCALATION: Dolt server unreachable") {
 		t.Fatalf("unreachable escalation mail did not fire, log:\n%s", gcLog)
 	}
-	if !strings.Contains(string(gcLog), "--from controller") {
-		t.Fatalf("unreachable escalation mail must pass --from controller so it is not attributed to 'human', log:\n%s", gcLog)
+	if !strings.Contains(string(gcLog), "mail send human/ -s ESCALATION: Dolt server unreachable") {
+		t.Fatalf("unreachable escalation must use the generic default recipient, log:\n%s", gcLog)
 	}
 }
 
@@ -4040,7 +4041,7 @@ func TestDoctorScriptUnreachableEscalationReportsMailFailure(t *testing.T) {
 	binDir := t.TempDir()
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/usr/bin/env bash
 if [ "$1" = "mail" ]; then
-  echo 'invalid sender "controller"' >&2
+  echo 'mail dead' >&2
   exit 1
 fi
 exit 0
@@ -4050,14 +4051,14 @@ exit 1
 `)
 
 	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir)
-	if !strings.Contains(out, "doctor: mail send failed: invalid sender \"controller\"") {
-		t.Fatalf("doctor should surface mail failure, output:\n%s", out)
+	if !strings.Contains(out, "doctor: escalation failed: mail dead") {
+		t.Fatalf("doctor should surface escalation failure, output:\n%s", out)
 	}
-	if !strings.Contains(out, "server unreachable on port 3307 (mail failed)") {
-		t.Fatalf("doctor should not claim escalation success after mail failure, output:\n%s", out)
+	if !strings.Contains(out, "server unreachable on port 3307 (escalation failed)") {
+		t.Fatalf("doctor should not claim escalation success after escalation failure, output:\n%s", out)
 	}
 	if strings.Contains(out, "server unreachable on port 3307 (escalated)") {
-		t.Fatalf("doctor claimed escalation success after mail failure, output:\n%s", out)
+		t.Fatalf("doctor claimed escalation success after escalation failure, output:\n%s", out)
 	}
 }
 

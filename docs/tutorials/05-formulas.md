@@ -86,15 +86,7 @@ or you can ask `gc` to enumerate them for you.
 ~/my-city
 $ gc formula list
 mol-do-work
-mol-dog-backup
-mol-dog-compactor
-mol-dog-doctor
-mol-dog-jsonl
-mol-dog-phantom-db
-mol-dog-reaper
 mol-dog-stale-db
-mol-dolt-health
-mol-dolt-remotes-patrol
 mol-polecat-base
 mol-polecat-commit
 mol-scoped-work

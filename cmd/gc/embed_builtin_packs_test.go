@@ -165,9 +165,9 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 
 	// Verify embedded order files are materialized alongside formulas.
 	for _, order := range []string{
+		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "jsonl-export.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "reaper.toml"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "gate-sweep.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "mol-dog-jsonl.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "mol-dog-reaper.toml"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "dolt-health.toml"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "orders", "digest-generate.toml"),
 	} {
@@ -198,19 +198,19 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 		needle   string
 		minCount int
 	}{
-		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), doltSystemNeedle, 1},
-		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), maintenanceScratchNeedle, 1},
-		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), maintenanceTempNeedle, 1},
-		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), doltSystemNeedle, 1},
-		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceScratchNeedle, 1},
-		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceTempNeedle, 1},
-		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), "expires_at", 1},
+		{"core", filepath.Join("assets", "scripts", "jsonl-export.sh"), doltSystemNeedle, 1},
+		{"core", filepath.Join("assets", "scripts", "jsonl-export.sh"), maintenanceScratchNeedle, 1},
+		{"core", filepath.Join("assets", "scripts", "jsonl-export.sh"), maintenanceTempNeedle, 1},
+		{"core", filepath.Join("assets", "scripts", "reaper.sh"), doltSystemNeedle, 1},
+		{"core", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceScratchNeedle, 1},
+		{"core", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceTempNeedle, 1},
+		{"core", filepath.Join("assets", "scripts", "reaper.sh"), "expires_at", 1},
 		{"dolt", filepath.Join("commands", "list", "run.sh"), doltSystemNeedle, 1},
 		{"dolt", filepath.Join("commands", "cleanup", "run.sh"), doltSystemNeedle, 1},
 		{"dolt", filepath.Join("commands", "health", "run.sh"), doltSystemNeedle, 2},
 		{"dolt", filepath.Join("commands", "sync", "run.sh"), doltSystemNeedle, 2},
+		{"dolt", filepath.Join("assets", "scripts", "mol-dog-doctor.sh"), "__gc_probe", 1},
 		{"dolt", filepath.Join("formulas", "mol-dog-stale-db.toml"), "__gc_probe", 1},
-		{"dolt", filepath.Join("formulas", "mol-dog-doctor.toml"), "__gc_probe", 1},
 	} {
 		path := filepath.Join(dir, citylayout.SystemPacksRoot, tt.pack, tt.rel)
 		data, err := os.ReadFile(path)
