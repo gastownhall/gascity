@@ -87,10 +87,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	// ordering stay correct (the Count fallback contract from #3211).
 	boundedMode := false
 	boundedFetch := 0
-	boundedTotal := 0
+	var boundedCounts map[string]int
 	if input.All && !dedupe && len(assigneeTerms) == 1 {
 		boundedFetch = pp.Offset + pp.Limit
-		boundedMode, boundedTotal = beadListBoundedTotal(ctx, stores, rigNames, assigneeTerms[0], input)
+		boundedMode, boundedCounts = beadListBoundedTotal(ctx, stores, rigNames, assigneeTerms[0], input)
 	}
 
 	seen := map[string]bool{}
@@ -122,10 +122,26 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			list, err := store.List(query)
 			if err != nil {
 				if beads.IsPartialResult(err) && len(list) > 0 {
+					// Partial result: the rig returned rows (appended to `all`
+					// below) but flagged a degraded read. Keep its bounded count
+					// — these rows ARE reachable, and dropping or shrinking the
+					// count risks under-advertising readable rows (silent data
+					// loss), strictly worse than the count's slight possible
+					// over-advertisement. Only a hard List failure (zero
+					// reachable rows, below) drops its count (gascity#3253).
 					pa.record("rig "+rigName, err)
 					pa.success()
 				} else {
 					pa.record("rig "+rigName, err)
+					if boundedMode {
+						// This rig's exact Count was baked into boundedCounts
+						// upfront, but its List failed so its rows never reach
+						// `all`. Drop its count so Total counts only reachable
+						// rows — matching the full-scan accounting under the same
+						// partial failure (where total == rows returned) and
+						// keeping next_cursor from overshooting (gascity#3253).
+						delete(boundedCounts, rigName)
+					}
 					continue
 				}
 			} else {
@@ -168,9 +184,14 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	var total int
 	var nextCursor string
 	if boundedMode {
-		// Total comes from the exact Count, not len(all) (which holds only the
-		// bounded prefix), so next_cursor still points at the real remainder.
-		total = boundedTotal
+		// Total is the exact Count summed over the rigs whose List actually
+		// returned rows, not len(all) (which holds only the bounded prefix) and
+		// not the upfront count of every rig: a rig counted then dropped at List
+		// time is removed from boundedCounts above, so Total tracks reachable
+		// rows and next_cursor still points at the real remainder (gascity#3253).
+		for _, n := range boundedCounts {
+			total += n
+		}
 		if pp.Offset < len(all) {
 			end := pp.Offset + pp.Limit
 			if end > len(all) {
@@ -204,26 +225,31 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}, nil
 }
 
-// beadListBoundedTotal returns the exact total bead count for the all=true
+// beadListBoundedTotal returns the exact per-rig bead counts for the all=true
 // list query across rigNames, sourced from each store's hydration-free Count.
 // The first return value reports whether bounding is safe: it is false (and
 // the caller keeps the full-scan path) if any store does not implement Counter
 // or cannot count the query exactly (ErrCountUnsupported), so Total and the
 // recency-ordered prefix stay correct on backends without a cheap count.
-func beadListBoundedTotal(ctx context.Context, stores map[string]beads.Store, rigNames []string, assignee string, input *BeadListInput) (bool, int) {
-	total := 0
+//
+// Counts are returned keyed by rig (not pre-summed) so the caller can drop the
+// count of any rig whose subsequent List fails: Total must reflect only the
+// rows actually reachable, matching the full-scan path under partial failure
+// (gascity#3253).
+func beadListBoundedTotal(ctx context.Context, stores map[string]beads.Store, rigNames []string, assignee string, input *BeadListInput) (bool, map[string]int) {
+	counts := make(map[string]int, len(rigNames))
 	for _, rigName := range rigNames {
 		counter, ok := stores[rigName].(beads.Counter)
 		if !ok {
-			return false, 0
+			return false, nil
 		}
 		n, err := counter.Count(ctx, beadListCountQuery(assignee, input))
 		if err != nil {
-			return false, 0
+			return false, nil
 		}
-		total += n
+		counts[rigName] = n
 	}
-	return true, total
+	return true, counts
 }
 
 // beadListCountQuery builds the count query for the all=true list path. It

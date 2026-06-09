@@ -21,10 +21,14 @@ import (
 // LIKE matching and applies the exact match in Go, so a metadata query cannot
 // be counted exactly in SQL and returns ErrCountUnsupported. The wisp and
 // both tiers also return ErrCountUnsupported because a union count would
-// double-count ids that List dedupes, and CreatedBefore/UpdatedBefore/ParentID
-// filters return ErrCountUnsupported because List applies them with Go-side
-// semantics a single COUNT cannot reproduce. Callers fall back to List for
-// those shapes, exactly as the Counter contract specifies.
+// double-count ids that List dedupes, and CreatedBefore/ParentID filters
+// return ErrCountUnsupported because List applies them with Go-side semantics a
+// single COUNT cannot reproduce. UpdatedBefore is also excluded, but as an
+// over-conservative exclusion pending cleanup of the duplicate SQL/Go filter:
+// queryIssueTable already emits an exact COALESCE(updated_at, created_at)
+// predicate for it, so a COUNT could reproduce it — the redundant Go-side
+// re-filter is what currently keeps it out. Callers fall back to List for those
+// shapes, exactly as the Counter contract specifies.
 func (s *DoltliteReadStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
 	if err := query.Validate(); err != nil {
 		return 0, err
