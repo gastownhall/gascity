@@ -3949,6 +3949,82 @@ exit 0
 	}
 }
 
+func TestDoctorScriptUsesServerMaxConnections(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		extraEnv  []string
+		want      string
+		wantQuery bool
+	}{
+		{
+			name:      "server value",
+			extraEnv:  []string{"GC_FAKE_MAX_CONNECTIONS=512", "GC_FAKE_CONN_COUNT=220"},
+			want:      "conns: 220/512",
+			wantQuery: true,
+		},
+		{
+			name:      "explicit override",
+			extraEnv:  []string{"GC_DOCTOR_CONN_MAX=100", "GC_FAKE_MAX_CONNECTIONS=512", "GC_FAKE_CONN_COUNT=70"},
+			want:      "conns: 70/100",
+			wantQuery: false,
+		},
+		{
+			name:      "malformed server value fallback",
+			extraEnv:  []string{"GC_FAKE_MAX_CONNECTIONS=not-a-number", "GC_FAKE_CONN_COUNT=220"},
+			want:      "conns: 220/256",
+			wantQuery: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			dataDir := filepath.Join(cityPath, "dolt-data")
+			if err := os.MkdirAll(dataDir, 0o755); err != nil {
+				t.Fatalf("mkdir data dir: %v", err)
+			}
+
+			binDir := t.TempDir()
+			queryLogPath := filepath.Join(binDir, "dolt-queries.log")
+			writeDogFakeGC(t, binDir)
+			writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf '%%s\n' "$*" >> %s
+case "$*" in
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    exit 0
+    ;;
+  *"SELECT @@GLOBAL.max_connections"*)
+    printf '@@GLOBAL.max_connections\n%%s\n' "${GC_FAKE_MAX_CONNECTIONS:-512}"
+    exit 0
+    ;;
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n%%s\n' "${GC_FAKE_CONN_COUNT:-1}"
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\n'
+    exit 0
+    ;;
+esac
+exit 0
+`, shellQuote(queryLogPath)))
+
+			out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, tc.extraEnv...)
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("doctor summary mismatch: want %q, output:\n%s", tc.want, out)
+			}
+			queryLog, err := os.ReadFile(queryLogPath)
+			if err != nil {
+				t.Fatalf("read fake dolt query log: %v", err)
+			}
+			hasQuery := strings.Contains(string(queryLog), "SELECT @@GLOBAL.max_connections")
+			if hasQuery != tc.wantQuery {
+				t.Fatalf("max_connections query presence = %v, want %v, log:\n%s", hasQuery, tc.wantQuery, queryLog)
+			}
+		})
+	}
+}
+
 // TestDoctorScriptAdvisoryMailUsesGenericEscalation asserts the latency-WARN
 // advisory path goes through the generic escalation recipient.
 func TestDoctorScriptAdvisoryMailUsesGenericEscalation(t *testing.T) {
