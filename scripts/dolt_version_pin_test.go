@@ -8,7 +8,8 @@ import (
 )
 
 func TestDoltVersionPins(t *testing.T) {
-	const doltVersion = "2.1.0"
+	const doltPin = "2.1.4"
+	const doltFloor = "2.1.0"
 	repoRoot := repoRoot(t)
 
 	assertContains := func(rel, want string) {
@@ -32,18 +33,18 @@ func TestDoltVersionPins(t *testing.T) {
 		}
 	}
 
-	assertContains("deps.env", "DOLT_VERSION="+doltVersion)
-	assertContains("contrib/k8s/Dockerfile.base", "ARG DOLT_VERSION="+doltVersion)
-	assertCount("contrib/k8s/dolt-statefulset.yaml", "image: dolthub/dolt:"+doltVersion, 2)
-	assertContains("README.md", "| dolt | Beads provider `bd` | "+doltVersion+" or newer")
-	assertContains("README.md", "Managed Dolt checks require a final Dolt "+doltVersion+" or newer.")
-	assertContains("examples/dolt/pack.toml", "# Minimum dolt version: "+doltVersion+".")
-	assertContains("examples/dolt/doctor/check-dolt/run.sh", `required="`+doltVersion+`"`)
-	assertContains("examples/dolt/assets/scripts/mol-dog-backup.sh", `MIN_DOLT_BACKUP_VERSION="`+doltVersion+`"`)
-	assertContains("examples/dolt/formulas/mol-dog-backup.toml", "**Required:** dolt >= "+doltVersion+".")
+	assertContains("deps.env", "DOLT_VERSION="+doltPin)
+	assertContains("contrib/k8s/Dockerfile.base", "ARG DOLT_VERSION="+doltPin)
+	assertCount("contrib/k8s/dolt-statefulset.yaml", "image: dolthub/dolt:"+doltPin, 2)
+	assertContains("README.md", "| dolt | Beads provider `bd` | "+doltFloor+" or newer")
+	assertContains("README.md", "Managed Dolt checks require a final Dolt "+doltFloor+" or newer.")
+	assertContains("examples/dolt/pack.toml", "# Minimum dolt version: "+doltFloor+".")
+	assertContains("examples/dolt/doctor/check-dolt/run.sh", `required="`+doltFloor+`"`)
+	assertContains("examples/dolt/assets/scripts/mol-dog-backup.sh", `MIN_DOLT_BACKUP_VERSION="`+doltFloor+`"`)
+	assertContains("examples/dolt/formulas/mol-dog-backup.toml", "**Required:** dolt >= "+doltFloor+".")
 
 	for _, platform := range []string{"linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64"} {
-		assertContains(".github/scripts/install-dolt-archive.sh", doltVersion+":"+platform)
+		assertContains(".github/scripts/install-dolt-archive.sh", doltPin+":"+platform)
 	}
 
 	workflowDir := filepath.Join(repoRoot, ".github", "workflows")
@@ -59,9 +60,9 @@ func TestDoltVersionPins(t *testing.T) {
 			return err
 		}
 		if strings.Contains(string(content), "DOLT_VERSION:") &&
-			!strings.Contains(string(content), `DOLT_VERSION: "`+doltVersion+`"`) {
+			!strings.Contains(string(content), `DOLT_VERSION: "`+doltPin+`"`) {
 			rel, _ := filepath.Rel(repoRoot, path)
-			t.Fatalf("%s has DOLT_VERSION but is not pinned to %s", rel, doltVersion)
+			t.Fatalf("%s has DOLT_VERSION but is not pinned to %s", rel, doltPin)
 		}
 		return nil
 	})

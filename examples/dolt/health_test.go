@@ -1234,6 +1234,119 @@ exit 1
 	}
 }
 
+// TestHealthScriptZombieScanExcludesExternallyManagedServers verifies that a
+// dolt sql-server launched with an explicit `--config <path>` whose config
+// directory has NO sibling `dolt.pid` is treated as externally managed (e.g.
+// a launchd-managed server for an unrelated app) and is NOT flagged as a
+// zombie. Regression guard for the bug where a healthy, unrelated dolt server
+// (a separate app's launchd-managed `dolt sql-server` on its own datadir and
+// port) was counted as a zombie because the foreign-managed exclusion only
+// recognized gc-managed siblings (config dir + matching dolt.pid). gc always
+// writes a dolt.pid next to a managed config; the absence of that sibling is
+// positive evidence the process is owned by another tool, not a town stray
+// the deacon patrol may kill. A plain `dolt sql-server` with no `--config`
+// (a genuine unidentified orphan) is still flagged, locking the boundary.
+func TestHealthScriptZombieScanExcludesExternallyManagedServers(t *testing.T) {
+	cityPath := t.TempDir()
+	externalConfigDir := t.TempDir()
+	fakeBin := t.TempDir()
+
+	mainPort := "19905"
+	mainPID := "424501"
+	externalPID := "424502"
+	zombiePID := "424503"
+
+	// External app's dolt config: a config file with NO sibling dolt.pid.
+	// This is the launchd-managed / non-gc shape from the field report.
+	externalConfigPath := filepath.Join(externalConfigDir, "config.yaml")
+	if err := os.WriteFile(externalConfigPath, []byte("# unrelated app dolt config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// City .beads directory with metadata.
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake gc: fail so metadata_files() falls back to find.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake pgrep: returns main PID, external PID, and a true zombie PID.
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
+		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, externalPID, zombiePID))
+
+	// Fake lsof: maps main port to mainPID.
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -iTCP:%s) echo %s; exit 0 ;;
+  esac
+done
+exit 1
+`, mainPort, mainPID))
+
+	// Fake ps: the bounded scan calls `ps -eo pid=,stat=,args=`. Emit the
+	// external PID's args line WITH `--config <path>` so the awk pass extracts
+	// it; its config dir has no dolt.pid sibling, so it must be excluded as an
+	// externally-managed server. The others are plain sql-servers.
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-eo" ]; then
+  echo "%s Sl dolt sql-server"
+  echo "%s Sl dolt sql-server --config %s"
+  echo "%s Sl dolt sql-server"
+  exit 0
+fi
+if [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "pid=" ]; then
+  printf ' %%s\n' "$2"
+  exit 0
+fi
+exit 1
+`, mainPID, externalPID, externalConfigPath, zombiePID))
+
+	// Fake nc: unreachable (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake dolt: SELECT 1 fails (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+	output := string(out)
+
+	// Only the true zombie (424503) should be counted; the externally-managed
+	// server is excluded.
+	if !strings.Contains(output, `"zombie_count": 1`) {
+		t.Errorf("expected zombie_count 1; got:\n%s", output)
+	}
+	if strings.Contains(output, externalPID) {
+		t.Errorf("externally-managed Dolt PID %s (--config, no dolt.pid sibling) should not be in zombie_pids; got:\n%s", externalPID, output)
+	}
+	if !strings.Contains(output, zombiePID) {
+		t.Errorf("true zombie PID %s should be in zombie_pids; got:\n%s", zombiePID, output)
+	}
+}
+
 // TestHealthScriptZombieScanIsBoundedFork is the regression guard for #2482:
 // the zombie scan must enumerate the process table a bounded number of times,
 // independent of how many dolt processes (especially Z-state zombies) exist.

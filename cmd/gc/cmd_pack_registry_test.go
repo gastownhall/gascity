@@ -559,13 +559,14 @@ func TestPackRegistryLiveGascityPacksCatalog(t *testing.T) {
 		t.Fatalf("search gascity-packs registry code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	searchOutput := stdout.String()
-	for _, name := range []string{"gascity", "gastown", "discord", "github-intake", "slack"} {
+	canaryPacks := []string{"gascity", "gastown", "discord", "github", "slack-full"}
+	for _, name := range canaryPacks {
 		if !strings.Contains(searchOutput, name) {
 			t.Fatalf("search output missing %q:\n%s", name, searchOutput)
 		}
 	}
 
-	for _, name := range []string{"gascity", "gastown", "discord", "github-intake", "slack"} {
+	for _, name := range canaryPacks {
 		stdout.Reset()
 		stderr.Reset()
 		if code := doPackRegistryShow("main:"+name, false, false, &stdout, &stderr); code != 0 {

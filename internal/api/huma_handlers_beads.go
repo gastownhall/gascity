@@ -74,6 +74,25 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 
 	var all []beads.Bead
 	dedupe := len(assigneeTerms) > 1
+
+	// all=true reads materialize closed history per rig, so the build is
+	// O(history) even though the caller only wants a recency-bounded page
+	// (gascity#3253). When every store can Count the query exactly, push the
+	// page bound down so each store returns only the rows this page needs and
+	// source Total from a hydration-free Count instead of len(full history) —
+	// the build collapses to O(limit) at the store boundary while the response
+	// shape (a created_at-desc prefix plus an accurate Total and next_cursor)
+	// is unchanged. Scoped to the single-assignee all=true hot path; if any
+	// store cannot Count the query, keep the full-scan path so Total and
+	// ordering stay correct (the Count fallback contract from #3211).
+	boundedMode := false
+	boundedFetch := 0
+	var boundedCounts map[string]int
+	if input.All && !dedupe && len(assigneeTerms) == 1 {
+		boundedFetch = pp.Offset + pp.Limit
+		boundedMode, boundedCounts = beadListBoundedTotal(ctx, stores, rigNames, assigneeTerms[0], input)
+	}
+
 	seen := map[string]bool{}
 	var pa partialAggregator
 	for _, rigName := range rigNames {
@@ -94,14 +113,35 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			if !query.HasFilter() {
 				query.AllowScan = true
 			}
+			if boundedMode {
+				// Each store need only return enough rows to cover this page;
+				// the cross-rig merge below cuts the exact global prefix.
+				query.Limit = boundedFetch
+			}
 			pa.attempt()
 			list, err := store.List(query)
 			if err != nil {
 				if beads.IsPartialResult(err) && len(list) > 0 {
+					// Partial result: the rig returned rows (appended to `all`
+					// below) but flagged a degraded read. Keep its bounded count
+					// — these rows ARE reachable, and dropping or shrinking the
+					// count risks under-advertising readable rows (silent data
+					// loss), strictly worse than the count's slight possible
+					// over-advertisement. Only a hard List failure (zero
+					// reachable rows, below) drops its count (gascity#3253).
 					pa.record("rig "+rigName, err)
 					pa.success()
 				} else {
 					pa.record("rig "+rigName, err)
+					if boundedMode {
+						// This rig's exact Count was baked into boundedCounts
+						// upfront, but its List failed so its rows never reach
+						// `all`. Drop its count so Total counts only reachable
+						// rows — matching the full-scan accounting under the same
+						// partial failure (where total == rows returned) and
+						// keeping next_cursor from overshooting (gascity#3253).
+						delete(boundedCounts, rigName)
+					}
 					continue
 				}
 			} else {
@@ -140,7 +180,31 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	// A non-cursor request is offset-0 paging: a truncated first page carries
 	// the continuation cursor too, otherwise the remainder of a limit-bounded
 	// read is unfetchable by design (#3208).
-	page, total, nextCursor := paginate(all, pp)
+	var page []beads.Bead
+	var total int
+	var nextCursor string
+	if boundedMode {
+		// Total is the exact Count summed over the rigs whose List actually
+		// returned rows, not len(all) (which holds only the bounded prefix) and
+		// not the upfront count of every rig: a rig counted then dropped at List
+		// time is removed from boundedCounts above, so Total tracks reachable
+		// rows and next_cursor still points at the real remainder (gascity#3253).
+		for _, n := range boundedCounts {
+			total += n
+		}
+		if pp.Offset < len(all) {
+			end := pp.Offset + pp.Limit
+			if end > len(all) {
+				end = len(all)
+			}
+			page = all[pp.Offset:end]
+		}
+		if pp.Offset+pp.Limit < total {
+			nextCursor = encodeCursor(pp.Offset + pp.Limit)
+		}
+	} else {
+		page, total, nextCursor = paginate(all, pp)
+	}
 	if page == nil {
 		page = []beads.Bead{}
 	}
@@ -159,6 +223,51 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		CacheAgeS: cacheAge,
 		Body:      body,
 	}, nil
+}
+
+// beadListBoundedTotal returns the exact per-rig bead counts for the all=true
+// list query across rigNames, sourced from each store's hydration-free Count.
+// The first return value reports whether bounding is safe: it is false (and
+// the caller keeps the full-scan path) if any store does not implement Counter
+// or cannot count the query exactly (ErrCountUnsupported), so Total and the
+// recency-ordered prefix stay correct on backends without a cheap count.
+//
+// Counts are returned keyed by rig (not pre-summed) so the caller can drop the
+// count of any rig whose subsequent List fails: Total must reflect only the
+// rows actually reachable, matching the full-scan path under partial failure
+// (gascity#3253).
+func beadListBoundedTotal(ctx context.Context, stores map[string]beads.Store, rigNames []string, assignee string, input *BeadListInput) (bool, map[string]int) {
+	counts := make(map[string]int, len(rigNames))
+	for _, rigName := range rigNames {
+		counter, ok := stores[rigName].(beads.Counter)
+		if !ok {
+			return false, nil
+		}
+		n, err := counter.Count(ctx, beadListCountQuery(assignee, input))
+		if err != nil {
+			return false, nil
+		}
+		counts[rigName] = n
+	}
+	return true, counts
+}
+
+// beadListCountQuery builds the count query for the all=true list path. It
+// carries the same filters as the list query so the count matches exactly;
+// Sort and Limit are omitted because they do not affect a count.
+func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
+	q := beads.ListQuery{
+		Status:        input.Status,
+		Type:          input.Type,
+		Label:         input.Label,
+		Assignee:      assignee,
+		IncludeClosed: input.All,
+		Live:          input.Status == "in_progress",
+	}
+	if !q.HasFilter() {
+		q.AllowScan = true
+	}
+	return q
 }
 
 // humaHandleBeadReady is the Huma-typed handler for GET /v0/beads/ready.

@@ -45,12 +45,15 @@ const primeHookReadTimeout = 500 * time.Millisecond
 var primeStdin = func() *os.File { return os.Stdin }
 
 type primeHookInput struct {
-	Source string `json:"source"`
+	Source        string `json:"source"`
+	SessionID     string `json:"session_id"`
+	HookEventName string `json:"hook_event_name"`
 }
 
 type primeHookContext struct {
-	Source        string
-	HookEventName string
+	Source            string
+	HookEventName     string
+	ProviderSessionID string
 }
 
 // newPrimeCmd creates the "gc prime [agent-name]" command.
@@ -187,7 +190,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		if !hookMode {
 			return
 		}
-		persistPrimeHookProviderSessionKey()
+		persistPrimeHookProviderSessionKey(hookContext.ProviderSessionID, stderr)
 	}
 	if !strictMode {
 		runHookSideEffects()
@@ -473,20 +476,18 @@ func readPrimeHookContext() primeHookContext {
 		Source:        strings.TrimSpace(os.Getenv("GC_HOOK_SOURCE")),
 		HookEventName: strings.TrimSpace(os.Getenv("GC_HOOK_EVENT_NAME")),
 	}
-	if shouldReadPrimeHookStdin() {
-		if input := readPrimeHookStdin(); input != nil {
-			if source := strings.TrimSpace(input.Source); source != "" {
-				ctx.Source = source
-			}
+	if input := readPrimeHookStdin(); input != nil {
+		if source := strings.TrimSpace(input.Source); source != "" {
+			ctx.Source = source
+		}
+		if event := strings.TrimSpace(input.HookEventName); event != "" {
+			ctx.HookEventName = event
+		}
+		if providerSessionID := strings.TrimSpace(input.SessionID); providerSessionID != "" {
+			ctx.ProviderSessionID = providerSessionID
 		}
 	}
 	return ctx
-}
-
-func shouldReadPrimeHookStdin() bool {
-	hasEnvSessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != "" ||
-		strings.TrimSpace(os.Getenv("CLAUDE_SESSION_ID")) != ""
-	return !hasEnvSessionID
 }
 
 func readPrimeHookStdin() *primeHookInput {
@@ -530,31 +531,62 @@ func readPrimeHookStdin() *primeHookInput {
 	return &input
 }
 
-func persistPrimeHookProviderSessionKey() {
+func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.Writer) {
 	gcSessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	providerSessionID := strings.TrimSpace(os.Getenv("GC_PROVIDER_SESSION_ID"))
 	if providerSessionID == "" {
 		providerSessionID = strings.TrimSpace(os.Getenv("GEMINI_SESSION_ID"))
 	}
-	if gcSessionID == "" || providerSessionID == "" || gcSessionID == providerSessionID {
+	fromHookStdin := false
+	if providerSessionID == "" {
+		providerSessionID = strings.TrimSpace(hookProviderSessionID)
+		fromHookStdin = providerSessionID != ""
+	}
+	requiredProviderID := strings.TrimSpace(os.Getenv("GC_PROVIDER_SESSION_ID_REQUIRED"))
+	warn := func(format string, args ...any) {
+		if requiredProviderID == "" || stderr == nil {
+			return
+		}
+		allArgs := append([]any{requiredProviderID}, args...)
+		fmt.Fprintf(stderr, "gc prime --hook: provider session key not persisted for %s: "+format+"\n", allArgs...) //nolint:errcheck // hook diagnostics are best effort.
+	}
+	if gcSessionID == "" {
+		warn("GC_SESSION_ID is empty")
+		return
+	}
+	if providerSessionID == "" {
+		warn("GC_PROVIDER_SESSION_ID/GEMINI_SESSION_ID/hook stdin session id is empty for session %q", gcSessionID)
+		return
+	}
+	if gcSessionID == providerSessionID {
+		warn("provider session id equals GC_SESSION_ID %q", gcSessionID)
 		return
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
+		warn("resolving city for session %q: %v", gcSessionID, err)
 		return
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
+		warn("opening city store for session %q: %v", gcSessionID, err)
 		return
 	}
 	sessionBead, err := store.Get(gcSessionID)
 	if err != nil {
+		warn("loading session bead %q: %v", gcSessionID, err)
+		return
+	}
+	if fromHookStdin && sessionProviderFamily(sessionBead) != "codex" {
+		warn("hook stdin provider session id is only accepted for codex session %q", gcSessionID)
 		return
 	}
 	if existing := strings.TrimSpace(sessionBead.Metadata["session_key"]); existing != "" {
 		return
 	}
-	_ = store.SetMetadata(gcSessionID, "session_key", providerSessionID)
+	if err := store.SetMetadata(gcSessionID, "session_key", providerSessionID); err != nil {
+		warn("writing session_key for session %q: %v", gcSessionID, err)
+	}
 }
 
 // isPoolInstance reports whether a resolved agent (with Pool=nil) originated

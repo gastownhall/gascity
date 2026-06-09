@@ -29,12 +29,12 @@ var configFS embed.FS
 
 // supported lists provider names that have hook support wired into
 // Gas Town's installer.
-var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot", "cursor", "pi", "omp"}
+var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot", "cursor", "pi", "omp", "kimi"}
 
 const (
-	managedPiHookVersion       = 4
-	managedOpenCodeHookVersion = 2
-	managedOmpHookVersion      = 1
+	managedPiHookVersion       = 7
+	managedOpenCodeHookVersion = 5
+	managedOmpHookVersion      = 2
 )
 
 var (
@@ -154,7 +154,7 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 		switch family {
 		case "claude":
 			err = installClaude(fs, cityDir)
-		case "codex", "gemini", "antigravity", "kiro", "opencode", "copilot", "cursor", "pi", "omp":
+		case "codex", "gemini", "antigravity", "kiro", "opencode", "copilot", "cursor", "pi", "omp", "kimi":
 			err = installOverlayManaged(fs, workDir, family)
 		case "groq", "cerebras":
 			err = installOverlayManaged(fs, workDir, "opencode")
@@ -245,7 +245,10 @@ func piHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "gc prime --hook") ||
 		!strings.Contains(content, "gc hook --inject") ||
 		!strings.Contains(content, "gc handoff --auto") ||
-		!strings.Contains(content, "mirrorTempCounter") {
+		!strings.Contains(content, "mirrorTempCounter") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}
 	for _, marker := range []string{
@@ -285,7 +288,10 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, `"experimental.session.compacting"`) ||
 		!strings.Contains(content, `runWithWarning(directory, "handoff", "--auto", "context cycle")`) ||
 		!strings.Contains(content, "output.context.push(handoff)") ||
-		!strings.Contains(content, "logRunFailure") {
+		!strings.Contains(content, "logRunFailure") ||
+		!strings.Contains(content, "logRunStderr(stderr);") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") {
 		return true
 	}
 	for _, marker := range []string{
@@ -320,10 +326,12 @@ func ompHookNeedsUpgrade(existing []byte) bool {
 	if ompHookVersion(content) < managedOmpHookVersion ||
 		!strings.Contains(content, "gascityOmpExtension") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
 		!strings.Contains(content, `pi.on("session_start"`) ||
 		!strings.Contains(content, `pi.on("session_compact"`) ||
 		!strings.Contains(content, `pi.on("before_agent_start"`) ||
-		!strings.Contains(content, "logRunFailure") {
+		!strings.Contains(content, "logRunFailure") ||
+		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}
 	for _, marker := range []string{

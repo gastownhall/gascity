@@ -188,8 +188,8 @@ func TestBuiltinProvidersKimi(t *testing.T) {
 	if !derefBool(p.SupportsACP) {
 		t.Error("SupportsACP = false, want true")
 	}
-	if derefBool(p.SupportsHooks) {
-		t.Error("SupportsHooks = true, want false until Kimi hook installer exists")
+	if !derefBool(p.SupportsHooks) {
+		t.Error("SupportsHooks = false, want true")
 	}
 	if p.ResumeFlag != "--session" {
 		t.Errorf("ResumeFlag = %q, want --session", p.ResumeFlag)

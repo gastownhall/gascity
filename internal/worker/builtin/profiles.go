@@ -355,6 +355,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:         []string{"kimi", "python"},
 		AcceptStartupDialogs: boolPtr(false),
 		SupportsACP:          true,
+		SupportsHooks:        true,
 		InstructionsFile:     "AGENTS.md",
 		ResumeFlag:           "--session",
 		ResumeStyle:          "flag",

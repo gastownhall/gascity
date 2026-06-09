@@ -1087,7 +1087,7 @@ type testDoltliteIssue struct {
 	Dependencies []testDoltliteDependency
 }
 
-func createTestDoltliteSchema(t *testing.T, db *sql.DB) {
+func createTestDoltliteSchema(t testing.TB, db *sql.DB) {
 	t.Helper()
 	for _, stmt := range []string{
 		`CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)`,
@@ -1148,7 +1148,7 @@ func createTestDoltliteSchema(t *testing.T, db *sql.DB) {
 	}
 }
 
-func insertTestDoltliteIssue(t *testing.T, db *sql.DB, issueTable, labelTable, depTable string, issue testDoltliteIssue) {
+func insertTestDoltliteIssue(t testing.TB, db *sql.DB, issueTable, labelTable, depTable string, issue testDoltliteIssue) {
 	t.Helper()
 	if issue.Status == "" {
 		issue.Status = "open"

@@ -279,14 +279,21 @@ fi
 # are legitimate — exclude any PID listening on a known rig port.
 #
 # Foreign Dolt servers (managed by OTHER cities on the same host) are
-# also legitimate. We recognize them by parsing `--config <path>` from
-# the process command line and checking the sibling dolt.pid for a
-# self-reference. Without this, every patrol in every city flags the
-# others as zombies on shared dev hosts. The `--config` parse happens
-# inside the single bounded `ps -eo` + awk pass below (it already has
-# the full args line in hand); only the sibling dolt.pid read is left
-# to the shell loop, which iterates O(matched sql-servers) — never
-# O(all pids/zombies) — so the bounded-fork invariant still holds.
+# also legitimate. gc ALWAYS writes a dolt.pid next to a managed dolt
+# config, so the sibling dolt.pid — located by parsing `--config <path>`
+# from the process command line — is the authoritative ownership signal:
+# present and self-referential means a healthy gc-managed instance.
+# Externally-managed Dolt servers (launchd- or manually-started servers
+# for unrelated apps, on their own datadir and port) also carry an
+# explicit `--config` but have NO sibling dolt.pid; they are not town
+# strays and must not be flagged, or the deacon patrol would kill a
+# healthy, unrelated server. Without these exclusions, every patrol in
+# every city flags the others (and unrelated apps) as zombies on shared
+# dev hosts. The `--config` parse happens inside the single bounded
+# `ps -eo` + awk pass below (it already has the full args line in hand);
+# only the sibling dolt.pid read is left to the shell loop, which
+# iterates O(matched sql-servers) — never O(all pids/zombies) — so the
+# bounded-fork invariant still holds.
 #
 # GC_HEALTH_SKIP_ZOMBIE_SCAN is a test-only escape hatch. Zombie
 # enumeration spawns one `ps` per matching process, which on shared
@@ -361,14 +368,26 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
   _tab="$(printf '\t')"
   while IFS="$_tab" read -r p config_path; do
     [ -n "$p" ] || continue
-    # Foreign-managed check: if --config points at a yaml whose sibling
-    # dolt.pid claims this PID, the process is owned by another managed
-    # Dolt instance (another city on this host) — not a zombie.
-    if [ -n "$config_path" ] && [ -f "$config_path" ]; then
+    # Ownership check for processes launched with an explicit --config.
+    # The sibling dolt.pid (gc writes one next to every managed config)
+    # is authoritative — we key on its presence, not on whether the
+    # config file itself is readable (it may live in another user's home
+    # on a shared host):
+    #   - present and claims this PID   -> healthy gc-managed Dolt instance
+    #     (another city/rig on this host) -> not a zombie.
+    #   - present but claims a DIFFERENT PID -> a gc-style config dir whose
+    #     recorded server died or was replaced -> still a zombie.
+    #   - absent -> the process is NOT gc-managed (e.g. a launchd-managed
+    #     or manually-started server for an unrelated app on its own
+    #     datadir/port) -> not a town stray; exclude it so the deacon
+    #     patrol does not kill a healthy, unrelated Dolt server.
+    if [ -n "$config_path" ]; then
       foreign_pid_file="$(dirname "$config_path")/dolt.pid"
       if [ -f "$foreign_pid_file" ]; then
         recorded_pid=$(head -1 "$foreign_pid_file" 2>/dev/null | tr -d ' \t\r\n')
         [ "$recorded_pid" = "$p" ] && continue
+      else
+        continue
       fi
     fi
     zombie_count=$((zombie_count + 1))

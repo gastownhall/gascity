@@ -509,10 +509,23 @@ gc runtime request-restart
 This blocks forever. The controller restarts you. The next wisp
 is already assigned — the new session resumes from context.
 
-**2. Pour next iteration BEFORE burning:**
+**2. Pour next iteration BEFORE burning (reconcile to exactly one):**
+
+Reuse an already-queued wisp instead of pouring a duplicate. A prior cycle
+may have poured a next wisp without burning, or a restart may have raced —
+keep one open patrol wisp and burn any surplus, so wisps never accumulate.
+Wisp roots are `issue_type=molecule` (never `--type=wisp`, which is not a
+valid bd type and matches nothing).
 ```bash
-NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id')
-gc bd update "$NEXT" --assignee=$GC_AGENT
+OPEN_WISPS=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=0 --json | jq -r '.[].id')
+NEXT=$(printf '%s\n' $OPEN_WISPS | sed -n '1p')
+for extra in $(printf '%s\n' $OPEN_WISPS | sed '1d'); do
+  gc bd mol burn "$extra" --force
+done
+if [ -z "$NEXT" ]; then
+  NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id')
+  gc bd update "$NEXT" --assignee="$GC_AGENT"
+fi
 ```
 
 **3. Burn this wisp:**

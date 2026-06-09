@@ -442,7 +442,10 @@ func TestMaterializeBuiltinPacksPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("before_agent_start"`,
 		"GC_PI_HOOK_VERSION",
 		"gc hook --inject",
-		`run(["prime", "--hook"], ctx.cwd)`,
+		`run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`,
+		"GC_PROVIDER_SESSION_ID",
+		"GC_PROVIDER_SESSION_ID_REQUIRED",
+		`stdio: ["ignore", "pipe", "inherit"]`,
 		"gc handoff --auto",
 		"mirrorTempCounter",
 		"fs.rmSync(tmp",
@@ -520,12 +523,14 @@ func TestMaterializeBuiltinPacksOmpHookPublishesProviderSessionID(t *testing.T) 
 	data := readMaterializedOmpHook(t, dir)
 	for _, want := range []string{
 		`import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent"`,
-		`const GC_OMP_HOOK_VERSION = 1`,
+		`const GC_OMP_HOOK_VERSION = 2`,
 		`export default function gascityOmpExtension(pi: ExtensionAPI)`,
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
 		`GC_PROVIDER_SESSION_ID`,
+		`GC_PROVIDER_SESSION_ID_REQUIRED`,
+		`stdio: ["ignore", "pipe", "inherit"]`,
 		`getSessionId`,
 		`logRunFailure`,
 	} {

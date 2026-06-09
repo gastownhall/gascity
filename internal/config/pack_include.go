@@ -351,11 +351,18 @@ var repoCacheGitEnvBlacklist = map[string]bool{
 // RepoCacheKey computes the sha256 cache key for a remote source+commit pair.
 // This is the canonical implementation — packman.RepoCacheKey must produce
 // identical results. Bundled synthetic caches live in a distinct namespace so
-// current-binary content never collides with same-repo git checkouts.
+// current-binary content never collides with same-repo git checkouts, and they
+// additionally fold in the running binary's bundled-pack content hash so two gc
+// binaries with different embedded pack content resolve to different cache
+// directories instead of fighting over one shared marker (the citywide
+// "bundled pack cache content hash does not match current binary" wedge).
 func RepoCacheKey(source, commit string) string {
 	identity := NormalizeRemoteSource(source) + commit
 	if builtinpacks.IsSource(source) {
 		identity = builtinpacks.SyntheticCacheNamespace + "\x00" + NormalizeRemoteSource(source) + "\x00" + commit
+		if component := builtinpacks.SyntheticCacheKeyComponent(); component != "" {
+			identity += "\x00" + component
+		}
 	}
 	sum := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%x", sum[:])

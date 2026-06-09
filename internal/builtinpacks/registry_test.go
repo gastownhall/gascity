@@ -345,3 +345,23 @@ func testRepoRoot(t *testing.T) string {
 	}
 	return root
 }
+
+func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {
+	want, err := SyntheticContentHash()
+	if err != nil {
+		t.Fatalf("SyntheticContentHash: %v", err)
+	}
+	got := SyntheticCacheKeyComponent()
+	if got == "" {
+		t.Fatal("SyntheticCacheKeyComponent returned empty for a valid binary")
+	}
+	if got != want {
+		t.Fatalf("SyntheticCacheKeyComponent = %q, want content hash %q", got, want)
+	}
+	if !strings.HasPrefix(got, "sha256:") {
+		t.Fatalf("SyntheticCacheKeyComponent = %q, want sha256 prefix", got)
+	}
+	if second := SyntheticCacheKeyComponent(); second != got {
+		t.Fatalf("SyntheticCacheKeyComponent not stable across calls: %q != %q", got, second)
+	}
+}
