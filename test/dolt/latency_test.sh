@@ -51,6 +51,68 @@ while [ "$i" -lt 30 ]; do
 done
 if [ "$warned" -eq 0 ]; then pass "30 fast probes -> 0 false warns"; else bad "$warned/30 fast probes false-warned"; fi
 
+# --- Fallback-cascade coverage ---------------------------------------------
+# A PATH shim emulates BSD/macOS date: '+%s%3N' prints a literal '3N' suffix
+# (no %N support); every other format defers to the real date. This forces
+# now_ms off the GNU-date branch on any platform, so the perl/python3
+# fallbacks are exercised even on GNU/Linux CI.
+
+SHIM_DIR=$(mktemp -d)
+trap 'rm -rf "$SHIM_DIR"' EXIT
+REAL_DATE=$(command -v date)
+
+mkdir -p "$SHIM_DIR/bsd"
+cat > "$SHIM_DIR/bsd/date" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = "+%s%3N" ]; then
+  printf '%s3N\n' "\$("$REAL_DATE" +%s)"
+else
+  exec "$REAL_DATE" "\$@"
+fi
+EOF
+chmod +x "$SHIM_DIR/bsd/date"
+
+# Without GNU date, a sub-second clock must still come from perl or python3.
+if command -v perl >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
+  d=$( (
+    PATH="$SHIM_DIR/bsd:$PATH"; export PATH
+    s=$(now_ms); sleep 0.05; e=$(now_ms); echo $((e - s))
+  ) )
+  if [ "$d" -ge 5 ] && [ "$d" -le 800 ]; then
+    pass "BSD-date shim: perl/python3 fallback keeps sub-second resolution (${d}ms)"
+  else
+    bad "BSD-date shim: got ${d}ms for a 50ms sleep, want 5..800 (fallback degraded to whole seconds)"
+  fi
+else
+  echo "SKIP: neither perl nor python3 on PATH; cannot exercise sub-second fallbacks"
+fi
+
+# With GNU date, perl, and python3 all unavailable, now_ms must degrade to
+# whole seconds (a plausible epoch reading ending in 000) rather than emit
+# garbage or crash.
+mkdir -p "$SHIM_DIR/bare"
+cp "$SHIM_DIR/bsd/date" "$SHIM_DIR/bare/date"
+for tool in perl python3; do
+  printf '#!/bin/sh\nexit 127\n' > "$SHIM_DIR/bare/$tool"
+  chmod +x "$SHIM_DIR/bare/$tool"
+done
+v=$( (PATH="$SHIM_DIR/bare:$PATH"; export PATH; now_ms) )
+case "$v" in
+  *[!0-9]*|'')
+    bad "exhausted-cascade now_ms emitted non-numeric output: '$v'"
+    ;;
+  *000)
+    if [ "${#v}" -ge 13 ]; then
+      pass "exhausted cascade degrades to whole-second epoch-ms ($v)"
+    else
+      bad "exhausted-cascade now_ms too short for epoch-ms: '$v'"
+    fi
+    ;;
+  *)
+    bad "exhausted-cascade now_ms not whole-second-quantized: '$v'"
+    ;;
+esac
+
 echo "----"
 if [ "$fail" -eq 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT"; fi
 exit "$fail"

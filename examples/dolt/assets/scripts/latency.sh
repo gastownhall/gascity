@@ -7,20 +7,49 @@
 # to 0s or 1s depending on whether it straddles a wall-clock second tick —
 # producing false latency WARNs (and MEDIUM advisory mail) at a 1s threshold.
 
+# _now_ms_plausible VALUE — exit 0 when VALUE looks like an epoch-millisecond
+# reading: all digits, at least 13 of them (epoch-ms is 13 digits from
+# 2001-09-09 through 2286-11-20).
+_now_ms_plausible() {
+  case "${1:-}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -ge 13 ]
+}
+
 # now_ms — echo the current time in epoch milliseconds.
-# GNU/coreutils date supports %3N (3-digit nanoseconds = milliseconds). On
-# platforms whose date lacks %N (e.g. BSD/macOS without coreutils), fall back
-# to second-resolution * 1000 — no worse than the prior whole-second behavior.
+#
+# Implementation cascade; the first plausible reading wins:
+#   1. date +%s%3N      — GNU/coreutils date (%3N = milliseconds). BSD/macOS
+#                         date has no %N and prints a literal '3N' suffix,
+#                         which the plausibility check rejects.
+#   2. perl Time::HiRes — core module since perl 5.8; present on stock macOS
+#                         and virtually every Linux.
+#   3. python3          — time.time() carries sub-millisecond resolution.
+#   4. date +%s × 1000  — whole seconds; no worse than the pre-fix behavior.
+#
+# The cascade exists because a GNU-only implementation silently degrades to
+# whole seconds on BSD/macOS, where a sub-second probe that straddles a
+# wall-clock second tick measures 1000ms and false-trips the default 1000ms
+# warn threshold — the same advisory storm the millisecond rewrite was meant
+# to stop, in different units.
 now_ms() {
   _now_ms_v=$(date +%s%3N 2>/dev/null)
-  case "$_now_ms_v" in
-    ''|*[!0-9]*) _now_ms_v="" ;;   # %3N printed literally: no ms support
-  esac
-  if [ -n "$_now_ms_v" ] && [ "${#_now_ms_v}" -ge 13 ]; then
-    printf '%s\n' "$_now_ms_v"     # epoch-ms is 13+ digits from 2001..2286
-  else
-    printf '%s\n' "$(( $(date +%s) * 1000 ))"
+  if _now_ms_plausible "$_now_ms_v"; then
+    printf '%s\n' "$_now_ms_v"
+    return 0
   fi
+  _now_ms_v=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time() * 1000' 2>/dev/null)
+  if _now_ms_plausible "$_now_ms_v"; then
+    printf '%s\n' "$_now_ms_v"
+    return 0
+  fi
+  _now_ms_v=$(python3 -c 'import time; print(int(time.time() * 1000))' 2>/dev/null)
+  if _now_ms_plausible "$_now_ms_v"; then
+    printf '%s\n' "$_now_ms_v"
+    return 0
+  fi
+  printf '%s\n' "$(( $(date +%s) * 1000 ))"
 }
 
 # latency_should_warn ELAPSED_MS THRESHOLD_MS — exit 0 (warn) when measured
