@@ -722,10 +722,9 @@ type PackSource struct {
 	Path string `toml:"path,omitempty"`
 }
 
-// Import defines a named import of another pack. This is the V2 replacement
-// for the flat `includes` list. The binding name is the TOML key; authored
-// public config uses source plus optional version. Package names discovered
-// from the imported pack are advisory/display names, not identity.
+// Import defines a named import of another pack. The binding name is the TOML
+// key; authored public config uses source plus optional version. Package names
+// discovered from the imported pack are advisory/display names, not identity.
 type Import struct {
 	// Source is the durable authored pack location: a local path, a remote git
 	// URL, or a dereferenceable GitHub tree URL for a pack below a repository
