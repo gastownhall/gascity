@@ -111,6 +111,7 @@ func TestDoltliteCountUnsupportedShapes(t *testing.T) {
 	}{
 		{name: "metadata filter", query: ListQuery{Metadata: map[string]string{"gc.routed_to": "rig/polecat"}}},
 		{name: "parent filter", query: ListQuery{ParentID: "gc-parent"}},
+		{name: "limited query", query: ListQuery{AllowScan: true, Limit: 1}},
 		{name: "created before", query: ListQuery{AllowScan: true, CreatedBefore: time.Now().Add(time.Hour)}},
 		{name: "tier both", query: ListQuery{Label: "tier-test", TierMode: TierBoth}},
 		{name: "tier wisps", query: ListQuery{Label: "tier-test", TierMode: TierWisps}},

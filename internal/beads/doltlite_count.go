@@ -23,12 +23,14 @@ import (
 // both tiers also return ErrCountUnsupported because a union count would
 // double-count ids that List dedupes, and CreatedBefore/ParentID filters
 // return ErrCountUnsupported because List applies them with Go-side semantics a
-// single COUNT cannot reproduce. UpdatedBefore is also excluded, but as an
-// over-conservative exclusion pending cleanup of the duplicate SQL/Go filter:
-// queryIssueTable already emits an exact COALESCE(updated_at, created_at)
-// predicate for it, so a COUNT could reproduce it — the redundant Go-side
-// re-filter is what currently keeps it out. Callers fall back to List for those
-// shapes, exactly as the Counter contract specifies.
+// single COUNT cannot reproduce. Limited queries are excluded because the
+// Counter contract is List cardinality parity, not full-result total
+// cardinality. UpdatedBefore is also excluded, but as an over-conservative
+// exclusion pending cleanup of the duplicate SQL/Go filter: queryIssueTable
+// already emits an exact COALESCE(updated_at, created_at) predicate for it, so
+// a COUNT could reproduce it — the redundant Go-side re-filter is what
+// currently keeps it out. Callers fall back to List for those shapes, exactly
+// as the Counter contract specifies.
 func (s *DoltliteReadStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
 	if err := query.Validate(); err != nil {
 		return 0, err
@@ -64,6 +66,9 @@ func doltliteCountSupported(query ListQuery) bool {
 		return false
 	}
 	if !query.CreatedBefore.IsZero() || !query.UpdatedBefore.IsZero() {
+		return false
+	}
+	if query.Limit > 0 {
 		return false
 	}
 	return true

@@ -62,6 +62,42 @@ func TestCachingStoreCountServedFromCache(t *testing.T) {
 	}
 }
 
+func TestCachingStoreCountRejectsLimitedCleanCacheQuery(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	mustCreate := func(title string) {
+		t.Helper()
+		if _, err := mem.Create(beads.Bead{Title: title, Type: "task"}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+	mustCreate("first open task")
+	mustCreate("second open task")
+
+	backing := &countingBackingStore{Store: mem, countResult: 99}
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	query := beads.ListQuery{Status: "open", AllowScan: true, Limit: 1}
+	listed, err := cs.List(query)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("List len = %d, want 1", len(listed))
+	}
+
+	_, err = cs.Count(context.Background(), query)
+	if !errors.Is(err, beads.ErrCountUnsupported) {
+		t.Fatalf("Count error = %v, want ErrCountUnsupported", err)
+	}
+	if backing.countCalls != 0 {
+		t.Fatalf("backing.Count called %d times, want 0", backing.countCalls)
+	}
+}
+
 func TestCachingStoreCountDelegatesBeforePrime(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
