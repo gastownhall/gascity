@@ -177,9 +177,9 @@ type City struct {
 	// plus optional version, so this legacy surface is intentionally omitted
 	// from generated public schemas and reference docs.
 	Packs map[string]PackSource `toml:"packs,omitempty" jsonschema:"-"`
-	// Imports defines named pack imports (V2 mechanism). Each key is a
-	// binding name; the value specifies the source and optional version,
-	// export, and transitive controls. Processed during ExpandCityPacks.
+	// Imports defines named pack imports (V2 mechanism). Each key is a local
+	// binding name; the authored public contract stores a durable source plus
+	// optional version. Processed during ExpandCityPacks.
 	Imports map[string]Import `toml:"imports,omitempty"`
 	// Defaults holds city-level defaults that seed generated config. The
 	// canonical default-rig import table is [defaults.rig.imports].
@@ -722,10 +722,10 @@ type PackSource struct {
 	Path string `toml:"path,omitempty"`
 }
 
-// Import defines a named import of another pack. This is the V2
-// replacement for the flat `includes` list. Each import has a binding
-// name (the TOML key), a source (local path or remote URL), and
-// optional version/export/transitive controls.
+// Import defines a named import of another pack. This is the V2 replacement
+// for the flat `includes` list. The binding name is the TOML key; authored
+// public config uses source plus optional version. Package names discovered
+// from the imported pack are advisory/display names, not identity.
 type Import struct {
 	// Source is the durable authored pack location: a local path, a remote git
 	// URL, or a dereferenceable GitHub tree URL for a pack below a repository
@@ -736,18 +736,16 @@ type Import struct {
 	// Version is an optional semver constraint for git-backed imports (e.g.,
 	// "^1.2"). Empty for local paths. "sha:<hex>" pins a specific commit.
 	Version string `toml:"version,omitempty"`
-	// Export re-exports this import's contents into the parent pack's
-	// namespace. Consumers of the parent get this import's agents
-	// flattened under the parent's binding name.
-	Export bool `toml:"export,omitempty"`
-	// Transitive controls whether this import's own imports are visible
-	// to the consumer. Defaults to true (transitive). Set to false to
-	// suppress transitive resolution for this specific import.
-	Transitive *bool `toml:"transitive,omitempty"`
-	// Shadow controls shadow warnings when the importer defines an agent
-	// with the same name as one from this import. "warn" (default) emits
-	// a warning; "silent" suppresses it.
-	Shadow string `toml:"shadow,omitempty" jsonschema:"enum=warn,enum=silent"`
+	// Export is a compatibility-only PackV2 loader knob retained for older
+	// configs. It is intentionally omitted from generated public schemas.
+	Export bool `toml:"export,omitempty" jsonschema:"-"`
+	// Transitive is a compatibility-only PackV2 loader knob retained for older
+	// configs. Authored public imports are a DAG through source plus version.
+	// It is intentionally omitted from generated public schemas.
+	Transitive *bool `toml:"transitive,omitempty" jsonschema:"-"`
+	// Shadow is a compatibility-only PackV2 loader knob retained for older
+	// configs. It is intentionally omitted from generated public schemas.
+	Shadow string `toml:"shadow,omitempty" jsonschema:"-"`
 }
 
 // PackMeta holds metadata from a pack's [pack] header.

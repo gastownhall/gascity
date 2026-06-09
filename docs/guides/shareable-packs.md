@@ -125,6 +125,11 @@ duplicate-agent error only when two source directories produce the same
 qualified name on the same surface — for example, two unbound legacy includes
 that both define `polecat` — and there is no fallback-agent resolution.
 
+The `[imports.<name>]` key is the local binding chosen by the importing pack.
+An imported pack's own name, or the name displayed in a registry, is display
+metadata and a suggested binding only. It does not override the import
+binding.
+
 ## Registry Discovery
 
 Registries help you find packs, but they do not change the authored import

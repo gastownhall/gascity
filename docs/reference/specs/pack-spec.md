@@ -247,6 +247,11 @@ binding names for deterministic ordering of imports and stamps the binding on
 every agent the import contributes, qualifying runtime agent identities
 (section 2.5).
 
+The imported pack's declared name and any registry display name are advisory:
+they can suggest a binding or provide UI copy, but they are not durable pack
+identity. Durable identity comes from `source` plus the optional `version`
+constraint or pin.
+
 A `source` string is a pack resolver coordinate. For GitHub-hosted packs, a
 browser-dereferenceable `tree/<ref>/<path>` URL is the preferred authored form.
 For other Git-backed sources, the Git remote and any pack-root subdirectory

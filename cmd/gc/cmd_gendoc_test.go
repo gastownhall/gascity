@@ -72,6 +72,8 @@ func TestGenDocImportAddDocumentsSourceLanes(t *testing.T) {
 		"remote GitHub repository subpaths",
 		"Registry catalog handles are lookup shortcuts",
 		"source and optional version",
+		"local binding name",
+		"display/advisory metadata",
 	} {
 		if !strings.Contains(section, want) {
 			t.Fatalf("gc import add docs missing %q:\n%s", want, section)

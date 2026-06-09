@@ -97,6 +97,10 @@ city pack
 Registries are catalogs for reusable packs. A registry record tells `gc` the
 pack name, summary, version metadata, and source.
 
+A pack name is display metadata and a suggested local binding. It is not the
+pack's durable identity. The durable coordinate is the authored `source` plus
+the optional `version` constraint or pin.
+
 A registry handle is a short command argument for a pack record. In
 `main:gascity`, `main` is the local registry name on this machine and
 `gascity` is the pack name inside that registry. `main` is not a keyword in
@@ -113,6 +117,7 @@ The distinction looks like this:
 | Value | Example | Used in |
 |---|---|---|
 | Registry handle | `main:gascity` | `gc pack registry` commands, such as search and show. |
+| Import binding | `[imports.gascity]` | Local name in the importing `pack.toml`. |
 | Durable source | `https://github.com/gastownhall/gascity-packs/tree/main/gascity` | Checked-in import TOML. |
 
 For a GitHub-hosted pack inside a repository, use a browser-dereferenceable
@@ -191,8 +196,10 @@ pack.
 
 ## Names
 
-Agent names are local names inside the pack that defines them. When a pack is
-imported, the import binding becomes part of the runtime agent name.
+Agent names are local names inside the pack that defines them. Import bindings
+are local names chosen by the importing file. When a pack is imported, the
+import binding becomes the runtime namespace for imported agent names; the
+imported pack's own name does not override that binding.
 
 If a city imports this dependency:
 

@@ -1656,6 +1656,9 @@ Registry catalog handles are lookup shortcuts in this wave, not durable
 [imports.*] field values. After lookup, authored TOML stores the resolved
 source and optional version.
 
+The [imports.&lt;name&gt;] table key is the local binding name. Imported package
+names are display/advisory metadata and never become registry identity.
+
 ```
 gc import add <source> [flags]
 ```
