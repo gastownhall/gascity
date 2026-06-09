@@ -318,6 +318,10 @@ test-pack-registry-live:
 	$(TEST_ENV) CGO_ENABLED=0 GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test ./cmd/gc -run '^TestPackRegistryLiveGascityPacksCatalog$$' -count=1
 	$(TEST_ENV) CGO_ENABLED=0 GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test -tags acceptance_a -timeout 10m ./test/acceptance -run '^TestPackRegistryLiveImportsEveryCatalogPack$$' -count=1
 
+## update-bundled-gastown-pack: sync the embedded gastown pack to the latest registry release
+update-bundled-gastown-pack:
+	scripts/update-bundled-gastown-pack
+
 ## test-native-doltlite-beads: compile and run the native DoltLite read-store suite
 test-native-doltlite-beads:
 	$(TEST_ENV) CGO_ENABLED=0 go test -tags gascity_native_beads ./internal/beads -count=1
