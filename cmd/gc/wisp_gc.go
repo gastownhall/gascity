@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -133,6 +134,31 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 		return nil, fmt.Errorf("listing closed wisp roots: %w", err)
 	}
 	appendUnique(wisps)
+
+	// Plain task wisps — sling/convoy trackers, loose step beads — live in
+	// the wisp tier but are neither Type=molecule nor tagged gc.kind=wisp,
+	// so the two selectors above never see them: they accumulate without
+	// bound on a busy coordination DB, inflating every ephemeral-tier scan.
+	// Everything in the wisp tier is ephemeral by definition, so a CLOSED
+	// wisp-tier bead past TTL is collectable. Two ownership exclusions:
+	// messages belong to read-mail retention (mailRetentionTTL), and
+	// order-tracking beads belong to `gc order sweep-tracking` + the
+	// [beads.policies.order_tracking].delete_after_close policy.
+	tierWisps, err := store.List(beads.ListQuery{Status: "closed", TierMode: beads.TierWisps})
+	if err != nil {
+		return nil, fmt.Errorf("listing closed wisp-tier beads: %w", err)
+	}
+	collectable := make([]beads.Bead, 0, len(tierWisps))
+	for _, item := range tierWisps {
+		if item.Type == "message" {
+			continue
+		}
+		if slices.Contains(item.Labels, labelOrderTracking) {
+			continue
+		}
+		collectable = append(collectable, item)
+	}
+	appendUnique(collectable)
 	return entries, nil
 }
 

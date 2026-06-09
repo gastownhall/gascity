@@ -815,3 +815,44 @@ func assertDeletedIDs(t *testing.T, deleted []string, want ...string) {
 }
 
 var _ beads.Store = (*gcTestStore)(nil)
+
+func TestWispGC_PurgesPlainTaskWispsInWispTier(t *testing.T) {
+	now := time.Now()
+	expired := now.Add(-2 * time.Hour)
+
+	// The regression case: an order-tracking-style plain task wisp — lives in
+	// the wisp tier, is neither Type=molecule nor tagged gc.kind=wisp, and
+	// previously matched no GC selector (accumulating without bound).
+	tracking := makeGCBead("trk-1", expired, "closed", "task")
+	tracking.Ephemeral = true
+
+	freshTracking := makeGCBead("trk-2", now.Add(-10*time.Minute), "closed", "task")
+	freshTracking.Ephemeral = true
+
+	openWisp := makeGCBead("trk-3", expired, "open", "task")
+	openWisp.Ephemeral = true
+
+	// Messages are owned by read-mail retention, never the TTL path.
+	message := makeGCBead("msg-1", expired, "closed", "message")
+	message.Ephemeral = true
+
+	// A persistent-tier closed task is a real issue — must never be collected.
+	persistent := makeGCBead("task-1", expired, "closed", "task")
+
+	// Order-tracking wisps belong to sweep-tracking + the order_tracking
+	// delete_after_close policy, never the TTL path.
+	orderTracking := makeGCBeadWithLabels("ot-1", expired, "closed", "task", labelOrderTracking)
+	orderTracking.Ephemeral = true
+
+	store := newGCStore([]beads.Bead{tracking, freshTracking, openWisp, message, persistent, orderTracking})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 (only the expired closed plain task wisp)", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "trk-1")
+}
