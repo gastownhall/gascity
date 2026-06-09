@@ -104,7 +104,7 @@ append_report_note() {
   local title="$1"
   local file="$2"
   if [ -s "$file" ]; then
-    if ! bd update "$WORK_BEAD" --append-notes "$(printf '## %s %s\n\n```json\n%s\n```' "$title" "$(date -Is)" "$(cat "$file")")"; then
+    if ! bd update "$WORK_BEAD" --append-notes "$(printf '## %s %s\n\n```json\n%s\n```' "$title" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$(cat "$file")")"; then
       echo "failed to append ${title} report; continuing to drain-ack" >&2
     fi
   fi
