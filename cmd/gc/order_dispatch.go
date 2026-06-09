@@ -288,6 +288,14 @@ type memoryOrderDispatcher struct {
 }
 
 type orderDispatchTrackingIndex struct {
+	// mu guards entries and errs. dispatch shares ONE index across every
+	// order's open-work gate, and gateOpenWorkBounded runs each gate in a
+	// goroutine it abandons on timeout/ctx-cancel (#2893) — so multiple gate
+	// goroutines touch these maps concurrently. The lock is held only around
+	// the map reads/writes below, never across the listCanonical* bd calls, so
+	// one slow or contended store read cannot stall sibling gates (the property
+	// gateOpenWorkBounded exists to preserve).
+	mu      sync.Mutex
 	entries map[string]map[string]orderTrackingSummary
 	errs    map[string]error
 }
@@ -829,16 +837,22 @@ func (idx *orderDispatchTrackingIndex) lastRunForStore(store beads.Store, storeK
 
 func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
 	key := storeKey + "\x00history"
+	idx.mu.Lock()
 	if err, ok := idx.errs[key]; ok {
+		idx.mu.Unlock()
 		return nil, err
 	}
 	if entries, ok := idx.entries[key]; ok {
+		idx.mu.Unlock()
 		return entries, nil
 	}
+	idx.mu.Unlock()
 	items, err := listCanonicalRecentOrderTrackingHistoryBeads(store)
 	if err != nil {
 		wrapped := fmt.Errorf("listing order-tracking history: %w", err)
+		idx.mu.Lock()
 		idx.errs[key] = wrapped
+		idx.mu.Unlock()
 		return nil, wrapped
 	}
 	entries := make(map[string]orderTrackingSummary)
@@ -853,21 +867,31 @@ func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store,
 		}
 		entries[scopedName] = summary
 	}
+	// A sibling gate goroutine may have populated this key while we listed;
+	// both computed the same result from the same store, so last writer wins.
+	idx.mu.Lock()
 	idx.entries[key] = entries
+	idx.mu.Unlock()
 	return entries, nil
 }
 
 func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
+	idx.mu.Lock()
 	if err, ok := idx.errs[storeKey]; ok {
+		idx.mu.Unlock()
 		return nil, err
 	}
 	if entries, ok := idx.entries[storeKey]; ok {
+		idx.mu.Unlock()
 		return entries, nil
 	}
+	idx.mu.Unlock()
 	items, err := listCanonicalOpenOrderTrackingBeads(store)
 	if err != nil {
 		wrapped := fmt.Errorf("listing order-tracking beads: %w", err)
+		idx.mu.Lock()
 		idx.errs[storeKey] = wrapped
+		idx.mu.Unlock()
 		return nil, wrapped
 	}
 	entries := make(map[string]orderTrackingSummary)
@@ -882,7 +906,11 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 		}
 		entries[scopedName] = summary
 	}
+	// A sibling gate goroutine may have populated this key while we listed;
+	// both computed the same result from the same store, so last writer wins.
+	idx.mu.Lock()
 	idx.entries[storeKey] = entries
+	idx.mu.Unlock()
 	return entries, nil
 }
 
