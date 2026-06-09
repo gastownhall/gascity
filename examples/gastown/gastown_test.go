@@ -909,6 +909,12 @@ func TestPolecatPromptHaltsOnAutoPushFalse(t *testing.T) {
 		"exit 0",
 		"fi",
 		"git push origin HEAD",
+		`REMOTE_REF=$(git ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1}')`,
+		`LOCAL_HEAD=$(git rev-parse HEAD)`,
+		`PUSH VERIFICATION FAILED`,
+		`gc runtime drain-ack`,
+		"exit 1",
+		`gc bd update <work-bead> \`,
 	)
 }
 
@@ -938,6 +944,12 @@ func TestPolecatRenderedApprovalFallacyHaltsOnAutoPushFalse(t *testing.T) {
 		"exit 0",
 		"fi",
 		"git push origin HEAD",
+		`REMOTE_REF=$(git ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1}')`,
+		`LOCAL_HEAD=$(git rev-parse HEAD)`,
+		`PUSH VERIFICATION FAILED`,
+		`gc runtime drain-ack`,
+		"exit 1",
+		`gc bd update <work-bead> \`,
 	)
 }
 
@@ -967,6 +979,13 @@ func TestPolecatFormulaHaltsOnAutoPushFalse(t *testing.T) {
 		"exit 0",
 		"fi",
 		"git push origin HEAD",
+		"PUSH_EXIT=$?",
+		`REMOTE_REF=$(git ls-remote origin "refs/heads/$CURRENT_BRANCH" 2>/dev/null | awk '{print $1}')`,
+		`LOCAL_HEAD=$(git rev-parse HEAD)`,
+		`PUSH VERIFICATION FAILED`,
+		`gc runtime drain-ack`,
+		"exit 1",
+		"```",
 	)
 }
 

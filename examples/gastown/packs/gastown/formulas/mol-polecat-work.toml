@@ -366,6 +366,34 @@ if [ "$AUTO_PUSH" = "false" ]; then
   exit 0
 fi
 git push origin HEAD
+PUSH_EXIT=$?
+if [ $PUSH_EXIT -ne 0 ]; then
+    echo "PUSH FAILED (exit $PUSH_EXIT)"
+    echo "Branch '$CURRENT_BRANCH' was NOT pushed to origin."
+    echo "Aborting handoff — bead stays with polecat."
+    echo ""
+    echo "Diagnose the push failure (network, auth, force-needed?) and re-run submit-and-exit."
+    gc runtime drain-ack
+    exit 1
+fi
+# Verify the ref is reachable on origin before trusting the push succeeded.
+REMOTE_REF=$(git ls-remote origin "refs/heads/$CURRENT_BRANCH" 2>/dev/null | awk '{print $1}')
+LOCAL_HEAD=$(git rev-parse HEAD)
+if [ -z "$REMOTE_REF" ]; then
+    echo "PUSH VERIFICATION FAILED"
+    echo "  git push exited 0 but 'git ls-remote' returned no ref for '$CURRENT_BRANCH' on origin."
+    echo "  Branch is local-only. Aborting handoff."
+    gc runtime drain-ack
+    exit 1
+fi
+if [ "$REMOTE_REF" != "$LOCAL_HEAD" ]; then
+    echo "PUSH VERIFICATION FAILED"
+    echo "  origin/$CURRENT_BRANCH = $REMOTE_REF"
+    echo "  local HEAD             = $LOCAL_HEAD"
+    echo "  Branch tip on origin does not match local HEAD. Aborting handoff."
+    gc runtime drain-ack
+    exit 1
+fi
 ```
 
 **4. Clean up local branch (prevent stale branch accumulation):**

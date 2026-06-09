@@ -269,7 +269,16 @@ if [ "$AUTO_PUSH" = "false" ]; then
   gc runtime drain-ack
   exit 0
 fi
-git push origin HEAD
+git push origin HEAD && {
+  BRANCH=$(git branch --show-current)
+  REMOTE_REF=$(git ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1}')
+  LOCAL_HEAD=$(git rev-parse HEAD)
+  if [ -z "$REMOTE_REF" ] || [ "$REMOTE_REF" != "$LOCAL_HEAD" ]; then
+    echo "PUSH VERIFICATION FAILED: origin/$BRANCH does not match local HEAD. Aborting handoff."
+    gc runtime drain-ack
+    exit 1
+  fi
+} || { echo "PUSH FAILED. Aborting handoff — bead stays with polecat."; gc runtime drain-ack; exit 1; }
 gc bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \
   --set-metadata target={{ .DefaultBranch }} \
