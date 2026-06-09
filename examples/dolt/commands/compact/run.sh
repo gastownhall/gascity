@@ -19,10 +19,10 @@
 #   2. Soft-reset to the root commit; all data stays staged.
 #   3. Commit everything as a single "compaction: flatten history" commit.
 #   4. Re-check post-flatten row counts, table value hashes, and database
-#      value hash. Row-count decreases fail before full GC. Row-count
-#      increases are treated as concurrent-writer evidence and allowed to
-#      continue only when table and database value hashes stay stable. Any
-#      value-hash drift, table-list drift, or row-count decrease is
+#      value hash. Row-count increases are treated as concurrent-writer
+#      evidence and allowed to continue only when table and database value
+#      hashes stay stable. Same-count table hash drift, table-list drift,
+#      or row-count decrease without a proven concurrent writer is
 #      quarantined before full GC.
 #   4a. Local-verify HEAD-stability gate. The pre-flight stability loop cannot
 #      close the residual window between its final HEAD check and the flatten,
@@ -32,15 +32,16 @@
 #      otherwise looks identical to the ambiguous gain+drift corruption signal.
 #      Quarantining that false positive blocks all future GC of the db and
 #      starves DOLT_GC until host memory is exhausted. So, mirroring the remote-
-#      push path's HEAD-stability defer, the gain+drift case is downgraded from
-#      a blocking quarantine to a skip-and-retry-next-run ONLY when a concurrent
-#      writer is proven. A writer is proven (and distinguished from the flatten's
-#      OWN commit) when either HEAD captured immediately before the mutating
-#      reset differs from the stable pre-flight HEAD (a writer landed in the
-#      preflight->reset window, before the flatten committed), or HEAD captured
-#      after verify moved past the flatten's own commit (a writer landed during/
-#      after verify). All other failures — and gain+drift with a stable HEAD —
-#      still quarantine. Probe failure leaves the race unproven and quarantines.
+#      push path's HEAD-stability defer, gain+drift and row-count-decrease
+#      cases are downgraded from a blocking quarantine to a skip-and-retry-
+#      next-run ONLY when a concurrent writer is proven. A writer is proven
+#      (and distinguished from the flatten's OWN commit) when either HEAD
+#      captured immediately before the mutating reset differs from the stable
+#      pre-flight HEAD (a writer landed in the preflight->reset window, before
+#      the flatten committed), or HEAD captured after verify moved past the
+#      flatten's own commit (a writer landed during/after verify). All other
+#      failures — and gain+drift or row-decrease with a stable HEAD — still
+#      quarantine. Probe failure leaves the race unproven and quarantines.
 #   5. Run CALL DOLT_GC('--full') to reclaim chunks orphaned by the flatten.
 #
 # Remote push failures are recorded in compact-pending-push markers and do not
@@ -790,6 +791,7 @@ verify_counts() {
   verify_counts_saw_gain_hash_drift=0
   verify_counts_gain_drift_tables=""
   verify_counts_saw_row_decrease=0
+  verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
   verify_counts_saw_table_list_change=0
   verify_counts_saw_probe_failure=0
@@ -846,11 +848,13 @@ verify_counts() {
       continue
     fi
     table_gained_rows=0
+    table_had_row_decrease=0
     if [ "$actual" != "$expected" ]; then
       if [ "$actual" -lt "$expected" ]; then
         printf 'compact: db=%s row count decreased after flatten table=%s before=%s after=%s\n' \
           "$db" "$t" "$expected" "$actual" >&2
         verify_counts_saw_row_decrease=1
+        table_had_row_decrease=1
         if [ "$fail" -ne 1 ]; then
           fail=1
           verify_counts_failure_reason="post-flatten row count decreased"
@@ -874,6 +878,10 @@ verify_counts() {
           verify_counts_failure_reason="post-flatten table value hash changed with row-count increase"
           verify_counts_failure_guidance="row-count increase plus table value hash drift cannot prove row preservation; investigate before re-running"
         fi
+      elif [ "$table_had_row_decrease" = "1" ]; then
+        verify_counts_saw_decrease_hash_drift=1
+        printf 'compact: db=%s table=%s value hash changed with row-count decrease before=%s after=%s\n' \
+          "$db" "$t" "$expected_hash" "$actual_hash" >&2
       else
         printf 'compact: db=%s table=%s value hash changed after flatten without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
@@ -1469,6 +1477,7 @@ flatten_database() {
   verify_counts_saw_gain_hash_drift=0
   verify_counts_gain_drift_tables=""
   verify_counts_saw_row_decrease=0
+  verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
   verify_counts_saw_table_list_change=0
   verify_counts_saw_probe_failure=0
@@ -1961,8 +1970,31 @@ flatten_database() {
       rm -f "$preflight_tmp"
       return 0
     fi
+    # Downgrade quarantine -> defer for concurrent-writer DELETE. A concurrent
+    # DELETE during the flatten window legitimately reduces row counts and shifts
+    # table value hashes. Safe to defer when a concurrent writer is proven and no
+    # other anomaly (unexplained same-count hash drift, table-list change, probe
+    # failure, or gain+drift) prevents safe deferral.
     if [ "$writer_race_detected" = "1" ] && \
-       [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ]; then
+       [ "${verify_counts_saw_row_decrease:-0}" = "1" ] && \
+       [ "${verify_counts_saw_same_count_hash_drift:-0}" != "1" ] && \
+       [ "${verify_counts_saw_gain_hash_drift:-0}" != "1" ] && \
+       [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
+       [ "${verify_counts_saw_probe_failure:-0}" != "1" ]; then
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — row-count decrease is concurrent-writer DELETE, not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+      if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+        "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+        "$compacted_from_head" "$local_branch" "$remote_branch"; then
+        rm -f "$preflight_tmp"
+        return 1
+      fi
+      rm -f "$preflight_tmp"
+      return 0
+    fi
+    if [ "$writer_race_detected" = "1" ] && \
+       { [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] || \
+         [ "${verify_counts_saw_row_decrease:-0}" = "1" ]; }; then
       printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s), but additional integrity failure category prevents defer; quarantine unchanged\n' \
         "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
     fi
