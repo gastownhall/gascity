@@ -12,6 +12,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 func TestProcessDrainSeparateExpandsConvoyIntoUnitRoots(t *testing.T) {
@@ -107,6 +108,65 @@ func TestProcessDrainSeparateProjectsMemberDependenciesOntoItemWorkflows(t *test
 	}
 	if beadListContainsID(ready, secondWork.ID) {
 		t.Fatalf("second item work step %s should not be ready while %s is open; ready=%+v", secondWork.ID, firstRow.ItemRootID, ready)
+	}
+}
+
+func TestProcessDrainSeparateCreatesDependentItemWorkflowsBlocked(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(false)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	mem, drain := seedDrainWorkflow(t)
+	parentRoot := mustGetBead(t, mem, drain.Metadata["gc.root_bead_id"])
+	members, err := convoycore.Members(mem, parentRoot.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("members = %d, want 2", len(members))
+	}
+	firstMember := members[0]
+	secondMember := members[1]
+	mustDepAdd(t, mem, secondMember.ID, firstMember.ID, "blocks")
+
+	var firstRootID string
+	var secondRootID string
+	secondRootCreatedBlocked := false
+	secondWorkCreatedBlocked := false
+	store := &createObservingStore{
+		Store: mem,
+		onCreate: func(created beads.Bead) {
+			if created.Metadata["gc.drain_member_id"] == firstMember.ID && created.Metadata["gc.kind"] == "workflow" {
+				firstRootID = created.ID
+			}
+			if firstRootID == "" {
+				return
+			}
+			if created.Metadata["gc.drain_member_id"] == secondMember.ID && created.Metadata["gc.kind"] == "workflow" {
+				secondRootID = created.ID
+				secondRootCreatedBlocked = beadNeedsContains(created.Needs, firstRootID)
+			}
+			if secondRootID != "" && strings.HasPrefix(created.Title, "Work ") && (created.ParentID == secondRootID || created.Metadata["gc.root_bead_id"] == secondRootID) {
+				secondWorkCreatedBlocked = beadNeedsContains(created.Needs, firstRootID)
+			}
+		},
+	}
+
+	result, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	if result.Action != "drain-expanded" {
+		t.Fatalf("result = %+v, want drain-expanded", result)
+	}
+	if !secondRootCreatedBlocked {
+		t.Fatalf("second item root was created without a blocks need on first root %s", firstRootID)
+	}
+	if !secondWorkCreatedBlocked {
+		t.Fatalf("second item work step was created without a blocks need on first root %s", firstRootID)
 	}
 }
 
@@ -912,6 +972,28 @@ type recordingDrainUnitStore struct {
 func (s *recordingDrainUnitStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	s.listMetadataOpts = append(s.listMetadataOpts, opts)
 	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+type createObservingStore struct {
+	beads.Store
+	onCreate func(beads.Bead)
+}
+
+func (s *createObservingStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.Store.Create(b)
+	if err == nil && s.onCreate != nil {
+		s.onCreate(created)
+	}
+	return created, err
+}
+
+func beadNeedsContains(needs []string, id string) bool {
+	for _, need := range needs {
+		if need == id || need == "blocks:"+id {
+			return true
+		}
+	}
+	return false
 }
 
 func TestEnsureDrainUnitConvoyLooksAcrossBothTiers(t *testing.T) {

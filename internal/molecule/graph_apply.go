@@ -132,11 +132,16 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 	graphWorkflow := preservesGraphActionTypes(recipe)
 	rootKey := recipe.Steps[0].ID
 	rootIncluded := false
+	externalDepsByStep, err := groupExternalDeps(opts.ExternalDeps)
+	if err != nil {
+		return nil, false, "", err
+	}
+	recipeParentByStep := recipeParentDeps(recipe.Deps)
 
 	plan := &beads.GraphApplyPlan{
 		CommitMessage: fmt.Sprintf("gc: instantiate %s", recipe.Name),
 		Nodes:         make([]beads.GraphApplyNode, 0, len(recipe.Steps)),
-		Edges:         make([]beads.GraphApplyEdge, 0, len(recipe.Deps)),
+		Edges:         make([]beads.GraphApplyEdge, 0, len(recipe.Deps)+len(opts.ExternalDeps)),
 	}
 
 	for i, step := range recipe.Steps {
@@ -206,6 +211,19 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if node.Assignee != "" {
 				node.AssignAfterCreate = true
 			}
+		}
+		for _, dep := range externalDepsByStep[step.ID] {
+			if dep.Type == "parent-child" && recipeParentByStep[step.ID] != "" {
+				continue
+			}
+			if dep.Type == "parent-child" {
+				node.ParentID = dep.DependsOnID
+			}
+			plan.Edges = append(plan.Edges, beads.GraphApplyEdge{
+				FromKey: step.ID,
+				ToID:    dep.DependsOnID,
+				Type:    dep.Type,
+			})
 		}
 		// Same residual-var guard as Instantiate — see #618.
 		if strings.Contains(node.Title, "{{") {
