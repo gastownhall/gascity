@@ -1710,6 +1710,53 @@ func TestFindCodexSessionFileUsesObservedRoots(t *testing.T) {
 	}
 }
 
+func TestFindCodexSessionFileByIDUsesSessionMetaID(t *testing.T) {
+	sessDir := t.TempDir()
+	workDir := "/data/projects/myproject"
+	dayDir := filepath.Join(sessDir, "2026", "05", "19")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	targetID := "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
+	targetFile := filepath.Join(dayDir, "rollout-target.jsonl")
+	targetMeta := fmt.Sprintf(`{"timestamp":"2026-05-19T04:46:07.848Z","type":"session_meta","payload":{"id":%q,"timestamp":"2026-05-19T04:46:07.761Z","cwd":%q}}`, targetID, workDir)
+	if err := os.WriteFile(targetFile, []byte(targetMeta+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	otherFile := filepath.Join(dayDir, "rollout-other.jsonl")
+	otherMeta := fmt.Sprintf(`{"timestamp":"2026-05-19T04:47:07.848Z","type":"session_meta","payload":{"id":"019e3e8e-ffff-7000-a1ef-8b9e882bea2f","cwd":%q}}`, workDir)
+	if err := os.WriteFile(otherFile, []byte(otherMeta+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindCodexSessionFileByIDFromCandidates([]string{sessDir}, workDir, targetID); got != targetFile {
+		t.Fatalf("FindCodexSessionFileByIDFromCandidates() = %q, want %q", got, targetFile)
+	}
+}
+
+func TestFindCodexSessionFileInTimeWindowRequiresUniqueMatch(t *testing.T) {
+	sessDir := t.TempDir()
+	workDir := "/data/projects/myproject"
+	dayDir := filepath.Join(sessDir, "2026", "05", "19")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Date(2026, 5, 19, 4, 46, 0, 0, time.UTC)
+	for _, name := range []string{"rollout-one.jsonl", "rollout-two.jsonl"} {
+		path := filepath.Join(dayDir, name)
+		meta := fmt.Sprintf(`{"timestamp":"2026-05-19T04:46:07Z","type":"session_meta","payload":{"cwd":%q}}`, workDir)
+		if err := os.WriteFile(path, []byte(meta+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := FindCodexSessionFileInTimeWindow([]string{sessDir}, workDir, start, start.Add(time.Minute)); got != "" {
+		t.Fatalf("FindCodexSessionFileInTimeWindow() = %q, want empty for non-unique window", got)
+	}
+}
+
 func TestCodexSessionCWD(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "test.jsonl")

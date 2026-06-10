@@ -3,6 +3,7 @@ package transcript
 
 import (
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
@@ -35,10 +36,12 @@ func DiscoverPath(searchPaths []string, provider, workDir, gcSessionID string) s
 
 // DiscoverKeyedPath resolves only the session-id-based transcript path.
 func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID string) string {
-	if strings.TrimSpace(gcSessionID) == "" || !SupportsIDLookup(provider) {
+	if strings.TrimSpace(gcSessionID) == "" {
 		return ""
 	}
 	switch sessionlog.ProviderFamily(provider) {
+	case "codex":
+		return sessionlog.FindCodexSessionFileByIDFromCandidates(searchPaths, workDir, gcSessionID)
 	case "kimi":
 		return sessionlog.FindKimiSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "pi":
@@ -46,7 +49,16 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 	case "antigravity":
 		return sessionlog.FindAntigravitySessionFileByID(searchPaths, workDir, gcSessionID)
 	}
+	if !SupportsIDLookup(provider) {
+		return ""
+	}
 	return sessionlog.FindSessionFileByID(searchPaths, workDir, gcSessionID)
+}
+
+// DiscoverCodexPathInTimeWindow resolves a Codex transcript whose metadata
+// timestamp uniquely matches the supplied session-start window.
+func DiscoverCodexPathInTimeWindow(searchPaths []string, workDir string, start, end time.Time) string {
+	return sessionlog.FindCodexSessionFileInTimeWindow(searchPaths, workDir, start, end)
 }
 
 // DiscoverFallbackPath resolves the narrow provider-specific fallback path to

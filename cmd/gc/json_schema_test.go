@@ -591,6 +591,16 @@ func TestJSONContractAllowsBdPassthrough(t *testing.T) {
 	}
 }
 
+func TestJSONContractAllowsHookClaimJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	root := newRootCmd(&stdout, &stderr)
+
+	handled, code := handleJSONContractRequest(root, []string{"hook", "--claim", "--json"}, &stdout, &stderr)
+	if handled || code != 0 {
+		t.Fatalf("handled=%v code=%d stdout=%q stderr=%q", handled, code, stdout.String(), stderr.String())
+	}
+}
+
 func TestJSONSchemaManifestForBdPassthrough(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"bd", "--json-schema"}, &stdout, &stderr)

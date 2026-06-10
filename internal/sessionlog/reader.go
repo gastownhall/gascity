@@ -1031,6 +1031,88 @@ func startOfLocalDay(t time.Time) time.Time {
 	return time.Date(year, month, day, 0, 0, 0, 0, time.Local)
 }
 
+// CodexSessionCandidate is a Codex transcript whose session metadata matches a
+// requested workdir.
+type CodexSessionCandidate struct {
+	Path      string
+	SessionID string
+	WorkDir   string
+	StartedAt time.Time
+	ModTime   time.Time
+}
+
+// FindCodexSessionCandidates returns Codex transcripts matching workDir,
+// newest first by transcript start time and then file modification time.
+func FindCodexSessionCandidates(searchPaths []string, workDir string) []CodexSessionCandidate {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return nil
+	}
+	var candidates []CodexSessionCandidate
+	for _, root := range mergeCodexSearchPaths(searchPaths) {
+		candidates = append(candidates, findCodexSessionCandidatesIn(root, workDir, make(map[string]bool))...)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		left := codexCandidateSortTime(candidates[i])
+		right := codexCandidateSortTime(candidates[j])
+		if left.Equal(right) {
+			return candidates[i].Path > candidates[j].Path
+		}
+		return left.After(right)
+	})
+	return candidates
+}
+
+// FindCodexSessionFileByIDFromCandidates resolves a Codex transcript by provider
+// session ID while still requiring the embedded cwd to match workDir.
+func FindCodexSessionFileByIDFromCandidates(searchPaths []string, workDir, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || strings.Contains(sessionID, "..") || strings.ContainsAny(sessionID, `/\`) {
+		return ""
+	}
+	for _, candidate := range FindCodexSessionCandidates(searchPaths, workDir) {
+		if candidate.SessionID == sessionID || strings.Contains(filepath.Base(candidate.Path), sessionID) {
+			return candidate.Path
+		}
+	}
+	return ""
+}
+
+// FindCodexSessionFileInTimeWindow resolves a Codex transcript whose metadata
+// start time uniquely falls inside [start, end). A zero end leaves the window
+// open-ended. If the window matches zero or multiple transcripts, it returns
+// empty to preserve same-workdir ambiguity guards.
+func FindCodexSessionFileInTimeWindow(searchPaths []string, workDir string, start, end time.Time) string {
+	if start.IsZero() {
+		return ""
+	}
+	var matches []CodexSessionCandidate
+	for _, candidate := range FindCodexSessionCandidates(searchPaths, workDir) {
+		candidateTime := codexCandidateSortTime(candidate)
+		if candidateTime.IsZero() {
+			continue
+		}
+		if candidateTime.Before(start.Add(-2 * time.Second)) {
+			continue
+		}
+		if !end.IsZero() && !candidateTime.Before(end) {
+			continue
+		}
+		matches = append(matches, candidate)
+	}
+	if len(matches) != 1 {
+		return ""
+	}
+	return matches[0].Path
+}
+
+func codexCandidateSortTime(candidate CodexSessionCandidate) time.Time {
+	if !candidate.StartedAt.IsZero() {
+		return candidate.StartedAt
+	}
+	return candidate.ModTime
+}
+
 // findCodexSessionFileIn searches a Codex sessions directory for the most
 // recent session matching workDir. Scans date directories in reverse
 // chronological order for efficiency. Also recurses into symlinked
@@ -1076,6 +1158,75 @@ func findCodexSessionFileIn(sessDir, workDir string) string {
 		}
 	}
 	return ""
+}
+
+func findCodexSessionCandidatesIn(sessDir, workDir string, seen map[string]bool) []CodexSessionCandidate {
+	if sessDir == "" {
+		return nil
+	}
+	cleaned := filepath.Clean(sessDir)
+	if seen[cleaned] {
+		return nil
+	}
+	seen[cleaned] = true
+	entries, err := os.ReadDir(cleaned)
+	if err != nil {
+		return nil
+	}
+
+	var candidates []CodexSessionCandidate
+	var yearDirs []string
+	var extraRoots []string
+	for _, e := range entries {
+		if !e.IsDir() && e.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		name := e.Name()
+		if len(name) == 4 && name >= "2000" && name <= "2099" {
+			yearDirs = append(yearDirs, name)
+		} else if e.Type()&os.ModeSymlink != 0 {
+			extraRoots = append(extraRoots, name)
+		}
+	}
+
+	for _, year := range yearDirs {
+		yearDir := filepath.Join(cleaned, year)
+		for _, month := range listDirsReverse(yearDir) {
+			monthDir := filepath.Join(yearDir, month)
+			for _, day := range listDirsReverse(monthDir) {
+				candidates = append(candidates, findCodexSessionCandidatesInDir(filepath.Join(monthDir, day), workDir)...)
+			}
+		}
+	}
+	for _, root := range extraRoots {
+		rootDir := filepath.Join(cleaned, root)
+		resolved, err := filepath.EvalSymlinks(rootDir)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, findCodexSessionCandidatesIn(resolved, workDir, seen)...)
+	}
+	return candidates
+}
+
+func findCodexSessionCandidatesInDir(dir, workDir string) []CodexSessionCandidate {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var candidates []CodexSessionCandidate
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		candidate, ok := codexSessionCandidate(path)
+		if !ok || candidate.WorkDir != workDir {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates
 }
 
 // scanYearDirs scans YYYY/MM/DD date tree for matching Codex sessions.
@@ -1140,30 +1291,70 @@ func findCodexSessionInDir(dir, workDir string) string {
 // extracts the cwd from the session_meta payload. Returns "" if the file
 // can't be read or doesn't contain a session_meta entry.
 func codexSessionCWD(path string) string {
+	candidate, ok := codexSessionCandidate(path)
+	if !ok {
+		return ""
+	}
+	return candidate.WorkDir
+}
+
+func codexSessionCandidate(path string) (CodexSessionCandidate, bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return CodexSessionCandidate{}, false
 	}
 	defer f.Close() //nolint:errcheck // read-only
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	if !scanner.Scan() {
-		return ""
+		return CodexSessionCandidate{}, false
 	}
 	var meta struct {
-		Type    string `json:"type"`
-		Payload struct {
-			CWD string `json:"cwd"`
+		Type      string `json:"type"`
+		Timestamp string `json:"timestamp"`
+		Payload   struct {
+			CWD       string `json:"cwd"`
+			ID        string `json:"id"`
+			Timestamp string `json:"timestamp"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(scanner.Bytes(), &meta); err != nil {
-		return ""
+		return CodexSessionCandidate{}, false
 	}
 	if meta.Type != "session_meta" {
-		return ""
+		return CodexSessionCandidate{}, false
 	}
-	return meta.Payload.CWD
+	info, _ := os.Stat(path)
+	var modTime time.Time
+	if info != nil {
+		modTime = info.ModTime()
+	}
+	startedAt := parseCodexSessionTime(meta.Payload.Timestamp)
+	if startedAt.IsZero() {
+		startedAt = parseCodexSessionTime(meta.Timestamp)
+	}
+	return CodexSessionCandidate{
+		Path:      path,
+		SessionID: strings.TrimSpace(meta.Payload.ID),
+		WorkDir:   meta.Payload.CWD,
+		StartedAt: startedAt,
+		ModTime:   modTime,
+	}, true
+}
+
+func parseCodexSessionTime(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return parsed
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		return parsed
+	}
+	return time.Time{}
 }
 
 // listDirsReverse returns directory names sorted in reverse lexicographic

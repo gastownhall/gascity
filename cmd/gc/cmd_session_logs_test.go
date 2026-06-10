@@ -506,6 +506,76 @@ func TestResolveStoredSessionLogSource_CodexDoesNotUseAmbiguousWorkDirFallback(t
 	}
 }
 
+func TestResolveStoredSessionLogSource_CodexAmbiguousWorkDirUsesStartOrder(t *testing.T) {
+	workDir := t.TempDir()
+	firstStarted := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	secondStarted := firstStarted.Add(2 * time.Minute)
+	store := beads.NewMemStoreFrom(2, []beads.Bead{
+		{
+			ID:        "gc-1",
+			Type:      session.BeadType,
+			Status:    "open",
+			Labels:    []string{session.LabelSession},
+			CreatedAt: firstStarted.Add(-time.Hour),
+			UpdatedAt: firstStarted,
+			Metadata: map[string]string{
+				"alias":         "workflows__codex-max-mc-one",
+				"provider":      "codex",
+				"provider_kind": "codex",
+				"session_name":  "workflows__codex-max-mc-one",
+				"state":         "awake",
+				"last_woke_at":  firstStarted.Format(time.RFC3339),
+				"work_dir":      workDir,
+			},
+		},
+		{
+			ID:        "gc-2",
+			Type:      session.BeadType,
+			Status:    "open",
+			Labels:    []string{session.LabelSession},
+			CreatedAt: secondStarted.Add(-time.Hour),
+			UpdatedAt: secondStarted,
+			Metadata: map[string]string{
+				"alias":         "workflows__codex-max-mc-two",
+				"provider":      "codex",
+				"provider_kind": "codex",
+				"session_name":  "workflows__codex-max-mc-two",
+				"state":         "awake",
+				"last_woke_at":  secondStarted.Format(time.RFC3339),
+				"work_dir":      workDir,
+			},
+		},
+	}, nil)
+
+	searchBase := t.TempDir()
+	dayDir := filepath.Join(searchBase, "2026", "05", "04")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	firstPath := filepath.Join(dayDir, "rollout-first.jsonl")
+	if err := os.WriteFile(firstPath, []byte(fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"cwd":%q}}`+"\n", firstStarted.Format(time.RFC3339), workDir)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	secondPath := filepath.Join(dayDir, "rollout-second.jsonl")
+	if err := os.WriteFile(secondPath, []byte(fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"cwd":%q}}`+"\n", secondStarted.Format(time.RFC3339), workDir)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "workflows__codex-max-mc-two", []string{searchBase})
+	if !ok {
+		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
+	}
+	if diagnostic != "" {
+		t.Fatalf("resolveStoredSessionLogSource() diagnostic = %q, want empty", diagnostic)
+	}
+	if provider != "codex" {
+		t.Fatalf("resolveStoredSessionLogSource() provider = %q, want codex", provider)
+	}
+	if got != secondPath {
+		t.Fatalf("resolveStoredSessionLogSource() path = %q, want %q", got, secondPath)
+	}
+}
+
 func TestCanFallbackStoredSessionLogByWorkDirUsesTargetedLookup(t *testing.T) {
 	store := &noLabelScanSessionLogStore{MemStore: beads.NewMemStore()}
 	workDir := t.TempDir()

@@ -132,6 +132,53 @@ func TestDiscoverPathCodexIgnoresGCSessionID(t *testing.T) {
 	}
 }
 
+func TestDiscoverPathCodexPrefersProviderSessionID(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "codex-project")
+	codexDir := filepath.Join(base, "2026", "05", "19")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	targetID := "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
+	targetPayload, err := json.Marshal(map[string]any{
+		"timestamp": "2026-05-19T04:46:07.848Z",
+		"type":      "session_meta",
+		"payload": map[string]string{
+			"id":  targetID,
+			"cwd": workDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetPath := filepath.Join(codexDir, "rollout-target.jsonl")
+	if err := os.WriteFile(targetPath, append(targetPayload, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	newerPayload, err := json.Marshal(map[string]any{
+		"timestamp": "2026-05-19T05:46:07.848Z",
+		"type":      "session_meta",
+		"payload": map[string]string{
+			"id":  "019e3e8e-ffff-7000-a1ef-8b9e882bea2f",
+			"cwd": workDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newerPath := filepath.Join(codexDir, "rollout-newer.jsonl")
+	if err := os.WriteFile(newerPath, append(newerPayload, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{base}, "codex/tmux-cli", workDir, targetID)
+	if got != targetPath {
+		t.Fatalf("DiscoverPath() = %q, want keyed Codex transcript %q", got, targetPath)
+	}
+}
+
 func TestDiscoverPathKimiPrefersSessionKey(t *testing.T) {
 	base := t.TempDir()
 	workDir := "/tmp/gascity/phase1/kimi"

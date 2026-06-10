@@ -157,6 +157,14 @@ func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store bead
 		path = ""
 	}
 	if path == "" && !fallbackAllowed {
+		if siblings, err := sessionLogFallbackSiblings(store, logCtx); err == nil {
+			path = sessionpkg.ResolveCodexTranscriptBySessionOrder(searchPaths, logCtx.provider, logCtx.workDir, logCtx.sessionID, siblings)
+		}
+	}
+	if !sessionLogPathFreshEnough(path, logCtx.createdAt) {
+		path = ""
+	}
+	if path == "" && !fallbackAllowed {
 		return "", logCtx.provider, true, ambiguousSessionLogDiagnostic(logCtx)
 	}
 	return path, logCtx.provider, true, ""
@@ -221,9 +229,14 @@ func canFallbackStoredSessionLogByWorkDir(store beads.Store, logCtx sessionLogCo
 	if store == nil || strings.TrimSpace(logCtx.sessionID) == "" || strings.TrimSpace(logCtx.workDir) == "" {
 		return false
 	}
+	siblings, err := sessionLogFallbackSiblings(store, logCtx)
+	return err == nil && len(siblings) == 1
+}
+
+func sessionLogFallbackSiblings(store beads.Store, logCtx sessionLogContext) ([]beads.Bead, error) {
 	all, err := sessionLogFallbackCandidates(store, logCtx.workDir, logCtx.provider)
 	if err != nil {
-		return false
+		return nil, err
 	}
 	targetLive := false
 	for _, b := range all {
@@ -232,7 +245,7 @@ func canFallbackStoredSessionLogByWorkDir(store beads.Store, logCtx sessionLogCo
 			break
 		}
 	}
-	matches := 0
+	var matches []beads.Bead
 	for _, b := range all {
 		if !sessionpkg.IsSessionBeadOrRepairable(b) {
 			continue
@@ -250,12 +263,9 @@ func canFallbackStoredSessionLogByWorkDir(store beads.Store, logCtx sessionLogCo
 		if targetLive && b.ID != logCtx.sessionID && !sessionLogFallbackCandidateLive(b) {
 			continue
 		}
-		matches++
-		if matches > 1 {
-			return false
-		}
+		matches = append(matches, b)
 	}
-	return matches == 1
+	return matches, nil
 }
 
 func sessionLogFallbackCandidates(store beads.Store, workDir, provider string) ([]beads.Bead, error) {

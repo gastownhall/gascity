@@ -1430,6 +1430,52 @@ func TestApplyInlineExpansionsWithVarsAllowsConditionallyExclusiveDuplicateTempl
 	}
 }
 
+func TestApplyInlineExpansionsWithVarsResolvesForwardedParentVarOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	expansion := `{
+		"formula": "inline-route-target",
+		"type": "expansion",
+		"version": 1,
+		"vars": {
+			"implementation_run_target": {"default": "default-worker"}
+		},
+		"template": [
+			{
+				"id": "{target}.fix",
+				"title": "Fix",
+				"metadata": {"gc.run_target": "{implementation_run_target}"}
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "inline-route-target.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+	steps := []*Step{
+		{
+			ID:     "review",
+			Title:  "Review",
+			Expand: "inline-route-target",
+			ExpandVars: map[string]string{
+				"implementation_run_target": "{{worker_target}}",
+			},
+		},
+	}
+
+	result, err := ApplyInlineExpansionsWithVars(steps, parser, map[string]string{"worker_target": "custom-worker"})
+	if err != nil {
+		t.Fatalf("ApplyInlineExpansionsWithVars failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if got := result[0].Metadata["gc.run_target"]; got != "custom-worker" {
+		t.Fatalf("gc.run_target = %q, want custom-worker", got)
+	}
+}
+
 func TestApplyInlineExpansionsWithVarsCarriesExpansionVarsIntoNestedInlineExpansions(t *testing.T) {
 	tmpDir := t.TempDir()
 

@@ -975,6 +975,7 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		return "", fmt.Errorf("listing sessions: %w", err)
 	}
 	matches := 0
+	var sameWorkDirSessions []beads.Bead
 	for _, other := range all {
 		if !IsSessionBeadOrRepairable(other) {
 			continue
@@ -993,13 +994,17 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 			continue
 		}
 		if other.Metadata["work_dir"] == workDir {
+			sameWorkDirSessions = append(sameWorkDirSessions, other)
 			matches++
-			if matches > 1 {
-				// Without a stable session key, multiple sessions sharing the
-				// same workdir cannot be mapped safely to a single transcript.
-				return "", nil
-			}
 		}
+	}
+	if matches > 1 {
+		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirSessions); path != "" {
+			return path, nil
+		}
+		// Without a stable session key, multiple sessions sharing the same
+		// workdir cannot be mapped safely to a single transcript.
+		return "", nil
 	}
 	return workertranscript.DiscoverPath(searchPaths, provider, workDir, ""), nil
 }
