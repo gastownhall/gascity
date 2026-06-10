@@ -522,6 +522,22 @@ func RecordBDSlow(ctx context.Context, args []string, dir, agentID string) {
 	emit(ctx, "bd.slow", otellog.SeverityWarn, kvs...)
 }
 
+// RecordCacheScanLarge records a beads-cache reconcile full scan whose
+// result size crossed the caller's warn threshold. The reconcile scan is
+// O(active beads) by design and is otherwise silent, so this event makes
+// store growth visible before it degrades every reconcile cycle. rig is the
+// cache's bead ID prefix; beadCount is the number of beads the scan
+// returned; threshold is the warn threshold that fired; elapsed is the
+// wall-clock duration of the backing list call.
+func RecordCacheScanLarge(ctx context.Context, rig string, beadCount, threshold int, elapsed time.Duration) {
+	emit(ctx, "beads.cache.scan_large", otellog.SeverityWarn,
+		otellog.String("rig", strings.TrimSpace(rig)),
+		otellog.Int64("bead_count", int64(beadCount)),
+		otellog.Int64("threshold", int64(threshold)),
+		otellog.Int64("elapsed_ms", elapsed.Milliseconds()),
+	)
+}
+
 // ── Phase 2 recording functions ──────────────────────────────────────────
 
 // RecordPoolSpawn records a pool member instance being spawned (metrics + log event).

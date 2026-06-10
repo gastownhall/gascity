@@ -463,7 +463,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	var err error
 	var partialErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		all, err = c.backing.List(ListQuery{AllowScan: true, SkipLabels: true, TierMode: TierBoth}) // active beads only
+		all, err = c.backing.List(cacheFullScanQuery()) // active beads only; see cacheFullScanQuery
 		if err == nil {
 			break
 		}
