@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -29,6 +30,13 @@ const (
 	nativeForceFallbackGate  = "force_fallback"
 	nativeHooksGate          = "bd_hooks"
 	nativeUnavailableMessage = "native_store_unavailable"
+
+	// gcHookStampPrefix is the comment prefix gc embeds in every hook script
+	// it installs. Hooks bearing this stamp are gc's own event-forwarding
+	// hooks; they do not block native-store eligibility because bd-CLI
+	// operations (e.g., agent writes) still invoke them for autoclose, and
+	// the controller cache covers the same bead events for gc's own writes.
+	gcHookStampPrefix = "# gc-hook-stamp: "
 )
 
 // BeadsDiagnostic summarizes native-store selection for status surfaces.
@@ -199,10 +207,33 @@ func diagnosticFromPreflight(result contract.PreflightResult) BeadsDiagnostic {
 	return diag
 }
 
+// scopeHasExecutableBdHooks reports whether any of the standard bd hooks
+// (on_create, on_update, on_close) are executable and NOT installed by gc.
+// GC's own stamped forwarder hooks are exempt: the controller-cache event
+// path already covers bead events for gc's own writes, and bd-CLI operations
+// (e.g., agent writes via bd close) still fire those hooks for autoclose.
 func scopeHasExecutableBdHooks(scopeRoot string) bool {
 	for _, name := range []string{"on_create", "on_update", "on_close"} {
-		info, err := os.Stat(filepath.Join(scopeRoot, ".beads", "hooks", name))
-		if err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+		path := filepath.Join(scopeRoot, ".beads", "hooks", name)
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		content, err := os.ReadFile(path)
+		if err != nil || !isGCStampedHook(content) {
+			return true
+		}
+	}
+	return false
+}
+
+// isGCStampedHook reports whether the hook content contains a gc-hook-stamp
+// line, meaning the hook was installed by gc as a bead event forwarder. The
+// marker must begin a line (matching cmd/gc/hooks.go's stamp format) so an
+// incidental occurrence in a comment or echo body cannot exempt a non-gc hook.
+func isGCStampedHook(content []byte) bool {
+	for _, line := range bytes.Split(content, []byte("\n")) {
+		if bytes.HasPrefix(bytes.TrimSpace(line), []byte(gcHookStampPrefix)) {
 			return true
 		}
 	}
