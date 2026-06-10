@@ -97,17 +97,20 @@ Independent bug PRs, not refactor work; each gets its own bead:
 
 Exit: each bug has a bead with a failing test, then a fix PR.
 
-### Step 4 — Store fence ADR (one decision, not ten contracts)
+### Step 4 — Store fence decision (one decision, not ten contracts)
 
-Write the single ADR that records what the beads store actually provides (no
-CAS; `SetMetadataBatch` may apply sequentially with partial application) and
-names the two proven fences: city identifier flock
-(`internal/session/names.go` + adoption-race fix `b0c53e84c`) and
-token/value precondition with immediate reread (`instance_token` pattern).
-Every later mutating extraction cites this ADR instead of negotiating fencing
-per operation.
+Decided in `engdocs/design/session-store-fences.md`: what the beads store
+actually provides (no CAS; non-atomic external batches; transactions cannot
+read), the two sanctioned fences — city identifier flock
+(`internal/session/names.go`, adoption-race fix `b0c53e84c`) and
+token-precondition-with-reread (`instance_token` pattern, `4649e7105`,
+`ca81d000a`) — and the NDI rules that make the reread-write residual safe
+(idempotent re-application, edge-triggered consumption, partial-batch
+tolerance). Every mutating extraction cites that document and states its
+fence, convergence story, and contended-path test in the PR description.
 
-Exit: ADR merged; DESIGN.md's Atomic Command Contract section defers to it.
+Exit: document merged; mutating slices (Step 6 on) cite it. When DESIGN.md
+lands, its Atomic Command Contract section defers to this document.
 
 ### Step 5 — Read-only target classification
 
