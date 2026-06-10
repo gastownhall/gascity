@@ -812,12 +812,11 @@ func (s *Server) humaHandleSessionSuspend(ctx context.Context, input *SessionIDI
 
 // humaHandleSessionClose is the Huma-typed handler for POST /v0/session/{id}/close.
 
-func (s *Server) humaHandleSessionClose(_ context.Context, input *SessionCloseInput) (*OKResponse, error) {
+func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionCloseInput) (*OKResponse, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
-	mgr := s.sessionManager(store)
 
 	id, err := s.resolveSessionIDWithConfig(store, input.ID)
 	if err != nil {
@@ -830,7 +829,11 @@ func (s *Server) humaHandleSessionClose(_ context.Context, input *SessionCloseIn
 		strings.Contains(strings.TrimSpace(b.Metadata[apiNamedSessionIdentityKey]), "/") {
 		return nil, huma.Error409Conflict("configured always-on named sessions cannot be closed while config-managed")
 	}
-	closeResult, err := mgr.CloseDetailed(id)
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	closeResult, err := handle.CloseDetailed(ctx)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
