@@ -196,6 +196,7 @@ func TestStateCache_ProcessAliveUsesFreshSnapshot(t *testing.T) {
 				Command: "claude",
 				Args:    "claude --dangerously-skip-permissions",
 			}}),
+			ProcessesAvailable: true,
 		},
 	}
 	cache := NewStateCache(f, 2*time.Second)
@@ -211,6 +212,37 @@ func TestStateCache_ProcessAliveUsesFreshSnapshot(t *testing.T) {
 	}
 	if got := f.getCalls(); got != 1 {
 		t.Fatalf("fetch calls = %d, want 1 across ProcessAlive and IsRunning", got)
+	}
+}
+
+// TestStateCache_DegradedProcessSnapshotRetainsLiveness asserts the control
+// plane stays correct when the OS process-table snapshot is unavailable (the
+// ps scan lost the CPU race to a busy fleet). tmux already proved the session
+// is alive, so IsRunning must stay true and ProcessAlive must degrade
+// optimistically (NOT report the process dead, which would wrongly reap it).
+func TestStateCache_DegradedProcessSnapshotRetainsLiveness(t *testing.T) {
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				"agent-1": {
+					Running: true,
+					Panes:   []paneRuntimeState{{Command: "bash", PID: "101"}},
+				},
+			},
+			// Processes empty + ProcessesAvailable=false models a failed ps scan.
+			ProcessesAvailable: false,
+		},
+	}
+	cache := NewStateCache(f, 2*time.Second)
+
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("IsRunning(agent-1) = false under degraded snapshot, want true (tmux liveness retained)")
+	}
+	if !cache.ProcessAlive("agent-1", []string{"claude"}) {
+		t.Fatal("ProcessAlive(agent-1, claude) = false under degraded snapshot, want true (optimistic degrade, never report dead)")
+	}
+	if cache.IsRunning("agent-2") {
+		t.Fatal("IsRunning(agent-2) = true, want false for an absent session even when degraded")
 	}
 }
 
@@ -230,6 +262,7 @@ func TestStateCache_ProcessAliveMatchesShellDescendantFromSnapshot(t *testing.T)
 				{PID: "101", PPID: "1", Command: "bash", Args: "bash -lc codex"},
 				{PID: "102", PPID: "101", Command: "node", Args: "node /usr/local/bin/codex"},
 			}),
+			ProcessesAvailable: true,
 		},
 	}
 	cache := NewStateCache(f, 2*time.Second)
@@ -258,6 +291,7 @@ func TestProviderObserveLivenessUsesCacheProcessSnapshot(t *testing.T) {
 				{PID: "101", PPID: "1", Command: "bash", Args: "bash -lc codex"},
 				{PID: "102", PPID: "101", Command: "node", Args: "node /usr/local/bin/codex"},
 			}),
+			ProcessesAvailable: true,
 		},
 	}
 	provider := &Provider{cache: NewStateCache(f, time.Hour)}
