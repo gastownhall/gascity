@@ -14,8 +14,17 @@ package session
 //
 // The classifier is side-effect free and holds no IDs or errors; the caller
 // keeps the payload for whichever step the decision names as Source.
+//
+// Two result kinds from the long-form design are deliberately absent.
+// Ambiguity is not a distinct kind: ambiguous lookups surface as the step
+// error the caller holds (session.ErrAmbiguous, configured-name conflicts),
+// preserving the existing conflict projections. The repair-pending
+// diagnostic is deferred with the repair-lifecycle work: today's gather
+// lookups still normalize empty-type beads exactly as the inline resolver
+// did, and that baseline moves only when the read-path repair fix lands.
 
-// TargetLookupFact is the tri-state outcome of one lookup vector.
+// TargetLookupFact is the gathered outcome of one lookup vector: Unknown
+// until gathered, then match, no-match, or error.
 type TargetLookupFact int
 
 // Lookup fact states.

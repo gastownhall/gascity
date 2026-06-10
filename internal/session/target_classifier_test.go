@@ -10,11 +10,9 @@ import "testing"
 // lookup. Caller-side characterization lives in
 // internal/api/session_resolution_precedence_test.go and the phase0 specs.
 
-func classify(f TargetFacts) TargetDecision { return DecideSessionTarget(f) }
-
 func gatherSequence(t *testing.T, f TargetFacts, supply func(TargetStep, *TargetFacts) bool) TargetDecision {
 	t.Helper()
-	for range [16]int{} {
+	for range 16 {
 		dec := DecideSessionTarget(f)
 		if dec.Action != TargetGather {
 			return dec
@@ -28,7 +26,7 @@ func gatherSequence(t *testing.T, f TargetFacts, supply func(TargetStep, *Target
 }
 
 func TestDecideSessionTargetTemplateFormRejected(t *testing.T) {
-	dec := classify(TargetFacts{TemplateForm: true})
+	dec := DecideSessionTarget(TargetFacts{TemplateForm: true})
 	if dec.Action != TargetDone || dec.Result != TargetNotFound {
 		t.Fatalf("template-form target: got %+v, want done/not-found", dec)
 	}
@@ -107,7 +105,7 @@ func TestDecideSessionTargetSelectionShortCircuits(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dec := classify(tc.facts)
+			dec := DecideSessionTarget(tc.facts)
 			if dec.Action != TargetDone || dec.Result != TargetSelected {
 				t.Fatalf("got %+v, want done/selected", dec)
 			}
@@ -157,7 +155,7 @@ func TestDecideSessionTargetErrorsAreTerminal(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dec := classify(tc.facts)
+			dec := DecideSessionTarget(tc.facts)
 			if dec.Action != TargetDone || dec.Result != TargetError {
 				t.Fatalf("got %+v, want done/error", dec)
 			}
@@ -171,7 +169,7 @@ func TestDecideSessionTargetErrorsAreTerminal(t *testing.T) {
 // A live match for a named-session bead whose configured identity is gone
 // is rejected by config, not selected and not silently skipped.
 func TestDecideSessionTargetLiveConfigOrphanRejected(t *testing.T) {
-	dec := classify(TargetFacts{
+	dec := DecideSessionTarget(TargetFacts{
 		ExactID:          LookupNoMatch,
 		ConfiguredName:   NamedLookupNoMatch,
 		Live:             LookupMatch,
@@ -188,7 +186,7 @@ func TestDecideSessionTargetLiveConfigOrphanRejected(t *testing.T) {
 // Reserved configured identities never reach closed lookup: a named-spec
 // match on an allow-closed surface terminates as not-found.
 func TestDecideSessionTargetNamedSpecBlocksClosedLookup(t *testing.T) {
-	dec := classify(TargetFacts{
+	dec := DecideSessionTarget(TargetFacts{
 		ExactID:         LookupNoMatch,
 		ConfiguredName:  NamedLookupNoMatch,
 		Live:            LookupNoMatch,
@@ -208,7 +206,7 @@ func TestDecideSessionTargetNamedSpecBlocksClosedLookup(t *testing.T) {
 // Without allow-closed, the ladder ends after path alias: no closed-side
 // facts are requested.
 func TestDecideSessionTargetClosedLadderGatedOnAllowClosed(t *testing.T) {
-	dec := classify(TargetFacts{
+	dec := DecideSessionTarget(TargetFacts{
 		ExactID:        LookupNoMatch,
 		ConfiguredName: NamedLookupNoMatch,
 		Live:           LookupNoMatch,

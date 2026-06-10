@@ -200,3 +200,105 @@ func TestResolveSessionTargetID_AllowClosedRejectsConfiguredNamedTargets(t *test
 		}
 	}
 }
+
+// Closed lookup is reachable only on allow-closed surfaces: the same closed
+// bead resolves through the allow-closed resolver and stays not-found on
+// the live-only resolver. Pins the opts-to-facts wiring, not just the
+// classifier-side gate.
+func TestResolveSessionTargetID_ClosedLookupRequiresAllowClosedSurface(t *testing.T) {
+	srv, fs := precedenceTestServer(t)
+
+	closed := createPrecedenceSessionBead(t, fs.cityBeadStore, "departed", map[string]string{
+		"session_name": "gone-token",
+		"state":        "active",
+	})
+	if err := fs.cityBeadStore.Close(closed.ID); err != nil {
+		t.Fatalf("close bead: %v", err)
+	}
+
+	if id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "gone-token"); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("live-only resolve(gone-token) = %q, %v; want ErrSessionNotFound", id, err)
+	}
+	id, err := srv.resolveSessionIDAllowClosedWithConfig(fs.cityBeadStore, "gone-token")
+	if err != nil {
+		t.Fatalf("allow-closed resolve(gone-token): %v", err)
+	}
+	if id != closed.ID {
+		t.Fatalf("allow-closed resolved %q, want closed bead %q", id, closed.ID)
+	}
+}
+
+// A configured-name conflict is terminal for the whole ladder: it must
+// surface as the conflict error instead of falling through to a live
+// ordinary session that spells the same bare token.
+func TestResolveSessionTargetID_ConfiguredNameConflictBlocksLiveFallthrough(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	if err != nil || !ok {
+		t.Fatalf("findNamedSessionSpecForTarget(worker) = %v, %v; want spec", ok, err)
+	}
+	createPrecedenceSessionBead(t, fs.cityBeadStore, "squatter", map[string]string{
+		"session_name": spec.SessionName,
+		"template":     "other/worker",
+		"agent_name":   "other/worker",
+		"state":        "asleep",
+	})
+	live := createPrecedenceSessionBead(t, fs.cityBeadStore, "live-worker", map[string]string{
+		"session_name": "worker",
+		"state":        "active",
+	})
+
+	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "worker")
+	if !errors.Is(err, errConfiguredNamedSessionConflict) {
+		t.Fatalf("resolve(worker) = %q, %v; want errConfiguredNamedSessionConflict, not fallthrough to %q", id, err, live.ID)
+	}
+}
+
+// Template-form tokens are rejected before any lookup runs: a live session
+// whose session_name spells the template token must stay unresolvable.
+func TestResolveSessionTargetID_TemplateFormBeatsSessionNameSquatter(t *testing.T) {
+	srv, fs := precedenceTestServer(t)
+
+	createPrecedenceSessionBead(t, fs.cityBeadStore, "template-squatter", map[string]string{
+		"session_name": "template:worker",
+		"state":        "active",
+	})
+
+	if id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "template:worker"); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("resolve(template:worker) = %q, %v; want ErrSessionNotFound", id, err)
+	}
+}
+
+// Config-orphan rejection holds on allow-closed surfaces too, and carries
+// the rejected-by-config marker at the resolver level: the live named bead
+// for a deconfigured identity is rejected rather than selected or deferred
+// to path-alias/closed lookup.
+func TestResolveSessionTargetID_AllowClosedStillRejectsConfigOrphan(t *testing.T) {
+	srv, fs := precedenceTestServer(t)
+
+	createPrecedenceSessionBead(t, fs.cityBeadStore, "orphan", map[string]string{
+		"session_name":             "ghost-runtime",
+		"state":                    "active",
+		apiNamedSessionMetadataKey: "true",
+		apiNamedSessionIdentityKey: "ghost/rig",
+	})
+
+	for _, resolve := range []struct {
+		name string
+		fn   func(target string) (string, error)
+	}{
+		{"live-only", func(target string) (string, error) {
+			return srv.resolveSessionIDWithConfig(fs.cityBeadStore, target)
+		}},
+		{"allow-closed", func(target string) (string, error) {
+			return srv.resolveSessionIDAllowClosedWithConfig(fs.cityBeadStore, target)
+		}},
+	} {
+		id, err := resolve.fn("ghost-runtime")
+		if !errors.Is(err, errSessionTargetRejectedByConfig) {
+			t.Fatalf("%s resolve(ghost-runtime) = %q, %v; want rejected-by-config marker", resolve.name, id, err)
+		}
+	}
+}
