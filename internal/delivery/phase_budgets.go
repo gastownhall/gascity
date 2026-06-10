@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -26,12 +27,16 @@ var PhaseBudgets = map[string]time.Duration{
 }
 
 // PhaseEnteredAt returns the time the bead entered its current phase.
-// It reads gc.phase_entered_at (RFC3339); falls back to b.UpdatedAt if
+// It reads gc.phase_entered_at as RFC3339 first (human-set), then as Unix
+// seconds (written by the delivery-warden); falls back to b.UpdatedAt if
 // absent or unparseable; falls back to b.CreatedAt if UpdatedAt is zero.
 func PhaseEnteredAt(b beads.Bead) time.Time {
 	if raw, ok := b.Metadata[MetaKeyPhaseEnteredAt]; ok && raw != "" {
 		if t, err := time.Parse(time.RFC3339, raw); err == nil {
 			return t
+		}
+		if unix, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			return time.Unix(unix, 0)
 		}
 	}
 	if !b.UpdatedAt.IsZero() {

@@ -1,6 +1,7 @@
 package delivery_test
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -39,6 +40,20 @@ func TestPhaseEnteredAt_fallsBackToCreatedAt(t *testing.T) {
 	got := delivery.PhaseEnteredAt(b)
 	if !got.Equal(createdAt) {
 		t.Fatalf("PhaseEnteredAt with no UpdatedAt and no metadata = %v, want CreatedAt %v", got, createdAt)
+	}
+}
+
+// TestPhaseEnteredAt_wardenUnixFormat verifies that PhaseEnteredAt correctly parses
+// the Unix-seconds format written by the delivery-warden (strconv.FormatInt(now.Unix(), 10)).
+func TestPhaseEnteredAt_wardenUnixFormat(t *testing.T) {
+	ts := time.Now().Add(-45 * time.Minute).Truncate(time.Second)
+	b := beads.Bead{
+		UpdatedAt: time.Now().Add(-10 * time.Minute),
+		Metadata:  map[string]string{delivery.MetaKeyPhaseEnteredAt: strconv.FormatInt(ts.Unix(), 10)},
+	}
+	got := delivery.PhaseEnteredAt(b)
+	if !got.Equal(ts) {
+		t.Fatalf("PhaseEnteredAt with Unix-seconds format: got %v, want %v", got, ts)
 	}
 }
 
