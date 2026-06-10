@@ -500,82 +500,14 @@ func TestBdStoreGetExactIDGuard(t *testing.T) {
 	}
 }
 
-// TestBdStoreUpdateBlocksOnIDCollision verifies that Update refuses to mutate
-// when bd's resolver would return a different bead (gcy-g4o regression).
-func TestBdStoreUpdateBlocksOnIDCollision(t *testing.T) {
-	runner := fakeRunner(map[string]struct {
-		out []byte
-		err error
-	}{
-		// Get pre-check: bd resolves "gcy-dv7" to the wrong bead.
-		`bd show --json gcy-dv7`: {
-			out: []byte(`[{"id":"gcy-wisp-dv78","title":"Wrong bead","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
-		},
-	})
-	s := beads.NewBdStore("/city", runner)
-	title := "mutated"
-	err := s.Update("gcy-dv7", beads.UpdateOpts{Title: &title})
-	if err == nil {
-		t.Fatal("Update returned nil error, want ErrIDCollision")
-	}
-	if !errors.Is(err, beads.ErrIDCollision) {
-		t.Errorf("Update error = %v, want errors.Is(err, ErrIDCollision) true", err)
-	}
-}
-
-// TestBdStoreDeleteBlocksOnIDCollision verifies that Delete refuses to mutate
-// when bd's resolver would return a different bead (gcy-g4o regression).
-func TestBdStoreDeleteBlocksOnIDCollision(t *testing.T) {
-	runner := fakeRunner(map[string]struct {
-		out []byte
-		err error
-	}{
-		`bd show --json gcy-dv7`: {
-			out: []byte(`[{"id":"gcy-wisp-dv78","title":"Wrong bead","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
-		},
-	})
-	s := beads.NewBdStore("/city", runner)
-	err := s.Delete("gcy-dv7")
-	if err == nil {
-		t.Fatal("Delete returned nil error, want ErrIDCollision")
-	}
-	if !errors.Is(err, beads.ErrIDCollision) {
-		t.Errorf("Delete error = %v, want errors.Is(err, ErrIDCollision) true", err)
-	}
-}
-
-// TestBdStoreCloseBlocksOnIDCollision verifies that Close refuses to mutate
-// when bd's resolver would return a different bead (gcy-g4o regression).
-func TestBdStoreCloseBlocksOnIDCollision(t *testing.T) {
-	runner := fakeRunner(map[string]struct {
-		out []byte
-		err error
-	}{
-		`bd show --json gcy-dv7`: {
-			out: []byte(`[{"id":"gcy-wisp-dv78","title":"Wrong bead","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
-		},
-	})
-	s := beads.NewBdStore("/city", runner)
-	err := s.Close("gcy-dv7")
-	if err == nil {
-		t.Fatal("Close returned nil error, want ErrIDCollision")
-	}
-	if !errors.Is(err, beads.ErrIDCollision) {
-		t.Errorf("Close error = %v, want errors.Is(err, ErrIDCollision) true", err)
-	}
-}
-
 // TestBdStoreMutationsPassThroughOnNotFound verifies that Update/Delete/Close
-// do NOT block when the bead simply doesn't exist (ErrNotFound without
-// collision). The write should reach bd and let bd produce its own error.
+// always reach bd directly (internal hot-path callers supply canonical full IDs;
+// the exact-ID collision guard lives at the CLI/API entry points — gcy-g4o).
 func TestBdStoreMutationsPassThroughOnNotFound(t *testing.T) {
 	var updateCalled, deleteCalled, closeCalled bool
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		cmd := strings.Join(append([]string{name}, args...), " ")
 		switch {
-		case cmd == "bd show --json gcy-dv7":
-			// bd returns empty — bead simply absent, no collision.
-			return []byte("[]"), nil
 		case strings.HasPrefix(cmd, "bd update "):
 			updateCalled = true
 			return nil, fmt.Errorf("bd: issue not found")
@@ -1101,13 +1033,10 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 
 	want := []string{
 		"bd show --json bd-42", // Tx initial Get
-		"bd show --json bd-42", // guardExactID pre-check before update
 		"bd update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
 		"bd show --json bd-42", // honesty re-read after update (close's honesty guard)
-		"bd show --json bd-42", // guardExactID pre-check before close
 		"bd close --force --json --reason completed during transaction bd-42",
 		"bd show --json bd-42", // honesty re-read after close (close's honesty guard)
-		"bd show --json bd-42", // guardExactID pre-check before fallback update
 		"bd update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
 		"bd show --json bd-42", // Tx final Get
 		"bd show --json bd-42", // final Get after Tx
@@ -1146,7 +1075,6 @@ func TestBdStoreTxCloseOnlyUsesCloseCommand(t *testing.T) {
 
 	want := []string{
 		"bd show --json bd-42", // Tx initial Get
-		"bd show --json bd-42", // guardExactID pre-check before close
 		"bd close --force --json --reason completed during transaction bd-42",
 		"bd show --json bd-42", // honesty re-read after close
 	}
@@ -1210,7 +1138,6 @@ func TestBdStoreTxPreservesAddsAndRemovesLabels(t *testing.T) {
 
 	want := []string{
 		"bd show --json bd-42", // Tx initial Get
-		"bd show --json bd-42", // guardExactID pre-check before update
 		"bd update --json bd-42 --title before --status open --type task --add-label b --add-label c --remove-label a",
 	}
 	if !reflect.DeepEqual(commands, want) {
