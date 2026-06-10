@@ -109,12 +109,7 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		baseEnv := processEnvSnapshotExcludingNativeDoltOpen()
-		if len(env) > 0 {
-			cmd.Env = mergeEnv(baseEnv, env)
-		} else {
-			cmd.Env = baseEnv
-		}
+		cmd.Env = execEnvFor(name, processEnvSnapshotExcludingNativeDoltOpen(), env)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -445,6 +440,29 @@ func truncateRawOutput(data []byte, maxBytes int) string {
 		return string(trimmed)
 	}
 	return string(trimmed[:maxBytes]) + "...(truncated)"
+}
+
+// bdAutoBackupOptOutEnvKey disables bd's PersistentPostRun auto-backup (the
+// hardcoded "backup_export" Dolt remote synced into <root>/.beads/backup on
+// nearly every bd invocation, with no retention). A stuck-looping
+// backup_export sync was the root cause of the 2026-06-08 town-wide wedge
+// (ga-0eq), and the unrotated archives reached 210GB on one dev store
+// (ga-yfbs28). gc's projected envs already opt out (cmd/gc applyBdAutoBackupOptOut);
+// injecting it here covers every other runner-spawned bd call — hook claim,
+// store bridge, t3bridge, libstore, provider lifecycle — current and future.
+const bdAutoBackupOptOutEnvKey = "BD_BACKUP_ENABLED"
+
+// execEnvFor assembles the child environment for a runner exec. For bd
+// commands the auto-backup opt-out is injected as a baseline, replacing any
+// value inherited from the parent process (matching the unconditional
+// projected-env opt-out policy); an explicit per-call override still wins
+// because mergeEnv applies overrides last. Non-bd commands (e.g. direct dolt
+// queries) pass through untouched.
+func execEnvFor(name string, baseEnv []string, overrides map[string]string) []string {
+	if name == "bd" {
+		baseEnv = append(envWithout(baseEnv, bdAutoBackupOptOutEnvKey), bdAutoBackupOptOutEnvKey+"=false")
+	}
+	return mergeEnv(baseEnv, overrides)
 }
 
 // envWithout returns a copy of environ with all entries for the given key removed.

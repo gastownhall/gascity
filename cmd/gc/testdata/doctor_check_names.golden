@@ -64,6 +64,7 @@ dolt-version
 events-log
 events-log-size
 bd-backup-size
+bd-backup-state
 worktree-disk-size
 nested-worktree-prune
 custom-types:city
