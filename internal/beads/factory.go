@@ -227,10 +227,17 @@ func scopeHasExecutableBdHooks(scopeRoot string) bool {
 	return false
 }
 
-// isGCStampedHook reports whether the hook content contains the gc-hook-stamp
-// marker, meaning the hook was installed by gc as a bead event forwarder.
+// isGCStampedHook reports whether the hook content contains a gc-hook-stamp
+// line, meaning the hook was installed by gc as a bead event forwarder. The
+// marker must begin a line (matching cmd/gc/hooks.go's stamp format) so an
+// incidental occurrence in a comment or echo body cannot exempt a non-gc hook.
 func isGCStampedHook(content []byte) bool {
-	return bytes.Contains(content, []byte(gcHookStampPrefix))
+	for _, line := range bytes.Split(content, []byte("\n")) {
+		if bytes.HasPrefix(bytes.TrimSpace(line), []byte(gcHookStampPrefix)) {
+			return true
+		}
+	}
+	return false
 }
 
 func forceNativeFallback() bool {

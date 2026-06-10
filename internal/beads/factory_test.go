@@ -300,6 +300,40 @@ func TestOpenStoreAtForCityGCStampedHooksDoNotBlockNativeStore(t *testing.T) {
 	}
 }
 
+func TestOpenStoreAtForCityEmbeddedStampMarkerStillBlocksNativeStore(t *testing.T) {
+	scope := t.TempDir()
+	hooksDir := filepath.Join(scope, ".beads", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Marker appears only inside an echo body, not as a stamp line.
+	hook := "#!/bin/sh\necho \"not really # gc-hook-stamp: spoofed\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(hooksDir, "on_create"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fallback := NewMemStore()
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore:      func() (Store, error) { return fallback, nil },
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called for embedded-marker non-gc hook")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != fallback {
+		t.Fatalf("Store = %T, want fallback store", result.Store)
+	}
+	if result.Diagnostic.PreflightGate != nativeHooksGate {
+		t.Fatalf("preflight_gate = %q, want %q", result.Diagnostic.PreflightGate, nativeHooksGate)
+	}
+}
+
 func factoryPreflightChecker(scope, metadata string, ctx contract.PreflightBDContext) contract.PreflightChecker {
 	files := fsys.NewFake()
 	files.Dirs[filepath.Join(scope, ".beads")] = true
