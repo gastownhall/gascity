@@ -948,9 +948,31 @@ func (s *BdStore) Get(id string) (Bead, error) {
 	// substring (e.g. "gcy-wisp-dv78"). Since gc always passes full bead IDs,
 	// a mismatch means the requested bead does not exist in this store.
 	if bead.ID != id {
-		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
+		// bd resolved a DIFFERENT bead (substring collision): the requested ID
+		// does not exist in this store but bd silently matched another one.
+		// Return ErrIDCollision so mutation guards can distinguish this from a
+		// plain absent bead. ErrIDCollision wraps ErrNotFound so existing
+		// errors.Is(err, ErrNotFound) callers remain unaffected.
+		return Bead{}, fmt.Errorf("getting bead %q (resolved to %q): %w", id, bead.ID, ErrIDCollision)
 	}
 	return bead, nil
+}
+
+// guardExactID checks whether the given id would collide with a different bead
+// via bd's fuzzy/substring resolver. It calls Get and inspects the result:
+//   - ErrIDCollision → returns ErrIDCollision so the caller can abort the mutation.
+//   - ErrNotFound or any other error (store unavailable, projection lag) → returns nil
+//     so the mutation is allowed to proceed (bd will produce its own error if needed).
+//   - Success (bead.ID == id) → returns nil.
+//
+// This intentionally does NOT block on ErrNotFound so that callers handling
+// ephemeral/wisp beads, projection-lagged rows, or store-unavailable paths are
+// not regressed. Only a genuine substring collision is fatal.
+func (s *BdStore) guardExactID(id string) error {
+	if _, err := s.Get(id); errors.Is(err, ErrIDCollision) {
+		return err
+	}
+	return nil
 }
 
 // Update modifies fields of an existing bead via bd update.
@@ -996,6 +1018,11 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	// No fields to update — no-op (bd errors on empty update).
 	if len(args) == 3 {
 		return nil
+	}
+	// Guard against bd's fuzzy/substring resolver mutating the wrong bead
+	// (gcy-g4o). Only runs when there are actual fields to write.
+	if err := s.guardExactID(id); err != nil {
+		return fmt.Errorf("updating bead %q: %w", id, err)
 	}
 	err := s.runBDTransientWrite(args...)
 	if err != nil {
@@ -1937,6 +1964,11 @@ func bdCloseArgs(reason string, ids ...string) []string {
 }
 
 func (s *BdStore) close(id, reason string) error {
+	// Guard against bd's fuzzy/substring resolver mutating the wrong bead
+	// (gcy-g4o). A genuine ID collision aborts; ErrNotFound passes through.
+	if err := s.guardExactID(id); err != nil {
+		return fmt.Errorf("closing bead %q: %w", id, err)
+	}
 	err := s.runBDTransientWrite(bdCloseArgs(reason, id)...)
 	if err != nil {
 		// Some bd error paths collapse to a bare exit status without a helpful
@@ -1975,6 +2007,11 @@ func (s *BdStore) Reopen(id string) error {
 
 // Delete permanently removes a bead from the store via bd delete.
 func (s *BdStore) Delete(id string) error {
+	// Guard against bd's fuzzy/substring resolver mutating the wrong bead
+	// (gcy-g4o). A genuine ID collision aborts; ErrNotFound passes through.
+	if err := s.guardExactID(id); err != nil {
+		return fmt.Errorf("deleting bead %q: %w", id, err)
+	}
 	err := s.runBDTransientWrite("delete", "--force", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {
