@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -40,7 +41,7 @@ type ConflictError struct {
 // SourceStoreRefMetadataKey is the bead metadata key recording which store
 // a workflow root's source bead lives in (e.g. "city:foo" or "rig:alpha").
 // Used by WorkflowMatchesSource to scope cross-store singleton checks.
-const SourceStoreRefMetadataKey = "gc.source_store_ref"
+const SourceStoreRefMetadataKey = beadmeta.SourceStoreRefMetadataKey
 
 // WorkflowSubtreeClosedReason is stamped on workflow subtree force-closes so
 // strict stores that require a human-readable close reason accept the cleanup.

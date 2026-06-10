@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -42,7 +43,7 @@ var workOptionLegacyKeys = []workOptionLegacyKey{
 }
 
 const (
-	legacyPerDispatchModelSourceKey = "gc.per_dispatch_model"
+	legacyPerDispatchModelSourceKey = beadmeta.PerDispatchModelMetadataKey
 	templateOverridesMetadataKey    = "template_overrides"
 )
 

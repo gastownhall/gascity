@@ -5,6 +5,7 @@ package sling
 // Callers should migrate to importing graphroute directly.
 
 import (
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -14,11 +15,11 @@ import (
 // GraphRouteBinding is an alias for graphroute.GraphRouteBinding.
 type GraphRouteBinding = graphroute.GraphRouteBinding
 
-// GraphExecutionRouteMetaKey is an alias for graphroute.GraphExecutionRouteMetaKey.
-const GraphExecutionRouteMetaKey = graphroute.GraphExecutionRouteMetaKey
+// GraphExecutionRouteMetaKey is an alias for beadmeta.ExecutionRoutedToMetadataKey.
+const GraphExecutionRouteMetaKey = beadmeta.ExecutionRoutedToMetadataKey
 
-// GraphExecutionRigContextMetaKey is an alias for graphroute.GraphExecutionRigContextMetaKey.
-const GraphExecutionRigContextMetaKey = graphroute.GraphExecutionRigContextMetaKey
+// GraphExecutionRigContextMetaKey is an alias for beadmeta.ExecutionRigContextMetadataKey.
+const GraphExecutionRigContextMetaKey = beadmeta.ExecutionRigContextMetadataKey
 
 // IsCompiledGraphWorkflow delegates to graphroute.
 func IsCompiledGraphWorkflow(recipe *formula.Recipe) bool {

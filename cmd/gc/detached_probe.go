@@ -8,12 +8,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 const (
 	// detachedProbeMetadataKey is a work-bead metadata contract documented in
 	// engdocs/architecture/health-patrol.md. Values use tmux:<socket>:<session>.
-	detachedProbeMetadataKey    = "gc.detached"
+	detachedProbeMetadataKey    = beadmeta.DetachedMetadataKey
 	detachedProbeDefaultTimeout = time.Second
 	detachedProbeErrorThreshold = 3
 )

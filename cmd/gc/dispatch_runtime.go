@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -22,11 +23,11 @@ import (
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
-// graphExecutionRouteMetaKey is an alias for sling.GraphExecutionRouteMetaKey.
-const graphExecutionRouteMetaKey = sling.GraphExecutionRouteMetaKey
+// graphExecutionRouteMetaKey is an alias for beadmeta.ExecutionRoutedToMetadataKey.
+const graphExecutionRouteMetaKey = beadmeta.ExecutionRoutedToMetadataKey
 
-// graphExecutionRigContextMetaKey is an alias for sling.GraphExecutionRigContextMetaKey.
-const graphExecutionRigContextMetaKey = sling.GraphExecutionRigContextMetaKey
+// graphExecutionRigContextMetaKey is an alias for beadmeta.ExecutionRigContextMetadataKey.
+const graphExecutionRigContextMetaKey = beadmeta.ExecutionRigContextMetadataKey
 
 // isControlDispatcherKind delegates to sling.IsControlDispatcherKind.
 func isControlDispatcherKind(kind string) bool {

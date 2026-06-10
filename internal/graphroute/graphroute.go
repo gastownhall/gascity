@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -17,10 +18,10 @@ import (
 
 const (
 	// GraphExecutionRouteMetaKey is the metadata key for the execution route.
-	GraphExecutionRouteMetaKey = "gc.execution_routed_to"
+	GraphExecutionRouteMetaKey = beadmeta.ExecutionRoutedToMetadataKey
 	// GraphExecutionRigContextMetaKey preserves the formula-layer rig context
 	// for control beads whose execution route is a concrete session ID.
-	GraphExecutionRigContextMetaKey = "gc.execution_rig_context"
+	GraphExecutionRigContextMetaKey = beadmeta.ExecutionRigContextMetadataKey
 )
 
 // AgentResolver resolves an agent name to a config.Agent.

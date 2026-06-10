@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -38,9 +39,9 @@ const (
 
 	// RuntimeVarsMetadataKey stores the caller/runtime vars a graph.v2 workflow
 	// root received, excluding graph.v2 reserved variables injected by runtime.
-	RuntimeVarsMetadataKey = "gc.graphv2_vars.v1"
+	RuntimeVarsMetadataKey = beadmeta.RuntimeVarsMetadataKey
 
-	syntheticMetadataKey     = "gc.synthetic"
+	syntheticMetadataKey     = beadmeta.SyntheticMetadataKey
 	previewInputConvoyPrefix = "preview-input-convoy:"
 )
 

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -475,7 +476,7 @@ func persistRetryEvalResult(store beads.Store, beadID string, result retryEvalRe
 func propagateRetrySubjectMetadata(store beads.Store, logicalID string, subject beads.Bead) error {
 	batch := map[string]string{}
 	for key, value := range subject.Metadata {
-		if key == "" || strings.HasPrefix(key, "gc.") {
+		if key == "" || strings.HasPrefix(key, beadmeta.Namespace) {
 			continue
 		}
 		batch[key] = value

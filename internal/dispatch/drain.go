@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -17,7 +18,7 @@ import (
 )
 
 const (
-	drainManifestMetadataKey = "gc.drain_manifest.v1"
+	drainManifestMetadataKey = beadmeta.DrainManifestMetadataKey
 	defaultDrainMaxUnits     = 100
 )
 

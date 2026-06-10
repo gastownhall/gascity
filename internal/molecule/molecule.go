@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 )
@@ -57,20 +58,20 @@ const (
 
 	// DeferredAssigneeMetadataKey stores an assignee withheld during speculative
 	// molecule creation. Activating the molecule restores the value as Assignee.
-	DeferredAssigneeMetadataKey = "gc.deferred_assignee"
+	DeferredAssigneeMetadataKey = beadmeta.DeferredAssigneeMetadataKey
 
 	// DeferredRoutedToMetadataKey stores gc.routed_to withheld during
 	// speculative molecule creation.
-	DeferredRoutedToMetadataKey = "gc.deferred_routed_to"
+	DeferredRoutedToMetadataKey = beadmeta.DeferredRoutedToMetadataKey
 
 	// DeferredExecutionRoutedToMetadataKey stores gc.execution_routed_to withheld
 	// during speculative molecule creation.
-	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
+	DeferredExecutionRoutedToMetadataKey = beadmeta.DeferredExecutionRoutedToMetadataKey
 
 	// DeferredTypeMetadataKey stores the bead type withheld during speculative
 	// molecule creation. Speculative actionable work is created as a ready-
 	// excluded type and restored on activation.
-	DeferredTypeMetadataKey = "gc.deferred_type"
+	DeferredTypeMetadataKey = beadmeta.DeferredTypeMetadataKey
 )
 
 // FragmentOptions configures instantiation of a rootless recipe fragment into
@@ -1041,7 +1042,7 @@ func ensureBeadMetadata(b *beads.Bead) {
 	}
 }
 
-const formulaVarMetadataPrefix = "gc.var."
+const formulaVarMetadataPrefix = beadmeta.FormulaVarPrefix
 
 // stampFormulaVars records non-empty formula input vars on the root bead as
 // gc.var.<name> metadata so they are discoverable from the parent alone

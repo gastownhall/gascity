@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -1500,7 +1501,7 @@ func appendAttemptLogValue(existing string, attempt int, outcome, reason string)
 
 func copyNonGCMetadata(dst, src map[string]string) {
 	for key, value := range src {
-		if key == "" || strings.HasPrefix(key, "gc.") {
+		if key == "" || strings.HasPrefix(key, beadmeta.Namespace) {
 			continue
 		}
 		dst[key] = value

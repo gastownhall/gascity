@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
@@ -22,7 +23,7 @@ import (
 // one (gastownhall/gascity#1855; reader tracked in dashboard #324). Unrelated
 // benchmark/test code writes the suffixless `gc.last_heartbeat` for a
 // different purpose; do not unify them.
-const heartbeatMetadataKey = "gc.last_heartbeat_at"
+const heartbeatMetadataKey = beadmeta.LastHeartbeatAtMetadataKey
 
 // bdHeartbeatNow supplies the timestamp stamped by `gc bd heartbeat`. It is a
 // package var so tests can pin it to a fixed instant; the rewrite normalizes

@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -79,7 +80,7 @@ const (
 	scopeBodyResolveRetryDelay = 100 * time.Millisecond
 )
 
-const workflowFinalizeErrorMetadataKey = "gc.last_finalize_error"
+const workflowFinalizeErrorMetadataKey = beadmeta.LastFinalizeErrorMetadataKey
 
 // ErrControlPending reports that a control bead is not yet processable but
 // should be retried later.
@@ -518,7 +519,7 @@ func (s scopeSnapshot) propagateScopeMemberMetadata(store beads.Store, bodyID st
 			continue
 		}
 		for key, value := range member.Metadata {
-			if key == "" || strings.HasPrefix(key, "gc.") {
+			if key == "" || strings.HasPrefix(key, beadmeta.Namespace) {
 				continue
 			}
 			batch[key] = value
