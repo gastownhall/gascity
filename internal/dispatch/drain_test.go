@@ -56,6 +56,60 @@ func TestProcessDrainSeparateExpandsConvoyIntoUnitRoots(t *testing.T) {
 	}
 }
 
+func TestProcessDrainSeparateProjectsMemberDependenciesOntoItemWorkflows(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	parentRoot := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	members, err := convoycore.Members(store, parentRoot.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("members = %d, want 2", len(members))
+	}
+	firstMember := members[0]
+	secondMember := members[1]
+	mustDepAdd(t, store, secondMember.ID, firstMember.ID, "blocks")
+
+	result, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	if result.Action != "drain-expanded" {
+		t.Fatalf("result = %+v, want drain-expanded", result)
+	}
+
+	drain = mustGetBead(t, store, drain.ID)
+	manifest := mustDrainManifest(t, drain)
+	rowByMember := make(map[string]drainManifestRow, len(manifest.Rows))
+	for _, row := range manifest.Rows {
+		rowByMember[row.MemberID] = row
+	}
+	firstRow := rowByMember[firstMember.ID]
+	secondRow := rowByMember[secondMember.ID]
+	if firstRow.ItemRootID == "" || secondRow.ItemRootID == "" {
+		t.Fatalf("missing item roots: first=%+v second=%+v", firstRow, secondRow)
+	}
+
+	assertHasBlockingDep(t, store, secondRow.ItemRootID, firstRow.ItemRootID)
+	secondWork := mustFindDrainItemWorkStep(t, store, secondRow.ItemRootID)
+	assertHasBlockingDep(t, store, secondWork.ID, firstRow.ItemRootID)
+
+	firstWork := mustFindDrainItemWorkStep(t, store, firstRow.ItemRootID)
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if !beadListContainsID(ready, firstWork.ID) {
+		t.Fatalf("first item work step %s should be ready; ready=%+v", firstWork.ID, ready)
+	}
+	if beadListContainsID(ready, secondWork.ID) {
+		t.Fatalf("second item work step %s should not be ready while %s is open; ready=%+v", secondWork.ID, firstRow.ItemRootID, ready)
+	}
+}
+
 func TestProcessDrainSeparateSucceedsForEmptyInputConvoy(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
@@ -1081,4 +1135,33 @@ func assertFormulaStepMetadata(t *testing.T, store beads.Store, rootID, key, wan
 		}
 	}
 	t.Fatalf("no child of %s has metadata %s=%q; beads=%+v", rootID, key, want, all)
+}
+
+func mustFindDrainItemWorkStep(t *testing.T, store beads.Store, rootID string) beads.Bead {
+	t.Helper()
+	all, err := listByWorkflowRoot(store, rootID)
+	if err != nil {
+		t.Fatalf("listByWorkflowRoot(%s): %v", rootID, err)
+	}
+	for _, bead := range all {
+		if bead.ID != rootID && strings.HasPrefix(bead.Title, "Work ") {
+			return bead
+		}
+	}
+	t.Fatalf("no drain item work step found under %s; beads=%+v", rootID, all)
+	return beads.Bead{}
+}
+
+func assertHasBlockingDep(t *testing.T, store beads.Store, issueID, dependsOnID string) {
+	t.Helper()
+	deps, err := store.DepList(issueID, "down")
+	if err != nil {
+		t.Fatalf("DepList(%s): %v", issueID, err)
+	}
+	for _, dep := range deps {
+		if dep.Type == "blocks" && dep.DependsOnID == dependsOnID {
+			return
+		}
+	}
+	t.Fatalf("dependencies for %s = %+v, want blocks dependency on %s", issueID, deps, dependsOnID)
 }

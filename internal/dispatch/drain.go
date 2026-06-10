@@ -150,6 +150,12 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 			return ControlResult{}, fmt.Errorf("%s: recording drain progress: %w", bead.ID, err)
 		}
 	}
+	if err := ensureDrainDependencyProjection(store, bead, manifest); err != nil {
+		if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+			return ControlResult{}, ErrControlPending
+		}
+		return ControlResult{}, fmt.Errorf("%s: projecting drain dependencies: %w", bead.ID, err)
+	}
 	if err := persistDrainManifest(store, bead.ID, manifest, map[string]string{
 		beadmeta.DrainStateMetadataKey:          "expanded",
 		beadmeta.DrainParentConvoyIDMetadataKey: parentConvoyID,
@@ -399,6 +405,12 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 			}
 			return ControlResult{}, err
 		}
+		if err := ensureDrainDependencyProjection(store, bead, manifest); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
+			return ControlResult{}, fmt.Errorf("%s: projecting shared drain dependencies: %w", bead.ID, err)
+		}
 		if err := persistDrainManifest(store, bead.ID, manifest, map[string]string{
 			beadmeta.DrainStateMetadataKey:          "expanded",
 			beadmeta.DrainParentConvoyIDMetadataKey: manifest.ParentConvoyID,
@@ -454,6 +466,87 @@ func materializeDrainRow(store beads.Store, control beads.Bead, parentConvoyID s
 	}
 	row.Status = "wired"
 	return createdCount, nil
+}
+
+func ensureDrainDependencyProjection(store beads.Store, control beads.Bead, manifest drainManifest) error {
+	rootByMember := make(map[string]string, len(manifest.Rows))
+	for _, row := range manifest.Rows {
+		memberID := strings.TrimSpace(row.MemberID)
+		rootID := strings.TrimSpace(row.ItemRootID)
+		if memberID == "" || rootID == "" {
+			continue
+		}
+		rootByMember[memberID] = rootID
+	}
+	for _, row := range manifest.Rows {
+		memberID := strings.TrimSpace(row.MemberID)
+		rootID := strings.TrimSpace(row.ItemRootID)
+		if memberID == "" || rootID == "" {
+			continue
+		}
+		blockerIDs, err := drainProjectedBlockerIDs(store, memberID, rootByMember)
+		if err != nil {
+			return fmt.Errorf("%s: listing source dependencies for member %s: %w", control.ID, memberID, err)
+		}
+		for _, blockerID := range blockerIDs {
+			if blockerID == rootID {
+				continue
+			}
+			if err := ensureDrainWorkflowBlocksOn(store, rootID, blockerID); err != nil {
+				return fmt.Errorf("%s: wiring item workflow %s for member %s to blocker %s: %w", control.ID, rootID, memberID, blockerID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func drainProjectedBlockerIDs(store beads.Store, memberID string, rootByMember map[string]string) ([]string, error) {
+	deps, err := store.DepList(memberID, "down")
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(deps))
+	blockerIDs := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		if !beads.IsReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		dependsOnID := strings.TrimSpace(dep.DependsOnID)
+		if dependsOnID == "" || dependsOnID == memberID {
+			continue
+		}
+		blockerID := dependsOnID
+		if projectedRootID := strings.TrimSpace(rootByMember[dependsOnID]); projectedRootID != "" {
+			blockerID = projectedRootID
+		}
+		if seen[blockerID] {
+			continue
+		}
+		seen[blockerID] = true
+		blockerIDs = append(blockerIDs, blockerID)
+	}
+	return blockerIDs, nil
+}
+
+func ensureDrainWorkflowBlocksOn(store beads.Store, rootID, blockerID string) error {
+	rootID = strings.TrimSpace(rootID)
+	blockerID = strings.TrimSpace(blockerID)
+	if rootID == "" || blockerID == "" || rootID == blockerID {
+		return nil
+	}
+	workflowBeads, err := listByWorkflowRoot(store, rootID)
+	if err != nil {
+		return err
+	}
+	for _, bead := range workflowBeads {
+		if strings.TrimSpace(bead.ID) == "" || bead.ID == blockerID {
+			continue
+		}
+		if err := ensureBlockingDependency(store, bead.ID, blockerID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func recordDrainRowOutcome(row *drainManifestRow, root beads.Bead) bool {
