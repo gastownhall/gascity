@@ -2361,6 +2361,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					"should_wake": shouldWake,
 				}, nil, "")
 			}
+			recordCurrentBeadIDOnWake(target.session, store, decision.AssignedWorkBeadID, stderr)
 			startCandidates = append(startCandidates, startCandidate{
 				session: target.session,
 				tp:      target.tp,
@@ -2369,6 +2370,24 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		if shouldWake && target.alive {
+			// Bead-reassignment cycle: when an alive named session is
+			// reassigned to a different bead than the one it's currently
+			// processing, wake_mode=fresh requires a brand-new conversation
+			// on the new bead. ComputeAwakeSet signals this via
+			// RequiresFreshCycle; honor it by routing through the same
+			// restart-handoff machinery as `gc runtime request-restart`.
+			// See #1893 (controller: alive on_demand session ignores
+			// bd update --assignee).
+			if decision.RequiresFreshCycle && target.session.Metadata["wake_mode"] == "fresh" {
+				if cycleAliveSessionForFreshReassign(target.session, target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace) {
+					continue
+				}
+			}
+			// Stamp currently_processing_bead_id so the next divergence
+			// check has a baseline. Backfills legacy sessions that were
+			// already alive before this metadata existed and refreshes the
+			// record after the agent picks up its next bead in resume mode.
+			recordCurrentBeadIDOnWake(target.session, store, decision.AssignedWorkBeadID, stderr)
 			// Session is correctly awake. Cancel any non-drift drain
 			// (handles scale-back-up: agent returns to desired set while draining).
 			cancelSessionDrain(*target.session, sp, dt)
