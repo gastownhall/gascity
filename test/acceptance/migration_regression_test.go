@@ -129,8 +129,8 @@ func TestRegression_GastownConfig(t *testing.T) {
 		if !strings.Contains(dog.PromptTemplate, filepath.Join("gastown", "agents", "dog", "prompt.template.md")) {
 			t.Errorf("gastown dog prompt_template = %q, want gastown-owned dog prompt", dog.PromptTemplate)
 		}
-		if !strings.Contains(dog.OverlayDir, filepath.Join("gastown", "agents", "dog", "overlay")) {
-			t.Errorf("gastown dog overlay_dir = %q, want gastown-owned dog overlay", dog.OverlayDir)
+		if dog.OverlayDir != "" {
+			t.Errorf("gastown dog overlay_dir = %q, want empty (pack-local dog ships no overlay)", dog.OverlayDir)
 		}
 	})
 

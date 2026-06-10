@@ -1811,6 +1811,41 @@ func TestGastownWarrantCreateCommandsUseCreateMetadata(t *testing.T) {
 	}
 }
 
+func TestShutdownDanceUsesClaimedWarrantModel(t *testing.T) {
+	// Release 0.1.2 of the gastown pack moved mol-shutdown-dance off the
+	// vapor-wisp shape: dogs read warrant metadata from the claimed bead
+	// via $GC_BEAD_ID instead of poured template vars.
+	path := filepath.Join(exampleDir(), "packs/gastown/formulas/mol-shutdown-dance.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading mol-shutdown-dance.toml: %v", err)
+	}
+	body := string(data)
+	var decoded struct {
+		Formula string                       `toml:"formula"`
+		Phase   string                       `toml:"phase"`
+		Vars    map[string]map[string]string `toml:"vars"`
+	}
+	if _, err := toml.Decode(body, &decoded); err != nil {
+		t.Fatalf("decoding mol-shutdown-dance.toml: %v", err)
+	}
+	if decoded.Formula != "mol-shutdown-dance" {
+		t.Errorf("formula = %q, want mol-shutdown-dance", decoded.Formula)
+	}
+	if decoded.Phase == "vapor" {
+		t.Error("mol-shutdown-dance must not be a vapor formula (claimed-warrant model)")
+	}
+	if _, ok := decoded.Vars["warrant_id"]; ok {
+		t.Error("mol-shutdown-dance must not declare a warrant_id var; the claimed bead is the warrant")
+	}
+	if !strings.Contains(body, "$GC_BEAD_ID") {
+		t.Error("mol-shutdown-dance must read warrant metadata from the claimed bead via $GC_BEAD_ID")
+	}
+	if strings.Contains(body, "formula_compiler") {
+		t.Error("mol-shutdown-dance must not require formula_compiler")
+	}
+}
+
 func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
 	dir := exampleDir()
 	checks := []struct {
@@ -1818,7 +1853,6 @@ func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
 		formula string
 	}{
 		{"../bd/dolt/formulas/mol-dog-stale-db.toml", "mol-dog-stale-db"},
-		{"packs/gastown/formulas/mol-shutdown-dance.toml", "mol-shutdown-dance"},
 		{"packs/gastown/formulas/mol-digest-generate.toml", "mol-digest-generate"},
 	}
 	for _, check := range checks {
@@ -1875,8 +1909,6 @@ func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
 func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
 	dir := exampleDir()
 	checks := []string{
-		"packs/gastown/agents/dog/prompt.template.md",
-		"packs/gastown/template-fragments/propulsion.template.md",
 		"packs/gastown/template-fragments/propulsion.template.md",
 	}
 	for _, rel := range checks {
@@ -1915,16 +1947,15 @@ func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
 		}
 	}
 
+	// The dog prompt stays thin: the claim-first startup protocol renders
+	// through the propulsion-dog fragment asserted above.
 	dogPrompt, err := os.ReadFile(filepath.Join(dir, "packs/gastown/agents/dog/prompt.template.md"))
 	if err != nil {
 		t.Fatalf("reading dog prompt: %v", err)
 	}
 	assertContainsInOrder(t, string(dogPrompt),
-		"## Startup Protocol",
-		"CLAIM-FIRST INVARIANT",
-		"{{ .AssignedInProgressQuery }}",
-		"{{ .AssignedReadyQuery }}",
-		"{{ .RoutedPoolQuery }}",
+		`{{ template "propulsion-dog" . }}`,
+		"{{ .WorkQuery }}",
 		"gc bd update <id> --claim",
 		"gc bd show <id> --json",
 	)
@@ -1937,16 +1968,16 @@ func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
 		"gastown",
 		"gastown.",
 	)
+	// The claim-first startup behavior renders through the propulsion-dog
+	// fragment: split queries expand, claim precedes inspection, and the
+	// source-aware verification guidance survives rendering.
 	assertContainsInOrder(t, renderedDogPrompt,
-		"CLAIM-FIRST INVARIANT",
-		"# Step 1a: Check for assigned in-progress work",
 		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`,
 		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_NAME"`,
 		`bd list --include-ephemeral --status in_progress --assignee="$GC_ALIAS"`,
-		"# Step 1b: If none, check for assigned ready work",
 		"bd ready --include-ephemeral --assignee=<session>",
-		"# Step 1c: If none, find routed pool work",
 		"bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"gc bd update <id> --claim",
 		"For Step 1a/1b candidates",
 		"Assigned work may have no",
 		"For Step 1c candidates",
@@ -3468,6 +3499,11 @@ func TestFormulasDir(t *testing.T) {
 			t.Errorf("FormulaLayers.City = %v, want entry ending with %s", cfg.FormulaLayers.City, suffix)
 		}
 	}
+	for _, d := range cfg.FormulaLayers.City {
+		if strings.HasSuffix(d, filepath.Join("packs", "maintenance", "formulas")) {
+			t.Errorf("FormulaLayers.City = %v, want no retired maintenance formula layer", cfg.FormulaLayers.City)
+		}
+	}
 }
 
 func TestPackDirsPopulated(t *testing.T) {
@@ -3480,6 +3516,9 @@ func TestPackDirsPopulated(t *testing.T) {
 	// they won't appear in this example's static expansion.
 	var hasGastown bool
 	for _, d := range cfg.PackDirs {
+		if strings.HasSuffix(d, filepath.Join("packs", "maintenance")) {
+			t.Errorf("PackDirs = %v, want no retired maintenance pack dir", cfg.PackDirs)
+		}
 		if strings.HasSuffix(d, filepath.Join("packs", "gastown")) {
 			hasGastown = true
 		}
@@ -3624,6 +3663,7 @@ func TestPackUsesIsolatedWorkDirs(t *testing.T) {
 		"mayor":    ".gc/agents/mayor",
 		"deacon":   ".gc/agents/deacon",
 		"boot":     ".gc/agents/boot",
+		"dog":      ".gc/agents/dogs/{{.AgentBase}}",
 		"witness":  ".gc/agents/{{.Rig}}/witness",
 		"refinery": ".gc/worktrees/{{.Rig}}/refinery",
 		"polecat":  ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
@@ -3671,7 +3711,7 @@ func TestCityAgentsFilter(t *testing.T) {
 	}
 }
 
-func TestExpandedCityUsesGastownDogOverride(t *testing.T) {
+func TestExpandedCityUsesGastownDog(t *testing.T) {
 	cfg := loadExpanded(t)
 
 	var dog *config.Agent
@@ -3691,9 +3731,8 @@ func TestExpandedCityUsesGastownDogOverride(t *testing.T) {
 	if !strings.HasSuffix(dog.PromptTemplate, wantPromptSuffix) {
 		t.Errorf("dog prompt_template = %q, want suffix %q", dog.PromptTemplate, wantPromptSuffix)
 	}
-	wantOverlaySuffix := filepath.Join("packs", "gastown", "agents", "dog", "overlay")
-	if !strings.HasSuffix(dog.OverlayDir, wantOverlaySuffix) {
-		t.Errorf("dog overlay_dir = %q, want suffix %q", dog.OverlayDir, wantOverlaySuffix)
+	if dog.OverlayDir != "" {
+		t.Errorf("dog overlay_dir = %q, want empty (pack-local dog ships no overlay)", dog.OverlayDir)
 	}
 	if len(dog.SessionLive) != 2 {
 		t.Fatalf("dog session_live has %d entries, want 2 gastown theming commands", len(dog.SessionLive))

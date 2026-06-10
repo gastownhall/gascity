@@ -95,6 +95,12 @@ func TestSyncLockUsesBundledFallbackForPublicGastownWhenRemoteUnavailable(t *tes
 	if _, err := os.Stat(filepath.Join(cacheDir, "gastown", "pack.toml")); err != nil {
 		t.Fatalf("public gastown synthetic cache missing pack.toml: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "gastown", "agents", "dog", "agent.toml")); err != nil {
+		t.Fatalf("public gastown synthetic cache missing dog agent: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "gastown", "formulas", "mol-shutdown-dance.toml")); err != nil {
+		t.Fatalf("public gastown synthetic cache missing shutdown formula: %v", err)
+	}
 }
 
 func TestCheckInstalledReportsMissingCache(t *testing.T) {

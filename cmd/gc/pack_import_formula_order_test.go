@@ -133,8 +133,10 @@ func TestTransitiveGastownPackDigestOrderResolvesAndRuns(t *testing.T) {
 		t.Fatalf("Abs(examples/gastown): %v", err)
 	}
 	gastownPackDir := filepath.Join(gastownRoot, "packs", "gastown")
+	retiredMaintenanceFormulaLayer := filepath.Join(gastownRoot, "packs", "maintenance", "formulas")
 	digestFormulaLayer := filepath.Join(gastownPackDir, "formulas")
 	digestFormulaFile := filepath.Join(digestFormulaLayer, "mol-digest-generate.toml")
+	shutdownFormulaFile := filepath.Join(digestFormulaLayer, "mol-shutdown-dance.toml")
 
 	writeFile(t, filepath.Join(cityDir, "city.toml"), `
 [daemon]
@@ -164,6 +166,7 @@ source = "`+gastownPackDir+`"
 	if err != nil {
 		t.Fatalf("loadCityConfig: %v", err)
 	}
+	assertNotContainsString(t, cfg.FormulaLayers.City, retiredMaintenanceFormulaLayer)
 	assertContainsString(t, cfg.FormulaLayers.City, digestFormulaLayer)
 	assertAgentQualifiedName(t, cfg.Agents, "wrapper.dog")
 
@@ -203,6 +206,7 @@ source = "`+gastownPackDir+`"
 		t.Fatalf("ResolveFormulas(city): %v", err)
 	}
 	assertSymlinkTarget(t, filepath.Join(cityDir, ".beads", "formulas", "mol-digest-generate.toml"), digestFormulaFile)
+	assertSymlinkTarget(t, filepath.Join(cityDir, ".beads", "formulas", "mol-shutdown-dance.toml"), shutdownFormulaFile)
 
 	store := beads.NewMemStore()
 	var stdout bytes.Buffer
