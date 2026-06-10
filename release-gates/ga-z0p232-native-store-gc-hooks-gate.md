@@ -26,8 +26,8 @@ deployer role release criteria and the repository testing guidance in
 | 2 | Acceptance criteria met | PASS | Diff is limited to `internal/beads/factory.go` and `internal/beads/factory_test.go`. Existing non-stamped hook fallback remains covered by `TestOpenStoreAtForCityExecutableHooksBlockNativeStore`; new gc-stamped hook path is covered by `TestOpenStoreAtForCityGCStampedHooksDoNotBlockNativeStore`. Focused command passed: `go test ./internal/beads -run 'TestOpenStoreAtForCity(ExecutableHooksBlockNativeStore|GCStampedHooksDoNotBlockNativeStore)'`. |
 | 3 | Tests pass | PASS | `make test-fast-parallel` initially reported two non-deterministic local failures; both failed tests passed on direct `-count=1` rerun, and a clean full `make test-fast-parallel` retry passed all fast jobs. `go vet ./...` passed. GitHub PR #3270 shows CI required checks passing. |
 | 4 | No high-severity review findings open | PASS | Reviewer notes list no blockers and no security concerns; unresolved HIGH findings count is 0. |
-| 5 | Final branch is clean | PASS | Clean detached gate worktree started at `origin/builder/ga-exfzfw`; only this gate file is added for the gate commit. Final cleanliness is verified after commit before push. |
-| 6 | Branch diverges cleanly from main | PASS | `git merge-tree --write-tree origin/main HEAD` succeeded with tree `c35ded2c9ca2adf51bf1888955f3942eebc6e361`; PR #3270 merge state is CLEAN. |
+| 5 | Final branch is clean | PASS | Clean detached gate worktree started at `origin/builder/ga-exfzfw`; after committing gate evidence, `git status --short --branch` showed no modified or untracked files. |
+| 6 | Branch diverges cleanly from main | PASS | `git merge-tree --write-tree origin/main HEAD` succeeded against the current `origin/main`; PR #3270 has no merge conflict and is blocked only by post-push checks while they run. |
 | 7 | Single feature theme | PASS | Commit set touches one subsystem and behavior: native bead store preflight handling for gc-owned bd hooks. |
 
 ## Test Details
