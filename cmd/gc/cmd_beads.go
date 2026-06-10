@@ -36,6 +36,7 @@ API with transparent fallback to direct bd reads.`,
 		newBeadsListCmd(stdout, stderr),
 		newBeadsMetadataCASCmd(stdout, stderr),
 		newBeadsShowCmd(stdout, stderr),
+		newBeadsStateCmd(stdout, stderr),
 	)
 	return cmd
 }

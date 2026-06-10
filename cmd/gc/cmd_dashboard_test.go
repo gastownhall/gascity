@@ -26,7 +26,13 @@ func stubDashboardOpen(t *testing.T) *string {
 
 func TestRunDashboardNoticePrintsSupervisorURL(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
-	t.Chdir(t.TempDir())
+	td := t.TempDir()
+	// Prevent /tmp/.gc/ from poisoning city discovery. Set the ceiling to
+	// the raw t.TempDir() path — NOT the EvalSymlinks-resolved path —
+	// because os.Getwd() returns the same unresolved value that t.Chdir
+	// passes to the OS, so both sides of the comparison must match.
+	t.Setenv("GC_CEILING_DIRECTORIES", td)
+	t.Chdir(td)
 	stubDashboardOpen(t)
 
 	oldAlive := supervisorAliveHook
@@ -164,7 +170,11 @@ func TestRunDashboardNoticeOpenFailureFallsBackToPrint(t *testing.T) {
 
 func TestRunDashboardNoticeUsesAPIOverride(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
-	t.Chdir(t.TempDir())
+	td := t.TempDir()
+	// Prevent /tmp/.gc/ from poisoning city discovery. Set ceiling to the
+	// raw t.TempDir() path (not EvalSymlinks-resolved) to match os.Getwd().
+	t.Setenv("GC_CEILING_DIRECTORIES", td)
+	t.Chdir(td)
 
 	oldAlive := supervisorAliveHook
 	oldCityFlag := cityFlag

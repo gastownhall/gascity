@@ -394,6 +394,7 @@ gc beads
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
+| [gc beads state](#gc-beads-state) | Classify beads by effective state |
 
 ## gc beads city
 
@@ -597,9 +598,33 @@ gc beads show ga-abc
 gc beads show ga-abc --format=json
 ```
 
+## gc beads state
+
+Classify every bead into one of 16 effective states and display
+the results grouped by state with owner and count.
+
+Anomaly states (orphaned, ready-unrouted, routed-stalled-dispatch, unknown)
+are prefixed with '!' in table output.
+
+```
+gc beads state [flags]
+```
+
+**Example:**
+
+```
+gc beads state
+  gc beads state --json
+  gc beads state --state routed-waiting
+  gc beads state --ids
+```
+
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--format` | string | `text` | output format: text or json |
+| `--ids` | bool |  | include bead IDs in table output |
+| `--json` | bool |  | emit JSON result |
+| `--rig` | string |  | limit to beads routed to this rig |
+| `--state` | string |  | show only beads in this effective state |
 
 ## gc build-image
 
