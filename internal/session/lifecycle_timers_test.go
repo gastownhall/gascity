@@ -81,6 +81,9 @@ func TestDecideMaxSessionAgeLadder(t *testing.T) {
 			if dec.TraceOutcome != tc.outcome {
 				t.Errorf("trace outcome = %q, want %q", dec.TraceOutcome, tc.outcome)
 			}
+			if dec.CancelDrain || dec.SkipWakePass {
+				t.Errorf("max-age decisions never cancel drains or skip the wake pass: %+v", dec)
+			}
 		})
 	}
 }
@@ -148,6 +151,9 @@ func TestDecideIdleTimeoutLadder(t *testing.T) {
 			}
 			if dec.TraceOutcome != tc.outcome {
 				t.Errorf("trace outcome = %q, want %q", dec.TraceOutcome, tc.outcome)
+			}
+			if dec.CancelDrain || dec.SkipWakePass {
+				t.Errorf("only pending-interaction deferrals cancel drains or skip the wake pass: %+v", dec)
 			}
 		})
 	}

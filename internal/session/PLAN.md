@@ -12,6 +12,11 @@ document-level gating with per-PR proof: each step is a normal PR reviewed
 against the scenario rows it touches, and each step must leave every existing
 test passing unchanged.
 
+Step tracking is canonical in beads, not in this file: ga-ltlwc1 (Step 1),
+ga-i9r8fi (Step 2), ga-4of1nc / ga-7f6ocx / ga-frfj2d / ga-kmoj9c (Step 3),
+ga-q65c22 (Step 4), ga-mxchkb (Step 5). This document holds the rationale and
+ordering; `bd show <id>` holds current status.
+
 The target shape, restated from the design core:
 
 ```text
@@ -72,7 +77,8 @@ Same treatment for the near-pure predicates in `cmd/gc/session_reconcile.go`
 (`checkStability`, `recordWakeFailure`, `recordChurn` family): split fused
 predicate+write helpers into pure decisions plus caller-applied patches.
 
-Exit: same-SHA parity on `session_reconcile_test.go` (105 tests).
+Exit: every test in `session_reconcile_test.go` passes unchanged at the same
+SHA.
 
 ### Step 3 — Fix the real bugs the design review surfaced
 

@@ -1,8 +1,10 @@
 # Session Module
 
 Read `REQUIREMENTS.md` before changing session behavior, tests, or callers that
-depend on session lifecycle semantics. Read `DESIGN.md` before changing session
-ownership boundaries, deciders, command APIs, events, or extraction backlog.
+depend on session lifecycle semantics. Read `PLAN.md` before changing session
+ownership boundaries, deciders, command APIs, events, or extraction sequencing.
+(`DESIGN.md` is the long-form architecture document; it has not landed yet and
+is iterating under design-review bead `ga-unpr2y`.)
 
 ## Purpose
 

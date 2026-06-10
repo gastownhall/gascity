@@ -61,8 +61,9 @@ type TimerFacts struct {
 	// Triggered reports whether the timer's tracker fired (threshold elapsed
 	// with a valid anchor). When false no other fact is consulted.
 	Triggered bool
-	// Blocker is the active lifecycle timer blocker ("user_hold",
-	// "quarantine"), or empty when none applies.
+	// Blocker is the active lifecycle timer blocker as reported by the
+	// caller (currently "user_hold" or "quarantine"), or empty when none
+	// applies. Any non-empty value defers the timer.
 	Blocker string
 	// Pending is the pending-interaction fact, gathered on demand.
 	Pending PendingFact
@@ -73,6 +74,7 @@ type TimerFacts struct {
 
 // TimerDecision is the outcome of one ladder evaluation.
 type TimerDecision struct {
+	// Action is what the caller must do next.
 	Action TimerAction
 	// TraceReason and TraceOutcome are the stable vocabulary for the
 	// reconciler.session.max_session_age and reconciler.session.idle_timeout

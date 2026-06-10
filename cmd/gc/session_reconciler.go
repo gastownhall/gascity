@@ -2192,15 +2192,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// pass to drain the live runtime. Pending-interaction
 				// deferrals cancel any pending drain and skip this tick's
 				// wake pass for the session.
-				drainCancelled := false
-				if dec.CancelDrain && dt != nil {
-					drainCancelled = cancelSessionDrain(*session, sp, dt)
+				var payload traceRecordPayload
+				if dec.CancelDrain {
+					drainCancelled := false
+					if dt != nil {
+						drainCancelled = cancelSessionDrain(*session, sp, dt)
+					}
+					payload = traceRecordPayload{"drain_canceled": drainCancelled}
 				}
 				if trace != nil {
-					var payload traceRecordPayload
-					if dec.CancelDrain {
-						payload = traceRecordPayload{"drain_canceled": drainCancelled}
-					}
 					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, dec.TraceReason, dec.TraceOutcome, payload, nil, "")
 				}
 				if dec.SkipWakePass {

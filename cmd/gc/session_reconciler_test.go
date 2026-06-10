@@ -8001,6 +8001,68 @@ func TestReconcileSessionBeads_MaxSessionAgeSkippedWhenBusyWithAssignedWork(t *t
 	}
 }
 
+// TestReconcileSessionBeads_MaxAgeBusyDeferFallsThroughToIdleTimeout pins the
+// max-age half of the timer asymmetry (SESSION-RECON-009): a max-age deferral
+// leaves the session in the rest of the tick. The busy witness is max-age
+// deferred on assigned work but must still be idle-evaluated on the same
+// tick, so the idle stop fires. Fails if the max-age defer path ever gains a
+// `continue`.
+func TestReconcileSessionBeads_MaxAgeBusyDeferFallsThroughToIdleTimeout(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+	})
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create(in-flight work): %v", err)
+	}
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	it := newFakeIdleTracker()
+	it.idle["witness"] = true
+	rec := events.NewFake()
+	env.rec = rec
+
+	poolDesired := make(map[string]int)
+	for _, tp := range env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeadsTraced(
+		context.Background(), "", []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, nil,
+		withMaxSessionAgeTracker(tr),
+	)
+
+	var maxAgeKilled, idleKilled bool
+	for _, e := range rec.Events {
+		switch e.Type {
+		case events.SessionMaxAgeKilled:
+			maxAgeKilled = true
+		case events.SessionIdleKilled:
+			idleKilled = true
+		}
+	}
+	if maxAgeKilled {
+		t.Error("SessionMaxAgeKilled must not fire while an in-progress assigned bead is held")
+	}
+	if !idleKilled {
+		t.Error("idle timeout must still run on the same tick after a max-age busy deferral")
+	}
+}
+
 // TestReconcileSessionBeads_MaxSessionAgeFailsClosedOnStoreError verifies
 // that a transient store error during the assigned-work check defers the
 // max-age restart rather than killing the session. This guards the fix at
