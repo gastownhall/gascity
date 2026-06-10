@@ -3799,6 +3799,87 @@ func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
 	}
 }
 
+// session.woke is the durable-commit notification: subscribers must never
+// observe a wake whose metadata commit then fails (the reconciler reports
+// failure and retries, so the "fact" the event announced never landed).
+// When the atomic start batch fails no session.woke is emitted; on success
+// exactly one is. Regression test for ga-kmoj9c.
+func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T) {
+	successResult := func(session *beads.Bead) startResult {
+		return startResult{
+			prepared: preparedStart{
+				candidate: startCandidate{
+					session: session,
+					tp: TemplateParams{
+						SessionName:  "sky",
+						TemplateName: "helper",
+					},
+				},
+				coreHash: "core",
+				liveHash: "live",
+			},
+			outcome:  "success",
+			started:  time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC),
+			finished: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC),
+		}
+	}
+	sessionMeta := func() map[string]string {
+		return map[string]string{
+			"session_name": "sky",
+			"state":        "creating",
+		}
+	}
+	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}
+
+	t.Run("metadata batch failure suppresses the event", func(t *testing.T) {
+		store := &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}
+		session, err := store.Create(beads.Bead{
+			Title:    "helper",
+			Type:     sessionBeadType,
+			Labels:   []string{sessionBeadLabel},
+			Metadata: sessionMeta(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := events.NewFake()
+		if commitStartResult(successResult(&session), store, clk, rec, 0, ioDiscard{}, ioDiscard{}) {
+			t.Fatal("commitStartResult returned true, want false when metadata batch fails")
+		}
+		woke, err := rec.List(events.Filter{Type: events.SessionWoke})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(woke) != 0 {
+			t.Fatalf("session.woke events = %d, want 0 when the durable commit failed", len(woke))
+		}
+	})
+
+	t.Run("successful commit emits exactly one event", func(t *testing.T) {
+		store := beads.NewMemStore()
+		session, err := store.Create(beads.Bead{
+			Title:    "helper",
+			Type:     sessionBeadType,
+			Labels:   []string{sessionBeadLabel},
+			Metadata: sessionMeta(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := events.NewFake()
+		if !commitStartResult(successResult(&session), store, clk, rec, 0, ioDiscard{}, ioDiscard{}) {
+			t.Fatal("commitStartResult returned false for successful start")
+		}
+		woke, err := rec.List(events.Filter{Type: events.SessionWoke})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(woke) != 1 {
+			t.Fatalf("session.woke events = %d, want exactly 1 after the durable commit", len(woke))
+		}
+	})
+}
+
 func TestRefreshConfiguredNamedStartCandidateAddsCurrentSkillFingerprint(t *testing.T) {
 	resetSkillCatalogCache()
 	cityPath := t.TempDir()

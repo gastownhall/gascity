@@ -1784,12 +1784,6 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 		return false
 	}
-	fmt.Fprintf(stdout, "Woke session '%s'\n", tp.DisplayName()) //nolint:errcheck
-	rec.Record(events.Event{
-		Type:    events.SessionWoke,
-		Actor:   "gc",
-		Subject: tp.DisplayName(),
-	})
 	coreBreakdown := ""
 	if bdj, err := json.Marshal(result.prepared.coreBreakdown); err == nil {
 		coreBreakdown = string(bdj)
@@ -1860,6 +1854,16 @@ func commitStartResultTraced(
 	for key, value := range metadata {
 		session.Metadata[key] = value
 	}
+	// Announce the wake only after the metadata batch has durably landed.
+	// Emitting earlier lets a subscriber observe a session.woke for a start
+	// whose commit then fails — a fact the store never recorded, since the
+	// failure paths above report the start as failed and retry (ga-kmoj9c).
+	fmt.Fprintf(stdout, "Woke session '%s'\n", tp.DisplayName()) //nolint:errcheck
+	rec.Record(events.Event{
+		Type:    events.SessionWoke,
+		Actor:   "gc",
+		Subject: tp.DisplayName(),
+	})
 	if trace != nil {
 		trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
 			"wave": wave,
