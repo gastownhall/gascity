@@ -115,6 +115,9 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		} else {
 			cmd.Env = baseEnv
 		}
+		if guardErr := liveDoltGuard(name, cmd.Env); guardErr != nil {
+			return nil, guardErr
+		}
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -386,6 +389,9 @@ func execPurge(dir string, env, args []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "bd", args...)
 	cmd.Dir = dir
 	cmd.Env = env
+	if guardErr := liveDoltGuard("bd", cmd.Env); guardErr != nil {
+		return nil, guardErr
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

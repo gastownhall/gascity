@@ -235,6 +235,13 @@ vet:
 ## tests and corrupt live cities. Only the allowlist below survives. To opt
 ## extra vars through, set EXTRA_TEST_ENV='FOO=bar BAZ=qux' on the make line.
 ## See PR #746.
+##
+## Load-bearing: GC_DOLT_PORT and BEADS_DOLT_SERVER_PORT are deliberately NOT in
+## the allowlist below. They point bd at the live shared city Dolt server, so
+## letting them reach `go test` makes every bd-forking test write to PRODUCTION
+## Dolt — 18+ parallel workers pegged the shared server and stalled bd writes
+## city-wide (ga-w2kh1r). Do not add them. The internal/beads live-Dolt guard
+## backstops bare `go test` runs that bypass this wrapper.
 GOPATH_VAL    := $(shell go env GOPATH)
 GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)

@@ -21,6 +21,14 @@ mode="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# GC_DOLT_PORT / BEADS_DOLT_SERVER_PORT point bd at the live shared city Dolt
+# server. They must never reach `go test`, or every bd-forking test writes to
+# PRODUCTION Dolt and stalls bd writes city-wide (ga-w2kh1r). The per-job
+# `env -i` below already drops them; unsetting here keeps them out of this
+# script's own go-env probes and documents the invariant. The internal/beads
+# live-Dolt guard backstops bare `go test` runs that bypass this harness.
+unset GC_DOLT_PORT BEADS_DOLT_SERVER_PORT
+
 detect_cpus() {
   nproc 2>/dev/null ||
     getconf _NPROCESSORS_ONLN 2>/dev/null ||
