@@ -1,5 +1,12 @@
 [order]
 description = "Generate daily code digest across all rigs"
+# City-scoped: one digest already covers every rig, so register a single
+# city-level instance instead of one per importing rig. Without this, the
+# gastown pack's per-rig import projects a digest-generate order onto every
+# rig; those per-rig instances never fire (only the city instance reaches the
+# city-level `dog` pool), so they sit perpetually overdue and trip the
+# order-firing-current doctor check.
+scope = "city"
 formula = "mol-digest-generate"
 trigger = "cooldown"
 interval = "24h"
