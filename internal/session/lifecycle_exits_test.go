@@ -227,3 +227,89 @@ func TestDecideSessionExitGatherTerminates(t *testing.T) {
 		}
 	}
 }
+
+func TestWakeFailureAccrualPatchBelowThreshold(t *testing.T) {
+	until := time.Date(2026, 3, 8, 13, 0, 0, 0, time.UTC)
+	acc := WakeFailureAccrualPatch(1, 5, until)
+	if acc.Quarantined {
+		t.Fatal("two failures with max 5 must not quarantine")
+	}
+	want := MetadataPatch{"wake_attempts": "2"}
+	assertPatch(t, acc.Patch, want)
+}
+
+func TestWakeFailureAccrualPatchAtThreshold(t *testing.T) {
+	until := time.Date(2026, 3, 8, 13, 0, 0, 0, time.UTC)
+	acc := WakeFailureAccrualPatch(4, 5, until)
+	if !acc.Quarantined {
+		t.Fatal("fifth failure with max 5 must quarantine")
+	}
+	want := MetadataPatch{
+		"wake_attempts":     "5",
+		"quarantined_until": "2026-03-08T13:00:00Z",
+		"sleep_reason":      "quarantine",
+	}
+	assertPatch(t, acc.Patch, want)
+	if _, ok := acc.Patch["state"]; ok {
+		t.Error("wake-failure quarantine is metadata-only and must not write state")
+	}
+}
+
+func TestChurnAccrualPatch(t *testing.T) {
+	until := time.Date(2026, 3, 8, 13, 0, 0, 0, time.UTC)
+
+	acc := ChurnAccrualPatch(0, 3, until)
+	if acc.Quarantined {
+		t.Fatal("first churn cycle with max 3 must not quarantine")
+	}
+	assertPatch(t, acc.Patch, MetadataPatch{"churn_count": "1"})
+
+	acc = ChurnAccrualPatch(2, 3, until)
+	if !acc.Quarantined {
+		t.Fatal("third churn cycle with max 3 must quarantine")
+	}
+	want := MetadataPatch{
+		"churn_count":       "3",
+		"quarantined_until": "2026-03-08T13:00:00Z",
+		"sleep_reason":      "context-churn",
+	}
+	assertPatch(t, acc.Patch, want)
+}
+
+func TestConversationResetPatch(t *testing.T) {
+	// Wake failures clear the config hash so the next start is a first
+	// start; churn clears only the conversation binding.
+	assertPatch(t, ConversationResetPatch(true), MetadataPatch{
+		"session_key":                "",
+		"started_config_hash":        "",
+		"continuation_reset_pending": "true",
+	})
+	assertPatch(t, ConversationResetPatch(false), MetadataPatch{
+		"session_key":                "",
+		"continuation_reset_pending": "true",
+	})
+}
+
+func TestRateLimitQuarantinePatch(t *testing.T) {
+	until := time.Date(2026, 3, 8, 13, 0, 0, 0, time.UTC)
+	assertPatch(t, RateLimitQuarantinePatch(until), MetadataPatch{
+		"state":                     string(StateAsleep),
+		"quarantined_until":         "2026-03-08T13:00:00Z",
+		"sleep_reason":              "rate_limit",
+		"last_woke_at":              "",
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+	})
+}
+
+func assertPatch(t *testing.T, got, want MetadataPatch) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("patch has %d keys, want %d: %v", len(got), len(want), got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("patch[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+}

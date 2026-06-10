@@ -613,15 +613,7 @@ func recordRateLimitQuarantine(session *beads.Bead, store beads.Store, clk clock
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string)
 	}
-	qUntil := clk.Now().Add(defaultRateLimitQuarantineDuration).UTC().Format(time.RFC3339)
-	batch := map[string]string{
-		"state":                     string(sessionpkg.StateAsleep),
-		"quarantined_until":         qUntil,
-		"sleep_reason":              "rate_limit",
-		"last_woke_at":              "",
-		"pending_create_claim":      "",
-		"pending_create_started_at": "",
-	}
+	batch := sessionpkg.RateLimitQuarantinePatch(clk.Now().Add(defaultRateLimitQuarantineDuration))
 	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
 		fmt.Fprintf(os.Stderr, "recordRateLimitQuarantine: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
 		return err
@@ -635,7 +627,6 @@ func recordRateLimitQuarantine(session *beads.Bead, store beads.Store, clk clock
 // recordWakeFailure increments wake_attempts and quarantines if threshold exceeded.
 func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) {
 	attempts, _ := strconv.Atoi(session.Metadata["wake_attempts"])
-	attempts++
 
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string)
@@ -652,30 +643,23 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 	// recovery remains correct in that call order and for any skewed state
 	// left behind by older builds.
 	if session.Metadata["session_key"] != "" || session.Metadata["started_config_hash"] != "" {
-		_ = store.SetMetadataBatch(session.ID, map[string]string{
-			"session_key":                "",
-			"started_config_hash":        "",
-			"continuation_reset_pending": "true",
-		})
-		session.Metadata["session_key"] = ""
-		session.Metadata["started_config_hash"] = ""
-		session.Metadata["continuation_reset_pending"] = "true"
-	}
-	if attempts >= defaultMaxWakeAttempts {
-		qUntil := clk.Now().Add(defaultQuarantineDuration).UTC().Format(time.RFC3339)
-		batch := map[string]string{
-			"wake_attempts":     strconv.Itoa(attempts),
-			"quarantined_until": qUntil,
-			"sleep_reason":      "quarantine",
+		reset := sessionpkg.ConversationResetPatch(true)
+		_ = store.SetMetadataBatch(session.ID, reset)
+		for k, v := range reset {
+			session.Metadata[k] = v
 		}
-		if err := store.SetMetadataBatch(session.ID, batch); err == nil {
-			for k, v := range batch {
+	}
+	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, clk.Now().Add(defaultQuarantineDuration))
+	if accrual.Quarantined {
+		if err := store.SetMetadataBatch(session.ID, accrual.Patch); err == nil {
+			for k, v := range accrual.Patch {
 				session.Metadata[k] = v
 			}
 		}
 	} else {
-		_ = store.SetMetadata(session.ID, "wake_attempts", strconv.Itoa(attempts))
-		session.Metadata["wake_attempts"] = strconv.Itoa(attempts)
+		next := accrual.Patch["wake_attempts"]
+		_ = store.SetMetadata(session.ID, "wake_attempts", next)
+		session.Metadata["wake_attempts"] = next
 	}
 }
 
@@ -737,7 +721,6 @@ func isDeliberateSleepReason(reason string) bool {
 // the counter reaches defaultMaxChurnCycles, the session is quarantined.
 func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock) {
 	count, _ := strconv.Atoi(session.Metadata["churn_count"])
-	count++
 
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string)
@@ -746,34 +729,27 @@ func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock) {
 	// Always clear session_key on churn — context exhaustion means the
 	// conversation itself is the problem. A fresh conversation avoids
 	// re-hitting the same wall.
-	clearBatch := map[string]string{
-		"session_key":                "",
-		"continuation_reset_pending": "true",
-	}
 	if session.Metadata["session_key"] != "" {
-		_ = store.SetMetadataBatch(session.ID, clearBatch)
-		for k, v := range clearBatch {
+		reset := sessionpkg.ConversationResetPatch(false)
+		_ = store.SetMetadataBatch(session.ID, reset)
+		for k, v := range reset {
 			session.Metadata[k] = v
 		}
 	}
 
-	if count >= defaultMaxChurnCycles {
-		qUntil := clk.Now().Add(defaultQuarantineDuration).UTC().Format(time.RFC3339)
-		batch := map[string]string{
-			"churn_count":       strconv.Itoa(count),
-			"quarantined_until": qUntil,
-			"sleep_reason":      "context-churn",
-		}
-		if err := store.SetMetadataBatch(session.ID, batch); err == nil {
-			for k, v := range batch {
+	accrual := sessionpkg.ChurnAccrualPatch(count, defaultMaxChurnCycles, clk.Now().Add(defaultQuarantineDuration))
+	if accrual.Quarantined {
+		if err := store.SetMetadataBatch(session.ID, accrual.Patch); err == nil {
+			for k, v := range accrual.Patch {
 				session.Metadata[k] = v
 			}
 		}
 		return
 	}
 
-	_ = store.SetMetadata(session.ID, "churn_count", strconv.Itoa(count))
-	session.Metadata["churn_count"] = strconv.Itoa(count)
+	next := accrual.Patch["churn_count"]
+	_ = store.SetMetadata(session.ID, "churn_count", next)
+	session.Metadata["churn_count"] = next
 }
 
 // clearChurn resets the churn counter for a productive session.

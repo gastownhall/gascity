@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strconv"
 	"strings"
 	"time"
 )
@@ -150,4 +151,71 @@ func parseWakeStamp(raw string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return t, true
+}
+
+// ExitAccrual is the built write for one more crash or churn event plus the
+// threshold verdict. Quarantined accruals carry the full quarantine patch;
+// otherwise only the counter advances.
+type ExitAccrual struct {
+	Patch       MetadataPatch
+	Quarantined bool
+}
+
+// WakeFailureAccrualPatch builds the write for one more rapid-crash wake
+// failure on top of priorAttempts. Reaching maxAttempts quarantines the
+// session until the given time with sleep reason "quarantine". The patch is
+// metadata-only; unlike QuarantinePatch it does not move the state machine.
+func WakeFailureAccrualPatch(priorAttempts, maxAttempts int, until time.Time) ExitAccrual {
+	return exitAccrual("wake_attempts", priorAttempts+1, maxAttempts, "quarantine", until)
+}
+
+// ChurnAccrualPatch builds the write for one more churn cycle on top of
+// priorCycles. Reaching maxCycles quarantines the session until the given
+// time with sleep reason "context-churn".
+func ChurnAccrualPatch(priorCycles, maxCycles int, until time.Time) ExitAccrual {
+	return exitAccrual("churn_count", priorCycles+1, maxCycles, "context-churn", until)
+}
+
+func exitAccrual(counterKey string, next, threshold int, sleepReason string, until time.Time) ExitAccrual {
+	count := strconv.Itoa(next)
+	if next >= threshold {
+		return ExitAccrual{
+			Quarantined: true,
+			Patch: MetadataPatch{
+				counterKey:          count,
+				"quarantined_until": until.UTC().Format(time.RFC3339),
+				"sleep_reason":      sleepReason,
+			},
+		}
+	}
+	return ExitAccrual{Patch: MetadataPatch{counterKey: count}}
+}
+
+// ConversationResetPatch clears the runtime conversation binding so the next
+// wake starts a fresh conversation. Wake failures also clear
+// started_config_hash so the next start runs as a first start instead of
+// resuming a conversation that no longer exists; churn keeps the hash.
+func ConversationResetPatch(clearStartedConfigHash bool) MetadataPatch {
+	patch := MetadataPatch{
+		"session_key":                "",
+		"continuation_reset_pending": "true",
+	}
+	if clearStartedConfigHash {
+		patch["started_config_hash"] = ""
+	}
+	return patch
+}
+
+// RateLimitQuarantinePatch backs a session off a provider rate-limit screen
+// until the given time without counting a crash or resetting its
+// conversation metadata.
+func RateLimitQuarantinePatch(until time.Time) MetadataPatch {
+	return MetadataPatch{
+		"state":                     string(StateAsleep),
+		"quarantined_until":         until.UTC().Format(time.RFC3339),
+		"sleep_reason":              "rate_limit",
+		"last_woke_at":              "",
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+	}
 }
