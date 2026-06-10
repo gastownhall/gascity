@@ -514,6 +514,20 @@ payload variant is still fully typed on the wire; consumers narrow
 explicitly rather than getting automatic discriminator narrowing.
 See §6 for the full tooling note.
 
+### Sibling discipline: the bead-metadata vocabulary
+
+The same declared-vocabulary discipline applies to the `gc.*`
+bead-metadata keys the API reads off beads (e.g.
+`gc.workflow_id`, `gc.root_bead_id` in the convoy stream): every
+engine-owned key is a constant in `internal/beadmeta`, and
+`TestNoUndeclaredMetadataKeys` fails CI on any raw `gc.*` key
+literal in non-test Go. Unlike the events registry this is a
+const block plus a static source guard, not a runtime
+registration — bead metadata is `map[string]string` with no
+decode or OpenAPI-projection consumer, so there is no payload
+type to register. See `engdocs/architecture/beads.md` ("Metadata
+vocabulary") for the scope boundary and open-world policy.
+
 ## 5. Developer workflow
 
 The invariants above exist so the developer's contribution to the

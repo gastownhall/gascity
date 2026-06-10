@@ -191,6 +191,42 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
     file first, then `os.Rename` to the target path -- never partial
     writes.
 
+## Metadata vocabulary (gc.*)
+
+`bead.Metadata` is a `map[string]string`, and the `gc.` prefix is the
+reserved namespace for engine-minted keys. The vocabulary of engine-owned
+keys -- every `gc.*` key read or written by non-test Go -- is declared once
+in `internal/beadmeta` (`beadmeta.KnownMetadataKeys`), which is the
+authoritative contract for the workflow engine, role workers, CLI, and API.
+Non-test Go must reference the `beadmeta` constants rather than spelling
+out raw key literals; `TestNoUndeclaredMetadataKeys` in
+`internal/beadmeta/guard_test.go` enforces this by scanning source for
+whole `gc.*`-key-shaped string literals.
+
+The namespace is deliberately open-world at the edges:
+
+- **Dynamic keys.** Formula input vars are stamped as `gc.var.<name>`
+  (`beadmeta.FormulaVarPrefix`); the suffix is user-authored and not
+  enumerable.
+- **Pack-private keys.** Packs and prompts may mint `gc.*` keys the engine
+  never reads (e.g. `gc.reviewer_model`). These never appear as Go
+  literals, so the guard does not constrain them and they are
+  intentionally NOT declared in `beadmeta`.
+- **Sibling namespaces.** `gc.*` event-type names belong to
+  `events.KnownEventTypes`, telemetry metric names to
+  `internal/telemetry`, and t3bridge UI thread-metadata keys to
+  `internal/runtime/t3bridge` -- each a separate owner, none of them bead
+  metadata. The non-`gc.`-prefixed directory keys (`worker_dir`,
+  `artifact_dir`, legacy `work_dir`) are also declared in `beadmeta`, with
+  their read/write helper behavior remaining in
+  `internal/beads/contract/metadata.go`.
+
+Keys embedded inside larger strings -- jq `--metadata-field` filters in
+`internal/config/config.go` and SQL JSON paths in
+`internal/api/convoy_sql.go` -- are outside the guard's key-shape rule and
+are tracked as a follow-up (generate those path fragments from the
+constants).
+
 ## Interactions
 
 | Depends on | How |

@@ -119,23 +119,23 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	}
 
 	switch bead.Metadata[beadmeta.KindMetadataKey] {
-	case "retry":
+	case beadmeta.KindRetry:
 		return processRetryControl(store, bead, opts)
-	case "ralph":
+	case beadmeta.KindRalph:
 		return processRalphControl(store, bead, opts)
-	case "check":
+	case beadmeta.KindCheck:
 		return processRalphCheck(store, bead, opts)
-	case "retry-eval":
+	case beadmeta.KindRetryEval:
 		return processRetryEval(store, bead, opts)
-	case "fanout":
+	case beadmeta.KindFanout:
 		return processFanout(store, bead, opts)
-	case "tally":
+	case beadmeta.KindTally:
 		return processTallyControl(store, bead, opts)
-	case "drain":
+	case beadmeta.KindDrain:
 		return processDrain(store, bead, opts)
-	case "scope-check":
+	case beadmeta.KindScopeCheck:
 		return processScopeCheck(store, bead, opts)
-	case "workflow-finalize":
+	case beadmeta.KindWorkflowFinalize:
 		return processWorkflowFinalize(store, bead, opts)
 	default:
 		return ControlResult{}, fmt.Errorf("%s: unsupported control bead kind %q", bead.ID, bead.Metadata[beadmeta.KindMetadataKey])

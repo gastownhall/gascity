@@ -96,7 +96,7 @@ gc hook --claim --drain-ack --json
 ## Important Metadata
 
 - `gc.root_bead_id` — workflow root for this bead
-- `gc.scope_id` — scope/body bead controlling teardown
+- `gc.scope_ref` — scope/body bead controlling teardown
 - `gc.continuation_group` — beads that prefer the same live session
 - `gc.scope_role=teardown` — cleanup/finalizer work; always execute when ready
 

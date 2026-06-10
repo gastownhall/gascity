@@ -1039,7 +1039,7 @@ func resolveAttemptControlAssignee(target string, cfg *config.City, store beads.
 
 func isAttemptControlKind(kind string) bool {
 	switch kind {
-	case "check", "fanout", "retry-eval", "scope-check", "workflow-finalize", "retry", "ralph":
+	case beadmeta.KindCheck, beadmeta.KindFanout, beadmeta.KindRetryEval, beadmeta.KindScopeCheck, beadmeta.KindWorkflowFinalize, beadmeta.KindRetry, beadmeta.KindRalph:
 		return true
 	default:
 		return false

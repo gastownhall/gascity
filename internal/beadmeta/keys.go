@@ -21,6 +21,12 @@
 // is map[string]string with no runtime decode/codegen consumer, so the
 // events.RegisterPayload reflect-based machinery would add init-ordering cost for
 // no benefit. Drift is enforced statically by the AST guard in guard_test.go.
+//
+// Cross-repo note: bd (the beads backend) stores these keys as opaque JSON in
+// its generic issues.metadata column and never interprets them — the key
+// names are 100% gascity-minted vocabulary, so changing bd's schema does not
+// require touching this package and vice versa. See
+// engdocs/design/beads-dolt-contract-redesign.md for the storage contract.
 package beadmeta
 
 // Namespace is the reserved prefix for every engine-minted bead-metadata key.
@@ -165,6 +171,27 @@ const (
 // variables are written as gc.var.<name>. The suffix is open-world (a
 // user-authored variable name), so it is declared as a prefix, not enumerated.
 const FormulaVarPrefix = Namespace + "var."
+
+// Directory keys: a deliberate non-"gc."-prefixed sibling family on bead
+// metadata, declared here so the vocabulary has one home. Their read/write
+// fallback semantics (canonical-then-legacy) live with their owner in
+// internal/beads/contract/metadata.go, which aliases these constants. They are
+// not in KnownMetadataKeys because the drift guard's key-shape rule only
+// covers the gc. namespace. Note these are distinct from the gc.-prefixed
+// WorkDirMetadataKey ("gc.work_dir") above.
+const (
+	// WorkerDirMetadataKey records the agent process working directory on
+	// session beads.
+	WorkerDirMetadataKey = "worker_dir"
+
+	// ArtifactDirMetadataKey records the work artifact directory on task and
+	// molecule beads.
+	ArtifactDirMetadataKey = "artifact_dir"
+
+	// LegacyWorkDirMetadataKey is the deprecated key that overloaded both
+	// meanings; reads still fall back to it on session beads.
+	LegacyWorkDirMetadataKey = "work_dir"
+)
 
 // KnownMetadataKeys lists every engine-owned bead-metadata key this package
 // declares. The guard test asserts every gc.* metadata literal used in non-test

@@ -1032,7 +1032,7 @@ func metadataRequiresGraphContract(metadata map[string]string) bool {
 		switch key {
 		case beadmeta.KindMetadataKey:
 			switch value {
-			case "scope", "cleanup", "scope-check", "workflow-finalize", "retry", "retry-run", "retry-eval", "ralph", "run", "check", "drain":
+			case beadmeta.KindScope, beadmeta.KindCleanup, beadmeta.KindScopeCheck, beadmeta.KindWorkflowFinalize, beadmeta.KindRetry, beadmeta.KindRetryRun, beadmeta.KindRetryEval, beadmeta.KindRalph, beadmeta.KindRun, beadmeta.KindCheck, beadmeta.KindDrain:
 				return true
 			}
 		case beadmeta.ScopeNameMetadataKey, beadmeta.ScopeRoleMetadataKey, beadmeta.ScopeRefMetadataKey, beadmeta.ContinuationGroupMetadataKey, beadmeta.OnFailMetadataKey:
