@@ -2820,6 +2820,7 @@ func emitSessionStrandedDiagnostic(
 		Actor:   "gc",
 		Subject: session.ID,
 		Message: formatStrandedMessage(template, session.Metadata["session_name"], ids),
+		Payload: api.SessionStrandedPayloadJSON(session.ID, session.Metadata["session_name"], template, ids),
 	})
 	// Set the in-memory marker first so a SetMetadata failure below
 	// can't cause the next tick (still seeing this same *Bead value or

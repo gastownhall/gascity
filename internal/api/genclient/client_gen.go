@@ -2711,6 +2711,21 @@ type SessionResponse struct {
 	Title                  string                  `json:"title"`
 }
 
+// SessionStrandedPayload defines model for SessionStrandedPayload.
+type SessionStrandedPayload struct {
+	// SessionId Canonical session bead ID for the stranded pool session (also the envelope Subject).
+	SessionId string `json:"session_id"`
+
+	// SessionName Runtime session name from the session bead metadata, when set.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// Template Pool template name when known at the emission site.
+	Template *string `json:"template,omitempty"`
+
+	// WorkBeadIds IDs of the open/in-progress work beads still assigned to the session. Never truncated, unlike the envelope Message. Empty when the work-collection query failed at emission time.
+	WorkBeadIds *[]string `json:"work_bead_ids,omitempty"`
+}
+
 // SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending interactions, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
 type SessionStreamCommonEvent struct {
 	union json.RawMessage
@@ -3896,7 +3911,7 @@ type TypedEventStreamEnvelopeSessionStopped struct {
 type TypedEventStreamEnvelopeSessionStranded struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
+	Payload  SessionStrandedPayload   `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -4737,7 +4752,7 @@ type TypedTaggedEventStreamEnvelopeSessionStranded struct {
 	Actor    string                   `json:"actor"`
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
+	Payload  SessionStrandedPayload   `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -6657,6 +6672,32 @@ func (t *EventPayload) FromSessionResetStalledPayload(v SessionResetStalledPaylo
 
 // MergeSessionResetStalledPayload performs a merge with any union data inside the EventPayload, using the provided SessionResetStalledPayload
 func (t *EventPayload) MergeSessionResetStalledPayload(v SessionResetStalledPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStrandedPayload returns the union data inside the EventPayload as a SessionStrandedPayload
+func (t EventPayload) AsSessionStrandedPayload() (SessionStrandedPayload, error) {
+	var body SessionStrandedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStrandedPayload overwrites any union data inside the EventPayload as the provided SessionStrandedPayload
+func (t *EventPayload) FromSessionStrandedPayload(v SessionStrandedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStrandedPayload performs a merge with any union data inside the EventPayload, using the provided SessionStrandedPayload
+func (t *EventPayload) MergeSessionStrandedPayload(v SessionStrandedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err

@@ -437,6 +437,35 @@ func SessionDrainAckedWithAssignedWorkPayloadJSON(sessionID, beadID, template, b
 	return b
 }
 
+// SessionStrandedPayload carries the machine-readable context for a
+// session.stranded event: a pool session whose runtime exited while open or
+// in-progress work beads still held it as assignee. The envelope Message
+// renders the same facts as operator text (ID list truncated past ten);
+// this payload is the untruncated machine contract so pack-level recovery
+// subscribers can act on the stranded work without parsing message text.
+type SessionStrandedPayload struct {
+	SessionID   string   `json:"session_id" doc:"Canonical session bead ID for the stranded pool session (also the envelope Subject)."`
+	SessionName string   `json:"session_name,omitempty" doc:"Runtime session name from the session bead metadata, when set."`
+	Template    string   `json:"template,omitempty" doc:"Pool template name when known at the emission site."`
+	WorkBeadIDs []string `json:"work_bead_ids,omitempty" doc:"IDs of the open/in-progress work beads still assigned to the session. Never truncated, unlike the envelope Message. Empty when the work-collection query failed at emission time."`
+}
+
+// IsEventPayload marks SessionStrandedPayload as an events.Payload variant.
+func (SessionStrandedPayload) IsEventPayload() {}
+
+// SessionStrandedPayloadJSON builds the JSON wire form for attachment to an
+// events.Event.Payload field. SessionName, Template, and WorkBeadIDs are
+// emitted only when non-empty.
+func SessionStrandedPayloadJSON(sessionID, sessionName, template string, workBeadIDs []string) json.RawMessage {
+	b, _ := json.Marshal(SessionStrandedPayload{
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		Template:    template,
+		WorkBeadIDs: workBeadIDs,
+	})
+	return b
+}
+
 func init() {
 	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
@@ -470,7 +499,7 @@ func init() {
 	events.RegisterPayload(events.SessionSuspended, events.NoPayload{})
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
-	events.RegisterPayload(events.SessionStranded, events.NoPayload{})
+	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
