@@ -17,7 +17,7 @@ __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$__SCRIPT_DIR/_bd_trace.sh" "spawn-storm-detect"
 
 CITY="${GC_CITY:-.}"
-PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance}"
+PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/core}"
 LEDGER="$PACK_STATE_DIR/spawn-storm-counts.json"
 THRESHOLD="${SPAWN_STORM_THRESHOLD:-2}"
 

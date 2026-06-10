@@ -89,10 +89,6 @@ func TestInitGastown(t *testing.T) {
 	if !c.HasFile("packs/gastown/pack.toml") {
 		t.Fatal("packs/gastown/pack.toml not materialized — Bug 4 regression")
 	}
-	if !c.HasFile("packs/maintenance/pack.toml") {
-		t.Fatal("packs/maintenance/pack.toml not materialized")
-	}
-
 	// Verify gastown-specific artifacts exist.
 	if !c.HasFile("packs/gastown/agents") {
 		t.Fatal("gastown agents not materialized")

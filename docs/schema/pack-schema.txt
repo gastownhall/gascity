@@ -255,10 +255,6 @@
           "type": "boolean",
           "description": "Attach controls whether the agent's session supports interactive\nattachment (e.g., tmux attach). When false, the agent can use a\nlighter runtime (subprocess instead of tmux). Defaults to true."
         },
-        "fallback": {
-          "type": "boolean",
-          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins.\nSee docs/guides/shareable-packs.md for pack layout guidance."
-        },
         "depends_on": {
           "items": {
             "type": "string"

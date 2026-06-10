@@ -25,6 +25,7 @@ func TestInternalMaterializeSkillsMaterializesClaude(t *testing.T) {
 	}
 	cityToml := `[workspace]
 name = "test-city"
+includes = [".gc/system/packs/core"]
 
 [beads]
 provider = "file"

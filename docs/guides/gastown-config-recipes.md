@@ -142,9 +142,11 @@ config. This section assembles them into a full, runnable topology: the three
 files that express the whole Gastown pack on Gas City.
 
 Read them in order. The **city file** is the normal starting point — the
-deployment you boot. The **root pack** wires the Gastown import and the default
-rig binding behind it. The **nested pack** holds the reusable defaults — the
-roles, named sessions, and dog pool every Gastown city inherits.
+deployment you boot; it also carries the explicit includes for the builtin
+`core` and `bd` packs (`gc init` writes these, `gc doctor --fix` repairs
+them). The **root pack** wires the Gastown import and the default rig binding
+behind it. The **nested pack** holds the reusable defaults — the roles, named
+sessions, and dog pool every Gastown city inherits.
 
 All three are PackV2 (`schema = 2`, `agents/<name>/`).
 
@@ -154,19 +156,18 @@ All three are PackV2 (`schema = 2`, `agents/<name>/`).
 # Gas Town — expressed as a Gas City configuration.
 #
 # This proves the Gas City thesis: any orchestration pack is pure config.
-# Three composable packs:
-#   maintenance  — generic infrastructure: dog pool, shutdown dance, exec
-#                  orders (gate-sweep, orphan-sweep, prune-branches,
-#                  wisp-compact)
-#   dolt         — reusable Dolt database management (dog formulas + exec
-#                  orders + CLI commands), requires a dog pool from
-#                  maintenance
-#   gastown      — domain-specific coding workflow: mayor, deacon, boot,
-#                  witness, refinery, polecat, crew + digest orders
+# Composable packs:
+#   core (builtin) — gc skills, default prompts, core formulas, mechanical
+#                    housekeeping orders (gate/orphan/wisp sweeps, branch
+#                    pruning, nudge relays); included explicitly below
+#   bd (builtin)   — Dolt-backed beads provider; pulls in the dolt pack
+#                    (server lifecycle, dog formulas + exec orders + CLI
+#                    commands, with its own dolt dog pool)
+#   gastown        — domain-specific coding workflow: mayor, deacon, boot,
+#                    dog utility pool, witness, refinery, polecat, crew +
+#                    digest orders
 #
-# City-scoped agents come from both packs: mayor, deacon, boot, plus the
-# effective dog definition from gastown. Maintenance still supplies the
-# fallback dog shape and shared dog formulas/prompts that gastown reuses.
+# City-scoped agents: mayor, deacon, boot, and the gastown-owned dog.
 # Rig-scoped agents (witness, refinery, polecat) are stamped per-rig.
 #
 # The sibling pack.toml owns the Gastown import. This city owns the default
@@ -180,6 +181,9 @@ All three are PackV2 (`schema = 2`, `agents/<name>/`).
 name = "gastown"
 provider = "claude"
 global_fragments = ["command-glossary", "operational-awareness"]
+# Builtin packs compose only through explicit includes (gc init writes
+# these; gc doctor --fix repairs them).
+includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [providers.claude]
 base = "builtin:claude"
@@ -256,12 +260,12 @@ source = "packs/gastown"
 # Gas Town — domain-specific coding workflow pack.
 #
 # Gastown roles: mayor (coordinator), deacon (patrol), boot (watchdog),
-# plus rig-scoped agents (witness, refinery, polecat).
-# Dog (utility pool) is defined here with tmux theming; maintenance provides
-# the fallback (unthemed) dog. Mechanical housekeeping lives in maintenance.
+# dog (utility pool, owned by this pack), plus rig-scoped agents
+# (witness, refinery, polecat). Mechanical housekeeping (gate/orphan/wisp
+# sweeps, branch pruning, nudge relays) ships with the builtin core pack.
 #
 # Referenced by both workspace.pack and rigs[].pack:
-#   workspace.pack → expands city-scoped agents only (mayor, deacon, boot)
+#   workspace.pack → expands city-scoped agents only (mayor, deacon, boot, dog)
 #   rigs[].pack    → expands rig agents only (witness, refinery, polecat)
 #
 # Crew members are individually named directory agents (agents/<name>/) plus a
@@ -271,19 +275,11 @@ source = "packs/gastown"
 name = "gastown"
 schema = 2
 
-[imports.maintenance]
-source = "../maintenance"
-
 [global]
 session_live = [
     "{{.ConfigDir}}/assets/scripts/tmux-theme.sh {{.Session}} {{.Agent}} {{.ConfigDir}}",
     "{{.ConfigDir}}/assets/scripts/tmux-keybindings.sh {{.ConfigDir}}",
 ]
-
-[[patches.agent]]
-name = "dog"
-wake_mode = "fresh"
-work_dir = ".gc/agents/dogs/{{.AgentBase}}"
 
 [[named_session]]
 template = "mayor"

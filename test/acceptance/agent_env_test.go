@@ -101,8 +101,8 @@ func TestConfigLoad_SwarmConfig(t *testing.T) {
 	if err != nil && strings.Contains(out, "pack.toml: no such file") {
 		t.Fatalf("swarm config has missing pack references:\n%s", out)
 	}
-	if !strings.Contains(out, "dog") {
-		t.Fatalf("swarm config explain missing system maintenance dog:\n%s", out)
+	if !strings.Contains(out, "mayor") {
+		t.Fatalf("swarm config explain missing swarm mayor:\n%s", out)
 	}
 }
 

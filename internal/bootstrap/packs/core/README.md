@@ -1,12 +1,13 @@
-# Maintenance pack
+# Core pack housekeeping orders
 
-Deterministic housekeeping for a Gas City. Every order here is **mechanical**
-— timer comparisons, dependency lookups, event decoding — so the controller
-runs them directly via `exec` instead of spending agent context. No LLM
-judgment, no wisps, no agent pipeline.
+Deterministic housekeeping for a Gas City, shipped as part of the bundled
+core pack. Every order here is **mechanical** — timer comparisons,
+dependency lookups, event decoding — so the controller runs them directly
+via `exec` instead of spending agent context. No LLM judgment, no wisps,
+no agent pipeline.
 
-Cities that include this pack get every order below automatically; none
-requires per-city configuration.
+Cities that include the core pack get every order below automatically;
+none requires per-city configuration.
 
 ## Orders
 
@@ -112,5 +113,5 @@ Entries older than the retention window are pruned on each run.
 ## Dependencies
 
 Both nudge scripts use only `bd`, `gc`, and `jq` — already required by the
-other maintenance-pack scripts. `jq` is a hard dependency and the scripts fail
+other core-pack scripts. `jq` is a hard dependency and the scripts fail
 loud at startup if it is missing.

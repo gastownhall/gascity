@@ -2369,6 +2369,7 @@ template = "mayor"
 		t.Fatalf("WriteFile(pack.toml): %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`[workspace]
+includes = [".gc/system/packs/core"]
 
 [beads]
 provider = "file"

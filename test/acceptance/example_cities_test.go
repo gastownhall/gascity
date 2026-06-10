@@ -100,9 +100,6 @@ func TestExamplePacks_PackArtifacts(t *testing.T) {
 			"packs/gastown/template-fragments",
 			"packs/gastown/formulas",
 			"packs/gastown/assets/scripts",
-			"packs/maintenance/pack.toml",
-			"packs/maintenance/agents",
-			"packs/maintenance/formulas",
 		}
 		for _, rel := range expected {
 			if !c.HasFile(rel) {

@@ -30,33 +30,22 @@ Describe what this agent should do here.
 // in cmd_config.go and cmd_start.go that intentionally use config.Load to
 // discover remote packs before fetching them.
 func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
-	tomlPath := filepath.Join(cityPath, "city.toml")
-	extras, err := builtinPackIncludesForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...))
-	if err != nil {
-		return nil, err
-	}
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extras...)
-	if err != nil {
-		return nil, err
-	}
-	emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
-	applyFeatureFlags(cfg)
-	return cfg, nil
+	return loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), warningWriter...)
 }
 
 // loadCityConfigFS is the testable variant of loadCityConfig that accepts a
 // filesystem implementation. Used by functions that take an fsys.FS parameter
 // for unit testing.
 func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
-	extras, err := builtinPackIncludesForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...))
-	if err != nil {
+	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...)); err != nil {
 		return nil, err
 	}
-	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath, extras...)
+	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
 	if err != nil {
 		return nil, err
 	}
 	emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
+	warnMissingRequiredBuiltinIncludes(fs, cfg, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...))
 	applyFeatureFlags(cfg)
 	return cfg, nil
 }
@@ -67,11 +56,7 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 // briefly reflect stale builtin-pack content after an upgrade until a normal
 // gc command refreshes the generated packs.
 func loadCityConfigWithoutBuiltinPackRefreshFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
-	var extras []string
-	if usesOSFS(fs) {
-		extras = builtinPackIncludes(filepath.Dir(tomlPath))
-	}
-	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath, extras...)
+	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
 	if err != nil {
 		return nil, err
 	}

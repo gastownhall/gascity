@@ -120,6 +120,9 @@ So when you move from Gas Town to Gas City, the default mental model becomes:
 
 - reusable behavior lives in `pack.toml` plus pack directories
 - deployment choices live in `city.toml`
+- even the builtin packs are explicit: `gc init` writes their includes into
+  `city.toml` (`[workspace] includes = [".gc/system/packs/core", ...]`) —
+  nothing is spliced into config composition implicitly
 - machine-local bindings and runtime state live in `.gc/`
 - every durable work item is a bead
 - agents are generic; roles come from prompts, formulas, orders, and config
@@ -152,7 +155,7 @@ Each table is preceded by a one-sentence scope statement so you always know whic
 | Refinery | Configured agent + a formula or order post-processing step | Post-processing is a workflow step, not a standing role type. |
 | Polecat | Scalable / transient agent config (a pool — `min`/`max_active_sessions`) | "Polecat" is an operating style — on-demand sessions, often with worktrees — expressed as agent config. |
 | Crew | Persistent named agent config | "Crew" is an operating style — long-lived named agents — expressed as agent config. |
-| Dog | Usually an exec order; sometimes a scalable agent config | Most relay work needs no LLM session, so an order is cleaner than a role. |
+| Dog | Exec orders shipped by the builtin core pack; the Gastown pack owns its own `dog` utility pool | Most relay and housekeeping work needs no LLM session, so it ships as core-pack exec orders; the Gastown pack's `dog` pool covers the work that does need an agent. |
 
 ### Mechanisms / Behaviors → Gas City Equivalents
 

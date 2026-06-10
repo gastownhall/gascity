@@ -1548,10 +1548,10 @@ prompt_template = "prompts/mayor.md"
 
 // TestV2DeprecationFixSurfacesMigrateWarnings guards the codex review
 // finding on PR #1880: when migrate.Apply emits warnings about
-// behavior-affecting fields it had to drop (e.g. legacy [[agent]] entries
-// with fallback = true), doctor --fix must surface them. Without this,
-// the next gc doctor run sees a green check and the manual follow-up is
-// lost forever.
+// behavior-affecting fields it had to drop (e.g. a legacy [formulas].dir
+// override), doctor --fix must surface them. Without this, the next
+// gc doctor run sees a green check and the manual follow-up is lost
+// forever.
 func TestV2DeprecationFixSurfacesMigrateWarnings(t *testing.T) {
 	t.Parallel()
 
@@ -1560,10 +1560,12 @@ func TestV2DeprecationFixSurfacesMigrateWarnings(t *testing.T) {
 [workspace]
 name = "legacy-city"
 
+[formulas]
+dir = "my-formulas"
+
 [[agent]]
 name = "mayor"
 prompt_template = "prompts/mayor.md"
-fallback = true
 `)
 	writeDoctorFile(t, cityDir, "prompts/mayor.md", "Hello {{.Agent}}\n")
 
@@ -1573,11 +1575,11 @@ fallback = true
 	}
 
 	got := sink.String()
-	if !strings.Contains(got, "fallback") {
-		t.Fatalf("expected migrate warnings about dropped fallback field to be surfaced; got:\n%s", got)
+	if !strings.Contains(got, "formulas.dir") {
+		t.Fatalf("expected migrate warnings about dropped formulas.dir to be surfaced; got:\n%s", got)
 	}
-	if !strings.Contains(got, "mayor") {
-		t.Fatalf("expected the agent name to appear in the warning; got:\n%s", got)
+	if !strings.Contains(got, "my-formulas") {
+		t.Fatalf("expected the dropped value to appear in the warning; got:\n%s", got)
 	}
 }
 
@@ -1589,10 +1591,12 @@ func TestV2DeprecationDoctorFixSurfacesMigrateWarningsInOutput(t *testing.T) {
 [workspace]
 name = "legacy-city"
 
+[formulas]
+dir = "my-formulas"
+
 [[agent]]
 name = "mayor"
 prompt_template = "prompts/mayor.md"
-fallback = true
 `)
 	writeDoctorFile(t, cityDir, "prompts/mayor.md", "Hello {{.Agent}}\n")
 
@@ -1602,7 +1606,7 @@ fallback = true
 	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, true)
 
 	got := buf.String()
-	if !strings.Contains(got, "fallback") {
+	if !strings.Contains(got, "formulas.dir") {
 		t.Fatalf("expected doctor --fix output to include migrate warning; got:\n%s", got)
 	}
 	if !strings.Contains(got, "✓ v2-agent-format") {

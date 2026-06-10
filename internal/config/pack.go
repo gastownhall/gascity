@@ -458,9 +458,6 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			cfg.RigOverlayDirs[rig.Name] = rigOverlayDirs
 		}
 
-		// Resolve fallback agents before collision detection.
-		rigAgents = resolveFallbackAgents(rigAgents)
-
 		// Check for duplicate agent names across packs for this rig.
 		if err := checkPackAgentCollisions(rigAgents, rig.Name); err != nil {
 			return err
@@ -825,18 +822,13 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 		}
 	}
 
-	// Resolve fallback agents before collision detection.
-	allAgents = resolveFallbackAgents(allAgents)
-
 	// Check for duplicate agent names across city packs.
 	if err := checkPackAgentCollisions(allAgents, ""); err != nil {
 		return nil, nil, nil, err
 	}
 
 	// City pack agents go at the front (before user-defined agents).
-	// Run fallback dedup again on the combined set so system pack
-	// fallback agents yield to inline city-level agents.
-	cfg.Agents = resolveFallbackAgents(append(allAgents, cfg.Agents...))
+	cfg.Agents = append(allAgents, cfg.Agents...)
 	cfg.NamedSessions = append(allNamedSessions, cfg.NamedSessions...)
 
 	// Detect shadow conflicts: city-local agents masking imported agents.
@@ -939,79 +931,6 @@ func ComputeFormulaLayers(cityTopoFormulas []string, cityLocalFormulas string, r
 	}
 
 	return fl
-}
-
-// resolveFallbackAgents resolves fallback agent collisions. When agents
-// from different SourceDirs share a name:
-//   - One fallback + one non-fallback: non-fallback wins, fallback removed
-//   - Both fallback: first loaded wins (depth-first include order)
-//   - Neither fallback: left for checkPackAgentCollisions to error
-//
-// Agents from the same SourceDir are never in conflict (they're duplicates
-// within one pack, handled elsewhere). Order is preserved.
-func resolveFallbackAgents(agents []Agent) []Agent {
-	// Build per-name groups from distinct SourceDirs.
-	type entry struct {
-		idx      int
-		fallback bool
-		srcDir   string
-	}
-	groups := make(map[string][]entry)
-	for i, a := range agents {
-		// Use QualifiedName so agents with different bindings
-		// (e.g., "gs.mayor" and "maint.mayor") don't collide.
-		groups[a.QualifiedName()] = append(groups[a.QualifiedName()], entry{i, a.Fallback, a.SourceDir})
-	}
-
-	// Determine which indices to remove.
-	remove := make(map[int]bool)
-	for _, entries := range groups {
-		// Only care about names from multiple sources.
-		// Empty SourceDir means city-level (inline) — count it as a
-		// distinct source so system pack fallbacks yield to inline agents.
-		dirs := make(map[string]bool)
-		for _, e := range entries {
-			dirs[e.srcDir] = true // "" is a valid key (city-level)
-		}
-		if len(dirs) < 2 {
-			continue
-		}
-
-		// Separate fallback vs non-fallback entries.
-		var fb, nonfb []entry
-		for _, e := range entries {
-			if e.fallback {
-				fb = append(fb, e)
-			} else {
-				nonfb = append(nonfb, e)
-			}
-		}
-
-		if len(nonfb) > 0 && len(fb) > 0 {
-			// Non-fallback wins: remove all fallback entries.
-			for _, e := range fb {
-				remove[e.idx] = true
-			}
-		} else if len(nonfb) == 0 && len(fb) > 1 {
-			// All fallback: keep first, remove rest.
-			for _, e := range fb[1:] {
-				remove[e.idx] = true
-			}
-		}
-		// Both non-fallback: leave alone for collision detection.
-	}
-
-	if len(remove) == 0 {
-		return agents
-	}
-
-	result := make([]Agent, 0, len(agents)-len(remove))
-	for i, a := range agents {
-		if !remove[i] {
-			result = append(result, a)
-		}
-	}
-	return result
 }
 
 // checkPackAgentCollisions detects duplicate agent names within

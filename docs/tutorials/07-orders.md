@@ -94,7 +94,7 @@ release-notes   formula  cooldown  24h             worker
 ```
 
 Your output will also include built-in housekeeping orders that ship
-with the tutorial template (`beads-health`, `gate-sweep`, `jsonl-export`,
+with the bundled core pack (`beads-health`, `gate-sweep`, `jsonl-export`,
 `reaper`, `orphan-sweep`, `prune-branches`, `spawn-storm-detect`,
 `wisp-compact`, etc.). They're the city's housekeeping orders — you can leave
 them alone.

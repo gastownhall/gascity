@@ -28,7 +28,6 @@ provider = "claude"
 prompt_template = "prompts/mayor.md"
 overlay_dir = "overlays/mayor"
 namepool = "namepools/mayor.txt"
-fallback = true
 
 [[agent]]
 name = "worker"
@@ -39,13 +38,8 @@ prompt_template = "prompts/worker.md"
 	writeFile(t, cityDir, "overlays/mayor/CLAUDE.md", "city overlay\n")
 	writeFile(t, cityDir, "namepools/mayor.txt", "Ada\nGrace\n")
 
-	report, err := Apply(cityDir, Options{})
-	if err != nil {
+	if _, err := Apply(cityDir, Options{}); err != nil {
 		t.Fatalf("Apply: %v", err)
-	}
-
-	if len(report.Warnings) == 0 {
-		t.Fatal("expected fallback warning, got none")
 	}
 
 	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
@@ -917,7 +911,6 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		InjectFragments:        []string{"frag1"},
 		AppendFragments:        []string{"append1"},
 		Attach:                 &trueVal,
-		Fallback:               true,
 		DependsOn:              []string{"other-agent"},
 		ResumeCommand:          "claude --resume {{.SessionKey}} --dangerously",
 		WakeMode:               "fresh",
@@ -935,7 +928,6 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		"InheritedDefaultSlingFormula": true,
 		"InheritedAppendFragments":     true,
 		"Implicit":                     true,
-		"Fallback":                     true,
 		"SleepAfterIdleSource":         true,
 		"PoolName":                     true,
 		"BindingName":                  true,

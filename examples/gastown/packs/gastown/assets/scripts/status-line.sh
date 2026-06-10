@@ -8,12 +8,12 @@ agent="$1"
 [ -z "$agent" ] && exit 0
 
 # Trace gc hook / gc mail check invocations to $GC_BD_TRACE when set.
-# The helper lives in the maintenance pack scripts dir; if it's not
+# The helper lives in the core pack scripts dir; if it's not
 # reachable, status-line continues without tracing.
 __bd_trace_helper=""
 for __cand in \
-    "${GC_CITY_PATH:-}/.gc/system/packs/maintenance/assets/scripts/_bd_trace.sh" \
-    "${GC_CITY:-}/.gc/system/packs/maintenance/assets/scripts/_bd_trace.sh"; do
+    "${GC_CITY_PATH:-}/.gc/system/packs/core/assets/scripts/_bd_trace.sh" \
+    "${GC_CITY:-}/.gc/system/packs/core/assets/scripts/_bd_trace.sh"; do
     if [ -n "$__cand" ] && [ -f "$__cand" ]; then
         __bd_trace_helper="$__cand"
         break

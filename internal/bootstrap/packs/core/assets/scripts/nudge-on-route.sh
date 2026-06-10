@@ -40,7 +40,7 @@ LOOKBACK="${GC_NUDGE_ON_ROUTE_LOOKBACK:-2m}"
 RETENTION="${GC_NUDGE_ON_ROUTE_RETENTION:-1h}"
 NUDGE_MESSAGE="${GC_NUDGE_ON_ROUTE_MESSAGE:-check for assigned work}"
 
-PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance}"
+PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/core}"
 STATE_FILE="$PACK_STATE_DIR/nudge-on-route-state.json"
 mkdir -p "$PACK_STATE_DIR"
 

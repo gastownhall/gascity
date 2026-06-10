@@ -22,6 +22,15 @@ func TestDirectJSONWriterPayloadsValidateDeclaredSchemas(t *testing.T) {
 
 	cityPath := t.TempDir()
 	writeManagementJSONTestCity(t, cityPath, "[workspace]\nname = \"test-city\"\n")
+	// The sling dry-run case targets a dog pool instance; the city defines
+	// its own dog pool (builtin packs no longer supply a fallback dog).
+	dogDir := filepath.Join(cityPath, "agents", "dog")
+	if err := os.MkdirAll(dogDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(agents/dog): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dogDir, "agent.toml"), []byte("start_command = \"true\"\nmin_active_sessions = 0\nmax_active_sessions = 3\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(agents/dog/agent.toml): %v", err)
+	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		t.Fatalf("open city store: %v", err)

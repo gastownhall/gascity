@@ -118,6 +118,11 @@ Do not write registry handles such as `main:gastown` into `pack.toml`. Registry
 handles are command-time lookup shortcuts; authored pack TOML stores the
 resolved durable `source` and, when needed, `version`.
 
+Packs own their agents. If two packs composed into the same city or rig
+define the same agent name, composition fails with a duplicate-agent error —
+there is no fallback-agent resolution. Give pack agents unambiguous names,
+or drop one of the conflicting imports.
+
 ## Registry Discovery
 
 Registries help you find packs, but they do not change the authored import
@@ -199,9 +204,12 @@ source = "./assets/code-review"
 Rig-level imports create rig-scoped identities such as
 `backend/gastown.polecat` and `backend/review.reviewer`.
 
-Gas City's built-in `core` and `maintenance` packs stay implicit in this wave.
-Do not add `[imports.maintenance]` just to get the standard maintenance
-behavior from `gc`.
+Gas City's built-in packs are not implicit. `gc init` writes explicit
+workspace includes into `city.toml` (`.gc/system/packs/core`, plus
+`.gc/system/packs/bd` for bd-provider cities), and `gc doctor --fix` repairs
+missing or stale entries. The former `maintenance` pack no longer exists; its
+housekeeping orders ship in the bundled `core` pack. See
+[System Packs](/reference/system-packs) for details.
 
 ## Named Sessions
 
@@ -275,7 +283,10 @@ The loader still exposes some V1 fields for migration and old city support:
 - `[packs.*]`
 - `[formulas].dir`
 
-Treat those as migration surfaces. `gc doctor --fix` can migrate root
+Treat those as migration surfaces for your own packs, with one exception:
+the built-in system packs compose through explicit `workspace.includes`
+entries in `city.toml` (`gc init` writes them; `gc doctor --fix` repairs
+them). `gc doctor --fix` can migrate root
 `pack.toml` legacy inline agent definitions into `agents/<name>/agent.toml`;
 legacy agent definitions inside config fragments still need a hand edit. New
 shareable packs should use `schema = 2`, `[imports.*]`,

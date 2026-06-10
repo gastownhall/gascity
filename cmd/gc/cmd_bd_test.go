@@ -580,6 +580,7 @@ func TestGcBdSuppressesBdAutoExportInChildEnv(t *testing.T) {
 	setCwd(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
+includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}

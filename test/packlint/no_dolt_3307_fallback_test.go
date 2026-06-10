@@ -20,7 +20,6 @@ func TestNoDolt3307FallbackInScripts(t *testing.T) {
 	root := repoRoot()
 	packDirs := []string{
 		filepath.Join(root, "examples", "bd", "dolt"),
-		filepath.Join(root, "examples", "gastown", "packs", "maintenance"),
 		filepath.Join(root, "internal", "bootstrap", "packs", "core"),
 	}
 

@@ -768,17 +768,17 @@ func TestRenderPromptGlobalAndPerAgent(t *testing.T) {
 	}
 }
 
-func TestRenderPromptMaintenanceDogPromptHasRequiredSharedTemplates(t *testing.T) {
+func TestRenderPromptGastownDogPromptHasRequiredSharedTemplates(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("filepath.Abs(repo root): %v", err)
 	}
-	maintenanceDir := filepath.Join(repoRoot, "examples", "gastown", "packs", "maintenance")
-	promptPath := filepath.Join(maintenanceDir, "agents", "dog", "prompt.template.md")
+	gastownDir := filepath.Join(repoRoot, "examples", "gastown", "packs", "gastown")
+	promptPath := filepath.Join(gastownDir, "agents", "dog", "prompt.template.md")
 
 	raw, err := os.ReadFile(promptPath)
 	if err != nil {
-		t.Fatalf("os.ReadFile(maintenance dog prompt): %v", err)
+		t.Fatalf("os.ReadFile(gastown dog prompt): %v", err)
 	}
 
 	var stderr strings.Builder
@@ -786,16 +786,16 @@ func TestRenderPromptMaintenanceDogPromptHasRequiredSharedTemplates(t *testing.T
 		CityRoot:  "/tmp/city",
 		AgentName: "dog",
 		WorkQuery: "bd ready",
-	}, "", &stderr, []string{maintenanceDir}, nil, nil)
+	}, "", &stderr, []string{gastownDir}, nil, nil)
 
 	if strings.Contains(stderr.String(), "template not defined") {
 		t.Fatalf("renderPrompt emitted missing-template warning: %s", stderr.String())
 	}
 	if got == string(raw) {
-		t.Fatalf("renderPrompt fell back to raw prompt; expected rendered maintenance prompt")
+		t.Fatalf("renderPrompt fell back to raw prompt; expected rendered gastown dog prompt")
 	}
-	if !strings.Contains(got, "Gas City Maintenance Context") {
-		t.Fatalf("rendered prompt missing maintenance architecture context:\n%s", got)
+	if !strings.Contains(got, "Gas Town Architecture") {
+		t.Fatalf("rendered prompt missing architecture context:\n%s", got)
 	}
 	if !strings.Contains(got, "Following Your Formula") {
 		t.Fatalf("rendered prompt missing following-mol fragment:\n%s", got)
@@ -813,7 +813,6 @@ func TestFormulaFilesystemSearchGuidanceCoversPromptSources(t *testing.T) {
 
 	paths := []string{
 		"examples/gastown/packs/gastown/template-fragments/following-mol.template.md",
-		"examples/gastown/packs/maintenance/template-fragments/following-mol.template.md",
 		"internal/bootstrap/packs/core/assets/prompts/pool-worker.md",
 		"internal/bootstrap/packs/core/assets/prompts/graph-worker.md",
 	}

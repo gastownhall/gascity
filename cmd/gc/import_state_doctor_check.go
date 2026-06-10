@@ -191,7 +191,7 @@ func legacyPublicPackImportDetails(cityPath string, imports map[string]config.Im
 		pack, _ := legacyPublicPackForSource(cityPath, imports[name].Source)
 		action := "should use the public gascity-packs source"
 		if pack == "maintenance" {
-			action = "should be removed; maintenance/core is supplied implicitly"
+			action = "should be removed; the maintenance pack was folded into the bundled core pack"
 		}
 		details = append(details, fmt.Sprintf("legacy-public-pack-source | %s | %s | legacy %s import %s", name, imports[name].Source, pack, action))
 	}

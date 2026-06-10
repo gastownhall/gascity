@@ -30,6 +30,13 @@ const (
 // materialized to .gc/system/packs/ on every gc start and gc init.
 var builtinPacks = builtinpacks.All()
 
+// retiredBuiltinPackNames lists packs that earlier gc binaries materialized
+// under .gc/system/packs but that no longer ship with the binary. Their
+// system-pack directories are binary-owned, so materialization removes any
+// stale copy left behind by an upgrade. The maintenance pack was folded into
+// the bundled core pack.
+var retiredBuiltinPackNames = []string{"maintenance"}
+
 var builtinPackRefreshCache sync.Map
 
 type builtinPackRefreshState struct {
@@ -58,8 +65,8 @@ type builtinPackFile struct {
 // Operator edits are preserved only for non-required packs: a regular,
 // correct-mode file in a non-required pack is left untouched even when its
 // content differs from the embedded bytes (see gastownhall/gascity#2429).
-// Required packs (core, maintenance, and the provider-dependent bd/dolt) are
-// always refreshed and validated, so a stale or corrupt required pack on disk
+// Required packs (core and the provider-dependent bd/dolt) are always
+// refreshed and validated, so a stale or corrupt required pack on disk
 // is repaired rather than silently accepted.
 // Idempotent: safe to call on every gc start and gc init.
 func MaterializeBuiltinPacks(cityPath string) error {
@@ -78,32 +85,37 @@ func MaterializeBuiltinPacks(cityPath string) error {
 			return fmt.Errorf("pruning legacy %s order paths: %w", bp.Name, err)
 		}
 	}
+	for _, name := range retiredBuiltinPackNames {
+		if err := os.RemoveAll(filepath.Join(cityPath, citylayout.SystemPacksRoot, name)); err != nil {
+			return fmt.Errorf("removing retired %s pack: %w", name, err)
+		}
+	}
 	if err := repairLegacyGcBeadsBdScript(cityPath); err != nil {
 		return fmt.Errorf("repairing legacy gc-beads-bd script: %w", err)
 	}
 	return nil
 }
 
-// builtinPackIncludesForConfigLoad is the shared config-load boundary for
+// ensureBuiltinPacksForConfigLoad is the shared config-load boundary for
 // builtin pack readiness: it hydrates the shared repo cache for bundled
-// imports pinned in packs.lock and materializes the builtin system packs
-// before returning the auto-include paths. Every production loader —
-// loadCityConfig, loadCityConfigFS, and cityConfigIncludesWithBuiltinPacks —
-// routes through it so any gc command self-heals a cold repo cache instead of
-// failing with "run \"gc import install\"" after a binary upgrade or cache
-// eviction.
-func builtinPackIncludesForConfigLoad(fs fsys.FS, tomlPath string, warningWriter io.Writer) ([]string, error) {
+// imports pinned in packs.lock and materializes the builtin system packs.
+// Every production loader — loadCityConfig, loadCityConfigFS, and
+// loadCityConfigWithBuiltinPacks — routes through it so any gc command
+// self-heals a cold repo cache instead of failing with "run \"gc import
+// install\"" after a binary upgrade or cache eviction.
+//
+// It deliberately injects nothing into config composition: builtin packs
+// compose only through the explicit city.toml includes that gc init writes
+// and gc doctor --fix repairs.
+func ensureBuiltinPacksForConfigLoad(fs fsys.FS, tomlPath string, warningWriter io.Writer) error {
 	if !usesOSFS(fs) {
-		return nil, nil
+		return nil
 	}
 	cityPath := filepath.Dir(tomlPath)
 	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
-		return nil, err
+		return err
 	}
-	if err := ensureBuiltinPacksReadyForConfigLoad(cityPath, warningWriter); err != nil {
-		return nil, err
-	}
-	return builtinPackIncludes(cityPath), nil
+	return ensureBuiltinPacksReadyForConfigLoad(cityPath, warningWriter)
 }
 
 func usesOSFS(fs fsys.FS) bool {
@@ -249,7 +261,7 @@ func requiredBuiltinPackSet(cityPath string) map[string]struct{} {
 }
 
 func requiredBuiltinPackNames(cityPath string) []string {
-	required := []string{"core", "maintenance"}
+	required := []string{"core"}
 
 	provider := strings.TrimSpace(configuredBeadsProviderValue(cityPath))
 	normalizedProvider := normalizeRawBeadsProvider(cityPath, provider)
@@ -272,29 +284,43 @@ func emitBuiltinPackRefreshWarning(w io.Writer, err error) {
 	fmt.Fprintf(w, "warning: %v\n", err) //nolint:errcheck // best-effort warning emission
 }
 
-// builtinPackIncludes returns the system pack paths that should be
-// auto-included in config loading. These are appended as extraIncludes
-// to LoadWithIncludes so they go through normal pack expansion
-// (ExpandCityPacks) with dedup/fallback resolution.
+// requiredBuiltinIncludePaths returns the canonical city-relative include
+// paths for the builtin packs this city requires (e.g. ".gc/system/packs/core").
+// gc init writes them into city.toml [workspace] includes; the
+// builtin-pack-includes doctor check repairs them when missing. Nothing on
+// the config-load path injects them — builtin packs compose only through
+// these explicit includes.
 //
-// Core and maintenance are always included. Core ships the role prompts
-// referenced by implicit agents and the overlay/per-provider hook files,
-// so its content must reach PackOverlayDirs even when the user has never
-// run `gc init` (and therefore has no implicit-import.toml written to
-// $GC_HOME). When the beads provider is "bd" (the default), include bd
-// and let its own pack includes pull in dolt transitively. Gastown is
-// never auto-included — it requires an explicit workspace.includes entry.
-func builtinPackIncludes(cityPath string) []string {
-	systemRoot := filepath.Join(cityPath, citylayout.SystemPacksRoot)
-
-	var includes []string
-	for _, name := range requiredBuiltinPackNames(cityPath) {
-		packPath := filepath.Join(systemRoot, name)
-		if packExists(packPath) {
-			includes = append(includes, packPath)
-		}
+// Core is always required: it ships the role prompts referenced by implicit
+// agents, the gc-* skills, mechanical housekeeping orders, and the
+// overlay/per-provider hook files. When the beads provider is "bd" (the
+// default), bd is required and its own pack imports pull in dolt
+// transitively. Gastown is never required — it needs an explicit import.
+func requiredBuiltinIncludePaths(cityPath string) []string {
+	names := requiredBuiltinPackNames(cityPath)
+	paths := make([]string, 0, len(names))
+	for _, name := range names {
+		paths = append(paths, builtinIncludePathForPack(name))
 	}
+	return paths
+}
 
+// builtinIncludePathForPack returns the canonical city-relative include path
+// for a builtin pack name.
+func builtinIncludePathForPack(name string) string {
+	return citylayout.SystemPacksRoot + "/" + name
+}
+
+// builtinIncludesForProvider mirrors requiredBuiltinIncludePaths for a city
+// whose city.toml has not been written yet: gc init computes the canonical
+// builtin include list straight from the provider value it is about to
+// write. GC_BEADS overrides and the managed exec-wrapper normalization never
+// apply at init time.
+func builtinIncludesForProvider(provider string) []string {
+	includes := []string{builtinIncludePathForPack("core")}
+	if providerUsesBdStoreContract(strings.TrimSpace(provider)) {
+		includes = append(includes, builtinIncludePathForPack("bd"))
+	}
 	return includes
 }
 

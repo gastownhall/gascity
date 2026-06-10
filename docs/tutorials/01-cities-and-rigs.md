@@ -133,6 +133,7 @@ template and default provider, `city.toml` keeps the shared runtime settings:
 $ cat city.toml
 [workspace]
 provider = "claude"
+includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 ```
 
 The portable pack definition lives next to it:
@@ -150,9 +151,14 @@ mode = "always"
 ```
 
 The `[workspace]` section in `city.toml` sets shared runtime defaults such as
-the provider. The machine-local workspace identity lives in `.gc/site.toml`
-instead, which is how `gc cities`, `gc status`, and other commands still know
-this city is named `my-city`.
+the provider. The `includes` entries are written by `gc init` and point at the
+builtin packs bundled with the `gc` binary, which Gas City materializes under
+`.gc/system/packs/`: `core` (housekeeping orders, doctor checks, default
+prompts, and core formulas) and — for cities on the default `bd` beads
+provider — `bd`, which brings in its `dolt` helper pack. If these includes go
+missing, `gc doctor --fix` restores them. The machine-local workspace identity
+lives in `.gc/site.toml` instead, which is how `gc cities`, `gc status`, and
+other commands still know this city is named `my-city`.
 
 The built-in `mayor` comes from the scaffolded `agents/mayor/` content, and
 `[[named_session]]` keeps a `mayor` session running so you can talk to it at
@@ -176,12 +182,11 @@ my-city  /Users/csells/my-city
   Suspended:  no
 
 Agents:
-  dog                     scaled (min=0, max=3)
+  dog                     scaled (min=0, max=2)
     dog-1                 stopped
     dog-2                 stopped
-    dog-3                 stopped
 
-0/3 agents running
+0/2 agents running
 
 Named sessions:
   mayor                   reserved-unmaterialized (always)
@@ -190,9 +195,10 @@ Named sessions:
 Depending on your version, `gc status` may list named sessions by state as
 `awake` or `active` — the two are equivalent.
 
-The `dog` pool is a background utility agent from the built-in maintenance
-pack. It handles internal housekeeping like shutdown coordination. You don't
-need to interact with it — ignore it for now.
+The `dog` pool is a background utility agent from the bundled `dolt` pack
+(pulled in through the `bd` include you saw in `city.toml`). It handles Dolt
+database housekeeping for the beads backend. You don't need to interact with
+it — ignore it for now.
 
 ## Adding a rig
 

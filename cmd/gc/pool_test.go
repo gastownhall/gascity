@@ -850,7 +850,6 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		AppendFragments:              []string{"agent-footer"},
 		InheritedAppendFragments:     []string{"pack-footer"},
 		Attach:                       &trueVal,
-		Fallback:                     true,
 		PoolName:                     "template/name",
 		ResumeCommand:                "claude --resume {{.SessionKey}} --dangerously",
 		DependsOn:                    []string{"other-agent"},

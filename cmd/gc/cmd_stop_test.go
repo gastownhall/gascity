@@ -55,7 +55,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test"},
+		Workspace: config.Workspace{Name: "test", Includes: []string{".gc/system/packs/core"}},
 		Beads:     config.BeadsConfig{Provider: "file"},
 		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
 	}

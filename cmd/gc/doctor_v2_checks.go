@@ -429,13 +429,19 @@ func (v2ImportFormatCheck) Fix(ctx *doctor.CheckContext) error {
 func (v2ImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
 	cfg, ok := parseCityConfig(cityTomlPath)
-	if !ok || len(cfg.Workspace.LegacyIncludes()) == 0 {
+	var legacyIncludes []string
+	if ok {
+		// Canonical builtin system-pack includes are the supported V2 form
+		// (written by gc init); only other entries are legacy PackV1.
+		legacyIncludes = config.NonBuiltinWorkspaceIncludes(cfg.Workspace.LegacyIncludes())
+	}
+	if !ok || len(legacyIncludes) == 0 {
 		return okCheck("v2-import-format", "workspace.includes already migrated")
 	}
 	return errorCheck("v2-import-format",
 		"unsupported PackV1 workspace.includes found; migrate this city to [imports] before gc can load it",
 		"run `gc doctor --fix` to replace workspace.includes with [imports.<binding>] entries",
-		doctorKeyDetails(cityTomlPath, "workspace", "includes", "workspace.includes", cfg.Workspace.LegacyIncludes()))
+		doctorKeyDetails(cityTomlPath, "workspace", "includes", "workspace.includes", legacyIncludes))
 }
 
 type v2DefaultRigImportFormatCheck struct{}
@@ -1250,9 +1256,8 @@ func errorCheck(name, message, hint string, details []string) *doctor.CheckResul
 // city that has already been migrated (it returns an empty change set).
 //
 // migrate.Apply can return warnings about behavior-affecting fields it had
-// to drop (e.g. legacy [[agent]] entries with fallback = true — the
-// fallback field has no v2 counterpart and shadowing must be reviewed by
-// hand). doctor --fix must not silently swallow those, otherwise the next
+// to drop (e.g. a legacy [formulas].dir override that has no v2
+// counterpart). doctor --fix must not silently swallow those, otherwise the next
 // gc doctor run reports a green check and the manual follow-up is lost
 // forever. The warnings are emitted to warnSink so Doctor.Run callers see
 // them in the same captured output stream as the check results.

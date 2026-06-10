@@ -51,6 +51,41 @@ Local checks reuse the same script protocol as pack doctor checks:
 The first stdout line becomes the check message. Additional stdout lines are
 shown by `gc doctor --verbose`.
 
+## "city.toml does not include required builtin pack(s)" Warning
+
+Builtin packs compose only through explicit `[workspace]` includes in
+`city.toml` — nothing splices them into config composition implicitly.
+`gc init` writes the includes for new cities:
+
+```toml
+[workspace]
+includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
+```
+
+(The `bd` entry is written only for bd-provider cities, the default;
+non-bd providers get only `core`.)
+
+If a required include is missing — typically in a city created before the
+includes became explicit — config load still refreshes the materialized
+pack content under `.gc/system/packs/` and prints a once-per-city warning:
+
+```
+warning: city.toml does not include required builtin pack(s) core; run "gc doctor --fix" to add the missing include(s)
+```
+
+Run the suggested fix:
+
+```bash
+gc doctor --fix
+```
+
+The `builtin-pack-includes` doctor check adds the missing include(s) and
+removes stale includes that point at the retired
+`.gc/system/packs/maintenance` pack, whose exec orders and scripts now
+ship in the bundled core pack at `.gc/system/packs/core`. Stale
+`.gc/system/packs/maintenance` directories on disk are pruned
+automatically by materialization.
+
 ## "command not found" After Install
 
 If `gc` is installed but your shell cannot find it, the binary is not on your
@@ -143,8 +178,8 @@ check.
 |------|-------|-------|
 | gh | `brew install gh` | [cli.github.com](https://cli.github.com/) |
 
-Gas City can run without `gh`. Maintenance skips GitHub gate checks when the
-GitHub CLI is not installed.
+Gas City can run without `gh`. The core pack's maintenance orders skip
+GitHub gate checks when the GitHub CLI is not installed.
 
 If you do not want to install dolt, bd, and flock, switch to the file-based
 store:
@@ -446,7 +481,7 @@ Common root causes, in rough order of frequency:
 
 If the underlying problem cannot be fixed immediately (e.g., the remote
 host is down for scheduled maintenance), set
-`GC_JSONL_MAX_PUSH_FAILURES=99` in the maintenance pack's environment and
+`GC_JSONL_MAX_PUSH_FAILURES=99` in the controller's environment and
 restart the city with `gc restart`. That bumps the escalation threshold
 from 3 to 99, which at the current 15-minute tick rate is ~24 hours of
 silence.

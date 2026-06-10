@@ -13,7 +13,7 @@ import (
 func TestEnsureRepoInCacheMaterializesBundledSourceWithoutGit(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	source := builtinpacks.MustSource("maintenance")
+	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
 
 	prev := runGit
@@ -36,9 +36,9 @@ func TestEnsureRepoInCacheMaterializesBundledSourceWithoutGit(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(got, ".git")); !os.IsNotExist(err) {
 		t.Fatalf("synthetic cache should not contain .git, stat err = %v", err)
 	}
-	packToml := filepath.Join(got, "examples", "gastown", "packs", "maintenance", "pack.toml")
+	packToml := filepath.Join(got, "examples", "gastown", "packs", "gastown", "pack.toml")
 	if _, err := os.Stat(packToml); err != nil {
-		t.Fatalf("synthetic cache missing maintenance pack.toml: %v", err)
+		t.Fatalf("synthetic cache missing gastown pack.toml: %v", err)
 	}
 	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err != nil {
 		t.Fatalf("ValidateSyntheticRepo: %v", err)
@@ -88,7 +88,7 @@ func TestBundledSyntheticCacheKeyDoesNotCollideWithSameRepoGitSource(t *testing.
 func TestReadCachedPackImportsAcceptsBundledSyntheticCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	source := builtinpacks.MustSource("maintenance")
+	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
 	cachePath, err := RepoCachePath(source, commit)
 	if err != nil {
@@ -106,7 +106,7 @@ func TestReadCachedPackImportsAcceptsBundledSyntheticCache(t *testing.T) {
 func TestReadCachedPackImportsTreatsBundledGitENOTDIRAsNonCheckout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	source := builtinpacks.MustSource("maintenance")
+	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
 	cachePath, err := RepoCachePath(source, commit)
 	if err != nil {
@@ -134,7 +134,7 @@ func TestReadCachedPackImportsTreatsBundledGitENOTDIRAsNonCheckout(t *testing.T)
 func TestMaterializeBundledRepoInCacheLockedRejectsNonCanonicalPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	source := builtinpacks.MustSource("maintenance")
+	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
 	nonCanonical := filepath.Join(t.TempDir(), "cache")
 
@@ -157,7 +157,7 @@ func TestMaterializeBundledRepoInCacheLockedRejectsNonCanonicalPath(t *testing.T
 func TestEnsureBundledCacheMaterializeFailureIncludesRecoveryCause(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	source := builtinpacks.MustSource("maintenance")
+	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
 	cachePath, err := RepoCachePath(source, commit)
 	if err != nil {

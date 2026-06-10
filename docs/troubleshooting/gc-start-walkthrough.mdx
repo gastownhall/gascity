@@ -131,17 +131,18 @@ The reported `buildID` should match `gc version`.
 
 ```text
 FATAL: agent 'mayor': duplicate name
-       (from packs/gastown/pack.toml [agent #2]
-        and .gc/system/packs/gastown/agents/mayor/agent.toml)
+       (from packs/mypack/pack.toml [agent #2]
+        and packs/gastown/agents/mayor/agent.toml)
        pack v1 → v2 mismatch
 ```
 
 **Cause**
 
 Your pack declares `[[agent]]` blocks (pack v1 layout) for an agent
-name that an auto-imported system pack declares in
+name that another included pack declares in
 `agents/<name>/agent.toml` (pack v2 layout). Both contribute the same
-agent name; the validator refuses ambiguity.
+agent name; cross-pack agent name collisions are hard errors, so the
+validator refuses the ambiguity.
 
 The `pack v1 → v2 mismatch` line is emitted by `ga-9ogb` (collision
 detection); the source paths are filled in by `ga-tpfc.1` (source-path
@@ -160,18 +161,18 @@ gc doctor --fix
 # Move each [[agent]] block to its own agents/<name>/ directory.
 ```
 
-```toml Override the system pack with fallback = true
-# In your pack's agents/<name>/agent.toml (v2 layout):
-[agent]
-name = "mayor"
-fallback = true   # use only if no other declaration exists
+```toml Rename the colliding agent
+# In your pack.toml, give your declaration a name no other
+# included pack declares:
+[[agent]]
+name = "mypack-mayor"
 # … the rest of your agent config …
 ```
 </CodeGroup>
 
-The recommended path is migration. The `fallback = true` escape hatch
-is for packs that intentionally wrap a system pack and need the local
-declaration to win when both are present.
+The recommended path is migration. There is no fallback escape hatch:
+each pack must own its agents under unambiguous names, so any remaining
+cross-pack collision means one declaration must be renamed or removed.
 
 **Background**: [Shareable Packs](/guides/shareable-packs)
 

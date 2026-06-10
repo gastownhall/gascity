@@ -1683,6 +1683,7 @@ func TestCmdSlingDefaultFormulaDoesNotMaterializePoolSession(t *testing.T) {
 	}
 	cityToml := `[workspace]
 name = "demo"
+includes = [".gc/system/packs/core"]
 
 [beads]
 provider = "file"

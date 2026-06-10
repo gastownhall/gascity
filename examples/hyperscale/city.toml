@@ -13,6 +13,7 @@
 [workspace]
 name = "hyperscale"
 provider = "claude"
+includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 isolation = "none"
 
 [providers.claude]

@@ -54,9 +54,6 @@ func TestGastownPackMaterialization(t *testing.T) {
 			"packs/gastown/formulas",
 			"packs/gastown/assets/scripts",
 			"packs/gastown/commands",
-			"packs/maintenance/pack.toml",
-			"packs/maintenance/agents",
-			"packs/maintenance/formulas",
 		}
 		for _, e := range expected {
 			if !c.HasFile(e) {
@@ -65,12 +62,11 @@ func TestGastownPackMaterialization(t *testing.T) {
 		}
 	})
 
-	t.Run("MaintenanceScriptsExecutable", func(t *testing.T) {
-		scriptsDir := filepath.Join(c.Dir, "packs", "maintenance", "scripts")
+	t.Run("CoreScriptsExecutable", func(t *testing.T) {
+		scriptsDir := filepath.Join(c.Dir, ".gc", "system", "packs", "core", "assets", "scripts")
 		entries, err := os.ReadDir(scriptsDir)
 		if err != nil {
-			// Not all maintenance packs have a scripts dir.
-			t.Skip("no maintenance scripts dir")
+			t.Fatalf("reading core pack scripts dir: %v", err)
 		}
 		for _, e := range entries {
 			if filepath.Ext(e.Name()) != ".sh" {
@@ -82,7 +78,7 @@ func TestGastownPackMaterialization(t *testing.T) {
 				continue
 			}
 			if info.Mode()&0o111 == 0 {
-				t.Errorf("packs/maintenance/scripts/%s is not executable (mode %o)", e.Name(), info.Mode())
+				t.Errorf("core pack script %s is not executable (mode %o)", e.Name(), info.Mode())
 			}
 		}
 	})

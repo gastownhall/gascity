@@ -1284,6 +1284,15 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// pack.toml. The built-in templates currently only need the prompt
 	// scaffold plus the pack-owned named session.
 	packCfg.Agents = nil
+	// Builtin packs compose only through explicit includes: write the
+	// canonical city-relative paths for this city's providers into
+	// city.toml. gc doctor --fix repairs them if they go missing. These are
+	// deployment-local (.gc paths), so they belong in city.toml, not in the
+	// portable pack.toml.
+	cityCfg.Workspace.SetLegacyIncludes(appendUniqueStrings(
+		cityCfg.Workspace.LegacyIncludes(),
+		builtinIncludesForProvider(cityCfg.Beads.Provider)...,
+	))
 	content, err := cityCfg.Marshal()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr

@@ -133,7 +133,6 @@ func TestTransitiveGastownPackDigestOrderResolvesAndRuns(t *testing.T) {
 		t.Fatalf("Abs(examples/gastown): %v", err)
 	}
 	gastownPackDir := filepath.Join(gastownRoot, "packs", "gastown")
-	maintenancePackDir := filepath.Join(gastownRoot, "packs", "maintenance")
 	digestFormulaLayer := filepath.Join(gastownPackDir, "formulas")
 	digestFormulaFile := filepath.Join(digestFormulaLayer, "mol-digest-generate.toml")
 
@@ -165,7 +164,6 @@ source = "`+gastownPackDir+`"
 	if err != nil {
 		t.Fatalf("loadCityConfig: %v", err)
 	}
-	assertContainsString(t, cfg.FormulaLayers.City, filepath.Join(maintenancePackDir, "formulas"))
 	assertContainsString(t, cfg.FormulaLayers.City, digestFormulaLayer)
 	assertAgentQualifiedName(t, cfg.Agents, "wrapper.dog")
 

@@ -3,6 +3,7 @@
 [workspace]
 name = "t3bridge-gastown"
 provider = "codex"
+includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [providers.codex]
 base = "builtin:codex"

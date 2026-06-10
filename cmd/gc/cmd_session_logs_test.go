@@ -633,6 +633,7 @@ func TestCmdSessionLogsJSONSuccessIsJSONOnly(t *testing.T) {
 	t.Setenv("GC_CITY", cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(fmt.Sprintf(`[workspace]
 name = "test"
+includes = [".gc/system/packs/core"]
 
 [daemon]
 observe_paths = [%q]

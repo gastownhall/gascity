@@ -36,6 +36,7 @@ beads-proxied-capability
 rig-pack-coverage
 mcp-config
 mcp-shared-target
+builtin-pack-includes
 packv2-import-state
 jsonl-archive
 tmux-binary

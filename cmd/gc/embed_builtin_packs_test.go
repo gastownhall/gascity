@@ -167,7 +167,7 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 	for _, order := range []string{
 		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "jsonl-export.toml"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "reaper.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "gate-sweep.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "gate-sweep.toml"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "dolt-health.toml"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "orders", "digest-generate.toml"),
 	} {
@@ -474,7 +474,7 @@ func TestMaterializeBuiltinPacksPiHookUsesCurrentExtensionAPI(t *testing.T) {
 // (gastownhall/gascity#2429): the operator-edit-protection introduced for
 // that issue is scoped to non-required packs, so a stale correct-mode file in
 // the required core pack is refreshed to the embedded content rather than
-// preserved. This keeps required packs (core, maintenance, bd/dolt) in
+// preserved. This keeps required packs (core, bd/dolt) in
 // lockstep with the binary while still protecting operator-authored formula
 // TOMLs and command scripts in non-required packs (covered by
 // TestMaterializeFS_PreservesExistingFiles).
@@ -675,7 +675,7 @@ func TestMaterializedBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
 			City: []string{
-				filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "formulas"),
+				filepath.Join(dir, citylayout.SystemPacksRoot, "core", "formulas"),
 				filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "formulas"),
 				filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "formulas"),
 			},
@@ -706,7 +706,7 @@ func TestMaterializeBuiltinPacks_PrunesLegacyOrderDirs(t *testing.T) {
 	dir := t.TempDir()
 
 	legacyPaths := []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "formulas", "orders", "gate-sweep", "order.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "formulas", "orders", "gate-sweep", "order.toml"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "formulas", "orders", "dolt-health", "order.toml"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "formulas", "orders", "digest-generate", "order.toml"),
 	}
@@ -730,7 +730,7 @@ func TestMaterializeBuiltinPacks_PrunesLegacyOrderDirs(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "gate-sweep.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "gate-sweep.toml"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "dolt-health.toml"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "orders", "digest-generate.toml"),
 	} {
@@ -789,7 +789,7 @@ func TestMaterializeBuiltinPacks_PrunesStaleGeneratedPackFiles(t *testing.T) {
 	stalePaths := []string{
 		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "removed-order.toml"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "removed-command", "run.sh"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "assets", "scripts", "removed-helper.sh"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "assets", "scripts", "removed-helper.sh"),
 	}
 	for _, path := range stalePaths {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -813,7 +813,7 @@ func TestMaterializeBuiltinPacks_PrunesStaleGeneratedPackFiles(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact", "run.sh"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "mol-dog-compactor.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "gate-sweep.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "gate-sweep.toml"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("embedded pack file missing after stale prune: %v", err)
@@ -1278,246 +1278,131 @@ func writeBuiltinPackLoadTestCity(dir string) error {
 	return os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644)
 }
 
-func TestBuiltinPackIncludes_DefaultProvider(t *testing.T) {
+func TestRequiredBuiltinIncludePaths_DefaultProvider(t *testing.T) {
 	dir := t.TempDir()
 
-	// Materialize packs first.
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatal(err)
-	}
-
-	// Default provider (empty) → should include core, maintenance, and bd.
+	// Default provider (empty) → core and bd are required.
 	t.Setenv("GC_BEADS", "")
-	includes := builtinPackIncludes(dir)
+	includes := requiredBuiltinIncludePaths(dir)
 
-	if len(includes) != 3 {
-		t.Fatalf("builtinPackIncludes() = %v, want 3 entries", includes)
+	want := []string{
+		citylayout.SystemPacksRoot + "/core",
+		citylayout.SystemPacksRoot + "/bd",
 	}
-
-	systemRoot := filepath.Join(dir, citylayout.SystemPacksRoot)
-	wantCore := filepath.Join(systemRoot, "core")
-	wantMaintenance := filepath.Join(systemRoot, "maintenance")
-	wantBd := filepath.Join(systemRoot, "bd")
-
-	if includes[0] != wantCore {
-		t.Errorf("includes[0] = %q, want %q", includes[0], wantCore)
+	if len(includes) != len(want) {
+		t.Fatalf("requiredBuiltinIncludePaths() = %v, want %v", includes, want)
 	}
-	if includes[1] != wantMaintenance {
-		t.Errorf("includes[1] = %q, want %q", includes[1], wantMaintenance)
-	}
-	if includes[2] != wantBd {
-		t.Errorf("includes[2] = %q, want %q", includes[2], wantBd)
+	for i := range want {
+		if includes[i] != want[i] {
+			t.Errorf("includes[%d] = %q, want %q", i, includes[i], want[i])
+		}
 	}
 }
 
-func TestBuiltinPackIncludes_ExplicitBd(t *testing.T) {
+func TestRequiredBuiltinIncludePaths_NonBdProvider(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write a city.toml with provider = "bd".
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_BEADS", "")
-	includes := builtinPackIncludes(dir)
-
-	if len(includes) != 3 {
-		t.Fatalf("builtinPackIncludes() = %v, want 3 entries (core + maintenance + bd)", includes)
-	}
-
-	if got := filepath.Base(includes[0]); got != "core" {
-		t.Errorf("includes[0] base = %q, want core", got)
-	}
-	if got := filepath.Base(includes[1]); got != "maintenance" {
-		t.Errorf("includes[1] base = %q, want maintenance", got)
-	}
-	if got := filepath.Base(includes[2]); got != "bd" {
-		t.Errorf("includes[2] base = %q, want bd", got)
-	}
-}
-
-func TestBuiltinPackIncludes_NonBdProvider(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write a city.toml with a non-bd provider.
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Setenv("GC_BEADS", "")
-	includes := builtinPackIncludes(dir)
+	includes := requiredBuiltinIncludePaths(dir)
 
-	// Core and maintenance are always auto-included; bd/dolt are gated
-	// on a bd-compatible provider.
-	if len(includes) != 2 {
-		t.Fatalf("builtinPackIncludes() = %v, want 2 entries (core + maintenance)", includes)
-	}
-
-	if got := filepath.Base(includes[0]); got != "core" {
-		t.Errorf("includes[0] base = %q, want core", got)
-	}
-	if got := filepath.Base(includes[1]); got != "maintenance" {
-		t.Errorf("includes[1] base = %q, want maintenance", got)
+	// Core is always required; bd/dolt are gated on a bd-compatible provider.
+	if len(includes) != 1 || includes[0] != citylayout.SystemPacksRoot+"/core" {
+		t.Fatalf("requiredBuiltinIncludePaths() = %v, want core only", includes)
 	}
 }
 
-func TestBuiltinPackIncludes_ExecGcBeadsBdOverrideIncludesBdAndDolt(t *testing.T) {
+func TestRequiredBuiltinIncludePaths_ExecGcBeadsBdOverrideIncludesBdAndDolt(t *testing.T) {
 	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatal(err)
-	}
 
 	t.Setenv("GC_BEADS", "exec:/tmp/gc-beads-bd")
-	includes := builtinPackIncludes(dir)
-	// core + maintenance + bd + dolt = 4 entries. Core and maintenance are
-	// always auto-included; bd and dolt arrive via the exec-override path.
-	if len(includes) != 4 {
-		t.Fatalf("builtinPackIncludes() = %v, want 4 entries when GC_BEADS=exec:gc-beads-bd", includes)
+	includes := requiredBuiltinIncludePaths(dir)
+	// core + bd + dolt: core is always required; bd and dolt arrive via the
+	// exec-override path.
+	want := []string{
+		citylayout.SystemPacksRoot + "/core",
+		citylayout.SystemPacksRoot + "/bd",
+		citylayout.SystemPacksRoot + "/dolt",
 	}
-	if got := filepath.Base(includes[0]); got != "core" {
-		t.Fatalf("includes[0] base = %q, want core", got)
+	if len(includes) != len(want) {
+		t.Fatalf("requiredBuiltinIncludePaths() = %v, want %v", includes, want)
 	}
-	if got := filepath.Base(includes[2]); got != "bd" {
-		t.Fatalf("includes[2] base = %q, want bd", got)
-	}
-	if got := filepath.Base(includes[3]); got != "dolt" {
-		t.Fatalf("includes[3] base = %q, want dolt", got)
-	}
-}
-
-func TestBuiltinPackIncludes_EnvOverride(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatal(err)
-	}
-
-	// GC_BEADS env var overrides city.toml provider.
-	t.Setenv("GC_BEADS", "file")
-	includes := builtinPackIncludes(dir)
-
-	// Core and maintenance are always auto-included; bd/dolt are gated on
-	// a bd-compatible provider.
-	if len(includes) != 2 {
-		t.Fatalf("builtinPackIncludes() = %v, want 2 entries when GC_BEADS=file", includes)
-	}
-
-	if got := filepath.Base(includes[0]); got != "core" {
-		t.Errorf("includes[0] base = %q, want core", got)
-	}
-	if got := filepath.Base(includes[1]); got != "maintenance" {
-		t.Errorf("includes[1] base = %q, want maintenance", got)
+	for i := range want {
+		if includes[i] != want[i] {
+			t.Errorf("includes[%d] = %q, want %q", i, includes[i], want[i])
+		}
 	}
 }
 
-func TestBuiltinPackIncludes_ManagedExecEnvStillIncludesBd(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(dir))
-	includes := builtinPackIncludes(dir)
-
-	if len(includes) != 3 {
-		t.Fatalf("builtinPackIncludes() = %v, want core + maintenance + bd", includes)
-	}
-	if got := filepath.Base(includes[0]); got != "core" {
-		t.Errorf("includes[0] base = %q, want core", got)
-	}
-	if got := filepath.Base(includes[1]); got != "maintenance" {
-		t.Errorf("includes[1] base = %q, want maintenance", got)
-	}
-	if got := filepath.Base(includes[2]); got != "bd" {
-		t.Errorf("includes[2] base = %q, want bd", got)
-	}
-}
-
-func TestBuiltinPackIncludes_NotMaterialized(t *testing.T) {
-	dir := t.TempDir()
-
-	// Don't materialize — should return empty.
-	t.Setenv("GC_BEADS", "")
-	includes := builtinPackIncludes(dir)
-
-	if len(includes) != 0 {
-		t.Errorf("builtinPackIncludes() = %v, want empty when packs not materialized", includes)
-	}
-}
-
-func TestBuiltinPackIncludes_PathsPointToSystemPacks(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_BEADS", "")
-	includes := builtinPackIncludes(dir)
-
-	systemRoot := filepath.Join(dir, citylayout.SystemPacksRoot)
-	for _, inc := range includes {
-		// Every include path must be under .gc/system/packs/.
-		rel, err := filepath.Rel(systemRoot, inc)
-		if err != nil {
-			t.Errorf("path %q not relative to system root: %v", inc, err)
+func TestBuiltinIncludesForProvider(t *testing.T) {
+	for _, tt := range []struct {
+		provider string
+		want     []string
+	}{
+		{provider: "", want: []string{citylayout.SystemPacksRoot + "/core", citylayout.SystemPacksRoot + "/bd"}},
+		{provider: "bd", want: []string{citylayout.SystemPacksRoot + "/core", citylayout.SystemPacksRoot + "/bd"}},
+		{provider: "file", want: []string{citylayout.SystemPacksRoot + "/core"}},
+		{provider: "exec:/tmp/custom-store", want: []string{citylayout.SystemPacksRoot + "/core"}},
+	} {
+		got := builtinIncludesForProvider(tt.provider)
+		if len(got) != len(tt.want) {
+			t.Errorf("builtinIncludesForProvider(%q) = %v, want %v", tt.provider, got, tt.want)
 			continue
 		}
-		if rel == ".." || len(rel) > 0 && rel[0] == '.' {
-			t.Errorf("path %q escapes system packs root (rel=%q)", inc, rel)
-		}
-		// Each include path should be a directory with pack.toml inside.
-		if _, err := os.Stat(filepath.Join(inc, "pack.toml")); err != nil {
-			t.Errorf("pack.toml missing in %q: %v", inc, err)
+		for i := range tt.want {
+			if got[i] != tt.want[i] {
+				t.Errorf("builtinIncludesForProvider(%q)[%d] = %q, want %q", tt.provider, i, got[i], tt.want[i])
+			}
 		}
 	}
 }
 
-func TestBuiltinPackIncludes_AlwaysIncludesMaintenance(t *testing.T) {
+func TestMaterializeBuiltinPacks_NoMaintenancePack(t *testing.T) {
 	dir := t.TempDir()
 
 	if err := MaterializeBuiltinPacks(dir); err != nil {
 		t.Fatal(err)
 	}
 
-	// Even with non-bd provider, maintenance must be present.
-	t.Setenv("GC_BEADS", "file")
-	includes := builtinPackIncludes(dir)
-
-	found := false
-	for _, inc := range includes {
-		if filepath.Base(inc) == "maintenance" {
-			found = true
-			break
+	// The maintenance pack was folded into core: it must not materialize,
+	// and its housekeeping orders must ship with core instead.
+	if _, err := os.Stat(filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance")); !os.IsNotExist(err) {
+		t.Errorf("stat .gc/system/packs/maintenance err = %v, want IsNotExist", err)
+	}
+	for _, rel := range []string{
+		"orders/gate-sweep.toml",
+		"orders/orphan-sweep.toml",
+		"orders/wisp-compact.toml",
+		"assets/scripts/gate-sweep.sh",
+		"doctor/check-binaries/run.sh",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, citylayout.SystemPacksRoot, "core", filepath.FromSlash(rel))); err != nil {
+			t.Errorf("core pack missing folded maintenance asset %s: %v", rel, err)
 		}
 	}
-	if !found {
-		t.Errorf("maintenance pack not found in includes: %v", includes)
+}
+
+func TestMaterializeBuiltinPacks_PrunesRetiredMaintenanceDir(t *testing.T) {
+	dir := t.TempDir()
+
+	// Simulate a stale maintenance dir left behind by an older binary.
+	stale := filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "pack.toml"), []byte("[pack]\nname = \"maintenance\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	// Also with bd provider.
-	t.Setenv("GC_BEADS", "bd")
-	includes = builtinPackIncludes(dir)
-
-	found = false
-	for _, inc := range includes {
-		if filepath.Base(inc) == "maintenance" {
-			found = true
-			break
-		}
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatal(err)
 	}
-	if !found {
-		t.Errorf("maintenance pack not found in bd includes: %v", includes)
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stat retired maintenance dir err = %v, want IsNotExist", err)
 	}
 }
 

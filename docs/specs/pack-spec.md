@@ -384,7 +384,6 @@ The normative authoring rules are specified here.
 | `append_fragments` | array of string | Prompt template fragments appended after the rendered prompt body. |
 | `inject_assigned_skills` | bool | Enables assigned-skill prompt injection. |
 | `attach` | bool | Whether interactive attachment is supported. |
-| `fallback` | bool | Marks this as a fallback definition for collision resolution. |
 | `depends_on` | array of string | Agent startup dependencies. Bare rig-pack dependencies are qualified during rig loading. |
 | `resume_command` | string | Provider resume command template. |
 | `wake_mode` | string | `resume` or `fresh`. |
@@ -392,6 +391,10 @@ The normative authoring rules are specified here.
 > **Compatibility:** The current runtime still parses agent-level `skills` and
 > `mcp` arrays as compatibility tombstones, but active materialization ignores
 > them. New packs should use the pack-level `skills/` and `mcp/` directories.
+
+> **Compatibility:** The fallback-agent mechanism was removed. A stale
+> `fallback` key in a v2 `agents/<name>/agent.toml` is ignored; in a v1 inline
+> `[[agent]]` table it fails the unknown-field gate.
 
 > **Compatibility:** Legacy inline `pack.toml` `[[agent]]` tables remain loader
 > compatibility for existing packs. New packs must use
@@ -789,7 +792,7 @@ when the same pack directory is reached through more than one acyclic path.
 
 Included or imported pack definitions are lower-priority base definitions. The
 parent pack's own definitions are appended after included definitions and are
-therefore the later layer for fallback resolution and provider merging.
+therefore the later layer for provider merging.
 
 ### 2.4. Scope Filtering And Stamping
 
@@ -825,14 +828,9 @@ The `dir` field is an identity prefix, not a filesystem path.
 Agent names are local names. Import bindings do not qualify runtime agent
 names.
 
-The loader resolves fallback collisions before reporting duplicate pack agents:
-
-1. If a fallback and a non-fallback from different source directories share a
-   local name, the non-fallback wins and the fallback is removed.
-2. If two or more fallbacks from different source directories share a local
-   name, the first loaded fallback wins and later fallbacks are removed.
-3. If two or more non-fallback agents from different source directories share a
-   local name on the same surface, loading fails.
+There is no fallback-agent mechanism. If two or more agents from different
+source directories share a local name on the same surface, loading fails;
+packs must own their agents under unambiguous names.
 
 The "same surface" means the city-level surface or one rig-level surface. Two
 different rigs may each have an agent with the same local name because their
@@ -981,9 +979,10 @@ The loader must fail when:
 9. A pack-level or city-level patch targets a missing agent.
 10. A rig-level pack declares a service.
 11. A pack service sets `publish_mode = "direct"`.
-12. A non-fallback agent collision remains after fallback resolution.
+12. Two or more agents from different source directories share a local name on
+    the same surface.
 13. A declared pack requirement is not satisfied.
-14. A schema-2 `city.toml` or included fragment uses a removed PackV1 surface such as `rigs.includes`, `[packs.*]`, `workspace.includes`, `workspace.default_rig_includes`, or inline agent definitions.
+14. A schema-2 `city.toml` or included fragment uses a removed PackV1 surface such as `rigs.includes`, `[packs.*]`, `workspace.includes`, `workspace.default_rig_includes`, or inline agent definitions. Exception: canonical builtin system-pack includes (`.gc/system/packs/<name>` entries written by `gc init`) remain supported in `workspace.includes`.
 
 The loader may skip missing remote pack subpaths in compatibility cases where a
 remote source was fetched but the referenced pack directory no longer exists.

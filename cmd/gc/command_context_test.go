@@ -47,6 +47,7 @@ func setupRegisteredRigFixture(t *testing.T, insideCity, suspended bool) registe
 
 	toml := fmt.Sprintf(`[workspace]
 name = "demo-city"
+includes = [".gc/system/packs/core"]
 
 [session]
 provider = "fake"

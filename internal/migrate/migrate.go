@@ -138,13 +138,7 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		return nil, err
 	}
 
-	selectedAgents, fallbackNames := selectAgents(packCfg.Agents, cityCfg.Agents)
-	if len(fallbackNames) > 0 {
-		sort.Strings(fallbackNames)
-		report.Warnings = append(report.Warnings,
-			fmt.Sprintf("dropped fallback field for agents: %s; review shadowing behavior manually",
-				strings.Join(fallbackNames, ", ")))
-	}
+	selectedAgents := selectAgents(packCfg.Agents, cityCfg.Agents)
 
 	usage := buildUsageCounts(cityPath, selectedAgents)
 	if err := validateAgentAssets(cityPath, selectedAgents); err != nil {
@@ -165,23 +159,34 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		cityCfg.Agents = nil
 	}
 
-	migratedPacks := packNamesReferencedByLegacyIncludes(nil, cityCfg.Workspace.LegacyIncludes(), cityCfg.Packs)
+	// Canonical builtin system-pack includes (.gc/system/packs/<name>) are
+	// the supported V2 form written by gc init; they stay in city.toml.
+	// Only other entries are legacy PackV1 includes to migrate.
+	builtinIncludes := make([]string, 0, len(cityCfg.Workspace.LegacyIncludes()))
+	for _, inc := range cityCfg.Workspace.LegacyIncludes() {
+		if config.IsBuiltinSystemPackInclude(inc) {
+			builtinIncludes = append(builtinIncludes, inc)
+		}
+	}
+	legacyIncludes := config.NonBuiltinWorkspaceIncludes(cityCfg.Workspace.LegacyIncludes())
+
+	migratedPacks := packNamesReferencedByLegacyIncludes(nil, legacyIncludes, cityCfg.Packs)
 	migratedPacks = packNamesReferencedByLegacyIncludes(migratedPacks, cityCfg.Workspace.LegacyDefaultRigIncludes(), cityCfg.Packs)
 
-	if len(selectedAgents) > 0 || len(cityCfg.Workspace.LegacyIncludes()) > 0 || len(cityCfg.Workspace.LegacyDefaultRigIncludes()) > 0 {
+	if len(selectedAgents) > 0 || len(legacyIncludes) > 0 || len(cityCfg.Workspace.LegacyDefaultRigIncludes()) > 0 {
 		if ensurePackMeta(&packCfg, cityCfg, cityPath) {
 			packChanged = true
 		}
 	}
 
-	if len(cityCfg.Workspace.LegacyIncludes()) > 0 {
+	if len(legacyIncludes) > 0 {
 		if packCfg.Imports == nil {
 			packCfg.Imports = make(map[string]config.Import)
 		}
-		if addImports(packCfg.Imports, cityCfg.Workspace.LegacyIncludes(), cityCfg.Packs) {
+		if addImports(packCfg.Imports, legacyIncludes, cityCfg.Packs) {
 			packChanged = true
 		}
-		cityCfg.Workspace.SetLegacyIncludes(nil)
+		cityCfg.Workspace.SetLegacyIncludes(builtinIncludes)
 	}
 
 	if len(packCfg.Defaults.Rig.Imports) > 0 {
@@ -469,17 +474,13 @@ func packDefaultRigImportOrder(md toml.MetaData) []string {
 	return order
 }
 
-func selectAgents(packAgents, cityAgents []config.Agent) ([]agentEntry, []string) {
+func selectAgents(packAgents, cityAgents []config.Agent) []agentEntry {
 	selected := make(map[string]agentEntry)
 	seenNames := make(map[string]bool)
 	var names []string
-	var fallbackNames []string
 
 	add := func(origin agentOrigin, agents []config.Agent, override bool) {
 		for _, agent := range agents {
-			if agent.Fallback {
-				fallbackNames = append(fallbackNames, agent.Name)
-			}
 			if !seenNames[agent.Name] {
 				seenNames[agent.Name] = true
 				names = append(names, agent.Name)
@@ -502,7 +503,7 @@ func selectAgents(packAgents, cityAgents []config.Agent) ([]agentEntry, []string
 	for _, name := range names {
 		result = append(result, selected[name])
 	}
-	return result, dedupeStrings(fallbackNames)
+	return result
 }
 
 func buildUsageCounts(cityPath string, agents []agentEntry) usageCounts {

@@ -409,12 +409,12 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.recordSource(fragPath, fragData)
 	}
 
-	// Inject system pack includes into Workspace.Includes. These are
-	// appended AFTER user includes so user packs override system pack
-	// fallbacks via the normal dedup/fallback resolution.
-	// Skip packs already reachable from user includes or top-level imports
-	// (avoids duplicate agent errors when a user pack transitively includes
-	// a system pack).
+	// Append caller-supplied extra pack includes to Workspace.Includes,
+	// after user includes. Skip packs already reachable from user includes
+	// or top-level imports (avoids duplicate agent errors when a user pack
+	// transitively includes the same pack). Builtin packs are NOT spliced
+	// here — they compose only through explicit city.toml includes; this
+	// path serves explicit extra includes passed by tests and tools.
 	rootIncludes := append([]string{}, rootPackIncludes...)
 	rootIncludes = append(rootIncludes, root.Workspace.LegacyIncludes()...)
 	root.Workspace.SetLegacyIncludes(rootIncludes)
@@ -1669,6 +1669,14 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 		visitImport(imp.Source, cityRoot, imp.ImportIsTransitive())
 	}
 	return names
+}
+
+// ReachablePackNames reports every pack name reachable from the config's
+// explicit includes, imports, rig pack graphs, and default-rig pack graphs.
+// The gc binary uses it after composition to verify that required builtin
+// packs (core, and bd for bd-provider cities) are explicitly included.
+func ReachablePackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[string]bool {
+	return resolvedConfigPackNames(cfg, sysFS, cityRoot)
 }
 
 // resolvedConfigPackNames collects all pack names reachable from the city,

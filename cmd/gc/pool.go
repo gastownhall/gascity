@@ -246,7 +246,6 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		OverlayDir:         src.OverlayDir,
 		SourceDir:          src.SourceDir,
 		// InheritedDefaultSlingFormula: deep-copied below with other pointer fields.
-		Fallback:             src.Fallback,
 		IdleTimeout:          src.IdleTimeout,
 		MaxSessionAge:        src.MaxSessionAge,
 		MaxSessionAgeJitter:  src.MaxSessionAgeJitter,

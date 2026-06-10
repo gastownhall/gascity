@@ -41,8 +41,10 @@ func TestCityTomlParses(t *testing.T) {
 	if cfg.Workspace.Name != "swarm" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "swarm")
 	}
-	if len(cfg.Workspace.LegacyIncludes()) != 0 {
-		t.Errorf("Workspace.Includes = %v, want empty", cfg.Workspace.LegacyIncludes())
+	wantIncludes := []string{".gc/system/packs/core", ".gc/system/packs/bd"}
+	gotIncludes := cfg.Workspace.LegacyIncludes()
+	if len(gotIncludes) != len(wantIncludes) || gotIncludes[0] != wantIncludes[0] || gotIncludes[1] != wantIncludes[1] {
+		t.Errorf("Workspace.Includes = %v, want %v (explicit builtin pack includes)", gotIncludes, wantIncludes)
 	}
 }
 

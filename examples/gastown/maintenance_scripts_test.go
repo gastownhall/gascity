@@ -74,7 +74,7 @@ func TestMaintenanceCheckBinariesTreatsGhAsOptional(t *testing.T) {
 	}
 	writeExecutable(t, filepath.Join(binDir, "jq"), "#!/bin/sh\nexit 0\n")
 
-	cmd := exec.Command(filepath.Join(exampleDir(), "packs", "maintenance", "doctor", "check-binaries", "run.sh"))
+	cmd := exec.Command(filepath.Join(corePackDir(), "doctor", "check-binaries", "run.sh"))
 	cmd.Env = mergeTestEnv(map[string]string{"PATH": binDir})
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -306,7 +306,7 @@ exit 1
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -421,7 +421,7 @@ func TestOrphanSweepPreservesBareShortFormOfLiveQualifiedAgent(t *testing.T) {
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -460,7 +460,7 @@ func TestOrphanSweepResetsBareShortFormWhenQualifiedAgentDead(t *testing.T) {
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -559,7 +559,7 @@ exit 1
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -655,7 +655,7 @@ exit 1
 		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -760,7 +760,7 @@ exit 1
 		"PATH":                      binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -845,7 +845,7 @@ exit 1
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -942,7 +942,7 @@ exit 1
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -1038,7 +1038,7 @@ exit 1
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -1133,7 +1133,7 @@ exit 1
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -1248,7 +1248,7 @@ exit 1
 				"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			}
 
-			script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+			script := coreScriptPath("orphan-sweep.sh")
 			cmd := exec.Command(script)
 			cmd.Env = mergeTestEnv(env)
 			out, err := cmd.CombinedOutput()
@@ -1371,7 +1371,7 @@ exit 1
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -1495,7 +1495,7 @@ exit 1
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -1619,7 +1619,7 @@ exit 1
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	script := coreScriptPath("orphan-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -1766,7 +1766,7 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 			})
 			assertOrphanSweepFakeGC(t, env, filepath.Join(binDir, "bash"), fakeGC, gcLog)
 
-			script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+			script := coreScriptPath("orphan-sweep.sh")
 			cmd := exec.Command(script)
 			cmd.Env = env
 			out, err := cmd.CombinedOutput()
@@ -6284,7 +6284,7 @@ exit 0
 		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "spawn-storm-detect.sh"), env)
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
 
 	ledgerData, err := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
 	if err != nil {
@@ -6339,7 +6339,7 @@ exit 0
 		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "spawn-storm-detect.sh"), env)
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
 
 	ledgerData, err := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
 	if err != nil {
@@ -6396,7 +6396,7 @@ exit 0
 		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "spawn-storm-detect.sh")
+	script := coreScriptPath("spawn-storm-detect.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	if out, err := cmd.CombinedOutput(); err == nil {
@@ -6458,7 +6458,7 @@ exit 0
 		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "spawn-storm-detect.sh"), env)
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
 
 	ledgerData, err := os.ReadFile(ledger)
 	if err != nil {
@@ -6525,7 +6525,7 @@ exit 0
 		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "spawn-storm-detect.sh"), env)
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
 
 	ledgerData, err := os.ReadFile(ledger)
 	if err != nil {
@@ -9743,7 +9743,7 @@ printf '%s\n' "$*" >> "$BD_LOG"
 exit 0
 `)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "gate-sweep.sh"), env)
+	runScript(t, coreScriptPath("gate-sweep.sh"), env)
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -9767,7 +9767,7 @@ printf '%s\n' "$*" >> "$BD_LOG"
 exit 0
 `)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "gate-sweep.sh"), env)
+	runScript(t, coreScriptPath("gate-sweep.sh"), env)
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -9811,7 +9811,7 @@ case "$*" in
 esac
 `)
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "gate-sweep.sh")
+	script := coreScriptPath("gate-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -9839,7 +9839,7 @@ case "$*" in
 esac
 `)
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "gate-sweep.sh")
+	script := coreScriptPath("gate-sweep.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -9949,7 +9949,7 @@ func TestPruneBranchesPrunesMergedGcBranches(t *testing.T) {
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "prune-branches.sh")
+	script := coreScriptPath("prune-branches.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -9977,7 +9977,7 @@ func TestPruneBranchesSkipsCurrentBranch(t *testing.T) {
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "prune-branches.sh")
+	script := coreScriptPath("prune-branches.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -10015,7 +10015,7 @@ func TestPruneBranchesPreservesBranchWithUnmergedWork(t *testing.T) {
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "prune-branches.sh")
+	script := coreScriptPath("prune-branches.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -10043,7 +10043,7 @@ func TestPruneBranchesNoOpWhenNoGcBranches(t *testing.T) {
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "prune-branches.sh")
+	script := coreScriptPath("prune-branches.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -10122,7 +10122,7 @@ func TestWispCompactDeletesClosedPastTTL(t *testing.T) {
 ]`, pastTTL)
 
 	bdLog, env := wispCompactEnv(t, beads)
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	runScript(t, coreScriptPath("wisp-compact.sh"), env)
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -10148,7 +10148,7 @@ func TestWispCompactReportsSummaryForActions(t *testing.T) {
 ]`, pastTTL, withinTTL)
 
 	_, env := wispCompactEnv(t, beads)
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("wisp-compact.sh"), env)
 	if err != nil {
 		t.Fatalf("wisp-compact.sh failed: %v\n%s", err, out)
 	}
@@ -10164,7 +10164,7 @@ func TestWispCompactPromotesNonClosedPastTTL(t *testing.T) {
 ]`, pastTTL)
 
 	bdLog, env := wispCompactEnv(t, beads)
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	runScript(t, coreScriptPath("wisp-compact.sh"), env)
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -10189,7 +10189,7 @@ func TestWispCompactPromotesClosedWispsWithComments(t *testing.T) {
 ]`, pastTTL)
 
 	bdLog, env := wispCompactEnv(t, beads)
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	runScript(t, coreScriptPath("wisp-compact.sh"), env)
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -10214,7 +10214,7 @@ func TestWispCompactSkipsBeadsWithinTTL(t *testing.T) {
 ]`, withinTTL)
 
 	bdLog, env := wispCompactEnv(t, beads)
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	runScript(t, coreScriptPath("wisp-compact.sh"), env)
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -10238,7 +10238,7 @@ func TestWispCompactRespectsHeartbeatTTL(t *testing.T) {
 ]`, aged7h)
 
 	bdLog, env := wispCompactEnv(t, beads)
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	runScript(t, coreScriptPath("wisp-compact.sh"), env)
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -10257,7 +10257,7 @@ func TestWispCompactSkipsNonEphemeralBeads(t *testing.T) {
 ]`, pastTTL)
 
 	bdLog, env := wispCompactEnv(t, beads)
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	runScript(t, coreScriptPath("wisp-compact.sh"), env)
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -10353,7 +10353,7 @@ func TestCrossRigDepsConvertsExternalBlocksToRelated(t *testing.T) {
 	deps := `[{"id":"external:other-rig:rig-dep-1"}]`
 
 	bdLog, env := crossRigDepsEnv(t, closed, deps)
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh"), env)
+	runScript(t, coreScriptPath("cross-rig-deps.sh"), env)
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -10373,7 +10373,7 @@ func TestCrossRigDepsReportsResolvedSummary(t *testing.T) {
 	deps := `[{"id":"external:other-rig:rig-dep-1"}]`
 
 	_, env := crossRigDepsEnv(t, closed, deps)
-	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("cross-rig-deps.sh"), env)
 	if err != nil {
 		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
 	}
@@ -10389,7 +10389,7 @@ func TestCrossRigDepsSkipsInternalDeps(t *testing.T) {
 	deps := `[{"id":"local-rig-dep"},{"id":"another-internal"}]`
 
 	bdLog, env := crossRigDepsEnv(t, closed, deps)
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh"), env)
+	runScript(t, coreScriptPath("cross-rig-deps.sh"), env)
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -10403,7 +10403,7 @@ func TestCrossRigDepsSkipsInternalDeps(t *testing.T) {
 
 func TestCrossRigDepsNoOpWhenNothingClosed(t *testing.T) {
 	bdLog, env := crossRigDepsEnv(t, `[]`, `[]`)
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh"), env)
+	runScript(t, coreScriptPath("cross-rig-deps.sh"), env)
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -10417,7 +10417,7 @@ func TestCrossRigDepsNoOpWhenNothingClosed(t *testing.T) {
 func TestCrossRigDepsHandlesEmptyDepsForClosedBead(t *testing.T) {
 	closed := `[{"id":"ga-blocker"}]`
 	bdLog, env := crossRigDepsEnv(t, closed, `[]`)
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh"), env)
+	runScript(t, coreScriptPath("cross-rig-deps.sh"), env)
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -10461,7 +10461,7 @@ exit 0
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh")
+	script := coreScriptPath("wisp-compact.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -10535,7 +10535,7 @@ exit 1
 		"TZ":           "America/Los_Angeles",
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh")
+	script := coreScriptPath("wisp-compact.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()
@@ -10620,7 +10620,7 @@ exit 0
 		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh")
+	script := coreScriptPath("cross-rig-deps.sh")
 	cmd := exec.Command(script)
 	cmd.Env = mergeTestEnv(env)
 	out, err := cmd.CombinedOutput()

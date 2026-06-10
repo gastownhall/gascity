@@ -132,15 +132,13 @@ func (c *providerCatalogReadinessAdvisoryCheck) WarmupEligible() bool { return f
 
 func loadCityConfigAllowMissingProviderReferences(cityPath string) (*config.City, error) {
 	tomlPath := filepath.Join(cityPath, citylayout.CityConfigFile)
-	extras, err := builtinPackIncludesForConfigLoad(fsys.OSFS{}, tomlPath, io.Discard)
-	if err != nil {
+	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, io.Discard); err != nil {
 		return nil, err
 	}
 	cfg, _, err := config.LoadWithIncludesOptions(
 		fsys.OSFS{},
 		tomlPath,
 		config.LoadOptions{AllowMissingProviderReferences: true},
-		extras...,
 	)
 	if err != nil {
 		return nil, err

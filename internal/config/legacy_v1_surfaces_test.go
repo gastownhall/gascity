@@ -416,3 +416,49 @@ source = "./pack"
 		t.Fatalf("error = %v, want one docs pointer, got %d", err, got)
 	}
 }
+
+func TestIsBuiltinSystemPackInclude(t *testing.T) {
+	for _, tt := range []struct {
+		entry string
+		want  bool
+	}{
+		{entry: ".gc/system/packs/core", want: true},
+		{entry: ".gc/system/packs/bd", want: true},
+		{entry: "./.gc/system/packs/core", want: true},
+		{entry: " .gc/system/packs/core ", want: true},
+		{entry: ".gc/system/packs", want: false},
+		{entry: ".gc/system/packs/", want: false},
+		{entry: ".gc/system/packs/core/agents", want: false},
+		{entry: "packs/gastown", want: false},
+		{entry: "", want: false},
+	} {
+		if got := IsBuiltinSystemPackInclude(tt.entry); got != tt.want {
+			t.Errorf("IsBuiltinSystemPackInclude(%q) = %v, want %v", tt.entry, got, tt.want)
+		}
+	}
+}
+
+// TestLegacyV1Surfaces_BuiltinSystemPackIncludesExempt pins the carve-out for
+// the canonical builtin includes that gc init writes: they must not trip the
+// PackV1 workspace.includes deprecation warning or the Wave 2 hard error.
+func TestLegacyV1Surfaces_BuiltinSystemPackIncludesExempt(t *testing.T) {
+	builtinOnly := &City{Workspace: Workspace{
+		Includes: []string{".gc/system/packs/core", ".gc/system/packs/bd"},
+	}}
+	if warnings := DetectLegacyV1Surfaces(builtinOnly, "city.toml"); len(warnings) != 0 {
+		t.Fatalf("DetectLegacyV1Surfaces = %v, want none for builtin includes", warnings)
+	}
+	if errs := LegacyV1SurfaceErrors(builtinOnly, "city.toml"); len(errs) != 0 {
+		t.Fatalf("LegacyV1SurfaceErrors = %v, want none for builtin includes", errs)
+	}
+
+	mixed := &City{Workspace: Workspace{
+		Includes: []string{".gc/system/packs/core", "packs/legacy"},
+	}}
+	if warnings := DetectLegacyV1Surfaces(mixed, "city.toml"); len(warnings) != 1 {
+		t.Fatalf("DetectLegacyV1Surfaces = %v, want 1 warning for mixed includes", warnings)
+	}
+	if errs := LegacyV1SurfaceErrors(mixed, "city.toml"); len(errs) != 1 {
+		t.Fatalf("LegacyV1SurfaceErrors = %v, want 1 error for mixed includes", errs)
+	}
+}

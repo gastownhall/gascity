@@ -83,7 +83,7 @@ See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https:
 | `gt mayor` | Gastown pack `mayor` agent plus `gc session attach mayor` / `gc status` | Managed as a configured agent, not a baked-in command family. |
 | `gt deacon` | Gastown pack `deacon` agent plus `gc session`, `gc status`, controller behavior | In Gas City, much of what deacon does lives in the controller/supervisor. |
 | `gt boot` | Gastown pack `boot` agent | Same pattern as other role agents. |
-| `gt dog` | usually `gc order`, sometimes a scalable agent config in `city.toml` | Dog-like helpers are often better modeled as exec orders. |
+| `gt dog` | usually `gc order`, sometimes a pack-owned `dog` pool | Dog-like helpers are exec orders shipped by the builtin core pack, or a pack-owned dog pool (e.g. the Gastown pack's `dog`). |
 | `gt role` | `gc config explain`, `gc session list`, prompt/config inspection | Role is not a first-class SDK concept. |
 | `gt callbacks` | no direct equivalent | Callback behavior is folded into runtime, hooks, waits, and orders. |
 | `gt cycle` | no direct generic command | Closest equivalents are tmux bindings or pack-specific session UX. |

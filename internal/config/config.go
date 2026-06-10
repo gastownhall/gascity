@@ -3097,11 +3097,6 @@ type Agent struct {
 	// attachment (e.g., tmux attach). When false, the agent can use a
 	// lighter runtime (subprocess instead of tmux). Defaults to true.
 	Attach *bool `toml:"attach,omitempty"`
-	// Fallback marks this agent as a fallback definition. During pack
-	// composition, a non-fallback agent with the same name wins silently.
-	// When two fallbacks collide, the first loaded (depth-first) wins.
-	// See docs/guides/shareable-packs.md for pack layout guidance.
-	Fallback bool `toml:"fallback,omitempty"`
 	// DependsOn lists agent names that must be awake before this agent wakes.
 	// Used for dependency-ordered startup and shutdown. Validated for cycles
 	// at config load time.

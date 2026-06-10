@@ -45,7 +45,7 @@ LOOKBACK="${GC_CASCADE_NUDGE_LOOKBACK:-5m}"
 # Must exceed LOOKBACK. Accepts a simple Ns / Nm / Nh duration.
 RETENTION="${GC_CASCADE_NUDGE_RETENTION:-1h}"
 
-PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance}"
+PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/core}"
 STATE_FILE="$PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json"
 mkdir -p "$PACK_STATE_DIR"
 

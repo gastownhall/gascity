@@ -2,6 +2,10 @@ package main
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (c *builtinIncludeDoctorCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *codexHooksDriftCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the

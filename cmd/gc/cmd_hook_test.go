@@ -665,6 +665,7 @@ func TestHookCommandHookFormatIsIgnoredForNonInjectOutput(t *testing.T) {
 	}
 	cityToml := `[workspace]
 name = "test-city"
+includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [[agent]]
 name = "worker"

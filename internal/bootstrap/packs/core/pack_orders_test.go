@@ -1,4 +1,4 @@
-package maintenance
+package core
 
 import (
 	"io/fs"
@@ -25,10 +25,10 @@ func readOrder(t *testing.T, file string) orders.Order {
 	return o
 }
 
-// TestMaintenanceOrdersValidate asserts every embedded order TOML parses and
+// TestCoreOrdersValidate asserts every embedded order TOML parses and
 // passes structural validation, so a malformed order can never ship in the gc
-// binary's bundled maintenance pack.
-func TestMaintenanceOrdersValidate(t *testing.T) {
+// binary's bundled core pack.
+func TestCoreOrdersValidate(t *testing.T) {
 	entries, err := fs.ReadDir(PackFS, "orders")
 	if err != nil {
 		t.Fatalf("reading orders dir: %v", err)

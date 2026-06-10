@@ -1,10 +1,17 @@
 # Bundled with the gc binary and materialized into each city at
 # .gc/system/packs/core.
 #
-# Gas City auto-includes this system pack when loading a city. It contributes
-# the gc-* skills that teach agents how to use Gas City, default worker prompts,
-# core formulas such as mol-do-work and mol-scoped-work, the beads-health order,
-# and per-provider hook overlays.
+# This is the single builtin pack every city needs. `gc init` writes an
+# explicit include for it into city.toml and `gc doctor --fix` repairs a
+# missing include. It contributes the gc-* skills that teach agents how to
+# use Gas City, default worker prompts, core formulas such as mol-do-work
+# and mol-scoped-work, mechanical housekeeping orders (gate/orphan/wisp
+# sweeps, branch pruning, nudge relays, beads health), the check-binaries
+# doctor check, and per-provider hook overlays.
+#
+# It deliberately ships no agents: packs that need long-lived utility
+# workers (for example gastown's dog pool or the dolt pack's dog) define
+# their own.
 #
 # Inspect this directory after `gc init` or `gc start` to see the exact
 # behavior your city received from the bundled core pack.
@@ -12,4 +19,4 @@
 name = "core"
 version = "0.1.0"
 schema = 2
-description = "Bundled Gas City core behavior: gc workflow skills, default prompts, core formulas, orders, and provider hook overlays."
+description = "Bundled Gas City core behavior: gc workflow skills, default prompts, core formulas, housekeeping orders, doctor checks, and provider hook overlays."

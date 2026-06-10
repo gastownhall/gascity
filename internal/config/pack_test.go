@@ -3872,114 +3872,14 @@ agent = ""
 }
 
 // ---------------------------------------------------------------------------
-// Fallback agent tests
+// Pack agent collision tests
 // ---------------------------------------------------------------------------
+// The fallback-agent mechanism was removed: packs own their agents under
+// unambiguous names and cross-pack duplicates are hard errors. A stale
+// `fallback` key in a V2 agents/<name>/agent.toml is ignored; in a V1
+// inline [[agent]] it fails the pack's unknown-key gate.
 
-func TestFallbackAgent_NonFallbackWins(t *testing.T) {
-	// Non-fallback dog from pack A, fallback dog from pack B.
-	// Only A's dog should survive.
-	dir := t.TempDir()
-	writeFile(t, dir, "packs/maintenance/pack.toml", `
-[pack]
-name = "maintenance"
-schema = 1
-
-[[agent]]
-name = "dog"
-scope = "city"
-nudge = "full dog"
-`)
-	writeFile(t, dir, "packs/dolt/pack.toml", `
-[pack]
-name = "dolt"
-schema = 1
-
-[[agent]]
-name = "dog"
-scope = "city"
-fallback = true
-nudge = "fallback dog"
-`)
-
-	cfg := &City{
-		Workspace: Workspace{
-			Includes: []string{"packs/maintenance", "packs/dolt"},
-		},
-	}
-
-	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
-	if err != nil {
-		t.Fatalf("ExpandCityPacks: %v", err)
-	}
-
-	// Only the non-fallback dog should remain.
-	var dogs []Agent
-	for _, a := range cfg.Agents {
-		if a.Name == "dog" {
-			dogs = append(dogs, a)
-		}
-	}
-	if len(dogs) != 1 {
-		t.Fatalf("got %d dogs, want 1", len(dogs))
-	}
-	if dogs[0].Nudge != "full dog" {
-		t.Errorf("surviving dog nudge = %q, want %q", dogs[0].Nudge, "full dog")
-	}
-}
-
-func TestFallbackAgent_BothFallback_FirstWins(t *testing.T) {
-	// Two fallback dogs from different packs. First loaded wins.
-	dir := t.TempDir()
-	writeFile(t, dir, "packs/alpha/pack.toml", `
-[pack]
-name = "alpha"
-schema = 1
-
-[[agent]]
-name = "dog"
-scope = "city"
-fallback = true
-nudge = "alpha dog"
-`)
-	writeFile(t, dir, "packs/beta/pack.toml", `
-[pack]
-name = "beta"
-schema = 1
-
-[[agent]]
-name = "dog"
-scope = "city"
-fallback = true
-nudge = "beta dog"
-`)
-
-	cfg := &City{
-		Workspace: Workspace{
-			Includes: []string{"packs/alpha", "packs/beta"},
-		},
-	}
-
-	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
-	if err != nil {
-		t.Fatalf("ExpandCityPacks: %v", err)
-	}
-
-	var dogs []Agent
-	for _, a := range cfg.Agents {
-		if a.Name == "dog" {
-			dogs = append(dogs, a)
-		}
-	}
-	if len(dogs) != 1 {
-		t.Fatalf("got %d dogs, want 1", len(dogs))
-	}
-	if dogs[0].Nudge != "alpha dog" {
-		t.Errorf("surviving dog nudge = %q, want %q (first loaded wins)", dogs[0].Nudge, "alpha dog")
-	}
-}
-
-func TestFallbackAgent_NeitherFallback_CollisionError(t *testing.T) {
-	// Two non-fallback dogs from different packs. Should still error.
+func TestPackAgents_DuplicateAcrossPacksErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/alpha/pack.toml", `
 [pack]
@@ -4008,26 +3908,26 @@ scope = "city"
 
 	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err == nil {
-		t.Fatal("expected collision error for two non-fallback dogs")
+		t.Fatal("expected collision error for two dogs from different packs")
 	}
 	if !strings.Contains(err.Error(), "duplicate agent") {
 		t.Errorf("error = %q, want 'duplicate agent'", err.Error())
 	}
 }
 
-func TestFallbackAgent_StandaloneWorks(t *testing.T) {
-	// Single fallback agent, no collision — should be kept normally.
+func TestPackAgents_StaleFallbackKeyInAgentTomlIgnored(t *testing.T) {
+	// The removed `fallback` key in a V2 agent.toml must not break loading;
+	// the agent is kept as a normal definition.
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/health/pack.toml", `
 [pack]
 name = "health"
-schema = 1
-
-[[agent]]
-name = "dog"
+schema = 2
+`)
+	writeFile(t, dir, "packs/health/agents/dog/agent.toml", `
 scope = "city"
 fallback = true
-nudge = "standalone fallback"
+nudge = "standalone dog"
 `)
 
 	cfg := &City{
@@ -4044,9 +3944,6 @@ nudge = "standalone fallback"
 	}
 	if cfg.Agents[0].Name != "dog" {
 		t.Errorf("agent name = %q, want dog", cfg.Agents[0].Name)
-	}
-	if !cfg.Agents[0].Fallback {
-		t.Error("agent should have Fallback = true")
 	}
 }
 

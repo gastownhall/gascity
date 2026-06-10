@@ -211,8 +211,8 @@ reviewer
 Gas City uses the binding to find and order dependencies while loading config.
 It does not use the binding as a runtime namespace.
 
-If two packs define city-level agents with the same name, config load fails
-after fallback rules are applied. The same rule applies inside a single rig.
+If two packs define city-level agents with the same name, config load fails.
+The same rule applies inside a single rig.
 Give one of the agents a different public name, or avoid importing both
 definitions onto the same surface.
 

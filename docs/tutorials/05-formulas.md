@@ -90,12 +90,12 @@ mol-dog-stale-db
 mol-polecat-base
 mol-polecat-commit
 mol-scoped-work
-mol-shutdown-dance
 pancakes
 ```
 
 Your fresh city carries many built-in `mol-*` formulas that ship with the
-tutorial template (dolt-watchdog workflows, polecat worker scaffolds, etc.).
+bundled core and dolt packs (polecat worker scaffolds, Dolt watchdog
+workflows, etc.).
 The list above shows those built-ins alongside the `pancakes` you just
 defined — the exact set may grow as new built-ins land, so expect your
 output to include additional `mol-*` entries.

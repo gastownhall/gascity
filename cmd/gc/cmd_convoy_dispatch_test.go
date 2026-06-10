@@ -871,6 +871,7 @@ func TestCmdWorkflowDeleteSourceFollowsRigLaunchSourceChain(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "test-city"
+includes = [".gc/system/packs/core"]
 
 [daemon]
 formula_v2 = true
@@ -5256,6 +5257,7 @@ func TestCmdWorkflowDeleteSourceAllowsStoreSelectorForAmbiguousSourceIDs(t *test
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "test-city"
+includes = [".gc/system/packs/core"]
 
 [[rigs]]
 name = "alpha"
@@ -5375,6 +5377,7 @@ func TestCmdWorkflowDeleteSourceStoreSelectorIgnoresLegacyRootInDifferentStore(t
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "test-city"
+includes = [".gc/system/packs/core"]
 
 [[rigs]]
 name = "alpha"
@@ -5497,6 +5500,7 @@ func TestCmdWorkflowReopenSourceRejectsLiveRootInDifferentStore(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "test-city"
+includes = [".gc/system/packs/core"]
 
 [[rigs]]
 name = "alpha"

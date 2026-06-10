@@ -22,6 +22,7 @@
 [workspace]
 name = "lifecycle-demo"
 start_command = "true"
+includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 # No workspace pack — all agents are rig-scoped.
 
 [defaults.rig.imports.lifecycle]

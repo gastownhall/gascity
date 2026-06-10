@@ -99,56 +99,54 @@ func TestRegression_GastownConfig(t *testing.T) {
 		}
 	})
 
-	// Schema 2 keeps a single maintenance fallback dog, then Gastown patches
-	// it with themed runtime fields instead of replacing it with a second dog.
-	t.Run("FallbackAgentResolution", func(t *testing.T) {
-		count := agentCount(cfg, "dog")
-		if count != 1 {
-			t.Errorf("expected exactly 1 dog agent, got %d (fallback resolution failure)", count)
-		}
-
+	// Each pack owns its dog outright: gastown ships the themed utility
+	// dog and the dolt pack ships its own Dolt-maintenance dog. The
+	// maintenance fallback dog and the fallback-resolution mechanism were
+	// removed, so the two coexist under distinct binding-qualified names.
+	t.Run("PacksOwnTheirDogs", func(t *testing.T) {
+		dogsByBinding := make(map[string]config.Agent)
 		for _, a := range cfg.Agents {
 			if a.Name == "dog" {
-				if !a.Fallback {
-					t.Error("dog agent should retain maintenance fallback=true under schema 2 patching")
-				}
-				if len(a.SessionLive) == 0 {
-					t.Error("dog agent has no session_live; expected gastown's themed dog")
-				}
-				if !strings.Contains(a.WorkDir, ".gc/agents/dogs/") {
-					t.Errorf("dog work_dir = %q, want gastown dog workdir override", a.WorkDir)
-				}
-				if !strings.Contains(a.PromptTemplate, "maintenance/agents/dog/prompt.template.md") {
-					t.Errorf("dog prompt_template = %q, want maintenance dog prompt via gastown patch", a.PromptTemplate)
-				}
-				if !strings.Contains(a.OverlayDir, "maintenance/agents/dog/overlay") {
-					t.Errorf("dog overlay_dir = %q, want maintenance dog overlay via gastown patch", a.OverlayDir)
-				}
-				break
+				dogsByBinding[a.BindingName] = a
 			}
+		}
+		if len(dogsByBinding) != 2 {
+			t.Errorf("dogs by binding = %v, want gastown + dolt", dogsByBinding)
+		}
+		if _, ok := dogsByBinding["dolt"]; !ok {
+			t.Error("dolt pack dog missing")
+		}
+		dog, ok := dogsByBinding["gastown"]
+		if !ok {
+			t.Fatal("gastown pack dog missing")
+		}
+		if len(dog.SessionLive) == 0 {
+			t.Error("gastown dog has no session_live; expected gastown's themed dog")
+		}
+		if !strings.Contains(dog.WorkDir, ".gc/agents/dogs/") {
+			t.Errorf("gastown dog work_dir = %q, want gastown dog workdir", dog.WorkDir)
+		}
+		if !strings.Contains(dog.PromptTemplate, filepath.Join("gastown", "agents", "dog", "prompt.template.md")) {
+			t.Errorf("gastown dog prompt_template = %q, want gastown-owned dog prompt", dog.PromptTemplate)
+		}
+		if !strings.Contains(dog.OverlayDir, filepath.Join("gastown", "agents", "dog", "overlay")) {
+			t.Errorf("gastown dog overlay_dir = %q, want gastown-owned dog overlay", dog.OverlayDir)
 		}
 	})
 
-	// Transitive inclusion: gastown pack includes maintenance pack.
+	// Gastown pack agents arrive via pack expansion.
 	t.Run("PackIncludesTransitive", func(t *testing.T) {
-		gastownAgents := []string{"mayor", "deacon", "boot"}
+		gastownAgents := []string{"mayor", "deacon", "boot", "dog"}
 		for _, name := range gastownAgents {
 			if !hasAgent(cfg, name) {
-				t.Errorf("gastown agent %q missing from config (transitive include failure)", name)
+				t.Errorf("gastown agent %q missing from config (pack expansion failure)", name)
 			}
-		}
-
-		if !hasAgent(cfg, "dog") {
-			t.Error("maintenance agent 'dog' missing from config (transitive include failure)")
 		}
 	})
 
-	// PR #213: system packs (maintenance) auto-included via pack expansion.
-	t.Run("SystemPacksAutoIncluded", func(t *testing.T) {
-		if !hasAgent(cfg, "dog") {
-			t.Error("maintenance pack agent 'dog' not found; system pack auto-inclusion failed (PR #213 regression)")
-		}
-
+	// Builtin packs compose via the explicit city.toml includes that gc init
+	// writes (no config-load auto-inclusion).
+	t.Run("BuiltinPacksExplicitlyIncluded", func(t *testing.T) {
 		// V2: gastown arrives via [imports.gastown] rather than
 		// workspace.includes. Accept either form so this regression test
 		// covers both the legacy-includes and the V2-imports layouts.
@@ -172,20 +170,27 @@ func TestRegression_GastownConfig(t *testing.T) {
 			t.Error("PackDirs is empty after config load; pack expansion did not run")
 		}
 
-		if cfg.Beads.Provider == "bd" || cfg.Beads.Provider == "" {
-			t.Log("beads provider is bd (or default); maintenance formulas expected via pack expansion")
-		}
-
-		cityFormulas := cfg.FormulaLayers.City
-		hasMaintenanceFormulas := false
-		for _, dir := range cityFormulas {
-			if strings.Contains(dir, "maintenance") {
-				hasMaintenanceFormulas = true
+		hasCoreInclude := false
+		for _, inc := range cfg.Workspace.LegacyIncludes() {
+			if strings.HasSuffix(filepath.ToSlash(inc), ".gc/system/packs/core") {
+				hasCoreInclude = true
 				break
 			}
 		}
-		if !hasMaintenanceFormulas && len(cityFormulas) > 0 {
-			t.Error("maintenance pack formulas not found in formula layers")
+		if !hasCoreInclude {
+			t.Errorf("workspace includes %v missing explicit .gc/system/packs/core entry", cfg.Workspace.LegacyIncludes())
+		}
+
+		cityFormulas := cfg.FormulaLayers.City
+		hasCoreFormulas := false
+		for _, dir := range cityFormulas {
+			if strings.Contains(dir, filepath.Join("system", "packs", "core")) {
+				hasCoreFormulas = true
+				break
+			}
+		}
+		if !hasCoreFormulas && len(cityFormulas) > 0 {
+			t.Error("core pack formulas not found in formula layers")
 		}
 	})
 }
@@ -201,7 +206,6 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 	t.Run("FormulasParse", func(t *testing.T) {
 		formulaDirs := []string{
 			filepath.Join(c.Dir, "packs", "gastown", "formulas"),
-			filepath.Join(c.Dir, "packs", "maintenance", "formulas"),
 		}
 
 		count := 0
@@ -245,7 +249,6 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 	t.Run("PromptsRender", func(t *testing.T) {
 		packDirs := []string{
 			filepath.Join(c.Dir, "packs", "gastown"),
-			filepath.Join(c.Dir, "packs", "maintenance"),
 		}
 
 		count := 0
@@ -293,7 +296,6 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 	t.Run("GtDoneNotBlockedByInfraFiles", func(t *testing.T) {
 		overlayDirs := []string{
 			filepath.Join(c.Dir, "packs", "gastown", "overlays", "default"),
-			filepath.Join(c.Dir, "packs", "maintenance", "overlays", "default"),
 		}
 
 		beadsExcluded := false

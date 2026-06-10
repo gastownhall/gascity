@@ -342,10 +342,6 @@ provider = "file"
 [daemon]
 patrol_interval = %q
 `, cityName, patrolInterval))
-	// Init scaffolds a default pool; this fixture needs only the worker pool.
-	if err := os.RemoveAll(filepath.Join(c.Dir, "agents", "dog")); err != nil {
-		t.Fatalf("removing scaffolded dog agent: %v", err)
-	}
 	c.WriteV2AgentDir("worker",
 		fmt.Sprintf("start_command = %q", scriptCmd),
 		`wake_mode = "fresh"`,
@@ -440,7 +436,7 @@ func TestLifecycle_PackMaterializationOnStart(t *testing.T) {
 	}
 
 	systemGastownPack := filepath.Join(".gc", "system", "packs", "gastown", "pack.toml")
-	systemMaintenancePack := filepath.Join(".gc", "system", "packs", "maintenance", "pack.toml")
+	systemCorePack := filepath.Join(".gc", "system", "packs", "core", "pack.toml")
 
 	// Verify managed system packs exist after init.
 	if !c.HasFile(systemGastownPack) {
@@ -467,7 +463,7 @@ func TestLifecycle_PackMaterializationOnStart(t *testing.T) {
 	if !found {
 		t.Fatal(".gc/system/packs/gastown/pack.toml not re-materialized on start — Bug 4 regression")
 	}
-	if !c.HasFile(systemMaintenancePack) {
-		t.Fatal(".gc/system/packs/maintenance/pack.toml not re-materialized on start")
+	if !c.HasFile(systemCorePack) {
+		t.Fatal(".gc/system/packs/core/pack.toml not re-materialized on start")
 	}
 }

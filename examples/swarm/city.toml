@@ -1,7 +1,7 @@
 # Swarm — flat peer pack with shared-directory rigs.
 #
 # A mayor coordinates, a deacon patrols health, and the initialized city
-# picks up dog-based infrastructure from the system maintenance pack.
+# picks up mechanical housekeeping orders from the builtin core pack.
 # Per-rig: N coders self-organize via beads and mail, a dedicated committer
 # handles git. No worktree isolation — all rig agents share one directory.
 #
@@ -17,6 +17,7 @@
 [workspace]
 name = "swarm"
 provider = "claude"
+includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [providers.claude]
 base = "builtin:claude"

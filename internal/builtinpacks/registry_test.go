@@ -23,7 +23,6 @@ func TestAllAndSourceAreDeterministic(t *testing.T) {
 		"core=internal/bootstrap/packs/core",
 		"bd=examples/bd",
 		"dolt=examples/bd/dolt",
-		"maintenance=examples/gastown/packs/maintenance",
 		"gastown=examples/gastown/packs/gastown",
 	}
 	if strings.Join(first, "\n") != strings.Join(want, "\n") {
