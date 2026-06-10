@@ -153,7 +153,7 @@ func TestResolveManagedDoltLockReleaseTimeoutFromCityToml(t *testing.T) {
 [workspace]
 name = "test-city"
 
-[daemon]
+[dolt]
 dolt_lock_release_timeout = "9s"
 `), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)

@@ -131,7 +131,7 @@ func waitManagedDoltSIGKILLLockGate(pid int, dataDir string, alive func(int) boo
 }
 
 // resolveManagedDoltLockReleaseTimeout returns the configured wait window for
-// dolt's on-disk exclusive lock. Reads `[daemon].dolt_lock_release_timeout`
+// dolt's on-disk exclusive lock. Reads `[dolt].dolt_lock_release_timeout`
 // from city.toml when available; falls back to
 // config.DefaultDoltLockReleaseTimeout when the config cannot be loaded.
 // Mirrors resolveManagedDoltStopTimeout's empty-cityPath guard.
@@ -143,5 +143,5 @@ func resolveManagedDoltLockReleaseTimeout(cityPath string) time.Duration {
 	if err != nil || cfg == nil {
 		return config.DefaultDoltLockReleaseTimeout
 	}
-	return cfg.Daemon.DoltLockReleaseTimeoutDuration()
+	return cfg.Dolt.DoltLockReleaseTimeoutDuration()
 }

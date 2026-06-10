@@ -69,7 +69,7 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[daemon]", "start_ready_timeout", cfg.Daemon.StartReadyTimeout)
 	check("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout)
 	check("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow)
-	check("[daemon]", "dolt_lock_release_timeout", cfg.Daemon.DoltLockReleaseTimeout)
+	check("[dolt]", "dolt_lock_release_timeout", cfg.Dolt.DoltLockReleaseTimeout)
 
 	// Orders config durations.
 	check("[orders]", "max_timeout", cfg.Orders.MaxTimeout)
@@ -176,7 +176,7 @@ func ValidateNonNegativeDurations(cfg *City, source string) error {
 	if err := checkNonNegative("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow); err != nil {
 		return err
 	}
-	if err := checkNonNegative("[daemon]", "dolt_lock_release_timeout", cfg.Daemon.DoltLockReleaseTimeout); err != nil {
+	if err := checkNonNegative("[dolt]", "dolt_lock_release_timeout", cfg.Dolt.DoltLockReleaseTimeout); err != nil {
 		return err
 	}
 	for name, policy := range cfg.Beads.Policies {

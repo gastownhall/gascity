@@ -3811,32 +3811,32 @@ func TestValidateNonNegativeDurationsRejectsNegativeDoltStopTimeout(t *testing.T
 
 // --- DoltLockReleaseTimeout tests ---
 
-func TestDaemonDoltLockReleaseTimeoutDefault(t *testing.T) {
-	d := DaemonConfig{}
+func TestDoltConfigDoltLockReleaseTimeoutDefault(t *testing.T) {
+	d := DoltConfig{}
 	got := d.DoltLockReleaseTimeoutDuration()
 	if got != DefaultDoltLockReleaseTimeout {
 		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want %v", got, DefaultDoltLockReleaseTimeout)
 	}
 }
 
-func TestDaemonDoltLockReleaseTimeoutCustom(t *testing.T) {
-	d := DaemonConfig{DoltLockReleaseTimeout: "90s"}
+func TestDoltConfigDoltLockReleaseTimeoutCustom(t *testing.T) {
+	d := DoltConfig{DoltLockReleaseTimeout: "90s"}
 	got := d.DoltLockReleaseTimeoutDuration()
 	if got != 90*time.Second {
 		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want 90s", got)
 	}
 }
 
-func TestDaemonDoltLockReleaseTimeoutZero(t *testing.T) {
-	d := DaemonConfig{DoltLockReleaseTimeout: "0s"}
+func TestDoltConfigDoltLockReleaseTimeoutZero(t *testing.T) {
+	d := DoltConfig{DoltLockReleaseTimeout: "0s"}
 	got := d.DoltLockReleaseTimeoutDuration()
 	if got != 0 {
 		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want 0", got)
 	}
 }
 
-func TestDaemonDoltLockReleaseTimeoutInvalid(t *testing.T) {
-	d := DaemonConfig{DoltLockReleaseTimeout: "not-a-duration"}
+func TestDoltConfigDoltLockReleaseTimeoutInvalid(t *testing.T) {
+	d := DoltConfig{DoltLockReleaseTimeout: "not-a-duration"}
 	got := d.DoltLockReleaseTimeoutDuration()
 	if got != DefaultDoltLockReleaseTimeout {
 		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want %v (default for invalid)", got, DefaultDoltLockReleaseTimeout)
@@ -3848,7 +3848,7 @@ func TestParseDoltLockReleaseTimeout(t *testing.T) {
 [workspace]
 name = "test"
 
-[daemon]
+[dolt]
 dolt_lock_release_timeout = "2m"
 
 [[agent]]
@@ -3858,10 +3858,10 @@ name = "mayor"
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.Daemon.DoltLockReleaseTimeout != "2m" {
-		t.Errorf("Daemon.DoltLockReleaseTimeout = %q, want %q", cfg.Daemon.DoltLockReleaseTimeout, "2m")
+	if cfg.Dolt.DoltLockReleaseTimeout != "2m" {
+		t.Errorf("Dolt.DoltLockReleaseTimeout = %q, want %q", cfg.Dolt.DoltLockReleaseTimeout, "2m")
 	}
-	got := cfg.Daemon.DoltLockReleaseTimeoutDuration()
+	got := cfg.Dolt.DoltLockReleaseTimeoutDuration()
 	if got != 2*time.Minute {
 		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want 2m", got)
 	}
@@ -3869,7 +3869,7 @@ name = "mayor"
 
 func TestValidateNonNegativeDurationsRejectsNegativeDoltLockReleaseTimeout(t *testing.T) {
 	cfg := &City{}
-	cfg.Daemon.DoltLockReleaseTimeout = "-1s"
+	cfg.Dolt.DoltLockReleaseTimeout = "-1s"
 	err := ValidateNonNegativeDurations(cfg, "city.toml")
 	if err == nil {
 		t.Fatal("ValidateNonNegativeDurations() = nil, want error for negative dolt_lock_release_timeout")
