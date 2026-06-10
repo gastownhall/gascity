@@ -84,11 +84,22 @@ func MaterializeBuiltinPacks(cityPath string) error {
 	return nil
 }
 
+// builtinPackIncludesForConfigLoad is the shared config-load boundary for
+// builtin pack readiness: it hydrates the shared repo cache for bundled
+// imports pinned in packs.lock and materializes the builtin system packs
+// before returning the auto-include paths. Every production loader —
+// loadCityConfig, loadCityConfigFS, and cityConfigIncludesWithBuiltinPacks —
+// routes through it so any gc command self-heals a cold repo cache instead of
+// failing with "run \"gc import install\"" after a binary upgrade or cache
+// eviction.
 func builtinPackIncludesForConfigLoad(fs fsys.FS, tomlPath string, warningWriter io.Writer) ([]string, error) {
 	if !usesOSFS(fs) {
 		return nil, nil
 	}
 	cityPath := filepath.Dir(tomlPath)
+	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
+		return nil, err
+	}
 	if err := ensureBuiltinPacksReadyForConfigLoad(cityPath, warningWriter); err != nil {
 		return nil, err
 	}

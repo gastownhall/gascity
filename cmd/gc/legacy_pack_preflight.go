@@ -25,6 +25,13 @@ func ensureLegacyNamedPacksCached(cityPath string) error {
 	return nil
 }
 
+// ensureBundledLockedRemoteImportsCached hydrates the shared repo cache for
+// every bundled pack source pinned in packs.lock so config load can resolve
+// locked bundled imports without network access or a prior "gc import
+// install". A cache that already validates is skipped lock-free; only on
+// validation failure does the preflight take the write-locked
+// packman.EnsureRepoInCache repair path, which revalidates under the lock
+// (a concurrent repair between the two checks is therefore benign).
 func ensureBundledLockedRemoteImportsCached(cityPath string) error {
 	lock, err := readImportLockfile(fsys.OSFS{}, cityPath)
 	if err != nil {
@@ -45,6 +52,13 @@ func ensureBundledLockedRemoteImportsCached(cityPath string) error {
 		pack := lock.Packs[source]
 		if strings.TrimSpace(pack.Commit) == "" {
 			return fmt.Errorf("lock entry %q is missing commit", source)
+		}
+		cachePath, err := packman.RepoCachePath(source, pack.Commit)
+		if err != nil {
+			return fmt.Errorf("resolving cache path for bundled import %q from packs.lock: %w", source, err)
+		}
+		if builtinpacks.ValidateSyntheticRepo(cachePath, pack.Commit) == nil {
+			continue
 		}
 		if _, err := packman.EnsureRepoInCache(source, pack.Commit); err != nil {
 			return fmt.Errorf("caching bundled import %q from packs.lock: %w", source, err)

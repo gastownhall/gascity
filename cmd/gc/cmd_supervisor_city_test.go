@@ -596,6 +596,22 @@ func TestLoadStartCityConfigInstallsLockedBundledRemoteImportBeforeLoad(t *testi
 	assertPublicGastownSyntheticCache(t, gcHome)
 }
 
+func TestLoadCityConfigInstallsLockedBundledRemoteImportBeforeLoad(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("HOME", gcHome)
+	cityPath := writeCityWithLockedPublicGastownImport(t)
+
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		t.Fatalf("loadCityConfig returned error: %v", err)
+	}
+	if cfg.Workspace.Name != "bright-lights" {
+		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
+	}
+	assertPublicGastownSyntheticCache(t, gcHome)
+}
+
 func TestLoadStartCityConfigBuiltinGastownMayorHasNoStartupNudge(t *testing.T) {
 	cityPath := writeCityWithUnmaterializedGastownImport(t)
 
