@@ -4,7 +4,6 @@ package overlay
 import (
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -331,20 +330,20 @@ func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 // plain canonical copy if the source can't be read or isn't a JSON object.
 func createCanonicalSettingsFile(src, dst string, wrapBareHooks bool) error {
 	if !wrapBareHooks {
-		return copyCanonicalJSONFile(src, dst, 0)
+		return copyCanonicalJSONFile(src, dst)
 	}
 	data, err := os.ReadFile(src)
 	if err != nil {
-		return copyCanonicalJSONFile(src, dst, 0)
+		return copyCanonicalJSONFile(src, dst)
 	}
 	out, err := MergeSettingsJSON([]byte("{}"), data, WithWrapBareHooks())
 	if err != nil {
 		// Source isn't a mergeable JSON object — fall back to canonical copy.
-		return copyCanonicalJSONFile(src, dst, 0)
+		return copyCanonicalJSONFile(src, dst)
 	}
 	info, err := os.Stat(src)
 	if err != nil {
-		return copyCanonicalJSONFile(src, dst, 0)
+		return copyCanonicalJSONFile(src, dst)
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("creating parent for %q: %w", dst, err)
@@ -352,7 +351,7 @@ func createCanonicalSettingsFile(src, dst string, wrapBareHooks bool) error {
 	return os.WriteFile(dst, out, info.Mode().Perm())
 }
 
-func copyCanonicalJSONFile(src, dst string, mode fs.FileMode) error {
+func copyCanonicalJSONFile(src, dst string) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return copyFile(src, dst)
@@ -361,17 +360,14 @@ func copyCanonicalJSONFile(src, dst string, mode fs.FileMode) error {
 	if err != nil {
 		return copyFile(src, dst)
 	}
-	if mode == 0 {
-		info, err := os.Stat(src)
-		if err != nil {
-			return copyFile(src, dst)
-		}
-		mode = info.Mode()
+	info, err := os.Stat(src)
+	if err != nil {
+		return copyFile(src, dst)
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("creating parent for %q: %w", dst, err)
 	}
-	return os.WriteFile(dst, canonical, mode.Perm())
+	return os.WriteFile(dst, canonical, info.Mode().Perm())
 }
 
 // copyFile copies a single file preserving permissions.
