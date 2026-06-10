@@ -212,7 +212,8 @@ func Classify(b BeadView, ready, blocked, live, liveRigs map[string]bool) Effect
 	}
 
 	// 7. Epic container needing decomposition.
-	if typ == "epic" || strings.HasPrefix(strings.ToUpper(strings.TrimSpace(title)), "EPIC") {
+	upper := strings.ToUpper(strings.TrimSpace(title))
+	if typ == "epic" || strings.HasPrefix(upper, "EPIC:") || strings.HasPrefix(upper, "EPIC ") {
 		return StateEpicTriage
 	}
 

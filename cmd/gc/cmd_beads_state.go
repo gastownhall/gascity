@@ -242,7 +242,7 @@ func buildBeadsStateLiveSets(store beads.Store) (live, liveRigs map[string]bool)
 	liveRigs = make(map[string]bool)
 	sessionBeads, err := session.ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: false})
 	if err != nil {
-		return
+		return nil, nil
 	}
 	for _, sb := range sessionBeads {
 		if sb.Status == "closed" {

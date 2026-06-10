@@ -107,6 +107,8 @@ func TestClassify(t *testing.T) {
 		{want: state.StateEpicTriage, bead: b("", "", "epic", "", nil, nil)},
 		// 22. epic-triage: title starts with EPIC:
 		{want: state.StateEpicTriage, bead: b("", "", "task", "EPIC: big thing", nil, nil)},
+		// 22b. NOT epic-triage: "epic" substring not at word boundary
+		{want: state.StateUnknown, bead: b("", "", "task", "Epically important task", nil, nil)},
 		// 23. routed-waiting: routed to a live rig
 		{want: state.StateRoutedWaiting, bead: b("R", "", "", "", nil, map[string]string{"gc.routed_to": "rig/agent"})},
 		// 24. ready-unrouted: open, in ready set, plannable, not routed
