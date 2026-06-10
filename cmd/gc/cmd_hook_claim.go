@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -230,8 +231,8 @@ func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, stdout, stder
 }
 
 func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) ([]string, error) {
-	rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
-	group := strings.TrimSpace(bead.Metadata["gc.continuation_group"])
+	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	group := strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
 	if rootID == "" || group == "" {
 		return nil, nil
 	}
@@ -278,8 +279,8 @@ func hookListContinuationWithBdStore(_ context.Context, dir string, env []string
 	return store.List(beads.ListQuery{
 		Status: "open",
 		Metadata: map[string]string{
-			"gc.root_bead_id":       rootID,
-			"gc.continuation_group": group,
+			beadmeta.RootBeadIDMetadataKey:        rootID,
+			beadmeta.ContinuationGroupMetadataKey: group,
 		},
 		TierMode: beads.TierBoth,
 	})
@@ -368,9 +369,9 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 	if len(routeTargets) == 0 {
 		return false
 	}
-	routedTo := strings.TrimSpace(candidate.Metadata["gc.routed_to"])
-	runTarget := strings.TrimSpace(candidate.Metadata["gc.run_target"])
-	kind := strings.TrimSpace(candidate.Metadata["gc.kind"])
+	routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey])
+	runTarget := strings.TrimSpace(candidate.Metadata[beadmeta.RunTargetMetadataKey])
+	kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 	for _, target := range routeTargets {
 		target = strings.TrimSpace(target)
 		if target == "" {
@@ -387,11 +388,11 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 }
 
 func hookClaimRoute(candidate beads.Bead) string {
-	if routedTo := strings.TrimSpace(candidate.Metadata["gc.routed_to"]); routedTo != "" {
+	if routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
 		return routedTo
 	}
-	if strings.TrimSpace(candidate.Metadata["gc.kind"]) == "workflow" {
-		return strings.TrimSpace(candidate.Metadata["gc.run_target"])
+	if strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey]) == "workflow" {
+		return strings.TrimSpace(candidate.Metadata[beadmeta.RunTargetMetadataKey])
 	}
 	return ""
 }

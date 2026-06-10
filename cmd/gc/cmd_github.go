@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/githubmonitor"
@@ -268,7 +269,7 @@ func githubPRRepairMetadata(result githubmonitor.Result) map[string]string {
 	metadata["github.state"] = result.State
 	metadata["github.failed_checks"] = strings.Join(result.FailedChecks, "\n")
 	metadata["github.pending_checks"] = strings.Join(result.PendingChecks, "\n")
-	metadata["gc.routed_to"] = result.RepairRoute
+	metadata[beadmeta.RoutedToMetadataKey] = result.RepairRoute
 	return metadata
 }
 

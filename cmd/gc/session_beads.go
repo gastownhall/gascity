@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -672,9 +673,9 @@ func unclaimWorkAssignedToRetiredSessionBead(
 						update.Status = &open
 					}
 					if fallbackRoute != "" &&
-						strings.TrimSpace(item.Metadata["gc.run_target"]) == "" &&
-						strings.TrimSpace(item.Metadata["gc.routed_to"]) == "" {
-						update.Metadata = map[string]string{"gc.run_target": fallbackRoute}
+						strings.TrimSpace(item.Metadata[beadmeta.RunTargetMetadataKey]) == "" &&
+						strings.TrimSpace(item.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
+						update.Metadata = map[string]string{beadmeta.RunTargetMetadataKey: fallbackRoute}
 					}
 					if err := ownerStore.Update(item.ID, update); err != nil {
 						fmt.Fprintf(stderr, "session beads: unclaiming work %s assigned to retired session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck

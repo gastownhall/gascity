@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -316,13 +317,13 @@ func projectWorkflowEvent(state State, event events.Event) *workflowEventProject
 
 	workflowID := resolvedWorkflowID(root)
 	if workflowID == "" {
-		workflowID = strings.TrimSpace(bead.Metadata["gc.workflow_id"])
+		workflowID = strings.TrimSpace(bead.Metadata[beadmeta.WorkflowIDMetadataKey])
 	}
 	if workflowID == "" {
 		workflowID = root.ID
 	}
 
-	logicalNodeID := strings.TrimSpace(bead.Metadata["gc.logical_bead_id"])
+	logicalNodeID := strings.TrimSpace(bead.Metadata[beadmeta.LogicalBeadIDMetadataKey])
 	if logicalNodeID == "" {
 		logicalNodeID = bead.ID
 	}
@@ -351,10 +352,10 @@ func projectWorkflowEvent(state State, event events.Event) *workflowEventProject
 			Title:         bead.Title,
 			Status:        workflowStatus(bead),
 			Kind:          workflowKind(bead),
-			StepRef:       strings.TrimSpace(bead.Metadata["gc.step_ref"]),
+			StepRef:       strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]),
 			Attempt:       workflowAttempt(bead),
-			LogicalBeadID: strings.TrimSpace(bead.Metadata["gc.logical_bead_id"]),
-			ScopeRef:      strings.TrimSpace(bead.Metadata["gc.scope_ref"]),
+			LogicalBeadID: strings.TrimSpace(bead.Metadata[beadmeta.LogicalBeadIDMetadataKey]),
+			ScopeRef:      strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey]),
 			Assignee:      strings.TrimSpace(bead.Assignee),
 			Metadata:      cloneStringMap(bead.Metadata),
 		},
@@ -406,9 +407,9 @@ func workflowEventPayloadLooksWorkflow(bead beads.Bead) bool {
 	if workflowKind(bead) == "workflow" {
 		return true
 	}
-	return strings.TrimSpace(bead.Metadata["gc.root_bead_id"]) != "" ||
-		strings.TrimSpace(bead.Metadata["gc.workflow_id"]) != "" ||
-		strings.TrimSpace(bead.Metadata["gc.root_store_ref"]) != ""
+	return strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey]) != "" ||
+		strings.TrimSpace(bead.Metadata[beadmeta.WorkflowIDMetadataKey]) != "" ||
+		strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey]) != ""
 }
 
 func workflowEventBeadFromSubject(state State, subjectID string) (beads.Bead, bool) {
@@ -434,7 +435,7 @@ func workflowEventBeadFromSubject(state State, subjectID string) (beads.Bead, bo
 }
 
 func workflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, beads.Bead, bool) {
-	rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" && workflowKind(bead) == "workflow" {
 		rootID = bead.ID
 	}
@@ -442,7 +443,7 @@ func workflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, beads.B
 		return workflowStoreInfo{}, beads.Bead{}, false
 	}
 
-	if info, ok := workflowStoreByRef(state, bead.Metadata["gc.root_store_ref"]); ok && info.store != nil {
+	if info, ok := workflowStoreByRef(state, bead.Metadata[beadmeta.RootStoreRefMetadataKey]); ok && info.store != nil {
 		root, ok := workflowRootInStore(info.store, rootID)
 		if ok {
 			return info, root, true
@@ -493,7 +494,7 @@ func workflowAttemptSummary(bead beads.Bead) *WorkflowAttemptSummary {
 		AttemptCount:  attempt,
 		ActiveAttempt: attempt,
 	}
-	if maxAttempts := metadataInt(bead.Metadata, "gc.max_attempts"); maxAttempts > 0 {
+	if maxAttempts := metadataInt(bead.Metadata, beadmeta.MaxAttemptsMetadataKey); maxAttempts > 0 {
 		summary.MaxAttempts = maxAttempts
 	}
 	return summary

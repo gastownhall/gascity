@@ -1,6 +1,10 @@
 package formula
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+)
 
 // Recipe is the output of formula compilation. It contains a flattened,
 // ordered list of steps with namespaced IDs and all dependency edges.
@@ -124,7 +128,7 @@ func RecipeHasReadySurface(recipe *Recipe) bool {
 		return true
 	}
 	root := recipe.RootStep()
-	return root != nil && root.Metadata["gc.kind"] == "workflow"
+	return root != nil && root.Metadata[beadmeta.KindMetadataKey] == "workflow"
 }
 
 // StepByID returns the step with the given ID, or nil if not found.

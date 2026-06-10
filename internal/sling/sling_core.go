@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -630,7 +631,7 @@ func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method st
 		return result, fmt.Errorf("setting workflow root %s in_progress: %w", rootID, err)
 	}
 	if sourceBeadID != "" {
-		if err := deps.Store.SetMetadata(rootID, "gc.source_bead_id", sourceBeadID); err != nil {
+		if err := deps.Store.SetMetadata(rootID, beadmeta.SourceBeadIDMetadataKey, sourceBeadID); err != nil {
 			return result, fmt.Errorf("setting gc.source_bead_id on workflow %s: %w", rootID, err)
 		}
 		if sourceStoreRef := strings.TrimSpace(deps.StoreRef); sourceStoreRef != "" {

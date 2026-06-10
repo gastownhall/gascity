@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 )
@@ -157,7 +158,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if opts.Title != "" {
 				node.Title = formula.Substitute(opts.Title, vars)
 			}
-			if opts.ParentID != "" && step.Metadata["gc.kind"] != "workflow" {
+			if opts.ParentID != "" && step.Metadata[beadmeta.KindMetadataKey] != "workflow" {
 				node.ParentID = opts.ParentID
 			}
 			if opts.IdempotencyKey != "" {
@@ -187,20 +188,20 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if node.Metadata == nil {
 				node.Metadata = make(map[string]string, 1)
 			}
-			if node.Metadata["gc.step_ref"] == "" {
-				node.Metadata["gc.step_ref"] = step.ID
+			if node.Metadata[beadmeta.StepRefMetadataKey] == "" {
+				node.Metadata[beadmeta.StepRefMetadataKey] = step.ID
 			}
-			if (graphWorkflow || step.Metadata["gc.kind"] != "") && node.Metadata["gc.root_bead_id"] == "" {
+			if (graphWorkflow || step.Metadata[beadmeta.KindMetadataKey] != "") && node.Metadata[beadmeta.RootBeadIDMetadataKey] == "" {
 				if node.MetadataRefs == nil {
 					node.MetadataRefs = make(map[string]string, 1)
 				}
-				node.MetadataRefs["gc.root_bead_id"] = rootKey
+				node.MetadataRefs[beadmeta.RootBeadIDMetadataKey] = rootKey
 			}
 			if logicalStepID, ok := logicalRecipeStepID(step); ok {
 				if node.MetadataRefs == nil {
 					node.MetadataRefs = make(map[string]string, 1)
 				}
-				node.MetadataRefs["gc.logical_bead_id"] = logicalStepID
+				node.MetadataRefs[beadmeta.LogicalBeadIDMetadataKey] = logicalStepID
 			}
 			if node.Assignee != "" {
 				node.AssignAfterCreate = true
@@ -272,8 +273,8 @@ func deferGraphNodeRouting(node *beads.GraphApplyNode) {
 		node.Assignee = ""
 		node.AssignAfterCreate = false
 	}
-	deferGraphNodeMetadataValue(node, "gc.routed_to", DeferredRoutedToMetadataKey)
-	deferGraphNodeMetadataValue(node, "gc.execution_routed_to", DeferredExecutionRoutedToMetadataKey)
+	deferGraphNodeMetadataValue(node, beadmeta.RoutedToMetadataKey, DeferredRoutedToMetadataKey)
+	deferGraphNodeMetadataValue(node, beadmeta.ExecutionRoutedToMetadataKey, DeferredExecutionRoutedToMetadataKey)
 }
 
 func deferGraphNodeMetadataValue(node *beads.GraphApplyNode, sourceKey, deferredKey string) {
@@ -355,18 +356,18 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 		if node.Metadata == nil {
 			node.Metadata = make(map[string]string, 2)
 		}
-		if node.Metadata["gc.step_ref"] == "" {
-			node.Metadata["gc.step_ref"] = step.ID
+		if node.Metadata[beadmeta.StepRefMetadataKey] == "" {
+			node.Metadata[beadmeta.StepRefMetadataKey] = step.ID
 		}
-		node.Metadata["gc.root_bead_id"] = opts.RootID
+		node.Metadata[beadmeta.RootBeadIDMetadataKey] = opts.RootID
 		if logicalStepID, ok := logicalRecipeStepID(step); ok {
 			if existingLogicalBeadID := existingLogicalBeadIDs[logicalStepID]; existingLogicalBeadID != "" {
-				node.Metadata["gc.logical_bead_id"] = existingLogicalBeadID
+				node.Metadata[beadmeta.LogicalBeadIDMetadataKey] = existingLogicalBeadID
 			} else {
 				if node.MetadataRefs == nil {
 					node.MetadataRefs = make(map[string]string, 1)
 				}
-				node.MetadataRefs["gc.logical_bead_id"] = logicalStepID
+				node.MetadataRefs[beadmeta.LogicalBeadIDMetadataKey] = logicalStepID
 			}
 		}
 		if node.Assignee != "" {

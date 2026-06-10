@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -67,14 +68,14 @@ func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, sk
 		// topology beads can also carry bare gc.run_target, but they are not
 		// claimed through the pool-demand gc.routed_to path. A targeted metadata
 		// query avoids a full-store scan.
-		items, err := store.List(beads.ListQuery{Metadata: map[string]string{"gc.kind": "workflow"}})
+		items, err := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: "workflow"}})
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err))
 			continue
 		}
 		for _, b := range items {
-			runTarget := strings.TrimSpace(b.Metadata["gc.run_target"])
-			if runTarget == "" || strings.TrimSpace(b.Metadata["gc.routed_to"]) != "" {
+			runTarget := strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])
+			if runTarget == "" || strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
 				continue
 			}
 			targets = append(targets, backfillTarget{label: sc.label, store: store, beadID: b.ID, runTarget: runTarget})
@@ -109,7 +110,7 @@ func (c *runTargetRoutedToBackfillCheck) Run(_ *doctor.CheckContext) *doctor.Che
 func (c *runTargetRoutedToBackfillCheck) Fix(_ *doctor.CheckContext) error {
 	targets, skipped := c.collect()
 	for _, tgt := range targets {
-		if err := tgt.store.SetMetadata(tgt.beadID, "gc.routed_to", tgt.runTarget); err != nil {
+		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.runTarget); err != nil {
 			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)
 		}
 	}

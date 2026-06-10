@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -543,8 +544,8 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 		}
 		if roots, err := info.store.List(beads.ListQuery{
 			Metadata: map[string]string{
-				"gc.kind":        "workflow",
-				"gc.workflow_id": workflowID,
+				beadmeta.KindMetadataKey:       "workflow",
+				beadmeta.WorkflowIDMetadataKey: workflowID,
 			},
 			IncludeClosed: true,
 		}); err == nil {
@@ -554,7 +555,7 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 		}
 		for _, rootID := range rootIDs {
 			all, err := info.store.List(beads.ListQuery{
-				Metadata:      map[string]string{"gc.root_bead_id": rootID},
+				Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 				IncludeClosed: true,
 			})
 			if err != nil {
@@ -569,8 +570,8 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 		}
 		found = true
 		info.store.CloseAll(ids, map[string]string{ //nolint:errcheck
-			"gc.outcome":   "skipped",
-			"close_reason": sourceworkflow.WorkflowSkippedCloseReason,
+			beadmeta.OutcomeMetadataKey: "skipped",
+			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 		})
 	}
 
@@ -684,8 +685,8 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 		}
 		if roots, err := info.store.List(beads.ListQuery{
 			Metadata: map[string]string{
-				"gc.kind":        "workflow",
-				"gc.workflow_id": workflowID,
+				beadmeta.KindMetadataKey:       "workflow",
+				beadmeta.WorkflowIDMetadataKey: workflowID,
 			},
 			IncludeClosed: true,
 		}); err == nil {
@@ -697,7 +698,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 		}
 		for _, rootID := range rootIDs {
 			all, err := info.store.List(beads.ListQuery{
-				Metadata:      map[string]string{"gc.root_bead_id": rootID},
+				Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 				IncludeClosed: true,
 			})
 			if err != nil {
@@ -715,8 +716,8 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 
 		// Phase 1: Batch close all open beads.
 		n, closeErr := info.store.CloseAll(ids, map[string]string{
-			"gc.outcome":   "skipped",
-			"close_reason": sourceworkflow.WorkflowSkippedCloseReason,
+			beadmeta.OutcomeMetadataKey: "skipped",
+			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 		})
 		closed += n
 		if closeErr != nil {

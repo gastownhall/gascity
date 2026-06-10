@@ -464,7 +464,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		pendingCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.ID
-			kind := strings.TrimSpace(candidate.Metadata["gc.kind"])
+			kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
 			// controlDispatcherServe currently returns nil both when it
 			// successfully advanced a control bead AND when ProcessControl

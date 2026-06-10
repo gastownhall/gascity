@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -88,7 +89,7 @@ func (c *v2RoutedToNamespaceCheck) scanScope(findings, skipped *[]string, aliase
 	sort.Strings(routes)
 	for _, route := range routes {
 		items, err := store.List(beads.ListQuery{
-			Metadata: map[string]string{"gc.routed_to": route},
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: route},
 		})
 		if err != nil {
 			*skipped = append(*skipped, fmt.Sprintf("%s skipped: listing beads: %v", label, err))
@@ -105,7 +106,7 @@ func (c *v2RoutedToNamespaceCheck) scanScope(findings, skipped *[]string, aliase
 }
 
 func (c *v2RoutedToNamespaceCheck) scanRoutedToBead(findings *[]string, aliases map[string][]string, label string, bead beads.Bead) {
-	route := strings.TrimSpace(bead.Metadata["gc.routed_to"])
+	route := strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey])
 	if route == "" {
 		return
 	}

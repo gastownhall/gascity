@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1354,7 +1355,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		)
 	}
 	if a.Pool != "" {
-		update.Metadata = map[string]string{"gc.routed_to": pool}
+		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		// Label failure is critical for duplicate-dispatch prevention.
@@ -1498,11 +1499,11 @@ func isOrderWispRootCandidate(b beads.Bead) bool {
 	if beads.IsMoleculeType(b.Type) {
 		return true
 	}
-	return b.Metadata["gc.kind"] == "workflow" || b.Metadata["gc.kind"] == "wisp"
+	return b.Metadata[beadmeta.KindMetadataKey] == "workflow" || b.Metadata[beadmeta.KindMetadataKey] == "wisp"
 }
 
 func isOrderRootOnlyWispCandidate(b beads.Bead) bool {
-	return b.Metadata["gc.kind"] == "wisp" && !beads.IsMoleculeType(b.Type)
+	return b.Metadata[beadmeta.KindMetadataKey] == "wisp" && !beads.IsMoleculeType(b.Type)
 }
 
 // isTransientNotificationBead reports whether a bead is a short-lived delivery
@@ -1544,7 +1545,7 @@ func isTransientNotificationBead(b beads.Bead) bool {
 func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.Bead) bool) (bool, error) {
 	reader := beads.HandlesFor(store).Live
 	members, err := reader.List(beads.ListQuery{
-		Metadata:      map[string]string{"gc.root_bead_id": rootID},
+		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		IncludeClosed: true,
 		TierMode:      beads.TierBoth,
 	})
@@ -1697,20 +1698,20 @@ func orderWispGraphDependentOwnedByRoot(child beads.Bead, rootID string) bool {
 	if child.ID == rootID {
 		return true
 	}
-	return child.Metadata["gc.root_bead_id"] == rootID
+	return child.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID
 }
 
 func orderWispMayHaveGraphDependents(bead beads.Bead) bool {
 	if isOrderWispRootCandidate(bead) {
 		return true
 	}
-	if bead.Metadata["gc.root_bead_id"] != "" {
+	if bead.Metadata[beadmeta.RootBeadIDMetadataKey] != "" {
 		return true
 	}
-	if bead.Metadata["gc.step_ref"] != "" {
+	if bead.Metadata[beadmeta.StepRefMetadataKey] != "" {
 		return true
 	}
-	if bead.Metadata["gc.logical_bead_id"] != "" {
+	if bead.Metadata[beadmeta.LogicalBeadIDMetadataKey] != "" {
 		return true
 	}
 	return false

@@ -3,6 +3,8 @@ package formula
 import (
 	"context"
 	"fmt"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // FragmentRecipe is a compiled rootless subgraph that can be instantiated into
@@ -160,7 +162,7 @@ func stripFragmentRecipe(recipe *Recipe) *FragmentRecipe {
 		if step.IsRoot {
 			continue
 		}
-		if step.Metadata["gc.kind"] == "workflow-finalize" {
+		if step.Metadata[beadmeta.KindMetadataKey] == "workflow-finalize" {
 			continue
 		}
 		steps = append(steps, step)
@@ -212,12 +214,12 @@ func ApplyFragmentRecipeGraphControls(fragment *FragmentRecipe) {
 
 		replacements[step.ID] = controlID
 		meta := map[string]string{
-			"gc.kind":        "scope-check",
-			"gc.scope_ref":   step.Metadata["gc.scope_ref"],
-			"gc.scope_role":  "control",
-			"gc.control_for": step.ID,
+			beadmeta.KindMetadataKey:       "scope-check",
+			beadmeta.ScopeRefMetadataKey:   step.Metadata[beadmeta.ScopeRefMetadataKey],
+			beadmeta.ScopeRoleMetadataKey:  "control",
+			beadmeta.ControlForMetadataKey: step.ID,
 		}
-		for _, key := range []string{"gc.step_id", "gc.ralph_step_id", "gc.attempt", "gc.on_fail"} {
+		for _, key := range []string{beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey, beadmeta.OnFailMetadataKey} {
 			if value := step.Metadata[key]; value != "" {
 				meta[key] = value
 			}
@@ -251,13 +253,13 @@ func ApplyFragmentRecipeGraphControls(fragment *FragmentRecipe) {
 }
 
 func recipeStepNeedsScopeCheck(step RecipeStep) bool {
-	if step.Metadata["gc.scope_ref"] == "" {
+	if step.Metadata[beadmeta.ScopeRefMetadataKey] == "" {
 		return false
 	}
-	if step.Metadata["gc.scope_role"] == "teardown" {
+	if step.Metadata[beadmeta.ScopeRoleMetadataKey] == "teardown" {
 		return false
 	}
-	switch step.Metadata["gc.kind"] {
+	switch step.Metadata[beadmeta.KindMetadataKey] {
 	case "scope", "scope-check", "workflow-finalize", "fanout", "check", "spec":
 		return false
 	default:
@@ -310,7 +312,7 @@ func fragmentSinkStepIDs(fragment *FragmentRecipe) []string {
 		if _, ok := referenced[step.ID]; ok {
 			continue
 		}
-		switch step.Metadata["gc.kind"] {
+		switch step.Metadata[beadmeta.KindMetadataKey] {
 		case "workflow-finalize", "spec":
 			continue
 		}

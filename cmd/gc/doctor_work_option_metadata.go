@@ -38,8 +38,8 @@ type workOptionLegacyKey struct {
 }
 
 var workOptionLegacyKeys = []workOptionLegacyKey{
-	{legacy: "gc.model", canonical: dispatchOptionMetadataKey("model")},
-	{legacy: "gc.reasoning", canonical: dispatchOptionMetadataKey("effort")},
+	{legacy: beadmeta.ModelMetadataKey, canonical: dispatchOptionMetadataKey("model")},
+	{legacy: beadmeta.ReasoningMetadataKey, canonical: dispatchOptionMetadataKey("effort")},
 }
 
 const (

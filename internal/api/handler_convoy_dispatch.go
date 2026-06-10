@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -125,8 +126,8 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 			}
 			roots, err := info.store.List(beads.ListQuery{
 				Metadata: map[string]string{
-					"gc.kind":        "workflow",
-					"gc.workflow_id": workflowID,
+					beadmeta.KindMetadataKey:       "workflow",
+					beadmeta.WorkflowIDMetadataKey: workflowID,
 				},
 				IncludeClosed: true,
 			})
@@ -168,7 +169,7 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 	if !usedSQL {
 		// Fall back to bd subprocess path.
 		all, err := info.store.List(beads.ListQuery{
-			Metadata:      map[string]string{"gc.root_bead_id": root.ID},
+			Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
 			IncludeClosed: true,
 		})
 		if err != nil {
@@ -231,10 +232,10 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 			Title:         bead.Title,
 			Status:        workflowStatus(bead),
 			Kind:          workflowKind(bead),
-			StepRef:       strings.TrimSpace(bead.Metadata["gc.step_ref"]),
+			StepRef:       strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]),
 			Attempt:       workflowAttempt(bead),
-			LogicalBeadID: strings.TrimSpace(bead.Metadata["gc.logical_bead_id"]),
-			ScopeRef:      strings.TrimSpace(bead.Metadata["gc.scope_ref"]),
+			LogicalBeadID: strings.TrimSpace(bead.Metadata[beadmeta.LogicalBeadIDMetadataKey]),
+			ScopeRef:      strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey]),
 			Assignee:      strings.TrimSpace(bead.Assignee),
 			Metadata:      cloneStringMap(bead.Metadata),
 		})
@@ -263,7 +264,7 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 }
 
 func isWorkflowRoot(bead beads.Bead) bool {
-	return strings.TrimSpace(bead.Metadata["gc.kind"]) == "workflow"
+	return strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == "workflow"
 }
 
 // isGraphConvoyBead reports whether a bead is a formula-compiled graph
@@ -273,7 +274,7 @@ func isGraphConvoyBead(b beads.Bead) bool {
 }
 
 func resolvedWorkflowID(root beads.Bead) string {
-	if workflowID := strings.TrimSpace(root.Metadata["gc.workflow_id"]); workflowID != "" {
+	if workflowID := strings.TrimSpace(root.Metadata[beadmeta.WorkflowIDMetadataKey]); workflowID != "" {
 		return workflowID
 	}
 	return root.ID
@@ -394,8 +395,8 @@ func parseOptionalWorkflowRequestScope(rawScopeKind, rawScopeRef string) (string
 }
 
 func workflowRootScope(root beads.Bead) (string, string) {
-	scopeKind := strings.TrimSpace(root.Metadata["gc.scope_kind"])
-	scopeRef := strings.TrimSpace(root.Metadata["gc.scope_ref"])
+	scopeKind := strings.TrimSpace(root.Metadata[beadmeta.ScopeKindMetadataKey])
+	scopeRef := strings.TrimSpace(root.Metadata[beadmeta.ScopeRefMetadataKey])
 	if scopeKind == "" || scopeRef == "" {
 		return "", ""
 	}
@@ -468,7 +469,7 @@ func workflowAttempt(bead beads.Bead) *int {
 }
 
 func workflowAttemptValue(bead beads.Bead) int {
-	raw := strings.TrimSpace(bead.Metadata["gc.attempt"])
+	raw := strings.TrimSpace(bead.Metadata[beadmeta.AttemptMetadataKey])
 	if raw == "" {
 		return 0
 	}
@@ -537,7 +538,7 @@ func cloneStringMap(src map[string]string) map[string]string {
 
 func workflowKind(bead beads.Bead) string {
 	if bead.Metadata != nil {
-		if kind := strings.TrimSpace(bead.Metadata["gc.kind"]); kind != "" {
+		if kind := strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]); kind != "" {
 			return kind
 		}
 	}
@@ -545,7 +546,7 @@ func workflowKind(bead beads.Bead) string {
 }
 
 func workflowStatus(bead beads.Bead) string {
-	outcome := strings.TrimSpace(bead.Metadata["gc.outcome"])
+	outcome := strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey])
 	hasAssignment := strings.TrimSpace(bead.Assignee) != ""
 	switch strings.TrimSpace(bead.Status) {
 	case "closed":

@@ -69,9 +69,13 @@ var excludedDirs = []string{
 // TestNoUndeclaredMetadataKeys is the inverted analog of the events package's
 // TestEveryKnownEventTypeHasRegisteredPayload: rather than asserting a closed
 // declared set is fully registered, it scans non-test Go source and asserts every
-// gc.*-prefixed string literal resolves to a declared metadata key, a declared
-// open-world prefix, or the audited allowlist. This is the open-world-safe shape
-// — pack-private keys (which never appear as Go literals) are never flagged.
+// whole gc.*-key-shaped string literal is either covered by a declared open-world
+// prefix or in the audited non-metadata allowlist. A literal that spells out a
+// DECLARED key is also a violation — reference the beadmeta constant instead, so
+// the vocabulary stays compiler-checked. This is the open-world-safe shape —
+// pack-private keys (which never appear as Go literals) are never flagged, and
+// keys embedded inside larger strings (jq filters, SQL JSON paths, fixture
+// documents) are out of scope by the key-shape rule.
 func TestNoUndeclaredMetadataKeys(t *testing.T) {
 	root := repoRoot(t)
 
@@ -115,16 +119,18 @@ func TestNoUndeclaredMetadataKeys(t *testing.T) {
 				if !keyShape.MatchString(val) {
 					return true // not a whole bead-metadata key (bare "gc.", message, filter, ...)
 				}
-				if _, ok := declared[val]; ok {
-					return true
-				}
 				if hasKnownPrefix(val) {
 					return true
 				}
 				if _, ok := allowedNonMetadata[val]; ok {
 					return true
 				}
-				violations = append(violations, fmt.Sprintf("  %s:%d  %q", rel, fset.Position(lit.Pos()).Line, val))
+				line := fset.Position(lit.Pos()).Line
+				if _, ok := declared[val]; ok {
+					violations = append(violations, fmt.Sprintf("  %s:%d  %q is declared — reference the beadmeta constant instead of the raw literal", rel, line, val))
+				} else {
+					violations = append(violations, fmt.Sprintf("  %s:%d  %q is undeclared — declare it in internal/beadmeta/keys.go", rel, line, val))
+				}
 				return true
 			})
 			return nil
@@ -135,9 +141,10 @@ func TestNoUndeclaredMetadataKeys(t *testing.T) {
 	}
 
 	if len(violations) > 0 {
-		t.Fatalf("found %d undeclared gc.* bead-metadata key literal(s).\n"+
-			"Declare each in internal/beadmeta/keys.go (and KnownMetadataKeys), or, if it is\n"+
-			"not a bead-metadata key, add it to allowedNonMetadata with a justification:\n%s",
+		t.Fatalf("found %d raw gc.* bead-metadata key literal(s) in non-test Go.\n"+
+			"Use the beadmeta constant (declaring it in internal/beadmeta/keys.go and\n"+
+			"KnownMetadataKeys if new), or, if the literal is not a bead-metadata key, add\n"+
+			"it to allowedNonMetadata with a justification:\n%s",
 			len(violations), strings.Join(violations, "\n"))
 	}
 }

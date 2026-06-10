@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 var (
@@ -205,7 +207,7 @@ func GraphV2RecipeHasDrain(recipe *Recipe) bool {
 		return false
 	}
 	for _, step := range recipe.Steps {
-		if strings.TrimSpace(step.Metadata["gc.kind"]) == "drain" {
+		if strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) == "drain" {
 			return true
 		}
 	}
@@ -389,7 +391,7 @@ func graphV2RecipeReservedSymbolErrors(recipe *Recipe, allowConvoyReference bool
 			collectGraphV2ReservedRefsInStringWithVisitor(stepPrefix+".gate.id", step.Gate.ID, allowConvoyReference, &errs, visit)
 			collectGraphV2ReservedRefsInStringWithVisitor(stepPrefix+".gate.timeout", step.Gate.Timeout, allowConvoyReference, &errs, visit)
 		}
-		if strings.TrimSpace(step.Metadata["gc.kind"]) == "drain" {
+		if strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) == "drain" {
 			validateGraphV2RecipeDrainStep(stepPrefix, step, &errs)
 		}
 	}
@@ -398,32 +400,32 @@ func graphV2RecipeReservedSymbolErrors(recipe *Recipe, allowConvoyReference bool
 
 func recipeDeclaresGraphV2Contract(recipe *Recipe) bool {
 	root := recipe.RootStep()
-	return root != nil && strings.EqualFold(strings.TrimSpace(root.Metadata["gc.formula_contract"]), "graph.v2")
+	return root != nil && strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), "graph.v2")
 }
 
 func validateGraphV2RecipeDrainStep(prefix string, step RecipeStep, errs *[]string) {
-	context := strings.TrimSpace(step.Metadata["gc.drain_context"])
+	context := strings.TrimSpace(step.Metadata[beadmeta.DrainContextMetadataKey])
 	switch context {
 	case "", "separate":
 	case "shared":
 	default:
 		*errs = append(*errs, fmt.Sprintf("%s.drain: context must be separate or shared", prefix))
 	}
-	formulaName := strings.TrimSpace(step.Metadata["gc.drain_formula"])
+	formulaName := strings.TrimSpace(step.Metadata[beadmeta.DrainFormulaMetadataKey])
 	if formulaName == "" {
 		*errs = append(*errs, fmt.Sprintf("%s.drain: formula is required", prefix))
 	}
 	if strings.Contains(formulaName, "{{") {
 		*errs = append(*errs, fmt.Sprintf("%s.drain: templated item formula names are not supported in v0", prefix))
 	}
-	memberAccess := strings.TrimSpace(step.Metadata["gc.drain_member_access"])
+	memberAccess := strings.TrimSpace(step.Metadata[beadmeta.DrainMemberAccessMetadataKey])
 	switch memberAccess {
 	case "", "read":
 	case "exclusive":
 	default:
 		*errs = append(*errs, fmt.Sprintf("%s.drain: member_access must be read or exclusive", prefix))
 	}
-	if raw := strings.TrimSpace(step.Metadata["gc.drain_max_units"]); raw != "" {
+	if raw := strings.TrimSpace(step.Metadata[beadmeta.DrainMaxUnitsMetadataKey]); raw != "" {
 		maxUnits, err := strconv.Atoi(raw)
 		switch {
 		case err != nil:
@@ -434,15 +436,15 @@ func validateGraphV2RecipeDrainStep(prefix string, step RecipeStep, errs *[]stri
 			*errs = append(*errs, fmt.Sprintf("%s.drain: max_units must be <= 100 in v0", prefix))
 		}
 	}
-	switch strings.TrimSpace(step.Metadata["gc.drain_on_item_failure"]) {
+	switch strings.TrimSpace(step.Metadata[beadmeta.DrainOnItemFailureMetadataKey]) {
 	case "", "skip_remaining", "continue":
 	default:
 		*errs = append(*errs, fmt.Sprintf("%s.drain: on_item_failure must be skip_remaining or continue", prefix))
 	}
-	if strings.TrimSpace(step.Metadata["gc.drain_continuation_group"]) != "" && context != "shared" {
+	if strings.TrimSpace(step.Metadata[beadmeta.DrainContinuationGroupMetadataKey]) != "" && context != "shared" {
 		*errs = append(*errs, fmt.Sprintf("%s.drain: continuation_group is valid only with context = \"shared\"", prefix))
 	}
-	if context == "shared" && strings.TrimSpace(step.Metadata["gc.drain_item_single_lane"]) != "true" {
+	if context == "shared" && strings.TrimSpace(step.Metadata[beadmeta.DrainItemSingleLaneMetadataKey]) != "true" {
 		*errs = append(*errs, fmt.Sprintf("%s.drain.item: shared drains require single_lane = true", prefix))
 	}
 	if strings.TrimSpace(step.Assignee) != "" {
@@ -801,7 +803,7 @@ func GraphV2OutputJSONWarnings(f *Formula) []string {
 
 func collectOutputJSONWarnings(steps []*Step, formulaName string, out *[]string) {
 	for _, step := range steps {
-		if step.Drain == nil && strings.TrimSpace(step.Metadata["gc.output_json_required"]) == "true" {
+		if step.Drain == nil && strings.TrimSpace(step.Metadata[beadmeta.OutputJSONRequiredMetadataKey]) == "true" {
 			*out = append(*out, fmt.Sprintf(
 				"formula %s step %s: gc.output_json is legacy; use drain in graph.v2 formulas (see: engdocs/drain-fanout.md)",
 				formulaName, step.ID,

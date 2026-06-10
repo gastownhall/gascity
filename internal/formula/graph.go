@@ -1,6 +1,10 @@
 package formula
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+)
 
 // ApplyGraphControls applies graph control metadata to steps in the formula.
 func ApplyGraphControls(f *Formula) {
@@ -30,23 +34,23 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		if step.Metadata == nil {
 			step.Metadata = make(map[string]string)
 		}
-		step.Metadata["gc.output_json_required"] = "true"
+		step.Metadata[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 		controlMetadata := map[string]string{
-			"gc.kind":        "fanout",
-			"gc.control_for": step.ID,
-			"gc.for_each":    step.OnComplete.ForEach,
-			"gc.bond":        step.OnComplete.Bond,
-			"gc.fanout_mode": "parallel",
+			beadmeta.KindMetadataKey:       "fanout",
+			beadmeta.ControlForMetadataKey: step.ID,
+			beadmeta.ForEachMetadataKey:    step.OnComplete.ForEach,
+			beadmeta.BondMetadataKey:       step.OnComplete.Bond,
+			beadmeta.FanoutModeMetadataKey: "parallel",
 		}
 		if step.OnComplete.Sequential {
-			controlMetadata["gc.fanout_mode"] = "sequential"
+			controlMetadata[beadmeta.FanoutModeMetadataKey] = "sequential"
 		}
 		if len(step.OnComplete.Vars) > 0 {
 			if data, err := json.Marshal(step.OnComplete.Vars); err == nil {
-				controlMetadata["gc.bond_vars"] = string(data)
+				controlMetadata[beadmeta.BondVarsMetadataKey] = string(data)
 			}
 		}
-		for _, key := range []string{"gc.scope_ref", "gc.scope_role", "gc.on_fail", "gc.step_id", "gc.ralph_step_id", "gc.attempt"} {
+		for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.ScopeRoleMetadataKey, beadmeta.OnFailMetadataKey, beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey} {
 			if value := step.Metadata[key]; value != "" {
 				controlMetadata[key] = value
 			}
@@ -67,12 +71,12 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		controlID := step.ID + "-scope-check"
 		scopeControlByStep[step.ID] = controlID
 		controlMetadata := map[string]string{
-			"gc.kind":        "scope-check",
-			"gc.scope_ref":   step.Metadata["gc.scope_ref"],
-			"gc.scope_role":  "control",
-			"gc.control_for": step.ID,
+			beadmeta.KindMetadataKey:       "scope-check",
+			beadmeta.ScopeRefMetadataKey:   step.Metadata[beadmeta.ScopeRefMetadataKey],
+			beadmeta.ScopeRoleMetadataKey:  "control",
+			beadmeta.ControlForMetadataKey: step.ID,
 		}
-		for _, key := range []string{"gc.step_id", "gc.ralph_step_id", "gc.attempt", "gc.on_fail"} {
+		for _, key := range []string{beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey, beadmeta.OnFailMetadataKey} {
 			if value := step.Metadata[key]; value != "" {
 				controlMetadata[key] = value
 			}
@@ -99,10 +103,10 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 			mode = "majority"
 		}
 		tallyMeta := map[string]string{
-			"gc.kind":        "tally",
-			"gc.control_for": step.ID,
-			"gc.tally_mode":  mode,
-			"gc.vote_field":  step.Tally.VoteField,
+			beadmeta.KindMetadataKey:       "tally",
+			beadmeta.ControlForMetadataKey: step.ID,
+			beadmeta.TallyModeMetadataKey:  mode,
+			beadmeta.VoteFieldMetadataKey:  step.Tally.VoteField,
 		}
 		controls = append(controls, &Step{
 			ID:       tallyID,
@@ -133,7 +137,7 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		Type:  "task",
 		Needs: sinks,
 		Metadata: map[string]string{
-			"gc.kind": "workflow-finalize",
+			beadmeta.KindMetadataKey: "workflow-finalize",
 		},
 	})
 	f.Steps = sortGraphSteps(f.Steps)
@@ -143,13 +147,13 @@ func needsScopeCheck(step *Step) bool {
 	if step == nil {
 		return false
 	}
-	if step.Metadata["gc.scope_ref"] == "" {
+	if step.Metadata[beadmeta.ScopeRefMetadataKey] == "" {
 		return false
 	}
-	if step.Metadata["gc.scope_role"] == "teardown" {
+	if step.Metadata[beadmeta.ScopeRoleMetadataKey] == "teardown" {
 		return false
 	}
-	switch step.Metadata["gc.kind"] {
+	switch step.Metadata[beadmeta.KindMetadataKey] {
 	case "scope", "scope-check", "workflow-finalize", "fanout", "tally", "check", "drain", "spec":
 		return false
 	default:
@@ -192,7 +196,7 @@ func graphSinkStepIDs(steps []*Step) []string {
 		if step == nil {
 			continue
 		}
-		switch step.Metadata["gc.kind"] {
+		switch step.Metadata[beadmeta.KindMetadataKey] {
 		case "workflow-finalize", "spec":
 			continue
 		case "scope":

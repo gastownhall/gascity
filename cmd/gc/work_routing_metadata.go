@@ -3,28 +3,29 @@ package main
 import (
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
 func legacyWorkflowRunTarget(b beads.Bead) string {
-	if strings.TrimSpace(b.Metadata["gc.kind"]) != "workflow" {
+	if strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
 		return ""
 	}
-	if strings.TrimSpace(b.Metadata["gc.routed_to"]) != "" {
+	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
 		return ""
 	}
-	return strings.TrimSpace(b.Metadata["gc.run_target"])
+	return strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])
 }
 
 func routedToOrLegacyWorkflowTarget(b beads.Bead) string {
-	if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
+	if routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
 		return routedTo
 	}
 	return legacyWorkflowRunTarget(b)
 }
 
 func routedToAndLegacyWorkflowCandidates(b beads.Bead) []string {
-	routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"])
+	routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
 	legacy := legacyWorkflowRunTarget(b)
 	if routedTo == "" {
 		if legacy == "" {

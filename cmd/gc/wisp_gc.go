@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -128,7 +129,7 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 		return nil, fmt.Errorf("listing closed molecule roots: %w", err)
 	}
 	appendUnique(molecules)
-	wisps, err := store.List(beads.ListQuery{Status: "closed", Metadata: map[string]string{"gc.kind": "wisp"}, TierMode: beads.TierBoth})
+	wisps, err := store.List(beads.ListQuery{Status: "closed", Metadata: map[string]string{beadmeta.KindMetadataKey: "wisp"}, TierMode: beads.TierBoth})
 	if err != nil {
 		return nil, fmt.Errorf("listing closed wisp roots: %w", err)
 	}
@@ -195,7 +196,7 @@ func collectExpiredBeadClosure(store beads.Store, rootID string) ([]string, erro
 	}
 	rootOwned := make([]string, 0, 4)
 	related, err := store.List(beads.ListQuery{
-		Metadata:      map[string]string{"gc.root_bead_id": rootID},
+		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		IncludeClosed: true,
 		TierMode:      beads.TierBoth,
 	})

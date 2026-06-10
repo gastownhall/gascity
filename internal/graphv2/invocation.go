@@ -252,7 +252,7 @@ func validateDrainItemFormulas(parentName string, searchPaths []string, recipe *
 			return fmt.Errorf("validating drain item formula %q for graph.v2 formula %q: %w", itemFormula, parentName, err)
 		}
 		root := recipe.RootStep()
-		if root == nil || root.Metadata["gc.kind"] != "workflow" || !strings.EqualFold(root.Metadata["gc.formula_contract"], "graph.v2") {
+		if root == nil || root.Metadata[beadmeta.KindMetadataKey] != "workflow" || !strings.EqualFold(root.Metadata[beadmeta.FormulaContractMetadataKey], "graph.v2") {
 			return fmt.Errorf("drain item formula %q for graph.v2 formula %q must declare contract = \"graph.v2\"", itemFormula, parentName)
 		}
 		if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
@@ -319,10 +319,10 @@ func drainItemFormulaNames(recipe *formula.Recipe) []string {
 	seen := make(map[string]struct{})
 	var out []string
 	for _, step := range recipe.Steps {
-		if strings.TrimSpace(step.Metadata["gc.kind"]) != "drain" {
+		if strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) != "drain" {
 			continue
 		}
-		name := strings.TrimSpace(step.Metadata["gc.drain_formula"])
+		name := strings.TrimSpace(step.Metadata[beadmeta.DrainFormulaMetadataKey])
 		if name == "" {
 			continue
 		}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphv2"
@@ -228,7 +229,7 @@ func buildFormulaDetail(ctx context.Context, store beads.Store, name string, pat
 			Title: title,
 			Kind:  kind,
 		}
-		if scopeRef := strings.TrimSpace(step.Metadata["gc.scope_ref"]); scopeRef != "" {
+		if scopeRef := strings.TrimSpace(step.Metadata[beadmeta.ScopeRefMetadataKey]); scopeRef != "" {
 			node.ScopeRef = scopeRef
 		}
 		nodes = append(nodes, node)
@@ -403,7 +404,7 @@ func formulaVarDefs(vars map[string]*formula.VarDef) []formulaVarDefResponse {
 }
 
 func recipeStepKind(step formula.RecipeStep) string {
-	if kind := strings.TrimSpace(step.Metadata["gc.kind"]); kind != "" {
+	if kind := strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]); kind != "" {
 		return kind
 	}
 	if step.Type != "" {
@@ -416,7 +417,7 @@ func includeFormulaPreviewStep(step formula.RecipeStep, rootID string) bool {
 	if step.ID == rootID {
 		return false
 	}
-	switch strings.TrimSpace(step.Metadata["gc.kind"]) {
+	switch strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) {
 	case "scope-check", "workflow-finalize", "spec":
 		return false
 	default:

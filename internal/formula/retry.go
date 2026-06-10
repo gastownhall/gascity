@@ -3,6 +3,8 @@ package formula
 import (
 	"fmt"
 	"strconv"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // ApplyRetries expands inline retry-managed steps into control + attempt beads.
@@ -66,14 +68,14 @@ func expandRetry(step *Step) ([]*Step, error) {
 	control.Children = nil
 	control.Assignee = ""
 	control.Metadata = withMetadata(control.Metadata, map[string]string{
-		"gc.kind":          "retry",
-		"gc.step_id":       step.ID,
-		"gc.max_attempts":  strconv.Itoa(step.Retry.MaxAttempts),
-		"gc.on_exhausted":  onExhausted,
-		"gc.control_epoch": "1",
+		beadmeta.KindMetadataKey:         "retry",
+		beadmeta.StepIDMetadataKey:       step.ID,
+		beadmeta.MaxAttemptsMetadataKey:  strconv.Itoa(step.Retry.MaxAttempts),
+		beadmeta.OnExhaustedMetadataKey:  onExhausted,
+		beadmeta.ControlEpochMetadataKey: "1",
 	})
-	if kind := step.Metadata["gc.kind"]; kind != "" {
-		control.Metadata["gc.original_kind"] = kind
+	if kind := step.Metadata[beadmeta.KindMetadataKey]; kind != "" {
+		control.Metadata[beadmeta.OriginalKindMetadataKey] = kind
 	}
 	control.Needs = appendUniqueCopy(control.Needs, attemptID)
 	control.WaitsFor = ""
@@ -85,18 +87,18 @@ func expandRetry(step *Step) ([]*Step, error) {
 	run.OnComplete = nil
 	run.Children = nil
 	run.Metadata = withMetadata(run.Metadata, map[string]string{
-		"gc.attempt": strconv.Itoa(attempt),
-		"gc.step_id": step.ID,
+		beadmeta.AttemptMetadataKey: strconv.Itoa(attempt),
+		beadmeta.StepIDMetadataKey:  step.ID,
 		// gc.step_ref is NOT set here — molecule.Instantiate fills it from
 		// step.ID which includes the formula prefix (e.g., "mol.finalize.attempt.1"
 		// instead of the bare "finalize.attempt.1").
 	})
-	if kind := step.Metadata["gc.kind"]; kind != "" {
-		run.Metadata["gc.original_kind"] = kind
+	if kind := step.Metadata[beadmeta.KindMetadataKey]; kind != "" {
+		run.Metadata[beadmeta.OriginalKindMetadataKey] = kind
 	}
-	delete(run.Metadata, "gc.scope_ref")
-	delete(run.Metadata, "gc.scope_role")
-	delete(run.Metadata, "gc.on_fail")
+	delete(run.Metadata, beadmeta.ScopeRefMetadataKey)
+	delete(run.Metadata, beadmeta.ScopeRoleMetadataKey)
+	delete(run.Metadata, beadmeta.OnFailMetadataKey)
 	run.SourceLocation = fmt.Sprintf("%s.retry.attempt.%d", step.SourceLocation, attempt)
 
 	return []*Step{control, specStep, run}, nil

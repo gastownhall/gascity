@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -99,8 +100,8 @@ func IsAttachedRoot(b beads.Bead) bool {
 
 // IsWorkflowAttachment reports whether a bead is a graph.v2 workflow attachment.
 func IsWorkflowAttachment(b beads.Bead) bool {
-	return strings.EqualFold(strings.TrimSpace(b.Metadata["gc.kind"]), "workflow") ||
-		strings.EqualFold(strings.TrimSpace(b.Metadata["gc.formula_contract"]), "graph.v2")
+	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), "workflow") ||
+		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), "graph.v2")
 }
 
 // IsMoleculeAttachment reports whether a bead is a molecule attachment.
@@ -395,7 +396,7 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		if b.Assignee != "" {
 			warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
 		}
-		if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
+		if routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
 			warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
 		}
 		for _, l := range b.Labels {
@@ -407,7 +408,7 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	}
 
 	target := a.QualifiedName()
-	if strings.TrimSpace(b.Metadata["gc.routed_to"]) == target {
+	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target {
 		if b.Assignee == "" || b.Assignee == target {
 			if needsConvoyRecovery(q, b, deps, opts) {
 				// Prior sling set gc.routed_to but left no convoy — let
@@ -433,7 +434,7 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		if b.Assignee != "" {
 			warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
 		}
-		if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
+		if routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
 			warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
 		}
 		for _, l := range b.Labels {
@@ -444,7 +445,7 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		return BeadCheckResult{Warnings: warnings}
 	}
 
-	if strings.TrimSpace(b.Metadata["gc.routed_to"]) == "" {
+	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
 		poolLabel := "pool:" + target
 		for _, l := range b.Labels {
 			if l == poolLabel {
@@ -459,7 +460,7 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	if b.Assignee != "" {
 		warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
 	}
-	if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
+	if routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
 		warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
 	}
 	for _, l := range b.Labels {

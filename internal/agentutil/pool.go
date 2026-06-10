@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -56,7 +57,7 @@ func findSessionNameByTemplate(store beads.Store, qualifiedName string) string {
 		return ""
 	}
 	for _, b := range beadList {
-		if b.Metadata["gc.template"] == qualifiedName {
+		if b.Metadata[beadmeta.TemplateMetadataKey] == qualifiedName {
 			if sn := b.Metadata["session_name"]; sn != "" {
 				return sn
 			}

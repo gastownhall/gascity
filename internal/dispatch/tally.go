@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -15,19 +16,19 @@ import (
 // each voter sink bead's gc.output_json, extracts gc.vote_field, and
 // reduces according to gc.tally_mode before closing itself.
 func processTallyControl(store beads.Store, bead beads.Bead, _ ProcessOptions) (ControlResult, error) {
-	rootID := bead.Metadata["gc.root_bead_id"]
+	rootID := bead.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
 		return ControlResult{}, fmt.Errorf("%s: missing gc.root_bead_id", bead.ID)
 	}
-	sourceRef := bead.Metadata["gc.control_for"]
+	sourceRef := bead.Metadata[beadmeta.ControlForMetadataKey]
 	if sourceRef == "" {
 		return ControlResult{}, fmt.Errorf("%s: missing gc.control_for", bead.ID)
 	}
-	mode := bead.Metadata["gc.tally_mode"]
+	mode := bead.Metadata[beadmeta.TallyModeMetadataKey]
 	if mode == "" {
 		mode = "majority"
 	}
-	voteField := bead.Metadata["gc.vote_field"]
+	voteField := bead.Metadata[beadmeta.VoteFieldMetadataKey]
 
 	// Find the fanout bead for this source step.
 	workflowBeads, err := listByWorkflowRoot(store, rootID)
@@ -72,7 +73,7 @@ func processTallyControl(store beads.Store, bead beads.Bead, _ ProcessOptions) (
 		var vote string
 		if mode == "any-pass" {
 			// any-pass is defined over voter gc.outcome, independent of vote_field.
-			vote = voter.Metadata["gc.outcome"]
+			vote = voter.Metadata[beadmeta.OutcomeMetadataKey]
 		} else {
 			vote, err = extractVote(voter, voteField)
 			if err != nil {
@@ -88,8 +89,8 @@ func processTallyControl(store beads.Store, bead beads.Bead, _ ProcessOptions) (
 	}
 
 	if err := store.SetMetadataBatch(bead.ID, map[string]string{
-		"gc.tally_result": result,
-		"gc.outcome":      outcome,
+		beadmeta.TallyResultMetadataKey: result,
+		beadmeta.OutcomeMetadataKey:     outcome,
 	}); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: writing tally result: %w", bead.ID, err)
 	}
@@ -104,9 +105,9 @@ func processTallyControl(store beads.Store, bead beads.Bead, _ ProcessOptions) (
 // Otherwise traverses voteField as a dot-separated path into gc.output_json.
 func extractVote(voter beads.Bead, voteField string) (string, error) {
 	if voteField == "" {
-		return voter.Metadata["gc.outcome"], nil
+		return voter.Metadata[beadmeta.OutcomeMetadataKey], nil
 	}
-	raw := voter.Metadata["gc.output_json"]
+	raw := voter.Metadata[beadmeta.OutputJSONMetadataKey]
 	if raw == "" {
 		return "", fmt.Errorf("voter %s has no gc.output_json", voter.ID)
 	}

@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 )
@@ -34,7 +35,7 @@ func ListSubtree(store beads.Store, rootID string) ([]beads.Bead, error) {
 	out := []beads.Bead{root}
 	queue := []string{root.ID}
 
-	logicalMembers, err := store.ListByMetadata(map[string]string{"gc.root_bead_id": root.ID}, 0, beads.IncludeClosed, beads.WithBothTiers)
+	logicalMembers, err := store.ListByMetadata(map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}, 0, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		return nil, err
 	}

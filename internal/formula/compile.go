@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"sync/atomic"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // Compile loads a formula by name and runs the full compilation pipeline.
@@ -338,10 +340,10 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 		IsRoot:      true,
 	}
 	if graphWorkflow {
-		rootStep.Metadata = map[string]string{"gc.kind": "workflow"}
-		rootStep.Metadata["gc.formula_contract"] = "graph.v2"
+		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: "workflow"}
+		rootStep.Metadata[beadmeta.FormulaContractMetadataKey] = "graph.v2"
 	} else if rootOnly {
-		rootStep.Metadata = map[string]string{"gc.kind": "wisp"}
+		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: "wisp"}
 	}
 	defPriority := 2
 	rootStep.Priority = &defPriority
@@ -459,9 +461,9 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 			metadata = metadataForDrainStep(step)
 		} else if isSourceSpecStep(step) {
 			metadata = maps.Clone(step.Metadata)
-			if specForRef := metadata["gc.spec_for_ref"]; specForRef != "" {
+			if specForRef := metadata[beadmeta.SpecForRefMetadataKey]; specForRef != "" {
 				if mapped, ok := idMapping[specForRef]; ok {
-					metadata["gc.spec_for_ref"] = mapped
+					metadata[beadmeta.SpecForRefMetadataKey] = mapped
 				}
 			}
 		}
@@ -549,16 +551,16 @@ func metadataForDrainStep(step *Step) map[string]string {
 		metadata = make(map[string]string)
 	}
 	spec := step.Drain
-	metadata["gc.kind"] = "drain"
-	metadata["gc.drain_context"] = spec.Context
-	metadata["gc.drain_formula"] = spec.Formula
+	metadata[beadmeta.KindMetadataKey] = "drain"
+	metadata[beadmeta.DrainContextMetadataKey] = spec.Context
+	metadata[beadmeta.DrainFormulaMetadataKey] = spec.Formula
 	memberAccess := strings.TrimSpace(spec.MemberAccess)
 	if memberAccess == "" {
 		memberAccess = "read"
 	}
-	metadata["gc.drain_member_access"] = memberAccess
+	metadata[beadmeta.DrainMemberAccessMetadataKey] = memberAccess
 	if spec.MaxUnits != nil {
-		metadata["gc.drain_max_units"] = fmt.Sprint(*spec.MaxUnits)
+		metadata[beadmeta.DrainMaxUnitsMetadataKey] = fmt.Sprint(*spec.MaxUnits)
 	}
 	onItemFailure := strings.TrimSpace(spec.OnItemFailure)
 	if onItemFailure == "" {
@@ -568,12 +570,12 @@ func metadataForDrainStep(step *Step) map[string]string {
 			onItemFailure = "continue"
 		}
 	}
-	metadata["gc.drain_on_item_failure"] = onItemFailure
+	metadata[beadmeta.DrainOnItemFailureMetadataKey] = onItemFailure
 	if spec.ContinuationGroup != "" {
-		metadata["gc.drain_continuation_group"] = spec.ContinuationGroup
+		metadata[beadmeta.DrainContinuationGroupMetadataKey] = spec.ContinuationGroup
 	}
 	if spec.Item != nil && spec.Item.SingleLane {
-		metadata["gc.drain_item_single_lane"] = "true"
+		metadata[beadmeta.DrainItemSingleLaneMetadataKey] = "true"
 	}
 	return metadata
 }
@@ -626,7 +628,7 @@ func isDetachedGraphStep(step *Step) bool {
 	if step == nil {
 		return false
 	}
-	switch step.Metadata["gc.kind"] {
+	switch step.Metadata[beadmeta.KindMetadataKey] {
 	case "ralph", "run", "check", "retry", "retry-run", "retry-eval":
 		return true
 	default:
@@ -636,7 +638,7 @@ func isDetachedGraphStep(step *Step) bool {
 
 func addWorkflowRootDeps(rootID string, steps []*Step, idMapping map[string]string, deps *[]RecipeDep) {
 	for _, step := range steps {
-		if step != nil && step.Metadata["gc.kind"] == "workflow-finalize" {
+		if step != nil && step.Metadata[beadmeta.KindMetadataKey] == "workflow-finalize" {
 			if issueID, ok := idMapping[step.ID]; ok {
 				*deps = append(*deps, RecipeDep{
 					StepID:      rootID,
@@ -667,7 +669,7 @@ func isWorkflowRootBlocker(step *Step) bool {
 	if step == nil {
 		return false
 	}
-	switch step.Metadata["gc.kind"] {
+	switch step.Metadata[beadmeta.KindMetadataKey] {
 	case "run", "check", "retry-run", "retry-eval", "spec":
 		return false
 	default:

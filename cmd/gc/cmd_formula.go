@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -860,8 +861,8 @@ func stampFormulaCookGraphV2Root(recipe *formula.Recipe, formulaName, inputConvo
 		root.Metadata = make(map[string]string)
 	}
 	rootKey := graphv2.RootKey(inputConvoyID, formulaName, vars, "formula-cook", "")
-	root.Metadata["gc.input_convoy_id"] = inputConvoyID
-	root.Metadata["gc.graphv2_root_key"] = rootKey
+	root.Metadata[beadmeta.InputConvoyIDMetadataKey] = inputConvoyID
+	root.Metadata[beadmeta.Graphv2RootKeyMetadataKey] = rootKey
 	if metadata := graphv2.RuntimeVarsMetadata(vars); metadata != "" {
 		root.Metadata[graphv2.RuntimeVarsMetadataKey] = metadata
 	}
@@ -901,7 +902,7 @@ func formulaCookLiveInputConvoyGraphRoots(store beads.Store, inputConvoyID, allo
 	if store == nil || inputConvoyID == "" {
 		return nil, nil
 	}
-	matches, err := store.ListByMetadata(map[string]string{"gc.input_convoy_id": inputConvoyID}, 0)
+	matches, err := store.ListByMetadata(map[string]string{beadmeta.InputConvoyIDMetadataKey: inputConvoyID}, 0)
 	if err != nil {
 		return nil, fmt.Errorf("checking live graph roots for input convoy %s: %w", inputConvoyID, err)
 	}
@@ -911,10 +912,10 @@ func formulaCookLiveInputConvoyGraphRoots(store beads.Store, inputConvoyID, allo
 		if root.Status == "closed" || !sourceworkflow.IsWorkflowRoot(root) {
 			continue
 		}
-		if root.Metadata["gc.formula_contract"] != "graph.v2" {
+		if root.Metadata[beadmeta.FormulaContractMetadataKey] != "graph.v2" {
 			continue
 		}
-		if allowedRootKey != "" && strings.TrimSpace(root.Metadata["gc.graphv2_root_key"]) == allowedRootKey {
+		if allowedRootKey != "" && strings.TrimSpace(root.Metadata[beadmeta.Graphv2RootKeyMetadataKey]) == allowedRootKey {
 			continue
 		}
 		roots = append(roots, root)
@@ -929,11 +930,11 @@ func closeFormulaCookFailedGraphV2Roots(store beads.Store, recipe *formula.Recip
 	if store == nil || recipe == nil || len(recipe.Steps) == 0 {
 		return nil
 	}
-	key := strings.TrimSpace(recipe.Steps[0].Metadata["gc.graphv2_root_key"])
+	key := strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.Graphv2RootKeyMetadataKey])
 	if key == "" {
 		return nil
 	}
-	matches, err := store.ListByMetadata(map[string]string{"gc.graphv2_root_key": key}, 0)
+	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 0)
 	if err != nil {
 		return fmt.Errorf("looking up failed graph.v2 roots for key %s: %w", key, err)
 	}
@@ -952,11 +953,11 @@ func existingFormulaCookGraphV2Root(store beads.Store, recipe *formula.Recipe) (
 	if store == nil || recipe == nil || len(recipe.Steps) == 0 {
 		return nil, nil
 	}
-	key := strings.TrimSpace(recipe.Steps[0].Metadata["gc.graphv2_root_key"])
+	key := strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.Graphv2RootKeyMetadataKey])
 	if key == "" {
 		return nil, nil
 	}
-	matches, err := store.ListByMetadata(map[string]string{"gc.graphv2_root_key": key}, 2)
+	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 2)
 	if err != nil {
 		return nil, fmt.Errorf("looking up graph.v2 root key %s: %w", key, err)
 	}
@@ -1139,7 +1140,7 @@ since it was spawned.`,
 				return fmt.Errorf("reading bead %s: %w", beadID, err)
 			}
 
-			beadHash := bead.Metadata["gc.formula_hash"]
+			beadHash := bead.Metadata[beadmeta.FormulaHashMetadataKey]
 			if beadHash == "" {
 				return fmt.Errorf("bead %s has no gc.formula_hash metadata (created before hash tracking)", beadID)
 			}

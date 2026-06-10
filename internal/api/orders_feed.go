@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -90,7 +91,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 
 		openChildrenByRoot := make(map[string][]beads.Bead)
 		for _, bead := range openBeads {
-			rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+			rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 			if rootID == "" {
 				continue
 			}
@@ -99,8 +100,8 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 
 		roots, err := info.store.List(beads.ListQuery{
 			Metadata: map[string]string{
-				"gc.kind":             "workflow",
-				"gc.formula_contract": "graph.v2",
+				beadmeta.KindMetadataKey:            "workflow",
+				beadmeta.FormulaContractMetadataKey: "graph.v2",
 			},
 			IncludeClosed: true,
 		})
@@ -108,7 +109,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 			log.Printf("api: workflow run projection closed-root list failed for %s: %v", info.ref, err)
 			roots = nil
 			for _, bead := range openBeads {
-				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata["gc.formula_contract"]) == "graph.v2" {
+				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata[beadmeta.FormulaContractMetadataKey]) == "graph.v2" {
 					roots = append(roots, bead)
 				}
 			}
@@ -132,7 +133,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 
 			runBeads := append([]beads.Bead{bead}, openChildrenByRoot[bead.ID]...)
 			children, childErr := info.store.List(beads.ListQuery{
-				Metadata:      map[string]string{"gc.root_bead_id": bead.ID},
+				Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: bead.ID},
 				IncludeClosed: true,
 			})
 			if childErr != nil {
@@ -162,7 +163,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 				ScopeRef:       scopeRef,
 				RootBeadID:     bead.ID,
 				RootStoreRef:   info.ref,
-				AttachedBeadID: strings.TrimSpace(bead.Metadata["gc.source_bead_id"]),
+				AttachedBeadID: strings.TrimSpace(bead.Metadata[beadmeta.SourceBeadIDMetadataKey]),
 			}
 			projections = append(projections, projection)
 		}
@@ -213,7 +214,7 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 
 		openChildrenByRoot := make(map[string][]beads.Bead)
 		for _, bead := range openBeads {
-			rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+			rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 			if rootID == "" {
 				continue
 			}
@@ -222,8 +223,8 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 
 		roots, err := info.store.List(beads.ListQuery{
 			Metadata: map[string]string{
-				"gc.kind":             "workflow",
-				"gc.formula_contract": "graph.v2",
+				beadmeta.KindMetadataKey:            "workflow",
+				beadmeta.FormulaContractMetadataKey: "graph.v2",
 			},
 			IncludeClosed: true,
 			// The root-only projection reads only id/status/created/metadata,
@@ -240,7 +241,7 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 			log.Printf("api: workflow root projection closed-root list failed for %s: %v", info.ref, err)
 			roots = nil
 			for _, bead := range openBeads {
-				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata["gc.formula_contract"]) == "graph.v2" {
+				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata[beadmeta.FormulaContractMetadataKey]) == "graph.v2" {
 					roots = append(roots, bead)
 				}
 			}
@@ -270,7 +271,7 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 				ScopeRef:       scopeRef,
 				RootBeadID:     root.ID,
 				RootStoreRef:   info.ref,
-				AttachedBeadID: strings.TrimSpace(root.Metadata["gc.source_bead_id"]),
+				AttachedBeadID: strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey]),
 			})
 		}
 	}
@@ -414,7 +415,7 @@ func workflowFormulaName(root beads.Bead) string {
 	if name := strings.TrimSpace(root.Ref); name != "" {
 		return name
 	}
-	if name := strings.TrimSpace(root.Metadata["gc.formula_name"]); name != "" {
+	if name := strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]); name != "" {
 		return name
 	}
 	return root.ID
@@ -428,7 +429,7 @@ func workflowProjectionTitle(root beads.Bead) string {
 }
 
 func workflowProjectionTarget(root beads.Bead) string {
-	for _, key := range []string{"gc.execution_routed_to", "gc.routed_to", "gc.run_target"} {
+	for _, key := range []string{beadmeta.ExecutionRoutedToMetadataKey, beadmeta.RoutedToMetadataKey, beadmeta.RunTargetMetadataKey} {
 		if value := strings.TrimSpace(root.Metadata[key]); value != "" {
 			return value
 		}

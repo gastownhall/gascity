@@ -3,6 +3,8 @@ package formula
 import (
 	"fmt"
 	"strconv"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // ApplyRalph expands inline Ralph steps into control + iteration beads.
@@ -67,16 +69,16 @@ func expandRalph(step *Step) ([]*Step, error) {
 	// and dispatch paths remain stable while the public formula surface uses
 	// the canonical "check" spelling.
 	controlMeta := map[string]string{
-		"gc.kind":          "ralph",
-		"gc.step_id":       step.ID,
-		"gc.max_attempts":  strconv.Itoa(step.Ralph.MaxAttempts),
-		"gc.check_mode":    step.Ralph.Check.Mode,
-		"gc.check_path":    step.Ralph.Check.Path,
-		"gc.check_timeout": step.Ralph.Check.Timeout,
-		"gc.control_epoch": "1",
+		beadmeta.KindMetadataKey:         "ralph",
+		beadmeta.StepIDMetadataKey:       step.ID,
+		beadmeta.MaxAttemptsMetadataKey:  strconv.Itoa(step.Ralph.MaxAttempts),
+		beadmeta.CheckModeMetadataKey:    step.Ralph.Check.Mode,
+		beadmeta.CheckPathMetadataKey:    step.Ralph.Check.Path,
+		beadmeta.CheckTimeoutMetadataKey: step.Ralph.Check.Timeout,
+		beadmeta.ControlEpochMetadataKey: "1",
 	}
 	if step.Timeout != "" {
-		controlMeta["gc.step_timeout"] = step.Timeout
+		controlMeta[beadmeta.StepTimeoutMetadataKey] = step.Timeout
 	}
 	control.Metadata = withMetadata(control.Metadata, controlMeta)
 	control.Needs = appendUniqueCopy(control.Needs, iterationID)
@@ -95,16 +97,16 @@ func expandRalph(step *Step) ([]*Step, error) {
 	// These runtime keys are internal control-bead metadata, not user-facing
 	// formula syntax, so they intentionally retain legacy ralph naming.
 	iteration.Metadata = withMetadata(iteration.Metadata, map[string]string{
-		"gc.attempt":       strconv.Itoa(attempt),
-		"gc.step_id":       step.ID,
-		"gc.ralph_step_id": step.ID,
-		"gc.step_ref":      iterationID,
+		beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
+		beadmeta.StepIDMetadataKey:      step.ID,
+		beadmeta.RalphStepIDMetadataKey: step.ID,
+		beadmeta.StepRefMetadataKey:     iterationID,
 	})
-	delete(iteration.Metadata, "gc.scope_ref")
-	delete(iteration.Metadata, "gc.scope_role")
-	delete(iteration.Metadata, "gc.on_fail")
+	delete(iteration.Metadata, beadmeta.ScopeRefMetadataKey)
+	delete(iteration.Metadata, beadmeta.ScopeRoleMetadataKey)
+	delete(iteration.Metadata, beadmeta.OnFailMetadataKey)
 	if step.OnComplete != nil {
-		iteration.Metadata["gc.output_json_required"] = "true"
+		iteration.Metadata[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 	}
 	iteration.SourceLocation = fmt.Sprintf("%s.ralph.iteration.%d", step.SourceLocation, attempt)
 
@@ -133,19 +135,19 @@ func expandNestedRalph(step, control, specStep *Step, iterationID string, attemp
 	iteration.WaitsFor = ""
 	iteration.SourceLocation = fmt.Sprintf("%s.ralph.iteration.%d", step.SourceLocation, attempt)
 	iteration.Metadata = withMetadata(step.Metadata, map[string]string{
-		"gc.kind":          "scope",
-		"gc.scope_role":    "body",
-		"gc.scope_name":    step.ID,
-		"gc.step_id":       step.ID,
-		"gc.ralph_step_id": step.ID,
-		"gc.attempt":       strconv.Itoa(attempt),
-		"gc.step_ref":      iterationID,
+		beadmeta.KindMetadataKey:        "scope",
+		beadmeta.ScopeRoleMetadataKey:   "body",
+		beadmeta.ScopeNameMetadataKey:   step.ID,
+		beadmeta.StepIDMetadataKey:      step.ID,
+		beadmeta.RalphStepIDMetadataKey: step.ID,
+		beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
+		beadmeta.StepRefMetadataKey:     iterationID,
 	})
 	if step.OnComplete != nil {
-		iteration.Metadata["gc.output_json_required"] = "true"
+		iteration.Metadata[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 	}
-	delete(iteration.Metadata, "gc.scope_ref")
-	delete(iteration.Metadata, "gc.on_fail")
+	delete(iteration.Metadata, beadmeta.ScopeRefMetadataKey)
+	delete(iteration.Metadata, beadmeta.OnFailMetadataKey)
 
 	out := []*Step{control, specStep, iteration}
 	out = append(out, flattenedBody...)
@@ -187,18 +189,18 @@ func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, att
 			// Preserve the child's own step_id (set by expandRetry/expandRalph)
 			// so that find_canonical_control can distinguish nested controls.
 			// Fall back to the ralph owner's ID for plain (non-control) children.
-			childStepID := node.Metadata["gc.step_id"]
+			childStepID := node.Metadata[beadmeta.StepIDMetadataKey]
 			if childStepID == "" {
 				childStepID = node.ID
 			}
 			clone.Metadata = withMetadata(clone.Metadata, map[string]string{
-				"gc.scope_ref":     iterationID,
-				"gc.on_fail":       metadataDefault(node.Metadata, "gc.on_fail", "abort_scope"),
-				"gc.scope_role":    metadataDefault(node.Metadata, "gc.scope_role", "member"),
-				"gc.step_id":       childStepID,
-				"gc.ralph_step_id": owner.ID,
-				"gc.attempt":       strconv.Itoa(attempt),
-				"gc.step_ref":      clone.ID,
+				beadmeta.ScopeRefMetadataKey:    iterationID,
+				beadmeta.OnFailMetadataKey:      metadataDefault(node.Metadata, beadmeta.OnFailMetadataKey, "abort_scope"),
+				beadmeta.ScopeRoleMetadataKey:   metadataDefault(node.Metadata, beadmeta.ScopeRoleMetadataKey, "member"),
+				beadmeta.StepIDMetadataKey:      childStepID,
+				beadmeta.RalphStepIDMetadataKey: owner.ID,
+				beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
+				beadmeta.StepRefMetadataKey:     clone.ID,
 			})
 			if top {
 				topLevel = append(topLevel, clone.ID)
@@ -247,11 +249,11 @@ func markRalphBodyOutputSinks(steps []*Step) {
 		if step == nil {
 			continue
 		}
-		switch step.Metadata["gc.kind"] {
+		switch step.Metadata[beadmeta.KindMetadataKey] {
 		case "scope", "scope-check", "workflow-finalize", "fanout", "check", "ralph", "spec":
 			continue
 		}
-		if step.Metadata["gc.scope_role"] == "teardown" {
+		if step.Metadata[beadmeta.ScopeRoleMetadataKey] == "teardown" {
 			continue
 		}
 		if _, ok := referenced[step.ID]; ok {
@@ -260,7 +262,7 @@ func markRalphBodyOutputSinks(steps []*Step) {
 		if step.Metadata == nil {
 			step.Metadata = make(map[string]string)
 		}
-		step.Metadata["gc.output_json_required"] = "true"
+		step.Metadata[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 	}
 }
 

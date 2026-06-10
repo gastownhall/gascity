@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
@@ -215,11 +216,11 @@ func (a *convergenceStoreAdapter) activateDeferredAssignees(id string) error {
 		update.Assignee = &assignee
 	}
 	metadata := map[string]string{}
-	if routedTo := b.Metadata[molecule.DeferredRoutedToMetadataKey]; routedTo != "" && b.Metadata["gc.routed_to"] != routedTo {
-		metadata["gc.routed_to"] = routedTo
+	if routedTo := b.Metadata[molecule.DeferredRoutedToMetadataKey]; routedTo != "" && b.Metadata[beadmeta.RoutedToMetadataKey] != routedTo {
+		metadata[beadmeta.RoutedToMetadataKey] = routedTo
 	}
-	if executionRoutedTo := b.Metadata[molecule.DeferredExecutionRoutedToMetadataKey]; executionRoutedTo != "" && b.Metadata["gc.execution_routed_to"] != executionRoutedTo {
-		metadata["gc.execution_routed_to"] = executionRoutedTo
+	if executionRoutedTo := b.Metadata[molecule.DeferredExecutionRoutedToMetadataKey]; executionRoutedTo != "" && b.Metadata[beadmeta.ExecutionRoutedToMetadataKey] != executionRoutedTo {
+		metadata[beadmeta.ExecutionRoutedToMetadataKey] = executionRoutedTo
 	}
 	if typ := b.Metadata[molecule.DeferredTypeMetadataKey]; typ != "" && b.Type != typ {
 		update.Type = &typ
