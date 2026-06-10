@@ -1476,3 +1476,61 @@ func equalIntSlice(a, b []int) bool {
 	}
 	return true
 }
+
+func TestRunDoltCleanup_DryRunReportsDeletedScopeTargets(t *testing.T) {
+	// Deleted-scope servers (ga-10wmzh): a bare server with a deleted cwd and
+	// a configured server whose --config no longer exists on disk are both
+	// reap targets, and the JSON envelope carries the reason so automation
+	// and operators can see why.
+	procs := []DoltProcInfo{
+		{
+			PID:      6201,
+			Argv:     []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "33420"},
+			CWDState: procPathStateDeleted,
+		},
+		{
+			PID:             6202,
+			Argv:            []string{"dolt", "sql-server", "--config", "/data/worktrees/gone/.gc/runtime/packs/dolt/dolt-config.yaml"},
+			CWDState:        procPathStateLive,
+			ConfigPathState: procPathStateDeleted,
+		},
+		{
+			PID:             6203,
+			Argv:            []string{"dolt", "sql-server", "--config", "/var/lib/external-app/dolt-config.yaml"},
+			CWDState:        procPathStateLive,
+			ConfigPathState: procPathStateLive,
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:                fsys.NewFake(),
+		JSON:              true,
+		HomeDir:           "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+
+	if len(r.Reaped.Targets) != 2 {
+		t.Fatalf("Reaped.Targets = %+v, want the two deleted-scope PIDs", r.Reaped.Targets)
+	}
+	if r.Reaped.Targets[0].PID != 6201 || r.Reaped.Targets[0].Reason == "" {
+		t.Errorf("Targets[0] = %+v, want PID 6201 with a deleted-cwd reason", r.Reaped.Targets[0])
+	}
+	if r.Reaped.Targets[1].PID != 6202 || r.Reaped.Targets[1].Reason == "" {
+		t.Errorf("Targets[1] = %+v, want PID 6202 with a config-missing reason", r.Reaped.Targets[1])
+	}
+	if r.Reaped.Targets[1].ConfigPath != "/data/worktrees/gone/.gc/runtime/packs/dolt/dolt-config.yaml" {
+		t.Errorf("Targets[1].ConfigPath = %q, want the vanished config echoed", r.Reaped.Targets[1].ConfigPath)
+	}
+	if !equalIntSlice(r.Reaped.ProtectedPIDs, []int{6203}) {
+		t.Errorf("ProtectedPIDs = %v, want [6203] (live external server stays protected)", r.Reaped.ProtectedPIDs)
+	}
+}

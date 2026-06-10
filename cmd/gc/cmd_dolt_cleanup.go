@@ -106,10 +106,13 @@ type CleanupReapedReport struct {
 }
 
 // CleanupReapTarget is a single orphan dolt sql-server process the reaper
-// identified for termination.
+// identified for termination. Reason is set for deleted-scope targets
+// (deleted cwd, vanished --config) and empty for the classic
+// test-config-path allowlist match where the path itself is the explanation.
 type CleanupReapTarget struct {
 	PID        int    `json:"pid"`
 	ConfigPath string `json:"config_path"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // CleanupSummary aggregates totals across the three steps.
@@ -381,7 +384,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	}
 	report.Reaped.Targets = nil
 	for _, t := range plan.Reap {
-		report.Reaped.Targets = append(report.Reaped.Targets, CleanupReapTarget{PID: t.PID, ConfigPath: t.ConfigPath})
+		report.Reaped.Targets = append(report.Reaped.Targets, CleanupReapTarget{PID: t.PID, ConfigPath: t.ConfigPath, Reason: t.Reason})
 	}
 
 	if !opts.Force {
@@ -677,6 +680,10 @@ func emitOrphansSection(report CleanupReport, stdout io.Writer) {
 		path := t.ConfigPath
 		if path == "" {
 			path = "(no --config flag)"
+		}
+		if t.Reason != "" {
+			fmt.Fprintf(stdout, "  PID %d  %s — %s\n", t.PID, path, t.Reason) //nolint:errcheck
+			continue
 		}
 		fmt.Fprintf(stdout, "  PID %d  %s\n", t.PID, path) //nolint:errcheck
 	}

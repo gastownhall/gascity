@@ -77,11 +77,13 @@ func discoverDoltProcesses() ([]DoltProcInfo, error) {
 			continue
 		}
 		out = append(out, DoltProcInfo{
-			PID:            pid,
-			Argv:           argv,
-			Ports:          pidPorts[pid],
-			RSSBytes:       readProcRSSBytes(pid),
-			StartTimeTicks: readProcStartTimeTicks(pid),
+			PID:             pid,
+			Argv:            argv,
+			Ports:           pidPorts[pid],
+			RSSBytes:        readProcRSSBytes(pid),
+			StartTimeTicks:  readProcStartTimeTicks(pid),
+			CWDState:        doltProcCWDState(pid),
+			ConfigPathState: doltConfigPathState(argv),
 		})
 	}
 	return out, nil
@@ -99,9 +101,57 @@ func discoverDoltProcessesFromPS() ([]DoltProcInfo, error) {
 		if !ok {
 			continue
 		}
+		// No /proc on this host, so CWDState stays unknown (protect-leaning),
+		// but the --config path can still be checked on disk.
+		proc.ConfigPathState = doltConfigPathState(proc.Argv)
 		out = append(out, proc)
 	}
 	return out, nil
+}
+
+// cwdStateFromLink classifies a /proc/<pid>/cwd readlink target. The kernel
+// appends " (deleted)" when the working directory inode has been unlinked;
+// that suffix can never revert (a rename shows the new path instead), so it
+// is an unambiguous deleted-scope signal. The suffix must terminate the
+// link — a directory literally named "x (deleted) suffix" stays live.
+func cwdStateFromLink(link string) string {
+	if strings.HasSuffix(link, " (deleted)") {
+		return procPathStateDeleted
+	}
+	return procPathStateLive
+}
+
+// doltProcCWDState resolves /proc/<pid>/cwd and classifies the target.
+// Returns unknown when the host has no /proc, the process is gone, or the
+// readlink fails — classification treats unknown as protect.
+func doltProcCWDState(pid int) string {
+	if pid <= 0 {
+		return procPathStateUnknown
+	}
+	link, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
+	if err != nil {
+		return procPathStateUnknown
+	}
+	return cwdStateFromLink(link)
+}
+
+// doltConfigPathState classifies the --config path from a dolt sql-server
+// argv: deleted when an absolute config path no longer exists on disk, live
+// when it does, unknown for absent or relative configs and for stat errors
+// other than not-exist (e.g. permission) so classification degrades toward
+// protection.
+func doltConfigPathState(argv []string) string {
+	cfg := extractConfigPath(argv)
+	if cfg == "" || !filepath.IsAbs(cfg) {
+		return procPathStateUnknown
+	}
+	if _, err := os.Stat(cfg); err != nil {
+		if os.IsNotExist(err) {
+			return procPathStateDeleted
+		}
+		return procPathStateUnknown
+	}
+	return procPathStateLive
 }
 
 func discoverActiveTestRoots(homeDir, tempDir string) []string {

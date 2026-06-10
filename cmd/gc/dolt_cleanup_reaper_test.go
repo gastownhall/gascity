@@ -235,6 +235,149 @@ func TestClassifyDoltProcess_RigPortBeatsConfigPath(t *testing.T) {
 	}
 }
 
+func TestClassifyDoltProcess_DeletedScopeSignals(t *testing.T) {
+	// New reap signals for deleted-scope dolt servers (ga-10wmzh): a process
+	// whose cwd readlink ends in " (deleted)" is an unambiguous zombie even
+	// without --config, and a --config path that no longer exists on disk
+	// means the owning scope (worktree, PR clone) was removed. Both must be
+	// detected before the no-config / not-on-allowlist protect branches.
+	// Unknown state must always protect.
+	cases := []struct {
+		name           string
+		proc           DoltProcInfo
+		rigPorts       map[int]string
+		activeRoots    []string
+		wantAction     string
+		wantConfigPath string
+		wantReasonSub  string
+	}{
+		{
+			name: "deleted cwd without config reaps",
+			proc: DoltProcInfo{
+				PID:      6001,
+				Argv:     []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "33401"},
+				CWDState: procPathStateDeleted,
+			},
+			wantAction:    "reap",
+			wantReasonSub: "deleted",
+		},
+		{
+			name: "deleted cwd with non-allowlist config reaps and echoes config",
+			proc: DoltProcInfo{
+				PID:      6002,
+				Argv:     []string{"dolt", "sql-server", "--config", "/data/clones/pr-123/.gc/runtime/packs/dolt/dolt-config.yaml"},
+				CWDState: procPathStateDeleted,
+			},
+			wantAction:     "reap",
+			wantConfigPath: "/data/clones/pr-123/.gc/runtime/packs/dolt/dolt-config.yaml",
+			wantReasonSub:  "deleted",
+		},
+		{
+			name: "missing config path on non-allowlist scope reaps",
+			proc: DoltProcInfo{
+				PID:             6003,
+				Argv:            []string{"dolt", "sql-server", "--config", "/data/worktrees/gone/.gc/runtime/packs/dolt/dolt-config.yaml"},
+				CWDState:        procPathStateLive,
+				ConfigPathState: procPathStateDeleted,
+			},
+			wantAction:     "reap",
+			wantConfigPath: "/data/worktrees/gone/.gc/runtime/packs/dolt/dolt-config.yaml",
+			wantReasonSub:  "no longer exists",
+		},
+		{
+			name: "live cwd with existing non-allowlist config protects",
+			proc: DoltProcInfo{
+				PID:             6004,
+				Argv:            []string{"dolt", "sql-server", "--config", "/var/lib/external-app/dolt-config.yaml"},
+				CWDState:        procPathStateLive,
+				ConfigPathState: procPathStateLive,
+			},
+			wantAction:    "protect",
+			wantReasonSub: "allowlist",
+		},
+		{
+			name: "unknown cwd and unknown config state protects",
+			proc: DoltProcInfo{
+				PID:  6005,
+				Argv: []string{"dolt", "sql-server", "--config", "/var/lib/external-app/dolt-config.yaml"},
+			},
+			wantAction:    "protect",
+			wantReasonSub: "allowlist",
+		},
+		{
+			name: "unknown cwd without config protects",
+			proc: DoltProcInfo{
+				PID:  6006,
+				Argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "33402"},
+			},
+			wantAction:    "protect",
+			wantReasonSub: "no --config",
+		},
+		{
+			name: "live cwd without config protects",
+			proc: DoltProcInfo{
+				PID:      6007,
+				Argv:     []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "33403"},
+				CWDState: procPathStateLive,
+			},
+			wantAction:    "protect",
+			wantReasonSub: "no --config",
+		},
+		{
+			name: "rig port match beats deleted cwd",
+			proc: DoltProcInfo{
+				PID:      6008,
+				Argv:     []string{"dolt", "sql-server"},
+				Ports:    []int{28231},
+				CWDState: procPathStateDeleted,
+			},
+			rigPorts:      map[int]string{28231: "beads"},
+			wantAction:    "protect",
+			wantReasonSub: "rig",
+		},
+		{
+			name: "active test root beats missing config",
+			proc: DoltProcInfo{
+				PID:             6009,
+				Argv:            []string{"dolt", "sql-server", "--config", "/tmp/TestActive123/001/.gc/runtime/packs/dolt/dolt-config.yaml"},
+				CWDState:        procPathStateLive,
+				ConfigPathState: procPathStateDeleted,
+			},
+			activeRoots:   []string{"/tmp/TestActive123"},
+			wantAction:    "protect",
+			wantReasonSub: "active test root",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyDoltProcess(tc.proc, tc.rigPorts, "/home/u", "", tc.activeRoots)
+			if got.Action != tc.wantAction {
+				t.Errorf("Action = %q, want %q (reason: %q)", got.Action, tc.wantAction, got.Reason)
+			}
+			if got.Action == "reap" && got.ConfigPath != tc.wantConfigPath {
+				t.Errorf("ConfigPath = %q, want %q", got.ConfigPath, tc.wantConfigPath)
+			}
+			if tc.wantReasonSub != "" && !strings.Contains(got.Reason, tc.wantReasonSub) {
+				t.Errorf("Reason = %q, want substring %q", got.Reason, tc.wantReasonSub)
+			}
+		})
+	}
+}
+
+func TestPlanReap_CarriesDeletedScopeReason(t *testing.T) {
+	procs := []DoltProcInfo{
+		{PID: 7001, Argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "33410"}, CWDState: procPathStateDeleted},
+	}
+	plan := planOrphanReap(procs, nil, "/home/u", "", nil)
+	if len(plan.Reap) != 1 {
+		t.Fatalf("Reap len = %d, want 1 (protected: %+v)", len(plan.Reap), plan.Protected)
+	}
+	if plan.Reap[0].Reason == "" {
+		t.Errorf("ReapTarget.Reason empty; want deleted-cwd explanation for the report")
+	}
+}
+
 func TestPlanReap_BuildsOrphanAndProtectedLists(t *testing.T) {
 	procs := []DoltProcInfo{
 		{PID: 1138290, Ports: []int{28231}, Argv: []string{"dolt", "sql-server"}},

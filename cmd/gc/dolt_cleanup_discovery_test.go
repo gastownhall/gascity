@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -195,5 +197,67 @@ func TestSameReapProcessIdentity_UsesPSStartIdentityFallback(t *testing.T) {
 	}
 	if sameReapProcessIdentity(target, reused) {
 		t.Fatal("sameReapProcessIdentity should reject mismatched ps start identity")
+	}
+}
+
+func TestCWDStateFromLink(t *testing.T) {
+	cases := []struct {
+		link string
+		want string
+	}{
+		{"/data/worktrees/live", procPathStateLive},
+		{"/data/worktrees/gone (deleted)", procPathStateDeleted},
+		{"/data/worktrees/dir with spaces", procPathStateLive},
+		// "(deleted)" must be a readlink suffix, not an arbitrary substring.
+		{"/data/worktrees/x (deleted) suffix", procPathStateLive},
+	}
+	for _, tc := range cases {
+		if got := cwdStateFromLink(tc.link); got != tc.want {
+			t.Errorf("cwdStateFromLink(%q) = %q, want %q", tc.link, got, tc.want)
+		}
+	}
+}
+
+func TestDoltProcCWDState_SelfIsLive(t *testing.T) {
+	if _, err := os.Stat("/proc/self/cwd"); err != nil {
+		t.Skip("host has no /proc; cwd state degrades to unknown by design")
+	}
+	if got := doltProcCWDState(os.Getpid()); got != procPathStateLive {
+		t.Errorf("doltProcCWDState(self) = %q, want %q", got, procPathStateLive)
+	}
+}
+
+func TestDoltProcCWDState_UnknownForBadPID(t *testing.T) {
+	// PID 0 has no /proc entry anywhere; the helper must degrade to unknown
+	// (the classification's protect-leaning default), never guess.
+	if got := doltProcCWDState(0); got != procPathStateUnknown {
+		t.Errorf("doltProcCWDState(0) = %q, want unknown", got)
+	}
+}
+
+func TestDoltConfigPathState(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "dolt-config.yaml")
+	if err := os.WriteFile(existing, []byte("listener:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "removed", "dolt-config.yaml")
+
+	cases := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"existing absolute config", []string{"dolt", "sql-server", "--config", existing}, procPathStateLive},
+		{"missing absolute config", []string{"dolt", "sql-server", "--config", missing}, procPathStateDeleted},
+		{"relative config is unknown", []string{"dolt", "sql-server", "--config", "dolt-config.yaml"}, procPathStateUnknown},
+		{"no config flag is unknown", []string{"dolt", "sql-server", "-H", "127.0.0.1"}, procPathStateUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := doltConfigPathState(tc.argv); got != tc.want {
+				t.Errorf("doltConfigPathState(%v) = %q, want %q", tc.argv, got, tc.want)
+			}
+		})
 	}
 }
