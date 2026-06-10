@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -1108,7 +1109,7 @@ func isGraphSlingFormula(ctx context.Context, formulaName string, searchPaths []
 	if err != nil {
 		return false, err
 	}
-	return IsCompiledGraphWorkflow(recipe), nil
+	return graphroute.IsCompiledGraphWorkflow(recipe), nil
 }
 
 func prepareGraphV2FormulaInvocation(ctx context.Context, formulaName, targetID string, opts SlingOpts, deps SlingDeps, a config.Agent) (graphv2.Invocation, bool, error) {

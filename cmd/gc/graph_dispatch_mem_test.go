@@ -12,6 +12,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -69,7 +70,7 @@ func selectExecutableGraphWorkerBead(ready []beads.Bead, assignee string) (beads
 		}
 		kind := bead.Metadata["gc.kind"]
 		switch {
-		case isControlDispatcherKind(kind):
+		case graphroute.IsControlDispatcherKind(kind):
 			return beads.Bead{}, false, fmt.Errorf("worker queue exposed control bead %s kind=%s ref=%s", bead.ID, kind, beadRef(bead))
 		case kind == "workflow" || kind == "scope" || kind == "ralph" || kind == "retry":
 			return beads.Bead{}, false, fmt.Errorf("worker queue exposed latch bead %s kind=%s ref=%s", bead.ID, kind, beadRef(bead))
@@ -196,7 +197,7 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 
 		progressed := false
 		for _, bead := range ready {
-			if !isControlDispatcherKind(bead.Metadata["gc.kind"]) {
+			if !graphroute.IsControlDispatcherKind(bead.Metadata["gc.kind"]) {
 				continue
 			}
 			result, err := dispatch.ProcessControl(store, bead, dispatch.ProcessOptions{CityPath: cityPath})
@@ -475,7 +476,7 @@ func TestGraphWorkflowInMemoryRouteUsesControlDispatcherForControlBeads(t *testi
 		if bead.Metadata["gc.root_bead_id"] != workflowID {
 			continue
 		}
-		if !isControlDispatcherKind(bead.Metadata["gc.kind"]) {
+		if !graphroute.IsControlDispatcherKind(bead.Metadata["gc.kind"]) {
 			continue
 		}
 		foundControl = true
@@ -556,7 +557,7 @@ func TestGraphWorkflowRoutingLeavesSpecBeadsUnrouted(t *testing.T) {
 	if spec.Assignee != "" {
 		t.Fatalf("spec Assignee = %q, want empty", spec.Assignee)
 	}
-	for _, key := range []string{"gc.routed_to", graphExecutionRouteMetaKey, "gc.run_target"} {
+	for _, key := range []string{"gc.routed_to", graphroute.GraphExecutionRouteMetaKey, "gc.run_target"} {
 		if spec.Metadata[key] != "" {
 			t.Fatalf("spec metadata %s = %q, want empty; full metadata: %#v", key, spec.Metadata[key], spec.Metadata)
 		}

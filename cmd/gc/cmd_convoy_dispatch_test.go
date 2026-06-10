@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -396,8 +397,8 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	if got := control.Metadata["gc.routed_to"]; got != "" {
 		t.Fatalf("review scope-check gc.routed_to = %q, want empty direct dispatcher assignee", got)
 	}
-	if control.Metadata[graphExecutionRouteMetaKey] != "reviewer" {
-		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphExecutionRouteMetaKey])
+	if control.Metadata[graphroute.GraphExecutionRouteMetaKey] != "reviewer" {
+		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphroute.GraphExecutionRouteMetaKey])
 	}
 	submit := steps["expansion-review.submit"]
 	if submit.Assignee != mayorSession {
@@ -434,8 +435,8 @@ func TestWorkflowFormulaSearchPathsUsesRoutedRigLayers(t *testing.T) {
 
 	control := workflowFormulaSearchPaths(cfg, beads.Bead{
 		Metadata: map[string]string{
-			"gc.routed_to":             config.ControlDispatcherAgentName,
-			graphExecutionRouteMetaKey: "frontend/reviewer",
+			"gc.routed_to":                        config.ControlDispatcherAgentName,
+			graphroute.GraphExecutionRouteMetaKey: "frontend/reviewer",
 		},
 	})
 	if len(control) != 2 || control[1] != "/rig/frontend/formulas" {
@@ -444,9 +445,9 @@ func TestWorkflowFormulaSearchPathsUsesRoutedRigLayers(t *testing.T) {
 
 	directControl := workflowFormulaSearchPaths(cfg, beads.Bead{
 		Metadata: map[string]string{
-			"gc.routed_to":                  config.ControlDispatcherAgentName,
-			graphExecutionRouteMetaKey:      "session-123",
-			graphExecutionRigContextMetaKey: "frontend",
+			"gc.routed_to":                             config.ControlDispatcherAgentName,
+			graphroute.GraphExecutionRouteMetaKey:      "session-123",
+			graphroute.GraphExecutionRigContextMetaKey: "frontend",
 		},
 	})
 	if len(directControl) != 2 || directControl[1] != "/rig/frontend/formulas" {
@@ -503,8 +504,8 @@ func TestDecorateDrainItemRecipeUsesDirectExecutionRoute(t *testing.T) {
 	source := beads.Bead{
 		ID: "drain-control",
 		Metadata: map[string]string{
-			graphExecutionRouteMetaKey:      direct.ID,
-			graphExecutionRigContextMetaKey: "frontend",
+			graphroute.GraphExecutionRouteMetaKey:      direct.ID,
+			graphroute.GraphExecutionRigContextMetaKey: "frontend",
 		},
 	}
 
@@ -525,10 +526,10 @@ func TestDecorateDrainItemRecipeUsesDirectExecutionRoute(t *testing.T) {
 	if check == nil {
 		t.Fatal("missing item.check")
 	}
-	if got := check.Metadata[graphExecutionRouteMetaKey]; got != direct.ID {
+	if got := check.Metadata[graphroute.GraphExecutionRouteMetaKey]; got != direct.ID {
 		t.Fatalf("item.check execution route = %q, want direct session %s", got, direct.ID)
 	}
-	if got := check.Metadata[graphExecutionRigContextMetaKey]; got != "frontend" {
+	if got := check.Metadata[graphroute.GraphExecutionRigContextMetaKey]; got != "frontend" {
 		t.Fatalf("item.check execution rig context = %q, want frontend", got)
 	}
 }
@@ -1482,8 +1483,8 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 	if got := control.Metadata["gc.routed_to"]; got != "" {
 		t.Fatalf("control gc.routed_to = %q, want empty direct dispatcher assignee", got)
 	}
-	if control.Metadata[graphExecutionRouteMetaKey] != "frontend/reviewer" {
-		t.Fatalf("control execution route = %q, want frontend/reviewer", control.Metadata[graphExecutionRouteMetaKey])
+	if control.Metadata[graphroute.GraphExecutionRouteMetaKey] != "frontend/reviewer" {
+		t.Fatalf("control execution route = %q, want frontend/reviewer", control.Metadata[graphroute.GraphExecutionRouteMetaKey])
 	}
 }
 
@@ -1510,8 +1511,8 @@ func TestDecorateDynamicFragmentRecipeUsesDirectExecutionRoute(t *testing.T) {
 		ID:    "gc-source",
 		Title: "Source",
 		Metadata: map[string]string{
-			graphExecutionRouteMetaKey:      direct.ID,
-			graphExecutionRigContextMetaKey: "frontend",
+			graphroute.GraphExecutionRouteMetaKey:      direct.ID,
+			graphroute.GraphExecutionRigContextMetaKey: "frontend",
 		},
 	}
 	fragment := &formula.FragmentRecipe{
@@ -1558,10 +1559,10 @@ func TestDecorateDynamicFragmentRecipeUsesDirectExecutionRoute(t *testing.T) {
 	if check.Assignee != config.ControlDispatcherAgentName {
 		t.Fatalf("check assignee = %q, want %q", check.Assignee, config.ControlDispatcherAgentName)
 	}
-	if got := check.Metadata[graphExecutionRouteMetaKey]; got != direct.ID {
+	if got := check.Metadata[graphroute.GraphExecutionRouteMetaKey]; got != direct.ID {
 		t.Fatalf("check execution route = %q, want direct session %s", got, direct.ID)
 	}
-	if got := check.Metadata[graphExecutionRigContextMetaKey]; got != "frontend" {
+	if got := check.Metadata[graphroute.GraphExecutionRigContextMetaKey]; got != "frontend" {
 		t.Fatalf("check execution rig context = %q, want frontend", got)
 	}
 }
@@ -4933,8 +4934,8 @@ func TestDecorateDynamicFragmentRecipeSynthesizesInheritedScopeChecks(t *testing
 	if got := control.Metadata["gc.routed_to"]; got != "" {
 		t.Fatalf("review scope-check gc.routed_to = %q, want empty direct dispatcher assignee", got)
 	}
-	if control.Metadata[graphExecutionRouteMetaKey] != "reviewer" {
-		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphExecutionRouteMetaKey])
+	if control.Metadata[graphroute.GraphExecutionRouteMetaKey] != "reviewer" {
+		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphroute.GraphExecutionRouteMetaKey])
 	}
 	if control.Metadata["gc.attempt"] != "2" || control.Metadata["gc.ralph_step_id"] != "review-loop" || control.Metadata["gc.step_id"] != "review-loop" {
 		t.Fatalf("review scope-check trace metadata = %#v, want inherited attempt/step ids", control.Metadata)

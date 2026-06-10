@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -2049,8 +2050,8 @@ title = "Do work"
 			if bead.Metadata["gc.routed_to"] != "" {
 				t.Fatalf("finalizer gc.routed_to = %q, want empty for concrete control dispatcher assignee", bead.Metadata["gc.routed_to"])
 			}
-			if bead.Metadata[graphExecutionRouteMetaKey] != "quinn" {
-				t.Fatalf("finalizer execution route = %q, want quinn", bead.Metadata[graphExecutionRouteMetaKey])
+			if bead.Metadata[graphroute.GraphExecutionRouteMetaKey] != "quinn" {
+				t.Fatalf("finalizer execution route = %q, want quinn", bead.Metadata[graphroute.GraphExecutionRouteMetaKey])
 			}
 			foundControl = true
 		}

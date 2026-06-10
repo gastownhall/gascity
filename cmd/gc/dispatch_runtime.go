@@ -19,54 +19,32 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/shellquote"
-	"github.com/gastownhall/gascity/internal/sling"
 )
 
-// graphExecutionRouteMetaKey is an alias for beadmeta.ExecutionRoutedToMetadataKey.
-const graphExecutionRouteMetaKey = beadmeta.ExecutionRoutedToMetadataKey
-
-// graphExecutionRigContextMetaKey is an alias for beadmeta.ExecutionRigContextMetadataKey.
-const graphExecutionRigContextMetaKey = beadmeta.ExecutionRigContextMetadataKey
-
-// isControlDispatcherKind delegates to sling.IsControlDispatcherKind.
-func isControlDispatcherKind(kind string) bool {
-	return sling.IsControlDispatcherKind(kind)
-}
-
-// workflowExecutionRoute delegates to sling.WorkflowExecutionRoute.
-func workflowExecutionRoute(bead beads.Bead) string {
-	return sling.WorkflowExecutionRoute(bead)
-}
-
-// controlDispatcherBinding delegates to sling.ControlDispatcherBinding.
-func controlDispatcherBinding(store beads.Store, cityName string, cfg *config.City, rigContext string) (sling.GraphRouteBinding, error) {
-	deps := sling.SlingDeps{
-		CityName: cityName,
-		Store:    store,
-		Cfg:      cfg,
-		Resolver: cliAgentResolver{},
-	}
-	return sling.ControlDispatcherBinding(store, cityName, cfg, rigContext, deps)
-}
-
-// assignGraphStepRoute delegates to sling.AssignGraphStepRoute.
-func assignGraphStepRoute(step *formula.RecipeStep, executionBinding sling.GraphRouteBinding, controlBinding *sling.GraphRouteBinding) {
-	sling.AssignGraphStepRoute(step, executionBinding, controlBinding)
-}
-
-// applyGraphRouting delegates to sling.ApplyGraphRouting with CLI interfaces.
-func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
-	deps := sling.SlingDeps{
-		CityName:              cityName,
+// cliGraphrouteDeps builds the graphroute dependencies used by CLI
+// graph-routing call sites.
+func cliGraphrouteDeps(cityPath string) graphroute.Deps {
+	return graphroute.Deps{
 		CityPath:              cityPath,
-		Store:                 store,
-		StoreRef:              storeRef,
-		Cfg:                   cfg,
 		Resolver:              cliAgentResolver{},
 		DirectSessionResolver: cliDirectSessionResolver,
 	}
-	return sling.ApplyGraphRouting(recipe, a, routedTo, vars, "", scopeKind, scopeRef, storeRef, store, cityName, cfg, deps)
+}
+
+// controlDispatcherBinding resolves the control-dispatcher route binding
+// with CLI dependencies. Only Resolver is supplied —
+// graphroute.ControlDispatcherBinding reads no other Deps fields, matching
+// the projection the retired sling alias layer forwarded.
+func controlDispatcherBinding(store beads.Store, cityName string, cfg *config.City, rigContext string) (graphroute.GraphRouteBinding, error) {
+	return graphroute.ControlDispatcherBinding(store, cityName, cfg, rigContext, graphroute.Deps{Resolver: cliAgentResolver{}})
+}
+
+// applyGraphRouting delegates to graphroute.ApplyGraphRouting with CLI
+// dependencies.
+func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+	return graphroute.ApplyGraphRouting(recipe, a, routedTo, vars, "", scopeKind, scopeRef, storeRef, store, cityName, cfg, cliGraphrouteDeps(cityPath))
 }
 
 var (

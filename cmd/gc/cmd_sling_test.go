@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/pgauth"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -4432,8 +4433,8 @@ title = "Do work"
 			if got := bead.Metadata["gc.routed_to"]; got != "" {
 				t.Fatalf("workflow-finalize gc.routed_to = %q, want empty direct dispatcher assignee", got)
 			}
-			if bead.Metadata[graphExecutionRouteMetaKey] != "mayor" {
-				t.Fatalf("workflow-finalize execution route = %q, want mayor", bead.Metadata[graphExecutionRouteMetaKey])
+			if bead.Metadata[graphroute.GraphExecutionRouteMetaKey] != "mayor" {
+				t.Fatalf("workflow-finalize execution route = %q, want mayor", bead.Metadata[graphroute.GraphExecutionRouteMetaKey])
 			}
 			assigned++
 		default:

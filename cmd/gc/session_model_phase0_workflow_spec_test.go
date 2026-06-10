@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -237,7 +238,7 @@ func TestPhase0WorkflowRouting_ControlStepPreservesExecutionConfigLane(t *testin
 	if got := check.Metadata["gc.routed_to"]; got != "" {
 		t.Fatalf("scope-check gc.routed_to = %q, want empty direct dispatcher assignee", got)
 	}
-	if got := check.Metadata[graphExecutionRouteMetaKey]; got != "frontend/codex" {
+	if got := check.Metadata[graphroute.GraphExecutionRouteMetaKey]; got != "frontend/codex" {
 		t.Fatalf("scope-check execution route = %q, want frontend/codex", got)
 	}
 }
