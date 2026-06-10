@@ -2269,6 +2269,253 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 	})
 }
 
+// TestBdMutationWriteID covers the compatibility shim (first-ID extraction).
+func TestBdMutationWriteID(t *testing.T) {
+	t.Run("extracts id from write subcommands", func(t *testing.T) {
+		cases := []struct {
+			args []string
+			want string
+		}{
+			{[]string{"update", "gcy-dv7", "--title", "x"}, "gcy-dv7"},
+			{[]string{"update", "--title", "x", "gcy-dv7"}, "gcy-dv7"},
+			{[]string{"close", "gcy-dv7"}, "gcy-dv7"},
+			{[]string{"close", "--reason", "done", "gcy-dv7"}, "gcy-dv7"},
+			{[]string{"close", "--force", "--json", "gcy-dv7"}, "gcy-dv7"},
+			{[]string{"reopen", "gcy-dv7"}, "gcy-dv7"},
+			{[]string{"delete", "--force", "gcy-dv7"}, "gcy-dv7"},
+			{[]string{"delete", "--force", "--json", "gcy-dv7"}, "gcy-dv7"},
+			// double-dash separator
+			{[]string{"update", "--", "gcy-dv7"}, "gcy-dv7"},
+		}
+		for _, tc := range cases {
+			got, ok := bdMutationWriteID(tc.args)
+			if !ok || got != tc.want {
+				t.Errorf("bdMutationWriteID(%q) = (%q, %v), want (%q, true)", tc.args, got, ok, tc.want)
+			}
+		}
+	})
+	t.Run("returns false for read or unrecognised subcommands", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"show", "gcy-dv7"},
+			{"list", "-s", "open"},
+			{"query", "gcy-dv7"},
+			{},
+			{"create", "new task"},
+		} {
+			if _, ok := bdMutationWriteID(args); ok {
+				t.Errorf("bdMutationWriteID(%q) returned ok=true, want false", args)
+			}
+		}
+	})
+	// Regression: short ID "gcy-dv7" must NOT be confused for "gcy-wisp-dv78"
+	// by the caller — the returned token is the exact string in args.
+	t.Run("returns the exact supplied token (gcy-g4o regression)", func(t *testing.T) {
+		got, ok := bdMutationWriteID([]string{"update", "gcy-dv7", "--status", "open"})
+		if !ok || got != "gcy-dv7" {
+			t.Errorf("bdMutationWriteID: got (%q, %v), want (\"gcy-dv7\", true)", got, ok)
+		}
+	})
+}
+
+// TestBdMutationWriteIDs covers the full scanner used by the pre-flight guard.
+func TestBdMutationWriteIDs(t *testing.T) {
+	type result struct {
+		ids       []string
+		ok        bool
+		ambiguous bool
+	}
+	cases := []struct {
+		name string
+		args []string
+		want result
+	}{
+		// --- Basic extraction ---
+		{
+			name: "single id, no flags",
+			args: []string{"close", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "id before flags",
+			args: []string{"update", "gcy-dv7", "--title", "x"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "id after long value flag",
+			args: []string{"update", "--title", "new title", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+
+		// --- Short flags (previously broken) ---
+		{
+			name: "short -s value flag before id",
+			args: []string{"update", "-s", "closed", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -a value flag before id",
+			args: []string{"update", "-a", "alice", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -t value flag before id",
+			args: []string{"update", "-t", "task", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -p value flag before id",
+			args: []string{"update", "-p", "P2", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -d value flag before id",
+			args: []string{"update", "-d", "description text", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -e value flag before id",
+			args: []string{"update", "-e", "60", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -r reason flag for close before id",
+			args: []string{"close", "-r", "done", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -C directory flag before id",
+			args: []string{"close", "-C", "/some/path", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+
+		// --- --flag=value form ---
+		{
+			name: "--flag=value does not consume next token",
+			args: []string{"update", "--status=closed", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "--title=value with id after",
+			args: []string{"update", "--title=new title", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+
+		// --- Message / notes flags whose values may contain bead tokens ---
+		{
+			name: "notes value contains bead token",
+			args: []string{"update", "--notes", "see gcy-dv7 for context", "gcy-real"},
+			want: result{ids: []string{"gcy-real"}, ok: true},
+		},
+		{
+			name: "append-notes value contains bead token",
+			args: []string{"update", "--append-notes", "related: gcy-dv7", "gcy-real"},
+			want: result{ids: []string{"gcy-real"}, ok: true},
+		},
+
+		// --- Batch IDs ---
+		{
+			name: "batch close multiple ids",
+			args: []string{"close", "id1", "id2", "id3"},
+			want: result{ids: []string{"id1", "id2", "id3"}, ok: true},
+		},
+		{
+			name: "batch delete multiple ids with --force",
+			args: []string{"delete", "--force", "id1", "id2", "id3"},
+			want: result{ids: []string{"id1", "id2", "id3"}, ok: true},
+		},
+		{
+			name: "batch update with flags interspersed",
+			args: []string{"update", "--status", "closed", "id1", "id2"},
+			want: result{ids: []string{"id1", "id2"}, ok: true},
+		},
+
+		// --- Double-dash terminator ---
+		{
+			name: "double-dash: everything after is positional",
+			args: []string{"update", "--", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "double-dash: multiple ids after",
+			args: []string{"close", "--force", "--", "id1", "id2"},
+			want: result{ids: []string{"id1", "id2"}, ok: true},
+		},
+
+		// --- Fail-closed: ambiguous unknown flags ---
+		// gcy-g4o demonstrated break: `close --session gcy-realbead gcy-dv7`
+		// Previously the hand-rolled scanner lacked --session → returned
+		// "gcy-realbead" as the ID, leaving gcy-dv7 unguarded. Now --session
+		// is in the known set so it is correctly handled, but an *unknown*
+		// value flag must trigger ambiguous.
+		{
+			name: "known --session flag handled correctly for close",
+			args: []string{"close", "--session", "sess-id-abc", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "unknown value flag triggers fail-closed",
+			args: []string{"close", "--unknown-future-flag", "gcy-realbead", "gcy-dv7"},
+			want: result{ok: true, ambiguous: true},
+		},
+		{
+			name: "unknown short flag triggers fail-closed",
+			args: []string{"update", "-z", "something", "gcy-dv7"},
+			want: result{ok: true, ambiguous: true},
+		},
+
+		// --- Non-write subcommands ---
+		{
+			name: "show is not a write command",
+			args: []string{"show", "gcy-dv7"},
+			want: result{ok: false},
+		},
+		{
+			name: "list is not a write command",
+			args: []string{"list", "-s", "open"},
+			want: result{ok: false},
+		},
+		{
+			name: "empty args",
+			args: []string{},
+			want: result{ok: false},
+		},
+
+		// --- No IDs supplied (e.g. "last touched" fallback) ---
+		{
+			name: "update with no ids (last-touched fallback)",
+			args: []string{"update", "--status", "closed"},
+			want: result{ids: nil, ok: true},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ids, ok, ambiguous := bdMutationWriteIDs(tc.args)
+			if ok != tc.want.ok {
+				t.Errorf("ok = %v, want %v", ok, tc.want.ok)
+			}
+			if ambiguous != tc.want.ambiguous {
+				t.Errorf("ambiguous = %v, want %v", ambiguous, tc.want.ambiguous)
+			}
+			if !bdTestSlicesEqual(ids, tc.want.ids) {
+				t.Errorf("ids = %v, want %v", ids, tc.want.ids)
+			}
+		})
+	}
+}
+
+func bdTestSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestParseBdReleaseIfCurrentArgs(t *testing.T) {
 	id, assignee, ok, err := parseBdReleaseIfCurrentArgs([]string{"release-if-current", "gc-abc", "worker-1"})
 	if err != nil {

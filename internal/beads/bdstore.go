@@ -941,7 +941,16 @@ func (s *BdStore) Get(id string) (Bead, error) {
 	if len(issues) == 0 {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
 	}
-	return issues[0].toBead(), nil
+	bead := issues[0].toBead()
+	// Guard against bd's fuzzy/substring ID resolution silently returning a
+	// different bead than requested (gascity#gcy-g4o). bd may resolve a short
+	// ID like "gcy-dv7" to an unrelated bead whose ID contains "dv7" as a
+	// substring (e.g. "gcy-wisp-dv78"). Since gc always passes full bead IDs,
+	// a mismatch means the requested bead does not exist in this store.
+	if bead.ID != id {
+		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
+	}
+	return bead, nil
 }
 
 // Update modifies fields of an existing bead via bd update.

@@ -471,6 +471,29 @@ func TestBdStoreGetEmptyArray(t *testing.T) {
 	}
 }
 
+// TestBdStoreGetExactIDGuard verifies that BdStore.Get returns ErrNotFound when
+// bd's fuzzy resolver returns a different bead than requested (gcy-g4o).
+// e.g. requesting "gcy-dv7" must NOT silently accept "gcy-wisp-dv78".
+func TestBdStoreGetExactIDGuard(t *testing.T) {
+	// bd returns a bead whose ID is a superset of the requested ID.
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gcy-dv7`: {
+			out: []byte(`[{"id":"gcy-wisp-dv78","title":"Wrong bead","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Get("gcy-dv7")
+	if err == nil {
+		t.Fatal("Get returned nil error, want ErrNotFound")
+	}
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("Get error = %v, want ErrNotFound", err)
+	}
+}
+
 // --- Close ---
 
 func TestBdStoreClose(t *testing.T) {

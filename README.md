@@ -99,6 +99,32 @@ bd create "Create a script that prints hello world"
 gc session attach mayor
 ```
 
+### Nix/Flox machines (ICU not on the default CGO path)
+
+On NixOS / Flox-managed Linux toolchains, system include/lib dirs are not
+searched, so the build fails with `fatal error: unicode/uregex.h: No such file
+or directory`. Point CGO at the Nix-store ICU dev headers + matching runtime
+lib (pick the dev output whose propagated lib matches your `gc`/`dolt` link, to
+avoid ICU version skew), and disable the Makefile's `/usr/lib` fallback so the
+Nix and system toolchains don't get mixed:
+
+```bash
+# Re-resolve the dev header path if the store path changes:
+#   find /nix/store -maxdepth 3 -path '*icu4c*-dev/include/unicode/uregex.h'
+# Match the lib to what your installed binary links: ldd $(which gc) | grep icu
+ICU_DEV=/nix/store/dvhx24q4icrig4q1v1lp7kzi3izd5jmb-icu4c-76.1-dev
+ICU_LIB=/nix/store/i4lj3w4yd9x9jbi7a1xhjqsr7bg8jq7p-icu4c-76.1
+
+CGO_ENABLED=1 \
+CGO_CPPFLAGS="-I$ICU_DEV/include" \
+CGO_LDFLAGS="-L$ICU_LIB/lib" \
+SYS_USR_CGO_FALLBACK=0 \
+  make build      # or: go build -o bin/gc ./cmd/gc
+```
+
+CGO-backed tests (e.g. `go test ./internal/beads`) take the same three CGO_*
+vars — no `CGO_ENABLED=0` workaround needed once ICU is pointed at correctly.
+
 For the longer walkthrough, start with
 [Tutorial 01](docs/tutorials/01-cities-and-rigs.md).
 
