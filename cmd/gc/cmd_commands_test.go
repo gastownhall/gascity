@@ -99,6 +99,111 @@ echo "args=$*"
 	}
 }
 
+func TestRunDiscoveredCommand_ProjectsCanonicalExternalDoltEnv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: city_canonical",
+		"gc.endpoint_status: verified",
+		"dolt.host: 127.0.0.1",
+		"dolt.port: 4406",
+		"dolt.user: city-user",
+		"",
+	}, "\n"))
+
+	packDir := filepath.Join(dir, "pack")
+	sourceDir := filepath.Join(packDir, "commands", "compact")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(sourceDir, "run.sh")
+	script := `#!/bin/sh
+echo "managed=$GC_DOLT_MANAGED_LOCAL"
+echo "host=$GC_DOLT_HOST"
+echo "port=$GC_DOLT_PORT"
+echo "user=$GC_DOLT_USER"
+echo "beadsport=$BEADS_DOLT_SERVER_PORT"
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stale ambient values from a parent session must lose to the city's
+	// canonical endpoint, exactly as they do on the order-dispatch path.
+	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("GC_DOLT_MANAGED_LOCAL", "1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+
+	entry := config.DiscoveredCommand{
+		BindingName: "dolt",
+		PackName:    "dolt",
+		Command:     []string{"compact"},
+		RunScript:   scriptPath,
+		PackDir:     packDir,
+		SourceDir:   sourceDir,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runDiscoveredCommand(entry, dir, "testcity", nil, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"managed=0",
+		"host=127.0.0.1",
+		"port=4406",
+		"user=city-user",
+		"beadsport=4406",
+	} {
+		if !strings.Contains(out, want+"\n") {
+			t.Fatalf("stdout missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunDiscoveredCommand_KeepsAmbientDoltEnvWithoutScopeConfig(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "pack")
+	sourceDir := filepath.Join(packDir, "commands", "compact")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(sourceDir, "run.sh")
+	script := `#!/bin/sh
+echo "port=$GC_DOLT_PORT"
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without an authoritative scope config the operator-seeded ambient
+	// value must pass through untouched.
+	t.Setenv("GC_DOLT_PORT", "7777")
+
+	entry := config.DiscoveredCommand{
+		BindingName: "dolt",
+		PackName:    "dolt",
+		Command:     []string{"compact"},
+		RunScript:   scriptPath,
+		PackDir:     packDir,
+		SourceDir:   sourceDir,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runDiscoveredCommand(entry, dir, "testcity", nil, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "port=7777\n") {
+		t.Fatalf("ambient GC_DOLT_PORT must pass through without scope config, got:\n%s", stdout.String())
+	}
+}
+
 func TestRunDiscoveredCommand_PrefersEntryPackDir(t *testing.T) {
 	dir := t.TempDir()
 	packDir := filepath.Join(dir, "actual-pack")
