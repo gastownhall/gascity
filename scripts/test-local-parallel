@@ -25,8 +25,9 @@ cd "$repo_root"
 # server. They must never reach `go test`, or every bd-forking test writes to
 # PRODUCTION Dolt and stalls bd writes city-wide (ga-w2kh1r). The per-job
 # `env -i` below already drops them; unsetting here keeps them out of this
-# script's own go-env probes and documents the invariant. The internal/beads
-# live-Dolt guard backstops bare `go test` runs that bypass this harness.
+# script's own go-env probes and documents the invariant. A bare `go test`
+# outside this harness is covered separately by internal/testenv, which scrubs
+# these vars at test-binary init in every covered package.
 unset GC_DOLT_PORT BEADS_DOLT_SERVER_PORT
 
 detect_cpus() {

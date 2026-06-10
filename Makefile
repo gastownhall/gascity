@@ -240,8 +240,9 @@ vet:
 ## the allowlist below. They point bd at the live shared city Dolt server, so
 ## letting them reach `go test` makes every bd-forking test write to PRODUCTION
 ## Dolt — 18+ parallel workers pegged the shared server and stalled bd writes
-## city-wide (ga-w2kh1r). Do not add them. The internal/beads live-Dolt guard
-## backstops bare `go test` runs that bypass this wrapper.
+## city-wide (ga-w2kh1r). Do not add them. For a bare `go test` that bypasses
+## this wrapper, internal/testenv scrubs these vars at test-binary init in every
+## covered package (enforced by TestRequiresDedicatedTestenvImportFile).
 GOPATH_VAL    := $(shell go env GOPATH)
 GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)
