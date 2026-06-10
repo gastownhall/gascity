@@ -541,7 +541,7 @@ func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drain
 	if handled, err := checkRateLimitStability(session, cfg, alive, dt, store, clk, peek); handled || err != nil {
 		return true
 	}
-	if !rapidExitWithinStabilityThreshold(session, cfg, alive, dt, clk) {
+	if sessionpkg.DecideSessionExit(sessionExitFacts(session, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
 		return false
 	}
 	recordWakeFailure(session, store, clk)
@@ -549,18 +549,26 @@ func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drain
 	return true
 }
 
+// checkRateLimitStability runs the rate-limit lane of the exit-classification
+// decider: a dead crash candidate whose provider screen shows a rate-limit
+// message is quarantined without counting a crash. Returns handled=true when
+// the quarantine was recorded, or the write error when recording failed; the
+// caller skips further processing for the session in either case.
 func checkRateLimitStability(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, store beads.Store, clk clock.Clock, peek func(lines int) (string, error)) (bool, error) {
-	if !rateLimitStabilityCandidate(session, cfg, alive, dt, clk) {
+	if session == nil {
 		return false, nil
 	}
-	if peek == nil {
-		return false, nil
+	facts := sessionExitFacts(session, cfg, alive, dt, clk)
+	facts.ScreenAvailable = peek != nil
+	dec := sessionpkg.DecideSessionExit(facts)
+	for dec == sessionpkg.ExitGatherScreen {
+		facts.Screen = sessionpkg.ScreenOther
+		if content, err := peek(rateLimitPeekLines); err == nil && runtime.ContainsProviderRateLimitScreen(content) {
+			facts.Screen = sessionpkg.ScreenRateLimit
+		}
+		dec = sessionpkg.DecideSessionExit(facts)
 	}
-	content, err := peek(rateLimitPeekLines)
-	if err != nil {
-		return false, nil
-	}
-	if !runtime.ContainsProviderRateLimitScreen(content) {
+	if dec != sessionpkg.ExitRateLimitQuarantine {
 		return false, nil
 	}
 	if err := recordRateLimitQuarantine(session, store, clk); err != nil {
@@ -569,63 +577,28 @@ func checkRateLimitStability(session *beads.Bead, cfg *config.City, alive bool, 
 	return true, nil
 }
 
-func rateLimitStabilityCandidate(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, clk clock.Clock) bool {
-	if session == nil || alive {
-		return false
-	}
-	if cfg != nil && cfg.Session.Provider == "subprocess" {
-		return false
-	}
-	if dt != nil && dt.get(session.ID) != nil {
-		return false
-	}
-	lastWoke := session.Metadata["last_woke_at"]
-	if lastWoke == "" {
-		return false
-	}
+// sessionExitFacts gathers the cheap facts for the exit-classification
+// decider. The provider-screen fact is gathered on demand by checkStability
+// when the decider asks for it.
+func sessionExitFacts(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, clk clock.Clock) sessionpkg.ExitFacts {
 	var startupTimeout time.Duration
+	subprocess := false
 	if cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
+		subprocess = cfg.Session.Provider == "subprocess"
 	}
-	if pendingCreateStartInFlight(*session, clk, startupTimeout) {
-		return false
+	return sessionpkg.ExitFacts{
+		Alive:                      alive,
+		SubprocessProvider:         subprocess,
+		DrainPending:               dt != nil && dt.get(session.ID) != nil,
+		PendingCreateClaim:         strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true",
+		PendingCreateStartInFlight: pendingCreateStartInFlight(*session, clk, startupTimeout),
+		SleepReason:                session.Metadata["sleep_reason"],
+		LastWokeAt:                 session.Metadata["last_woke_at"],
+		Now:                        clk.Now(),
+		StabilityThreshold:         stabilityThreshold,
+		ProductivityThreshold:      churnProductivityThreshold,
 	}
-	if _, err := time.Parse(time.RFC3339, lastWoke); err != nil {
-		return false
-	}
-	return true
-}
-
-func rapidExitWithinStabilityThreshold(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, clk clock.Clock) bool {
-	if alive {
-		return false
-	}
-	// Subprocess sessions are used for headless and deterministic workers that
-	// intentionally exit after a unit of work. Treating those short-lived exits
-	// as crashes quarantines valid one-shot workers like control-dispatcher.
-	if cfg != nil && cfg.Session.Provider == "subprocess" {
-		return false
-	}
-	// Don't count intentional drains as crashes.
-	if dt != nil && dt.get(session.ID) != nil {
-		return false
-	}
-	lastWoke := session.Metadata["last_woke_at"]
-	if lastWoke == "" {
-		return false
-	}
-	var startupTimeout time.Duration
-	if cfg != nil {
-		startupTimeout = cfg.Session.StartupTimeoutDuration()
-	}
-	if pendingCreateStartInFlight(*session, clk, startupTimeout) {
-		return false
-	}
-	t, err := time.Parse(time.RFC3339, lastWoke)
-	if err != nil {
-		return false
-	}
-	return clk.Now().Sub(t) < stabilityThreshold
 }
 
 func clearLastWokeAt(session *beads.Bead, store beads.Store) {
@@ -736,64 +709,27 @@ func clearWakeFailures(session *beads.Bead, store beads.Store) {
 // Returns true if a churn event was recorded (caller should skip further
 // processing for this session).
 func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, store beads.Store, clk clock.Clock) bool {
-	if alive {
-		return false
-	}
-	// Pending-create sessions have not completed startup yet. A stale create
-	// lease should trigger a retried wake, not a churn increment that blocks
-	// the retry before start execution.
-	if session != nil && strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true" {
-		return false
-	}
-	// Subprocess sessions exit intentionally — not churn.
-	if cfg != nil && cfg.Session.Provider == "subprocess" {
-		return false
-	}
-	// Intentional drains are not churn.
-	if dt != nil && dt.get(session.ID) != nil {
-		return false
-	}
-	if isDeliberateSleepReason(session.Metadata["sleep_reason"]) {
-		return false
-	}
-	lastWoke := session.Metadata["last_woke_at"]
-	if lastWoke == "" {
-		return false
-	}
-	t, err := time.Parse(time.RFC3339, lastWoke)
-	if err != nil {
-		return false
-	}
-	elapsed := clk.Now().Sub(t)
-	// Only fires for sessions in the "churn band": survived past
-	// stabilityThreshold (so checkStability didn't fire) but died
-	// before churnProductivityThreshold (so not productive).
-	if elapsed < stabilityThreshold {
-		return false
-	}
-	if elapsed >= churnProductivityThreshold {
+	switch sessionpkg.DecideSessionExit(sessionExitFacts(session, cfg, alive, dt, clk)) {
+	case sessionpkg.ExitChurn:
+		recordChurn(session, store, clk)
+		// Clear last_woke_at so this death is not re-counted next tick
+		// (edge-triggered, same pattern as checkStability).
+		_ = store.SetMetadata(session.ID, "last_woke_at", "")
+		session.Metadata["last_woke_at"] = ""
+		return true
+	case sessionpkg.ExitProductiveDeath:
 		// Session was productive — clear any stale churn count so it
 		// doesn't carry over and cause premature quarantine next time.
 		clearChurn(session, store)
 		return false
+	default:
+		// Rapid crashes belong to checkStability, which ran first.
+		return false
 	}
-
-	recordChurn(session, store, clk)
-	// Clear last_woke_at so this death is not re-counted next tick
-	// (edge-triggered, same pattern as checkStability).
-	_ = store.SetMetadata(session.ID, "last_woke_at", "")
-	session.Metadata["last_woke_at"] = ""
-	return true
 }
 
 func isDeliberateSleepReason(reason string) bool {
-	switch strings.TrimSpace(reason) {
-	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained",
-		sleepReasonCityStop, "user-hold", "wait-hold", "rate_limit", "failed-create":
-		return true
-	default:
-		return false
-	}
+	return sessionpkg.IsDeliberateSleepReason(reason)
 }
 
 // recordChurn increments the churn counter and clears session_key on
