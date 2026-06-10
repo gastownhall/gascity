@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -53,7 +54,7 @@ func ResolveSessionBeadByExactID(store beads.Store, identifier string) (beads.Be
 	}
 	b, err := store.Get(identifier)
 	if err == nil && IsSessionBeadOrRepairable(b) {
-		RepairEmptyType(store, &b)
+		normalizeEmptyType(&b)
 		return b, b.ID, nil
 	}
 	if err != nil && !errors.Is(err, beads.ErrNotFound) {
@@ -139,7 +140,7 @@ func listSessionBeadsByMetadata(store beads.Store, key, value string, allowClose
 		if !IsSessionBeadOrRepairable(b) {
 			continue
 		}
-		RepairEmptyType(store, &b)
+		normalizeEmptyType(&b)
 		out = append(out, b)
 	}
 	return out, nil
@@ -216,16 +217,30 @@ func IsSessionBeadOrRepairable(b beads.Bead) bool {
 }
 
 // RepairEmptyType fixes a session bead with an empty type field by
-// setting it to "session". This is a best-effort repair — if the store
-// update fails, the in-memory bead is still patched so the current
-// operation can proceed.
+// setting it to "session". Only call it from paths that already mutate
+// or materialize the bead; read-only resolution normalizes in memory
+// instead. This is a best-effort repair — if the store update fails,
+// the failure is logged and the in-memory bead is still patched so the
+// current operation can proceed.
 func RepairEmptyType(store beads.Store, b *beads.Bead) {
 	if b.Type != "" {
 		return
 	}
 	t := BeadType
-	_ = store.Update(b.ID, beads.UpdateOpts{Type: &t})
+	if err := store.Update(b.ID, beads.UpdateOpts{Type: &t}); err != nil {
+		log.Printf("session %s: repairing empty bead type: %v", b.ID, err)
+	}
 	b.Type = BeadType
+}
+
+// normalizeEmptyType patches an empty session bead type in memory only,
+// so read-only resolution paths can select repairable beads exactly as
+// before without writing to the store. Persisting the repair is the job
+// of RepairEmptyType, called from explicitly-mutating paths.
+func normalizeEmptyType(b *beads.Bead) {
+	if b.Type == "" {
+		b.Type = BeadType
+	}
 }
 
 func sessionIdentifierLabel(b beads.Bead) string {
