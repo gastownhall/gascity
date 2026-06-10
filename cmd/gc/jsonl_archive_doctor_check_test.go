@@ -301,6 +301,60 @@ func TestJsonlArchiveDoctorCheck_StateEnvOverridesRuntimePackLocations(t *testin
 	}
 }
 
+func TestJsonlArchiveDoctorCheck_ArchiveRepoRuntimePackPrecedence(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		coreExists        bool
+		maintenanceExists bool
+		legacyExists      bool
+		want              string
+	}{
+		{
+			name:       "core wins",
+			coreExists: true,
+			want:       "core",
+		},
+		{
+			name:              "maintenance fallback",
+			maintenanceExists: true,
+			legacyExists:      true,
+			want:              "maintenance",
+		},
+		{
+			name:         "pre-pack fallback",
+			legacyExists: true,
+			want:         "legacy",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			runtimeDir := filepath.Join(cityDir, ".gc", "runtime")
+			paths := map[string]string{
+				"core":        filepath.Join(runtimeDir, "packs", "core", "jsonl-archive"),
+				"maintenance": filepath.Join(runtimeDir, "packs", "maintenance", "jsonl-archive"),
+				"legacy":      filepath.Join(cityDir, ".gc", "jsonl-archive"),
+			}
+			if tt.coreExists {
+				initBareArchiveRepo(t, paths["core"], true)
+			}
+			if tt.maintenanceExists {
+				initBareArchiveRepo(t, paths["maintenance"], true)
+			}
+			if tt.legacyExists {
+				initBareArchiveRepo(t, paths["legacy"], true)
+			}
+
+			check := newJsonlArchiveDoctorCheck(cityDir)
+			check.getenv = stubArchiveEnv{vars: map[string]string{
+				"GC_CITY_RUNTIME_DIR": runtimeDir,
+			}}.get
+			if got := check.resolveArchiveRepo(); got != paths[tt.want] {
+				t.Fatalf("resolveArchiveRepo() = %q, want %q", got, paths[tt.want])
+			}
+		})
+	}
+}
+
 func TestDoDoctorRegistersJsonlArchiveCheck(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()

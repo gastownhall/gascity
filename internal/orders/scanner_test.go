@@ -109,6 +109,33 @@ trigger = "manual"
 	}
 }
 
+func TestScanSkipAliases(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/layer1/orders/maintenance-export.toml"] = []byte(`
+[order]
+exec = "scripts/export.sh"
+trigger = "cooldown"
+interval = "15m"
+skip_aliases = ["old-export"]
+`)
+	fs.Files["/layer1/orders/cleanup.toml"] = []byte(`
+[order]
+formula = "mol-cleanup"
+trigger = "manual"
+`)
+
+	orders, err := Scan(fs, []string{"/layer1/formulas"}, []string{"old-export"})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("got %d orders, want 1", len(orders))
+	}
+	if orders[0].Name != "cleanup" {
+		t.Errorf("Name = %q, want %q", orders[0].Name, "cleanup")
+	}
+}
+
 func TestScanDisabled(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/layer1/orders/digest.toml"] = []byte(`

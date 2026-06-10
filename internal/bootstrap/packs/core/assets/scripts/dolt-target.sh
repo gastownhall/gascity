@@ -150,6 +150,26 @@ else
     DOLT_PROVIDER_STATE_FILE="$DOLT_PACK_DIR/dolt-provider-state.json"
 fi
 
+# No-Dolt guard. Core ships these maintenance scripts to every city, but
+# they only have work when the city has a Dolt target. Skip (exit 0)
+# instead of failing (exit 78) when no Dolt evidence exists, so cities on
+# file/postgres backends do not log a recurring OrderFailed every cooldown.
+# Order dispatch projects GC_DOLT_PORT explicitly — empty when the city has
+# no canonical Dolt target — so a non-empty port here is city-derived, not
+# inherited operator environment.
+core_city_has_dolt_target() {
+    [ -n "${GC_DOLT_PORT:-}" ] && return 0
+    [ -f "$DOLT_STATE_FILE" ] && return 0
+    [ -n "${DOLT_PROVIDER_STATE_FILE:-}" ] && [ -f "$DOLT_PROVIDER_STATE_FILE" ] && return 0
+    [ -d "$GC_CITY_PATH/.beads/dolt" ] && return 0
+    return 1
+}
+
+if ! core_city_has_dolt_target; then
+    echo "core: no managed dolt target for this city; skipping ${0##*/}"
+    exit 0
+fi
+
 DOLT_SYSTEM_PACKS_DIR="${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}"
 DOLT_PORT_RESOLVE_SCRIPT="$DOLT_SYSTEM_PACKS_DIR/dolt/assets/scripts/port_resolve.sh"
 if [ ! -f "$DOLT_PORT_RESOLVE_SCRIPT" ]; then

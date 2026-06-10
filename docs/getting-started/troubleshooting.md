@@ -300,6 +300,23 @@ database to a text-diffable JSONL snapshot inside a local git repository
 if the live Dolt server loses data, the last-known-good bead graph can be
 reconstructed from the archive's commit history.
 
+`jsonl-export` (every 15 minutes) and `reaper` (every 30 minutes) ship in
+the core pack, so they are active in every city by default — including
+cities that previously ran them only via the opt-in gastown maintenance
+pack. On cities without a Dolt target (for example `[beads]
+provider = "file"`), both orders skip with a one-line `no managed dolt
+target for this city` message instead of running. To turn them off
+entirely, skip them by name in `city.toml`:
+
+```toml
+[orders]
+skip = ["jsonl-export", "reaper"]
+```
+
+Cities that had skipped the old formula orders (`mol-dog-jsonl`,
+`mol-dog-reaper`) stay opted out; the renamed orders honor the legacy
+skip entries.
+
 ### Local-only vs push mode
 
 The archive operates in one of two modes, detected from the state of its
@@ -337,6 +354,13 @@ git -C "$ARCHIVE" push -u origin main
 
 On the next 15-minute tick, `jsonl-export` detects the new `origin`,
 logs `archive running in push mode`, and resumes pushing every run.
+
+On cities migrated from the gastown maintenance pack, the archive stays
+at its legacy location — `.gc/runtime/packs/maintenance/jsonl-archive`
+(or `.gc/jsonl-archive` for pre-pack cities) — and the
+`packs/core/jsonl-archive` path above does not exist. Point `ARCHIVE` at
+the legacy path instead; `gc doctor` reports the resolved archive path
+for the city.
 
 ### Switching back to local-only
 
@@ -385,6 +409,24 @@ failure. It continues recording `consecutive_push_failures` and
 `pending_archive_push` in state, but does not mail the same failure on
 every tick. A successful push or a switch back to local-only mode clears
 the escalation marker.
+
+### Maintenance escalation and completion routing
+
+Core maintenance scripts route alerts through a generic escalation hook
+instead of mailing a hardcoded role. Orders inherit the controller's
+environment, so set these at controller start to customize routing:
+
+- `GC_ESCALATION_RECIPIENT` — mail recipient for escalations (default:
+  `human`, the reserved human mailbox).
+- `GC_ESCALATE_SCRIPT` — absolute path to an escalation script to run
+  instead of searching packs.
+- `GC_ESCALATE_SEARCH_PACKS` — space-separated pack names searched (in
+  order) for an `assets/scripts/escalate.sh` override (default:
+  `gastown maintenance bd core`). A pack earlier in the list wins.
+- `GC_MAINTENANCE_DONE_TARGET` — session target to nudge with
+  `MAINTENANCE_DONE:`/warn summaries when a maintenance run completes
+  (default: unset, no completion nudge). Deployments that relied on the
+  old hardcoded deacon nudges should set this to restore that loop.
 
 Common root causes, in rough order of frequency:
 

@@ -5456,6 +5456,10 @@ func TestQualifyPool(t *testing.T) {
 		{Name: "dog", BindingName: "wrapper", PackName: "maintenance", SourceDir: "/repo/examples/gastown/packs/maintenance"},
 		{Name: "dog", BindingName: "dolt", PackName: "dolt", SourceDir: "/city/.gc/system/packs/bd/dolt"},
 	}}
+	sameTailShadowForkCfg := &config.City{Agents: []config.Agent{
+		{Name: "dog", BindingName: "fork", PackName: "gastown", SourceDir: "/city/packs/gastown"},
+		{Name: "dog", BindingName: "gastown", PackName: "gastown", SourceDir: "/city/.gc/system/packs/gastown"},
+	}}
 	rigWithCityFallbackCfg := &config.City{Agents: []config.Agent{
 		{Name: "dog", BindingName: "maintenance"},
 	}}
@@ -5494,6 +5498,13 @@ func TestQualifyPool(t *testing.T) {
 		{"source checkout hint matches materialized same pack", materializedPackCfg, "dog", "", "/repo/examples/bd/dolt", "dolt.dog", ""},
 		{"source hint ignores unrelated nested materialized pack", transitiveNestedPackCfg, "dog", "", "/repo/examples/gastown/packs/gastown", "wrapper.dog", ""},
 		{"source hint carries transitive import binding context", transitiveClosureCfg, "dog", "", "/repo/examples/gastown/packs/gastown", "wrapper.dog", ""},
+
+		// Distinct packs sharing the same two-component source tail (a
+		// city-local fork plus the builtin pack materialized under
+		// .gc/system) must resolve by exact SourceDir, not go ambiguous
+		// because the other pack tail-matches.
+		{"same-tail distinct packs prefer exact fork source", sameTailShadowForkCfg, "dog", "", "/city/packs/gastown", "fork.dog", ""},
+		{"same-tail distinct packs prefer exact materialized source", sameTailShadowForkCfg, "dog", "", "/city/.gc/system/packs/gastown", "gastown.dog", ""},
 
 		// Rig-order binding lookup.
 		{"rig order resolves binding", rigBindingCfg, "dog", "api", "", "api/foo.dog", ""},
@@ -7835,6 +7846,51 @@ func TestOrderExecEnvSetsBeadsActorToOrderName(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("orderExecEnv missing %q; env=%v", want, envSlice)
+	}
+}
+
+// TestOrderExecEnvScrubsAmbientDoltEnvForCityWithoutDoltTarget pins the
+// projection contract the core maintenance scripts' no-Dolt guard relies
+// on: for a city without a canonical Dolt target (e.g. `[beads] provider =
+// "file"`), the order exec env defines every projected GC_DOLT_* key as
+// explicitly empty, so mergeOrderExecEnv drops ambient operator values and
+// Dolt-dependent core orders cannot be aimed at a server outside the city.
+func TestOrderExecEnvScrubsAmbientDoltEnvForCityWithoutDoltTarget(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT_HOST", "ambient.example.internal")
+	t.Setenv("GC_DOLT_PORT", "4406")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{Name: "jsonl-export", Trigger: "cooldown", Interval: "15m", Exec: "true"}
+
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+	overrides := map[string]string{}
+	for _, entry := range envSlice {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			overrides[key] = value
+		}
+	}
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT"} {
+		value, defined := overrides[key]
+		if !defined {
+			t.Fatalf("order env does not define %s; ambient controller env would leak through: %v", key, envSlice)
+		}
+		if value != "" {
+			t.Fatalf("%s = %q, want explicitly empty for a city without a dolt target", key, value)
+		}
+	}
+
+	merged := mergeOrderExecEnv([]string{"GC_DOLT_HOST=ambient.example.internal", "GC_DOLT_PORT=4406"}, envSlice)
+	for _, entry := range merged {
+		if entry == "GC_DOLT_PORT=4406" || entry == "GC_DOLT_HOST=ambient.example.internal" {
+			t.Fatalf("ambient dolt env survived merge: %q in %v", entry, merged)
+		}
 	}
 }
 

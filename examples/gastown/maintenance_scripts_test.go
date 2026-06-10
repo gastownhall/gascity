@@ -171,6 +171,63 @@ exit 0
 	}
 }
 
+// TestMaintenanceScriptsSkipWhenCityHasNoDoltTarget pins the no-Dolt guard:
+// the core pack ships jsonl-export and reaper to every city, so on cities
+// without a Dolt target (e.g. `[beads] provider = "file"`) the scripts must
+// skip with exit 0 instead of failing with exit 78 and producing a recurring
+// OrderFailed every cooldown. The env mirrors order dispatch for such a
+// city: projected GC_DOLT_* keys are explicitly empty and no Dolt state
+// files or .beads/dolt data dir exist.
+func TestMaintenanceScriptsSkipWhenCityHasNoDoltTarget(t *testing.T) {
+	tests := []struct {
+		name   string
+		script string
+	}{
+		{name: "reaper", script: coreScriptPath("reaper.sh")},
+		{name: "jsonl export", script: coreScriptPath("jsonl-export.sh")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+			env := map[string]string{
+				"DOLT_ARGS_LOG":      doltLog,
+				"GC_CALL_LOG":        gcLog,
+				"GC_CITY":            cityDir,
+				"GC_CITY_PATH":       cityDir,
+				"GC_DOLT_HOST":       "",
+				"GC_DOLT_PORT":       "",
+				"GC_DOLT_STATE_FILE": "",
+				"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+
+			out, err := runScriptResult(t, scriptPath(tt.script), env)
+			if err != nil {
+				t.Fatalf("%s should skip cleanly without a dolt target: %v\n%s", filepath.Base(tt.script), err, out)
+			}
+			if !strings.Contains(string(out), "no managed dolt target for this city; skipping") {
+				t.Fatalf("missing no-dolt skip message:\n%s", out)
+			}
+			if data, err := os.ReadFile(doltLog); err == nil && len(data) > 0 {
+				t.Fatalf("dolt should not be invoked without a dolt target:\n%s", data)
+			}
+			if data, err := os.ReadFile(gcLog); err == nil && strings.Contains(string(data), "mail send") {
+				t.Fatalf("no escalation mail expected without a dolt target:\n%s", data)
+			}
+		})
+	}
+}
+
 func TestOrphanSweepPreservesQualifiedRigAssignees(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -3581,7 +3638,7 @@ exit 0
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	gcLogText := string(gcData)
-	if !strings.Contains(gcLogText, "mail send human/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+	if !strings.Contains(gcLogText, "mail send human -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
 		t.Fatalf("reaper did not send escalation mail for session-state prune failure:\n%s", gcLogText)
 	}
 	if !strings.Contains(gcLogText, "gm: terminal session-state prune failed: session prune exploded") {
@@ -3689,7 +3746,7 @@ exit 0
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	gcLogText := string(gcData)
-	if !strings.Contains(gcLogText, "mail send human/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+	if !strings.Contains(gcLogText, "mail send human -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
 		t.Fatalf("reaper did not send escalation mail for session-prune anomaly:\n%s", gcLogText)
 	}
 	if !strings.Contains(gcLogText, "gm: 1500 closed session beads pruned in one run (threshold: 1000)") {
@@ -4730,7 +4787,7 @@ exit 0
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	gcLogText := string(gcData)
-	if !strings.Contains(gcLogText, "mail send human/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+	if !strings.Contains(gcLogText, "mail send human -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
 		t.Fatalf("reaper did not escalate Dolt commit failure:\n%s", gcLogText)
 	}
 	if !strings.Contains(gcLogText, "Dolt commit failed for beads") {
@@ -5109,7 +5166,7 @@ exit 0
 	if !strings.Contains(gcLogText, "closed:1") || !strings.Contains(gcLogText, "skipped_non_city_issues:1") {
 		t.Fatalf("reaper summary did not report city close and non-city skip:\n%s", gcLogText)
 	}
-	if strings.Contains(gcLogText, "mail send human/ -s ESCALATION") || strings.Contains(gcLogText, "non-city database") {
+	if strings.Contains(gcLogText, "mail send human -s ESCALATION") || strings.Contains(gcLogText, "non-city database") {
 		t.Fatalf("reaper escalated expected non-city stale issue skips:\n%s", gcLogText)
 	}
 }
@@ -5967,7 +6024,7 @@ exit 0
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	gcLogText := string(gcData)
-	if strings.Contains(gcLogText, "mail send human/ -s ESCALATION") || strings.Contains(gcLogText, "Dolt commit found nothing to commit") {
+	if strings.Contains(gcLogText, "mail send human -s ESCALATION") || strings.Contains(gcLogText, "Dolt commit found nothing to commit") {
 		t.Fatalf("reaper escalated benign nothing-to-commit race:\n%s", gcLogText)
 	}
 }
@@ -8357,6 +8414,41 @@ func TestJsonlExportLegacyStateBackupRecoversPendingArchiveReplay(t *testing.T) 
 	}
 	if strings.Contains(string(stateData), `"pending_archive_push":true`) {
 		t.Fatalf("expected legacy pending_archive_push to clear after replay, got:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportReusesMaintenancePackArchiveRepo(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	runtimeDir := filepath.Join(cityDir, ".gc", "runtime")
+	stateDir := filepath.Join(runtimeDir, "packs", "core")
+	coreArchiveRepo := filepath.Join(stateDir, "jsonl-archive")
+	maintenanceArchiveRepo := filepath.Join(runtimeDir, "packs", "maintenance", "jsonl-archive")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+
+	prevHead := initSeedArchive(t, maintenanceArchiveRepo, 3)
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, coreArchiveRepo, gcLog, mailLog)
+	env["GC_CITY_RUNTIME_DIR"] = runtimeDir
+	delete(env, "GC_JSONL_ARCHIVE_REPO")
+
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	if _, err := os.Stat(filepath.Join(coreArchiveRepo, ".git")); err == nil {
+		t.Fatalf("jsonl-export.sh created a fresh core archive repo at %s instead of reusing %s", coreArchiveRepo, maintenanceArchiveRepo)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("Stat(core archive .git): %v", err)
+	}
+
+	headOut, err := exec.Command("git", "-C", maintenanceArchiveRepo, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse maintenance archive HEAD: %v\n%s", err, headOut)
+	}
+	if got := strings.TrimSpace(string(headOut)); got == prevHead {
+		t.Fatalf("maintenance archive HEAD did not advance; script may not have reused %s", maintenanceArchiveRepo)
 	}
 }
 

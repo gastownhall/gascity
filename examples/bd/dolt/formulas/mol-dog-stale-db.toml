@@ -146,7 +146,7 @@ send_escalation() {
     "$ESCALATE_SCRIPT" --subject "$subject" --message "$message"
     return
   fi
-  gc mail send "${GC_ESCALATION_RECIPIENT:-human/}" -s "$subject" -m "$message"
+  gc mail send "${GC_ESCALATION_RECIPIENT:-human}" -s "$subject" -m "$message"
 }
 
 maintenance_notice() {

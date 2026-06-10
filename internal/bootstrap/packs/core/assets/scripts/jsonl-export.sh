@@ -21,6 +21,7 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/core}"
 LEGACY_PACK_STATE_DIR="${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance"
+LEGACY_PACK_ARCHIVE_REPO="$LEGACY_PACK_STATE_DIR/jsonl-archive"
 LEGACY_ARCHIVE_REPO="$CITY/.gc/jsonl-archive"
 LEGACY_STATE_FILE="$CITY/.gc/jsonl-export-state.json"
 
@@ -734,8 +735,12 @@ discard_staged_archive_outputs() {
 STATE_FILE="$PACK_STATE_DIR/jsonl-export-state.json"
 LEGACY_PACK_STATE_FILE="$LEGACY_PACK_STATE_DIR/jsonl-export-state.json"
 
-if [ -z "${GC_JSONL_ARCHIVE_REPO:-}" ] && [ ! -d "$ARCHIVE_REPO/.git" ] && [ -d "$LEGACY_ARCHIVE_REPO/.git" ]; then
-    ARCHIVE_REPO="$LEGACY_ARCHIVE_REPO"
+if [ -z "${GC_JSONL_ARCHIVE_REPO:-}" ] && [ ! -d "$ARCHIVE_REPO/.git" ]; then
+    if [ -d "$LEGACY_PACK_ARCHIVE_REPO/.git" ]; then
+        ARCHIVE_REPO="$LEGACY_PACK_ARCHIVE_REPO"
+    elif [ -d "$LEGACY_ARCHIVE_REPO/.git" ]; then
+        ARCHIVE_REPO="$LEGACY_ARCHIVE_REPO"
+    fi
 fi
 if [ ! -e "$STATE_FILE" ] && [ -e "$LEGACY_PACK_STATE_FILE" ]; then
     STATE_FILE="$LEGACY_PACK_STATE_FILE"

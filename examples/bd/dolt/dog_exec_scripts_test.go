@@ -3335,7 +3335,7 @@ func TestPhantomDBScriptEscalatesAndPreservesAllDatabases(t *testing.T) {
 	if !strings.Contains(gcLog, "Retired replacement directories: 1 orders.replaced-20260509T010203Z") {
 		t.Fatalf("escalation should report retired replacements separately:\n%s", gcLog)
 	}
-	if !strings.Contains(gcLog, "mail send human/ -s ESCALATION: Unservable Dolt databases detected [HIGH]") {
+	if !strings.Contains(gcLog, "mail send human -s ESCALATION: Unservable Dolt databases detected [HIGH]") {
 		t.Fatalf("phantom-db escalation must use the generic default recipient:\n%s", gcLog)
 	}
 	if strings.Contains(gcLog, "phantom database(s)") {
@@ -3436,7 +3436,7 @@ func TestBackupScriptSkipsOldDoltBeforeSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read gc log: %v", err)
 	}
-	if !strings.Contains(string(gcLog), "mail send human/ -s Dolt backup: dolt-too-old for backup sync [HIGH]") {
+	if !strings.Contains(string(gcLog), "mail send human -s Dolt backup: dolt-too-old for backup sync [HIGH]") {
 		t.Fatalf("old-Dolt backup escalation must use the generic default recipient:\n%s", gcLog)
 	}
 }
@@ -3663,7 +3663,7 @@ func TestBackupScriptCountsFailedDatabasesByDatabase(t *testing.T) {
 	if !strings.Contains(string(gcLog), "Dolt backup: 1/1 databases failed to sync") {
 		t.Fatalf("failure mail should count databases, log:\n%s", gcLog)
 	}
-	if !strings.Contains(string(gcLog), "mail send human/ -s Dolt backup: 1/1 databases failed to sync [MEDIUM]") {
+	if !strings.Contains(string(gcLog), "mail send human -s Dolt backup: 1/1 databases failed to sync [MEDIUM]") {
 		t.Fatalf("backup failure escalation must use the generic default recipient:\n%s", gcLog)
 	}
 }
@@ -3993,7 +3993,7 @@ exit 0
 	if !strings.Contains(string(gcLog), "Dolt health advisory") {
 		t.Fatalf("advisory mail did not fire; latency-WARN should have triggered, log:\n%s", gcLog)
 	}
-	if !strings.Contains(string(gcLog), "mail send human/ -s Dolt health advisory [MEDIUM]") {
+	if !strings.Contains(string(gcLog), "mail send human -s Dolt health advisory [MEDIUM]") {
 		t.Fatalf("advisory escalation must use the generic default recipient, log:\n%s", gcLog)
 	}
 }
@@ -4026,7 +4026,7 @@ exit 1
 	if !strings.Contains(string(gcLog), "ESCALATION: Dolt server unreachable") {
 		t.Fatalf("unreachable escalation mail did not fire, log:\n%s", gcLog)
 	}
-	if !strings.Contains(string(gcLog), "mail send human/ -s ESCALATION: Dolt server unreachable") {
+	if !strings.Contains(string(gcLog), "mail send human -s ESCALATION: Dolt server unreachable") {
 		t.Fatalf("unreachable escalation must use the generic default recipient, log:\n%s", gcLog)
 	}
 }

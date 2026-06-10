@@ -661,7 +661,7 @@ func TestStaleDBFormulaDryRunForceBlockersLeaveWorkOpenBeforeApply(t *testing.T)
 	}
 	for _, want := range []string{
 		"gc event emit mol-dog-stale-db.escalate",
-		"gc mail send human/",
+		"gc mail send human -s",
 		"gc runtime drain-ack",
 	} {
 		if !strings.Contains(log, want) {
