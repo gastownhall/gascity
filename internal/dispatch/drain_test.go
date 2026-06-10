@@ -170,6 +170,61 @@ func TestProcessDrainSeparateCreatesDependentItemWorkflowsBlocked(t *testing.T) 
 	}
 }
 
+func TestProcessDrainSeparateTopologicallyOrdersMembersBeforeCreation(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(false)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	mem, drain, blocker, dependent := seedReverseOrderedDrainWorkflow(t)
+	mustDepAdd(t, mem, dependent.ID, blocker.ID, "blocks")
+
+	var blockerRootID string
+	var dependentRootID string
+	dependentRootCreatedBlocked := false
+	dependentWorkCreatedBlocked := false
+	store := &createObservingStore{
+		Store: mem,
+		onCreate: func(created beads.Bead) {
+			if created.Metadata["gc.drain_member_id"] == blocker.ID && created.Metadata["gc.kind"] == "workflow" {
+				blockerRootID = created.ID
+			}
+			if created.Metadata["gc.drain_member_id"] == dependent.ID && created.Metadata["gc.kind"] == "workflow" {
+				dependentRootID = created.ID
+				dependentRootCreatedBlocked = blockerRootID != "" && beadNeedsContains(created.Needs, blockerRootID)
+			}
+			if dependentRootID != "" && strings.HasPrefix(created.Title, "Work ") && (created.ParentID == dependentRootID || created.Metadata["gc.root_bead_id"] == dependentRootID) {
+				dependentWorkCreatedBlocked = blockerRootID != "" && beadNeedsContains(created.Needs, blockerRootID)
+			}
+		},
+	}
+
+	result, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	if result.Action != "drain-expanded" {
+		t.Fatalf("result = %+v, want drain-expanded", result)
+	}
+
+	manifest := mustDrainManifest(t, mustGetBead(t, mem, drain.ID))
+	if len(manifest.Rows) != 2 {
+		t.Fatalf("manifest rows = %d, want 2", len(manifest.Rows))
+	}
+	if manifest.Rows[0].MemberID != blocker.ID || manifest.Rows[1].MemberID != dependent.ID {
+		t.Fatalf("manifest order = [%s, %s], want blocker %s before dependent %s", manifest.Rows[0].MemberID, manifest.Rows[1].MemberID, blocker.ID, dependent.ID)
+	}
+	if !dependentRootCreatedBlocked {
+		t.Fatalf("dependent item root was created without a blocks need on blocker root %s", blockerRootID)
+	}
+	if !dependentWorkCreatedBlocked {
+		t.Fatalf("dependent item work step was created without a blocks need on blocker root %s", blockerRootID)
+	}
+	assertHasBlockingDep(t, mem, manifest.Rows[1].ItemRootID, manifest.Rows[0].ItemRootID)
+}
+
 func TestProcessDrainSeparateSucceedsForEmptyInputConvoy(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
@@ -1116,6 +1171,55 @@ func seedDrainWorkflow(t *testing.T) (*beads.MemStore, beads.Bead) {
 		t.Fatal(err)
 	}
 	return store, drain
+}
+
+func seedReverseOrderedDrainWorkflow(t *testing.T) (*beads.MemStore, beads.Bead, beads.Bead, beads.Bead) {
+	t.Helper()
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "parent", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependent, err := store.Create(beads.Bead{Title: "dependent", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range []beads.Bead{dependent, blocker} {
+		if err := convoycore.TrackItem(store, parent.ID, member.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.input_convoy_id":  parent.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain, err := store.Create(beads.Bead{
+		Title: "drain",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "drain",
+			"gc.root_bead_id":        root.ID,
+			"gc.drain_context":       "separate",
+			"gc.drain_formula":       "drain-item",
+			"gc.drain_member_access": "read",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, drain, blocker, dependent
 }
 
 func writeDrainItemFormula(t *testing.T, dir string) {

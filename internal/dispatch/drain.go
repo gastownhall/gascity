@@ -236,7 +236,11 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 		}
 		return drainManifest{}, nil, errDrainLimitExceeded
 	}
-	return buildDrainManifest(bead, parentConvoyID, itemFormula, members), members, nil
+	orderedMembers, err := orderDrainMembersByDependencies(store, members)
+	if err != nil {
+		return drainManifest{}, nil, fmt.Errorf("%s: ordering drain members for %s: %w", bead.ID, parentConvoyID, err)
+	}
+	return buildDrainManifest(bead, parentConvoyID, itemFormula, orderedMembers), orderedMembers, nil
 }
 
 var (
@@ -667,6 +671,82 @@ func buildDrainManifest(bead beads.Bead, parentConvoyID, itemFormula string, mem
 		})
 	}
 	return drainManifest{Version: 1, Context: context, ParentConvoyID: parentConvoyID, Formula: itemFormula, Rows: rows}
+}
+
+func orderDrainMembersByDependencies(store beads.Store, members []beads.Bead) ([]beads.Bead, error) {
+	if len(members) < 2 {
+		return members, nil
+	}
+	memberByID := make(map[string]beads.Bead, len(members))
+	for _, member := range members {
+		memberID := strings.TrimSpace(member.ID)
+		if memberID == "" {
+			continue
+		}
+		memberByID[memberID] = member
+	}
+	blockersByMember := make(map[string]map[string]bool, len(members))
+	for _, member := range members {
+		memberID := strings.TrimSpace(member.ID)
+		if memberID == "" {
+			continue
+		}
+		deps, err := store.DepList(memberID, "down")
+		if err != nil {
+			return nil, fmt.Errorf("listing source dependencies for member %s: %w", memberID, err)
+		}
+		for _, dep := range deps {
+			if !beads.IsReadyBlockingDependencyType(dep.Type) {
+				continue
+			}
+			blockerID := strings.TrimSpace(dep.DependsOnID)
+			if blockerID == "" || blockerID == memberID {
+				continue
+			}
+			if _, ok := memberByID[blockerID]; !ok {
+				continue
+			}
+			if blockersByMember[memberID] == nil {
+				blockersByMember[memberID] = make(map[string]bool)
+			}
+			blockersByMember[memberID][blockerID] = true
+		}
+	}
+	ordered := make([]beads.Bead, 0, len(members))
+	emitted := make(map[string]bool, len(members))
+	for len(ordered) < len(members) {
+		progressed := false
+		for _, member := range members {
+			memberID := strings.TrimSpace(member.ID)
+			if emitted[memberID] {
+				continue
+			}
+			blocked := false
+			for blockerID := range blockersByMember[memberID] {
+				if !emitted[blockerID] {
+					blocked = true
+					break
+				}
+			}
+			if blocked {
+				continue
+			}
+			ordered = append(ordered, member)
+			emitted[memberID] = true
+			progressed = true
+		}
+		if !progressed {
+			cycleMembers := make([]string, 0, len(members)-len(ordered))
+			for _, member := range members {
+				memberID := strings.TrimSpace(member.ID)
+				if memberID != "" && !emitted[memberID] {
+					cycleMembers = append(cycleMembers, memberID)
+				}
+			}
+			return nil, fmt.Errorf("source dependency cycle among drain members: %s", strings.Join(cycleMembers, ", "))
+		}
+	}
+	return ordered, nil
 }
 
 func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID string, count int, row drainManifestRow, member beads.Bead) (beads.Bead, bool, error) {
