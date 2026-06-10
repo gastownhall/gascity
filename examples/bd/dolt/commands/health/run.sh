@@ -18,8 +18,11 @@ metadata_files() {
   if command -v gc >/dev/null 2>&1; then
     # Bound the gc rig list call: if gc is itself in a bad state (the
     # failure mode this patrol is meant to detect) we must not block
-    # here. Degrade to the fallback rig scan below.
-    rig_paths=$(run_bounded 5 gc rig list --json 2>/dev/null \
+    # here. Degrade to the fallback rig scan below. The bound must absorb
+    # a slow-but-healthy gc on a busy host (~16s observed) because the
+    # fallback scan only sees the city directory and silently drops
+    # external rig databases (gascity#2740).
+    rig_paths=$(run_bounded 30 gc rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else
