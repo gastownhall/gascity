@@ -223,6 +223,14 @@ fi
 
 _run_bounded_warned_no_timeout=""
 
+# Wall-clock bound (seconds) for `gc rig list --json` rig discovery, shared
+# by the compact and health commands and tunable via
+# GC_DOLT_RIG_LIST_TIMEOUT_SECS. The bound must absorb a slow-but-healthy gc
+# on a busy host (~16s observed): discovery callers degrade to a city-only
+# filesystem scan on timeout, which silently drops external rig databases
+# (gascity#2740).
+GC_DOLT_RIG_LIST_TIMEOUT_SECS="${GC_DOLT_RIG_LIST_TIMEOUT_SECS:-30}"
+
 # run_bounded SECS CMD...  — Run CMD with a wall-clock timeout. Exits
 # 124 on timeout (coreutils convention). Uses --kill-after=2 so an
 # uncooperative child that ignores SIGTERM (e.g. a dolt client stuck

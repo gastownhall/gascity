@@ -122,8 +122,17 @@ func TestHealthScriptIsBounded(t *testing.T) {
 	root := repoRoot(t)
 	script := filepath.Join(root, healthScript)
 
+	// Stub gc on PATH: metadata_files would otherwise call the real gc
+	// with the 30s rig-list bound from runtime.sh, leaving this budget
+	// hostage to host `gc rig list` latency — worst exactly on the busy
+	// hosts this hang guard is for. The bounded dolt probe is what this
+	// test measures; rig discovery is incidental.
+	binDir := t.TempDir()
+	writeExecutable(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 1\n")
+
 	cmd := exec.Command("sh", script)
 	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_HOST=127.0.0.1",
@@ -149,8 +158,9 @@ func TestHealthScriptIsBounded(t *testing.T) {
 	var buf strings.Builder
 	go func() { _, _ = io.Copy(&buf, stdout) }()
 
-	// The script has per-call 5s timeouts. Allow generous slack for
-	// CI jitter, but fail hard well before "indefinite hang".
+	// With gc stubbed out, the largest per-call bound left is the 5s
+	// dolt probe. Allow generous slack for CI jitter, but fail hard
+	// well before "indefinite hang".
 	const budget = 45 * time.Second
 	select {
 	case err := <-done:
@@ -306,6 +316,101 @@ func TestHealthOrphansFromCleanupAuthority(t *testing.T) {
 		switch o {
 		case "hq", "gco", "tga":
 			t.Errorf("live rig DB %q misclassified as orphan", o)
+		}
+	}
+}
+
+// TestHealthScriptToleratesSlowRigListDiscovery pins the health half of
+// gascity#2740: `gc rig list --json` regularly takes longer than the old 5s
+// discovery bound on busy hosts. When the bound expires, metadata_files
+// silently degrades to a city-only filesystem scan that cannot see
+// externally-pathed rigs, so their metadata drops out of downstream
+// consumers — surfacing here as a live external rig DB misclassified as an
+// orphan, a false positive automation may act on. Answer rig list after 7s
+// with an external rig and require the result to be consumed.
+func TestHealthScriptToleratesSlowRigListDiscovery(t *testing.T) {
+	if _, errT := exec.LookPath("timeout"); errT != nil {
+		if _, errG := exec.LookPath("gtimeout"); errG != nil {
+			t.Skip("neither timeout nor gtimeout installed; skipping")
+		}
+	}
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	// External rig OUTSIDE the city directory: only the rig-list result can
+	// discover it — the fallback find scan is rooted at the city path.
+	extRig := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(extRig, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir external rig: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(extRig, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"extdb"}`), 0o644); err != nil {
+		t.Fatalf("write external rig metadata: %v", err)
+	}
+
+	// Data dir holds the city DB and the external rig's DB.
+	dataDir := t.TempDir()
+	for _, db := range []string{"hq", "extdb"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir db %s: %v", db, err)
+		}
+	}
+
+	binDir := t.TempDir()
+	// Fake gc: `rig list` answers after 7s — past the old 5s bound, inside
+	// the 30s one — naming the external rig. Everything else (notably
+	// `gc dolt-cleanup`) fails, so orphan detection takes the metadata
+	// referenced-set fallback, which protects extdb only when the rig-list
+	// result was consumed instead of the city-only scan.
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" ]; then
+  sleep 7
+  printf '{"rigs":[{"path": "`+extRig+`"}]}\n'
+  exit 0
+fi
+exit 1
+`)
+	// No live server: lsof/nc fail, so the bounded dolt probe is skipped.
+	writeExecutable(t, filepath.Join(binDir, "lsof"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(binDir, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_DOLT_PORT", "PATH", "GC_DOLT_DATA_DIR", "GC_DOLT_RIG_LIST_TIMEOUT_SECS"),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT=3306",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Orphans []struct {
+			Name string `json:"name"`
+		} `json:"orphans"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parse health JSON: %v\n%s", err, out)
+	}
+	for _, o := range report.Orphans {
+		if o.Name == "extdb" {
+			t.Fatalf("external rig DB extdb misclassified as orphan: a rig list answering within the 30s bound must be consumed, not dropped for the city-only fallback scan\n%s", out)
 		}
 	}
 }
