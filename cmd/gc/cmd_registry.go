@@ -20,7 +20,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const defaultRegistryPublishURL = "https://registry.gascity.com"
+const (
+	defaultRegistryPublishURL     = "https://registry.gascity.com"
+	registryGitHubActionsAudience = "gascity-registry"
+)
 
 var registryPublishHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
@@ -34,7 +37,9 @@ func newRegistryCmd(stdout, stderr io.Writer) *cobra.Command {
 			return cmd.Help()
 		},
 	}
+	cmd.AddCommand(newRegistryLoginCmd(stdout, stderr))
 	cmd.AddCommand(newRegistryPublishCmd(stdout, stderr))
+	cmd.AddCommand(newRegistryWhoamiCmd(stdout, stderr))
 	return cmd
 }
 
@@ -114,6 +119,14 @@ func doRegistryPublish(packRoot string, opts registryPublishOptions, stdout, std
 		SessionCookie: strings.TrimSpace(opts.SessionCookie),
 		CSRFToken:     strings.TrimSpace(opts.CSRFToken),
 	}
+	if auth.Token == "" && auth.SessionCookie == "" && auth.CSRFToken == "" && !opts.DevAuth {
+		configuredToken, err := readRegistryConfiguredToken(baseURL)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc registry publish: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		auth.Token = configuredToken
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	if opts.DevAuth {
@@ -124,8 +137,21 @@ func doRegistryPublish(packRoot string, opts registryPublishOptions, stdout, std
 			return 1
 		}
 	}
+	if !auth.hasCredentials() && registryGitHubActionsOIDCAvailable() {
+		oidcToken, err := registryRequestGitHubActionsOIDCToken(ctx, registryPublishHTTPClient, registryGitHubActionsAudience)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc registry publish: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		publishToken, err := registryMintGitHubActionsPublishToken(ctx, registryPublishHTTPClient, baseURL, request, oidcToken)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc registry publish: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		auth.Token = publishToken
+	}
 	if !auth.hasCredentials() {
-		fmt.Fprintln(stderr, "gc registry publish: authentication required; set GC_REGISTRY_TOKEN, pass --token, set GC_REGISTRY_SESSION and GC_REGISTRY_CSRF_TOKEN, or use --dev-auth against a local registry") //nolint:errcheck
+		fmt.Fprintln(stderr, "gc registry publish: authentication required; run `gc registry login`, set GC_REGISTRY_TOKEN, pass --token, set GC_REGISTRY_SESSION and GC_REGISTRY_CSRF_TOKEN, or use --dev-auth against a local registry") //nolint:errcheck
 		return 1
 	}
 
@@ -392,7 +418,7 @@ func registryPublishDevAuth(ctx context.Context, client *http.Client, baseURL, h
 	if err != nil {
 		return registryPublishAuth{}, fmt.Errorf("creating dev auth session: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var sessionCookie string
 	for _, cookie := range resp.Cookies() {
 		if cookie.Name == "registry_session" {
@@ -420,7 +446,7 @@ func registryPublishFetchCSRF(ctx context.Context, client *http.Client, baseURL,
 	if err != nil {
 		return "", fmt.Errorf("fetching registry session: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("fetching registry session: HTTP %d", resp.StatusCode)
 	}
@@ -470,7 +496,7 @@ func submitRegistryPublishRequest(ctx context.Context, client *http.Client, base
 	if err != nil {
 		return registryPublishSubmitted{}, fmt.Errorf("submitting publish request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var raw registryPublishAPIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return registryPublishSubmitted{}, fmt.Errorf("decoding registry response: %w", err)

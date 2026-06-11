@@ -2710,7 +2710,29 @@ gc registry
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc registry login](#gc-registry-login) | Log in to Gas City Registry |
 | [gc registry publish](#gc-registry-publish) | Submit a pack publish request |
+| [gc registry whoami](#gc-registry-whoami) | Show the authenticated registry account |
+
+## gc registry login
+
+Log in to Gas City Registry and store a local API token.
+
+By default this opens a browser for GitHub or Google Workspace sign-in. Use
+--device for headless shells, or --token to store an existing registry token.
+
+```
+gc registry login [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--device` | bool |  | use device-code login instead of browser callback login |
+| `--label` | string | `GC CLI login` | label for the registry API token |
+| `--no-browser` | bool |  | print the browser login URL instead of opening it |
+| `--registry-url` | string | `https://registry.gascity.com` | registry app base URL |
+| `--timeout` | duration | `15m0s` | maximum time to wait for interactive login |
+| `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN |
 
 ## gc registry publish
 
@@ -2737,6 +2759,19 @@ gc registry publish <path-to-pack-root> [flags]
 | `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN |
 | `--validate` | bool | `true` | ask the registry to validate the request immediately |
 | `--version` | string |  | release version; defaults to [pack].version |
+
+## gc registry whoami
+
+Show the authenticated registry account
+
+```
+gc registry whoami [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--registry-url` | string | `https://registry.gascity.com` | registry app base URL |
+| `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN or stored login |
 
 ## gc reload
 

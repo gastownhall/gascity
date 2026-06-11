@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildRegistryPublishRequestUsesCleanPushedGitHubHead(t *testing.T) {
@@ -158,6 +159,168 @@ func TestSubmitRegistryPublishRequestSendsBearerToken(t *testing.T) {
 	}
 	if submitted.ID != "prq_token" {
 		t.Fatalf("submitted = %+v", submitted)
+	}
+}
+
+func TestRegistryLoginStoresVerifiedToken(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "registry.json")
+	t.Setenv(registryCLIConfigEnv, configPath)
+	oldClient := registryPublishHTTPClient
+	defer func() { registryPublishHTTPClient = oldClient }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/me" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer gcr_manual_token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"user":{"id":"usr_test","handle":"publisher","displayName":"Publisher"}}`))
+	}))
+	defer server.Close()
+	registryPublishHTTPClient = server.Client()
+
+	var stdout, stderr bytes.Buffer
+	code := doRegistryLogin(registryLoginOptions{
+		RegistryURL: server.URL,
+		Token:       "gcr_manual_token",
+		Timeout:     time.Second,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRegistryLogin = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Logged in") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	token, err := readRegistryConfiguredToken(server.URL)
+	if err != nil {
+		t.Fatalf("readRegistryConfiguredToken: %v", err)
+	}
+	if token != "gcr_manual_token" {
+		t.Fatalf("stored token = %q", token)
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("Stat config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("config mode = %o, want 0600", got)
+	}
+}
+
+func TestDoRegistryPublishUsesStoredLoginToken(t *testing.T) {
+	_, packDir := setupRegistryPublishRepo(t)
+	configPath := filepath.Join(t.TempDir(), "registry.json")
+	t.Setenv(registryCLIConfigEnv, configPath)
+	oldClient := registryPublishHTTPClient
+	defer func() { registryPublishHTTPClient = oldClient }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer gcr_stored_token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"publishRequest": {
+				"id": "prq_stored",
+				"status": "pending_review",
+				"requestedName": "demo-pack",
+				"requestedVersion": "0.2.0",
+				"repository": {"fullName": "gastownhall/demo-packs"}
+			}
+		}`))
+	}))
+	defer server.Close()
+	registryPublishHTTPClient = server.Client()
+	if err := writeRegistryConfiguredToken(server.URL, "gcr_stored_token"); err != nil {
+		t.Fatalf("writeRegistryConfiguredToken: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRegistryPublish(packDir, registryPublishOptions{
+		RegistryURL: server.URL,
+		Validate:    true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRegistryPublish = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "prq_stored") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestDoRegistryPublishUsesGitHubActionsOIDC(t *testing.T) {
+	_, packDir := setupRegistryPublishRepo(t)
+	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "actions-request-token")
+	oldClient := registryPublishHTTPClient
+	defer func() { registryPublishHTTPClient = oldClient }()
+
+	var sawMint bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/actions/oidc":
+			if got := r.Header.Get("Authorization"); got != "Bearer actions-request-token" {
+				t.Fatalf("OIDC Authorization = %q", got)
+			}
+			if got := r.URL.Query().Get("audience"); got != registryGitHubActionsAudience {
+				t.Fatalf("audience = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"value":"github-oidc-jwt"}`))
+		case "/api/publish-tokens/github-actions/mint":
+			var payload struct {
+				registryPublishRequest
+				GitHubOIDCToken string `json:"githubOidcToken"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("Decode mint: %v", err)
+			}
+			if payload.GitHubOIDCToken != "github-oidc-jwt" {
+				t.Fatalf("githubOidcToken = %q", payload.GitHubOIDCToken)
+			}
+			if payload.RequestedName != "demo-pack" || payload.RequestedVersion != "0.2.0" {
+				t.Fatalf("mint payload = %+v", payload.registryPublishRequest)
+			}
+			sawMint = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"gcr_actions_publish","token_type":"bearer"}`))
+		case "/api/publish-requests":
+			if !sawMint {
+				t.Fatalf("publish happened before mint")
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer gcr_actions_publish" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"publishRequest": {
+					"id": "prq_actions",
+					"status": "pending_review",
+					"requestedName": "demo-pack",
+					"requestedVersion": "0.2.0",
+					"repository": {"fullName": "gastownhall/demo-packs"}
+				}
+			}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", server.URL+"/actions/oidc")
+	registryPublishHTTPClient = server.Client()
+
+	var stdout, stderr bytes.Buffer
+	code := doRegistryPublish(packDir, registryPublishOptions{
+		RegistryURL: server.URL,
+		Validate:    true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRegistryPublish = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "prq_actions") {
+		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
 
