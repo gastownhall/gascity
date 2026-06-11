@@ -254,6 +254,40 @@ func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAliasHistory(t *testin
 	}
 }
 
+func TestComputePoolDesiredStates_ResumeResolvesPersistedBoundTemplate(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("implementation-worker", "gascity-packs", intPtr(8), 0)},
+	}
+	sessionName := "gc__implementation-worker-mc-xbvk5"
+	work := []beads.Bead{
+		workBead("gp-qx0o", "gascity-packs/gc.implementation-worker", sessionName, "in_progress", 5),
+	}
+	sessions := []beads.Bead{{
+		ID:     "mc-xbvk5",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":             "gascity-packs/gc.implementation-worker",
+			"session_name":         sessionName,
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}}
+
+	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if result[0].Template != "gascity-packs/implementation-worker" {
+		t.Fatalf("result template = %q, want current canonical template", result[0].Template)
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 || reqs[0].Tier != "resume" || reqs[0].SessionBeadID != "mc-xbvk5" {
+		t.Fatalf("requests = %+v, want one resume for mc-xbvk5", reqs)
+	}
+}
+
 func TestComputePoolDesiredStates_MaxCapsTotal(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(2), 0)},

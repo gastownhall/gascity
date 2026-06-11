@@ -489,15 +489,59 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 // findAgentByTemplate looks up a config agent by template name.
 // Returns nil if not found.
 func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
+	template = strings.TrimSpace(template)
 	if cfg == nil || template == "" {
 		return nil
 	}
 	for i := range cfg.Agents {
-		if cfg.Agents[i].QualifiedName() == template {
+		if config.AgentMatchesIdentity(&cfg.Agents[i], template) {
+			return &cfg.Agents[i]
+		}
+	}
+	for i := range cfg.Agents {
+		if legacyBoundTemplateMatchesUnboundAgent(&cfg.Agents[i], template) {
 			return &cfg.Agents[i]
 		}
 	}
 	return nil
+}
+
+func legacyBoundTemplateMatchesUnboundAgent(agent *config.Agent, template string) bool {
+	if agent == nil || strings.TrimSpace(agent.BindingName) != "" {
+		return false
+	}
+	dir, local := config.ParseQualifiedName(strings.TrimSpace(template))
+	if strings.TrimSpace(dir) != strings.TrimSpace(agent.Dir) {
+		return false
+	}
+	binding, unbound, ok := strings.Cut(local, ".")
+	if !ok || strings.TrimSpace(binding) == "" {
+		return false
+	}
+	return strings.TrimSpace(unbound) == strings.TrimSpace(agent.Name)
+}
+
+func normalizeAgentTemplateIdentity(cfg *config.City, template string) string {
+	template = strings.TrimSpace(template)
+	if template == "" {
+		return ""
+	}
+	if agent := findAgentByTemplate(cfg, template); agent != nil {
+		return agent.QualifiedName()
+	}
+	return template
+}
+
+func agentTemplateIdentitiesEquivalent(cfg *config.City, a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return normalizeAgentTemplateIdentity(cfg, a) == normalizeAgentTemplateIdentity(cfg, b)
 }
 
 // healExpiredTimers clears expired held_until and quarantined_until.

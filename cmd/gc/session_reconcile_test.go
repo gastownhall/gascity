@@ -2393,6 +2393,23 @@ func TestFindAgentByTemplate(t *testing.T) {
 	if a := findAgentByTemplate(cfg, "worker"); a == nil || a.Name != "worker" {
 		t.Error("expected to find worker")
 	}
+	legacyCfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "implementation-worker", Dir: "gascity-packs"},
+		},
+	}
+	if a := findAgentByTemplate(legacyCfg, "gascity-packs/gc.implementation-worker"); a == nil || a.QualifiedName() != "gascity-packs/implementation-worker" {
+		t.Fatalf("expected persisted bound template to resolve to current unbound agent, got %#v", a)
+	}
+	boundCfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "rig"},
+			{Name: "worker", Dir: "rig", BindingName: "gc"},
+		},
+	}
+	if a := findAgentByTemplate(boundCfg, "rig/gc.worker"); a == nil || a.BindingName != "gc" {
+		t.Fatalf("expected exact bound agent to win over unbound legacy fallback, got %#v", a)
+	}
 	if a := findAgentByTemplate(cfg, "missing"); a != nil {
 		t.Error("expected nil for missing template")
 	}

@@ -137,6 +137,42 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsLegacyWorkflowRunTarget(t *tes
 	}
 }
 
+func TestFilterAssignedWorkBeadsForPoolDemandKeepsPersistedBoundRoute(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "gascity-packs")
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "gascity-packs", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name: "implementation-worker",
+			Dir:  "gascity-packs",
+		}},
+	}
+	sessionName := "gc__implementation-worker-mc-xbvk5"
+	sessions := []beads.Bead{{
+		ID:     "mc-xbvk5",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "gascity-packs/gc.implementation-worker",
+			"session_name": sessionName,
+		},
+	}}
+	work := []beads.Bead{{
+		ID:       "gp-qx0o",
+		Status:   "in_progress",
+		Assignee: sessionName,
+		Metadata: map[string]string{
+			"gc.routed_to": "gascity-packs/gc.implementation-worker",
+		},
+	}}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessions, work, []string{"gascity-packs"})
+
+	if len(got) != 1 || got[0].ID != "gp-qx0o" {
+		t.Fatalf("filtered work = %#v, want persisted bound route preserved", got)
+	}
+}
+
 func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")

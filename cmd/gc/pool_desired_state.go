@@ -149,9 +149,10 @@ func computePoolDesiredStates(
 					routedTo = cfg.Agents[0].QualifiedName()
 				}
 			}
+			routedTo = normalizeAgentTemplateIdentity(cfg, routedTo)
 			if sessionBeadID != "" {
 				sessionTemplate := strings.TrimSpace(sessionBeadTemplate[sessionBeadID])
-				if sessionTemplate != "" && routedTo != "" && routedTo != sessionTemplate {
+				if sessionTemplate != "" && routedTo != "" && !agentTemplateIdentitiesEquivalent(cfg, routedTo, sessionTemplate) {
 					continue
 				}
 			}

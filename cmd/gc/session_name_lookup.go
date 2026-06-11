@@ -55,8 +55,8 @@ func resolveLegacyPoolTemplate(cfg *config.City, storedTemplate string) string {
 	if cfg == nil || storedTemplate == "" {
 		return ""
 	}
-	if findAgentByTemplate(cfg, storedTemplate) != nil {
-		return storedTemplate
+	if agent := findAgentByTemplate(cfg, storedTemplate); agent != nil {
+		return agent.QualifiedName()
 	}
 	match := ""
 	for i := range cfg.Agents {
@@ -89,8 +89,8 @@ func resolvedTemplateForIdentity(identity string, cfg *config.City) string {
 	if cfg == nil || identity == "" {
 		return ""
 	}
-	if findAgentByTemplate(cfg, identity) != nil {
-		return identity
+	if agent := findAgentByTemplate(cfg, identity); agent != nil {
+		return agent.QualifiedName()
 	}
 	if resolved := resolveLegacyPoolTemplate(cfg, identity); resolved != "" {
 		return resolved
@@ -119,7 +119,7 @@ func resolvedTemplateForIdentity(identity string, cfg *config.City) string {
 func resolvedSessionTemplate(bead beads.Bead, cfg *config.City) string {
 	template := normalizedSessionTemplate(bead, cfg)
 	if template != "" && (cfg == nil || findAgentByTemplate(cfg, template) != nil) {
-		return template
+		return normalizeAgentTemplateIdentity(cfg, template)
 	}
 	storedTemplate := sessionBeadStoredTemplate(bead)
 	if storedTemplate == "" {
@@ -137,7 +137,7 @@ func storedTemplateMatchesPoolTemplate(storedTemplate, template string, cfg *con
 	if storedTemplate == "" || template == "" {
 		return false
 	}
-	if storedTemplate == template {
+	if agentTemplateIdentitiesEquivalent(cfg, storedTemplate, template) {
 		return true
 	}
 	return resolveLegacyPoolTemplate(cfg, storedTemplate) == template
@@ -373,8 +373,10 @@ func normalizedSessionTemplate(bead beads.Bead, cfg *config.City) string {
 	if cfg == nil {
 		return template
 	}
-	if template != "" && findAgentByTemplate(cfg, template) != nil {
-		return template
+	if template != "" {
+		if agent := findAgentByTemplate(cfg, template); agent != nil {
+			return agent.QualifiedName()
+		}
 	}
 	agentName := sessionBeadAgentName(bead)
 	if agentName != "" {
