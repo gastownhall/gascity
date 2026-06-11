@@ -8,6 +8,8 @@ package state
 import (
 	"regexp"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // EffectiveState is a single, unambiguous classification of a bead's current
@@ -154,10 +156,10 @@ func Classify(b BeadView, ready, blocked, live, liveRigs map[string]bool) Effect
 	typ := strings.ToLower(b.IssueType())
 	title := b.Title()
 	bid := b.ID()
-	phase := b.Meta("gc.phase")
-	routed := b.Meta("gc.routed_to")
-	session := b.Meta("gc.session_name")
-	gcKind := b.Meta("gc.kind")
+	phase := b.Meta(beadmeta.PhaseMetadataKey)
+	routed := b.Meta(beadmeta.RoutedToMetadataKey)
+	session := b.Meta(beadmeta.SessionNameMetadataKey)
+	gcKind := b.Meta(beadmeta.KindMetadataKey)
 
 	labelsSlice := b.Labels()
 	labels := make(map[string]bool, len(labelsSlice))
@@ -207,7 +209,7 @@ func Classify(b BeadView, ready, blocked, live, liveRigs map[string]bool) Effect
 	}
 
 	// 6. Human-gated.
-	if labels["human"] || typ == "decision" || isTruthy(b.Meta("gc.do_not_auto_route")) {
+	if labels["human"] || typ == "decision" || isTruthy(b.Meta(beadmeta.DoNotAutoRouteMetadataKey)) {
 		return StateWaitingHuman
 	}
 

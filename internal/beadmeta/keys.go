@@ -187,6 +187,7 @@ const (
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
 	DeferredTypeMetadataKey              = "gc.deferred_type"
 	DetachedMetadataKey                  = "gc.detached"
+	DoNotAutoRouteMetadataKey            = "gc.do_not_auto_route"
 	DrainContextMetadataKey              = "gc.drain_context"
 	DrainContinuationGroupMetadataKey    = "gc.drain_continuation_group"
 	DrainControlIDMetadataKey            = "gc.drain_control_id"
@@ -606,6 +607,7 @@ var KnownMetadataKeys = []string{
 	DeferredRoutedToMetadataKey,
 	DeferredTypeMetadataKey,
 	DetachedMetadataKey,
+	DoNotAutoRouteMetadataKey,
 	DrainContextMetadataKey,
 	DrainContinuationGroupMetadataKey,
 	DrainControlIDMetadataKey,

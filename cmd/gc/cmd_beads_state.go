@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/state"
 	"github.com/gastownhall/gascity/internal/session"
@@ -105,7 +106,7 @@ func cmdBeadsState(rigFlag, stateFilter string, showIDs, jsonOut bool, stdout, s
 	groups := make(map[state.EffectiveState][]beadsStateRow)
 	for _, b := range allBeads {
 		if rigFlag != "" {
-			routed := b.Metadata["gc.routed_to"]
+			routed := b.Metadata[beadmeta.RoutedToMetadataKey]
 			rig, _, _ := strings.Cut(routed, "/")
 			if rig != rigFlag {
 				continue
