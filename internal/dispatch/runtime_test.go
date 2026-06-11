@@ -637,6 +637,64 @@ func TestProcessScopeCheckAbortScopeAffirmativeAndLegacyOutcomes(t *testing.T) {
 	}
 }
 
+// Retry-managed attempt subjects are exempt from the fail-closed abort_scope
+// contract: a bare-closed nested-retry attempt (gc.logical_bead_id +
+// gc.attempt, with the opt-in hardcoded at dispatch) must keep routing
+// through retry-eval as a transient contract violation, not abort its
+// iteration scope. An explicit gc.outcome=fail still counts as failed. The
+// opt-in match itself is whitespace-tolerant so formula-authored variants
+// cannot silently keep the legacy lenient contract.
+func TestBeadOutcomeFailedRetryAttemptExemptionAndOptInTrim(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		meta map[string]string
+		want bool
+	}{
+		{
+			name: "bare-closed retry attempt is exempt from fail-closed",
+			meta: map[string]string{
+				"gc.on_fail":         "abort_scope",
+				"gc.logical_bead_id": "ga-logical-1",
+				"gc.attempt":         "1",
+			},
+			want: false,
+		},
+		{
+			name: "explicit fail on retry attempt still counts as failed",
+			meta: map[string]string{
+				"gc.on_fail":         "abort_scope",
+				"gc.logical_bead_id": "ga-logical-1",
+				"gc.attempt":         "1",
+				"gc.outcome":         "fail",
+			},
+			want: true,
+		},
+		{
+			name: "whitespace-padded opt-in still fail-closes a bare close",
+			meta: map[string]string{
+				"gc.on_fail": " abort_scope ",
+			},
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			subject := beads.Bead{
+				ID:       "ga-subject-1",
+				Status:   "closed",
+				Metadata: tc.meta,
+			}
+			if got := beadOutcomeFailed(subject); got != tc.want {
+				t.Fatalf("beadOutcomeFailed = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSkipOpenScopeMembersBatchesDependencyChecksAndUpdates(t *testing.T) {
 	t.Parallel()
 

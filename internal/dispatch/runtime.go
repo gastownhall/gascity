@@ -643,7 +643,7 @@ func beadOutcomeFailed(subject beads.Bead) bool {
 	if outcome == "fail" {
 		return true
 	}
-	if subject.Metadata[beadmeta.OnFailMetadataKey] != "abort_scope" || isRetryAttemptSubject(subject) {
+	if strings.TrimSpace(subject.Metadata[beadmeta.OnFailMetadataKey]) != "abort_scope" || isRetryAttemptSubject(subject) {
 		return false
 	}
 	switch outcome {
