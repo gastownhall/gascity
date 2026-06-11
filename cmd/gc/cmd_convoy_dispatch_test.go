@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
@@ -1485,6 +1486,89 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 	if control.Metadata[graphExecutionRouteMetaKey] != "frontend/reviewer" {
 		t.Fatalf("control execution route = %q, want frontend/reviewer", control.Metadata[graphExecutionRouteMetaKey])
 	}
+}
+
+func TestPropagateDynamicScopeMetadataClassifiesEveryControlKind(t *testing.T) {
+	source := beads.Bead{
+		ID: "gc-source",
+		Metadata: map[string]string{
+			beadmeta.ScopeRefMetadataKey: "body",
+		},
+	}
+	for _, kind := range beadmeta.ControlKinds {
+		t.Run(kind, func(t *testing.T) {
+			step := &formula.RecipeStep{
+				ID: "frag.step",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey: kind,
+				},
+			}
+			propagateDynamicScopeMetadata(step, source)
+			if got := step.Metadata[beadmeta.ScopeRefMetadataKey]; got != "body" {
+				t.Fatalf("kind %q: gc.scope_ref = %q, want body", kind, got)
+			}
+			if got := step.Metadata[beadmeta.ScopeRoleMetadataKey]; got != beadmeta.ScopeRoleControl {
+				t.Fatalf("kind %q: gc.scope_role = %q, want %q", kind, got, beadmeta.ScopeRoleControl)
+			}
+		})
+	}
+}
+
+func TestPropagateDynamicScopeMetadataNonControlRoles(t *testing.T) {
+	source := beads.Bead{
+		ID: "gc-source",
+		Metadata: map[string]string{
+			beadmeta.ScopeRefMetadataKey: "body",
+		},
+	}
+
+	t.Run("plain work defaults to member", func(t *testing.T) {
+		step := &formula.RecipeStep{ID: "frag.step"}
+		propagateDynamicScopeMetadata(step, source)
+		if got := step.Metadata[beadmeta.ScopeRoleMetadataKey]; got != beadmeta.ScopeRoleMember {
+			t.Fatalf("gc.scope_role = %q, want %q", got, beadmeta.ScopeRoleMember)
+		}
+	})
+
+	t.Run("scope kind gets no role", func(t *testing.T) {
+		step := &formula.RecipeStep{
+			ID: "frag.step",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey: beadmeta.KindScope,
+			},
+		}
+		propagateDynamicScopeMetadata(step, source)
+		if got := step.Metadata[beadmeta.ScopeRoleMetadataKey]; got != "" {
+			t.Fatalf("gc.scope_role = %q, want empty for scope kind", got)
+		}
+	})
+
+	t.Run("explicit role is preserved", func(t *testing.T) {
+		step := &formula.RecipeStep{
+			ID: "frag.step",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:      beadmeta.KindTally,
+				beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleTeardown,
+			},
+		}
+		propagateDynamicScopeMetadata(step, source)
+		if got := step.Metadata[beadmeta.ScopeRoleMetadataKey]; got != beadmeta.ScopeRoleTeardown {
+			t.Fatalf("gc.scope_role = %q, want preserved %q", got, beadmeta.ScopeRoleTeardown)
+		}
+	})
+
+	t.Run("no scope_ref means no role", func(t *testing.T) {
+		step := &formula.RecipeStep{
+			ID: "frag.step",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey: beadmeta.KindTally,
+			},
+		}
+		propagateDynamicScopeMetadata(step, beads.Bead{ID: "gc-source"})
+		if got := step.Metadata[beadmeta.ScopeRoleMetadataKey]; got != "" {
+			t.Fatalf("gc.scope_role = %q, want empty without scope_ref", got)
+		}
+	})
 }
 
 func TestDecorateDynamicFragmentRecipeUsesDirectExecutionRoute(t *testing.T) {

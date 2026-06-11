@@ -756,12 +756,12 @@ func propagateDynamicScopeMetadata(step *formula.RecipeStep, source beads.Bead) 
 	if step.Metadata[beadmeta.ScopeRefMetadataKey] == "" || step.Metadata[beadmeta.ScopeRoleMetadataKey] != "" {
 		return
 	}
-	switch step.Metadata[beadmeta.KindMetadataKey] {
-	case "scope":
+	kind := step.Metadata[beadmeta.KindMetadataKey]
+	switch {
+	case kind == beadmeta.KindScope:
 		return
-	case "scope-check", "workflow-finalize", "fanout", "check", "retry-eval", "retry", "ralph":
+	case beadmeta.IsControlKind(kind):
 		step.Metadata[beadmeta.ScopeRoleMetadataKey] = beadmeta.ScopeRoleControl
-		return
 	default:
 		step.Metadata[beadmeta.ScopeRoleMetadataKey] = beadmeta.ScopeRoleMember
 	}
