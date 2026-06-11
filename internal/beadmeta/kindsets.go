@@ -124,7 +124,8 @@ var WorkflowTopologyKinds = []string{
 // this set). It is exactly StructuralGraphKinds ∪ (ControlKinds \ {fanout}):
 // the fanout exclusion is intentional — that kind is engine-minted from
 // [steps.on_complete], which formula validation catches via struct-field
-// checks (commit 2531b9440), so metadata coverage is unnecessary for it.
+// checks (commit 2531b9440), so it is covered by EngineMintedOnlyKinds
+// instead (hand-writing it is a validation error, not a contract trigger).
 // KindDrain appears in both detection paths (struct field and metadata) as
 // belt-and-suspenders from PR #2784. TestKindSetRelationships pins this
 // composition.
@@ -140,4 +141,18 @@ var GraphContractMetadataKinds = []string{
 	KindRun,
 	KindCheck,
 	KindDrain,
+}
+
+// EngineMintedOnlyKinds lists the gc.kind values that only the formula
+// compiler may mint: fanout control beads are expanded from the
+// [steps.on_complete] authoring surface (formula ApplyGraphControls), and no
+// hand-authoring surface exists for them. Hand-writing these values in step
+// metadata is rejected by formula validation (the behavior owner is
+// Formula.Validate via validateEngineMintedKindMetadata, ga-cjg11s) —
+// otherwise the bead would pass validation and the legacy routing path would
+// stamp it onto a worker instead of the control dispatcher. It is exactly
+// ControlKinds \ GraphContractMetadataKinds; TestKindSetRelationships pins
+// this composition.
+var EngineMintedOnlyKinds = []string{
+	KindFanout,
 }

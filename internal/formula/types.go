@@ -1035,6 +1035,50 @@ func metadataRequiresGraphContract(metadata map[string]string) bool {
 	return false
 }
 
+// engineMintedAuthoringSurfaces maps each engine-minted-only gc.kind value to
+// the TOML authoring surface a formula author should use instead. The set
+// membership is data in beadmeta (EngineMintedOnlyKinds); the guidance is
+// formula-package judgment. TestEngineMintedAuthoringSurfacesCoverEngineMintedOnlyKinds
+// keeps the two in lockstep.
+var engineMintedAuthoringSurfaces = map[string]string{
+	beadmeta.KindFanout: "[steps.on_complete]",
+}
+
+// validateEngineMintedKindMetadata rejects hand-written gc.kind values that
+// only the formula compiler may mint (beadmeta.EngineMintedOnlyKinds). Without
+// this check a hand-written fanout step passes validation — the kind
+// is intentionally excluded from the graph-contract metadata trigger because
+// their real authoring surfaces are struct fields — and the legacy compile
+// path then routes the bead to a worker instead of the control dispatcher
+// (ga-cjg11s). Engine-minted steps never re-enter Validate: ApplyGraphControls
+// runs after Resolve, so this check only ever sees authored steps.
+func validateEngineMintedKindMetadata(steps []*Step, errs *[]string, prefix string) {
+	for i, step := range steps {
+		if step == nil {
+			continue
+		}
+		stepPrefix := fmt.Sprintf("%s[%d] (%s)", prefix, i, step.ID)
+		for rawKey, rawValue := range step.Metadata {
+			if strings.TrimSpace(rawKey) != beadmeta.KindMetadataKey {
+				continue
+			}
+			kind := strings.TrimSpace(rawValue)
+			if !slices.Contains(beadmeta.EngineMintedOnlyKinds, kind) {
+				continue
+			}
+			guidance := "it has no hand-authoring surface"
+			if surface, ok := engineMintedAuthoringSurfaces[kind]; ok {
+				guidance = "author " + surface + " instead"
+			}
+			*errs = append(*errs, fmt.Sprintf("%s: metadata %s=%q is engine-minted; %s", stepPrefix, beadmeta.KindMetadataKey, kind, guidance))
+		}
+		if step.Loop != nil {
+			validateEngineMintedKindMetadata(step.Loop.Body, errs, stepPrefix+".loop.body")
+		}
+		validateEngineMintedKindMetadata(step.Children, errs, stepPrefix+".children")
+	}
+}
+
 // Validate checks the formula for structural errors.
 func (f *Formula) Validate() error {
 	var errs []string
@@ -1051,6 +1095,8 @@ func (f *Formula) Validate() error {
 	if requiresExplicitGraphContract(f) {
 		errs = append(errs, explicitGraphRequirementError)
 	}
+	validateEngineMintedKindMetadata(f.Steps, &errs, "steps")
+	validateEngineMintedKindMetadata(f.Template, &errs, "template")
 
 	if f.Type != "" && !f.Type.IsValid() {
 		errs = append(errs, fmt.Sprintf("type: invalid value %q (must be workflow, expansion, or aspect)", f.Type))
