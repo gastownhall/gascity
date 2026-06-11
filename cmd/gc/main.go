@@ -261,6 +261,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newImportCmd(stdout, stderr),
 		newConfigCmd(stdout, stderr),
 		newPackCmd(stdout, stderr),
+		newRegistryCmd(stdout, stderr),
 		newLintCmd(stdout, stderr),
 		newDoctorCmd(stdout, stderr),
 		newHookCmd(stdout, stderr),

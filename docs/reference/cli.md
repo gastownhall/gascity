@@ -57,6 +57,7 @@ gc [flags]
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
+| [gc registry](#gc-registry) | Publish packs to Gas City Registry |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
@@ -2698,6 +2699,43 @@ gc register [path] [flags]
 | `--json` | bool |  | emit JSONL summary |
 | `--name` | string |  | machine-local alias for this city registration |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
+
+## gc registry
+
+Publish packs to the hosted Gas City Registry.
+
+```
+gc registry
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc registry publish](#gc-registry-publish) | Submit a pack publish request |
+
+## gc registry publish
+
+Submit a pack publish request to Gas City Registry.
+
+The command requires a clean Git checkout whose current HEAD matches its
+configured upstream branch, then submits the GitHub repository, commit, pack
+path, pack name, and version to the registry API.
+
+```
+gc registry publish <path-to-pack-root> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--csrf-token` | string |  | registry CSRF token |
+| `--description` | string |  | release description; defaults to [pack].description |
+| `--dev-auth` | bool |  | create a local dev-auth session before submitting; localhost only |
+| `--dev-auth-handle` | string | `local-cli` | dev-auth handle when --dev-auth is used |
+| `--dry-run` | bool |  | print the publish request without submitting |
+| `--ref` | string |  | release ref label; defaults to the upstream branch name |
+| `--registry-url` | string | `https://registry.gascity.com` | registry app base URL |
+| `--session-cookie` | string |  | registry_session cookie value or Cookie header |
+| `--validate` | bool | `true` | ask the registry to validate the request immediately |
+| `--version` | string |  | release version; defaults to [pack].version |
 
 ## gc reload
 
