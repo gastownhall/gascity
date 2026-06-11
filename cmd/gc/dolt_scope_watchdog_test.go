@@ -159,8 +159,8 @@ func TestManagedDoltScopeWatchdogKillsServerWhenScopeDeleted(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	logData, _ := os.ReadFile(logPath)
-	if !strings.Contains(string(logData), "scope watchdog") {
-		t.Errorf("watchdog log missing the termination explanation; log:\n%s", logData)
+	if !strings.Contains(string(logData), "gone for") {
+		t.Errorf("watchdog log missing the scope-gone termination decision; log:\n%s", logData)
 	}
 }
 

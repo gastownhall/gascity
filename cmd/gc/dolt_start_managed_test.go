@@ -373,7 +373,7 @@ func TestManagedDoltTestWatchdogCanBeDisabledByEnv(t *testing.T) {
 	}
 }
 
-func TestManagedDoltTestWatchdogExecutableUsesOSExecutable(t *testing.T) {
+func TestManagedDoltWatchdogExecutableUsesOSExecutable(t *testing.T) {
 	oldExecutable := managedDoltTestExecutable
 	t.Cleanup(func() { managedDoltTestExecutable = oldExecutable })
 	want := filepath.Join(t.TempDir(), "gc-test-binary")
@@ -381,12 +381,12 @@ func TestManagedDoltTestWatchdogExecutableUsesOSExecutable(t *testing.T) {
 		return want, nil
 	}
 
-	got, err := managedDoltTestWatchdogExecutable()
+	got, err := managedDoltWatchdogExecutable()
 	if err != nil {
-		t.Fatalf("managedDoltTestWatchdogExecutable: %v", err)
+		t.Fatalf("managedDoltWatchdogExecutable: %v", err)
 	}
 	if got != want {
-		t.Fatalf("managedDoltTestWatchdogExecutable() = %q, want %q", got, want)
+		t.Fatalf("managedDoltWatchdogExecutable() = %q, want %q", got, want)
 	}
 }
 

@@ -396,7 +396,7 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 	if err != nil {
 		return managedDoltStartedProcess{}, err
 	}
-	watchdogExecutable, err := managedDoltTestWatchdogExecutable()
+	watchdogExecutable, err := managedDoltWatchdogExecutable()
 	if err != nil {
 		_ = os.Remove(disarmFile)
 		return managedDoltStartedProcess{}, err
@@ -470,7 +470,10 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 	return started, nil
 }
 
-func managedDoltTestWatchdogExecutable() (string, error) {
+// managedDoltWatchdogExecutable resolves the gc binary to re-exec as a
+// managed-dolt watchdog. It serves both the test watchdog and the
+// production scope watchdog (dolt_scope_watchdog.go).
+func managedDoltWatchdogExecutable() (string, error) {
 	executable, executableErr := managedDoltTestExecutable()
 	if executableErr == nil && strings.TrimSpace(executable) != "" {
 		return executable, nil
@@ -478,16 +481,16 @@ func managedDoltTestWatchdogExecutable() (string, error) {
 	fallback := strings.TrimSpace(os.Args[0])
 	if fallback == "" {
 		if executableErr != nil {
-			return "", fmt.Errorf("resolve dolt test watchdog executable: os.Executable: %w", executableErr)
+			return "", fmt.Errorf("resolve dolt watchdog executable: os.Executable: %w", executableErr)
 		}
-		return "", fmt.Errorf("resolve dolt test watchdog executable: os.Executable returned empty path")
+		return "", fmt.Errorf("resolve dolt watchdog executable: os.Executable returned empty path")
 	}
 	if filepath.IsAbs(fallback) {
 		return fallback, nil
 	}
 	abs, err := filepath.Abs(fallback)
 	if err != nil {
-		return "", fmt.Errorf("resolve dolt test watchdog executable from argv %q: %w", fallback, err)
+		return "", fmt.Errorf("resolve dolt watchdog executable from argv %q: %w", fallback, err)
 	}
 	return abs, nil
 }

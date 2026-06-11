@@ -9,14 +9,22 @@ package main
 // ~44GB RSS and a sustained ~4.5 cores in aggregate.
 //
 // The watchdog closes the ownership gap at the source instead of relying on
-// after-the-fact reaping: production servers are spawned under a small
-// supervisor process (a gc re-exec, modeled on the managed-dolt TEST
-// watchdog in dolt_start_managed.go) that terminates the server when its
-// scope is provably gone. "Provably gone" means the server's --config file
-// no longer exists on disk for two consecutive checks — the second check is
-// the grace window that protects transient states (crash-adoption moves,
-// mid-flight renames) from being misread as deletion. The check queries
-// live filesystem state every cycle; there are no status files.
+// after-the-fact reaping: production servers are spawned under a supervisor
+// process (a gc re-exec, modeled on the managed-dolt TEST watchdog in
+// dolt_start_managed.go) that terminates the server when its scope is
+// provably gone. "Provably gone" means the server's --config file no longer
+// exists on disk for two consecutive checks — the second check is the grace
+// window that protects transient states (crash-adoption moves, mid-flight
+// renames) from being misread as deletion. The check queries live
+// filesystem state every cycle; there are no status files.
+//
+// Memory cost: a gc re-exec initializes the full cmd/gc dependency graph
+// and holds it for the life of the scope — measured at ~97MB RSS per
+// watchdog, of which ~20MB is private dirty (the rest is binary text shared
+// across all gc processes). The marginal cost is therefore ~20MB of
+// unshareable memory per live scope. This is a deliberate trade against the
+// multi-GB orphan leak above; it scales only with live scopes because each
+// watchdog dies with its server.
 
 import (
 	"errors"
@@ -50,7 +58,8 @@ const (
 	// managedDoltScopeWatchdogDefaultInterval is the production poll
 	// cadence. Scope deletion is rare and the response does not need to be
 	// fast — it needs to be reliable. A slow cadence keeps the watchdog's
-	// steady-state cost negligible.
+	// steady-state CPU cost negligible; the per-watchdog memory footprint
+	// is the re-exec cost documented in the file header.
 	managedDoltScopeWatchdogDefaultInterval = 30 * time.Second
 
 	// managedDoltScopeGoneConfirmations is how many consecutive polls must
@@ -121,7 +130,7 @@ func managedDoltScopeGone(configFile string) bool {
 // observe the same managedDoltStartedProcess shape as a direct spawn plus
 // the supervising WatchdogPID.
 func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePath string, logFile *os.File) (managedDoltStartedProcess, error) {
-	watchdogExecutable, err := managedDoltTestWatchdogExecutable()
+	watchdogExecutable, err := managedDoltWatchdogExecutable()
 	if err != nil {
 		return managedDoltStartedProcess{}, err
 	}
@@ -179,9 +188,17 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
-	// Setpgid: the dolt sql-server leads its own process group so
-	// terminateManagedDoltPID's escalation reaches descendant helpers
-	// (auto_gc, archive workers) the same way the test watchdog does.
+	// Setpgid: the dolt sql-server leads its own process group, matching
+	// the direct production spawn (managedDoltSQLServerSysProcAttr) and the
+	// test watchdog's layout, and keeping the server's descendants out of
+	// the watchdog's own group. Termination here is leader-only:
+	// terminateManagedDoltPID signals just this PID — group-kill
+	// (kill(-pgid, ...)) exists only in terminateManagedDoltTestPID, the
+	// test-registry reaper. Leader-only is accepted on this path because
+	// the managed config disables auto_gc/stats helper workers (see
+	// cmd_dolt_config.go), so descendant helpers are rare by construction,
+	// and a SIGTERM'd dolt winds down its own children; only the SIGKILL
+	// escalation of an unresponsive server could strand descendants.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
