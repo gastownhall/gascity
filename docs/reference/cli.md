@@ -1582,6 +1582,7 @@ gc import
 | [gc import list](#gc-import-list) | List imported packs |
 | [gc import prune](#gc-import-prune) | Remove unreferenced clones from the global pack cache |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
+| [gc import status](#gc-import-status) | Report declared imports and packs.lock pins |
 | [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
 | [gc import why](#gc-import-why) | Explain why an import is present |
 
@@ -1685,6 +1686,23 @@ Remove a pack import
 ```
 gc import remove <name>
 ```
+
+## gc import status
+
+Report declared imports and packs.lock pins.
+
+Covers every import scope (root pack [imports.*], [defaults.rig.imports.*],
+and rig-scoped [rigs.imports.*]) plus the full packs.lock closure and the
+lockfile content hash. With --json the output is a stable machine-readable
+document for drift checkers.
+
+```
+gc import status [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON result |
 
 ## gc import upgrade
 

@@ -3165,8 +3165,11 @@ type SupervisorHealthOutputBody struct {
 	CitiesRunning int64 `json:"cities_running"`
 
 	// CitiesTotal Total managed cities.
-	CitiesTotal int64              `json:"cities_total"`
-	Startup     *SupervisorStartup `json:"startup,omitempty"`
+	CitiesTotal int64 `json:"cities_total"`
+
+	// PacksLockSha256 SHA-256 hex digest of the first managed city's packs.lock contents, for single-city deployments (mirrors the startup field's first-city semantics). Drift checkers compare this against the committed lockfile copy. Omitted when no city is registered or the city has no packs.lock.
+	PacksLockSha256 *string            `json:"packs_lock_sha256,omitempty"`
+	Startup         *SupervisorStartup `json:"startup,omitempty"`
 
 	// Status Health status ("ok").
 	Status string `json:"status"`
