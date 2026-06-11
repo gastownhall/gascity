@@ -188,6 +188,22 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 // or the inactive managed runtime. When the city has no authoritative
 // scope config the environment is returned unchanged and pack scripts
 // keep resolving the managed runtime themselves.
+//
+// Pack commands are a city-level surface: the projection intentionally
+// targets the city scope even when the invoking shell carries a
+// rig-scoped projection, matching what the same command would see when
+// dispatched as a city order.
+//
+// Unlike the order path, whose resolution input is a freshly built env
+// map, the input here is the raw ambient environment. Ambient password
+// mirrors are parent-shell state — possibly projected for a different
+// scope — and doltauth.ResolveScopedFromEnv would trust a map-provided
+// BEADS_DOLT_PASSWORD as already-resolved auth ahead of the endpoint's
+// credentials-file lookup. They are therefore stripped from the
+// resolution input, gated on the same authoritativeness check the
+// projection itself applies so the non-authoritative pass-through stays
+// a strict no-op. The operator overrides are unaffected: doltauth reads
+// GC_DOLT_PASSWORD via os.Getenv, not from the resolution map.
 func mergeCanonicalScopeDoltEnv(environ []string, cityPath string) []string {
 	resolved := make(map[string]string, len(environ))
 	for _, entry := range environ {
@@ -198,6 +214,9 @@ func mergeCanonicalScopeDoltEnv(environ []string, cityPath string) []string {
 	before := make(map[string]string, len(resolved))
 	for key, value := range resolved {
 		before[key] = value
+	}
+	if canonicalScopeDoltProjectionAuthoritative(cityPath) {
+		clearProjectedDoltPasswordEnv(resolved)
 	}
 	applyOrderExecCanonicalDoltEnv(cityPath, cityPath, resolved)
 

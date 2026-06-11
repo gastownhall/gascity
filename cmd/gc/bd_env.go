@@ -280,6 +280,26 @@ func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnecti
 	return target, true, nil
 }
 
+// canonicalScopeDoltProjectionAuthoritative reports whether canonical
+// Dolt projection would resolve auth for the city scope: the scope
+// backend is not postgres and the scope config resolves authoritative —
+// the same ResolveScopeConfigState gate applyOrderExecCanonicalDoltEnv
+// and its managed fallback apply before calling
+// applyCanonicalDoltAuthEnv. Callers that feed ambient environments
+// into the projection use this to strip untrusted password mirrors
+// from the resolution input without breaking the strict no-op
+// pass-through for non-authoritative scopes.
+func canonicalScopeDoltProjectionAuthoritative(cityPath string) bool {
+	if scopeBackendIsPostgres(cityPath, cityPath) {
+		return false
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
+	if err != nil {
+		return false
+	}
+	return resolved.Kind == contract.ScopeConfigAuthoritative
+}
+
 func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConnectionTarget) {
 	if env == nil {
 		return
