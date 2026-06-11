@@ -122,6 +122,7 @@ func TestInit_BothURLsUnset_ReturnsNil(t *testing.T) {
 	resetInitState(t)
 	t.Setenv(EnvMetricsURL, "")
 	t.Setenv(EnvLogsURL, "")
+	t.Setenv(EnvOTLPEndpoint, "")
 
 	p, err := Init(context.Background(), "test-svc", "0.0.1")
 	if err != nil {
@@ -136,6 +137,7 @@ func TestInit_Idempotent(t *testing.T) {
 	resetInitState(t)
 	t.Setenv(EnvMetricsURL, "")
 	t.Setenv(EnvLogsURL, "")
+	t.Setenv(EnvOTLPEndpoint, "")
 
 	p1, _ := Init(context.Background(), "test-svc", "0.0.1")
 	p2, _ := Init(context.Background(), "test-svc", "0.0.1")
@@ -181,6 +183,152 @@ func TestProvider_Shutdown_Empty(t *testing.T) {
 	p := &Provider{}
 	if err := p.Shutdown(context.Background()); err != nil {
 		t.Errorf("Shutdown with no fns should not error: %v", err)
+	}
+}
+
+func TestInit_OTLPEndpointFallbackEnablesTelemetry(t *testing.T) {
+	resetInitState(t)
+	t.Setenv(EnvMetricsURL, "")
+	t.Setenv(EnvLogsURL, "")
+	// Unroutable port; OTLP HTTP exporters connect lazily so Init succeeds.
+	t.Setenv(EnvOTLPEndpoint, "http://127.0.0.1:1")
+
+	p, err := Init(context.Background(), "test-svc", "0.0.1")
+	if err != nil {
+		t.Fatalf("Init error: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil provider when OTEL_EXPORTER_OTLP_ENDPOINT is set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	// Best-effort flush to a dead endpoint; the export error is expected.
+	_ = p.Shutdown(ctx)
+}
+
+func TestResolveEndpoints_GCVarsWinOverOTLPEndpoint(t *testing.T) {
+	t.Setenv(EnvMetricsURL, "http://vm:8428/opentelemetry/api/v1/push")
+	t.Setenv(EnvLogsURL, "http://vl:9428/insert/opentelemetry/v1/logs")
+	t.Setenv(EnvOTLPEndpoint, "http://collector:4318")
+
+	metricsURL, logsURL, enabled := resolveEndpoints()
+	if !enabled {
+		t.Fatal("expected telemetry enabled")
+	}
+	if metricsURL != "http://vm:8428/opentelemetry/api/v1/push" {
+		t.Errorf("metricsURL = %q, want GC_OTEL_METRICS_URL value", metricsURL)
+	}
+	if logsURL != "http://vl:9428/insert/opentelemetry/v1/logs" {
+		t.Errorf("logsURL = %q, want GC_OTEL_LOGS_URL value", logsURL)
+	}
+}
+
+func TestResolveEndpoints_OTLPEndpointFallback(t *testing.T) {
+	t.Setenv(EnvMetricsURL, "")
+	t.Setenv(EnvLogsURL, "")
+	t.Setenv(EnvOTLPEndpoint, "http://collector:4318")
+
+	metricsURL, logsURL, enabled := resolveEndpoints()
+	if !enabled {
+		t.Fatal("expected telemetry enabled via OTEL_EXPORTER_OTLP_ENDPOINT")
+	}
+	if want := "http://collector:4318/v1/metrics"; metricsURL != want {
+		t.Errorf("metricsURL = %q, want %q", metricsURL, want)
+	}
+	if want := "http://collector:4318/v1/logs"; logsURL != want {
+		t.Errorf("logsURL = %q, want %q", logsURL, want)
+	}
+}
+
+func TestResolveEndpoints_OTLPEndpointTrailingSlash(t *testing.T) {
+	t.Setenv(EnvMetricsURL, "")
+	t.Setenv(EnvLogsURL, "")
+	t.Setenv(EnvOTLPEndpoint, "http://collector:4318/")
+
+	metricsURL, logsURL, enabled := resolveEndpoints()
+	if !enabled {
+		t.Fatal("expected telemetry enabled via OTEL_EXPORTER_OTLP_ENDPOINT")
+	}
+	if want := "http://collector:4318/v1/metrics"; metricsURL != want {
+		t.Errorf("metricsURL = %q, want %q", metricsURL, want)
+	}
+	if want := "http://collector:4318/v1/logs"; logsURL != want {
+		t.Errorf("logsURL = %q, want %q", logsURL, want)
+	}
+}
+
+func TestResolveEndpoints_PartialGCVarsKeepDefaults(t *testing.T) {
+	// When at least one GC_OTEL_*_URL is set, the unset one falls back to the
+	// package default, not to OTEL_EXPORTER_OTLP_ENDPOINT — existing behavior
+	// is unchanged.
+	t.Setenv(EnvMetricsURL, "http://vm:8428/opentelemetry/api/v1/push")
+	t.Setenv(EnvLogsURL, "")
+	t.Setenv(EnvOTLPEndpoint, "http://collector:4318")
+
+	metricsURL, logsURL, enabled := resolveEndpoints()
+	if !enabled {
+		t.Fatal("expected telemetry enabled")
+	}
+	if metricsURL != "http://vm:8428/opentelemetry/api/v1/push" {
+		t.Errorf("metricsURL = %q, want GC_OTEL_METRICS_URL value", metricsURL)
+	}
+	if logsURL != DefaultLogsURL {
+		t.Errorf("logsURL = %q, want DefaultLogsURL %q", logsURL, DefaultLogsURL)
+	}
+}
+
+func TestResolveEndpoints_AllUnset_Disabled(t *testing.T) {
+	t.Setenv(EnvMetricsURL, "")
+	t.Setenv(EnvLogsURL, "")
+	t.Setenv(EnvOTLPEndpoint, "")
+
+	_, _, enabled := resolveEndpoints()
+	if enabled {
+		t.Error("expected telemetry disabled when no endpoint env var is set")
+	}
+}
+
+func TestNewResource_HonorsOTELResourceAttributes(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=prod,gc.city=testcity")
+
+	res, err := newResource(context.Background(), "test-svc", "0.0.1")
+	if err != nil {
+		t.Fatalf("newResource error: %v", err)
+	}
+
+	attrs := make(map[string]string)
+	for _, kv := range res.Attributes() {
+		attrs[string(kv.Key)] = kv.Value.Emit()
+	}
+	if got := attrs["deployment.environment"]; got != "prod" {
+		t.Errorf("deployment.environment = %q, want %q", got, "prod")
+	}
+	if got := attrs["gc.city"]; got != "testcity" {
+		t.Errorf("gc.city = %q, want %q", got, "testcity")
+	}
+	if got := attrs["service.name"]; got != "test-svc" {
+		t.Errorf("service.name = %q, want %q", got, "test-svc")
+	}
+}
+
+func TestNewResource_ExplicitServiceIdentityWinsOverEnv(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=env-svc,service.version=9.9.9")
+
+	res, err := newResource(context.Background(), "test-svc", "0.0.1")
+	if err != nil {
+		t.Fatalf("newResource error: %v", err)
+	}
+
+	attrs := make(map[string]string)
+	for _, kv := range res.Attributes() {
+		attrs[string(kv.Key)] = kv.Value.Emit()
+	}
+	if got := attrs["service.name"]; got != "test-svc" {
+		t.Errorf("service.name = %q, want explicit %q to win over env", got, "test-svc")
+	}
+	if got := attrs["service.version"]; got != "0.0.1" {
+		t.Errorf("service.version = %q, want explicit %q to win over env", got, "0.0.1")
 	}
 }
 
