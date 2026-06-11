@@ -222,11 +222,10 @@ func TestOpenCityEventsProviderEmitsShortRetainAgeWarningFromConfig(t *testing.T
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
 [workspace]
 name = "test-city"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [events.rotation]
 archive_retain_age = "24h"
-`), 0o644); err != nil {
+` + builtinImportsTOML("core")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 

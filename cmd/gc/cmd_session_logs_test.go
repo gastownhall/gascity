@@ -633,13 +633,13 @@ func TestCmdSessionLogsJSONSuccessIsJSONOnly(t *testing.T) {
 	t.Setenv("GC_CITY", cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(fmt.Sprintf(`[workspace]
 name = "test"
-includes = [".gc/system/packs/core"]
 
 [daemon]
 observe_paths = [%q]
-`, searchBase)), 0o644); err != nil {
+`, searchBase)+builtinImportsTOML("core")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
+	writeBuiltinImportsLock(t, cityDir, "core")
 
 	store, err := openCityStoreAt(cityDir)
 	if err != nil {

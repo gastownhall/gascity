@@ -1,0 +1,73 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"github.com/gastownhall/gascity/internal/config"
+)
+
+// materializeBuiltinPacksForTest is the test replacement for the retired
+// per-city pack materialization: it hydrates the bundled-pack cache under
+// the process GC_HOME (set by TestMain) and writes the stable gc-beads-bd
+// shim for bd-provider cities.
+func materializeBuiltinPacksForTest(t testing.TB, cityPath string) {
+	t.Helper()
+	if err := EnsureBuiltinRuntimeAssets(cityPath, io.Discard); err != nil {
+		t.Fatalf("EnsureBuiltinRuntimeAssets: %v", err)
+	}
+}
+
+// builtinImportsTOML returns [imports.<name>] manifest blocks for bundled
+// builtin packs, usable inside city.toml or pack.toml fixture literals.
+// Pair with writeBuiltinImportsLock so the sources resolve offline.
+func builtinImportsTOML(names ...string) string {
+	var b strings.Builder
+	for _, name := range names {
+		source, ok := builtinpacks.Source(name)
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(&b, "\n[imports.%s]\nsource = %q\nversion = %q\n", name, source, config.BundledPackImportVersion)
+	}
+	return b.String()
+}
+
+// writeBuiltinImportsLock writes a packs.lock pinning the bundled builtin
+// sources so fixture cities resolve them from the embedded synthetic cache
+// without network access.
+func writeBuiltinImportsLock(t testing.TB, cityDir string, names ...string) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("schema = 1\n\n[packs]\n")
+	for _, name := range names {
+		source, ok := builtinpacks.Source(name)
+		if !ok {
+			t.Fatalf("unknown builtin pack %q", name)
+		}
+		fmt.Fprintf(&b, "[packs.%q]\nversion = %q\ncommit = %q\n\n", source, config.BundledPackImportVersion, bundledPackImportCommit())
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "packs.lock"), []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("writing packs.lock: %v", err)
+	}
+}
+
+// bundledGcBeadsBdScriptForTest returns the cache-resolved bundled bd
+// lifecycle script (the stable per-city shim's exec target) for tests that
+// assert on the script's content.
+func bundledGcBeadsBdScriptForTest(t testing.TB) string {
+	t.Helper()
+	target, err := bundledGcBeadsBdScriptTarget()
+	if err != nil {
+		t.Fatalf("bundledGcBeadsBdScriptTarget: %v", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("bundled gc-beads-bd script not cached: %v", err)
+	}
+	return target
+}

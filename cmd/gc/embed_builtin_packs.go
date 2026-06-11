@@ -55,6 +55,13 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 	state := stateAny.(*builtinRuntimeState)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if _, err := config.GlobalRepoCacheRoot(); err != nil {
+		// No user-global cache root (hermetic test environment without
+		// GC_HOME). There is nothing to heal: bundled-source resolution
+		// surfaces its own error if config references a bundled import.
+		pruneRetiredSystemPacks(cityPath, warningWriter)
+		return nil
+	}
 	if state.ready && requiredBuiltinSourcesUsable(cityPath) {
 		return nil
 	}
@@ -113,14 +120,13 @@ func requiredBuiltinSources(cityPath string) map[string]string {
 func requiredBuiltinPackNames(cityPath string) []string {
 	required := []string{"core"}
 
-	provider := strings.TrimSpace(configuredBeadsProviderValue(cityPath))
-	normalizedProvider := normalizeRawBeadsProvider(cityPath, provider)
-	if providerUsesBdStoreContract(normalizedProvider) {
+	if cityUsesBdStoreContract(cityPath) {
 		required = append(required, "bd")
 	}
+	provider := strings.TrimSpace(configuredBeadsProviderValue(cityPath))
 	usesDirectExecLifecycle := strings.HasPrefix(provider, "exec:") &&
 		execProviderBase(provider) == "gc-beads-bd" &&
-		normalizedProvider != "bd"
+		normalizeRawBeadsProvider(cityPath, provider) != "bd"
 	if usesDirectExecLifecycle {
 		required = append(required, "dolt")
 	}
@@ -131,6 +137,20 @@ func requiredBuiltinPackNames(cityPath string) []string {
 // entries pin (config.BundledPackImportVersion without the "sha:" prefix).
 func bundledPackImportCommit() string {
 	return strings.TrimPrefix(config.BundledPackImportVersion, "sha:")
+}
+
+// bundledSourcePinnedVersion returns the canonical pinned version for a
+// bundled source: packs published from the public gascity-packs registry
+// keep their public registry pin (so they never conflict with the pins gc
+// init templates write); everything else uses the bundled gascity.git pin.
+func bundledSourcePinnedVersion(source string) string {
+	if s, ok := builtinpacks.Source("gastown"); ok && s == source {
+		return config.PublicGastownPackVersion
+	}
+	if s, ok := builtinpacks.Source("gascity"); ok && s == source {
+		return config.PublicGascityPackVersion
+	}
+	return config.BundledPackImportVersion
 }
 
 // requiredBuiltinImports returns the [imports.<name>] entries gc init
@@ -147,10 +167,13 @@ func requiredBuiltinImports(cityPath string) (map[string]config.Import, []string
 func builtinImportsForInit(cityProvider string) (map[string]config.Import, []string) {
 	provider := strings.TrimSpace(os.Getenv("GC_BEADS"))
 	if provider == "" {
-		provider = cityProvider
+		provider = strings.TrimSpace(cityProvider)
+	}
+	if provider == "" {
+		provider = "bd" // matches the rawBeadsProvider default
 	}
 	names := []string{"core"}
-	if providerUsesBdStoreContract(strings.TrimSpace(provider)) {
+	if providerUsesBdStoreContract(provider) {
 		names = append(names, "bd")
 	}
 	return builtinImportsForNames(names)
@@ -229,7 +252,7 @@ func bundledGcBeadsBdScriptTarget() (string, error) {
 // boundary rewrites its target whenever the binary (and therefore the
 // cache location) changes. Cities on non-bd providers skip it.
 func ensureGcBeadsBdShim(cityPath string) error {
-	if !providerUsesBdStoreContract(normalizeRawBeadsProvider(cityPath, strings.TrimSpace(configuredBeadsProviderValue(cityPath)))) {
+	if !cityUsesBdStoreContract(cityPath) {
 		return nil
 	}
 	target, err := bundledGcBeadsBdScriptTarget()

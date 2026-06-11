@@ -170,21 +170,14 @@ func TestRegression_GastownConfig(t *testing.T) {
 			t.Error("PackDirs is empty after config load; pack expansion did not run")
 		}
 
-		hasCoreInclude := false
-		for _, inc := range cfg.Workspace.LegacyIncludes() {
-			if strings.HasSuffix(filepath.ToSlash(inc), ".gc/system/packs/core") {
-				hasCoreInclude = true
-				break
-			}
-		}
-		if !hasCoreInclude {
-			t.Errorf("workspace includes %v missing explicit .gc/system/packs/core entry", cfg.Workspace.LegacyIncludes())
+		if cfg.PackDirByName("core") == "" {
+			t.Error("core pack not reachable from composed config (missing pinned [imports.core])")
 		}
 
 		cityFormulas := cfg.FormulaLayers.City
 		hasCoreFormulas := false
 		for _, dir := range cityFormulas {
-			if strings.Contains(dir, filepath.Join("system", "packs", "core")) {
+			if strings.Contains(filepath.ToSlash(dir), "/packs/core") {
 				hasCoreFormulas = true
 				break
 			}

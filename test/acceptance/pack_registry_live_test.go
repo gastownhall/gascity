@@ -73,10 +73,14 @@ func TestPackRegistryLiveImportsEveryCatalogPack(t *testing.T) {
 	}
 
 	c := helpers.NewCity(t, env)
-	// Builtin packs compose only through explicit includes; the gastown
-	// catalog pack's formulas extend core recipes (mol-polecat-base).
-	c.WriteConfig("[workspace]\nname = \"pack-registry-smoke\"\nincludes = [\".gc/system/packs/core\", \".gc/system/packs/bd\"]\n")
-	c.AppendToPack("[pack]\nname = \"pack-registry-smoke\"\nschema = 1\n")
+	// Builtin packs compose only through explicit pinned imports; the
+	// gastown catalog pack's formulas extend core recipes (mol-polecat-base).
+	c.WriteConfig("[workspace]\nname = \"pack-registry-smoke\"\n")
+	coreSource, _ := builtinpacks.Source("core")
+	bdSource, _ := builtinpacks.Source("bd")
+	c.AppendToPack("[pack]\nname = \"pack-registry-smoke\"\nschema = 1\n" +
+		"\n[imports.core]\nsource = \"" + coreSource + "\"\nversion = \"" + config.BundledPackImportVersion + "\"\n" +
+		"\n[imports.bd]\nsource = \"" + bdSource + "\"\nversion = \"" + config.BundledPackImportVersion + "\"\n")
 	type expectedPack struct {
 		Name    string
 		Source  string

@@ -134,7 +134,7 @@ Baseline:
   baseline so the LLM iterates on a known-good shape rather than
   designing from scratch. Resolution priority:
     1. <city>/agents/<role>/prompt.template.md     (user customization)
-    2. <city>/.gc/system/packs/*/agents/<role>/    (pack default)
+    2. <composed pack dirs>/agents/<role>/         (pack default)
     3. embedded prompts/<role>.md                  (built-in fallback)
     4. embedded prompts/mayor.md                   (structural reference,
                                                      used only when no

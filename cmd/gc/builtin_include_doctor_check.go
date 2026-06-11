@@ -245,7 +245,7 @@ func (c *builtinImportDoctorCheck) missingAfterIncludeStrip() []string {
 	}
 	var missing []string
 	for _, name := range requiredBuiltinPackNames(c.cityPath) {
-		if _, ok := declared[name]; !ok {
+		if _, ok := declared["pack:"+name]; !ok {
 			missing = append(missing, name)
 		}
 	}

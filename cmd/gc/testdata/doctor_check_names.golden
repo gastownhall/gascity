@@ -36,7 +36,7 @@ codex-hooks-drift
 rig-pack-coverage
 mcp-config
 mcp-shared-target
-builtin-pack-includes
+builtin-pack-imports
 packv2-import-state
 jsonl-archive
 tmux-binary

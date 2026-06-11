@@ -803,12 +803,12 @@ func TestHookCommandHookFormatIsIgnoredForNonInjectOutput(t *testing.T) {
 	}
 	cityToml := `[workspace]
 name = "test-city"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [[agent]]
 name = "worker"
 work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
-`
+` + builtinImportsTOML("core", "bd")
+	writeBuiltinImportsLock(t, cityDir, "core", "bd")
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}

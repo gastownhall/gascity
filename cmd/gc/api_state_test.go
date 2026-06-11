@@ -452,9 +452,10 @@ func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 	cityDir := shortSocketTempDir(t, "gc-state-runtime-builtin-")
 	cleanupManagedDoltTestCity(t, cityDir)
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\nincludes = [\".gc/system/packs/core\", \".gc/system/packs/bd\"]\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"+builtinImportsTOML("core", "bd")), 0o644); err != nil {
 		t.Fatalf("write initial city.toml: %v", err)
 	}
+	writeBuiltinImportsLock(t, cityDir, "core", "bd")
 
 	initial, err := tryReloadConfig(tomlPath, "test", cityDir)
 	if err != nil {
@@ -464,7 +465,7 @@ func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 	cs := newControllerState(context.Background(), initial.Cfg, runtime.NewFake(), events.NewFake(), "test", cityDir)
 
 	rigDir := t.TempDir()
-	updatedToml := fmt.Sprintf("[workspace]\nname = \"test\"\nincludes = [\".gc/system/packs/core\", \".gc/system/packs/bd\"]\n\n[[rigs]]\nname = \"alpha\"\npath = %q\n", rigDir)
+	updatedToml := fmt.Sprintf("[workspace]\nname = \"test\"\n\n[[rigs]]\nname = \"alpha\"\npath = %q\n", rigDir) + builtinImportsTOML("core", "bd")
 	if err := os.WriteFile(tomlPath, []byte(updatedToml), 0o644); err != nil {
 		t.Fatalf("write updated city.toml: %v", err)
 	}
@@ -490,9 +491,10 @@ func TestControllerStateMutationRefreshKeepsBuiltinOrdersAndClearsPending(t *tes
 	cityDir := shortSocketTempDir(t, "gc-state-mutation-builtin-")
 	cleanupManagedDoltTestCity(t, cityDir)
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\nincludes = [\".gc/system/packs/core\", \".gc/system/packs/bd\"]\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"+builtinImportsTOML("core", "bd")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
+	writeBuiltinImportsLock(t, cityDir, "core", "bd")
 
 	initial, err := tryReloadConfig(tomlPath, "test", cityDir)
 	if err != nil {

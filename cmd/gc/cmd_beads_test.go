@@ -534,7 +534,7 @@ func TestDoBeadsHealth_BdSkip(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	MaterializeBuiltinPacks(dir) //nolint:errcheck
+	materializeBuiltinPacksForTest(t, dir)
 	cityFlag = dir
 	defer func() { cityFlag = "" }()
 	t.Setenv("GC_BEADS", "bd")

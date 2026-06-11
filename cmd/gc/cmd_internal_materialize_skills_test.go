@@ -25,12 +25,12 @@ func TestInternalMaterializeSkillsMaterializesClaude(t *testing.T) {
 	}
 	cityToml := `[workspace]
 name = "test-city"
-includes = [".gc/system/packs/core"]
 
 [beads]
 provider = "file"
-`
+` + builtinImportsTOML("core")
 	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeBuiltinImportsLock(t, cityDir, "core")
 	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
 	// Pack.toml enables PackSkillsDir discovery. Without it, the
 	// materializer sees no shared city catalog and the sink stays empty.

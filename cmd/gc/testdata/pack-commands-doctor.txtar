@@ -47,7 +47,6 @@ stdout 'passed'
 
 -- city.toml.custom --
 [workspace]
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [imports.ops]
 source = "../packs/ops"

@@ -129,12 +129,13 @@ func TestInitGastown(t *testing.T) {
 }
 
 // TestInitGastownResumeAfterFailure simulates the scenario where gc init wrote
-// city.toml and pack.toml but failed before builtin packs were materialized. A
-// subsequent gc init (resume) should materialize packs before loading config.
+// city.toml and pack.toml but failed before the import lockfile was written. A
+// subsequent gc init (resume) should sync the lock and hydrate the bundled
+// cache so the pinned import resolves before config load.
 func TestInitGastownResumeAfterFailure(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 
-	// Simulate partial PackV2 init but DON'T create .gc/system/packs.
+	// Simulate partial PackV2 init: manifests exist but no packs.lock.
 	c.WriteConfig(`[workspace]
 name = "partial"
 `)
@@ -143,17 +144,15 @@ name = "partial"
 schema = 2
 
 [imports.gastown]
-source = ".gc/system/packs/gastown"
-
-[defaults.rig.imports.gastown]
-source = ".gc/system/packs/gastown"
+source = "` + config.PublicGastownPackSource + `"
+version = "` + config.PublicGastownPackVersion + `"
 `
 	if err := os.WriteFile(filepath.Join(c.Dir, "pack.toml"), []byte(packToml), 0o644); err != nil {
 		t.Fatalf("writing pack.toml: %v", err)
 	}
 
 	// Ensure full scaffold exists so gc init resume recognizes this as a city.
-	for _, sub := range []string{".gc", ".gc/cache", ".gc/runtime", ".gc/system"} {
+	for _, sub := range []string{".gc", ".gc/cache", ".gc/runtime"} {
 		os.MkdirAll(filepath.Join(c.Dir, sub), 0o755) //nolint:errcheck
 	}
 	if err := os.WriteFile(filepath.Join(c.Dir, ".gc", "events.jsonl"), nil, 0o644); err != nil {
@@ -161,15 +160,18 @@ source = ".gc/system/packs/gastown"
 	}
 
 	// Re-running gc init on an existing city triggers the resume path,
-	// which calls finalizeInit → MaterializeBuiltinPacks.
+	// which syncs the lock and installs the pinned imports.
 	out, err := c.GC("init", "--skip-provider-readiness", c.Dir)
-	if err != nil && containsSubstr(out, "pack.toml: no such file or directory") {
-		t.Fatalf("gc init resume failed with missing packs — Bug 4 regression:\n%s", out)
+	if err != nil {
+		t.Fatalf("gc init resume failed — Bug 4 regression:\n%s", out)
 	}
 	t.Cleanup(c.CleanupRuntime)
-	// Positive assertion: packs must have been materialized.
-	if !c.HasFile(".gc/system/packs/gastown/pack.toml") {
-		t.Fatal(".gc/system/packs/gastown/pack.toml not materialized after resume — Bug 4 regression")
+	// Positive assertions: the lock pins the import and config composes.
+	if !c.HasFile("packs.lock") {
+		t.Fatal("packs.lock not written by gc init resume — Bug 4 regression")
+	}
+	if out, err := c.GC("config", "show", "--validate"); err != nil {
+		t.Fatalf("gc config show --validate after resume failed: %v\n%s", err, out)
 	}
 }
 

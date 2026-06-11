@@ -1302,7 +1302,7 @@ provider = "antigravity"
 	require.NoError(t, err)
 	agentText := string(agentData)
 	require.Contains(t, agentText, `provider = "antigravity-default-pool-no-skills"`)
-	require.Contains(t, agentText, `prompt_template = ".gc/system/packs/core/assets/prompts/pool-worker.md"`)
+	require.Contains(t, agentText, `prompt_template = "agents/default-pool/prompt.template.md"`)
 	require.Contains(t, agentText, `default_sling_formula = "mol-do-work"`)
 	require.Contains(t, agentText, `min_active_sessions = 0`)
 	require.Contains(t, agentText, `max_active_sessions = 2`)

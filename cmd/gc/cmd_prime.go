@@ -324,7 +324,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			// (if unusual) minimal config — emit the default fallback.
 		}
 		// Agents without a prompt_template: read a builtin prompt shipped by
-		// the core bootstrap pack, materialized under .gc/system/packs/core/.
+		// the core bootstrap pack, resolved from the composed pack dirs.
 		// When formula_v2 is enabled, all agents use graph-worker.md.
 		// Otherwise pool agents use pool-worker.md.
 		// Pool instances have Pool=nil after resolution, so also check the

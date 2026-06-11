@@ -339,7 +339,7 @@ func TestStartBeadsLifecycleIgnoresStaleStandaloneBdPID(t *testing.T) {
 func TestInitDirIfReadyDetectsStandaloneBdDoltAtProviderConvergence(t *testing.T) {
 	cityPath := t.TempDir()
 	writeManagedBdCityFixture(t, cityPath)
-	MaterializeBuiltinPacks(cityPath) //nolint:errcheck
+	materializeBuiltinPacksForTest(t, cityPath)
 
 	callLog := filepath.Join(cityPath, "provider-start.log")
 	script := gcBeadsBdScriptPath(cityPath)

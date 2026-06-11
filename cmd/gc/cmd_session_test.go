@@ -2369,11 +2369,10 @@ template = "mayor"
 		t.Fatalf("WriteFile(pack.toml): %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`[workspace]
-includes = [".gc/system/packs/core"]
 
 [beads]
 provider = "file"
-`), 0o644); err != nil {
+` + builtinImportsTOML("core")), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".gc", "site.toml"), []byte(`workspace_name = "test-city"

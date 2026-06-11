@@ -1031,7 +1031,7 @@ The loader must fail when:
 12. Two or more agents from different source directories share a qualified
     name on the same surface.
 13. A declared pack requirement is not satisfied.
-14. A schema-2 `city.toml` or included fragment uses a removed PackV1 surface such as `rigs.includes`, `[packs.*]`, `workspace.includes`, `workspace.default_rig_includes`, or inline agent definitions. Exception: canonical builtin system-pack includes (`.gc/system/packs/<name>` entries written by `gc init`) remain supported in `workspace.includes`.
+14. A schema-2 `city.toml` or included fragment uses a removed PackV1 surface such as `rigs.includes`, `[packs.*]`, `workspace.includes`, `workspace.default_rig_includes`, or inline agent definitions. Exception: legacy builtin system-pack includes (`.gc/system/packs/<name>` entries written by older `gc init` versions) are tolerated during migration; the `builtin-pack-imports` doctor check converts them to pinned `[imports]` entries.
 
 The loader may skip missing remote pack subpaths in compatibility cases where a
 remote source was fetched but the referenced pack directory no longer exists.

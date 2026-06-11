@@ -32,9 +32,7 @@ func TestGcBeadsBdEnsureTypesCustomInYaml_MergesWithExistingValues(t *testing.T)
 		t.Fatalf("WriteFile(initial): %v", err)
 	}
 
-	if err := MaterializeBuiltinPacks(cityDir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks: %v", err)
-	}
+	materializeBuiltinPacksForTest(t, cityDir)
 	script := gcBeadsBdScriptPath(cityDir)
 
 	desiredTypes := "alpha,beta,gamma"
@@ -94,9 +92,7 @@ func TestGcBeadsBdEnsureTypesCustomInYaml_IdempotentWhenMatching(t *testing.T) {
 		t.Fatalf("Stat(before): %v", err)
 	}
 
-	if err := MaterializeBuiltinPacks(cityDir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks: %v", err)
-	}
+	materializeBuiltinPacksForTest(t, cityDir)
 	script := gcBeadsBdScriptPath(cityDir)
 
 	bashCmd := fmt.Sprintf(`
@@ -151,9 +147,7 @@ func TestGcBeadsBdEnsureTypesCustomInYaml_PreservesCustomExtensions(t *testing.T
 		t.Fatalf("WriteFile(initial): %v", err)
 	}
 
-	if err := MaterializeBuiltinPacks(cityDir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks: %v", err)
-	}
+	materializeBuiltinPacksForTest(t, cityDir)
 	script := gcBeadsBdScriptPath(cityDir)
 
 	// Caller passes only the baseline. The merge must keep pack_custom_a
@@ -201,9 +195,7 @@ func TestGcBeadsBdEnsureTypesCustomInYaml_AddsMissingBaselineToCustomSet(t *test
 		t.Fatalf("WriteFile(initial): %v", err)
 	}
 
-	if err := MaterializeBuiltinPacks(cityDir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks: %v", err)
-	}
+	materializeBuiltinPacksForTest(t, cityDir)
 	script := gcBeadsBdScriptPath(cityDir)
 
 	desiredTypes := "alpha,beta,gamma"
