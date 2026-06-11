@@ -194,13 +194,13 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				if node.Metadata == nil {
 					node.Metadata = make(map[string]string, 2)
 				}
-				node.Metadata["gc.formula_hash"] = recipe.ContentHash
+				node.Metadata[beadmeta.FormulaHashMetadataKey] = recipe.ContentHash
 			}
 			if recipe.FormulaSource != "" {
 				if node.Metadata == nil {
 					node.Metadata = make(map[string]string, 1)
 				}
-				node.Metadata["gc.formula_source"] = recipe.FormulaSource
+				node.Metadata[beadmeta.FormulaSourceMetadataKey] = recipe.FormulaSource
 			}
 		} else {
 			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
