@@ -2345,7 +2345,7 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	// provider assets are present before the bead lifecycle starts.
 	// gc-beads-bd now ships inside the bd pack's assets/scripts/ and is
 	// materialized alongside the rest of the pack content.
-	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+	if err := EnsureBuiltinRuntimeAssets(cityPath, os.Stderr); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin packs: %v\n", cityName, err) //nolint:errcheck
 		// Non-fatal.
 	}

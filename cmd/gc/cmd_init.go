@@ -996,6 +996,25 @@ func applyInitPackTemplateExtras(dst *initPackConfig, src initPackConfig) {
 	}
 }
 
+// addBuiltinImportsToInitPack merges the required bundled-pack imports
+// into the init pack manifest, preserving any imports the template (or a
+// preserved pack.toml) already declares.
+func addBuiltinImportsToInitPack(packCfg *initPackConfig, cityProvider string) {
+	imports, names := builtinImportsForInit(cityProvider)
+	if len(names) == 0 {
+		return
+	}
+	if packCfg.Imports == nil {
+		packCfg.Imports = make(map[string]config.Import, len(names))
+	}
+	for _, name := range names {
+		if _, exists := packCfg.Imports[name]; exists {
+			continue
+		}
+		packCfg.Imports[name] = imports[name]
+	}
+}
+
 func appendUniqueStrings(dst []string, items ...string) []string {
 	seen := make(map[string]struct{}, len(dst))
 	for _, item := range dst {
@@ -1101,13 +1120,11 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 	rewriteInitPromptTemplates(cfg)
 	packCfg, cityCfg := splitInitConfig(cityName, cfg)
 	applyInitPackTemplateExtras(&packCfg, templatePack)
-	// Builtin packs compose only through explicit includes: write the
-	// canonical city-relative paths for this city's providers into
-	// city.toml (mirrors doInit; gc doctor --fix repairs them later).
-	cityCfg.Workspace.SetLegacyIncludes(appendUniqueStrings(
-		cityCfg.Workspace.LegacyIncludes(),
-		builtinIncludesForInit(cityCfg.Beads.Provider)...,
-	))
+	// Builtin packs compose only through explicit imports: write the
+	// canonical bundled-source entries for this city's providers into
+	// pack.toml (mirrors doInit; the builtin-pack-imports doctor check
+	// repairs them later).
+	addBuiltinImportsToInitPack(&packCfg, cityCfg.Beads.Provider)
 	var rigSiteBindings []config.Rig
 	if hasInitRigSiteBindings(cityCfg.Rigs) {
 		rigSiteBindings = append([]config.Rig(nil), cityCfg.Rigs...)
@@ -1300,15 +1317,11 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// pack.toml. The built-in templates currently only need the prompt
 	// scaffold plus the pack-owned named session.
 	packCfg.Agents = nil
-	// Builtin packs compose only through explicit includes: write the
-	// canonical city-relative paths for this city's providers into
-	// city.toml. gc doctor --fix repairs them if they go missing. These are
-	// deployment-local (.gc paths), so they belong in city.toml, not in the
-	// portable pack.toml.
-	cityCfg.Workspace.SetLegacyIncludes(appendUniqueStrings(
-		cityCfg.Workspace.LegacyIncludes(),
-		builtinIncludesForInit(cityCfg.Beads.Provider)...,
-	))
+	// Builtin packs compose only through explicit imports: write the
+	// canonical bundled-source entries for this city's providers into
+	// pack.toml. The builtin-pack-imports doctor check repairs them if
+	// they go missing.
+	addBuiltinImportsToInitPack(&packCfg, cityCfg.Beads.Provider)
 	content, err := cityCfg.Marshal()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr

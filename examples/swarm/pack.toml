@@ -7,5 +7,16 @@
 name = "swarm"
 schema = 2
 
+# Builtin packs compose through explicit imports; the gc binary serves
+# these bundled sources offline from its embedded content (the version is
+# a stable cache pin). The builtin-pack-imports doctor check repairs them.
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+
 [imports.swarm]
 source = "packs/swarm"

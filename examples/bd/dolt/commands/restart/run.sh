@@ -13,7 +13,7 @@
 set -e
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
-GC_BEADS_BD_SCRIPT="${GC_BEADS_BD_SCRIPT:-$GC_CITY_PATH/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh}"
+GC_BEADS_BD_SCRIPT="${GC_BEADS_BD_SCRIPT:-$GC_CITY_PATH/.gc/scripts/gc-beads-bd.sh}"
 
 if [ ! -x "$GC_BEADS_BD_SCRIPT" ]; then
   echo "gc dolt restart: gc-beads-bd not found" >&2

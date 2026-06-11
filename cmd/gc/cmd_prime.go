@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -332,13 +331,15 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		// template agent via findAgentByName.
 		if a.PromptTemplate == "" {
 			promptFile := ""
-			if cfg.Daemon.FormulaV2 {
-				promptFile = citylayout.SystemPacksRoot + "/core/assets/prompts/graph-worker.md"
-			} else if a.SupportsInstanceExpansion() || isPoolInstance(cfg, a) {
-				promptFile = citylayout.SystemPacksRoot + "/core/assets/prompts/pool-worker.md"
+			if coreDir := cfg.PackDirByName("core"); coreDir != "" {
+				if cfg.Daemon.FormulaV2 {
+					promptFile = filepath.Join(coreDir, "assets", "prompts", "graph-worker.md")
+				} else if a.SupportsInstanceExpansion() || isPoolInstance(cfg, a) {
+					promptFile = filepath.Join(coreDir, "assets", "prompts", "pool-worker.md")
+				}
 			}
 			if promptFile != "" {
-				if content, fErr := os.ReadFile(filepath.Join(cityPath, promptFile)); fErr == nil {
+				if content, fErr := os.ReadFile(promptFile); fErr == nil {
 					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt)
 					return 0
 				}

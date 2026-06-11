@@ -1672,6 +1672,17 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 	return names
 }
 
+// PackDirByName returns the composed pack directory whose pack.toml
+// declares the given name, or "" when no such pack composed.
+func (c *City) PackDirByName(name string) string {
+	for _, dir := range c.PackDirs {
+		if readPackNameFromDir(dir) == name {
+			return dir
+		}
+	}
+	return ""
+}
+
 // ReachablePackNames reports every pack name reachable from the config's
 // explicit includes, imports, rig pack graphs, and default-rig pack graphs.
 // The gc binary uses it after composition to verify that required builtin

@@ -4029,7 +4029,14 @@ func InjectImplicitAgents(cfg *City) {
 	// then any custom providers in sorted order.
 	providers := configuredProviderOrder(configured)
 
-	promptTemplate := citylayout.SystemPacksRoot + "/core/assets/prompts/pool-worker.md"
+	// Implicit agents default to the core pack's pool-worker prompt when
+	// the core pack is composed (it resolves from the user-global cache,
+	// so the path is absolute). Without core the template stays empty and
+	// prompt rendering falls back to the embedded baseline.
+	promptTemplate := ""
+	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
+		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.md")
+	}
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
 	if slingFormula == "" {

@@ -11,11 +11,12 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads/contract"
-	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/spf13/cobra"
 )
 
@@ -266,6 +267,10 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	includes = canonicalizeBuiltinPackIncludes(fs, cityPath, includes, cfg.Packs)
 
 	explicitRigImports := boundImportsFromLegacySources(includes, cfg.Packs)
+	if err := ensureBundledRigImportsInstalled(cityPath, explicitRigImports); err != nil {
+		fmt.Fprintf(stderr, "gc rig add: installing bundled rig imports: %v\n", err) //nolint:errcheck // best-effort stderr
+		return config.Rig{}, 1
+	}
 	if cityUsesBdStoreContract(cityPath) && cityDoltConfigHasLifecycleFields(cfg.Dolt) {
 		registerCityDoltConfig(cityPath, cfg.Dolt)
 		defer clearCityDoltConfig(cityPath)
@@ -634,17 +639,15 @@ func formatBoundImports(imports []config.BoundImport) string {
 }
 
 // canonicalizeBuiltinPackIncludes rewrites --include tokens that name a
-// materialized builtin pack to the resolvable .gc/system/packs/<name> path.
-// Builtin packs are materialized under .gc/system/packs and are not registered
-// in [packs], so a bare "<name>" or "packs/<name>" token (the form documented in
-// `gc rig add --help`) would otherwise be persisted as the non-resolvable literal
-// "./<token>", breaking pack expansion citywide (gascity#3137). Only tokens whose
-// pack is actually materialized (.gc/system/packs/<name>/pack.toml exists) are
-// rewritten; everything else is returned unchanged so genuine local-path imports
-// are preserved. A token whose raw form or derived single-segment name is a key
-// in packs is left unchanged so an explicitly configured [packs] reference keeps
-// its configured source rather than being shadowed by the builtin.
-func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []string, packs map[string]config.PackSource) []string {
+// bundled pack to its canonical remote source. Builtin packs compose from
+// the user-global repo cache and are not registered in [packs], so a bare
+// "<name>" or "packs/<name>" token (the form documented in `gc rig add
+// --help`) would otherwise be persisted as the non-resolvable literal
+// "./<token>", breaking pack expansion citywide (gascity#3137). A token
+// whose raw form or derived single-segment name is a key in packs is left
+// unchanged so an explicitly configured [packs] reference keeps its
+// configured source rather than being shadowed by the builtin.
+func canonicalizeBuiltinPackIncludes(_ fsys.FS, _ string, includes []string, packs map[string]config.PackSource) []string {
 	out := make([]string, len(includes))
 	for i, inc := range includes {
 		out[i] = inc
@@ -666,12 +669,46 @@ func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []str
 		if _, ok := packs[name]; ok {
 			continue
 		}
-		packToml := filepath.Join(cityPath, filepath.FromSlash(citylayout.SystemPacksRoot), name, "pack.toml")
-		if _, err := fs.Stat(packToml); err == nil {
-			out[i] = citylayout.SystemPacksRoot + "/" + name
+		if source, ok := builtinpacks.Source(name); ok {
+			out[i] = source
 		}
 	}
 	return out
+}
+
+// ensureBundledRigImportsInstalled pins and caches any bundled-source rig
+// imports so the new rig composes offline without a manual
+// "gc import install".
+func ensureBundledRigImportsInstalled(cityPath string, imports []config.BoundImport) error {
+	declared := make(map[string]config.Import)
+	for _, bound := range imports {
+		if builtinpacks.IsSource(bound.Import.Source) {
+			imp := bound.Import
+			if strings.TrimSpace(imp.Version) == "" {
+				imp.Version = config.BundledPackImportVersion
+			}
+			declared[bound.Binding] = imp
+		}
+	}
+	if len(declared) == 0 {
+		return nil
+	}
+	existing, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return err
+	}
+	for name, imp := range declared {
+		existing[name] = imp
+	}
+	lock, err := syncImports(cityPath, existing, packman.InstallResolveIfNeeded)
+	if err != nil {
+		return err
+	}
+	if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
+		return err
+	}
+	_, err = installLockedImports(cityPath)
+	return err
 }
 
 func boundImportsFromLegacySources(sources []string, packs map[string]config.PackSource) []config.BoundImport {

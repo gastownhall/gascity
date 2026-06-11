@@ -39,7 +39,7 @@ type initProviderTarget struct {
 }
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
-	MaterializeBuiltinPacks(cityPath) //nolint:errcheck // best-effort; needed before dependency and provider checks
+	EnsureBuiltinRuntimeAssets(cityPath, os.Stderr) //nolint:errcheck // best-effort; needed before dependency and provider checks
 
 	// Check hard binary dependencies before handing off to the supervisor.
 	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
