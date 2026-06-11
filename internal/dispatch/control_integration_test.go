@@ -901,6 +901,64 @@ func TestSpawnNextAttemptRoutesDirectSessionRetryControlViaDispatcher(t *testing
 	}
 }
 
+func TestSpawnNextAttemptAttachesDrainControl(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	spec := &formula.Step{
+		ID:    "loop",
+		Title: "Loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{
+				ID:    "drain-items",
+				Title: "Drain items",
+				Drain: &formula.DrainSpec{Context: "separate", Formula: "item-formula"},
+			},
+		},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "loop",
+		Metadata: map[string]string{
+			"gc.kind":             "ralph",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-int.loop",
+			"gc.step_id":          "loop",
+			"gc.source_step_spec": string(specJSON),
+			"gc.control_epoch":    "1",
+		},
+	})
+
+	if err := spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{}); err != nil {
+		t.Fatalf("spawnNextAttempt: %v", err)
+	}
+
+	drain := findAttemptByRef(t, store, root.ID, "mol-int.loop.iteration.2.drain-items")
+	if drain.ID == "" {
+		t.Fatal("drain control bead not attached for iteration 2")
+	}
+	if got := drain.Metadata["gc.kind"]; got != "drain" {
+		t.Errorf("drain gc.kind = %q, want drain", got)
+	}
+	if got := drain.Metadata["gc.drain_formula"]; got != "item-formula" {
+		t.Errorf("drain gc.drain_formula = %q, want item-formula", got)
+	}
+	// Drain is a control-dispatcher kind on the compile path; attempt
+	// re-spawn must route it the same way.
+	if got := drain.Metadata["gc.routed_to"]; got != config.ControlDispatcherAgentName {
+		t.Errorf("drain gc.routed_to = %q, want %q", got, config.ControlDispatcherAgentName)
+	}
+}
+
 func TestResolveAttemptRouteBinding_ConfigTargetBeatsCollidingSessionAlias(t *testing.T) {
 	t.Parallel()
 

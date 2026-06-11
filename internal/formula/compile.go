@@ -550,7 +550,21 @@ func metadataForDrainStep(step *Step) map[string]string {
 	if metadata == nil {
 		metadata = make(map[string]string)
 	}
-	spec := step.Drain
+	ApplyDrainControlMetadata(metadata, step.Drain)
+	return metadata
+}
+
+// ApplyDrainControlMetadata writes the drain-owned control metadata for spec
+// into metadata: gc.kind=drain plus the gc.drain_* execution contract, with
+// the compiler's defaulting (member_access "read"; on_item_failure
+// "skip_remaining" for shared context, "continue" otherwise). It is the
+// single shape owner for drain control metadata so compile-time flattening
+// and attempt re-spawn (internal/dispatch buildAttemptRecipe) mint identical
+// drain beads. A nil spec is a no-op.
+func ApplyDrainControlMetadata(metadata map[string]string, spec *DrainSpec) {
+	if metadata == nil || spec == nil {
+		return
+	}
 	metadata[beadmeta.KindMetadataKey] = beadmeta.KindDrain
 	metadata[beadmeta.DrainContextMetadataKey] = spec.Context
 	metadata[beadmeta.DrainFormulaMetadataKey] = spec.Formula
@@ -577,7 +591,6 @@ func metadataForDrainStep(step *Step) map[string]string {
 	if spec.Item != nil && spec.Item.SingleLane {
 		metadata[beadmeta.DrainItemSingleLaneMetadataKey] = "true"
 	}
-	return metadata
 }
 
 // formulaV2Enabled controls whether formula compiler capability v2 is allowed.

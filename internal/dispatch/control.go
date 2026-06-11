@@ -715,6 +715,12 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 				nestedSeedSteps = append(nestedSeedSteps, seedSteps...)
 				nestedSeedDeps = append(nestedSeedDeps, seedDeps...)
 			}
+			// Drain children are themselves control beads: re-apply the
+			// compiler's drain contract (gc.kind=drain + gc.drain_* keys) so
+			// re-spawned iterations keep the shape minted by flattenSteps.
+			// Validation forbids combining drain with retry/ralph, so this
+			// never overwrites the nested-control kinds above.
+			formula.ApplyDrainControlMetadata(childMeta, child.Drain)
 			childStep := formula.RecipeStep{
 				ID:          childID,
 				Title:       child.Title,
@@ -850,6 +856,14 @@ func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *form
 	return control, dep, true
 }
 
+// buildAttemptRecipeTallyControl re-mints the tally control for a re-spawned
+// attempt step whose source declares on_complete + tally. It mirrors the
+// compile-time shape injected by formula.ApplyGraphControls: a gc.kind=tally
+// step keyed to the source ref that blocks on the re-minted fanout and
+// carries no scope membership metadata (the enclosing scope waits on it via
+// the rewritten blocks dep instead). Callers must only invoke it for sources
+// that also received a fanout control, since the tally dispatcher resolves
+// the fanout by ref before aggregating.
 func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 	if recipe == nil || len(recipe.Steps) == 0 {
 		return

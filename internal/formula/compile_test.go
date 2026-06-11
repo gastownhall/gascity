@@ -2244,3 +2244,71 @@ type = "task"
 		t.Errorf("ContentHash = %q, want %q", recipe.ContentHash, want)
 	}
 }
+
+func TestApplyDrainControlMetadata(t *testing.T) {
+	t.Parallel()
+
+	t.Run("separate context defaults", func(t *testing.T) {
+		t.Parallel()
+		maxUnits := 7
+		metadata := map[string]string{"existing": "kept"}
+		ApplyDrainControlMetadata(metadata, &DrainSpec{
+			Context:  "separate",
+			Formula:  "item-formula",
+			MaxUnits: &maxUnits,
+		})
+		want := map[string]string{
+			"existing":                 "kept",
+			"gc.kind":                  "drain",
+			"gc.drain_context":         "separate",
+			"gc.drain_formula":         "item-formula",
+			"gc.drain_member_access":   "read",
+			"gc.drain_max_units":       "7",
+			"gc.drain_on_item_failure": "continue",
+		}
+		for k, v := range want {
+			if metadata[k] != v {
+				t.Errorf("metadata[%q] = %q, want %q", k, metadata[k], v)
+			}
+		}
+		if len(metadata) != len(want) {
+			t.Errorf("metadata = %v, want exactly %v", metadata, want)
+		}
+	})
+
+	t.Run("shared context defaults", func(t *testing.T) {
+		t.Parallel()
+		metadata := map[string]string{}
+		ApplyDrainControlMetadata(metadata, &DrainSpec{
+			Context:           "shared",
+			Formula:           "item-formula",
+			MemberAccess:      "exclusive",
+			OnItemFailure:     "",
+			ContinuationGroup: "lane-a",
+			Item:              &DrainItemSpec{SingleLane: true},
+		})
+		want := map[string]string{
+			"gc.kind":                     "drain",
+			"gc.drain_context":            "shared",
+			"gc.drain_formula":            "item-formula",
+			"gc.drain_member_access":      "exclusive",
+			"gc.drain_on_item_failure":    "skip_remaining",
+			"gc.drain_continuation_group": "lane-a",
+			"gc.drain_item_single_lane":   "true",
+		}
+		for k, v := range want {
+			if metadata[k] != v {
+				t.Errorf("metadata[%q] = %q, want %q", k, metadata[k], v)
+			}
+		}
+	})
+
+	t.Run("nil spec is a no-op", func(t *testing.T) {
+		t.Parallel()
+		metadata := map[string]string{"existing": "kept"}
+		ApplyDrainControlMetadata(metadata, nil)
+		if len(metadata) != 1 || metadata["existing"] != "kept" {
+			t.Errorf("metadata = %v, want unchanged", metadata)
+		}
+	})
+}

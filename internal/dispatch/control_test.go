@@ -3091,6 +3091,101 @@ func TestBuildAttemptRecipeRalphChildOnCompleteCreatesScopedFanout(t *testing.T)
 	}
 }
 
+func TestBuildAttemptRecipeRalphChildDrainKeepsDrainControl(t *testing.T) {
+	t.Parallel()
+
+	// A drain child inside a ralph body must keep its gc.kind=drain control
+	// contract on re-spawned iterations, mirroring the compile-time
+	// metadata from flattenSteps (gc.drain_* keys with compiler defaults).
+	maxUnits := 5
+	step := &formula.Step{
+		ID:    "process-loop",
+		Title: "Process loop",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{
+				ID:    "drain-items",
+				Title: "Drain convoy items",
+				Drain: &formula.DrainSpec{
+					Context:  "separate",
+					Formula:  "item-formula",
+					MaxUnits: &maxUnits,
+				},
+			},
+		},
+	}
+	control := beads.Bead{
+		ID: "ctrl-drain",
+		Metadata: map[string]string{
+			"gc.step_id":  "process-loop",
+			"gc.step_ref": "mol-batch.process-loop",
+		},
+	}
+
+	recipe := buildAttemptRecipe(step, control, 2)
+	scopeID := "mol-batch.process-loop.iteration.2"
+	drainID := scopeID + ".drain-items"
+
+	drain := recipe.StepByID(drainID)
+	if drain == nil {
+		t.Fatalf("missing drain child step; steps = %+v", stepIDsOf(recipe))
+	}
+	if got := drain.Metadata["gc.kind"]; got != "drain" {
+		t.Errorf("drain gc.kind = %q, want drain", got)
+	}
+	if got := drain.Metadata["gc.drain_formula"]; got != "item-formula" {
+		t.Errorf("gc.drain_formula = %q, want item-formula", got)
+	}
+	if got := drain.Metadata["gc.drain_context"]; got != "separate" {
+		t.Errorf("gc.drain_context = %q, want separate", got)
+	}
+	if got := drain.Metadata["gc.drain_member_access"]; got != "read" {
+		t.Errorf("gc.drain_member_access = %q, want read (compiler default)", got)
+	}
+	if got := drain.Metadata["gc.drain_max_units"]; got != "5" {
+		t.Errorf("gc.drain_max_units = %q, want 5", got)
+	}
+	if got := drain.Metadata["gc.drain_on_item_failure"]; got != "continue" {
+		t.Errorf("gc.drain_on_item_failure = %q, want continue (separate-context default)", got)
+	}
+	// Scope membership metadata is preserved alongside the drain contract.
+	if got := drain.Metadata["gc.scope_ref"]; got != scopeID {
+		t.Errorf("drain gc.scope_ref = %q, want %s", got, scopeID)
+	}
+	if got := drain.Metadata["gc.scope_role"]; got != "member" {
+		t.Errorf("drain gc.scope_role = %q, want member", got)
+	}
+
+	// Compile-time needsScopeCheck excludes kind=drain: no scope-check is
+	// minted for the drain control and the iteration scope blocks on the
+	// drain bead directly.
+	if recipe.StepByID(drainID+"-scope-check") != nil {
+		t.Errorf("unexpected scope-check minted for drain control")
+	}
+	if !hasBlocksDep(recipe, scopeID, drainID) {
+		t.Errorf("missing scope blocks dep on drain control; deps = %+v", recipe.Deps)
+	}
+}
+
+// stepIDsOf lists recipe step IDs for failure messages.
+func stepIDsOf(recipe *formula.Recipe) []string {
+	ids := make([]string, 0, len(recipe.Steps))
+	for _, s := range recipe.Steps {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
+// hasBlocksDep reports whether the recipe wires stepID -> dependsOnID blocks.
+func hasBlocksDep(recipe *formula.Recipe, stepID, dependsOnID string) bool {
+	for _, dep := range recipe.Deps {
+		if dep.StepID == stepID && dep.DependsOnID == dependsOnID && dep.Type == "blocks" {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBuildAttemptRecipeScopeMetadataAndStepRef(t *testing.T) {
 	t.Parallel()
 
