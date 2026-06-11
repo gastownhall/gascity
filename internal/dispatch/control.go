@@ -1038,17 +1038,20 @@ func resolveAttemptControlAssignee(target string, cfg *config.City, store beads.
 }
 
 // isAttemptControlKind reports whether an Attach-path recipe step should be
-// routed to the control dispatcher rather than a worker.
-//
-// KNOWN DRIFT: this is beadmeta.ControlKinds minus KindDrain — a frozen
-// 2026-04-14 snapshot of the then-complete control vocabulary; drain
-// (PR #2784) was added to other predicates but not here. The exclusion is
-// masked on the attempt path (buildAttemptRecipe cannot mint that kind) but
-// reachable on the fanout-fragment path. Adopting the full set changes
-// routing for persisted fragments and is tracked as a dispatch routing bug
-// rather than silently flipped here.
+// routed to the control dispatcher rather than a worker: exactly the kinds
+// the dispatcher's ProcessControl switch executes (beadmeta.ControlKinds).
+// Pinned to the authoritative set by TestIsAttemptControlKindMatchesControlKinds.
 func isAttemptControlKind(kind string) bool {
-	return beadmeta.IsControlKind(kind) && kind != beadmeta.KindDrain
+	return beadmeta.IsControlKind(kind)
+}
+
+// latestAttemptCandidateIsControlInfrastructure reports whether a bead kind
+// is control infrastructure (never selectable as the latest-attempt work
+// bead): every control kind plus the workflow topology root. Scope beads are
+// deliberately NOT included — for ralph controls, scope beads ARE the
+// iterations, and the caller handles that case.
+func latestAttemptCandidateIsControlInfrastructure(kind string) bool {
+	return beadmeta.IsControlKind(kind) || kind == beadmeta.KindWorkflow
 }
 
 type attemptRouteBinding struct {
@@ -1379,10 +1382,11 @@ func latestAttemptFromCandidates(control beads.Bead, candidates []beads.Bead) be
 		// Skip beads that are control infrastructure, not actual work.
 		// For ralph controls, scope beads ARE the iterations — don't skip them.
 		kind := b.Metadata[beadmeta.KindMetadataKey]
-		switch kind {
-		case "scope-check", "workflow-finalize", "fanout", "check", "retry-eval", "retry", "ralph", "workflow":
+		if latestAttemptCandidateIsControlInfrastructure(kind) {
 			continue
-		case "scope":
+		}
+		switch kind {
+		case beadmeta.KindScope:
 			if controlKind != "ralph" {
 				continue
 			}

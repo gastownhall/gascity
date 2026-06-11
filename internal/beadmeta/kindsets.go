@@ -9,14 +9,10 @@ import "slices"
 // The AUTHORITATIVE set is ControlKinds — "kinds the control dispatcher can
 // execute" — whose behavior owner is the ProcessControl switch in
 // internal/dispatch/runtime.go (exactly one case per member; unknown kinds
-// hard-error). Every other control-routing predicate is, by intent, equal to
-// ControlKinds; graphroute.IsControlDispatcherKind is exactly equal to it,
-// and one predicate currently lags it with an explicit, documented exclusion
-// at its definition site pending a behavior-reviewed routing fix:
-//
-//   - dispatch.isAttemptControlKind excludes KindDrain (frozen 2026-04-14
-//     snapshot of the then-complete control set; later kinds were never
-//     added).
+// hard-error). Every control-routing predicate is exactly equal to
+// ControlKinds (graphroute.IsControlDispatcherKind and
+// dispatch.isAttemptControlKind both derive from IsControlKind, and each has
+// a lockstep test pinning the equality).
 //
 // Three persisted kind values sit outside every set below: KindWisp (wisp
 // molecule roots), KindClosed (closed-marker beads), and KindTask (written on
