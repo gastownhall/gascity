@@ -221,11 +221,11 @@ The namespace is deliberately open-world at the edges:
   their read/write helper behavior remaining in
   `internal/beads/contract/metadata.go`.
 
-Keys embedded inside larger strings -- jq `--metadata-field` filters in
-`internal/config/config.go` and SQL JSON paths in
-`internal/api/convoy_sql.go` -- are outside the guard's key-shape rule and
-are tracked as a follow-up (generate those path fragments from the
-constants).
+Keys embedded inside larger strings are outside the guard's key-shape
+rule, but the two such surfaces are constructed from the constants rather
+than spelled raw: the jq/bd shell builders in `internal/config/config.go`
+(via the local `jqMeta` helper and direct constant concatenation) and the
+SQL JSON paths in `internal/api/convoy_sql.go` (via `beadmeta.JSONPath`).
 
 ## Interactions
 

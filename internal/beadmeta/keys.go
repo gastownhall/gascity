@@ -121,7 +121,6 @@ const (
 	OutcomeMetadataKey                   = "gc.outcome"
 	OutputJSONMetadataKey                = "gc.output_json"
 	OutputJSONRequiredMetadataKey        = "gc.output_json_required"
-	PRURLMetadataKey                     = "gc.pr_url"
 	ParentConvoyIDMetadataKey            = "gc.parent_convoy_id"
 	PartialFragmentMetadataKey           = "gc.partial_fragment"
 	PartialRetryMetadataKey              = "gc.partial_retry"
@@ -129,8 +128,6 @@ const (
 	PackRootMetadataKey                  = "gc.pack_root"
 	PackWorkspaceMetadataKey             = "gc.pack_workspace"
 	PerDispatchModelMetadataKey          = "gc.per_dispatch_model"
-	PhaseHistoryMetadataKey              = "gc.phase_history"
-	PhaseMetadataKey                     = "gc.phase"
 	RalphStepIDMetadataKey               = "gc.ralph_step_id"
 	ReasoningMetadataKey                 = "gc.reasoning"
 	RequiredArtifactMetadataKey          = "gc.required_artifact"
@@ -313,7 +310,6 @@ var KnownMetadataKeys = []string{
 	OutcomeMetadataKey,
 	OutputJSONMetadataKey,
 	OutputJSONRequiredMetadataKey,
-	PRURLMetadataKey,
 	ParentConvoyIDMetadataKey,
 	PartialFragmentMetadataKey,
 	PartialRetryMetadataKey,
@@ -321,8 +317,6 @@ var KnownMetadataKeys = []string{
 	PackRootMetadataKey,
 	PackWorkspaceMetadataKey,
 	PerDispatchModelMetadataKey,
-	PhaseHistoryMetadataKey,
-	PhaseMetadataKey,
 	RalphStepIDMetadataKey,
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
