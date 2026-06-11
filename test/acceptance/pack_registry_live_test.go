@@ -73,7 +73,9 @@ func TestPackRegistryLiveImportsEveryCatalogPack(t *testing.T) {
 	}
 
 	c := helpers.NewCity(t, env)
-	c.WriteConfig("[workspace]\nname = \"pack-registry-smoke\"\n")
+	// Builtin packs compose only through explicit includes; the gastown
+	// catalog pack's formulas extend core recipes (mol-polecat-base).
+	c.WriteConfig("[workspace]\nname = \"pack-registry-smoke\"\nincludes = [\".gc/system/packs/core\", \".gc/system/packs/bd\"]\n")
 	c.AppendToPack("[pack]\nname = \"pack-registry-smoke\"\nschema = 1\n")
 	type expectedPack struct {
 		Name    string
