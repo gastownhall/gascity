@@ -825,10 +825,16 @@ func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *form
 			meta[beadmeta.BondVarsMetadataKey] = string(data)
 		}
 	}
-	for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.ScopeRoleMetadataKey, beadmeta.OnFailMetadataKey, beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey} {
+	for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.OnFailMetadataKey, beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey} {
 		if value := source.Metadata[key]; value != "" {
 			meta[key] = value
 		}
+	}
+	// Control infrastructure is never a scope member: stamp the control role
+	// explicitly (mirroring minted scope-checks) instead of inheriting the
+	// host step's role (see the identical stamp in formula's applyGraphControls).
+	if meta[beadmeta.ScopeRefMetadataKey] != "" {
+		meta[beadmeta.ScopeRoleMetadataKey] = beadmeta.ScopeRoleControl
 	}
 	control := formula.RecipeStep{
 		ID:       source.ID + "-fanout",

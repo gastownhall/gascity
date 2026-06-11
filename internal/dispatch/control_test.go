@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -2960,8 +2961,8 @@ func TestBuildAttemptRecipeRalphChildOnCompleteCreatesScopedFanout(t *testing.T)
 	if got := fanout.Metadata["gc.scope_ref"]; got != "mol-review.review-loop.iteration.2" {
 		t.Fatalf("fanout gc.scope_ref = %q, want mol-review.review-loop.iteration.2", got)
 	}
-	if got := fanout.Metadata["gc.scope_role"]; got != "member" {
-		t.Fatalf("fanout gc.scope_role = %q, want member", got)
+	if got := fanout.Metadata["gc.scope_role"]; got != beadmeta.ScopeRoleControl {
+		t.Fatalf("fanout gc.scope_role = %q, want control (control infrastructure must not inherit the member role)", got)
 	}
 	if got := fanout.Metadata["gc.attempt"]; got != "2" {
 		t.Fatalf("fanout gc.attempt = %q, want 2", got)

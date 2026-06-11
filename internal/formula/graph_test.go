@@ -1,6 +1,10 @@
 package formula
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+)
 
 func TestApplyGraphControlsRecursesIntoNestedChildren(t *testing.T) {
 	t.Parallel()
@@ -224,4 +228,42 @@ func containsString(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestApplyGraphControls_FanoutControlScopeRoleIsControl pins that a minted
+// fanout control for a scope member is classified as scope-role control, not
+// member: control infrastructure must not inherit the host step's member role,
+// or its metadata/output participates in scope finalization as if it were work
+// (mirrors the explicit ScopeRoleControl stamp on minted scope-checks).
+func TestApplyGraphControls_FanoutControlScopeRoleIsControl(t *testing.T) {
+	f := &Formula{
+		Steps: []*Step{{
+			ID:    "work",
+			Title: "Work",
+			OnComplete: &OnCompleteSpec{
+				ForEach: "output.members",
+				Bond:    "review-member",
+			},
+			Metadata: map[string]string{
+				beadmeta.ScopeRefMetadataKey:  "scope-1",
+				beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
+			},
+		}},
+	}
+	applyGraphControls(f, false)
+	var control *Step
+	for _, s := range f.Steps {
+		if s.ID == "work-fanout" {
+			control = s
+		}
+	}
+	if control == nil {
+		t.Fatal("missing minted fanout control work-fanout")
+	}
+	if got := control.Metadata[beadmeta.ScopeRefMetadataKey]; got != "scope-1" {
+		t.Fatalf("fanout control gc.scope_ref = %q, want scope-1", got)
+	}
+	if got := control.Metadata[beadmeta.ScopeRoleMetadataKey]; got != beadmeta.ScopeRoleControl {
+		t.Fatalf("fanout control gc.scope_role = %q, want %q", got, beadmeta.ScopeRoleControl)
+	}
 }
