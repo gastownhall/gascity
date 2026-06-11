@@ -132,6 +132,10 @@ func DecideSessionExit(f ExitFacts) ExitOutcome {
 // IsDeliberateSleepReason reports whether a sleep_reason records an
 // intentional stop rather than a crash, so the death must not accrue churn.
 // "city-stop" mirrors the CLI's stop sleep reason.
+// The reason list deliberately diverges from shouldResetContinuation's
+// near-identical list (this one has "failed-create" and lacks
+// "runtime-missing"): that one decides continuation reset on wake, this one
+// decides churn suppression — do not merge the lists.
 func IsDeliberateSleepReason(reason string) bool {
 	switch strings.TrimSpace(reason) {
 	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained",

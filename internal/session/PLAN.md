@@ -71,7 +71,7 @@ telemetry, patches), and the fail-closed store-error mapping.
 Exit: all existing reconciler tests pass unchanged; decider has its own unit
 tests; new `SESSION-RECON-008`/`009` ledger rows cite both.
 
-### Step 2 — Stability, churn, and rate-limit predicates
+### Step 2 — Stability, churn, and rate-limit predicates (this PR)
 
 Same treatment for the near-pure predicates in `cmd/gc/session_reconcile.go`
 (`checkStability`, `recordWakeFailure`, `recordChurn` family): split fused
@@ -97,7 +97,7 @@ Independent bug PRs, not refactor work; each gets its own bead:
 
 Exit: each bug has a bead with a failing test, then a fix PR.
 
-### Step 4 — Store fence decision (one decision, not ten contracts)
+### Step 4 — Store fence decision (one decision, not ten contracts) (this PR)
 
 Decided in `engdocs/design/session-store-fences.md`: what the beads store
 actually provides (no CAS; non-atomic external batches; transactions cannot

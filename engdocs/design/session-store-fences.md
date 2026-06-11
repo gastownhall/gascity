@@ -1,8 +1,10 @@
-# Session Store Fences
+---
+title: "Session Store Fences"
+---
 
 | Field | Value |
 |---|---|
-| Status | Decided |
+| Status | Accepted |
 | Scope | Cross-process write safety for session-owned bead metadata |
 | Consumers | Every session refactor slice that moves a metadata writer (`internal/session/PLAN.md` Steps 5-6 and beyond) |
 | Related | `internal/session/REQUIREMENTS.md` (scenario ledger); design-review bead `ga-unpr2y` |
@@ -19,7 +21,10 @@ Facts, from `internal/beads/beads.go` on this branch:
 
 - **No conditional writes.** `UpdateOpts` has no expected-revision,
   expected-value, or token field. There is no compare-and-swap primitive
-  anywhere in the `Store` interface.
+  anywhere in the `Store` interface; the optional
+  `ConditionalAssignmentReleaser.ReleaseIfCurrent` is the one existing
+  narrowly-scoped conditional write, and is the precedent for proposing
+  another narrow conditional primitive rather than general CAS.
 - **Batches are not atomic on external stores.** `SetMetadataBatch` applies
   all writes atomically on in-memory stores (MemStore, FileStore) but
   sequentially on external stores (BdStore, exec) — partial application is
