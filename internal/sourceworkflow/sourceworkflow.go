@@ -584,7 +584,7 @@ func generatedSpecSidecarCandidates(store beads.Store) ([]beads.Bead, error) {
 	appendUnique(typed)
 
 	marked, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-		Metadata:      map[string]string{beadmeta.KindMetadataKey: "spec"},
+		Metadata:      map[string]string{beadmeta.KindMetadataKey: beadmeta.KindSpec},
 		IncludeClosed: true,
 		TierMode:      beads.TierBoth,
 	})

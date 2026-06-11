@@ -340,10 +340,10 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 		IsRoot:      true,
 	}
 	if graphWorkflow {
-		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: "workflow"}
+		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}
 		rootStep.Metadata[beadmeta.FormulaContractMetadataKey] = "graph.v2"
 	} else if rootOnly {
-		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: "wisp"}
+		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}
 	}
 	defPriority := 2
 	rootStep.Priority = &defPriority

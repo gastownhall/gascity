@@ -167,7 +167,7 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		storePath = cityPath
 	}
 
-	workDir := resolveInheritedMetadata(store, bead, "work_dir", beadmeta.WorkDirMetadataKey)
+	workDir := resolveInheritedMetadata(store, bead, beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey)
 	resolvedWorkDir := ""
 	if workDir != "" {
 		if filepath.IsAbs(workDir) {

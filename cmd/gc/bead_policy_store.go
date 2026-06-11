@@ -253,14 +253,14 @@ func policyNameForBead(b beads.Bead) string {
 }
 
 func isWispPolicyMetadata(metadata map[string]string) bool {
-	return metadata[beadmeta.KindMetadataKey] == "wisp"
+	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWisp
 }
 
 func isWorkflowPolicyMetadata(metadata map[string]string) bool {
 	if metadata == nil {
 		return false
 	}
-	return metadata[beadmeta.KindMetadataKey] == "workflow" ||
+	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow ||
 		metadata[beadmeta.FormulaContractMetadataKey] == "graph.v2" ||
 		strings.TrimSpace(metadata[beadmeta.RootBeadIDMetadataKey]) != ""
 }

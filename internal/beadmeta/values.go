@@ -36,6 +36,13 @@ const (
 
 	// KindWorkflow marks a workflow root bead.
 	KindWorkflow = "workflow"
+
+	// KindWisp marks the root bead of a root-only wisp molecule.
+	KindWisp = "wisp"
+
+	// KindSpec marks a generated step-spec sidecar bead carrying a serialized
+	// step definition rather than executable work.
+	KindSpec = "spec"
 )
 
 // Values of OutcomeMetadataKey ("gc.outcome").

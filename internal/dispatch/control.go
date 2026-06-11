@@ -1197,7 +1197,7 @@ func newSpecRecipeStep(childID string, child *formula.Step) *formula.RecipeStep 
 		Type:        "spec",
 		Description: string(specJSON),
 		Metadata: map[string]string{
-			beadmeta.KindMetadataKey:       "spec",
+			beadmeta.KindMetadataKey:       beadmeta.KindSpec,
 			beadmeta.SpecForMetadataKey:    child.ID,
 			beadmeta.SpecForRefMetadataKey: childID,
 		},
