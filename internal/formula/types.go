@@ -28,6 +28,7 @@ package formula
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -35,6 +36,13 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
+
+// errTallyRemoved rejects the removed [steps.tally] authoring surface. The
+// tally aggregation control was reverted from the SDK pending a real design
+// review (Primitive Test / ZFC); unknown TOML tables and JSON fields are
+// otherwise silently ignored by the decoders, so the removed surface must be
+// rejected explicitly to fail loudly instead of silently dropping the table.
+var errTallyRemoved = errors.New("steps.tally was removed from the SDK; aggregate votes in your pack instead")
 
 // Type categorizes formulas by their purpose.
 type Type string
@@ -288,12 +296,6 @@ type Step struct {
 	// Used for runtime expansion over step output (the for-each construct).
 	OnComplete *OnCompleteSpec `json:"on_complete,omitempty" toml:"on_complete,omitempty"`
 
-	// Tally aggregates outputs from voters spawned by OnComplete.
-	// Requires OnComplete to be set. A tally control step is injected
-	// after the fanout; downstream steps are automatically rewritten to
-	// wait for the tally result rather than the source step.
-	Tally *TallySpec `json:"tally,omitempty" toml:"tally,omitempty"`
-
 	// Ralph wraps this step in an inline run/check retry loop.
 	// The original step becomes a logical container, and the actionable work is
 	// emitted as first-class graph steps.
@@ -381,6 +383,10 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
+	if rawTally, ok := raw["tally"]; ok && string(rawTally) != "null" {
+		return errTallyRemoved
+	}
+
 	rawCheck, hasCheck := raw["check"]
 	rawRalph, hasRalph := raw["ralph"]
 	return s.normalizeCheckAlias(hasCheck, rawCheck, hasRalph, rawRalph)
@@ -456,12 +462,14 @@ type stepTOMLAlias struct {
 	Gate            *Gate             `json:"gate,omitempty"`
 	Loop            *loopTOMLAlias    `json:"loop,omitempty"`
 	OnComplete      *OnCompleteSpec   `json:"on_complete,omitempty"`
-	Tally           *TallySpec        `json:"tally,omitempty"`
-	Check           json.RawMessage   `json:"check,omitempty"`
-	Ralph           json.RawMessage   `json:"ralph,omitempty"`
-	Retry           *RetrySpec        `json:"retry,omitempty"`
-	Drain           *DrainSpec        `json:"drain,omitempty"`
-	Timeout         string            `json:"timeout,omitempty"`
+	// Tally captures the removed [steps.tally] table so toStep can reject it
+	// loudly; the decoder would otherwise drop the unknown table silently.
+	Tally   json.RawMessage `json:"tally,omitempty"`
+	Check   json.RawMessage `json:"check,omitempty"`
+	Ralph   json.RawMessage `json:"ralph,omitempty"`
+	Retry   *RetrySpec      `json:"retry,omitempty"`
+	Drain   *DrainSpec      `json:"drain,omitempty"`
+	Timeout string          `json:"timeout,omitempty"`
 }
 
 type loopTOMLAlias struct {
@@ -474,6 +482,9 @@ type loopTOMLAlias struct {
 }
 
 func (a stepTOMLAlias) toStep() (Step, error) {
+	if len(a.Tally) > 0 && string(a.Tally) != "null" {
+		return Step{}, errTallyRemoved
+	}
 	hasCheck := len(a.Check) > 0
 	hasRalph := len(a.Ralph) > 0
 	if hasCheck && hasRalph {
@@ -533,7 +544,6 @@ func (a stepTOMLAlias) toStep() (Step, error) {
 		Gate:            a.Gate,
 		Loop:            loop,
 		OnComplete:      a.OnComplete,
-		Tally:           a.Tally,
 		Ralph:           ralph,
 		Retry:           a.Retry,
 		Drain:           a.Drain,
@@ -761,23 +771,6 @@ type OnCompleteSpec struct {
 	// Each molecule starts only after the previous one completes.
 	// Mutually exclusive with Parallel.
 	Sequential bool `json:"sequential,omitempty"`
-}
-
-// TallySpec defines how to aggregate outputs from voter fragments spawned by
-// an OnComplete fanout. The tally control step waits for all voters to close
-// then reduces their gc.output_json values into a single pass/fail outcome.
-type TallySpec struct {
-	// VoteField is the dot-separated JSON path within each voter's
-	// gc.output_json to extract as the vote value (e.g. "answer",
-	// "result.verdict"). If empty, the raw gc.outcome ("pass"/"fail")
-	// of each voter bead is used directly.
-	VoteField string `json:"vote_field,omitempty" toml:"vote_field,omitempty"`
-
-	// Mode controls the aggregation logic. Supported values:
-	//   "majority"   (default) — the most common vote must have >50% share
-	//   "unanimous"            — every voter must produce the same value
-	//   "any-pass"             — at least one voter's gc.outcome must be "pass"
-	Mode string `json:"mode,omitempty" toml:"mode,omitempty"`
 }
 
 // BranchRule defines parallel execution paths that rejoin.
@@ -1140,20 +1133,6 @@ func (f *Formula) Validate() error {
 		// Validate on_complete field - runtime expansion
 		if step.OnComplete != nil {
 			validateOnComplete(step.OnComplete, &errs, fmt.Sprintf("steps[%d] (%s)", i, step.ID))
-		}
-		// Validate tally field - requires on_complete
-		if step.Tally != nil {
-			prefix := fmt.Sprintf("steps[%d] (%s)", i, step.ID)
-			if step.OnComplete == nil {
-				errs = append(errs, prefix+": tally requires on_complete to be set")
-			}
-			if step.Tally.Mode != "" {
-				switch step.Tally.Mode {
-				case beadmeta.TallyModeMajority, beadmeta.TallyModeUnanimous, beadmeta.TallyModeAnyPass:
-				default:
-					errs = append(errs, fmt.Sprintf("%s: tally.mode %q is invalid; valid values: majority, unanimous, any-pass", prefix, step.Tally.Mode))
-				}
-			}
 		}
 		// Validate children's depends_on and needs recursively
 		validateChildDependsOn(step.Children, stepIDLocations, &errs, fmt.Sprintf("steps[%d]", i))

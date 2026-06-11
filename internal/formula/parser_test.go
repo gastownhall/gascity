@@ -2540,6 +2540,94 @@ func TestParseJSON_RalphLegacyAliasStillWorks(t *testing.T) {
 	}
 }
 
+func TestParseTOML_RemovedTallyRejected(t *testing.T) {
+	tomlData := `
+formula = "mol-tally-removed"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "ask"
+title = "Ask voters"
+
+[steps.on_complete]
+for_each = "output.voters"
+bond = "mol-voter"
+
+[steps.tally]
+vote_field = "answer"
+mode = "majority"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want loud rejection of removed [steps.tally]")
+	}
+	if !strings.Contains(err.Error(), "steps.tally was removed from the SDK; aggregate votes in your pack instead") {
+		t.Fatalf("ParseTOML error = %v, want removed-tally rejection", err)
+	}
+}
+
+func TestParseTOML_RemovedTallyRejectedInChildren(t *testing.T) {
+	tomlData := `
+formula = "mol-tally-removed-child"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "parent"
+title = "Parent"
+
+[[steps.children]]
+id = "ask"
+title = "Ask voters"
+
+[steps.children.tally]
+mode = "unanimous"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want loud rejection of removed [steps.children.tally]")
+	}
+	if !strings.Contains(err.Error(), "steps.tally was removed from the SDK; aggregate votes in your pack instead") {
+		t.Fatalf("ParseTOML error = %v, want removed-tally rejection", err)
+	}
+}
+
+func TestParseJSON_RemovedTallyRejected(t *testing.T) {
+	jsonData := `{
+  "formula": "mol-tally-removed",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {
+      "id": "ask",
+      "title": "Ask voters",
+      "on_complete": {
+        "for_each": "output.voters",
+        "bond": "mol-voter"
+      },
+      "tally": {
+        "vote_field": "answer",
+        "mode": "majority"
+      }
+    }
+  ]
+}`
+
+	p := NewParser()
+	_, err := p.Parse([]byte(jsonData))
+	if err == nil {
+		t.Fatal("Parse succeeded, want loud rejection of removed \"tally\" step field")
+	}
+	if !strings.Contains(err.Error(), "steps.tally was removed from the SDK; aggregate votes in your pack instead") {
+		t.Fatalf("Parse error = %v, want removed-tally rejection", err)
+	}
+}
+
 func TestParseTOML_CheckAndRalphMixedRejected(t *testing.T) {
 	tomlData := `
 formula = "mol-check-mixed"

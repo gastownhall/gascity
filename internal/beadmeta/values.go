@@ -12,7 +12,7 @@ package beadmeta
 // vocabulary coexist with different membership; the named subsets, their
 // relationships, and the authoritative set are declared in kindsets.go
 // (ControlKinds is authoritative; see that file's doc for the known drift in
-// two routing predicates).
+// one routing predicate).
 const (
 	// Control-bead kinds processed by the control dispatcher.
 	KindRetry            = "retry"
@@ -20,7 +20,6 @@ const (
 	KindCheck            = "check"
 	KindRetryEval        = "retry-eval"
 	KindFanout           = "fanout"
-	KindTally            = "tally"
 	KindDrain            = "drain"
 	KindScopeCheck       = "scope-check"
 	KindWorkflowFinalize = "workflow-finalize"
@@ -112,13 +111,6 @@ const (
 	DispositionControllerError   = "controller_error"
 	DispositionOrphanedWorkflow  = "orphaned_workflow"
 	DispositionControlQuarantine = "control_quarantined"
-)
-
-// Values of TallyModeMetadataKey ("gc.tally_mode").
-const (
-	TallyModeMajority  = "majority"
-	TallyModeUnanimous = "unanimous"
-	TallyModeAnyPass   = "any-pass"
 )
 
 // Values of FanoutModeMetadataKey ("gc.fanout_mode").

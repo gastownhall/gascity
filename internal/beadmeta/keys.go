@@ -154,12 +154,9 @@ const (
 	StepTimeoutMetadataKey               = "gc.step_timeout"
 	SyntheticKindMetadataKey             = "gc.synthetic_kind"
 	SyntheticMetadataKey                 = "gc.synthetic"
-	TallyModeMetadataKey                 = "gc.tally_mode"
-	TallyResultMetadataKey               = "gc.tally_result"
 	TemplateMetadataKey                  = "gc.template"
 	TerminalMetadataKey                  = "gc.terminal"
 	TruncatedMetadataKey                 = "gc.truncated"
-	VoteFieldMetadataKey                 = "gc.vote_field"
 	WorkDirMetadataKey                   = "gc.work_dir"
 	WorkflowIDMetadataKey                = "gc.workflow_id"
 )
@@ -309,12 +306,9 @@ var KnownMetadataKeys = []string{
 	StepTimeoutMetadataKey,
 	SyntheticKindMetadataKey,
 	SyntheticMetadataKey,
-	TallyModeMetadataKey,
-	TallyResultMetadataKey,
 	TemplateMetadataKey,
 	TerminalMetadataKey,
 	TruncatedMetadataKey,
-	VoteFieldMetadataKey,
 	WorkDirMetadataKey,
 	WorkflowIDMetadataKey,
 }
