@@ -109,7 +109,14 @@ func lastTranscriptUsage(path string) (tokens int, model string, ok bool) {
 			continue
 		}
 		tokens = u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
-		model = entry.Message.Model
+		// Track the last NON-EMPTY model string: usage entries don't always
+		// carry the model (tool-result turns, synthetic entries), and the
+		// newest usage entry having an empty model must not flip a 1M session
+		// to the 200k default — that would fire the urgent tier at ~20% of a
+		// 1M window.
+		if m := entry.Message.Model; m != "" {
+			model = m
+		}
 		ok = true // keep scanning: we want the LAST qualifying entry
 	}
 	return tokens, model, ok
@@ -146,11 +153,11 @@ func contextUsageMessage(tokens, window int) string {
 		return ""
 	case pct <= float64(urgent):
 		return fmt.Sprintf(
-			"Context usage: %s/%s (~%.0f%%). Advisory: ample room remains — do NOT stop or split the session for this; steer current work toward a clean handoff point rather than opening new long-horizon tasks.\n",
+			"Context usage: %s/%s (~%.0f%%). Approaching the recycle zone. Steer toward a clean seam: finish in-flight work, don't open new long-horizon tasks, and keep durable notes/work-items current so a handoff is cheap. Plan to hand off and reset before this climbs into the urgent band — a fresh session from durable notes outperforms riding lossy compaction.\n",
 			k(tokens), k(window), pct)
 	default:
 		return fmt.Sprintf(
-			"Context usage: %s/%s (~%.0f%%) — HIGH. Finish or checkpoint the current task and run your handoff process now (durable notes + work-item updates) before context compaction does it for you. Do not start new work.\n",
+			"Context usage: %s/%s (~%.0f%%) — HIGH. Recycle this session now: reach a clean seam, run your handoff (durable notes + work-item updates + memory), then `gc session reset` yourself to resume fresh from that durable state. Repeated compaction degrades awareness — a clean reset beats running to compaction. Do this once you are at a seam; do NOT abandon work mid-step. (If an operator has told you to stay up, honor that and just hold at a clean seam instead of resetting.)\n",
 			k(tokens), k(window), pct)
 	}
 }
