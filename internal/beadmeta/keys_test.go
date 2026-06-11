@@ -62,6 +62,7 @@ func TestPinnedValues(t *testing.T) {
 		ExecutionRoutedToMetadataKey: "gc.execution_routed_to",
 		FormulaVarPrefix:             "gc.var.",
 		Namespace:                    "gc.",
+		OptionMetadataPrefix:         "opt_",
 	}
 	for got, want := range pinned {
 		if got != want {

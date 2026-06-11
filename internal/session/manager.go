@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -1220,7 +1221,7 @@ func (m *Manager) UpdateTemplateOverrides(id string, updates map[string]string) 
 			if key == "initial_message" {
 				continue
 			}
-			metadata["opt_"+key] = value
+			metadata[beadmeta.OptionMetadataPrefix+key] = value
 		}
 		if err := m.store.SetMetadataBatch(id, metadata); err != nil {
 			return err
