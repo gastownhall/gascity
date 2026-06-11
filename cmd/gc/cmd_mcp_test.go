@@ -95,8 +95,7 @@ func TestMcpListAgentJSON(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	writeBuiltinImportsLock(t, cityDir, "core")
-	writeProjectedMCPCity(t, cityDir, builtinImportsTOML("core")+`[workspace]
+	writeProjectedMCPCity(t, cityDir, `[workspace]
 
 [beads]
 provider = "file"
@@ -108,6 +107,7 @@ provider = "tmux"
 command = "echo"
 prompt_mode = "none"
 `)
+	writeBuiltinImportsFixture(t, cityDir, "core")
 	agentDir := filepath.Join(cityDir, "agents", "mayor")
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(agentDir): %v", err)

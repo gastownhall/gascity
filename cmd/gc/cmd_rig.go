@@ -644,10 +644,11 @@ func formatBoundImports(imports []config.BoundImport) string {
 // "<name>" or "packs/<name>" token (the form documented in `gc rig add
 // --help`) would otherwise be persisted as the non-resolvable literal
 // "./<token>", breaking pack expansion citywide (gascity#3137). A token
-// whose raw form or derived single-segment name is a key in packs is left
-// unchanged so an explicitly configured [packs] reference keeps its
-// configured source rather than being shadowed by the builtin.
-func canonicalizeBuiltinPackIncludes(_ fsys.FS, _ string, includes []string, packs map[string]config.PackSource) []string {
+// whose raw form or derived single-segment name is a key in packs, or
+// that resolves to a real local pack directory in the city, is left
+// unchanged so explicit references keep their configured/local source
+// rather than being shadowed by the builtin.
+func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []string, packs map[string]config.PackSource) []string {
 	out := make([]string, len(includes))
 	for i, inc := range includes {
 		out[i] = inc
@@ -668,6 +669,13 @@ func canonicalizeBuiltinPackIncludes(_ fsys.FS, _ string, includes []string, pac
 		}
 		if _, ok := packs[name]; ok {
 			continue
+		}
+		// A token that resolves to a real local pack in the city is a local
+		// import, not a builtin-pack reference.
+		if !filepath.IsAbs(tok) {
+			if _, err := fs.Stat(filepath.Join(cityPath, filepath.FromSlash(tok), "pack.toml")); err == nil {
+				continue
+			}
 		}
 		if source, ok := builtinpacks.Source(name); ok {
 			out[i] = source

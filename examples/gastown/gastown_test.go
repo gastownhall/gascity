@@ -3679,8 +3679,10 @@ func TestPackPromptFilesExist(t *testing.T) {
 
 func TestCityAgentsFilter(t *testing.T) {
 	// Verify config.LoadWithIncludes with both packs produces
-	// only city-scoped agents when no rigs are registered.
-	// Effective dog from gastown override + mayor/deacon/boot = 4.
+	// only city-scoped agents when no rigs are registered:
+	// mayor/deacon/boot + the gastown dog pool + the dolt maintenance dog
+	// contributed by the composed builtin bd pack = 5. The two dogs keep
+	// distinct binding-qualified identities (gastown.dog vs bd.dog).
 	cfg := loadExpanded(t)
 
 	cityAgents := map[string]bool{"mayor": true, "deacon": true, "boot": true, "dog": true}
@@ -3697,8 +3699,8 @@ func TestCityAgentsFilter(t *testing.T) {
 			t.Errorf("city agent %q: dir = %q, want empty", a.Name, a.Dir)
 		}
 	}
-	if explicit != 4 {
-		t.Errorf("got %d explicit agents, want 4 city-scoped agents", explicit)
+	if explicit != 5 {
+		t.Errorf("got %d explicit agents, want 5 city-scoped agents (incl. both dogs)", explicit)
 	}
 }
 
@@ -3707,13 +3709,13 @@ func TestExpandedCityUsesGastownDog(t *testing.T) {
 
 	var dog *config.Agent
 	for i := range cfg.Agents {
-		if cfg.Agents[i].Name == "dog" && !cfg.Agents[i].Implicit {
+		if cfg.Agents[i].Name == "dog" && !cfg.Agents[i].Implicit && cfg.Agents[i].BindingName == "gastown" {
 			dog = &cfg.Agents[i]
 			break
 		}
 	}
 	if dog == nil {
-		t.Fatal("expected explicit dog agent in expanded gastown config")
+		t.Fatal("expected explicit gastown-bound dog agent in expanded gastown config")
 	}
 	if dog.WorkDir != ".gc/agents/dogs/{{.AgentBase}}" {
 		t.Errorf("dog work_dir = %q, want gastown themed work dir", dog.WorkDir)

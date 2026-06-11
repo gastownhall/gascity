@@ -532,7 +532,7 @@ func TestProviderLifecycleProcessEnvOmitsLoglevelWhenLaunchctlEmpty(t *testing.T
 func TestGcBeadsBdReadOnlyFallbackDoesNotTargetLegacyProbeDatabase(t *testing.T) {
 	cityPath := t.TempDir()
 	materializeBuiltinPacksForTest(t, cityPath)
-	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
+	scriptData, err := os.ReadFile(bundledGcBeadsBdScriptForTest(t))
 	if err != nil {
 		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
 	}
@@ -549,7 +549,7 @@ func TestGcBeadsBdReadOnlyFallbackDoesNotTargetLegacyProbeDatabase(t *testing.T)
 func TestGcBeadsBdShellFallbackSanitizesArchiveLevel(t *testing.T) {
 	cityPath := t.TempDir()
 	materializeBuiltinPacksForTest(t, cityPath)
-	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
+	scriptData, err := os.ReadFile(bundledGcBeadsBdScriptForTest(t))
 	if err != nil {
 		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
 	}
@@ -758,7 +758,7 @@ func TestNormalizeCanonicalBdScopeFilesForInitPreservesExistingManagedProbeDatab
 func TestGcBeadsBdReadOnlyFallbackNoUserDatabaseIsDiagnostic(t *testing.T) {
 	cityPath := t.TempDir()
 	materializeBuiltinPacksForTest(t, cityPath)
-	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
+	scriptData, err := os.ReadFile(bundledGcBeadsBdScriptForTest(t))
 	if err != nil {
 		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
 	}
@@ -833,7 +833,7 @@ printf 'status=%s\n' "$status"
 func TestGcBeadsBdHealthNoUserDatabaseWarnsAndContinues(t *testing.T) {
 	cityPath := t.TempDir()
 	materializeBuiltinPacksForTest(t, cityPath)
-	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
+	scriptData, err := os.ReadFile(bundledGcBeadsBdScriptForTest(t))
 	if err != nil {
 		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
 	}
@@ -911,7 +911,7 @@ printf 'status=%s\n' "$status"
 func TestGcBeadsBdReadOnlyHelperErrorIsDiagnostic(t *testing.T) {
 	cityPath := t.TempDir()
 	materializeBuiltinPacksForTest(t, cityPath)
-	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
+	scriptData, err := os.ReadFile(bundledGcBeadsBdScriptForTest(t))
 	if err != nil {
 		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
 	}
@@ -9336,7 +9336,7 @@ func TestGcBeadsBdStopUsesGCBinStopManagedHelperWhenAvailable(t *testing.T) {
 func TestGcBeadsBdStopDrainsConnectionsBeforeSignal(t *testing.T) {
 	cityPath := t.TempDir()
 	materializeBuiltinPacksForTest(t, cityPath)
-	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
+	scriptData, err := os.ReadFile(bundledGcBeadsBdScriptForTest(t))
 	if err != nil {
 		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
 	}

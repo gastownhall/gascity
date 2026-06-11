@@ -2372,9 +2372,10 @@ template = "mayor"
 
 [beads]
 provider = "file"
-` + builtinImportsTOML("core")), 0o644); err != nil {
+`), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
+	writeBuiltinImportsFixture(t, dir, "core")
 	if err := os.WriteFile(filepath.Join(dir, ".gc", "site.toml"), []byte(`workspace_name = "test-city"
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile(.gc/site.toml): %v", err)

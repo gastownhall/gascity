@@ -632,14 +632,19 @@ func TestCmdSessionLogsJSONSuccessIsJSONOnly(t *testing.T) {
 	workDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(fmt.Sprintf(`[workspace]
-name = "test"
 
 [daemon]
 observe_paths = [%q]
-`, searchBase)+builtinImportsTOML("core")), 0o644); err != nil {
+`, searchBase)), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	writeBuiltinImportsLock(t, cityDir, "core")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte("workspace_name = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write site.toml: %v", err)
+	}
+	writeBuiltinImportsFixture(t, cityDir, "core")
 
 	store, err := openCityStoreAt(cityDir)
 	if err != nil {

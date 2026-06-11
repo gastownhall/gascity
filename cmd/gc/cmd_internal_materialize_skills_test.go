@@ -28,13 +28,13 @@ name = "test-city"
 
 [beads]
 provider = "file"
-` + builtinImportsTOML("core")
+`
 	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
-	writeBuiltinImportsLock(t, cityDir, "core")
 	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
 	// Pack.toml enables PackSkillsDir discovery. Without it, the
 	// materializer sees no shared city catalog and the sink stays empty.
 	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
+	writeBuiltinImportsFixture(t, cityDir, "core")
 	writeSkillSource(t, filepath.Join(cityDir, "skills", "plan"))
 
 	workdir := t.TempDir()

@@ -34,10 +34,10 @@ func TestDoctorJSONSuccessIsParseableJSONOnly(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n"+builtinImportsTOML("core")), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeBuiltinImportsLock(t, cityDir, "core")
+	writeBuiltinImportsFixture(t, cityDir, "core")
 	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte("workspace_name = \"demo\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -530,6 +530,7 @@ func TestDoDoctorRegistersStaleLocalPackDirCheckForRemoteImport(t *testing.T) {
 	cityDir := t.TempDir()
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 	source := "https://github.com/gastownhall/gc-actual-packs"
 	commit := writeDoctorRemotePackFixture(t, homeDir, source)
 
@@ -565,6 +566,7 @@ func TestDoDoctorRegistersStaleLocalPackDirCheckForRigRemoteImport(t *testing.T)
 	cityDir := t.TempDir()
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 	source := "https://github.com/gastownhall/gc-actual-packs"
 	commit := writeDoctorRemotePackFixture(t, homeDir, source)
 

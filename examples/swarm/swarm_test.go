@@ -9,11 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 )
 
 func exampleDir() string {
@@ -21,9 +24,32 @@ func exampleDir() string {
 	return filepath.Dir(filename)
 }
 
+// primeBundledPackCache hydrates a hermetic repo cache with the bundled
+// builtin pack content at the pinned commit so the example's packs.lock
+// resolves offline.
+func primeBundledPackCache(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	commit := strings.TrimPrefix(config.BundledPackImportVersion, "sha:")
+	coreSource, ok := builtinpacks.Source("core")
+	if !ok {
+		t.Fatal("bundled core pack not registered")
+	}
+	cachePath, err := packman.RepoCachePath(coreSource, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, commit); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+}
+
 // loadExpanded loads city.toml with full pack expansion.
 func loadExpanded(t *testing.T) *config.City {
 	t.Helper()
+	primeBundledPackCache(t)
 	dir := exampleDir()
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
 	if err != nil {
@@ -173,11 +199,11 @@ func TestCombinedPackParses(t *testing.T) {
 }
 
 func TestCityAgentsFilter(t *testing.T) {
-	// In the raw source-tree config, only Swarm's own city-scoped agents appear.
-	// The initialized city later gains a maintenance dog from system packs.
+	// Swarm's own city-scoped agents plus the dolt maintenance dog that the
+	// composed builtin packs contribute (bd imports dolt transitively).
 	cfg := loadExpanded(t)
 
-	cityAgents := map[string]bool{"mayor": true, "deacon": true}
+	cityAgents := map[string]bool{"mayor": true, "deacon": true, "dog": true}
 	var explicit int
 	for _, a := range cfg.Agents {
 		if a.Implicit {
@@ -190,9 +216,12 @@ func TestCityAgentsFilter(t *testing.T) {
 		if a.Dir != "" {
 			t.Errorf("city agent %q: dir = %q, want empty", a.Name, a.Dir)
 		}
+		if a.Name == "dog" && a.BindingName != "bd" {
+			t.Errorf("dog agent binding = %q, want bd (city-level imports stamp the city binding)", a.BindingName)
+		}
 	}
-	if explicit != 2 {
-		t.Errorf("got %d explicit agents, want 2 source-tree city-scoped agents", explicit)
+	if explicit != 3 {
+		t.Errorf("got %d explicit agents, want mayor + deacon + dolt dog", explicit)
 	}
 }
 

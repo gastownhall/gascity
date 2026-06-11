@@ -140,17 +140,10 @@ func bundledPackImportCommit() string {
 }
 
 // bundledSourcePinnedVersion returns the canonical pinned version for a
-// bundled source: packs published from the public gascity-packs registry
-// keep their public registry pin (so they never conflict with the pins gc
-// init templates write); everything else uses the bundled gascity.git pin.
+// bundled source (public registry pins for gastown/gascity so they never
+// conflict with the pins gc init templates write).
 func bundledSourcePinnedVersion(source string) string {
-	if s, ok := builtinpacks.Source("gastown"); ok && s == source {
-		return config.PublicGastownPackVersion
-	}
-	if s, ok := builtinpacks.Source("gascity"); ok && s == source {
-		return config.PublicGascityPackVersion
-	}
-	return config.BundledPackImportVersion
+	return config.BundledSourcePinnedVersion(source)
 }
 
 // requiredBuiltinImports returns the [imports.<name>] entries gc init
@@ -284,11 +277,6 @@ func pruneRetiredSystemPacks(cityPath string, warningWriter io.Writer) {
 		emitBuiltinRuntimeWarning(warningWriter, fmt.Errorf("pruning retired %s: %w", citylayout.SystemPacksRoot, err))
 	}
 }
-
-// retiredBuiltinPackNames lists builtin packs that older binaries shipped
-// and config may still reference; the builtin-pack-imports doctor check
-// strips includes pointing at them.
-var retiredBuiltinPackNames = []string{"maintenance"}
 
 func emitBuiltinRuntimeWarning(w io.Writer, err error) {
 	if w == nil || err == nil {

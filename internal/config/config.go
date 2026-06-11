@@ -4787,8 +4787,6 @@ func GastownCity(name, provider, startCommand string) City {
 	return GastownCityWithProviders(name, provider, []string{provider})
 }
 
-// GastownCityWithProviders returns a Gas Town city whose default provider is
-// selected from an explicit built-in provider catalog.
 // GascityCityWithProviders returns a minimal managed city that imports the
 // public gascity planning/implementation skills pack: a single mayor agent
 // plus [imports.gascity] pinned to the registry release. The pack ships
@@ -4805,6 +4803,8 @@ func GascityCityWithProviders(name, defaultProvider string, providers []string) 
 	return city
 }
 
+// GastownCityWithProviders returns a Gas Town city whose default provider is
+// selected from an explicit built-in provider catalog.
 func GastownCityWithProviders(name, defaultProvider string, providers []string) City {
 	ws := Workspace{
 		Name:            name,

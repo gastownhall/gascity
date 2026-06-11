@@ -309,3 +309,35 @@ fetched = "2026-04-10T00:00:00Z"
 func bundledRepoCacheDir(home, source, commit string) string {
 	return filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(source, commit))
 }
+
+// TestResolveInstalledRemoteImportBundledFallbackWithoutLock pins the
+// no-lock self-heal: a bundled source with no packs.lock resolves to the
+// binary's canonical pin, hydrating the synthetic cache on demand.
+func TestResolveInstalledRemoteImportBundledFallbackWithoutLock(t *testing.T) {
+	home, cityDir := setupBundledImportTest(t)
+	source := bundledPackSource()
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
+
+	got, err := resolveInstalledRemoteImport(source, cityDir)
+	if err != nil {
+		t.Fatalf("resolveInstalledRemoteImport without lock: %v", err)
+	}
+	want := bundledRepoCacheDir(home, source, commit)
+	if got != want {
+		t.Fatalf("cacheDir = %q, want %q", got, want)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err != nil {
+		t.Fatalf("fallback did not hydrate a valid synthetic cache: %v", err)
+	}
+}
+
+// TestResolveInstalledRemoteImportNonBundledStillRequiresLock pins that the
+// no-lock fallback stays scoped to bundled sources.
+func TestResolveInstalledRemoteImportNonBundledStillRequiresLock(t *testing.T) {
+	_, cityDir := setupBundledImportTest(t)
+
+	_, err := resolveInstalledRemoteImport("https://github.com/example/other.git", cityDir)
+	if err == nil || !strings.Contains(err.Error(), "missing packs.lock") {
+		t.Fatalf("err = %v, want missing packs.lock error", err)
+	}
+}

@@ -180,11 +180,54 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 	return cacheDir, true, nil
 }
 
+// BundledSourcePinnedVersion returns the canonical pinned version for a
+// bundled builtin source: packs published from the public gascity-packs
+// registry keep their public registry pin; everything else uses the
+// bundled gascity.git pin. The pin is a stable cache tag — the running
+// binary serves the content for it offline.
+func BundledSourcePinnedVersion(source string) string {
+	if s, ok := builtinpacks.Source("gastown"); ok && s == source {
+		return PublicGastownPackVersion
+	}
+	if s, ok := builtinpacks.Source("gascity"); ok && s == source {
+		return PublicGascityPackVersion
+	}
+	return BundledPackImportVersion
+}
+
+// resolveBundledSourceWithoutLock resolves a bundled builtin source that has
+// no packs.lock entry to the binary's canonical pin, hydrating the synthetic
+// cache when needed. The lock stays the source of truth when an entry
+// exists; this fallback keeps cities composable before the first
+// "gc import install" writes the lock (and lets non-OS filesystem loads in
+// tests resolve bundled imports).
+func resolveBundledSourceWithoutLock(source string) (string, bool) {
+	if !builtinpacks.IsSource(source) {
+		return "", false
+	}
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
+	cacheRoot, err := GlobalRepoCacheRoot()
+	if err != nil {
+		return "", false
+	}
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
+	if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
+		return cacheDir, true
+	}
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+		return "", false
+	}
+	return cacheDir, true
+}
+
 func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	lockPath := filepath.Join(cityRoot, "packs.lock")
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			if cacheDir, ok := resolveBundledSourceWithoutLock(source); ok {
+				return cacheDir, nil
+			}
 			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); run \"gc import install\"", source)
 		}
 		return "", fmt.Errorf("reading packs.lock: %w", err)
@@ -196,6 +239,9 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	}
 	entry, ok := lock.Packs[source]
 	if !ok || entry.Commit == "" {
+		if cacheDir, ok := resolveBundledSourceWithoutLock(source); ok {
+			return cacheDir, nil
+		}
 		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run \"gc import install\"", source)
 	}
 

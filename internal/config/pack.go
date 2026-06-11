@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -246,6 +247,9 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 			for _, bindingName := range importNames {
 				imp := rig.Imports[bindingName]
+				if !isOSFileSystem(fs) && builtinpacks.IsSource(imp.Source) {
+					continue
+				}
 
 				impDir, err := resolvePackRef(imp.Source, cityRoot, cityRoot)
 				if err != nil {
@@ -639,6 +643,12 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			if cfg.ImplicitImportBindings != nil && cfg.ImplicitImportBindings[bindingName] {
 				continue
 			}
+			// Bundled builtin sources resolve from the user-global cache
+			// on the real filesystem; hermetic non-OS loads (test fakes)
+			// skip them.
+			if !isOSFileSystem(fs) && builtinpacks.IsSource(imp.Source) {
+				continue
+			}
 
 			// Unlike V1 includes (which skip gracefully for missing remote
 			// subpaths), V2 imports are always fatal on missing source.
@@ -762,7 +772,11 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			cfg.Services = append(cfg.Services, services...)
 			cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
-			if !slices.Contains(BootstrapManagedImportNames(), bindingName) {
+			// Bootstrap-managed implicit imports own their skill
+			// materialization through the compat path; explicit user
+			// imports (including [imports.core]) contribute skills like
+			// any other pack.
+			if cfg.BootstrapImportBindings == nil || !cfg.BootstrapImportBindings[bindingName] {
 				cfg.PackSkills = appendDiscoveredSkills(cfg.PackSkills, stampImportedSkillBinding(skills, bindingName, imp.Export)...)
 			}
 			allPackDirs = appendUnique(allPackDirs, topoDirs...)
@@ -1851,6 +1865,19 @@ func cachedPackDoctors(cache *packLoadCache, topoDir string) []DiscoveredDoctor 
 	}
 	out := deepCopyDoctors(result.doctors)
 	return out
+}
+
+// isOSFileSystem reports whether fs is the real operating-system
+// filesystem. Bundled builtin pack content only exists there (embedded in
+// the binary, served via the user-global cache), so non-OS loads skip
+// bundled imports.
+func isOSFileSystem(fs fsys.FS) bool {
+	switch fs.(type) {
+	case fsys.OSFS, *fsys.OSFS:
+		return true
+	default:
+		return false
+	}
 }
 
 func cachedPackSkills(cache *packLoadCache, topoDir string) []DiscoveredSkillCatalog {

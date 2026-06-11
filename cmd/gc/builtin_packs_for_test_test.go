@@ -23,6 +23,26 @@ func materializeBuiltinPacksForTest(t testing.TB, cityPath string) {
 	}
 }
 
+// writeBuiltinImportsFixture gives a fixture city the canonical builtin
+// pack composition: pinned [imports.<name>] entries in pack.toml (created
+// with a minimal [pack] header when absent) plus a matching packs.lock.
+// This is the shape gc init writes; the lock collection and the
+// packv2-import-state doctor check only recognize pack.toml imports.
+func writeBuiltinImportsFixture(t testing.TB, cityDir string, names ...string) {
+	t.Helper()
+	packPath := filepath.Join(cityDir, "pack.toml")
+	data, err := os.ReadFile(packPath)
+	if os.IsNotExist(err) {
+		data = []byte(fmt.Sprintf("[pack]\nname = %q\nschema = 2\n", filepath.Base(cityDir)))
+	} else if err != nil {
+		t.Fatalf("reading pack.toml: %v", err)
+	}
+	if err := os.WriteFile(packPath, append(data, []byte(builtinImportsTOML(names...))...), 0o644); err != nil {
+		t.Fatalf("writing pack.toml: %v", err)
+	}
+	writeBuiltinImportsLock(t, cityDir, names...)
+}
+
 // builtinImportsTOML returns [imports.<name>] manifest blocks for bundled
 // builtin packs, usable inside city.toml or pack.toml fixture literals.
 // Pair with writeBuiltinImportsLock so the sources resolve offline.

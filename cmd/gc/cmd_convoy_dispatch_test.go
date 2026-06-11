@@ -872,7 +872,6 @@ func TestCmdWorkflowDeleteSourceFollowsRigLaunchSourceChain(t *testing.T) {
 		t.Fatalf("MkdirAll(rigDir): %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-name = "test-city"
 
 [daemon]
 formula_v2 = true
@@ -880,10 +879,11 @@ formula_v2 = true
 [[rigs]]
 name = "alpha"
 prefix = "BL"
-` + builtinImportsTOML("core")), 0o644); err != nil {
+`), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
+	writeBuiltinImportsFixture(t, cityDir, "core")
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
@@ -2280,7 +2280,7 @@ func TestRunWorkflowServeWarnsWhenLegacyRigTraceFileStillExists(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
 	rigRoot := filepath.Join(cityDir, "rigs", "alpha")
 	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
 		t.Fatalf("mkdir rig root: %v", err)
@@ -2332,7 +2332,7 @@ func TestRunWorkflowServeWarnsWhenLegacyEnvRigTraceFileStillExistsOutsideConfigu
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
 	rigRoot := filepath.Join(cityDir, "rigs", "beta")
 	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
 		t.Fatalf("mkdir rig root: %v", err)
@@ -5291,15 +5291,15 @@ func TestCmdWorkflowDeleteSourceAllowsStoreSelectorForAmbiguousSourceIDs(t *test
 		t.Fatalf("MkdirAll(rigDir): %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-name = "test-city"
 
 [[rigs]]
 name = "alpha"
 prefix = "BL"
-` + builtinImportsTOML("core")), 0o644); err != nil {
+`), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
-	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
+	writeBuiltinImportsFixture(t, cityDir, "core")
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
@@ -5410,15 +5410,15 @@ func TestCmdWorkflowDeleteSourceStoreSelectorIgnoresLegacyRootInDifferentStore(t
 		t.Fatalf("MkdirAll(rigDir): %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-name = "test-city"
 
 [[rigs]]
 name = "alpha"
 prefix = "BL"
-` + builtinImportsTOML("core")), 0o644); err != nil {
+`), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
-	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
+	writeBuiltinImportsFixture(t, cityDir, "core")
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
@@ -5532,15 +5532,15 @@ func TestCmdWorkflowReopenSourceRejectsLiveRootInDifferentStore(t *testing.T) {
 		t.Fatalf("MkdirAll(rigDir): %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-name = "test-city"
 
 [[rigs]]
 name = "alpha"
 prefix = "BL"
-` + builtinImportsTOML("core")), 0o644); err != nil {
+`), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
-	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
+	writeBuiltinImportsFixture(t, cityDir, "core")
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")

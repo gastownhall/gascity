@@ -33,7 +33,7 @@ func TestGcBeadsBdEnsureTypesCustomInYaml_MergesWithExistingValues(t *testing.T)
 	}
 
 	materializeBuiltinPacksForTest(t, cityDir)
-	script := gcBeadsBdScriptPath(cityDir)
+	script := bundledGcBeadsBdScriptForTest(t)
 
 	desiredTypes := "alpha,beta,gamma"
 	// Source just the function definition out of the script and call it.
@@ -93,7 +93,7 @@ func TestGcBeadsBdEnsureTypesCustomInYaml_IdempotentWhenMatching(t *testing.T) {
 	}
 
 	materializeBuiltinPacksForTest(t, cityDir)
-	script := gcBeadsBdScriptPath(cityDir)
+	script := bundledGcBeadsBdScriptForTest(t)
 
 	bashCmd := fmt.Sprintf(`
 set -e
@@ -148,7 +148,7 @@ func TestGcBeadsBdEnsureTypesCustomInYaml_PreservesCustomExtensions(t *testing.T
 	}
 
 	materializeBuiltinPacksForTest(t, cityDir)
-	script := gcBeadsBdScriptPath(cityDir)
+	script := bundledGcBeadsBdScriptForTest(t)
 
 	// Caller passes only the baseline. The merge must keep pack_custom_a
 	// and pack_custom_b — narrowing the set would defeat the doctor-merge
@@ -196,7 +196,7 @@ func TestGcBeadsBdEnsureTypesCustomInYaml_AddsMissingBaselineToCustomSet(t *test
 	}
 
 	materializeBuiltinPacksForTest(t, cityDir)
-	script := gcBeadsBdScriptPath(cityDir)
+	script := bundledGcBeadsBdScriptForTest(t)
 
 	desiredTypes := "alpha,beta,gamma"
 	bashCmd := fmt.Sprintf(`
