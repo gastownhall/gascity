@@ -59,17 +59,11 @@ type graphStepTarget struct {
 }
 
 // IsControlDispatcherKind reports whether a gc.kind value is a control-
-// dispatcher kind (routed to the control dispatcher agent).
-//
-// KNOWN DRIFT: this is beadmeta.ControlKinds minus KindTally. PR #1194 added
-// tally to formula compilation and the ProcessControl switch but never wired
-// routing, so today tally steps are routed like worker work and never reach
-// the dispatcher. Including KindTally here is the routing fix, but it changes
-// where persisted tally beads land and needs a resolver arm plus migration
-// review — tracked as a dispatch routing bug, not silently flipped in a
-// vocabulary refactor.
+// dispatcher kind (routed to the control dispatcher agent). This is exactly
+// beadmeta.ControlKinds: every kind the ProcessControl switch executes is
+// routed to the control dispatcher.
 func IsControlDispatcherKind(kind string) bool {
-	return beadmeta.IsControlKind(kind) && kind != beadmeta.KindTally
+	return beadmeta.IsControlKind(kind)
 }
 
 // IsWorkflowTopologyKind reports whether a gc.kind value identifies a

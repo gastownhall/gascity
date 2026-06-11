@@ -1040,15 +1040,15 @@ func resolveAttemptControlAssignee(target string, cfg *config.City, store beads.
 // isAttemptControlKind reports whether an Attach-path recipe step should be
 // routed to the control dispatcher rather than a worker.
 //
-// KNOWN DRIFT: this is beadmeta.ControlKinds minus {KindTally, KindDrain} — a
-// frozen 2026-04-14 snapshot of the then-complete control vocabulary; drain
-// (PR #2784) and tally (PR #1194) were added to other predicates but not here.
-// The exclusions are masked on the attempt path (buildAttemptRecipe cannot
-// mint those kinds) but reachable on the fanout-fragment path. Adopting the
-// full set changes routing for persisted fragments and is tracked as a
-// dispatch routing bug rather than silently flipped here.
+// KNOWN DRIFT: this is beadmeta.ControlKinds minus KindDrain — a frozen
+// 2026-04-14 snapshot of the then-complete control vocabulary; drain
+// (PR #2784) was added to other predicates but not here. The exclusion is
+// masked on the attempt path (buildAttemptRecipe cannot mint that kind) but
+// reachable on the fanout-fragment path. Adopting the full set changes
+// routing for persisted fragments and is tracked as a dispatch routing bug
+// rather than silently flipped here.
 func isAttemptControlKind(kind string) bool {
-	return beadmeta.IsControlKind(kind) && kind != beadmeta.KindTally && kind != beadmeta.KindDrain
+	return beadmeta.IsControlKind(kind) && kind != beadmeta.KindDrain
 }
 
 type attemptRouteBinding struct {

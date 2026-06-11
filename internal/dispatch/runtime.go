@@ -129,8 +129,6 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 		return processRetryEval(store, bead, opts)
 	case beadmeta.KindFanout:
 		return processFanout(store, bead, opts)
-	case beadmeta.KindTally:
-		return processTallyControl(store, bead, opts)
 	case beadmeta.KindDrain:
 		return processDrain(store, bead, opts)
 	case beadmeta.KindScopeCheck:

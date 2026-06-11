@@ -210,10 +210,11 @@ retry / fanout state machines, dispositions, modes, scope kind), and
 their relationships — `ControlKinds` (authoritative; the ProcessControl
 switch in `internal/dispatch/runtime.go` is its behavior owner),
 `StructuralGraphKinds`, `WorkflowTopologyKinds`, and
-`GraphContractMetadataKinds`. Two routing predicates intentionally lag
-`ControlKinds` with documented exclusions (tally/drain routing drift,
-tracked as dispatch bugs); `TestKindSetRelationships` and the dispatch
-lockstep test pin the compositions.
+`GraphContractMetadataKinds`. One routing predicate
+(`dispatch.isAttemptControlKind`) intentionally lags `ControlKinds` with a
+documented drain exclusion (tracked as a dispatch bug);
+`TestKindSetRelationships` and the dispatch lockstep test pin the
+compositions.
 
 The namespace is deliberately open-world at the edges:
 
