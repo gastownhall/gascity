@@ -751,6 +751,9 @@ func wakeDemandOverridesSleepSuppression(
 		return false
 	}
 	hasDemand := poolDesired[template] > 0 || eval.HasAssignedWork
+	if eval.HasAssignedWork {
+		return true
+	}
 	if hasDemand && policy.Class == config.SessionSleepNonInteractive {
 		return true
 	}
