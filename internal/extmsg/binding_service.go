@@ -218,9 +218,14 @@ func (s *bindingService) ResolveByConversation(ctx context.Context, ref Conversa
 
 // overlayLiveSession re-points a binding record at its session's current live
 // bead when the stored session_id has gone stale across a respawn. It mutates
-// only the in-memory copy — persistent healing is the binding reaper's job —
-// and is a no-op when the binding has no recorded session name or the name has
-// no live owner (a genuinely dead session, which the reaper clears).
+// only the in-memory copy — persistent healing is the binding reaper's job.
+//
+// Both layers are intentional: this overlay corrects routing immediately after
+// a respawn, before the next reconciler tick arrives. Without it, inbound
+// traffic would resolve to the dead bead ID for up to one full reconciler
+// interval. The reaper's persistent write is still needed to update the
+// labelBindingSessionPrefix label (indexed on the volatile ID) and keep
+// label-based lookups correct across ticks.
 func overlayLiveSession(store beads.Store, record *SessionBindingRecord) {
 	if record.SessionName == "" {
 		return

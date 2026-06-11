@@ -65,7 +65,7 @@ func ReapStaleBindings(ctx context.Context, store beads.Store, now time.Time) (B
 	// reassigned tracks stale session IDs already processed so we don't call
 	// ReassignSessionBindings (which operates on all bindings for a session)
 	// more than once per session per sweep.
-	reassigned := make(map[string]bool)
+	reassigned := make(map[string]struct{})
 	for _, item := range items {
 		if err := checkContext(ctx); err != nil {
 			return stats, err
@@ -89,11 +89,14 @@ func ReapStaleBindings(ctx context.Context, store beads.Store, now time.Time) (B
 				return stats, fmt.Errorf("clear dead binding %s: %w", record.ID, err)
 			}
 			stats.Cleared++
-		case liveID != "" && liveID != record.SessionID && !reassigned[record.SessionID]:
+		case liveID != "" && liveID != record.SessionID:
+			if _, ok := reassigned[record.SessionID]; ok {
+				break
+			}
 			if err := ReassignSessionBindings(ctx, store, record.SessionID, liveID, now); err != nil {
 				return stats, fmt.Errorf("reassign session %s to live bead %s: %w", record.SessionID, liveID, err)
 			}
-			reassigned[record.SessionID] = true
+			reassigned[record.SessionID] = struct{}{}
 			stats.Reassigned++
 		}
 	}
@@ -121,6 +124,10 @@ func bindingLiveTarget(store beads.Store, record SessionBindingRecord) (liveID s
 	// Legacy binding with no recorded name: it can only ever point at the bead
 	// ID it stored, which never recovers across respawn (the replacement gets a
 	// fresh ID). Clear it once that bead is gone or closed; otherwise leave it.
+	// This path is self-eliminating: new bindings always record a SessionName,
+	// and re-binds opportunistically backfill it on existing entries. Legacy
+	// bindings that are never re-bound are eventually cleared here when their
+	// session is retired — no active migration is needed.
 	stored := record.SessionID
 	if stored == "" {
 		return "", false
