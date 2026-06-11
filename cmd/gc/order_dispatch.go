@@ -1532,11 +1532,11 @@ func isOrderWispRootCandidate(b beads.Bead) bool {
 	if beads.IsMoleculeType(b.Type) {
 		return true
 	}
-	return b.Metadata[beadmeta.KindMetadataKey] == "workflow" || b.Metadata[beadmeta.KindMetadataKey] == "wisp"
+	return b.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow || b.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWisp
 }
 
 func isOrderRootOnlyWispCandidate(b beads.Bead) bool {
-	return b.Metadata[beadmeta.KindMetadataKey] == "wisp" && !beads.IsMoleculeType(b.Type)
+	return b.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWisp && !beads.IsMoleculeType(b.Type)
 }
 
 // isTransientNotificationBead reports whether a bead is a short-lived delivery

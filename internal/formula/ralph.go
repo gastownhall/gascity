@@ -69,7 +69,7 @@ func expandRalph(step *Step) ([]*Step, error) {
 	// and dispatch paths remain stable while the public formula surface uses
 	// the canonical "check" spelling.
 	controlMeta := map[string]string{
-		beadmeta.KindMetadataKey:         "ralph",
+		beadmeta.KindMetadataKey:         beadmeta.KindRalph,
 		beadmeta.StepIDMetadataKey:       step.ID,
 		beadmeta.MaxAttemptsMetadataKey:  strconv.Itoa(step.Ralph.MaxAttempts),
 		beadmeta.CheckModeMetadataKey:    step.Ralph.Check.Mode,
@@ -135,8 +135,8 @@ func expandNestedRalph(step, control, specStep *Step, iterationID string, attemp
 	iteration.WaitsFor = ""
 	iteration.SourceLocation = fmt.Sprintf("%s.ralph.iteration.%d", step.SourceLocation, attempt)
 	iteration.Metadata = withMetadata(step.Metadata, map[string]string{
-		beadmeta.KindMetadataKey:        "scope",
-		beadmeta.ScopeRoleMetadataKey:   "body",
+		beadmeta.KindMetadataKey:        beadmeta.KindScope,
+		beadmeta.ScopeRoleMetadataKey:   beadmeta.ScopeRoleBody,
 		beadmeta.ScopeNameMetadataKey:   step.ID,
 		beadmeta.StepIDMetadataKey:      step.ID,
 		beadmeta.RalphStepIDMetadataKey: step.ID,
@@ -196,7 +196,7 @@ func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, att
 			clone.Metadata = withMetadata(clone.Metadata, map[string]string{
 				beadmeta.ScopeRefMetadataKey:    iterationID,
 				beadmeta.OnFailMetadataKey:      metadataDefault(node.Metadata, beadmeta.OnFailMetadataKey, "abort_scope"),
-				beadmeta.ScopeRoleMetadataKey:   metadataDefault(node.Metadata, beadmeta.ScopeRoleMetadataKey, "member"),
+				beadmeta.ScopeRoleMetadataKey:   metadataDefault(node.Metadata, beadmeta.ScopeRoleMetadataKey, beadmeta.ScopeRoleMember),
 				beadmeta.StepIDMetadataKey:      childStepID,
 				beadmeta.RalphStepIDMetadataKey: owner.ID,
 				beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
@@ -253,7 +253,7 @@ func markRalphBodyOutputSinks(steps []*Step) {
 		case "scope", "scope-check", "workflow-finalize", "fanout", "check", "ralph", "spec":
 			continue
 		}
-		if step.Metadata[beadmeta.ScopeRoleMetadataKey] == "teardown" {
+		if step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 			continue
 		}
 		if _, ok := referenced[step.ID]; ok {

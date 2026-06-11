@@ -100,8 +100,8 @@ func IsAttachedRoot(b beads.Bead) bool {
 
 // IsWorkflowAttachment reports whether a bead is a graph.v2 workflow attachment.
 func IsWorkflowAttachment(b beads.Bead) bool {
-	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), "workflow") ||
-		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), "graph.v2")
+	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindWorkflow) ||
+		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)
 }
 
 // IsMoleculeAttachment reports whether a bead is a molecule attachment.

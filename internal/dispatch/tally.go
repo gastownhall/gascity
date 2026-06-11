@@ -26,7 +26,7 @@ func processTallyControl(store beads.Store, bead beads.Bead, _ ProcessOptions) (
 	}
 	mode := bead.Metadata[beadmeta.TallyModeMetadataKey]
 	if mode == "" {
-		mode = "majority"
+		mode = beadmeta.TallyModeMajority
 	}
 	voteField := bead.Metadata[beadmeta.VoteFieldMetadataKey]
 
@@ -71,7 +71,7 @@ func processTallyControl(store beads.Store, bead beads.Bead, _ ProcessOptions) (
 			return ControlResult{}, fmt.Errorf("%s: fetching voter %s: %w", bead.ID, dep.DependsOnID, err)
 		}
 		var vote string
-		if mode == "any-pass" {
+		if mode == beadmeta.TallyModeAnyPass {
 			// any-pass is defined over voter gc.outcome, independent of vote_field.
 			vote = voter.Metadata[beadmeta.OutcomeMetadataKey]
 		} else {
@@ -133,10 +133,10 @@ func extractVote(voter beads.Bead, voteField string) (string, error) {
 // and a human-readable result summary.
 func tallyVotes(votes []string, mode string) (outcome, result string, err error) {
 	if len(votes) == 0 {
-		return "pass", "no-voters", nil
+		return beadmeta.OutcomePass, "no-voters", nil
 	}
 	switch mode {
-	case "majority":
+	case beadmeta.TallyModeMajority:
 		counts := make(map[string]int, len(votes))
 		for _, v := range votes {
 			counts[v]++
@@ -150,24 +150,24 @@ func tallyVotes(votes []string, mode string) (outcome, result string, err error)
 			}
 		}
 		if winnerCount*2 > len(votes) {
-			return "pass", winner, nil
+			return beadmeta.OutcomePass, winner, nil
 		}
-		return "fail", "no-majority", nil
-	case "unanimous":
+		return beadmeta.OutcomeFail, "no-majority", nil
+	case beadmeta.TallyModeUnanimous:
 		first := votes[0]
 		for _, v := range votes[1:] {
 			if v != first {
-				return "fail", "not-unanimous", nil
+				return beadmeta.OutcomeFail, "not-unanimous", nil
 			}
 		}
-		return "pass", first, nil
-	case "any-pass":
+		return beadmeta.OutcomePass, first, nil
+	case beadmeta.TallyModeAnyPass:
 		for _, v := range votes {
-			if v == "pass" {
-				return "pass", "any-pass", nil
+			if v == beadmeta.OutcomePass {
+				return beadmeta.OutcomePass, "any-pass", nil
 			}
 		}
-		return "fail", "no-pass", nil
+		return beadmeta.OutcomeFail, "no-pass", nil
 	default:
 		return "", "", fmt.Errorf("unknown tally mode %q", mode)
 	}

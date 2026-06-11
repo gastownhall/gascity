@@ -203,6 +203,18 @@ out raw key literals; `TestNoUndeclaredMetadataKeys` in
 `internal/beadmeta/guard_test.go` enforces this by scanning source for
 whole `gc.*`-key-shaped string literals.
 
+Value vocabularies live alongside the keys: `values.go` declares the
+closed value domains (kind, outcome, failure class, scope role, drain /
+retry / fanout state machines, dispositions, modes, scope kind), and
+`kindsets.go` declares the named subsets of the kind vocabulary with
+their relationships — `ControlKinds` (authoritative; the ProcessControl
+switch in `internal/dispatch/runtime.go` is its behavior owner),
+`StructuralGraphKinds`, `WorkflowTopologyKinds`, and
+`GraphContractMetadataKinds`. Two routing predicates intentionally lag
+`ControlKinds` with documented exclusions (tally/drain routing drift,
+tracked as dispatch bugs); `TestKindSetRelationships` and the dispatch
+lockstep test pin the compositions.
+
 The namespace is deliberately open-world at the edges:
 
 - **Dynamic keys.** Formula input vars are stamped as `gc.var.<name>`

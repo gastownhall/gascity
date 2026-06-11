@@ -171,7 +171,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if opts.Title != "" {
 				node.Title = formula.Substitute(opts.Title, vars)
 			}
-			if opts.ParentID != "" && step.Metadata[beadmeta.KindMetadataKey] != "workflow" {
+			if opts.ParentID != "" && step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflow {
 				node.ParentID = opts.ParentID
 			}
 			if opts.IdempotencyKey != "" {

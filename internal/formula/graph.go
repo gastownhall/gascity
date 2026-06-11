@@ -36,14 +36,14 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		}
 		step.Metadata[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 		controlMetadata := map[string]string{
-			beadmeta.KindMetadataKey:       "fanout",
+			beadmeta.KindMetadataKey:       beadmeta.KindFanout,
 			beadmeta.ControlForMetadataKey: step.ID,
 			beadmeta.ForEachMetadataKey:    step.OnComplete.ForEach,
 			beadmeta.BondMetadataKey:       step.OnComplete.Bond,
-			beadmeta.FanoutModeMetadataKey: "parallel",
+			beadmeta.FanoutModeMetadataKey: beadmeta.FanoutModeParallel,
 		}
 		if step.OnComplete.Sequential {
-			controlMetadata[beadmeta.FanoutModeMetadataKey] = "sequential"
+			controlMetadata[beadmeta.FanoutModeMetadataKey] = beadmeta.FanoutModeSequential
 		}
 		if len(step.OnComplete.Vars) > 0 {
 			if data, err := json.Marshal(step.OnComplete.Vars); err == nil {
@@ -71,9 +71,9 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		controlID := step.ID + "-scope-check"
 		scopeControlByStep[step.ID] = controlID
 		controlMetadata := map[string]string{
-			beadmeta.KindMetadataKey:       "scope-check",
+			beadmeta.KindMetadataKey:       beadmeta.KindScopeCheck,
 			beadmeta.ScopeRefMetadataKey:   step.Metadata[beadmeta.ScopeRefMetadataKey],
-			beadmeta.ScopeRoleMetadataKey:  "control",
+			beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleControl,
 			beadmeta.ControlForMetadataKey: step.ID,
 		}
 		for _, key := range []string{beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey, beadmeta.OnFailMetadataKey} {
@@ -103,7 +103,7 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 			mode = "majority"
 		}
 		tallyMeta := map[string]string{
-			beadmeta.KindMetadataKey:       "tally",
+			beadmeta.KindMetadataKey:       beadmeta.KindTally,
 			beadmeta.ControlForMetadataKey: step.ID,
 			beadmeta.TallyModeMetadataKey:  mode,
 			beadmeta.VoteFieldMetadataKey:  step.Tally.VoteField,
@@ -137,7 +137,7 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		Type:  "task",
 		Needs: sinks,
 		Metadata: map[string]string{
-			beadmeta.KindMetadataKey: "workflow-finalize",
+			beadmeta.KindMetadataKey: beadmeta.KindWorkflowFinalize,
 		},
 	})
 	f.Steps = sortGraphSteps(f.Steps)
@@ -150,7 +150,7 @@ func needsScopeCheck(step *Step) bool {
 	if step.Metadata[beadmeta.ScopeRefMetadataKey] == "" {
 		return false
 	}
-	if step.Metadata[beadmeta.ScopeRoleMetadataKey] == "teardown" {
+	if step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 		return false
 	}
 	switch step.Metadata[beadmeta.KindMetadataKey] {

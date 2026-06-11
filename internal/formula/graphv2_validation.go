@@ -207,7 +207,7 @@ func GraphV2RecipeHasDrain(recipe *Recipe) bool {
 		return false
 	}
 	for _, step := range recipe.Steps {
-		if strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) == "drain" {
+		if strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindDrain {
 			return true
 		}
 	}
@@ -391,7 +391,7 @@ func graphV2RecipeReservedSymbolErrors(recipe *Recipe, allowConvoyReference bool
 			collectGraphV2ReservedRefsInStringWithVisitor(stepPrefix+".gate.id", step.Gate.ID, allowConvoyReference, &errs, visit)
 			collectGraphV2ReservedRefsInStringWithVisitor(stepPrefix+".gate.timeout", step.Gate.Timeout, allowConvoyReference, &errs, visit)
 		}
-		if strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) == "drain" {
+		if strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindDrain {
 			validateGraphV2RecipeDrainStep(stepPrefix, step, &errs)
 		}
 	}
@@ -400,14 +400,14 @@ func graphV2RecipeReservedSymbolErrors(recipe *Recipe, allowConvoyReference bool
 
 func recipeDeclaresGraphV2Contract(recipe *Recipe) bool {
 	root := recipe.RootStep()
-	return root != nil && strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), "graph.v2")
+	return root != nil && strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)
 }
 
 func validateGraphV2RecipeDrainStep(prefix string, step RecipeStep, errs *[]string) {
 	context := strings.TrimSpace(step.Metadata[beadmeta.DrainContextMetadataKey])
 	switch context {
-	case "", "separate":
-	case "shared":
+	case "", beadmeta.DrainContextSeparate:
+	case beadmeta.DrainContextShared:
 	default:
 		*errs = append(*errs, fmt.Sprintf("%s.drain: context must be separate or shared", prefix))
 	}
@@ -420,8 +420,8 @@ func validateGraphV2RecipeDrainStep(prefix string, step RecipeStep, errs *[]stri
 	}
 	memberAccess := strings.TrimSpace(step.Metadata[beadmeta.DrainMemberAccessMetadataKey])
 	switch memberAccess {
-	case "", "read":
-	case "exclusive":
+	case "", beadmeta.DrainMemberAccessRead:
+	case beadmeta.DrainMemberAccessExclusive:
 	default:
 		*errs = append(*errs, fmt.Sprintf("%s.drain: member_access must be read or exclusive", prefix))
 	}
@@ -437,7 +437,7 @@ func validateGraphV2RecipeDrainStep(prefix string, step RecipeStep, errs *[]stri
 		}
 	}
 	switch strings.TrimSpace(step.Metadata[beadmeta.DrainOnItemFailureMetadataKey]) {
-	case "", "skip_remaining", "continue":
+	case "", beadmeta.DrainOnItemFailureSkipRemaining, beadmeta.DrainOnItemFailureContinue:
 	default:
 		*errs = append(*errs, fmt.Sprintf("%s.drain: on_item_failure must be skip_remaining or continue", prefix))
 	}

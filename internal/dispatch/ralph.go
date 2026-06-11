@@ -22,7 +22,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	if bead.Metadata[beadmeta.TerminalMetadataKey] == "true" {
 		return ControlResult{}, nil
 	}
-	if bead.Metadata[beadmeta.CheckModeMetadataKey] != "exec" {
+	if bead.Metadata[beadmeta.CheckModeMetadataKey] != beadmeta.CheckModeExec {
 		return ControlResult{}, fmt.Errorf("%s: unsupported check mode %q", bead.ID, bead.Metadata[beadmeta.CheckModeMetadataKey])
 	}
 
@@ -61,7 +61,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	}
 
 	if result.Outcome == convergence.GatePass {
-		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
+		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed check: %w", bead.ID, err)
 		}
 		if outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
@@ -69,7 +69,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 				return ControlResult{}, fmt.Errorf("%s: propagating gc.output_json to logical bead: %w", logicalID, err)
 			}
 		}
-		if err := setOutcomeAndClose(store, logicalID, "pass"); err != nil {
+		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "pass"}, nil
@@ -77,15 +77,15 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 
 	if attempt >= maxAttempts {
 		if err := store.SetMetadataBatch(logicalID, map[string]string{
-			beadmeta.OutcomeMetadataKey:       "fail",
+			beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
 			beadmeta.FailedAttemptMetadataKey: strconv.Itoa(attempt),
 		}); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: marking logical failure: %w", logicalID, err)
 		}
-		if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
+		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing failed check: %w", bead.ID, err)
 		}
-		if err := setOutcomeAndClose(store, logicalID, "fail"); err != nil {
+		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing failed logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "fail"}, nil
@@ -96,7 +96,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	case "":
 		opts.tracef("ralph retry-mark-spawning bead=%s next=%d", bead.ID, nextAttempt)
 		if err := store.SetMetadataBatch(bead.ID, map[string]string{
-			beadmeta.RetryStateMetadataKey:  "spawning",
+			beadmeta.RetryStateMetadataKey:  beadmeta.SpawnStateSpawning,
 			beadmeta.NextAttemptMetadataKey: strconv.Itoa(nextAttempt),
 		}); err != nil {
 			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
@@ -104,14 +104,14 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			}
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn start: %w", bead.ID, err)
 		}
-	case "spawning":
+	case beadmeta.SpawnStateSpawning:
 		// Resume partial append below.
-	case "spawned":
+	case beadmeta.SpawnStateSpawned:
 		// Resume finalization below without cloning again.
 	default:
 		return ControlResult{}, fmt.Errorf("%s: unsupported gc.retry_state %q", bead.ID, bead.Metadata[beadmeta.RetryStateMetadataKey])
 	}
-	if bead.Metadata[beadmeta.RetryStateMetadataKey] != "spawned" {
+	if bead.Metadata[beadmeta.RetryStateMetadataKey] != beadmeta.SpawnStateSpawned {
 		opts.tracef("ralph retry-append-start bead=%s next=%d", bead.ID, nextAttempt)
 		if _, err := appendRalphRetry(store, logicalID, subject, bead, nextAttempt, opts); err != nil {
 			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
@@ -121,7 +121,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		}
 		opts.tracef("ralph retry-append-done bead=%s next=%d", bead.ID, nextAttempt)
 		spawnedMetadata := map[string]string{
-			beadmeta.RetryStateMetadataKey:  "spawned",
+			beadmeta.RetryStateMetadataKey:  beadmeta.SpawnStateSpawned,
 			beadmeta.NextAttemptMetadataKey: strconv.Itoa(nextAttempt),
 		}
 		clearControllerSpawnErrorMetadata(spawnedMetadata)
@@ -141,7 +141,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 }
 
 func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opts ProcessOptions) (convergence.GateResult, error) {
-	if subject.Metadata[beadmeta.OutcomeMetadataKey] == "fail" {
+	if subject.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeFail {
 		exitCode := 1
 		return convergence.GateResult{
 			Outcome:   convergence.GateFail,
@@ -644,7 +644,7 @@ func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRe
 		} else {
 			meta[beadmeta.LogicalBeadIDMetadataKey] = oldLogicalID
 		}
-	} else if kind := meta[beadmeta.KindMetadataKey]; kind == "scope" || kind == "check" {
+	} else if kind := meta[beadmeta.KindMetadataKey]; kind == beadmeta.KindScope || kind == beadmeta.KindCheck {
 		meta[beadmeta.LogicalBeadIDMetadataKey] = logicalID
 	}
 	parentKey := ""
@@ -721,11 +721,11 @@ func finalizeRalphRetry(store beads.Store, logicalID, checkID string) error {
 	if check.Status == "closed" {
 		return nil
 	}
-	return setOutcomeAndClose(store, checkID, "fail")
+	return setOutcomeAndClose(store, checkID, beadmeta.OutcomeFail)
 }
 
 func collectRalphAttemptBeads(store beads.Store, subject beads.Bead) (map[string]beads.Bead, error) {
-	if subject.Metadata[beadmeta.KindMetadataKey] != "scope" {
+	if subject.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope {
 		return map[string]beads.Bead{subject.ID: subject}, nil
 	}
 	rootID := subject.Metadata[beadmeta.RootBeadIDMetadataKey]
@@ -743,7 +743,7 @@ func collectRalphAttemptBeadsFromBeads(all []beads.Bead, subject beads.Bead) (ma
 	out := map[string]beads.Bead{
 		subject.ID: subject,
 	}
-	if subject.Metadata[beadmeta.KindMetadataKey] != "scope" {
+	if subject.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope {
 		return out, nil
 	}
 	scopeRef := subject.Metadata[beadmeta.StepRefMetadataKey]
@@ -882,7 +882,7 @@ func logicalStepRefForAttemptBead(bead beads.Bead) string {
 	}
 	kind := strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])
 	normalized := stepRef
-	if kind == "scope-check" && strings.HasSuffix(normalized, "-scope-check") {
+	if kind == beadmeta.KindScopeCheck && strings.HasSuffix(normalized, "-scope-check") {
 		normalized = strings.TrimSuffix(normalized, "-scope-check")
 	}
 	attempt := strings.TrimSpace(bead.Metadata[beadmeta.AttemptMetadataKey])
@@ -893,7 +893,7 @@ func logicalStepRefForAttemptBead(bead beads.Bead) string {
 	// normalized ref (e.g., .eval.1 from a nested retry scope-check) to
 	// resolve to the logical retry/ralph step. Fall back to normalized ref
 	// for flat scope-checks that don't have attempt patterns.
-	if kind == "scope-check" && normalized != stepRef {
+	if kind == beadmeta.KindScopeCheck && normalized != stepRef {
 		if trimmed, ok := trimRightmostAttemptStepRef(normalized); ok {
 			return trimmed
 		}
@@ -906,7 +906,7 @@ func logicalStepRefForAttemptBead(bead beads.Bead) string {
 }
 
 func scopeCheckControlledStepRef(bead beads.Bead) string {
-	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) != "scope-check" {
+	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) != beadmeta.KindScopeCheck {
 		return ""
 	}
 	stepRef := strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey])
@@ -1074,7 +1074,7 @@ func rewriteRetryControlRef(controlFor, oldScopeRef, newScopeRef string, oldAtte
 }
 
 func rewriteRetryControlFor(meta map[string]string, controlFor, oldScopeRef, newScopeRef string, oldAttempt, nextAttempt int) string {
-	if kind := strings.TrimSpace(meta[beadmeta.KindMetadataKey]); kind == "scope-check" {
+	if kind := strings.TrimSpace(meta[beadmeta.KindMetadataKey]); kind == beadmeta.KindScopeCheck {
 		if stepRef := strings.TrimSpace(meta[beadmeta.StepRefMetadataKey]); strings.HasSuffix(stepRef, "-scope-check") {
 			return strings.TrimSuffix(stepRef, "-scope-check")
 		}
@@ -1272,7 +1272,7 @@ func discardPartialRalphRetry(store beads.Store, partial map[string]beads.Bead) 
 				return err
 			}
 			if err := store.SetMetadataBatch(id, map[string]string{
-				beadmeta.OutcomeMetadataKey:      "skipped",
+				beadmeta.OutcomeMetadataKey:      beadmeta.OutcomeSkipped,
 				beadmeta.PartialRetryMetadataKey: "true",
 			}); err != nil {
 				return err

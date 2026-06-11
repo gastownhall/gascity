@@ -69,7 +69,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 	projections := make([]workflowRunProjection, 0)
 	partialErrors := make([]string, 0)
 	cityScopeRef := workflowCityScopeRef(state.CityName())
-	includeAllForCity := requestedScopeKind == "city" && requestedScopeRef == cityScopeRef
+	includeAllForCity := requestedScopeKind == beadmeta.ScopeKindCity && requestedScopeRef == cityScopeRef
 	var requestedScopeErr error
 
 	for _, info := range stores {
@@ -100,8 +100,8 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 
 		roots, err := info.store.List(beads.ListQuery{
 			Metadata: map[string]string{
-				beadmeta.KindMetadataKey:            "workflow",
-				beadmeta.FormulaContractMetadataKey: "graph.v2",
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
 			},
 			IncludeClosed: true,
 		})
@@ -109,7 +109,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 			log.Printf("api: workflow run projection closed-root list failed for %s: %v", info.ref, err)
 			roots = nil
 			for _, bead := range openBeads {
-				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata[beadmeta.FormulaContractMetadataKey]) == "graph.v2" {
+				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata[beadmeta.FormulaContractMetadataKey]) == beadmeta.FormulaContractGraphV2 {
 					roots = append(roots, bead)
 				}
 			}
@@ -192,7 +192,7 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 	projections := make([]workflowRunProjection, 0)
 	partialErrors := make([]string, 0)
 	cityScopeRef := workflowCityScopeRef(state.CityName())
-	includeAllForCity := requestedScopeKind == "city" && requestedScopeRef == cityScopeRef
+	includeAllForCity := requestedScopeKind == beadmeta.ScopeKindCity && requestedScopeRef == cityScopeRef
 	var requestedScopeErr error
 
 	for _, info := range stores {
@@ -223,8 +223,8 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 
 		roots, err := info.store.List(beads.ListQuery{
 			Metadata: map[string]string{
-				beadmeta.KindMetadataKey:            "workflow",
-				beadmeta.FormulaContractMetadataKey: "graph.v2",
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
 			},
 			IncludeClosed: true,
 			// The root-only projection reads only id/status/created/metadata,
@@ -241,7 +241,7 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 			log.Printf("api: workflow root projection closed-root list failed for %s: %v", info.ref, err)
 			roots = nil
 			for _, bead := range openBeads {
-				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata[beadmeta.FormulaContractMetadataKey]) == "graph.v2" {
+				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata[beadmeta.FormulaContractMetadataKey]) == beadmeta.FormulaContractGraphV2 {
 					roots = append(roots, bead)
 				}
 			}
@@ -306,7 +306,7 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 	}
 
 	cityScopeRef := workflowCityScopeRef(state.CityName())
-	includeAllForCity := requestedScopeKind == "city" && requestedScopeRef == cityScopeRef
+	includeAllForCity := requestedScopeKind == beadmeta.ScopeKindCity && requestedScopeRef == cityScopeRef
 	items := make([]monitorFeedItemResponse, 0)
 	partialErrors := make([]string, 0)
 	var requestedScopeErr error

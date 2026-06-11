@@ -923,7 +923,7 @@ func formulaCookLiveInputConvoyGraphRoots(store beads.Store, inputConvoyID, allo
 		if root.Status == "closed" || !sourceworkflow.IsWorkflowRoot(root) {
 			continue
 		}
-		if root.Metadata[beadmeta.FormulaContractMetadataKey] != "graph.v2" {
+		if root.Metadata[beadmeta.FormulaContractMetadataKey] != beadmeta.FormulaContractGraphV2 {
 			continue
 		}
 		if allowedRootKey != "" && strings.TrimSpace(root.Metadata[beadmeta.Graphv2RootKeyMetadataKey]) == allowedRootKey {

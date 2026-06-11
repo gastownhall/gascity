@@ -612,10 +612,10 @@ func workflowSQLRouteCandidate(state State, prefix string) (workflowSQLStoreCand
 
 func workflowStorePath(state State, info workflowStoreInfo) (string, bool) {
 	switch strings.TrimSpace(info.scopeKind) {
-	case "city":
+	case beadmeta.ScopeKindCity:
 		cityPath := strings.TrimSpace(state.CityPath())
 		return cityPath, cityPath != ""
-	case "rig":
+	case beadmeta.ScopeKindRig:
 		cfg := state.Config()
 		if cfg == nil {
 			return "", false

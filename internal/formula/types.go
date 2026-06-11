@@ -1062,7 +1062,7 @@ func (f *Formula) Validate() error {
 		errs = append(errs, "formula: name is required")
 	}
 
-	if contract := strings.TrimSpace(f.Contract); contract != "" && !strings.EqualFold(contract, "graph.v2") {
+	if contract := strings.TrimSpace(f.Contract); contract != "" && !strings.EqualFold(contract, beadmeta.FormulaContractGraphV2) {
 		errs = append(errs, fmt.Sprintf("contract: invalid value %q (must be graph.v2)", f.Contract))
 	}
 	errs = append(errs, validateRequirementDeclarations(f)...)
@@ -1160,7 +1160,7 @@ func (f *Formula) Validate() error {
 			}
 			if step.Tally.Mode != "" {
 				switch step.Tally.Mode {
-				case "majority", "unanimous", "any-pass":
+				case beadmeta.TallyModeMajority, beadmeta.TallyModeUnanimous, beadmeta.TallyModeAnyPass:
 				default:
 					errs = append(errs, fmt.Sprintf("%s: tally.mode %q is invalid; valid values: majority, unanimous, any-pass", prefix, step.Tally.Mode))
 				}

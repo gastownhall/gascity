@@ -342,7 +342,7 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 	}
 	if graphWorkflow {
 		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}
-		rootStep.Metadata[beadmeta.FormulaContractMetadataKey] = "graph.v2"
+		rootStep.Metadata[beadmeta.FormulaContractMetadataKey] = beadmeta.FormulaContractGraphV2
 	} else if rootOnly {
 		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}
 	}
@@ -552,7 +552,7 @@ func metadataForDrainStep(step *Step) map[string]string {
 		metadata = make(map[string]string)
 	}
 	spec := step.Drain
-	metadata[beadmeta.KindMetadataKey] = "drain"
+	metadata[beadmeta.KindMetadataKey] = beadmeta.KindDrain
 	metadata[beadmeta.DrainContextMetadataKey] = spec.Context
 	metadata[beadmeta.DrainFormulaMetadataKey] = spec.Formula
 	memberAccess := strings.TrimSpace(spec.MemberAccess)
@@ -565,10 +565,10 @@ func metadataForDrainStep(step *Step) map[string]string {
 	}
 	onItemFailure := strings.TrimSpace(spec.OnItemFailure)
 	if onItemFailure == "" {
-		if spec.Context == "shared" {
-			onItemFailure = "skip_remaining"
+		if spec.Context == beadmeta.DrainContextShared {
+			onItemFailure = beadmeta.DrainOnItemFailureSkipRemaining
 		} else {
-			onItemFailure = "continue"
+			onItemFailure = beadmeta.DrainOnItemFailureContinue
 		}
 	}
 	metadata[beadmeta.DrainOnItemFailureMetadataKey] = onItemFailure
@@ -622,7 +622,7 @@ func isGraphWorkflow(f *Formula, v2Enabled bool) (bool, error) {
 }
 
 func declaresGraphV2Contract(f *Formula) bool {
-	return f != nil && strings.EqualFold(strings.TrimSpace(f.Contract), "graph.v2")
+	return f != nil && strings.EqualFold(strings.TrimSpace(f.Contract), beadmeta.FormulaContractGraphV2)
 }
 
 func isDetachedGraphStep(step *Step) bool {
@@ -639,7 +639,7 @@ func isDetachedGraphStep(step *Step) bool {
 
 func addWorkflowRootDeps(rootID string, steps []*Step, idMapping map[string]string, deps *[]RecipeDep) {
 	for _, step := range steps {
-		if step != nil && step.Metadata[beadmeta.KindMetadataKey] == "workflow-finalize" {
+		if step != nil && step.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 			if issueID, ok := idMapping[step.ID]; ok {
 				*deps = append(*deps, RecipeDep{
 					StepID:      rootID,

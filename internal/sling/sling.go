@@ -1233,7 +1233,7 @@ func IsGraphWorkflowAttachment(store beads.Store, rootID string) bool {
 	if err != nil {
 		return false
 	}
-	return b.Metadata[beadmeta.KindMetadataKey] == "workflow" && b.Metadata[beadmeta.FormulaContractMetadataKey] == "graph.v2"
+	return b.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow && b.Metadata[beadmeta.FormulaContractMetadataKey] == beadmeta.FormulaContractGraphV2
 }
 
 // InstantiateSlingFormula compiles and instantiates a formula, applying
@@ -1457,7 +1457,7 @@ func stampGraphV2RootMetadata(recipe *formula.Recipe, formulaName string, vars m
 	}
 	root.Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
 	for i := range recipe.Steps {
-		if recipe.Steps[i].Metadata[beadmeta.KindMetadataKey] != "drain" {
+		if recipe.Steps[i].Metadata[beadmeta.KindMetadataKey] != beadmeta.KindDrain {
 			continue
 		}
 		if recipe.Steps[i].Metadata == nil {
@@ -1497,7 +1497,7 @@ func privatizeAttachedRootOnlyWisp(recipe *formula.Recipe, sourceBeadID string) 
 		return
 	}
 	root := &recipe.Steps[0]
-	if root.Metadata[beadmeta.KindMetadataKey] != "wisp" {
+	if root.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWisp {
 		return
 	}
 	root.Type = "molecule"

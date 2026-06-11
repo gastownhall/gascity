@@ -105,7 +105,7 @@ func IsCompiledGraphWorkflow(recipe *formula.Recipe) bool {
 		return false
 	}
 	root := recipe.Steps[0]
-	return root.Metadata[beadmeta.KindMetadataKey] == "workflow" && root.Metadata[beadmeta.FormulaContractMetadataKey] == "graph.v2"
+	return root.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow && root.Metadata[beadmeta.FormulaContractMetadataKey] == beadmeta.FormulaContractGraphV2
 }
 
 // GraphWorkflowRouteVars builds the route variable map by merging recipe
