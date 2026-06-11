@@ -708,7 +708,30 @@ Shows recent log output from background and service-managed supervisor runs.`,
 	return cmd
 }
 
+// supervisorLogsTeeDisabledHint builds the operator-facing pointer printed by
+// `gc supervisor logs` when GC_SUPERVISOR_LOG_TEE=0 disables the supervisor
+// log tee: the tee file is not being written, so direct the operator at the
+// service manager's log instead (journalctl on linux).
+func supervisorLogsTeeDisabledHint(goos string, numLines int, follow bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "gc supervisor logs: log tee is disabled (%s=0); supervisor output goes to the service manager log\n", supervisorLogTeeEnv)
+	if goos == "linux" {
+		journalCmd := fmt.Sprintf("journalctl --user -u %s -n %d", supervisorSystemdServiceName(), numLines)
+		if follow {
+			journalCmd += " -f"
+		}
+		fmt.Fprintf(&b, "gc supervisor logs: try: %s\n", journalCmd)
+	}
+	return b.String()
+}
+
 func doSupervisorLogs(numLines int, follow bool, stdout, stderr io.Writer) int {
+	if supervisorLogTeeDisabled() {
+		// The tee file is not being written, so tailing it would show stale
+		// (or no) output. Point the operator at the service manager's log.
+		fmt.Fprint(stderr, supervisorLogsTeeDisabledHint(goruntime.GOOS, numLines, follow)) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	logPath := supervisorLogPath()
 	if _, err := os.Stat(logPath); os.IsNotExist(err) {
 		fmt.Fprintf(stderr, "gc supervisor logs: log file not found: %s\n", logPath) //nolint:errcheck // best-effort stderr

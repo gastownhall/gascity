@@ -6159,6 +6159,117 @@ func TestRunSupervisorWarnsWhenLogTeeOpenFails(t *testing.T) {
 	}
 }
 
+// TestRunSupervisorLogTeeDisabledSkipsTeeFile confirms GC_SUPERVISOR_LOG_TEE=0
+// opts `gc supervisor run` out of teeing output into ~/.gc/supervisor.log so
+// the service manager's log (e.g. journald under systemd) is the single sink.
+func TestRunSupervisorLogTeeDisabledSkipsTeeFile(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "fresh-home")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv(supervisorLogTeeEnv, "0")
+
+	oldLoadConfig := supervisorLoadConfig
+	supervisorLoadConfig = func(string) (supervisor.Config, error) {
+		return supervisor.Config{}, errors.New("stop after log setup")
+	}
+	t.Cleanup(func() { supervisorLoadConfig = oldLoadConfig })
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("runSupervisor code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stop after log setup") {
+		t.Fatalf("stderr = %q, want stubbed config failure", stderr.String())
+	}
+
+	// The tee file must NOT have been created or written.
+	logPath := filepath.Join(gcHome, "supervisor.log")
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("after runSupervisor with %s=0, %s must not exist; err=%v", supervisorLogTeeEnv, logPath, err)
+	}
+}
+
+// TestRunSupervisorLogTeeNonZeroValueKeepsTee confirms only the exact value
+// "0" disables the tee; any other value keeps the default behavior.
+func TestRunSupervisorLogTeeNonZeroValueKeepsTee(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "fresh-home")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv(supervisorLogTeeEnv, "1")
+
+	oldLoadConfig := supervisorLoadConfig
+	supervisorLoadConfig = func(string) (supervisor.Config, error) {
+		return supervisor.Config{}, errors.New("stop after log setup")
+	}
+	t.Cleanup(func() { supervisorLoadConfig = oldLoadConfig })
+
+	var stdout, stderr bytes.Buffer
+	if code := runSupervisor(&stdout, &stderr); code != 1 {
+		t.Fatalf("runSupervisor code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	logPath := filepath.Join(gcHome, "supervisor.log")
+	logContent, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read supervisor log: %v", err)
+	}
+	if !strings.Contains(string(logContent), "stop after log setup") {
+		t.Fatalf("supervisor log = %q, want stubbed config failure", string(logContent))
+	}
+}
+
+// TestDoSupervisorLogsTeeDisabledPointsAtServiceManagerLog confirms
+// `gc supervisor logs` does not tail the (stale or absent) tee file when
+// GC_SUPERVISOR_LOG_TEE=0 and instead points the operator at the service
+// manager's log.
+func TestDoSupervisorLogsTeeDisabledPointsAtServiceManagerLog(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv(supervisorLogTeeEnv, "0")
+	// Seed a stale tee file: the hint must win over tailing outdated logs.
+	if err := os.WriteFile(filepath.Join(gcHome, "supervisor.log"), []byte("stale tee content\n"), 0o644); err != nil {
+		t.Fatalf("seed stale log: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doSupervisorLogs(50, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doSupervisorLogs code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "stale tee content") {
+		t.Fatalf("stdout = %q, must not tail the stale tee file", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), supervisorLogTeeEnv+"=0") {
+		t.Fatalf("stderr = %q, want %s=0 mention", stderr.String(), supervisorLogTeeEnv)
+	}
+}
+
+// TestSupervisorLogsTeeDisabledHint pins the operator-facing pointer:
+// journalctl on linux (with the unit name and the requested -n/-f flags),
+// no journalctl reference elsewhere.
+func TestSupervisorLogsTeeDisabledHint(t *testing.T) {
+	linuxHint := supervisorLogsTeeDisabledHint("linux", 50, false)
+	wantCmd := "journalctl --user -u " + supervisorSystemdServiceName() + " -n 50"
+	if !strings.Contains(linuxHint, wantCmd) {
+		t.Fatalf("linux hint = %q, want journalctl pointer %q", linuxHint, wantCmd)
+	}
+	if strings.Contains(linuxHint, "-n 50 -f") {
+		t.Fatalf("linux hint = %q, must not include -f without --follow", linuxHint)
+	}
+
+	followHint := supervisorLogsTeeDisabledHint("linux", 10, true)
+	if !strings.Contains(followHint, "-n 10 -f") {
+		t.Fatalf("follow hint = %q, want -f for --follow", followHint)
+	}
+
+	darwinHint := supervisorLogsTeeDisabledHint("darwin", 50, false)
+	if strings.Contains(darwinHint, "journalctl") {
+		t.Fatalf("darwin hint = %q, must not point at journalctl", darwinHint)
+	}
+	if !strings.Contains(darwinHint, supervisorLogTeeEnv) {
+		t.Fatalf("darwin hint = %q, want %s mention", darwinHint, supervisorLogTeeEnv)
+	}
+}
+
 // TestShouldTeeSupervisorLogAvoidsDoubleLoggingForRedirectedFDs confirms the
 // guard that prevents double-writes when stdout/stderr are already the
 // supervisor log file, even when the fd carries a cosmetic /dev/stdout name.

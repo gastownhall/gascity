@@ -129,6 +129,18 @@ func newSupervisorStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+// supervisorLogTeeEnv, when set to "0" in the supervisor's environment,
+// disables teeing `gc supervisor run` output into the supervisor log file so
+// the service manager's log (e.g. journald under systemd) is the single
+// sink. Any other value, including unset, keeps the default tee behavior.
+const supervisorLogTeeEnv = "GC_SUPERVISOR_LOG_TEE"
+
+// supervisorLogTeeDisabled reports whether GC_SUPERVISOR_LOG_TEE=0 opts the
+// supervisor out of teeing its output into the supervisor log file.
+func supervisorLogTeeDisabled() bool {
+	return os.Getenv(supervisorLogTeeEnv) == "0"
+}
+
 // openSupervisorLogForTee opens the supervisor log file in append mode for
 // runSupervisor to tee output into.
 func openSupervisorLogForTee() (*os.File, error) {
@@ -1100,8 +1112,12 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// Always tee to ~/.gc/supervisor.log so `gc supervisor logs` works
 	// regardless of how the supervisor was invoked. We skip the tee when
 	// stdout/stderr already point at the same file (manual `gc supervisor
-	// start` path) to avoid double-logging.
-	if logFile, err := openSupervisorLogForTee(); err != nil {
+	// start` path) to avoid double-logging, and when GC_SUPERVISOR_LOG_TEE=0
+	// opts out entirely so the service manager's log (e.g. journald under
+	// systemd) is the single sink.
+	if supervisorLogTeeDisabled() {
+		fmt.Fprintf(stderr, "gc supervisor: log tee disabled (%s=0); not writing %s\n", supervisorLogTeeEnv, supervisorLogPath()) //nolint:errcheck
+	} else if logFile, err := openSupervisorLogForTee(); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: tee disabled: %v\n", err) //nolint:errcheck
 	} else {
 		defer logFile.Close() //nolint:errcheck // keep after later run-loop cleanup defers
