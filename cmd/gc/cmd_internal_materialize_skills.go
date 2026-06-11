@@ -57,11 +57,19 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			cityPath, err := resolveCity()
 			if err != nil {
+				if bestEffort {
+					fmt.Fprintf(stderr, "gc internal materialize-skills: city not found: %v; skipping (best-effort)\n", err) //nolint:errcheck // best-effort stderr
+					return nil
+				}
 				fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
+				if bestEffort {
+					fmt.Fprintf(stderr, "gc internal materialize-skills: city config unavailable: %v; skipping (best-effort)\n", err) //nolint:errcheck // best-effort stderr
+					return nil
+				}
 				fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
@@ -128,7 +136,7 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&workdir, "workdir", "", "agent working directory (skills materialize into workdir/.<vendor>/skills/)")
 	cmd.Flags().StringVar(&sharedCatalogSnapshot, "shared-catalog-snapshot", "", "base64-encoded shared catalog snapshot from the controller")
 	cmd.Flags().StringVar(&sharedCatalogSnapshotFile, "shared-catalog-snapshot-file", "", "path to a file containing the base64-encoded shared catalog snapshot (preferred over --shared-catalog-snapshot for large catalogs to avoid argv/env limits)")
-	cmd.Flags().BoolVar(&bestEffort, "best-effort", false, "warn and exit 0 instead of failing when the agent can't be resolved; used by pre_start so an unresolvable session identity (named/wisp expansion) doesn't make session start fatal")
+	cmd.Flags().BoolVar(&bestEffort, "best-effort", false, "warn and exit 0 instead of failing when city path, city config, or agent identity can't be resolved; used by pre_start so session startup is non-fatal when city state is transiently unavailable (dirty import cache, missing city.toml) or the session identity can't be matched to a config template")
 	return cmd
 }
 
