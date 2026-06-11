@@ -453,11 +453,7 @@ func TestFindCity(t *testing.T) {
 	t.Run("not_found", func(t *testing.T) {
 		// Use an explicit /tmp-rooted dir so the upward walk cannot
 		// accidentally hit a real .gc/ directory on the host (e.g.
-		// a running city under $HOME). Skip when /tmp/.gc already
-		// exists (running city in /tmp would make findCity succeed).
-		if _, err := os.Stat("/tmp/.gc"); err == nil {
-			t.Skip("machine has /tmp/.gc — running city in /tmp would cause a false positive")
-		}
+		// a running city under $HOME).
 		dir, err := os.MkdirTemp("/tmp", "gc-test-notfound-*")
 		if err != nil {
 			t.Fatal(err)

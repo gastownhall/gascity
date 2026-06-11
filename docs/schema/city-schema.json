@@ -992,21 +992,6 @@
           ],
           "description": "BDCompatibility selects the bd CLI semantics Gas City may rely on.\nEmpty defaults to \"bd-1.0.4\", which keeps claimable work history-backed\nand avoids bd ready/list flags that are unavailable or incomplete in bd\n1.0.4."
         },
-        "proxied": {
-          "type": "boolean",
-          "description": "Proxied routes bd through the pooling db-proxy (ProxiedServerMode,\nexternal backend) instead of direct ServerMode, eliminating the per-call\nbd→dolt connection churn (#1978: ~71 new connections/sec to the managed\ndolt server). Defaults to false = current direct ServerMode, byte-for-byte\nidentical, so existing cities are unaffected. Requires a bd build that\nsupports `bd init --proxied-server` (external); when the resolved bd lacks\nit, gascity falls back to server mode and a doctor check flags it, so a\ncity paired with a standard bd never breaks.",
-          "default": false
-        },
-        "proxy_pool_size": {
-          "type": "integer",
-          "description": "ProxyPoolSize is the warm backend-connection pool size the db-proxy keeps\nper (capabilities, database) key when Proxied is true. Defaults to 4.\nThe proxy is shared per workspace root, so all agents of a scope share one\nwarm pool; the size is frozen by the first bd invocation that spawns the\nproxy (changing it requires restarting the db-proxy-child).",
-          "default": 4
-        },
-        "proxy_idle_timeout": {
-          "type": "string",
-          "description": "ProxyIdleTimeout is how long a db-proxy-child stays alive with no active\nclient before it shuts down. The bd default (30s) is tuned for one busy\nworkspace; gascity touches many scopes sparsely (controller patrol probes\nevery rig once per interval), starving each proxy below 30s so it spawns,\nserves one op, idle-dies, and respawns on the next touch — pure churn that\nnever reaches the warm-pool steady state. A longer timeout keeps proxies\nwarm across sparse bursts. Go duration string; defaults to \"10m\". Read by\nbd as BEADS_PROXY_IDLE_TIMEOUT.",
-          "default": "10m"
-        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"

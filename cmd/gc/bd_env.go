@@ -1278,10 +1278,6 @@ func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	// stuck-looping backup_export sync wedged the whole town on 2026-06-08
 	// (ga-0eq); managed backups run through mol-dog-backup, not this path.
 	applyBdAutoBackupOptOut(env)
-	// Opt-in: route bd through the pooling db-proxy (no-op unless [beads] proxied
-	// and bd supports it). Covers agent AND controller bd calls (rig env builds
-	// on this base).
-	applyProxiedPoolEnv(env, cityPath)
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
 	}
@@ -1358,9 +1354,6 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 			}
 		}
 	}
-	// Opt-in: carry the proxied/pool env to the gc-beads-bd provider script and
-	// any bd it forks (no-op unless [beads] proxied and bd supports it).
-	applyProxiedPoolEnv(overrides, cityPath)
 	return mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides), projectionErr
 }
 

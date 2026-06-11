@@ -2187,28 +2187,6 @@ op_ensure_ready() {
 # run_bd_pinned executes bd against the already-selected Dolt backend for this
 # provider operation. Without these exports, plain bd commands can rediscover
 # or auto-start a different local server mid-init.
-# bd_supports_proxied reports (memoized, exit 0/1) whether the resolved bd
-# supports `bd init --proxied-server` external. A city may opt into proxied mode
-# (GC_BEADS_PROXIED=1) while paired with a standard bd; in that case we fall back
-# to direct server mode so init never breaks.
-_BD_PROXIED_PROBE=""
-bd_supports_proxied() {
-    if [ -z "$_BD_PROXIED_PROBE" ]; then
-        if bd init --help 2>&1 | grep -q 'proxied-server-external'; then
-            _BD_PROXIED_PROBE=yes
-        else
-            _BD_PROXIED_PROBE=no
-        fi
-    fi
-    [ "$_BD_PROXIED_PROBE" = yes ]
-}
-
-# proxied_active reports whether this invocation should run bd in pooling
-# proxied-server mode: the city opted in AND bd supports it.
-proxied_active() {
-    [ "${GC_BEADS_PROXIED:-}" = "1" ] && bd_supports_proxied
-}
-
 run_bd_pinned() {
     local dir="$1"
     shift
@@ -2219,24 +2197,13 @@ run_bd_pinned() {
         cd "$dir" || exit 1
         export BEADS_DIR="$beads_dir"
         export GC_DOLT_HOST="$host"
+        export BEADS_DOLT_SERVER_HOST="$host"
         export GC_DOLT_PORT="$DOLT_PORT"
+        export BEADS_DOLT_SERVER_PORT="$DOLT_PORT"
         export GC_DOLT_USER="$DOLT_USER"
         export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
-        if proxied_active; then
-            # Proxied-server mode: bd selects the mode from metadata.json
-            # (dolt_mode=proxied-server, written by gc) + proxied_server_client_info.json.
-            # Do NOT export BEADS_DOLT_SERVER_*: they select direct ServerMode and
-            # would shadow proxied mode. Pass the pool size + external password.
-            export BEADS_PROXY_POOL_SIZE="${GC_BEADS_PROXY_POOL_SIZE:-4}"
-            # Keep the proxy warm across sparse controller probes (anti-respawn).
-            [ -n "${GC_BEADS_PROXY_IDLE_TIMEOUT:-}" ] && export BEADS_PROXY_IDLE_TIMEOUT="$GC_BEADS_PROXY_IDLE_TIMEOUT"
-            [ -n "$DOLT_PASSWORD" ] && export BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD="$DOLT_PASSWORD"
-        else
-            export BEADS_DOLT_SERVER_HOST="$host"
-            export BEADS_DOLT_SERVER_PORT="$DOLT_PORT"
-            export BEADS_DOLT_SERVER_USER="$DOLT_USER"
-            export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
-        fi
+        export BEADS_DOLT_SERVER_USER="$DOLT_USER"
+        export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
         bd "$@"
     )
 }
@@ -2247,30 +2214,14 @@ run_bd_init_pinned() {
     local dolt_database="$3"
     local host="$4"
     local force_init="${5:-false}"
-    local mode_args
-    if proxied_active; then
-        # Provision the scope in proxied-server external mode so bd routes through
-        # the pooling db-proxy fronting the managed dolt server. Proxied init needs
-        # the external target explicitly (it writes proxied_server_client_info.json).
-        mode_args="--proxied-server --proxied-server-external-host $host --proxied-server-external-port $DOLT_PORT --proxied-server-external-user $DOLT_USER"
-    else
-        # Direct server mode: bd reads host/port/user from the BEADS_DOLT_SERVER_*
-        # env that run_bd_pinned exports, so plain --server suffices (and keeps the
-        # arg ordering byte-identical to the non-proxied default).
-        mode_args="--server"
-        if [ "${GC_BEADS_PROXIED:-}" = "1" ]; then
-            echo "gc-beads-bd: [beads] proxied=1 but resolved bd lacks --proxied-server support; using direct server mode" >&2
-        fi
-    fi
-    # shellcheck disable=SC2086 # mode_args is intentionally word-split
     if [ "$force_init" = "true" ]; then
-        run_bd_pinned "$dir" init --force --quiet $mode_args -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
-            "$dir" || die "bd init failed for $dir"
+        run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+            --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
         return 0
     fi
 
-    run_bd_pinned "$dir" init --quiet $mode_args -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
-        "$dir" || die "bd init failed for $dir"
+    run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+        --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
 }
 
 run_bd_doltlite() {
