@@ -29,6 +29,7 @@ package formula
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -1042,8 +1043,7 @@ func metadataRequiresGraphContract(metadata map[string]string) bool {
 		value := strings.TrimSpace(rawValue)
 		switch key {
 		case beadmeta.KindMetadataKey:
-			switch value {
-			case beadmeta.KindScope, beadmeta.KindCleanup, beadmeta.KindScopeCheck, beadmeta.KindWorkflowFinalize, beadmeta.KindRetry, beadmeta.KindRetryRun, beadmeta.KindRetryEval, beadmeta.KindRalph, beadmeta.KindRun, beadmeta.KindCheck, beadmeta.KindDrain:
+			if slices.Contains(beadmeta.GraphContractMetadataKinds, value) {
 				return true
 			}
 		case beadmeta.ScopeNameMetadataKey, beadmeta.ScopeRoleMetadataKey, beadmeta.ScopeRefMetadataKey, beadmeta.ContinuationGroupMetadataKey, beadmeta.OnFailMetadataKey:

@@ -6,6 +6,7 @@ package graphroute
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -77,13 +78,16 @@ type graphStepTarget struct {
 
 // IsControlDispatcherKind reports whether a gc.kind value is a control-
 // dispatcher kind (routed to the control dispatcher agent).
+//
+// KNOWN DRIFT: this is beadmeta.ControlKinds minus KindTally. PR #1194 added
+// tally to formula compilation and the ProcessControl switch but never wired
+// routing, so today tally steps are routed like worker work and never reach
+// the dispatcher. Including KindTally here is the routing fix, but it changes
+// where persisted tally beads land and needs a resolver arm plus migration
+// review — tracked as a dispatch routing bug, not silently flipped in a
+// vocabulary refactor.
 func IsControlDispatcherKind(kind string) bool {
-	switch kind {
-	case "check", "drain", "fanout", "retry-eval", "scope-check", "workflow-finalize", "retry", "ralph":
-		return true
-	default:
-		return false
-	}
+	return beadmeta.IsControlKind(kind) && kind != beadmeta.KindTally
 }
 
 // IsWorkflowTopologyKind reports whether a gc.kind value identifies a
@@ -91,12 +95,7 @@ func IsControlDispatcherKind(kind string) bool {
 // Routing never lands on these — they exist to structure the graph, not
 // to be claimed by an agent.
 func IsWorkflowTopologyKind(kind string) bool {
-	switch kind {
-	case "workflow", "scope", "spec":
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(beadmeta.WorkflowTopologyKinds, kind)
 }
 
 // IsCompiledGraphWorkflow reports whether a compiled recipe is a graph.v2
