@@ -5,6 +5,11 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
 // resetInitState resets the package-level telemetry init guard so tests run
@@ -21,6 +26,85 @@ func resetInitState(t *testing.T) {
 		globalProvider = nil
 		initMu.Unlock()
 	})
+}
+
+// resourceAttr returns the value of key in res, or "" when absent.
+func resourceAttr(t *testing.T, res *resource.Resource, key string) string {
+	t.Helper()
+	for _, kv := range res.Attributes() {
+		if string(kv.Key) == key {
+			return kv.Value.AsString()
+		}
+	}
+	return ""
+}
+
+func TestNewResource_SetsUniqueServiceInstanceID(t *testing.T) {
+	ctx := context.Background()
+
+	res1, err := newResource(ctx, "test-svc", "0.0.1")
+	if err != nil {
+		t.Fatalf("newResource error: %v", err)
+	}
+	res2, err := newResource(ctx, "test-svc", "0.0.1")
+	if err != nil {
+		t.Fatalf("newResource error: %v", err)
+	}
+
+	id1 := resourceAttr(t, res1, string(semconv.ServiceInstanceIDKey))
+	id2 := resourceAttr(t, res2, string(semconv.ServiceInstanceIDKey))
+
+	if id1 == "" {
+		t.Fatal("resource is missing service.instance.id")
+	}
+	if _, err := uuid.Parse(id1); err != nil {
+		t.Errorf("service.instance.id %q is not a valid UUID: %v", id1, err)
+	}
+	if id1 == id2 {
+		t.Errorf("service.instance.id must be unique per resource, got %q twice", id1)
+	}
+}
+
+func TestNewResource_KeepsServiceIdentity(t *testing.T) {
+	res, err := newResource(context.Background(), "test-svc", "0.0.1")
+	if err != nil {
+		t.Fatalf("newResource error: %v", err)
+	}
+	if got := resourceAttr(t, res, string(semconv.ServiceNameKey)); got != "test-svc" {
+		t.Errorf("service.name = %q, want %q", got, "test-svc")
+	}
+	if got := resourceAttr(t, res, string(semconv.ServiceVersionKey)); got != "0.0.1" {
+		t.Errorf("service.version = %q, want %q", got, "0.0.1")
+	}
+}
+
+func TestInit_WiresResourceWithInstanceID(t *testing.T) {
+	resetInitState(t)
+	// Unreachable endpoint: the exporter does not dial at construction and
+	// export is best-effort, so Init succeeds without a live backend.
+	t.Setenv(EnvMetricsURL, "http://127.0.0.1:1/v1/metrics")
+	t.Setenv(EnvLogsURL, "")
+
+	p, err := Init(context.Background(), "test-svc", "0.0.1")
+	if err != nil {
+		t.Fatalf("Init error: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil provider when metrics URL is set")
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = p.Shutdown(ctx) // flush to the unreachable endpoint fails; irrelevant here
+	})
+
+	id := resourceAttr(t, p.resource, string(semconv.ServiceInstanceIDKey))
+	if id == "" {
+		t.Fatal("Init did not wire a resource carrying service.instance.id")
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		t.Errorf("service.instance.id %q is not a valid UUID: %v", id, err)
+	}
 }
 
 func TestInit_BothURLsUnset_ReturnsNil(t *testing.T) {

@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
@@ -60,6 +61,10 @@ type Provider struct {
 	shutdowns    []func(context.Context) error
 	shutdownMu   sync.Mutex
 	shutdownDone bool
+
+	// resource is the OTel resource shared by all providers; retained so
+	// tests can assert Init wires newResource into the export pipeline.
+	resource *resource.Resource
 }
 
 // Shutdown flushes all pending data and stops the OTel providers.
@@ -83,6 +88,29 @@ func (p *Provider) Shutdown(ctx context.Context) error {
 		return fmt.Errorf("telemetry shutdown errors: %v", errs)
 	}
 	return nil
+}
+
+// newResource builds the OTel resource shared by the metric and log
+// providers. service.instance.id (a fresh UUID, per the OTel semantic
+// conventions) is required for correctness, not just attribution: gc
+// counters are cumulative per process, and many gc processes run
+// concurrently on one host — without a unique instance id their
+// snapshots interleave on a single series, so rate queries over the
+// merged series are meaningless.
+func newResource(ctx context.Context, serviceName, serviceVersion string) (*resource.Resource, error) {
+	instanceID, err := uuid.NewRandom()
+	if err != nil {
+		return nil, fmt.Errorf("generating service.instance.id: %w", err)
+	}
+	return resource.New(ctx,
+		resource.WithAttributes(
+			semconv.ServiceName(serviceName),
+			semconv.ServiceVersion(serviceVersion),
+			semconv.ServiceInstanceID(instanceID.String()),
+		),
+		resource.WithHost(),
+		resource.WithOS(),
+	)
 }
 
 // ResetForTest resets the global init state so tests can re-initialize.
@@ -128,19 +156,12 @@ func Init(ctx context.Context, serviceName, serviceVersion string) (*Provider, e
 		logsURL = DefaultLogsURL
 	}
 
-	res, err := resource.New(ctx,
-		resource.WithAttributes(
-			semconv.ServiceName(serviceName),
-			semconv.ServiceVersion(serviceVersion),
-		),
-		resource.WithHost(),
-		resource.WithOS(),
-	)
+	res, err := newResource(ctx, serviceName, serviceVersion)
 	if err != nil {
 		return nil, fmt.Errorf("creating OTel resource: %w", err)
 	}
 
-	p := &Provider{}
+	p := &Provider{resource: res}
 
 	// Metrics → VictoriaMetrics
 	metricExp, err := otlpmetrichttp.New(ctx,
