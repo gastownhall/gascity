@@ -182,6 +182,7 @@ func workflowTracef(format string, args ...any) {
 	if path == "" {
 		return
 	}
+	maybeRotateWorkflowTrace(path)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		workflowTraceWarnOpenFailure(path, err)
