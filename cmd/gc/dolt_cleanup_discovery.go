@@ -44,7 +44,12 @@ func loadRigDoltPorts(rigs []resolverRig, fs fsys.FS) map[int]string {
 
 // procEnumerationTimeout caps the per-PID I/O during /proc walks so a stuck
 // kernel thread or hung process can't make the reaper hang.
-const procEnumerationTimeout = 2 * time.Second
+const procEnumerationTimeout = 5 * time.Second
+
+// psEnumerationTimeout caps the wall-clock budget for the full-system ps -ax
+// invocation on Darwin/macOS. ps -ax can take 2–5 s on a busy machine; it
+// needs a much larger budget than the per-PID procEnumerationTimeout.
+const psEnumerationTimeout = 30 * time.Second
 
 // discoverDoltProcesses finds live `dolt sql-server` processes and reports
 // their argv and listening ports. Linux uses /proc for argv, ports, RSS, and
@@ -277,7 +282,7 @@ func readDoltSQLServerArgv(pid int) ([]string, bool) {
 }
 
 func psLStartCommandLines() ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), psEnumerationTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=,rss=,lstart=,command=")
 	out, err := cmd.Output()
