@@ -6,6 +6,7 @@ package deliverywarden
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -15,25 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/delivery"
 )
 
-// Warden metadata key constants.
-const (
-	metaKeyPhaseEnteredAt    = "gc.phase_entered_at"    // Unix timestamp when bead entered current phase
-	metaKeyWardenRetries     = "gc.warden_retries"      // number of recovery attempts by the warden
-	metaKeyWardenEscalated   = "gc.warden_escalated"    // set when escalation mail has been sent
-	metaKeyCreatedAtOverride = "gc.created_at_override" // test hook: override effective creation time (Unix seconds)
-)
-
 const maxLifetime = 24 * time.Hour
-
-// phaseDwellBudgets maps each delivery phase to its maximum allowed dwell time.
-var phaseDwellBudgets = map[string]time.Duration{
-	delivery.PhaseBuilding:        10 * time.Minute,
-	delivery.PhaseCIPending:       30 * time.Minute,
-	delivery.PhaseReviewPending:   60 * time.Minute,
-	delivery.PhaseRework:          30 * time.Minute,
-	delivery.PhaseDecisionPending: 20 * time.Minute,
-	delivery.PhaseMergePending:    15 * time.Minute,
-}
 
 // recoveryTarget maps each delivery phase to the agent pool that should be nudged on stall.
 var recoveryTarget = map[string]string{
@@ -43,6 +26,7 @@ var recoveryTarget = map[string]string{
 	delivery.PhaseRework:          "voxist-platform/voxist.executor",
 	delivery.PhaseDecisionPending: "voxist-platform/voxist.reviewer",
 	delivery.PhaseMergePending:    "voxist-platform/voxist.reviewer",
+	delivery.PhaseConflicted:      "voxist-platform/voxist.executor",
 }
 
 // PullRequest is the subset of GitHub PR data the warden needs.
@@ -75,11 +59,12 @@ type Warden struct {
 	github GitHubClient
 	mail   MailSender
 	clock  func() time.Time // injectable for tests; defaults to time.Now
+	log    io.Writer        // injectable for tests; defaults to os.Stderr
 }
 
 // NewWarden creates a Warden backed by the given store, GitHub client, and mail sender.
 func NewWarden(store beads.Store, gh GitHubClient, mail MailSender) *Warden {
-	return &Warden{store: store, github: gh, mail: mail, clock: time.Now}
+	return &Warden{store: store, github: gh, mail: mail, clock: time.Now, log: os.Stderr}
 }
 
 // now returns the current time via the injectable clock.
@@ -175,7 +160,7 @@ func (w *Warden) RepairZombie() error {
 
 		pr, err := w.github.GetPR(prURL)
 		if err != nil {
-			// Fail-open: log and continue rather than aborting the sweep.
+			_, _ = fmt.Fprintf(w.log, "RepairZombie: GetPR(%s): %v\n", prURL, err)
 			continue
 		}
 
@@ -222,33 +207,33 @@ func (w *Warden) CheckPhaseDwell() error {
 			continue
 		}
 
-		budget, ok := phaseDwellBudgets[phase]
+		budget, ok := delivery.PhaseBudgets[phase]
 		if !ok {
 			continue
 		}
 
 		// Bootstrap gc.phase_entered_at on first encounter; skip this tick.
-		enteredAtStr := b.Metadata[metaKeyPhaseEnteredAt]
+		enteredAtStr := b.Metadata[delivery.MetaKeyPhaseEnteredAt]
 		if enteredAtStr == "" {
-			_ = w.store.SetMetadata(b.ID, metaKeyPhaseEnteredAt, strconv.FormatInt(now.Unix(), 10))
+			_ = w.store.SetMetadata(b.ID, delivery.MetaKeyPhaseEnteredAt, now.UTC().Format(time.RFC3339))
 			continue
 		}
 
-		enteredAtUnix, err := strconv.ParseInt(enteredAtStr, 10, 64)
+		enteredAt, err := time.Parse(time.RFC3339, enteredAtStr)
 		if err != nil {
 			continue
 		}
 
-		if now.Sub(time.Unix(enteredAtUnix, 0)) <= budget {
+		if now.Sub(enteredAt) <= budget {
 			continue
 		}
 
 		// Already escalated — skip (idempotent).
-		if b.Metadata[metaKeyWardenEscalated] != "" {
+		if b.Metadata[delivery.MetaKeyWardenEscalated] != "" {
 			continue
 		}
 
-		retries, _ := strconv.Atoi(b.Metadata[metaKeyWardenRetries])
+		retries, _ := strconv.Atoi(b.Metadata[delivery.MetaKeyWardenRetries])
 
 		if retries >= 3 {
 			subject := fmt.Sprintf("stall: %s phase=%s", b.ID, phase)
@@ -256,7 +241,7 @@ func (w *Warden) CheckPhaseDwell() error {
 			if err := w.mail.Send("voxist-platform/voxist.warden", "voxist-platform/human", subject, body); err != nil {
 				return fmt.Errorf("CheckPhaseDwell: escalate %s: %w", b.ID, err)
 			}
-			if err := w.store.SetMetadata(b.ID, metaKeyWardenEscalated, "1"); err != nil {
+			if err := w.store.SetMetadata(b.ID, delivery.MetaKeyWardenEscalated, "1"); err != nil {
 				return fmt.Errorf("CheckPhaseDwell: set escalated on %s: %w", b.ID, err)
 			}
 		} else {
@@ -269,7 +254,7 @@ func (w *Warden) CheckPhaseDwell() error {
 			if err := w.mail.Send("voxist-platform/voxist.warden", target, subject, body); err != nil {
 				return fmt.Errorf("CheckPhaseDwell: recovery nudge %s: %w", b.ID, err)
 			}
-			if err := w.store.SetMetadata(b.ID, metaKeyWardenRetries, strconv.Itoa(retries+1)); err != nil {
+			if err := w.store.SetMetadata(b.ID, delivery.MetaKeyWardenRetries, strconv.Itoa(retries+1)); err != nil {
 				return fmt.Errorf("CheckPhaseDwell: update retries on %s: %w", b.ID, err)
 			}
 		}
@@ -293,7 +278,7 @@ func (w *Warden) CheckGlobalLifetime() error {
 		if b.Metadata[delivery.MetaKeyPhase] == "" {
 			continue // not a delivery bead
 		}
-		if b.Metadata[metaKeyWardenEscalated] == "global" {
+		if b.Metadata[delivery.MetaKeyWardenEscalated] == "global" {
 			continue // already escalated (idempotent)
 		}
 		if now.Sub(b.CreatedAt) <= maxLifetime {
@@ -306,7 +291,7 @@ func (w *Warden) CheckGlobalLifetime() error {
 		if err := w.mail.Send("voxist-platform/voxist.warden", "voxist-platform/human", subject, body); err != nil {
 			return fmt.Errorf("CheckGlobalLifetime: escalate %s: %w", b.ID, err)
 		}
-		if err := w.store.SetMetadata(b.ID, metaKeyWardenEscalated, "global"); err != nil {
+		if err := w.store.SetMetadata(b.ID, delivery.MetaKeyWardenEscalated, "global"); err != nil {
 			return fmt.Errorf("CheckGlobalLifetime: set escalated on %s: %w", b.ID, err)
 		}
 	}
@@ -344,10 +329,8 @@ func (w *Warden) Sweep(repos [][2]string, heartbeatFile string) error {
 	if err := w.CheckGlobalLifetime(); err != nil {
 		errs = append(errs, err)
 	}
-	if len(errs) == 0 {
-		if err := WriteHeartbeat(heartbeatFile); err != nil {
-			errs = append(errs, fmt.Errorf("WriteHeartbeat: %w", err))
-		}
+	if err := WriteHeartbeat(heartbeatFile); err != nil {
+		errs = append(errs, fmt.Errorf("WriteHeartbeat: %w", err))
 	}
 
 	if len(errs) == 0 {

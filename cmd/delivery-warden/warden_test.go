@@ -3,7 +3,6 @@ package deliverywarden
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,9 +16,13 @@ type FakeGitHub struct {
 	OpenPRs   []PullRequest
 	PRByURL   map[string]PullRequest
 	SendCalls []string // records "owner/repo#N" for GetPR calls
+	ListErr   error    // if non-nil, ListOpenPRs returns this error
 }
 
 func (f *FakeGitHub) ListOpenPRs(owner, repo string) ([]PullRequest, error) {
+	if f.ListErr != nil {
+		return nil, f.ListErr
+	}
 	var out []PullRequest
 	for _, pr := range f.OpenPRs {
 		if pr.Owner == owner && pr.Repo == repo {
@@ -229,7 +232,7 @@ func TestRepairZombie_Closed(t *testing.T) {
 // newDeliveryBeadWithPhaseEnteredAt creates a delivery bead with gc.phase_entered_at set.
 func newDeliveryBeadWithPhaseEnteredAt(store beads.Store, prURL, phase string, enteredAt time.Time) beads.Bead {
 	b := newDeliveryBead(store, prURL, phase)
-	if err := store.SetMetadata(b.ID, metaKeyPhaseEnteredAt, strconv.FormatInt(enteredAt.Unix(), 10)); err != nil {
+	if err := store.SetMetadata(b.ID, delivery.MetaKeyPhaseEnteredAt, enteredAt.UTC().Format(time.RFC3339)); err != nil {
 		panic(err)
 	}
 	got, err := store.Get(b.ID)
@@ -258,8 +261,8 @@ func TestPhaseDwellRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
-	if got.Metadata[metaKeyWardenRetries] != "1" {
-		t.Errorf("gc.warden_retries: got %q, want %q", got.Metadata[metaKeyWardenRetries], "1")
+	if got.Metadata[delivery.MetaKeyWardenRetries] != "1" {
+		t.Errorf("gc.warden_retries: got %q, want %q", got.Metadata[delivery.MetaKeyWardenRetries], "1")
 	}
 	if len(mail.Sent) == 0 {
 		t.Error("want recovery nudge sent, got none")
@@ -272,7 +275,7 @@ func TestPhaseDwellEscalate(t *testing.T) {
 	// Bead in review-pending 65 min, already retried 3 times → escalation path.
 	enteredAt := time.Now().Add(-65 * time.Minute)
 	b := newDeliveryBeadWithPhaseEnteredAt(store, "https://github.com/org/repo/pull/20", delivery.PhaseReviewPending, enteredAt)
-	if err := store.SetMetadata(b.ID, metaKeyWardenRetries, "3"); err != nil {
+	if err := store.SetMetadata(b.ID, delivery.MetaKeyWardenRetries, "3"); err != nil {
 		t.Fatalf("set retries: %v", err)
 	}
 
@@ -288,7 +291,7 @@ func TestPhaseDwellEscalate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
-	if got.Metadata[metaKeyWardenEscalated] == "" {
+	if got.Metadata[delivery.MetaKeyWardenEscalated] == "" {
 		t.Error("gc.warden_escalated not set after escalation")
 	}
 	if len(mail.Sent) != 1 {
@@ -327,8 +330,8 @@ func TestGlobalLifetime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
-	if got.Metadata[metaKeyWardenEscalated] != "global" {
-		t.Errorf("gc.warden_escalated: got %q, want %q", got.Metadata[metaKeyWardenEscalated], "global")
+	if got.Metadata[delivery.MetaKeyWardenEscalated] != "global" {
+		t.Errorf("gc.warden_escalated: got %q, want %q", got.Metadata[delivery.MetaKeyWardenEscalated], "global")
 	}
 	if len(mail.Sent) != 1 {
 		t.Errorf("want 1 escalation mail, got %d", len(mail.Sent))
@@ -405,5 +408,117 @@ func TestWardenNoop(t *testing.T) {
 	// No mail sent.
 	if len(mail.Sent) != 0 {
 		t.Errorf("want 0 mails, got %d", len(mail.Sent))
+	}
+}
+
+// TestSweepHeartbeatWrittenOnError verifies that the heartbeat file is written
+// even when an earlier sweep step returns an error — catches the
+// heartbeat-gated-on-zero-errors regression.
+func TestSweepHeartbeatWrittenOnError(t *testing.T) {
+	store := beads.NewMemStore()
+	// Make ListOpenPRs fail so RepairOrphan returns an error.
+	gh := &FakeGitHub{ListErr: fmt.Errorf("github unavailable")}
+	mail := &FakeMail{}
+	w := NewWarden(store, gh, mail)
+
+	heartbeatFile := t.TempDir() + "/heartbeat"
+	repos := [][2]string{{"gastownhall", "gascity"}}
+
+	// Sweep should return a non-nil error (GitHub failed).
+	err := w.Sweep(repos, heartbeatFile)
+	if err == nil {
+		t.Fatal("want error from Sweep when GitHub fails, got nil")
+	}
+
+	// Despite the error, the heartbeat must have been written.
+	if _, statErr := os.Stat(heartbeatFile); statErr != nil {
+		t.Errorf("heartbeat not written despite warden running: %v", statErr)
+	}
+}
+
+// TestRepairZombie_LogsGetPRError verifies that a GetPR failure is written to
+// the warden's log writer rather than silently swallowed — catches the
+// zombie-repair-no-logging regression.
+func TestRepairZombie_LogsGetPRError(t *testing.T) {
+	store := beads.NewMemStore()
+	// Bead whose PR URL is not registered in FakeGitHub → GetPR returns error.
+	prURL := "https://github.com/org/repo/pull/50"
+	newDeliveryBead(store, prURL, delivery.PhaseReviewPending)
+
+	gh := &FakeGitHub{PRByURL: map[string]PullRequest{}} // URL absent → error
+	mail := &FakeMail{}
+	w := NewWarden(store, gh, mail)
+
+	var logBuf strings.Builder
+	w.log = &logBuf
+
+	if err := w.RepairZombie(); err != nil {
+		t.Fatalf("RepairZombie: %v", err)
+	}
+
+	if logBuf.Len() == 0 {
+		t.Error("want log output for GetPR error, got none")
+	}
+}
+
+// TestCheckPhaseDwell_BootstrapsRFC3339 verifies that CheckPhaseDwell bootstraps
+// gc.phase_entered_at in RFC3339 format so delivery.PhaseEnteredAt reads the
+// same timestamp back correctly. Catches the phase_entered_at-format-mismatch
+// regression (warden wrote Unix epoch, doctor read RFC3339).
+func TestCheckPhaseDwell_BootstrapsRFC3339(t *testing.T) {
+	store := beads.NewMemStore()
+	prURL := "https://github.com/org/repo/pull/99"
+	b := newDeliveryBead(store, prURL, delivery.PhaseReviewPending)
+
+	gh := &FakeGitHub{}
+	mail := &FakeMail{}
+	w := NewWarden(store, gh, mail)
+
+	// First call: warden bootstraps gc.phase_entered_at and skips this tick.
+	if err := w.CheckPhaseDwell(); err != nil {
+		t.Fatalf("CheckPhaseDwell bootstrap: %v", err)
+	}
+
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+
+	raw := got.Metadata[delivery.MetaKeyPhaseEnteredAt]
+	if raw == "" {
+		t.Fatal("gc.phase_entered_at not set after bootstrap")
+	}
+
+	// Value must be parseable as RFC3339 — the canonical format that delivery.PhaseEnteredAt reads first.
+	if _, err := time.Parse(time.RFC3339, raw); err != nil {
+		t.Errorf("gc.phase_entered_at is not RFC3339: %q: %v", raw, err)
+	}
+
+	// delivery.PhaseAge must report near-zero (just bootstrapped).
+	if age := delivery.PhaseAge(got); age < 0 || age > 2*time.Second {
+		t.Errorf("PhaseAge after RFC3339 bootstrap: got %v, want ≤ 2s", age)
+	}
+}
+
+// TestPhaseDwellConflicted verifies that a bead stuck in the "conflicted" phase
+// past its 60-minute budget triggers a recovery nudge. Catches the
+// phase_conflicted-missing-from-dwell-budgets regression.
+func TestPhaseDwellConflicted(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Bead in conflicted for 70 min — past the 60-min budget.
+	enteredAt := time.Now().Add(-70 * time.Minute)
+	newDeliveryBeadWithPhaseEnteredAt(store, "https://github.com/org/repo/pull/40", delivery.PhaseConflicted, enteredAt)
+
+	gh := &FakeGitHub{}
+	mail := &FakeMail{}
+	w := NewWarden(store, gh, mail)
+
+	if err := w.CheckPhaseDwell(); err != nil {
+		t.Fatalf("CheckPhaseDwell: %v", err)
+	}
+
+	if len(mail.Sent) == 0 {
+		t.Error("want recovery nudge sent for conflicted phase, got none")
 	}
 }
