@@ -44,6 +44,9 @@ type liveWorkerHandleHarness struct {
 	authSource string
 	workDir    string
 	gcHome     string
+	cityDir    string            // non-empty when the profile is city-backed (hook session-key persistence)
+	store      beads.Store       // the manager's bead store (shared city store for city-backed profiles)
+	sessionEnv map[string]string // env the provider session (and its gc children) receives
 	adapter    workerpkg.SessionLogAdapter
 }
 
@@ -81,6 +84,35 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 		return nil, err
 	}
 
+	// Hook-managed profiles persist the provider resume key from the
+	// provider's hook plugin: plugin → `gc prime --hook` → city store
+	// metadata. Those profiles need a real city behind the harness so the
+	// gc child and the in-process session manager share one store. The
+	// city must exist before the instructions file and provider hooks are
+	// staged into the work dir below.
+	store := beads.Store(beads.NewMemStore())
+	cityDir := ""
+	if profileUsesHookSessionKeyPersistence(liveSetup.Profile) {
+		// Register the runtime teardown before staging: gc init registers
+		// the city and starts a supervisor, so a failure in any later
+		// staging step must still reap that runtime. The teardown is
+		// best-effort and idempotent, so the success-path cleanup below
+		// repeating it is harmless.
+		t.Cleanup(func() {
+			teardownLiveHandleCityRuntime(env, root)
+		})
+		cityStore, err := stageLiveHandleCity(env, root, liveSetup.Provider)
+		if err != nil {
+			return nil, err
+		}
+		store = cityStore
+		cityDir = root
+		// GC_CITY is belt and braces with the cwd walk-up (the session work
+		// dir is the city root); GC_BIN points the provider hook plugin at
+		// the staged gc binary instead of whatever is first on PATH.
+		env.With("GC_CITY", cityDir).With("GC_BIN", gcPath)
+	}
+
 	resolved, err := resolveLiveHandleProvider()
 	if err != nil {
 		return nil, err
@@ -97,7 +129,8 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 	tmuxCfg.SocketName = socketName
 
 	provider := runtimetmux.NewProviderWithConfig(tmuxCfg)
-	manager := sessionpkg.NewManager(beads.NewMemStore(), provider)
+	manager := sessionpkg.NewManager(store, provider)
+	sessionEnv := mergeStringMaps(envMapFromAcceptanceEnv(env), resolved.Env)
 	handle, err := workerpkg.NewSessionHandle(workerpkg.SessionHandleConfig{
 		Manager: manager,
 		Adapter: workerpkg.SessionLogAdapter{
@@ -112,7 +145,7 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 			WorkDir:   root,
 			Provider:  liveSetup.Provider,
 			Transport: "tmux",
-			Env:       mergeStringMaps(envMapFromAcceptanceEnv(env), resolved.Env),
+			Env:       sessionEnv,
 			Resume: sessionpkg.ProviderResume{
 				ResumeFlag:    resolved.ResumeFlag,
 				ResumeStyle:   resolved.ResumeStyle,
@@ -133,12 +166,21 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 		authSource: authSource,
 		workDir:    root,
 		gcHome:     gcHome,
+		cityDir:    cityDir,
+		store:      store,
+		sessionEnv: sessionEnv,
 		adapter: workerpkg.SessionLogAdapter{
 			SearchPaths: profileSearchPaths(gcHome, liveSetup.Profile),
 		},
 	}
 	t.Cleanup(func() {
 		_ = harness.handle.Stop(context.Background())
+		if harness.cityDir != "" {
+			// Reap any runtime started against the city (e.g. nudge-poller
+			// sidecars spawned by gc prime --hook) before removing it.
+			teardownLiveHandleCityRuntime(env, harness.cityDir)
+		}
+		closeLiveHandleStore(harness.store)
 		if os.Getenv("GC_ACCEPTANCE_KEEP") != "1" {
 			_ = os.RemoveAll(root)
 		}
