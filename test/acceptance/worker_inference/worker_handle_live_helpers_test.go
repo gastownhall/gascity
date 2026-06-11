@@ -150,6 +150,8 @@ func installLiveHandleProviderHooks(workDir string, profile workerpkg.Profile) e
 	switch profile {
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"opencode"})
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"mimocode"})
 	case workerpkg.ProfilePiTmuxCLI:
 		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"pi"})
 	case workerpkg.ProfileAntigravityTmuxCLI:

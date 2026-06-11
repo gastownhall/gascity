@@ -11,6 +11,7 @@ const ( //nolint:revive // exported profile IDs are documented by the enclosing 
 	ProfileGeminiTmuxCLI      ProfileID = "gemini/tmux-cli"
 	ProfileKimiTmuxCLI        ProfileID = "kimi/tmux-cli"
 	ProfileOpenCodeTmuxCLI    ProfileID = "opencode/tmux-cli"
+	ProfileMimoCodeTmuxCLI    ProfileID = "mimocode/tmux-cli"
 	ProfilePiTmuxCLI          ProfileID = "pi/tmux-cli"
 	ProfileAntigravityTmuxCLI ProfileID = "antigravity/tmux-cli"
 )
@@ -122,6 +123,22 @@ func Phase1Profiles() []Profile {
 				RecallPromptContains:   "Repeat the exact OpenCode phase-1 summary from earlier before answering.",
 				RecallResponseContains: "OpenCode phase 1 validates the tmux CLI transcript contract.",
 				ResetResponseContains:  "I cannot repeat the earlier OpenCode summary because this session started fresh.",
+			},
+		},
+		{
+			ID:       ProfileMimoCodeTmuxCLI,
+			Provider: "mimocode/tmux-cli",
+			WorkDir:  "/tmp/gascity/phase1/mimocode",
+			Fixtures: ProfileFixtureSet{
+				FreshRoot:        "testdata/fixtures/mimocode/fresh",
+				ContinuationRoot: "testdata/fixtures/mimocode/continuation",
+				ResetRoot:        "testdata/fixtures/mimocode/reset",
+			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "MiMo Code phase 1 validates the tmux CLI transcript contract.",
+				RecallPromptContains:   "Repeat the exact MiMo Code phase-1 summary from earlier before answering.",
+				RecallResponseContains: "MiMo Code phase 1 validates the tmux CLI transcript contract.",
+				ResetResponseContains:  "I cannot repeat the earlier MiMo Code summary because this session started fresh.",
 			},
 		},
 		{

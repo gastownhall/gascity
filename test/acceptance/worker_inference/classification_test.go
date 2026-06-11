@@ -568,6 +568,42 @@ func TestStageOpenCodeGeminiAuthMapsGoogleAPIKey(t *testing.T) {
 	require.Equal(t, "google-key", env.Get("GEMINI_API_KEY"))
 }
 
+func TestMimoCodeProfileSetupUsesMimoBinaryAndTranscriptMirrorSearchPath(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	profile := resolveProfile(string(workerpkg.ProfileMimoCodeTmuxCLI))
+
+	require.Equal(t, workerpkg.ProfileMimoCodeTmuxCLI, profile)
+	require.Equal(t, "mimocode", profileProvider(profile))
+	require.Equal(t, "mimo", profileExecutable(profile, profileProvider(profile)))
+	require.Equal(t, []string{filepath.Join(gcHome, ".local", "share", "gascity", "mimocode-transcripts")}, profileSearchPaths(gcHome, profile))
+}
+
+func TestStageMimoCodeAuthFromEnv(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("XIAOMI_API_KEY", "xiaomi-key")
+
+	source, err := stageMimoCodeAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:XIAOMI_API_KEY", source)
+	require.Equal(t, "xiaomi-key", env.Get("XIAOMI_API_KEY"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "share"), env.Get("XDG_DATA_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".config"), env.Get("XDG_CONFIG_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".cache"), env.Get("XDG_CACHE_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "state"), env.Get("XDG_STATE_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "share", "gascity", "mimocode-transcripts"), env.Get("GC_MIMOCODE_TRANSCRIPT_DIR"))
+}
+
+func TestStageMimoCodeAuthErrorsWithoutKey(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("XIAOMI_API_KEY", "")
+
+	_, err := stageMimoCodeAuth(gcHome, env)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "XIAOMI_API_KEY")
+}
+
 func TestStagePiOllamaCloudAuthFromEnv(t *testing.T) {
 	gcHome := t.TempDir()
 	env := helpers.NewEnv("", gcHome, t.TempDir())
@@ -1016,6 +1052,36 @@ install_agent_hooks = ["opencode"]`)
 	require.Contains(t, string(agentData), `session = "tmux"`)
 }
 
+func TestInstallInferenceProbeAgentEnablesMimoCodeHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "mimocode"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[workspace]
+name = "worker-inference-test"
+provider = "mimocode"
+install_agent_hooks = ["mimocode"]`)
+	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["mimocode"]`))
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(agentData), `session = "tmux"`)
+}
+
 func TestInstallInferenceProbeAgentEnablesPiHooks(t *testing.T) {
 	cityDir := t.TempDir()
 	cityToml := filepath.Join(cityDir, "city.toml")
@@ -1412,4 +1478,47 @@ func writeGeminiChat(t *testing.T, path, sessionID, userText, assistantText stri
 func writeLines(t *testing.T, path string, lines ...string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644))
+}
+
+func TestInstallLiveProviderCommandOverrideReplacesInitBuiltinAlias(t *testing.T) {
+	cityDir := t.TempDir()
+	writeLines(t, filepath.Join(cityDir, "city.toml"),
+		"[workspace]",
+		`provider = "mimocode"`,
+		`install_agent_hooks = ["mimocode"]`,
+		"",
+		"[providers]",
+		"[providers.mimocode]",
+		`base = "builtin:mimocode"`,
+		"ready_delay_ms = 0",
+		"",
+		"[daemon]",
+		"formula_v2 = true",
+	)
+
+	err := installLiveProviderCommandOverrideWithArgs(cityDir, "mimocode", "/stage/bin/mimo", []string{"mimo", ".mimocode"}, []string{"--model", "xiaomi-token-plan-sgp/mimo-v2.5-pro"})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
+	require.NoError(t, err)
+	text := string(data)
+	require.Equal(t, 1, strings.Count(text, "[providers.mimocode]"), "exactly one provider section expected:\n%s", text)
+	require.NotContains(t, text, `base = "builtin:mimocode"`, "init alias should be replaced:\n%s", text)
+	require.Contains(t, text, `command = "/stage/bin/mimo"`)
+	require.Contains(t, text, `args_append = ["--model", "xiaomi-token-plan-sgp/mimo-v2.5-pro"]`)
+	require.Contains(t, text, "[daemon]", "unrelated sections must survive:\n%s", text)
+}
+
+func TestInstallLiveProviderCommandOverrideRejectsCustomizedSection(t *testing.T) {
+	cityDir := t.TempDir()
+	writeLines(t, filepath.Join(cityDir, "city.toml"),
+		"[providers]",
+		"[providers.mimocode]",
+		`base = "builtin:mimocode"`,
+		`args = ["--custom-flag"]`,
+	)
+
+	err := installLiveProviderCommandOverrideWithArgs(cityDir, "mimocode", "/stage/bin/mimo", nil, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "already defines")
 }

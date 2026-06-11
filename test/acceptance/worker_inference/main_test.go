@@ -24,7 +24,10 @@ var (
 
 const (
 	defaultOpenCodeGeminiModel = "google/gemini-2.5-flash"
-	defaultPiOllamaCloudModel  = "gpt-oss:20b"
+	// Our XIAOMI_API_KEY is a token-plan SGP key; the plain xiaomi/* and
+	// token-plan-{cn,ams}/* providers reject it.
+	defaultMimoCodeModel      = "xiaomi-token-plan-sgp/mimo-v2.5-pro"
+	defaultPiOllamaCloudModel = "gpt-oss:20b"
 )
 
 type providerSetup struct {
@@ -137,6 +140,8 @@ func resolveProfile(raw string) workerpkg.Profile {
 		return workerpkg.ProfileKimiTmuxCLI
 	case string(workerpkg.ProfileOpenCodeTmuxCLI):
 		return workerpkg.ProfileOpenCodeTmuxCLI
+	case string(workerpkg.ProfileMimoCodeTmuxCLI):
+		return workerpkg.ProfileMimoCodeTmuxCLI
 	case string(workerpkg.ProfilePiTmuxCLI):
 		return workerpkg.ProfilePiTmuxCLI
 	case string(workerpkg.ProfileAntigravityTmuxCLI):
@@ -158,6 +163,8 @@ func profileProvider(profile workerpkg.Profile) string {
 		return "kimi"
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return "opencode"
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return "mimocode"
 	case workerpkg.ProfilePiTmuxCLI:
 		return "pi"
 	case workerpkg.ProfileAntigravityTmuxCLI:
@@ -168,10 +175,14 @@ func profileProvider(profile workerpkg.Profile) string {
 }
 
 func profileExecutable(profile workerpkg.Profile, provider string) string {
-	if profile == workerpkg.ProfileAntigravityTmuxCLI {
+	switch profile {
+	case workerpkg.ProfileAntigravityTmuxCLI:
 		return "agy"
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return "mimo"
+	default:
+		return provider
 	}
-	return provider
 }
 
 func profileSearchPaths(gcHome string, profile workerpkg.Profile) []string {
@@ -184,6 +195,8 @@ func profileSearchPaths(gcHome string, profile workerpkg.Profile) []string {
 		return []string{filepath.Join(gcHome, ".kimi", "sessions")}
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "opencode-transcripts")}
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "mimocode-transcripts")}
 	case workerpkg.ProfilePiTmuxCLI:
 		return []string{filepath.Join(gcHome, ".pi", "agent", "sessions")}
 	case workerpkg.ProfileAntigravityTmuxCLI:
@@ -205,6 +218,8 @@ func stageProviderAuth(gcHome string, env *helpers.Env, profile workerpkg.Profil
 		return stageKimiAuth(gcHome, env)
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return stageOpenCodeGeminiAuth(gcHome, env)
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return stageMimoCodeAuth(gcHome, env)
 	case workerpkg.ProfilePiTmuxCLI:
 		return stagePiOllamaCloudAuth(gcHome, env)
 	case workerpkg.ProfileAntigravityTmuxCLI:
@@ -651,6 +666,30 @@ func stageOpenCodeGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
 		return "env:OPENCODE_AUTH_CONTENT", nil
 	}
 	return "", fmt.Errorf("opencode gemini auth unavailable: set GOOGLE_GENERATIVE_AI_API_KEY/GEMINI_API_KEY/GOOGLE_API_KEY or OPENCODE_AUTH_CONTENT")
+}
+
+func stageMimoCodeAuth(gcHome string, env *helpers.Env) (string, error) {
+	xdgData := filepath.Join(gcHome, ".local", "share")
+	xdgConfig := filepath.Join(gcHome, ".config")
+	xdgCache := filepath.Join(gcHome, ".cache")
+	xdgState := filepath.Join(gcHome, ".local", "state")
+	transcriptDir := filepath.Join(xdgData, "gascity", "mimocode-transcripts")
+	for _, dir := range []string{xdgData, xdgConfig, xdgCache, xdgState, transcriptDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+	}
+	env.With("XDG_DATA_HOME", xdgData).
+		With("XDG_CONFIG_HOME", xdgConfig).
+		With("XDG_CACHE_HOME", xdgCache).
+		With("XDG_STATE_HOME", xdgState).
+		With("GC_MIMOCODE_TRANSCRIPT_DIR", transcriptDir)
+
+	if apiKey := strings.TrimSpace(os.Getenv("XIAOMI_API_KEY")); apiKey != "" {
+		env.With("XIAOMI_API_KEY", apiKey)
+		return "env:XIAOMI_API_KEY", nil
+	}
+	return "", fmt.Errorf("mimocode auth unavailable: set XIAOMI_API_KEY")
 }
 
 func stagePiOllamaCloudAuth(gcHome string, env *helpers.Env) (string, error) {

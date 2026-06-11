@@ -331,6 +331,7 @@ func TestSupportsIDLookup(t *testing.T) {
 		{provider: "gemini/tmux-cli", want: false},
 		{provider: "kimi/tmux-cli", want: true},
 		{provider: "opencode/tmux-cli", want: false},
+		{provider: "mimocode/tmux-cli", want: false},
 		{provider: "pi/tmux-cli", want: true},
 		{provider: "antigravity/tmux-cli", want: true},
 	}

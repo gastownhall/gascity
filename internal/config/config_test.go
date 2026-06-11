@@ -7776,6 +7776,7 @@ func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
 		want     []string
 	}{
 		{"opencode", []string{"opencode"}},
+		{"mimocode", []string{"mimocode"}},
 		{"kiro", []string{"kiro"}},
 		{"groq", []string{"groq"}},
 		{"kimi", []string{"kimi"}},

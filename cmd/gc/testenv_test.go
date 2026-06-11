@@ -226,6 +226,7 @@ var testProviderStubCommands = []string{
 	"copilot",
 	"amp",
 	"opencode",
+	"mimo",
 	"auggie",
 	"pi",
 	"omp",

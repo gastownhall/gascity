@@ -82,7 +82,8 @@ const (
 
 var builtinProviderOrder = []string{
 	"claude", "codex", "gemini", "grok", "kimi", "kiro", "cursor", "copilot",
-	"amp", "opencode", "groq", "cerebras", "auggie", "pi", "omp", "antigravity",
+	"amp", "opencode", "mimocode", "groq", "cerebras", "auggie", "pi", "omp",
+	"antigravity",
 }
 
 var builtinProviderSpecs = map[string]BuiltinProviderSpec{
@@ -484,6 +485,41 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			},
 		},
 	},
+	"mimocode": {
+		// MiMo Code (Xiaomi's `mimo` CLI) is an OpenCode fork. Permission
+		// defaults are already permissive for bash/edit; only the
+		// question/plan interaction gates block headless runs, so
+		// --never-ask-questions is the only default arg needed. No
+		// mimocode.json is staged — staging one would clobber user config.
+		DisplayName:      "MiMo Code",
+		Command:          "mimo",
+		Args:             []string{"--never-ask-questions"},
+		PromptMode:       "flag",
+		PromptFlag:       "--prompt",
+		ReadyDelayMs:     8000,
+		ProcessNames:     []string{"mimo", ".mimocode", "node", "bun"},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
+		ACPArgs:          []string{"acp"},
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "mimo/mimo-auto", Label: "MiMo Auto (free)", FlagArgs: []string{"--model", "mimo/mimo-auto"}, FlagAliases: [][]string{{"-m", "mimo/mimo-auto"}}},
+					{Value: "xiaomi/mimo-v2.5-pro", Label: "MiMo V2.5 Pro", FlagArgs: []string{"--model", "xiaomi/mimo-v2.5-pro"}, FlagAliases: [][]string{{"-m", "xiaomi/mimo-v2.5-pro"}}},
+					{Value: "xiaomi/mimo-v2.5", Label: "MiMo V2.5", FlagArgs: []string{"--model", "xiaomi/mimo-v2.5"}, FlagAliases: [][]string{{"-m", "xiaomi/mimo-v2.5"}}},
+					{Value: "xiaomi-token-plan-sgp/mimo-v2.5-pro", Label: "MiMo V2.5 Pro (Token Plan SGP)", FlagArgs: []string{"--model", "xiaomi-token-plan-sgp/mimo-v2.5-pro"}, FlagAliases: [][]string{{"-m", "xiaomi-token-plan-sgp/mimo-v2.5-pro"}}},
+					{Value: "xiaomi-token-plan-sgp/mimo-v2.5", Label: "MiMo V2.5 (Token Plan SGP)", FlagArgs: []string{"--model", "xiaomi-token-plan-sgp/mimo-v2.5"}, FlagAliases: [][]string{{"-m", "xiaomi-token-plan-sgp/mimo-v2.5"}}},
+				},
+			},
+		},
+	},
 	"cerebras": {
 		DisplayName: "Cerebras (OpenCode)",
 		Command:     "opencode",
@@ -676,6 +712,8 @@ func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 		return newProfileIdentity(profile, "kimi"), true
 	case "opencode/tmux-cli":
 		return newProfileIdentity(profile, "opencode"), true
+	case "mimocode/tmux-cli":
+		return newProfileIdentity(profile, "mimocode"), true
 	case "pi/tmux-cli":
 		return newProfileIdentity(profile, "pi"), true
 	case "antigravity/tmux-cli":

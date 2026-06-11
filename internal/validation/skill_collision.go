@@ -23,6 +23,7 @@ var supportedSkillVendors = map[string]struct{}{
 	"codex":    {},
 	"gemini":   {},
 	"opencode": {},
+	"mimocode": {},
 }
 
 // citySentinel is the ScopeRoot marker used for city-scoped groupings.
@@ -40,7 +41,7 @@ type SkillCollision struct {
 	// agents this is the sentinel "<city>".
 	ScopeRoot string
 	// Vendor is the provider whose sink the collision lands in
-	// (one of "claude", "codex", "gemini", "opencode").
+	// (one of "claude", "codex", "gemini", "opencode", "mimocode").
 	Vendor string
 	// SkillName is the colliding agent-local skill name.
 	SkillName string

@@ -36,6 +36,7 @@ import (
 //	TOGETHER_    Together AI
 //	VERTEX_      Vertex AI direct
 //	XAI_         xAI / Grok
+//	XIAOMI_      Xiaomi MiMo
 var providerCredentialEnvPrefixes = []string{
 	"ANTHROPIC_",
 	"AZURE_",
@@ -53,6 +54,7 @@ var providerCredentialEnvPrefixes = []string{
 	"TOGETHER_",
 	"VERTEX_",
 	"XAI_",
+	"XIAOMI_",
 }
 
 // providerCredentialEnvKeys lists exact provider credential/config env vars for

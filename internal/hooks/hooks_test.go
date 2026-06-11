@@ -53,8 +53,8 @@ func TestSupportedProviders(t *testing.T) {
 	got := SupportedProviders()
 	want := map[string]bool{
 		"claude": true, "codex": true, "gemini": true, "kiro": true, "opencode": true,
-		"groq": true, "cerebras": true, "copilot": true, "cursor": true, "pi": true, "omp": true,
-		"antigravity": true, "kimi": true,
+		"mimocode": true, "groq": true, "cerebras": true, "copilot": true, "cursor": true,
+		"pi": true, "omp": true, "antigravity": true, "kimi": true,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("SupportedProviders() = %v, want %d entries", got, len(want))
@@ -1436,7 +1436,7 @@ func TestInstallClaudeSurfacesNonObjectOverride(t *testing.T) {
 // are materialized from the embedded core pack overlay into the workdir.
 func TestInstallOverlayManagedProviders(t *testing.T) {
 	fs := fsys.NewFake()
-	providers := []string{"codex", "gemini", "opencode", "copilot", "cursor", "kiro", "pi", "omp", "antigravity", "kimi"}
+	providers := []string{"codex", "gemini", "opencode", "mimocode", "copilot", "cursor", "kiro", "pi", "omp", "antigravity", "kimi"}
 	if err := Install(fs, "/city", "/work", providers); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -1444,6 +1444,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"/work/.codex/hooks.json",
 		"/work/.gemini/settings.json",
 		"/work/.opencode/plugins/gascity.js",
+		"/work/.mimocode/plugin/gascity.js",
 		"/work/.github/hooks/gascity.json",
 		"/work/.github/copilot-instructions.md",
 		"/work/.cursor/hooks.json",
@@ -1531,6 +1532,29 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		if strings.Contains(opencodeHooks, unwanted) {
 			t.Errorf("OpenCode plugin contains obsolete marker %q:\n%s", unwanted, opencodeHooks)
 		}
+	}
+	mimocodeHooks := string(fs.Files["/work/.mimocode/plugin/gascity.js"])
+	for _, want := range []string{
+		"Gas City hooks for MiMo Code.",
+		"const GC_MIMOCODE_HOOK_VERSION = 1",
+		`process.env.GC_BIN || "gc"`,
+		"GC_MIMOCODE_TRANSCRIPT_DIR",
+		`"experimental.session.compacting"`,
+		`runWithWarning(directory, "handoff", "--auto", "context cycle")`,
+		"output.context.push(handoff)",
+		"logRunFailure",
+		"logRunStderr",
+		"mirrorTranscript(directory, client",
+		"providerSessionEnv(sessionID)",
+		"GC_PROVIDER_SESSION_ID",
+		`GC_PROVIDER_SESSION_ID_REQUIRED: "mimocode"`,
+	} {
+		if !strings.Contains(mimocodeHooks, want) {
+			t.Errorf("MiMo Code plugin missing marker %q:\n%s", want, mimocodeHooks)
+		}
+	}
+	if strings.Contains(mimocodeHooks, "GC_OPENCODE_TRANSCRIPT_DIR") {
+		t.Errorf("MiMo Code plugin must not read the OpenCode transcript env var:\n%s", mimocodeHooks)
 	}
 	for _, rel := range []string{
 		"/work/.codex/hooks.json",
@@ -1956,6 +1980,69 @@ func TestInstallOpenCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
 	}
 	if got := string(fs.Files["/work/.opencode/plugins/gascity.js"]); got != string(custom) {
 		t.Fatalf("user-authored OpenCode plugin was overwritten:\n%s", got)
+	}
+}
+
+func TestMimoCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
+	current := []byte(`// Gas City hooks for MiMo Code.
+const GC_MIMOCODE_HOOK_VERSION = 1;
+const GC_BIN = process.env.GC_BIN || "gc";
+`)
+	stale := []byte(`// Gas City hooks for MiMo Code.
+const GC_BIN = process.env.GC_BIN || "gc";
+`)
+	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 1"), []byte("GC_MIMOCODE_HOOK_VERSION = 2"), 1)
+
+	if !mimocodeHookNeedsUpgrade(stale) {
+		t.Fatal("versionless managed MiMo Code hook did not request upgrade")
+	}
+	if mimocodeHookNeedsUpgrade(current) {
+		t.Fatal("current MiMo Code hook version requested upgrade")
+	}
+	if mimocodeHookNeedsUpgrade(future) {
+		t.Fatal("newer MiMo Code hook version requested downgrade")
+	}
+}
+
+func TestInstallMimoCodeHookUpgradesStaleManagedPlugin(t *testing.T) {
+	fs := fsys.NewFake()
+	legacy := []byte(`// Gas City hooks for MiMo Code.
+export default async function gascityPlugin() {
+  return {};
+}
+`)
+	fs.Files["/work/.mimocode/plugin/gascity.js"] = legacy
+
+	if err := Install(fs, "/city", "/work", []string{"mimocode"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := string(fs.Files["/work/.mimocode/plugin/gascity.js"])
+	if data == string(legacy) {
+		t.Fatal("stale MiMo Code managed plugin was preserved; expected managed upgrade")
+	}
+	if !strings.Contains(data, "const GC_MIMOCODE_HOOK_VERSION = 1") {
+		t.Errorf("upgraded MiMo Code plugin missing version marker:\n%s", data)
+	}
+	backup := string(fs.Files["/work/.mimocode/plugin/gascity.js.bak"])
+	if backup != string(legacy) {
+		t.Fatalf("legacy MiMo Code plugin backup = %q, want original legacy content", backup)
+	}
+}
+
+func TestInstallMimoCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := []byte(`export default async function customPlugin() {
+  return {};
+}
+`)
+	fs.Files["/work/.mimocode/plugin/gascity.js"] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"mimocode"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := string(fs.Files["/work/.mimocode/plugin/gascity.js"]); got != string(custom) {
+		t.Fatalf("user-authored MiMo Code plugin was overwritten:\n%s", got)
 	}
 }
 

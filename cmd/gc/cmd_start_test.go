@@ -1164,6 +1164,35 @@ func TestStageHookFilesIncludesAntigravityHooks(t *testing.T) {
 	t.Fatal("stageHookFiles() did not stage Antigravity .agents/hooks.json")
 }
 
+func TestStageHookFilesIncludesMimoCodeHooks(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	hookPath := filepath.Join(workDir, ".mimocode", "plugin", "gascity.js")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", hookPath, err)
+	}
+	if err := os.WriteFile(hookPath, []byte("// plugin"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", hookPath, err)
+	}
+
+	got := stageHookFiles(nil, cityDir, workDir, []string{"mimocode"})
+	for _, entry := range got {
+		if entry.RelDst == path.Join("worker", ".mimocode", "plugin", "gascity.js") {
+			if entry.Src != hookPath {
+				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, hookPath)
+			}
+			if !entry.Probed {
+				t.Fatal("stageHookFiles() .mimocode/plugin/gascity.js not marked Probed")
+			}
+			if entry.ContentHash == "" {
+				t.Fatal("stageHookFiles() .mimocode/plugin/gascity.js has empty ContentHash")
+			}
+			return
+		}
+	}
+	t.Fatal("stageHookFiles() did not stage MiMo Code .mimocode/plugin/gascity.js")
+}
+
 func TestStageHookFilesIncludesKimiHooks(t *testing.T) {
 	cityDir := filepath.Join(t.TempDir(), "city")
 	workDir := filepath.Join(cityDir, "worker")

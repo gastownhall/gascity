@@ -29,17 +29,19 @@ var configFS embed.FS
 
 // supported lists provider names that have hook support wired into
 // Gas Town's installer.
-var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot", "cursor", "pi", "omp", "kimi"}
+var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "groq", "cerebras", "copilot", "cursor", "pi", "omp", "kimi"}
 
 const (
 	managedPiHookVersion       = 7
 	managedOpenCodeHookVersion = 5
+	managedMimoCodeHookVersion = 1
 	managedOmpHookVersion      = 2
 )
 
 var (
 	piHookVersionPattern       = regexp.MustCompile(`\bGC_PI_HOOK_VERSION\s*=\s*([0-9]+)\b`)
 	opencodeHookVersionPattern = regexp.MustCompile(`\bGC_OPENCODE_HOOK_VERSION\s*=\s*([0-9]+)\b`)
+	mimocodeHookVersionPattern = regexp.MustCompile(`\bGC_MIMOCODE_HOOK_VERSION\s*=\s*([0-9]+)\b`)
 	ompHookVersionPattern      = regexp.MustCompile(`\bGC_OMP_HOOK_VERSION\s*=\s*([0-9]+)\b`)
 )
 
@@ -154,7 +156,7 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 		switch family {
 		case "claude":
 			err = installClaude(fs, cityDir)
-		case "codex", "gemini", "antigravity", "kiro", "opencode", "copilot", "cursor", "pi", "omp", "kimi":
+		case "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "copilot", "cursor", "pi", "omp", "kimi":
 			err = installOverlayManaged(fs, workDir, family)
 		case "groq", "cerebras":
 			err = installOverlayManaged(fs, workDir, "opencode")
@@ -229,6 +231,9 @@ func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
 	}
 	if provider == "opencode" && rel == path.Join(".opencode", "plugins", "gascity.js") {
 		return opencodeHookNeedsUpgrade
+	}
+	if provider == "mimocode" && rel == path.Join(".mimocode", "plugin", "gascity.js") {
+		return mimocodeHookNeedsUpgrade
 	}
 	if provider == "omp" && rel == path.Join(".omp", "hooks", "gc-hook.ts") {
 		return ompHookNeedsUpgrade
@@ -308,6 +313,29 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 
 func opencodeHookVersion(content string) int {
 	match := opencodeHookVersionPattern.FindStringSubmatch(content)
+	if len(match) != 2 {
+		return 0
+	}
+	version, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0
+	}
+	return version
+}
+
+// mimocodeHookNeedsUpgrade reports whether an existing managed MiMo Code
+// plugin predates the current managed version. Files without the managed
+// header are user-authored and never upgraded.
+func mimocodeHookNeedsUpgrade(existing []byte) bool {
+	content := string(existing)
+	if !strings.Contains(content, "Gas City hooks for MiMo Code.") {
+		return false
+	}
+	return mimocodeHookVersion(content) < managedMimoCodeHookVersion
+}
+
+func mimocodeHookVersion(content string) int {
+	match := mimocodeHookVersionPattern.FindStringSubmatch(content)
 	if len(match) != 2 {
 		return 0
 	}

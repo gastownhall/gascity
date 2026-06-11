@@ -113,6 +113,17 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantModelOverrideArgs: []string{"--model", "opencode/deepseek-v4-flash-free"},
 		},
 		{
+			profileID:             "mimocode/tmux-cli",
+			family:                "mimocode",
+			wantCommand:           "mimo --never-ask-questions",
+			wantPromptMode:        "flag",
+			wantPromptFlag:        "--prompt",
+			wantReadyDelayMs:      8000,
+			wantProcessNames:      []string{"mimo", ".mimocode", "node", "bun"},
+			wantModelOverride:     "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+			wantModelOverrideArgs: []string{"--model", "xiaomi-token-plan-sgp/mimo-v2.5-pro"},
+		},
+		{
 			profileID:             "antigravity/tmux-cli",
 			family:                "antigravity",
 			wantCommand:           "agy --dangerously-skip-permissions",

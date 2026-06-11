@@ -56,6 +56,7 @@ var (
 		"claude":      {},
 		"codex":       {},
 		"gemini":      {},
+		"mimocode":    {},
 	}
 	supportedReadiness = readinessItemSet{
 		"antigravity": {},
@@ -63,6 +64,7 @@ var (
 		"codex":       {},
 		"gemini":      {},
 		"github_cli":  {},
+		"mimocode":    {},
 	}
 	readinessProbeSpecs = map[string]readinessProbeSpec{
 		"claude": {
@@ -89,6 +91,13 @@ var (
 			kind:        probeKindProvider,
 			probe: func(_ context.Context, homeDir string) providerProbeResult {
 				return probeAntigravity(homeDir)
+			},
+		},
+		"mimocode": {
+			displayName: "MiMo Code",
+			kind:        probeKindProvider,
+			probe: func(_ context.Context, homeDir string) providerProbeResult {
+				return probeMimoCode(homeDir)
 			},
 		},
 		"github_cli": {
@@ -481,6 +490,36 @@ func probeAntigravity(homeDir string) providerProbeResult {
 	}
 	if strings.TrimSpace(string(data)) == "" {
 		return providerProbeResult{status: probeStatusNeedsAuth, detail: "Antigravity OAuth token is empty"}
+	}
+	return providerProbeResult{status: probeStatusConfigured}
+}
+
+func probeMimoCode(homeDir string) providerProbeResult {
+	if _, ok := findProbeBinary("mimo", homeDir); !ok {
+		return providerProbeResult{status: probeStatusNotInstalled, detail: "mimo executable not found in probe PATH"}
+	}
+
+	// XIAOMI_API_KEY is the headless auth path (mirrors the GitHub CLI
+	// token-env precedent); the auth.json credential store is the
+	// `mimo providers login` path.
+	if strings.TrimSpace(os.Getenv("XIAOMI_API_KEY")) != "" {
+		return providerProbeResult{status: probeStatusConfigured}
+	}
+
+	authPath := filepath.Join(homeDir, ".local", "share", "mimocode", "auth.json")
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return providerProbeResult{status: probeStatusNeedsAuth, detail: "set XIAOMI_API_KEY or run `mimo providers login` (missing ~/.local/share/mimocode/auth.json)"}
+		}
+		return providerProbeResult{status: probeStatusProbeError, detail: "failed to read ~/.local/share/mimocode/auth.json"}
+	}
+	var credentials map[string]json.RawMessage
+	if err := json.Unmarshal(data, &credentials); err != nil {
+		return providerProbeResult{status: probeStatusProbeError, detail: "invalid JSON in ~/.local/share/mimocode/auth.json"}
+	}
+	if len(credentials) == 0 {
+		return providerProbeResult{status: probeStatusNeedsAuth, detail: "no credentials in ~/.local/share/mimocode/auth.json; set XIAOMI_API_KEY or run `mimo providers login`"}
 	}
 	return providerProbeResult{status: probeStatusConfigured}
 }

@@ -42,7 +42,11 @@ const pollInterval = 100 * time.Millisecond
 // non-listed providers) prevents the Enter from submitting — the worker then
 // idles at grok's welcome screen forever. Skip the pre-Enter Escape for grok
 // (like the other send-keys-driven TUIs). See ga-3xu / grok-engagement follow-up.
-var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "grok", "kimi", "opencode", "pi", "antigravity"}
+// The list doubles as a process-name fallback when the pane lacks a
+// GC_PROVIDER env var; mimocode's binary names differ from its provider
+// name ("mimo" wrapper, ".mimocode" compiled child), so both are listed
+// alongside the family name.
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "grok", "kimi", "mimocode", "mimo", ".mimocode", "opencode", "pi", "antigravity"}
 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.

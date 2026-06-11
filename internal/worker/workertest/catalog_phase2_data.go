@@ -30,6 +30,7 @@ var phase2CatalogProfiles = []ProfileID{
 	ProfileGeminiTmuxCLI,
 	ProfileKimiTmuxCLI,
 	ProfileOpenCodeTmuxCLI,
+	ProfileMimoCodeTmuxCLI,
 	ProfilePiTmuxCLI,
 	ProfileAntigravityTmuxCLI,
 }

@@ -46,6 +46,9 @@ tmp_*.diff
 tmp_*.patch
 issues.jsonl
 
+# Python bytecode from script tests
+__pycache__/
+
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
 .beads.backup-*

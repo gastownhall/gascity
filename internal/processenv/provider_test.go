@@ -50,6 +50,7 @@ func TestProviderProcessPassthroughEnvIncludesProviderAndRuntimeBaseline(t *test
 	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "test-anthropic-token")
 	t.Setenv("OLLAMA_API_KEY", "test-ollama-token")
+	t.Setenv("XIAOMI_API_KEY", "test-xiaomi-key")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test-aws-key")
 	t.Setenv("AWS_PAGER", "less")
 	t.Setenv("CLAUDECODE", "1")
@@ -69,6 +70,7 @@ func TestProviderProcessPassthroughEnvIncludesProviderAndRuntimeBaseline(t *test
 		"XDG_STATE_HOME":         filepath.Join(homeDir, ".local", "state"),
 		"ANTHROPIC_AUTH_TOKEN":   "test-anthropic-token",
 		"OLLAMA_API_KEY":         "test-ollama-token",
+		"XIAOMI_API_KEY":         "test-xiaomi-key",
 		"AWS_ACCESS_KEY_ID":      "test-aws-key",
 		"CLAUDECODE":             "",
 		"CLAUDE_CODE_ENTRYPOINT": "",

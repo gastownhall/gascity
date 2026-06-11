@@ -8,11 +8,11 @@ func TestBuiltinProvidersAndOrder(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	if len(providers) != 16 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 16", len(providers))
+	if len(providers) != 17 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 17", len(providers))
 	}
-	if len(order) != 16 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 16", len(order))
+	if len(order) != 17 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 17", len(order))
 	}
 
 	for _, name := range order {
@@ -26,6 +26,55 @@ func TestBuiltinProvidersAndOrder(t *testing.T) {
 		if spec.DisplayName == "" {
 			t.Fatalf("provider %q has empty DisplayName", name)
 		}
+	}
+}
+
+func TestBuiltinProviderMimoCodeSpec(t *testing.T) {
+	providers := BuiltinProviders()
+	spec, ok := providers["mimocode"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing mimocode")
+	}
+	if spec.Command != "mimo" {
+		t.Errorf("mimocode Command = %q, want %q", spec.Command, "mimo")
+	}
+	if spec.DisplayName != "MiMo Code" {
+		t.Errorf("mimocode DisplayName = %q, want %q", spec.DisplayName, "MiMo Code")
+	}
+	if len(spec.Args) != 1 || spec.Args[0] != "--never-ask-questions" {
+		t.Errorf("mimocode Args = %v, want [--never-ask-questions]", spec.Args)
+	}
+	if spec.PromptMode != "flag" || spec.PromptFlag != "--prompt" {
+		t.Errorf("mimocode prompt = (%q, %q), want (flag, --prompt)", spec.PromptMode, spec.PromptFlag)
+	}
+	if !spec.SupportsACP || !spec.SupportsHooks {
+		t.Errorf("mimocode SupportsACP=%v SupportsHooks=%v, want both true", spec.SupportsACP, spec.SupportsHooks)
+	}
+	if spec.ResumeFlag != "--session" || spec.ResumeStyle != "flag" {
+		t.Errorf("mimocode resume = (%q, %q), want (--session, flag)", spec.ResumeFlag, spec.ResumeStyle)
+	}
+	if len(spec.ACPArgs) != 1 || spec.ACPArgs[0] != "acp" {
+		t.Errorf("mimocode ACPArgs = %v, want [acp]", spec.ACPArgs)
+	}
+	if spec.InstructionsFile != "AGENTS.md" {
+		t.Errorf("mimocode InstructionsFile = %q, want AGENTS.md", spec.InstructionsFile)
+	}
+
+	order := BuiltinProviderOrder()
+	opencodeIdx, mimocodeIdx := -1, -1
+	for i, name := range order {
+		switch name {
+		case "opencode":
+			opencodeIdx = i
+		case "mimocode":
+			mimocodeIdx = i
+		}
+	}
+	if mimocodeIdx == -1 {
+		t.Fatal("BuiltinProviderOrder() missing mimocode")
+	}
+	if mimocodeIdx != opencodeIdx+1 {
+		t.Errorf("mimocode order index = %d, want immediately after opencode (%d)", mimocodeIdx, opencodeIdx)
 	}
 }
 

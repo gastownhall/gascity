@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 16 built-in providers.
-	if len(providers) != 16 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 16", len(providers))
+	// Must have exactly 17 built-in providers.
+	if len(providers) != 17 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 17", len(providers))
 	}
-	if len(order) != 16 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 16", len(order))
+	if len(order) != 17 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 17", len(order))
 	}
 
 	// Every entry in order must exist in providers.
