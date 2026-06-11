@@ -444,7 +444,7 @@ func validateGraphV2RecipeDrainStep(prefix string, step RecipeStep, errs *[]stri
 	if strings.TrimSpace(step.Metadata[beadmeta.DrainContinuationGroupMetadataKey]) != "" && context != "shared" {
 		*errs = append(*errs, fmt.Sprintf("%s.drain: continuation_group is valid only with context = \"shared\"", prefix))
 	}
-	if context == "shared" && strings.TrimSpace(step.Metadata[beadmeta.DrainItemSingleLaneMetadataKey]) != "true" {
+	if context == beadmeta.DrainContextShared && strings.TrimSpace(step.Metadata[beadmeta.DrainItemSingleLaneMetadataKey]) != "true" {
 		*errs = append(*errs, fmt.Sprintf("%s.drain.item: shared drains require single_lane = true", prefix))
 	}
 	if strings.TrimSpace(step.Assignee) != "" {
