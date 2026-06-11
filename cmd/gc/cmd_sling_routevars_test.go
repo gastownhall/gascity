@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sling"
 )
@@ -70,8 +71,8 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 		t.Fatalf("expected non-empty sessions for frontend agents, got claude=%q codex=%q", claudeSession, codexSession)
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/claude", claudeSession, store, cfg.Workspace.Name, "", cfg); err != nil {
-		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
+	if err := graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeSession, store, cfg.Workspace.Name, cfg, cliGraphrouteDeps("")); err != nil {
+		t.Fatalf("graphroute.DecorateGraphWorkflowRecipe: %v", err)
 	}
 	root := recipe.StepByID("demo")
 	if root == nil {
@@ -115,7 +116,7 @@ func TestGraphWorkflowRouteVarsCallerOverridesDefaults(t *testing.T) {
 		},
 	}
 
-	routeVars := graphWorkflowRouteVars(recipe, map[string]string{"design_target": "claude"})
+	routeVars := graphroute.GraphWorkflowRouteVars(recipe, map[string]string{"design_target": "claude"})
 	if got := routeVars["design_target"]; got != "claude" {
 		t.Fatalf("routeVars[design_target] = %q, want claude", got)
 	}
@@ -138,7 +139,7 @@ func (s *graphApplySpyStore) ApplyGraphPlan(_ context.Context, plan *beads.Graph
 }
 
 // TestInstantiateSlingFormulaGraphWorkflowPreservesRoutedTo tests the full
-// code path: compile v2 formula -> decorateGraphWorkflowRecipe -> molecule.Instantiate
+// code path: compile v2 formula -> graphroute.DecorateGraphWorkflowRecipe -> molecule.Instantiate
 // -> graph apply plan, verifying gc.routed_to appears in the plan's node metadata.
 func TestInstantiateSlingFormulaGraphWorkflowPreservesRoutedTo(t *testing.T) {
 	// Create a v2 formula on disk.
@@ -219,7 +220,7 @@ type = "task"
 	}
 
 	// This is the critical assertion: gc.routed_to must be set by
-	// decorateGraphWorkflowRecipe and preserved in the graph apply plan.
+	// graphroute.DecorateGraphWorkflowRecipe and preserved in the graph apply plan.
 	if got := stepNode.Metadata["gc.routed_to"]; got != "worker" {
 		t.Fatalf("gc.routed_to = %q, want %q; full metadata = %v", got, "worker", stepNode.Metadata)
 	}
