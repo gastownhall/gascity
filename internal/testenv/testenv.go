@@ -44,9 +44,21 @@
 // In that mode init() skips the scrub so env vars the testscript has
 // deliberately set (via its own `env FOO=bar` line) reach the subcommand.
 // Testscript owns the child env fully, so there is no leak risk.
+//
+// Production Dolt port guard: a Dolt port var (BEADS_DOLT_SERVER_PORT or
+// GC_DOLT_PORT) carrying ProdDoltPort that would survive into the process —
+// passthrough-preserved in go-test mode, or any value in testscript
+// subcommand mode — makes init() panic instead, unless the paired Dolt host
+// var survives with a non-local value (3307 is Dolt's default port, so
+// external-server fixtures like db.example.com:3307 are legitimate). Test
+// debris (testrig, tt, my_db databases) inside the production Dolt store
+// traced back to test clients reaching the local server on port 3307
+// (ga-4c2ss6). For the rare legitimate case, set ProdDoltPortOptOutVar
+// (GC_ALLOW_PROD_DOLT_PORT_IN_TESTS) to "1".
 package testenv
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,11 +120,74 @@ var LeakVectorVars = []string{
 	"GC_TMUX_SESSION",
 }
 
+// ProdDoltPort is the well-known port of the production Dolt server on
+// maintainer hosts. Nothing listens locally on 3307 in any gc-managed test
+// city, so a test binary about to talk to a local Dolt on it can only
+// corrupt the production store.
+const ProdDoltPort = "3307"
+
+// ProdDoltPortOptOutVar names the env var that disables the production
+// Dolt-port guard. Set it to "1" for the rare legitimate case where a test
+// process must deliberately target a local Dolt server on ProdDoltPort.
+const ProdDoltPortOptOutVar = "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS"
+
+// doltPortVars maps each env var that selects a Dolt server port to the env
+// var that selects the matching Dolt server host.
+var doltPortVars = map[string]string{
+	"BEADS_DOLT_SERVER_PORT": "BEADS_DOLT_SERVER_HOST",
+	"GC_DOLT_PORT":           "GC_DOLT_HOST",
+}
+
+// isLocalDoltHost reports whether a Dolt host value targets the local
+// machine: empty (clients default to localhost), "localhost", a loopback
+// address, or an unspecified address.
+func isLocalDoltHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" || host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
+}
+
+// refuseProdDoltPort panics when a Dolt port var that will outlive init()
+// points at the local production Dolt server. survives reports whether the
+// named var survives the scrub: always in testscript subcommand mode,
+// passthrough-listed only in go-test mode. A paired host var that survives
+// with a non-local value disarms the guard for that pair — 3307 is Dolt's
+// default port, so external-server fixtures use it legitimately.
+// ProdDoltPortOptOutVar set to "1" disables the guard entirely.
+func refuseProdDoltPort(survives func(name string) bool) {
+	if os.Getenv(ProdDoltPortOptOutVar) == "1" {
+		return
+	}
+	for portVar, hostVar := range doltPortVars {
+		if !survives(portVar) {
+			continue
+		}
+		if strings.TrimSpace(os.Getenv(portVar)) != ProdDoltPort {
+			continue
+		}
+		host := ""
+		if survives(hostVar) {
+			host = os.Getenv(hostVar)
+		}
+		if !isLocalDoltHost(host) {
+			continue
+		}
+		panic("testenv: " + portVar + "=" + ProdDoltPort + " with a local Dolt host points at the production Dolt server; refusing to run tests against it (set " + ProdDoltPortOptOutVar + "=1 to deliberately allow it)")
+	}
+}
+
 func init() {
 	if !isGoTestBinary() {
 		// Testscript subcommand mode (e.g. this binary was copied to
 		// $PATH/bin/gc by testscript.Main). Testscript owns the child env
 		// exactly — skip the scrub so env vars it sets reach the subcommand.
+		// Every var survives here, so the prod-Dolt-port guard checks all of
+		// them: a testscript-driven gc/bd must never write to the production
+		// store either.
+		refuseProdDoltPort(func(string) bool { return true })
 		return
 	}
 	keep := map[string]bool{}
@@ -124,6 +199,7 @@ func init() {
 		}
 	}
 	_ = os.Unsetenv(PassthroughVar)
+	refuseProdDoltPort(func(name string) bool { return keep[name] })
 	for _, name := range LeakVectorVars {
 		if !keep[name] {
 			_ = os.Unsetenv(name)
