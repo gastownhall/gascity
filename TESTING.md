@@ -102,6 +102,24 @@ Raw `go test` is still appropriate for a focused package or a single failing
 test. Do not use it as the default for full local sweeps when a sharded target
 exists.
 
+#### Resource isolation via gascity-test.slice
+
+On hosts that provision a `gascity-test.slice` systemd user slice (resource
+limits for test workloads), the test entrypoints — `scripts/go-test-observable`
+(behind `make test` and `make test-cmd-gc-process`), `scripts/test-go-test-shard`,
+`scripts/test-integration-shard`, and `scripts/test-local-parallel` — re-exec
+themselves inside that slice via
+`systemd-run --user --slice=gascity-test.slice --scope --collect --quiet --`.
+
+Enrollment is automatic and strictly best-effort: it only happens when
+`systemd-run` exists, the user manager responds, the slice unit is present
+(`systemctl --user list-unit-files gascity-test.slice`), and a pre-flight
+scope allocation succeeds. Everywhere else (CI runners, macOS, containers)
+the entrypoints run unchanged. Nested runners detect existing slice
+membership through `/proc/self/cgroup` and never double-wrap. Set
+`GC_TEST_NO_SLICE=1` to opt out explicitly. The decision matrix is covered
+by `scripts/test-slice-enroll-test` (run by `go test ./scripts`).
+
 ### 2. Testscript (`.txtar` files in `cmd/gc/testdata/`)
 
 Test what the USER sees. Run the real `gc` binary, assert on stdout/stderr.

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/test-slice.sh
+source "$script_dir/lib/test-slice.sh"
+gc_test_slice_reexec "$script_dir/go-test-observable" "$@"
+
 if [ "$#" -lt 2 ] || [ "$2" != "--" ]; then
   echo "usage: scripts/go-test-observable <name> -- <go test args...>" >&2
   exit 2
