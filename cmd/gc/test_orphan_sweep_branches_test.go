@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 )
 
 const testNonLivePID = 2147483647
@@ -21,6 +22,16 @@ func nonLivePID(t *testing.T) int {
 
 func pidPrefixedTestDir(root, prefix string, pid int) string {
 	return filepath.Join(root, prefix+strconv.Itoa(pid)+"-fixture")
+}
+
+// backdatePastSweepAge ages a fixture dir past the sweep's minimum-age guard
+// so tests exercise the liveness branches rather than the age guard.
+func backdatePastSweepAge(t *testing.T, path string) {
+	t.Helper()
+	old := time.Now().Add(-2 * testOrphanSweepMinAge)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("Chtimes(%s): %v", path, err)
+	}
 }
 
 func TestCmdGCTempRootPrefixKeepsControllerSocketLegacy(t *testing.T) {
@@ -135,6 +146,7 @@ func TestSweepOrphanSkipsCurrentPID(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	backdatePastSweepAge(t, dir)
 	sweepOrphanPIDPrefixedDirs(root, "pfx")
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		t.Error("sweepOrphanPIDPrefixedDirs removed the current process PID directory")
@@ -154,6 +166,7 @@ func TestSweepOrphanPreservesLivePID(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	backdatePastSweepAge(t, dir)
 	sweepOrphanPIDPrefixedDirs(root, "pfx")
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		t.Errorf("sweepOrphanPIDPrefixedDirs removed directory for live PID %d", cmd.Process.Pid)
@@ -167,6 +180,7 @@ func TestSweepOrphanRemovesStalePIDDirectory(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	backdatePastSweepAge(t, dir)
 	sweepOrphanPIDPrefixedDirs(root, "pfx")
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("sweepOrphanPIDPrefixedDirs did not remove stale PID %d directory", pid)
@@ -183,6 +197,7 @@ func TestSweepOrphanSkipsMarkedActiveRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, testActiveTempRootMarker), []byte("active\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	backdatePastSweepAge(t, dir)
 	sweepOrphanPIDPrefixedDirs(root, "pfx")
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		t.Errorf("sweepOrphanPIDPrefixedDirs removed marked active root for stale PID %d", pid)
@@ -206,6 +221,8 @@ func TestSweepOrphanIsIdempotent(t *testing.T) {
 	if err := os.MkdirAll(staleDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	backdatePastSweepAge(t, selfDir)
+	backdatePastSweepAge(t, staleDir)
 
 	sweepOrphanPIDPrefixedDirs(root, "pfx")
 	sweepOrphanPIDPrefixedDirs(root, "pfx") // second call must be safe
@@ -245,6 +262,7 @@ func TestSweepOrphanAllPrefixesStabilize(t *testing.T) {
 			if err := os.MkdirAll(d, 0o755); err != nil {
 				t.Fatalf("MkdirAll %s: %v", d, err)
 			}
+			backdatePastSweepAge(t, d)
 		}
 	}
 
@@ -316,7 +334,9 @@ func TestTestscriptCommandInvocationDoesNotLeakTempRoot(t *testing.T) {
 
 			pid := cmd.ProcessState.Pid()
 			for _, prefix := range []string{testCmdGCTempRootPrefix, testCmdGCShardTempRootPrefix} {
-				matches, err := filepath.Glob(filepath.Join("/tmp", fmt.Sprintf("%s%d-*", prefix, pid)))
+				// A leaked root would be created under the inherited
+				// TMPDIR (os.TempDir()), not hardcoded /tmp.
+				matches, err := filepath.Glob(filepath.Join(os.TempDir(), fmt.Sprintf("%s%d-*", prefix, pid)))
 				if err != nil {
 					t.Fatalf("Glob: %v", err)
 				}
@@ -331,6 +351,124 @@ func TestTestscriptCommandInvocationDoesNotLeakTempRoot(t *testing.T) {
 	}
 }
 
+// TestSweepOrphanSkipsDirYoungerThanMinAge verifies the minimum-age guard:
+// a freshly created dir must survive the sweep even when its PID looks dead
+// and it has no sentinel, closing the window between MkdirTemp and sentinel
+// acquisition (ga-djbcqt).
+func TestSweepOrphanSkipsDirYoungerThanMinAge(t *testing.T) {
+	root := t.TempDir()
+	pid := nonLivePID(t)
+	dir := pidPrefixedTestDir(root, "pfx", pid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sweepOrphanPIDPrefixedDirs(root, "pfx")
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		t.Errorf("sweepOrphanPIDPrefixedDirs removed dir younger than %v for stale PID %d", testOrphanSweepMinAge, pid)
+	}
+}
+
+// TestSweepOrphanSkipsHeldSentinelEvenWhenPIDLooksDead simulates the
+// cross-PID-namespace incident (ga-djbcqt): from inside a bwrap
+// --unshare-pid sandbox every host PID looks dead, but the host creator
+// still holds the flock on the alive sentinel. The sweep must trust the
+// lock, not PID visibility.
+func TestSweepOrphanSkipsHeldSentinelEvenWhenPIDLooksDead(t *testing.T) {
+	root := t.TempDir()
+	pid := nonLivePID(t) // creator's PID "looks dead", as across namespaces
+	dir := pidPrefixedTestDir(root, "pfx", pid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel, err := holdAliveSentinel(dir)
+	if err != nil {
+		t.Fatalf("holdAliveSentinel: %v", err)
+	}
+	t.Cleanup(func() { _ = sentinel.Close() })
+	backdatePastSweepAge(t, dir)
+
+	sweepOrphanPIDPrefixedDirs(root, "pfx")
+
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		t.Errorf("sweepOrphanPIDPrefixedDirs removed dir with held alive sentinel for dead-looking PID %d", pid)
+	}
+}
+
+// TestSweepOrphanRemovesDirWithFreeSentinel verifies the reclaim path: when
+// the sentinel exists but nobody holds its lock, the creator is gone and the
+// dir is removable — even though the active-root marker is still present
+// (crashed runs never remove their marker).
+func TestSweepOrphanRemovesDirWithFreeSentinel(t *testing.T) {
+	root := t.TempDir()
+	pid := nonLivePID(t)
+	dir := pidPrefixedTestDir(root, "pfx", pid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, testActiveTempRootMarker), []byte("active\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, testAliveSentinelName), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	backdatePastSweepAge(t, dir)
+
+	sweepOrphanPIDPrefixedDirs(root, "pfx")
+
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("sweepOrphanPIDPrefixedDirs did not remove dir with free alive sentinel for stale PID %d", pid)
+	}
+}
+
+// TestCreateActiveTestTempRootHonorsTMPDIR verifies the TestMain fixture root
+// is created under the inherited TMPDIR instead of hardcoded /tmp, so gate
+// runners can isolate concurrent runs (ga-djbcqt).
+func TestCreateActiveTestTempRootHonorsTMPDIR(t *testing.T) {
+	parent := t.TempDir()
+	t.Setenv("TMPDIR", parent)
+
+	root, sentinel, err := createActiveTestTempRoot("pfx")
+	if err != nil {
+		t.Fatalf("createActiveTestTempRoot: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sentinel.Close()
+		_ = os.RemoveAll(root)
+	})
+
+	if filepath.Dir(root) != parent {
+		t.Errorf("createActiveTestTempRoot created %s; want a child of TMPDIR %s", root, parent)
+	}
+	if _, err := os.Stat(filepath.Join(root, testActiveTempRootMarker)); err != nil {
+		t.Errorf("active-root marker missing: %v", err)
+	}
+	exists, held := aliveSentinelHeld(root)
+	if !exists || !held {
+		t.Errorf("aliveSentinelHeld(%s) = (exists=%v, held=%v); want (true, true)", root, exists, held)
+	}
+}
+
+// TestCreateActiveTestTempRootSentinelFreeAfterClose verifies the sentinel
+// lock dies with its holder: once the creator's handle closes (as on process
+// death), the probe reports the root reclaimable.
+func TestCreateActiveTestTempRootSentinelFreeAfterClose(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+
+	root, sentinel, err := createActiveTestTempRoot("pfx")
+	if err != nil {
+		t.Fatalf("createActiveTestTempRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	if err := sentinel.Close(); err != nil {
+		t.Fatalf("close sentinel: %v", err)
+	}
+	exists, held := aliveSentinelHeld(root)
+	if !exists || held {
+		t.Errorf("aliveSentinelHeld(%s) after close = (exists=%v, held=%v); want (true, false)", root, exists, held)
+	}
+}
+
 func TestSweepOrphanRemovesStaleCmdGCTempRootInSystemTmp(t *testing.T) {
 	prefix := fmt.Sprintf("%s%d-test-", testCmdGCTempRootPrefix, os.Getpid())
 	pid := nonLivePID(t)
@@ -340,6 +478,7 @@ func TestSweepOrphanRemovesStaleCmdGCTempRootInSystemTmp(t *testing.T) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	backdatePastSweepAge(t, root)
 
 	sweepOrphanPIDPrefixedDirs("/tmp", prefix)
 

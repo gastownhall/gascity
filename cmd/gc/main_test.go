@@ -168,6 +168,13 @@ func configureFSPressureForTests() {
 	}
 }
 
+// testTempRootAliveSentinel pins the alive-sentinel flock on this process's
+// test temp root for the binary's lifetime. The reference must stay live:
+// the runtime finalizes unreachable os.Files, which would close the
+// descriptor and release the lock, letting cross-namespace sweepers reclaim
+// an active root (ga-djbcqt).
+var testTempRootAliveSentinel *os.File
+
 func TestMain(m *testing.M) {
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar
 	// command. On that path we must not create a new temp root — the parent
@@ -192,18 +199,18 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv(managedDoltTestParentPIDEnv, fmt.Sprintf("%d", os.Getpid())); err != nil {
 		panic(err)
 	}
-	// Sweep stale testTempRoot dirs in system /tmp before creating a new one.
-	// Sharded cmd/gc runs use a separate prefix so concurrent worktrees with
-	// older test harnesses cannot remove this package's active root.
-	testTempRootPrefix := cmdGCTestTempRootPrefix()
-	sweepOrphanPIDPrefixedDirs(os.TempDir(), testTempRootPrefix)
-	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testTempRootPrefix))
+	// Sweep stale testTempRoot dirs under the inherited temp dir (honoring
+	// TMPDIR) before creating a new one there. Sharded cmd/gc runs use a
+	// separate prefix so concurrent worktrees with older test harnesses
+	// cannot remove this package's active root. The root's alive sentinel
+	// flock must stay held for the binary's lifetime: sweepers in other
+	// processes — including other PID namespaces — probe it instead of
+	// trusting PID visibility (ga-djbcqt).
+	testTempRoot, sentinel, err := createActiveTestTempRoot(cmdGCTestTempRootPrefix())
 	if err != nil {
 		panic(err)
 	}
-	if err := os.WriteFile(filepath.Join(testTempRoot, testActiveTempRootMarker), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
-		panic(err)
-	}
+	testTempRootAliveSentinel = sentinel
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
 		panic(err)
 	}
