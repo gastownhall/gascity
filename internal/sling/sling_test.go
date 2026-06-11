@@ -2899,6 +2899,49 @@ func TestFinalizeAutoConvoyTracksDepAddError(t *testing.T) {
 	}
 }
 
+// TestFinalizeAutoConvoyTracksDepCreated is a regression test for
+// "Field 'id' doesn't have a default value" on dependencies.id: Dolt strips
+// DEFAULT (uuid()) when migration 0043 runs via PREPARE/EXECUTE, causing
+// every DepAdd to fail silently via MetadataErrors. Verify that DoSling
+// creates the convoy→bead tracks dependency with no metadata errors.
+func TestFinalizeAutoConvoyTracksDepCreated(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+
+	b, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task"})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+
+	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: b.ID}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.ConvoyID == "" {
+		t.Fatal("expected auto-convoy creation")
+	}
+	if len(result.MetadataErrors) != 0 {
+		t.Errorf("unexpected MetadataErrors (dep link failure?): %v", result.MetadataErrors)
+	}
+
+	downDeps, err := deps.Store.DepList(result.ConvoyID, "down")
+	if err != nil {
+		t.Fatalf("DepList convoy: %v", err)
+	}
+	var tracks bool
+	for _, d := range downDeps {
+		if d.DependsOnID == b.ID && d.Type == "tracks" {
+			tracks = true
+			break
+		}
+	}
+	if !tracks {
+		t.Errorf("convoy %s missing tracks dep to bead %s; deps=%v", result.ConvoyID, b.ID, downDeps)
+	}
+}
+
 func TestFinalizeNoConvoyWhenSuppressed(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
