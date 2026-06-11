@@ -87,6 +87,19 @@ func ImplicitGCHome() string {
 	return filepath.Join(home, ".gc")
 }
 
+// GlobalRepoCacheRoot returns the user-global repo cache root
+// (<GC_HOME>/cache/repos), honoring the GC_HOME override the same way
+// every other user-global path does. It errors when no GC_HOME is
+// resolvable (hermetic test binaries without GC_HOME set) instead of
+// silently touching the developer's real cache.
+func GlobalRepoCacheRoot() (string, error) {
+	gcHome := ImplicitGCHome()
+	if gcHome == "" {
+		return "", fmt.Errorf("no GC_HOME available to resolve the repo cache; set GC_HOME")
+	}
+	return filepath.Join(gcHome, "cache", "repos"), nil
+}
+
 // GlobalRepoCachePath returns the user-global cache path for a source+commit pair.
 func GlobalRepoCachePath(gcHome, source, commit string) string {
 	return filepath.Join(gcHome, "cache", "repos", GlobalRepoCacheDirName(source, commit))

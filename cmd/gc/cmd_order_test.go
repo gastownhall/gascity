@@ -369,6 +369,7 @@ schedule = "*/5 * * * *"
 func TestScanAllOrdersRemoteImportedFlatPackOrders(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	cityDir := t.TempDir()
 	source := "https://github.com/example/orders-pack.git"

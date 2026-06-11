@@ -707,6 +707,7 @@ func TestImport_RootPackRemoteImportFromLockfileCache(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	cityDir := filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
@@ -767,6 +768,7 @@ func TestImport_RootPackRemoteImportDirtySharedCacheFails(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	cityDir := filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
@@ -845,6 +847,7 @@ func TestImport_RootPackRemoteImportMissingSharedCacheFails(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	cityDir := filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
@@ -884,6 +887,7 @@ func TestImport_RootPackRemoteImportMissingCacheHeadFails(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	cityDir := filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
@@ -954,6 +958,7 @@ func TestImport_RootPackRemoteImportMissingLockfileSuggestsInstall(t *testing.T)
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	cityDir := filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
@@ -985,6 +990,7 @@ func TestImport_RootPackRemoteSubpathImportFromLockfileCache(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	cityDir := filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
@@ -1045,6 +1051,7 @@ func TestImport_RootPackGitHubTreeImportFromLockfileCache(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	cityDir := filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
@@ -1104,6 +1111,7 @@ func TestResolvedPackNamesResolvesGitHubTreeImportsFromLockfileCache(t *testing.
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	cityDir := filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)

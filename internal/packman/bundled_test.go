@@ -13,6 +13,7 @@ import (
 func TestEnsureRepoInCacheMaterializesBundledSourceWithoutGit(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
 
@@ -48,6 +49,7 @@ func TestEnsureRepoInCacheMaterializesBundledSourceWithoutGit(t *testing.T) {
 func TestBundledSyntheticCacheKeyDoesNotCollideWithSameRepoGitSource(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	source := builtinpacks.MustSource("core")
 	gitSource := builtinpacks.Repository + "//contrib/k8s"
 	commit := "abc123def456"
@@ -88,6 +90,7 @@ func TestBundledSyntheticCacheKeyDoesNotCollideWithSameRepoGitSource(t *testing.
 func TestReadCachedPackImportsAcceptsBundledSyntheticCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
 	cachePath, err := RepoCachePath(source, commit)
@@ -106,6 +109,7 @@ func TestReadCachedPackImportsAcceptsBundledSyntheticCache(t *testing.T) {
 func TestReadCachedPackImportsTreatsBundledGitENOTDIRAsNonCheckout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
 	cachePath, err := RepoCachePath(source, commit)
@@ -134,6 +138,7 @@ func TestReadCachedPackImportsTreatsBundledGitENOTDIRAsNonCheckout(t *testing.T)
 func TestMaterializeBundledRepoInCacheLockedRejectsNonCanonicalPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
 	nonCanonical := filepath.Join(t.TempDir(), "cache")
@@ -157,6 +162,7 @@ func TestMaterializeBundledRepoInCacheLockedRejectsNonCanonicalPath(t *testing.T
 func TestEnsureBundledCacheMaterializeFailureIncludesRecoveryCause(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
 	cachePath, err := RepoCachePath(source, commit)

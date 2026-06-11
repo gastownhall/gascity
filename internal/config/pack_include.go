@@ -169,12 +169,10 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 		return "", false, nil
 	}
 
-	home, err := os.UserHomeDir()
+	cacheRoot, err := GlobalRepoCacheRoot()
 	if err != nil {
-		return "", false, fmt.Errorf("resolving home dir: %w", err)
+		return "", false, err
 	}
-
-	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit); err != nil {
 		return "", false, err
@@ -201,12 +199,10 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run \"gc import install\"", source)
 	}
 
-	home, err := os.UserHomeDir()
+	cacheRoot, err := GlobalRepoCacheRoot()
 	if err != nil {
-		return "", fmt.Errorf("resolving home dir: %w", err)
+		return "", err
 	}
-
-	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit); err != nil {
 		return "", err

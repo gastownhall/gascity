@@ -17,6 +17,7 @@ func TestCheckInstalledNoRemoteImportsMissingLockOK(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	report, err := CheckInstalled(city, map[string]config.Import{
 		"local": {Source: "./packs/local"},
@@ -36,6 +37,7 @@ func TestCheckInstalledReportsMissingLockfile(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	report, err := CheckInstalled(city, map[string]config.Import{
 		"pack:tools": {Source: "https://example.com/tools.git", Version: "^1.0"},
@@ -50,6 +52,7 @@ func TestSyncLockUsesBundledFallbackForPublicGastownWhenRemoteUnavailable(t *tes
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	oldRunGit := runGit
 	t.Cleanup(func() { runGit = oldRunGit })
@@ -107,6 +110,7 @@ func TestSyncLockUsesBundledFallbackForPublicGascityWhenRemoteUnavailable(t *tes
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	oldRunGit := runGit
 	t.Cleanup(func() { runGit = oldRunGit })
@@ -150,6 +154,7 @@ func TestCheckInstalledReportsMissingCache(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	writeTestLockfile(t, city, map[string]LockedPack{
 		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
 	})
@@ -167,6 +172,7 @@ func TestCheckInstalledAcceptsBundledSyntheticCache(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
 	writeTestLockfile(t, city, map[string]LockedPack{
@@ -198,6 +204,7 @@ func TestCheckInstalledFallsBackToGitCheckoutForBundledSource(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 
 	source := builtinpacks.MustSource("core")
@@ -236,6 +243,7 @@ func TestCheckInstalledReportsInvalidSyntheticCache(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
@@ -266,6 +274,7 @@ func TestCheckInstalledTreatsBundledGitENOTDIRAsInvalidSyntheticCache(t *testing
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	source := builtinpacks.MustSource("gastown")
 	commit := "abc123def456"
@@ -299,6 +308,7 @@ func TestCheckInstalledMissingCacheDoesNotCreateCacheEntry(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	source := "https://example.com/tools.git"
 	commit := "aaaa"
 	writeTestLockfile(t, city, map[string]LockedPack{
@@ -325,6 +335,7 @@ func TestCheckInstalledDeduplicatesRepeatedSourceIssues(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	writeTestLockfile(t, city, map[string]LockedPack{
 		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
 	})
@@ -346,6 +357,7 @@ func TestCheckInstalledSkipsStaleLockEntriesWhenClosureIncomplete(t *testing.T) 
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	writeTestLockfile(t, city, map[string]LockedPack{
 		"https://example.com/a.git": {Version: "1.0.0", Commit: "aaaa"},
 		"https://example.com/b.git": {Version: "1.0.0", Commit: "bbbb"},
@@ -364,6 +376,7 @@ func TestCheckInstalledReportsConstraintMismatch(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	writeTestLockfile(t, city, map[string]LockedPack{
 		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
 	})
@@ -381,6 +394,7 @@ func TestCheckInstalledWalksTransitiveClosureAndReportsStaleLockEntry(t *testing
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 	writeTestLockfile(t, city, map[string]LockedPack{
 		"https://example.com/a.git":     {Version: "1.0.0", Commit: "aaaa"},
@@ -418,6 +432,7 @@ func TestCheckInstalledReportsMissingTransitiveLockEntry(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 	writeTestLockfile(t, city, map[string]LockedPack{
 		"https://example.com/a.git": {Version: "1.0.0", Commit: "aaaa"},
@@ -445,6 +460,7 @@ func TestCheckInstalledExpandsRepeatedSourceWhenAnyImportIsTransitive(t *testing
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 	writeTestLockfile(t, city, map[string]LockedPack{
 		"https://example.com/shared.git": {Version: "1.0.0", Commit: "aaaa"},
@@ -485,6 +501,7 @@ func TestCheckInstalledParsesNonTransitiveCachedPack(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 	writeTestLockfile(t, city, map[string]LockedPack{
 		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
@@ -509,6 +526,7 @@ func TestCheckInstalledReportsCacheCheckoutMismatch(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 	writeTestLockfile(t, city, map[string]LockedPack{
 		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
@@ -532,6 +550,7 @@ func TestCheckInstalledReportsDirtyCacheWorktree(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 	writeTestLockfile(t, city, map[string]LockedPack{
 		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
@@ -556,6 +575,7 @@ func TestCheckInstalledUsesRemoteSubpath(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 	source := "file:///tmp/repo.git//packs/base"
 	writeTestLockfile(t, city, map[string]LockedPack{

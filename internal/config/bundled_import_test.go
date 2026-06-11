@@ -280,6 +280,7 @@ func setupBundledImportTest(t *testing.T) (home, cityDir string) {
 	dir := t.TempDir()
 	home = filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityDir = filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
 	return home, cityDir

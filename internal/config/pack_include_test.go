@@ -323,6 +323,7 @@ func setupLockedPackRefTest(t *testing.T, ref, commit string) (cityDir, cacheDir
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityDir = filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
 	writeTestFile(t, cityDir, "packs.lock", fmt.Sprintf(`
@@ -385,6 +386,7 @@ func TestResolvePackRefFallsBackToIncludeCacheWhenUnlocked(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityDir := filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
 
