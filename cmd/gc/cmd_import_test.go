@@ -656,6 +656,61 @@ version = "^1.4"
 	}
 }
 
+func TestDoImportInstallCityImportOverridesRootPackImport(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	localPack := filepath.Join(dir, "packs", "tools")
+	if err := os.MkdirAll(localPack, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writePackToml(t, localPack, "[pack]\nname = \"tools\"\nschema = 1\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.4"
+`)
+	writeCityToml(t, dir, `[workspace]
+name = "demo"
+
+[imports.tools]
+source = "packs/tools"
+`)
+
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+	})
+	syncImports = func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		imp, ok := imports["pack:tools"]
+		if !ok {
+			t.Fatalf("imports = %#v, want pack:tools", imports)
+		}
+		if imp.Source != "packs/tools" {
+			t.Fatalf("pack:tools source = %q, want city.toml override", imp.Source)
+		}
+		for name, imp := range imports {
+			if imp.Source == "https://example.com/tools.git" {
+				t.Fatalf("imports[%s] still uses root pack remote source: %#v", name, imports)
+			}
+		}
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+	installLockedImports = func(_ string) (*packman.Lockfile, error) {
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportInstall(dir, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+}
+
 func TestDoImportInstallRewritesLockToCurrentGraph(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
@@ -1205,6 +1260,44 @@ source = "../packs/local"
 	}
 	if !strings.Contains(stdout.String(), "local\t../packs/local\t\t(path)") {
 		t.Fatalf("unexpected flat output:\n%s", stdout.String())
+	}
+}
+
+func TestDoImportListShowsCityImportOverrideForRootPackImport(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.4"
+`)
+	writeCityToml(t, dir, `[workspace]
+name = "demo"
+
+[imports.tools]
+source = "packs/tools"
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs:  map[string]packman.LockedPack{},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportList(dir, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "tools\tpacks/tools\t\t(path)") {
+		t.Fatalf("missing city override path import:\n%s", out)
+	}
+	if strings.Contains(out, "https://example.com/tools.git") {
+		t.Fatalf("output still shows root pack remote source:\n%s", out)
 	}
 }
 

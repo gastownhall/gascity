@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
@@ -271,12 +272,15 @@ func resolveImportRoot() (string, error) {
 	if raw, ok := resolveExplicitImportPathEnv(); ok {
 		return validateImportRootPath(raw)
 	}
-	if cityPath, err := resolveCity(); err == nil {
-		return cityPath, nil
-	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
+	}
+	if root, ok, err := findNearestImportRoot(cwd); ok || err != nil {
+		return root, err
+	}
+	if cityPath, err := resolveCity(); err == nil {
+		return cityPath, nil
 	}
 	return findPackRoot(cwd)
 }
@@ -320,6 +324,27 @@ func findPackRoot(dir string) (string, error) {
 		abs = parent
 	}
 	return "", fmt.Errorf("could not find city or pack root from %s", dir)
+}
+
+func findNearestImportRoot(dir string) (string, bool, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", false, err
+	}
+	for {
+		if packExists(abs) {
+			return abs, true, nil
+		}
+		if citylayout.HasCityConfig(abs) || citylayout.HasRuntimeRoot(abs) {
+			cityPath, err := validateCityPath(abs)
+			return cityPath, true, err
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return "", false, nil
+		}
+		abs = parent
+	}
 }
 
 type importScopeState struct {
@@ -389,7 +414,11 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 	if err != nil {
 		return nil, err
 	}
-	for name, imp := range packManifest.Imports {
+	rootImports := copyImports(packManifest.Imports)
+	if err := applyCityRootImportOverridesFS(fs, cityPath, rootImports); err != nil {
+		return nil, err
+	}
+	for name, imp := range rootImports {
 		all["pack:"+name] = imp
 	}
 	defaults, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
@@ -420,12 +449,12 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 }
 
 func collectInspectableImportsFS(fs fsys.FS, cityPath string, scope *importScopeState) (map[string]config.Import, error) {
-	imports := make(map[string]config.Import, len(scope.imports))
-	for name, imp := range scope.imports {
-		imports[name] = imp
-	}
+	imports := copyImports(scope.imports)
 	if !scope.isRootPackScope() {
 		return imports, nil
+	}
+	if err := applyCityRootImportOverridesFS(fs, cityPath, imports); err != nil {
+		return nil, err
 	}
 	defaults, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
 	if err != nil {
@@ -439,6 +468,31 @@ func collectInspectableImportsFS(fs fsys.FS, cityPath string, scope *importScope
 		imports[key] = bound.Import
 	}
 	return imports, nil
+}
+
+func copyImports(imports map[string]config.Import) map[string]config.Import {
+	out := make(map[string]config.Import, len(imports))
+	for name, imp := range imports {
+		out[name] = imp
+	}
+	return out
+}
+
+func applyCityRootImportOverridesFS(fs fsys.FS, cityPath string, imports map[string]config.Import) error {
+	if _, err := fs.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	cfg, err := loadCityImportManifestFS(fs, cityPath)
+	if err != nil {
+		return err
+	}
+	for name, imp := range cfg.Imports {
+		imports[name] = imp
+	}
+	return nil
 }
 
 func lookupInspectableImport(target string, imports map[string]config.Import) (config.Import, bool) {
