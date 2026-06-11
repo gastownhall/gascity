@@ -181,31 +181,86 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 }
 
 // BundledSourcePinnedVersion returns the canonical pinned version for a
-// bundled builtin source: packs published from the public gascity-packs
-// registry keep their public registry pin; everything else uses the
-// bundled gascity.git pin. The pin is a stable cache tag — the running
-// binary serves the content for it offline.
+// bundled builtin source: packs addressed through the public gascity-packs
+// repository keep their public registry pin; gascity.git sources use the
+// bundled gascity.git pin. The canonical pin is the only commit the
+// running binary pre-seeds from its embedded content — any other commit
+// on a bundled source is an ordinary remote import.
 func BundledSourcePinnedVersion(source string) string {
-	if s, ok := builtinpacks.Source("gastown"); ok && s == source {
-		return PublicGastownPackVersion
-	}
-	if s, ok := builtinpacks.Source("gascity"); ok && s == source {
-		return PublicGascityPackVersion
+	name, repository, ok := builtinpacks.SourceLayout(source)
+	if ok && repository == builtinpacks.PublicRepository {
+		switch name {
+		case "gastown":
+			return PublicGastownPackVersion
+		case "gascity":
+			return PublicGascityPackVersion
+		}
 	}
 	return BundledPackImportVersion
+}
+
+// SupersededBundledPinTarget reports the current canonical version for a
+// bundled source whose declared version is a SUPERSEDED canonical pin —
+// one an older gc release wrote as canonical. Only public registry pins
+// are ever bumped; deliberate user pins at other commits never match.
+func SupersededBundledPinTarget(source, version string) (string, bool) {
+	name, repository, ok := builtinpacks.SourceLayout(source)
+	if !ok || repository != builtinpacks.PublicRepository {
+		return "", false
+	}
+	var superseded []string
+	var current string
+	switch name {
+	case "gastown":
+		superseded, current = SupersededPublicGastownPackVersions, PublicGastownPackVersion
+	case "gascity":
+		superseded, current = SupersededPublicGascityPackVersions, PublicGascityPackVersion
+	default:
+		return "", false
+	}
+	v := strings.TrimSpace(version)
+	for _, old := range superseded {
+		if v == old {
+			return current, true
+		}
+	}
+	return "", false
+}
+
+// IsBundledSourceAtCanonicalPin reports whether commit is the canonical
+// pinned commit the running binary pre-seeds for a bundled source. Only
+// the canonical pin is served from embedded content; pinning a bundled
+// source at any other commit makes it behave exactly like a regular
+// remote import — fetched for real by gc import install.
+//
+// The comparison is deliberately exact (full lowercase sha): this
+// predicate determines cache-key derivation, which must be stable. An
+// abbreviated or differently-cased pin classifies as non-canonical and
+// takes the real-fetch path consistently at every gate.
+func IsBundledSourceAtCanonicalPin(source, commit string) bool {
+	commit = strings.TrimSpace(commit)
+	if commit == "" || !builtinpacks.IsSource(source) {
+		return false
+	}
+	return strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:") == commit
 }
 
 // resolveBundledSourceWithoutLock resolves a bundled builtin source that has
 // no packs.lock entry to the binary's canonical pin, hydrating the synthetic
 // cache when needed. The lock stays the source of truth when an entry
-// exists; this fallback keeps cities composable before the first
-// "gc import install" writes the lock (and lets non-OS filesystem loads in
-// tests resolve bundled imports).
-func resolveBundledSourceWithoutLock(source string) (string, bool) {
+// exists, and a declared non-canonical pin never falls back here — it must
+// be installed for real, exactly like any other remote import. This
+// fallback keeps cities composable before the first "gc import install"
+// writes the lock.
+func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, bool) {
 	if !builtinpacks.IsSource(source) {
 		return "", false
 	}
 	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
+	if declared := strings.TrimSpace(declaredVersion); declared != "" &&
+		strings.TrimPrefix(declared, "sha:") != commit {
+		return "", false
+	}
 	cacheRoot, err := GlobalRepoCacheRoot()
 	if err != nil {
 		return "", false
@@ -214,18 +269,23 @@ func resolveBundledSourceWithoutLock(source string) (string, bool) {
 	if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
 		return cacheDir, true
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
+		if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
+			return cacheDir, nil
+		}
+		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, commit)
+	}); err != nil {
 		return "", false
 	}
 	return cacheDir, true
 }
 
-func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
+func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (string, error) {
 	lockPath := filepath.Join(cityRoot, "packs.lock")
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if cacheDir, ok := resolveBundledSourceWithoutLock(source); ok {
+			if cacheDir, ok := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
 				return cacheDir, nil
 			}
 			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); run \"gc import install\"", source)
@@ -239,7 +299,7 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	}
 	entry, ok := lock.Packs[source]
 	if !ok || entry.Commit == "" {
-		if cacheDir, ok := resolveBundledSourceWithoutLock(source); ok {
+		if cacheDir, ok := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
 			return cacheDir, nil
 		}
 		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run \"gc import install\"", source)
@@ -318,7 +378,7 @@ func ResetRemoteCacheValidationCache() {
 func validateInstalledRemoteCache(source, cacheDir, commit string) error {
 	gitPath := filepath.Join(cacheDir, ".git")
 	gitInfo, gitStatErr := os.Stat(gitPath)
-	if builtinpacks.IsSource(source) {
+	if IsBundledSourceAtCanonicalPin(source, commit) {
 		err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit)
 		if err == nil {
 			return nil
@@ -393,7 +453,7 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 // "bundled pack cache content hash does not match current binary" wedge).
 func RepoCacheKey(source, commit string) string {
 	identity := NormalizeRemoteSource(source) + commit
-	if builtinpacks.IsSource(source) {
+	if IsBundledSourceAtCanonicalPin(source, commit) {
 		identity = builtinpacks.SyntheticCacheNamespace + "\x00" + NormalizeRemoteSource(source) + "\x00" + commit
 		if component := builtinpacks.SyntheticCacheKeyComponent(); component != "" {
 			identity += "\x00" + component

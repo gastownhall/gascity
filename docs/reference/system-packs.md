@@ -8,8 +8,9 @@ description: Built-in packs bundled with gc and composed via pinned imports.
 Gas City ships with a small set of built-in packs. These packs are embedded
 in the `gc` binary and served from the user-global pack cache under
 `$GC_HOME/cache/repos/` (default `~/.gc/cache/repos/`). Nothing is
-materialized into the city; the binary self-heals the cache with its own
-embedded content, so the pinned imports below resolve offline.
+materialized into the city; the binary pre-seeds the cache with its own
+embedded content at each pack's canonical pinned commit, so the pinned
+imports below resolve offline.
 
 Built-in packs are not implicit: nothing splices them into config composition
 at load time. They compose only through explicit pinned imports in
@@ -25,8 +26,11 @@ source = "https://github.com/gastownhall/gascity.git//examples/bd"
 version = "sha:<pinned commit>"
 ```
 
-`gc init` also writes a matching `packs.lock`; the version is a stable cache
-pin, not a fetch requirement -- the running binary serves the content.
+`gc init` also writes a matching `packs.lock`. The canonical pin is served
+offline from the binary's embedded copy; pinning a bundled source at any
+other commit makes it an ordinary remote import; `gc import install`
+fetches that exact commit from git, so editing the pin always does what it
+says.
 
 The `bd` entry is written only for cities using the `bd` beads provider (the
 default); cities on other providers get only `core`. The `bd` pack pulls in
@@ -64,9 +68,11 @@ the legacy includes from `city.toml`, adds the missing pinned imports to
 `pack.toml` (creating a minimal one for legacy cities), and refreshes
 `packs.lock` plus the cache.
 
-Config load self-heals the user-global cache for the pinned bundled sources,
-prunes any leftover `.gc/system/packs` tree, and emits a once-per-city
-warning when a required built-in import is missing from the composed config.
+Config load re-seeds the user-global cache for canonically pinned bundled
+sources, prunes any leftover `.gc/system/packs` tree, and emits a
+once-per-city warning when a required built-in import is missing from the
+composed config. Bundled sources pinned at non-canonical commits are left
+to `gc import install` like any other remote import.
 
 ## Inspect The Files
 

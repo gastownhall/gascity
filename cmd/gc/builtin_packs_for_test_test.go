@@ -53,7 +53,7 @@ func builtinImportsTOML(names ...string) string {
 		if !ok {
 			continue
 		}
-		fmt.Fprintf(&b, "\n[imports.%s]\nsource = %q\nversion = %q\n", name, source, config.BundledPackImportVersion)
+		fmt.Fprintf(&b, "\n[imports.%s]\nsource = %q\nversion = %q\n", name, source, config.BundledSourcePinnedVersion(source))
 	}
 	return b.String()
 }
@@ -70,7 +70,8 @@ func writeBuiltinImportsLock(t testing.TB, cityDir string, names ...string) {
 		if !ok {
 			t.Fatalf("unknown builtin pack %q", name)
 		}
-		fmt.Fprintf(&b, "[packs.%q]\nversion = %q\ncommit = %q\n\n", source, config.BundledPackImportVersion, bundledPackImportCommit())
+		version := config.BundledSourcePinnedVersion(source)
+		fmt.Fprintf(&b, "[packs.%q]\nversion = %q\ncommit = %q\n\n", source, version, strings.TrimPrefix(version, "sha:"))
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "packs.lock"), []byte(b.String()), 0o644); err != nil {
 		t.Fatalf("writing packs.lock: %v", err)

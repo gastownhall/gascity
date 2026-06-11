@@ -677,7 +677,7 @@ func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []str
 				continue
 			}
 		}
-		if source, ok := builtinpacks.Source(name); ok {
+		if source, ok := builtinpacks.CanonicalImportSource(name); ok {
 			out[i] = source
 		}
 	}

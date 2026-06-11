@@ -13,7 +13,7 @@ import (
 func TestResolveLockedRemoteImportAcceptsBundledSyntheticCache(t *testing.T) {
 	home, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()
-	commit := "abc123def456abc123def456abc123def456abc123de"
+	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
 	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
@@ -35,7 +35,7 @@ func TestResolveLockedRemoteImportAcceptsBundledSyntheticCache(t *testing.T) {
 func TestResolveLockedRemoteImportRejectsBundledSyntheticContentDrift(t *testing.T) {
 	home, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()
-	commit := "abc123def456abc123def456abc123def456abc123de"
+	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
 	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
@@ -59,7 +59,7 @@ schema = 1
 func TestResolveLockedRemoteImportRejectsBundledSyntheticExtraFile(t *testing.T) {
 	home, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()
-	commit := "abc123def456abc123def456abc123def456abc123de"
+	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
 	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
@@ -79,14 +79,14 @@ func TestResolveLockedRemoteImportRejectsBundledSyntheticExtraFile(t *testing.T)
 func TestResolveInstalledRemoteImportAcceptsBundledSyntheticCache(t *testing.T) {
 	home, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()
-	commit := "abc123def456abc123def456abc123def456abc123de"
+	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
 	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
-	got, err := resolveInstalledRemoteImport(source, cityDir)
+	got, err := resolveInstalledRemoteImport(source, "", cityDir)
 	if err != nil {
 		t.Fatalf("resolveInstalledRemoteImport: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestResolveImportPackRefAcceptsPublicGastownSyntheticCache(t *testing.T) {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
-	got, err := resolveImportPackRef(source, cityDir, cityDir)
+	got, err := resolveImportPackRef(source, "", cityDir, cityDir)
 	if err != nil {
 		t.Fatalf("resolveImportPackRef: %v", err)
 	}
@@ -177,7 +177,7 @@ fetched = "2026-01-01T00:00:00Z"
 func TestResolveLockedRemoteImportSurfacesInvalidBundledMarker(t *testing.T) {
 	home, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()
-	commit := "abc123def456abc123def456abc123def456abc123de"
+	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
 	writeTestFile(t, cacheDir, ".gc-bundled-pack-cache.toml", `
@@ -221,7 +221,7 @@ content_hash = "sha256:deadbeef"
 func TestResolveLockedRemoteImportPrefersGitCacheOverInvalidBundledMarker(t *testing.T) {
 	home, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()
-	commit := "abc123def456abc123def456abc123def456abc123de"
+	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
 	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
@@ -263,7 +263,8 @@ func TestValidateInstalledRemoteCacheTreatsBundledGitENOTDIRAsNonCheckout(t *tes
 		t.Fatalf("WriteFile(%q): %v", cacheDir, err)
 	}
 
-	err := validateInstalledRemoteCache(bundledPackSource(), cacheDir, "abc123def456")
+	source := bundledPackSource()
+	err := validateInstalledRemoteCache(source, cacheDir, canonicalBundledCommit(source))
 	if err == nil {
 		t.Fatal("validateInstalledRemoteCache accepted file cache")
 	}
@@ -310,6 +311,107 @@ func bundledRepoCacheDir(home, source, commit string) string {
 	return filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(source, commit))
 }
 
+// canonicalBundledCommit returns the only commit the running binary
+// pre-seeds from embedded content for a bundled source. Any other commit
+// on a bundled source behaves like an ordinary remote import.
+func canonicalBundledCommit(source string) string {
+	return strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
+}
+
+// TestIsBundledSourceAtCanonicalPin pins the gate that decides whether a
+// bundled source is served from the binary's embedded content: only the
+// source's canonical pin qualifies. Spellings are normalized per
+// builtinpacks.SourceLayout — public gascity-packs sources carry the
+// public registry pins, while gascity.git sources (including the legacy
+// gascity.git gastown spelling) carry the bundled gascity.git pin.
+func TestIsBundledSourceAtCanonicalPin(t *testing.T) {
+	coreSource := bundledPackSource()
+	gascityGitCommit := strings.TrimPrefix(BundledPackImportVersion, "sha:")
+	publicGastownCommit := strings.TrimPrefix(PublicGastownPackVersion, "sha:")
+	legacyGastownSource := builtinpacks.MustSource("gastown")
+
+	tests := []struct {
+		name   string
+		source string
+		commit string
+		want   bool
+	}{
+		{"core at canonical gascity.git pin", coreSource, gascityGitCommit, true},
+		{"core at non-canonical commit", coreSource, "abc123def456abc123def456abc123def456abc123de", false},
+		{"public gastown tree URL at public pin", PublicGastownPackSource, publicGastownCommit, true},
+		{"public gastown git subpath spelling at public pin", builtinpacks.PublicRepository + "//gastown", publicGastownCommit, true},
+		{"public gastown at gascity.git pin", PublicGastownPackSource, gascityGitCommit, false},
+		{"legacy gascity.git gastown at gascity.git pin", legacyGastownSource, gascityGitCommit, true},
+		{"legacy gascity.git gastown at public pin", legacyGastownSource, publicGastownCommit, false},
+		{"non-bundled URL", "https://github.com/example/other.git//pack", gascityGitCommit, false},
+		{"empty commit", coreSource, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsBundledSourceAtCanonicalPin(tt.source, tt.commit); got != tt.want {
+				t.Fatalf("IsBundledSourceAtCanonicalPin(%q, %q) = %v, want %v", tt.source, tt.commit, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBundledSourcePinnedVersionNormalizesSpellings pins the canonical-pin
+// lookup across source spellings: every spelling addressing a pack through
+// the public gascity-packs repository resolves to that pack's public
+// registry pin, while gascity.git spellings resolve to the bundled
+// gascity.git pin.
+func TestBundledSourcePinnedVersionNormalizesSpellings(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{"public gastown tree URL", PublicGastownPackSource, PublicGastownPackVersion},
+		{"public gastown git subpath spelling", builtinpacks.PublicRepository + "//gastown", PublicGastownPackVersion},
+		{"public gascity tree URL", PublicGascityPackSource, PublicGascityPackVersion},
+		{"public gascity canonical source", builtinpacks.MustSource("gascity"), PublicGascityPackVersion},
+		{"core canonical source", bundledPackSource(), BundledPackImportVersion},
+		{"legacy gascity.git gastown spelling", builtinpacks.MustSource("gastown"), BundledPackImportVersion},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := BundledSourcePinnedVersion(tt.source); got != tt.want {
+				t.Fatalf("BundledSourcePinnedVersion(%q) = %q, want %q", tt.source, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateInstalledRemoteCacheRequiresGitForNonCanonicalBundledPin pins
+// the new semantics for bundled sources locked at a non-canonical commit:
+// they behave exactly like ordinary remote imports. With no cache present
+// the load fails with the regular not-cached error — no synthetic-cache
+// language — and the loader must not auto-materialize embedded content.
+func TestValidateInstalledRemoteCacheRequiresGitForNonCanonicalBundledPin(t *testing.T) {
+	home, cityDir := setupBundledImportTest(t)
+	source := bundledPackSource()
+	commit := "abc123def456abc123def456abc123def456abc123de"
+	if IsBundledSourceAtCanonicalPin(source, commit) {
+		t.Fatalf("test commit %q unexpectedly matches the canonical pin for %q", commit, source)
+	}
+	writeBundledImportLock(t, cityDir, source, commit)
+	cacheDir := bundledRepoCacheDir(home, source, commit)
+
+	_, _, err := resolveLockedRemoteImport(source, cityDir)
+	if err == nil {
+		t.Fatal("expected non-canonical bundled pin without cache to fail")
+	}
+	if !strings.Contains(err.Error(), "locked but not cached") || !strings.Contains(err.Error(), `run "gc import install"`) {
+		t.Fatalf("error = %v, want regular not-cached error", err)
+	}
+	if strings.Contains(err.Error(), "synthetic") {
+		t.Fatalf("error = %v, must not mention the synthetic cache for a non-canonical pin", err)
+	}
+	if _, statErr := os.Stat(cacheDir); !os.IsNotExist(statErr) {
+		t.Fatalf("cache dir %q exists (stat err = %v); non-canonical bundled pin must not auto-materialize embedded content", cacheDir, statErr)
+	}
+}
+
 // TestResolveInstalledRemoteImportBundledFallbackWithoutLock pins the
 // no-lock self-heal: a bundled source with no packs.lock resolves to the
 // binary's canonical pin, hydrating the synthetic cache on demand.
@@ -318,7 +420,7 @@ func TestResolveInstalledRemoteImportBundledFallbackWithoutLock(t *testing.T) {
 	source := bundledPackSource()
 	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
 
-	got, err := resolveInstalledRemoteImport(source, cityDir)
+	got, err := resolveInstalledRemoteImport(source, "", cityDir)
 	if err != nil {
 		t.Fatalf("resolveInstalledRemoteImport without lock: %v", err)
 	}
@@ -336,8 +438,28 @@ func TestResolveInstalledRemoteImportBundledFallbackWithoutLock(t *testing.T) {
 func TestResolveInstalledRemoteImportNonBundledStillRequiresLock(t *testing.T) {
 	_, cityDir := setupBundledImportTest(t)
 
-	_, err := resolveInstalledRemoteImport("https://github.com/example/other.git", cityDir)
+	_, err := resolveInstalledRemoteImport("https://github.com/example/other.git", "", cityDir)
 	if err == nil || !strings.Contains(err.Error(), "missing packs.lock") {
 		t.Fatalf("err = %v, want missing packs.lock error", err)
+	}
+}
+
+// TestResolveInstalledRemoteImportRejectsDeclaredNonCanonicalPinWithoutLock
+// pins the declared-version gate: a bundled source declared at a
+// non-canonical pin with no lock entry must NOT silently fall back to the
+// binary's embedded canonical content — it errors like any other
+// uninstalled remote import.
+func TestResolveInstalledRemoteImportRejectsDeclaredNonCanonicalPinWithoutLock(t *testing.T) {
+	_, cityDir := setupBundledImportTest(t)
+	source := bundledPackSource()
+
+	_, err := resolveInstalledRemoteImport(source, "sha:0123456789abcdef0123456789abcdef01234567", cityDir)
+	if err == nil || !strings.Contains(err.Error(), "missing packs.lock") {
+		t.Fatalf("err = %v, want missing packs.lock error for declared non-canonical pin", err)
+	}
+
+	// The canonical declared pin (and an empty declaration) still falls back.
+	if _, err := resolveInstalledRemoteImport(source, BundledSourcePinnedVersion(source), cityDir); err != nil {
+		t.Fatalf("canonical declared pin should fall back to embedded content: %v", err)
 	}
 }

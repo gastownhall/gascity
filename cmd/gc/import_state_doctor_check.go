@@ -61,6 +61,13 @@ func (c *importStateDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 		r.Details = details
 		return r
 	}
+	if details := supersededBundledPinDetails(imports); len(details) > 0 {
+		r.Status = doctor.StatusError
+		r.Message = fmt.Sprintf("%d bundled import(s) pinned at a superseded canonical version", len(details))
+		r.FixHint = `run "gc doctor --fix" to re-pin superseded canonical bundled imports to the current canonical version`
+		r.Details = details
+		return r
+	}
 	report, err := checkInstalledImports(c.cityPath, imports)
 	if err != nil {
 		r.Status = doctor.StatusError
@@ -121,6 +128,15 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 			return fmt.Errorf("reading migrated imports: %w", err)
 		}
 	}
+	if len(supersededBundledPinDetails(imports)) > 0 {
+		if _, err := rewriteSupersededBundledPinsFS(fsys.OSFS{}, c.cityPath); err != nil {
+			return err
+		}
+		imports, err = collectAllImportsFS(fsys.OSFS{}, c.cityPath)
+		if err != nil {
+			return fmt.Errorf("reading re-pinned imports: %w", err)
+		}
+	}
 	lock, err := syncImports(c.cityPath, imports, packman.InstallResolveIfNeeded)
 	if err != nil {
 		return err
@@ -132,6 +148,84 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 		return err
 	}
 	return nil
+}
+
+// supersededBundledPinDetails reports bundled imports pinned at a
+// superseded canonical version (a pin an older gc release wrote as
+// canonical). Deliberate pins at other commits are not flagged.
+func supersededBundledPinDetails(imports map[string]config.Import) []string {
+	var names []string
+	for name, imp := range imports {
+		if _, ok := config.SupersededBundledPinTarget(imp.Source, imp.Version); ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	details := make([]string, 0, len(names))
+	for _, name := range names {
+		imp := imports[name]
+		current, _ := config.SupersededBundledPinTarget(imp.Source, imp.Version)
+		details = append(details, fmt.Sprintf("superseded-canonical-pin | %s | %s | pinned at superseded canonical %s; current canonical is %s", name, imp.Source, imp.Version, current))
+	}
+	return details
+}
+
+// rewriteSupersededBundledPinsFS bumps superseded canonical pins to the
+// current canonical version across pack.toml imports, pack.toml default
+// rig imports, and city.toml rig / default-rig imports.
+func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) (bool, error) {
+	bump := func(imports map[string]config.Import) bool {
+		changed := false
+		for name, imp := range imports {
+			if current, ok := config.SupersededBundledPinTarget(imp.Source, imp.Version); ok {
+				imp.Version = current
+				imports[name] = imp
+				changed = true
+			}
+		}
+		return changed
+	}
+
+	changed := false
+	manifest, err := loadCityPackManifestFS(fs, cityPath)
+	if err != nil {
+		return false, err
+	}
+	packChanged := bump(manifest.Imports)
+	defaultRigChanged := bump(manifest.Defaults.Rig.Imports)
+	if packChanged || defaultRigChanged {
+		if err := writeCityPackManifest(fs, cityPath, manifest); err != nil {
+			return false, err
+		}
+		changed = true
+	}
+
+	if _, err := fs.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		if os.IsNotExist(err) {
+			return changed, nil
+		}
+		return false, err
+	}
+	cfg, err := loadCityImportManifestFS(fs, cityPath)
+	if err != nil {
+		return false, err
+	}
+	cityChanged := false
+	for i := range cfg.Rigs {
+		if bump(cfg.Rigs[i].Imports) {
+			cityChanged = true
+		}
+	}
+	if bump(cfg.Defaults.Rig.Imports) {
+		cityChanged = true
+	}
+	if cityChanged {
+		if err := writeCityImportManifestFS(fs, cityPath, cfg); err != nil {
+			return false, err
+		}
+		changed = true
+	}
+	return changed, nil
 }
 
 func defaultWave1PublicPackImports(packNames []string) (map[string]wave1PublicPackImportTarget, error) {

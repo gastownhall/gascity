@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Version pins on builtin packs are honored: the binary only pre-seeds
+  its embedded content at each pack's canonical pin.** Previously the
+  bundled synthetic cache served the running binary's embedded bytes for
+  ANY commit pinned on a bundled source — editing the pin changed nothing.
+  Now only the canonical pin (the one `gc init` writes) resolves from the
+  embedded copy; a bundled source pinned at any other commit behaves
+  exactly like a regular remote import: `gc import install` fetches that
+  exact commit from git, validation uses the git checkout, and the cache
+  slot uses the plain remote key. Cities on canonical pins keep working
+  fully offline, including across binary upgrades that keep the pin
+  constants; releases that bump a canonical pin migrate existing cities
+  via `gc doctor --fix` (superseded canonical pins are rewritten to the
+  current one).
+
 - **Builtin packs are no longer materialized into cities; they compose via
   pinned imports resolved from the user-global pack cache.** The per-city
   `.gc/system/packs` tree is retired (and pruned on sight): `gc init` now

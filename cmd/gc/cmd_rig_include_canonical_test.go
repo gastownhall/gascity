@@ -57,7 +57,7 @@ func TestRigAddIncludeCanonicalizesBuiltinPackSource(t *testing.T) {
 			"./packs/gastown", cityToml)
 	}
 	// The import source must canonicalize to the bundled remote source.
-	wantSource, ok := builtinpacks.Source("gastown")
+	wantSource, ok := builtinpacks.CanonicalImportSource("gastown")
 	if !ok {
 		t.Fatal("bundled gastown pack not registered")
 	}
@@ -117,7 +117,7 @@ func TestRigAddIncludePrefersConfiguredPackOverBuiltin(t *testing.T) {
 	}
 	// The bundled remote source must NOT be written as the import source for
 	// a token that names a configured pack.
-	bundledSource, ok := builtinpacks.Source("gastown")
+	bundledSource, ok := builtinpacks.CanonicalImportSource("gastown")
 	if !ok {
 		t.Fatal("bundled gastown pack not registered")
 	}

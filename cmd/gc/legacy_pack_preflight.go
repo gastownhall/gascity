@@ -53,6 +53,12 @@ func ensureBundledLockedRemoteImportsCached(cityPath string) error {
 		if strings.TrimSpace(pack.Commit) == "" {
 			return fmt.Errorf("lock entry %q is missing commit", source)
 		}
+		if !config.IsBundledSourceAtCanonicalPin(source, pack.Commit) {
+			// A bundled source pinned at a non-canonical commit is an
+			// ordinary remote import: gc import install fetches it for
+			// real; the binary never serves embedded content for it.
+			continue
+		}
 		cachePath, err := packman.RepoCachePath(source, pack.Commit)
 		if err != nil {
 			return fmt.Errorf("resolving cache path for bundled import %q from packs.lock: %w", source, err)

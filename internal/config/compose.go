@@ -1476,7 +1476,7 @@ func LoadPackGraphDirsForDoctor(fs fsys.FS, cityTomlPath string) ([]string, erro
 }
 
 func loadImportPackGraphDirsForDoctor(fs fsys.FS, imp Import, declDir, cityRoot string, cache *packLoadCache) ([]string, error) {
-	impDir, err := resolveImportPackRef(imp.Source, declDir, cityRoot)
+	impDir, err := resolveImportPackRef(imp.Source, imp.Version, declDir, cityRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -1656,7 +1656,7 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 	}
 
 	visitImport = func(ref, declDir string, transitive bool) {
-		dir, err := resolveImportPackRef(ref, declDir, cityRoot)
+		dir, err := resolveImportPackRef(ref, "", declDir, cityRoot)
 		if err != nil {
 			return
 		}

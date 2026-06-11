@@ -422,8 +422,9 @@ func readRespawnMarkers(t *testing.T, path string) []float64 {
 // TestLifecycle_PackCacheSelfHealsOnStart verifies that gc start re-hydrates
 // the user-global bundled pack cache even if it was deleted after init.
 // End-to-end regression test for Bug 4 (2026-03-18), updated for the
-// imports-based composition model: builtin packs resolve from the GC_HOME
-// cache that the binary self-heals from its embedded content.
+// imports-based composition model: builtin packs at their canonical pins
+// resolve from the GC_HOME cache that the binary self-heals from its
+// embedded content.
 func TestLifecycle_PackCacheSelfHealsOnStart(t *testing.T) {
 	c := helpers.NewCity(t, testEnvB)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))

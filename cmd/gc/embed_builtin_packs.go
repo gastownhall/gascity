@@ -19,8 +19,10 @@ import (
 // Builtin packs are never materialized into the city: they compose through
 // explicit [imports.<name>] entries (written by gc init, repaired by the
 // builtin-pack-imports doctor check) whose bundled sources resolve from the
-// user-global repo cache that the running binary self-heals with its own
-// embedded content. The retired .gc/system/packs tree is pruned on sight.
+// user-global repo cache. The running binary pre-seeds that cache with its
+// embedded content at each pack's canonical pin; a bundled source pinned at
+// any other commit is an ordinary remote import and is fetched for real.
+// The retired .gc/system/packs tree is pruned on sight.
 
 var builtinRuntimeReadyCache sync.Map
 
@@ -182,7 +184,7 @@ func builtinImportsForNames(names []string) (map[string]config.Import, []string)
 		}
 		imports[name] = config.Import{
 			Source:  source,
-			Version: config.BundledPackImportVersion,
+			Version: config.BundledSourcePinnedVersion(source),
 		}
 		ordered = append(ordered, name)
 	}

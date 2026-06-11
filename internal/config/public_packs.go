@@ -15,15 +15,36 @@ const (
 	PublicGascityPackSource = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 
 	// PublicGascityPackVersion pins fresh init output to the registry
-	// release content commit from gastownhall/gascity-packs main.
+	// release content commit from gastownhall/gascity-packs main
+	// (gascity 0.1.2).
 	PublicGascityPackVersion = "sha:5fc675b85d4ae0ebca2f17cb027a24b03f2832f8"
 
 	// BundledPackImportVersion pins the [imports.core]/[imports.bd] entries
-	// gc init writes for the packs bundled with the binary. The bundled
-	// synthetic repo cache serves the RUNNING BINARY's embedded content for
-	// any requested commit (the cache key folds in the binary content hash),
-	// so this pin is primarily a stable cache/lock tag; it names a real
-	// gascity.git commit where the bundled pack paths exist so the git
-	// fallback degrades gracefully when a binary cannot serve the source.
+	// gc init writes for the gascity.git packs bundled with the binary.
+	// This is the CANONICAL pin: the only commit the binary pre-seeds into
+	// the repo cache from its embedded content (in a binary-content-hashed
+	// cache slot, so different binaries never fight over one entry). A
+	// bundled source pinned at any other commit is an ordinary remote
+	// import and is fetched from git for real — so editing a pin always
+	// does what it says. The pin names a real gascity.git commit where the
+	// bundled pack paths exist, keeping that fetch path honest.
 	BundledPackImportVersion = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
 )
+
+// SupersededPublicGastownPackVersions lists previous canonical pins for the
+// public gastown pack, oldest first. Older gc releases and docs wrote these
+// as "the canonical pin"; the packv2-import-state doctor fix rewrites them
+// to the current PublicGastownPackVersion so a pin bump never strands a
+// city on a network-only resolution path for content it only ever wanted
+// as "the builtin". Deliberate user pins at other commits are untouched.
+// When bumping PublicGastownPackVersion, append the old value here
+// (scripts/update-bundled-gastown-pack does this).
+var SupersededPublicGastownPackVersions = []string{
+	"sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b",
+}
+
+// SupersededPublicGascityPackVersions is the gascity-pack counterpart of
+// SupersededPublicGastownPackVersions.
+var SupersededPublicGascityPackVersions = []string{
+	"sha:788b6e8ec224a8951c728ef6da74dab8bc04d474",
+}

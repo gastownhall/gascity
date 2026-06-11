@@ -729,3 +729,65 @@ knob = "keep-me"
 		t.Fatalf("pack.toml was rewritten despite refusal:\n%s", data)
 	}
 }
+
+// TestImportStateDoctorCheckMigratesSupersededCanonicalPin pins the
+// pin-bump migration: a bundled import pinned at a SUPERSEDED canonical
+// version (one an older gc release wrote as canonical) is flagged, and
+// --fix re-pins it to the current canonical version and re-locks so the
+// city resolves offline from the embedded copy again.
+func TestImportStateDoctorCheckMigratesSupersededCanonicalPin(t *testing.T) {
+	clearGCEnv(t)
+	superseded := config.SupersededPublicGastownPackVersions
+	if len(superseded) == 0 {
+		t.Skip("no superseded gastown pins registered")
+	}
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 2
+
+[imports.gastown]
+source = "`+config.PublicGastownPackSource+`"
+version = "`+superseded[0]+`"
+`)
+
+	check := newImportStateDoctorCheck(cityDir)
+	result := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error for superseded pin; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
+		t.Fatalf("details = %v, want superseded-canonical-pin entry", result.Details)
+	}
+
+	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+
+	packData, err := os.ReadFile(filepath.Join(cityDir, "pack.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(packData), superseded[0]) {
+		t.Fatalf("pack.toml still pins superseded version:\n%s", packData)
+	}
+	if !strings.Contains(string(packData), config.PublicGastownPackVersion) {
+		t.Fatalf("pack.toml missing current canonical pin:\n%s", packData)
+	}
+	lockData, err := os.ReadFile(filepath.Join(cityDir, "packs.lock"))
+	if err != nil {
+		t.Fatalf("packs.lock after fix: %v", err)
+	}
+	wantCommit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
+	if !strings.Contains(string(lockData), wantCommit) {
+		t.Fatalf("packs.lock missing canonical commit after fix:\n%s", lockData)
+	}
+
+	result = check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status after fix = %v, want OK; result=%#v", result.Status, result)
+	}
+}

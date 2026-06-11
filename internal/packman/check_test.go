@@ -174,7 +174,7 @@ func TestCheckInstalledAcceptsBundledSyntheticCache(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	source := builtinpacks.MustSource("gastown")
-	commit := "abc123def456"
+	commit := canonicalBundledCommit(source)
 	writeTestLockfile(t, city, map[string]LockedPack{
 		source: {Version: "sha:" + commit, Commit: commit},
 	})
@@ -246,7 +246,7 @@ func TestCheckInstalledReportsInvalidSyntheticCache(t *testing.T) {
 	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	source := builtinpacks.MustSource("gastown")
-	commit := "abc123def456"
+	commit := canonicalBundledCommit(source)
 	writeTestLockfile(t, city, map[string]LockedPack{
 		source: {Version: "sha:" + commit, Commit: commit},
 	})
@@ -277,7 +277,7 @@ func TestCheckInstalledTreatsBundledGitENOTDIRAsInvalidSyntheticCache(t *testing
 	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	source := builtinpacks.MustSource("gastown")
-	commit := "abc123def456"
+	commit := canonicalBundledCommit(source)
 	writeTestLockfile(t, city, map[string]LockedPack{
 		source: {Version: "sha:" + commit, Commit: commit},
 	})
@@ -301,6 +301,46 @@ func TestCheckInstalledTreatsBundledGitENOTDIRAsInvalidSyntheticCache(t *testing
 	assertSingleIssue(t, report, "invalid-synthetic-cache")
 	if strings.Contains(report.Issues[0].Message, "cannot inspect cached repository") {
 		t.Fatalf("message = %q, want ENOTDIR classified as non-checkout", report.Issues[0].Message)
+	}
+}
+
+func TestCheckInstalledFlagsMissingCacheForNonCanonicalBundledPin(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := builtinpacks.MustSource("gastown")
+	commit := "abc123def456"
+	if config.IsBundledSourceAtCanonicalPin(source, commit) {
+		t.Fatalf("commit %q is unexpectedly canonical for %q", commit, source)
+	}
+	writeTestLockfile(t, city, map[string]LockedPack{
+		source: {Version: "sha:" + commit, Commit: commit},
+	})
+
+	prevGit := runGit
+	runGit = func(_ string, args ...string) (string, error) {
+		return "", fmt.Errorf("unexpected git call for check: %v", args)
+	}
+	t.Cleanup(func() { runGit = prevGit })
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:gastown": {Source: source, Version: "sha:" + commit},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-cache")
+	if !strings.Contains(report.Issues[0].RepairHint, "gc import install") {
+		t.Fatalf("repair hint = %q, want gc import install", report.Issues[0].RepairHint)
+	}
+	cachePath, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("repo cache entry stat err = %v, want not exist", err)
 	}
 }
 

@@ -58,7 +58,7 @@ func EnsureRepoInCache(source, commit string) (string, error) {
 		return "", fmt.Errorf("creating repo cache root: %w", err)
 	}
 	return config.WithRepoCacheWriteLock(root, func() (string, error) {
-		if builtinpacks.IsSource(source) {
+		if config.IsBundledSourceAtCanonicalPin(source, commit) {
 			return ensureBundledRepoInCacheLocked(source, commit, cachePath)
 		}
 		return ensureRepoInCacheLocked(source, commit, parsed, cachePath)

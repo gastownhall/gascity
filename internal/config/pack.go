@@ -653,7 +653,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			// Unlike V1 includes (which skip gracefully for missing remote
 			// subpaths), V2 imports are always fatal on missing source.
 			// A typo in [imports.X].source should not be silently ignored.
-			impDir, err := resolveImportPackRef(imp.Source, cityRoot, cityRoot)
+			impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
@@ -880,10 +880,14 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 	return formulaDirs, allRequires, shadowWarnings, nil
 }
 
-func resolveImportPackRef(ref, declDir, cityRoot string) (string, error) {
+// resolveImportPackRef resolves a V2 import's pack directory.
+// declaredVersion is the import's declared version constraint; it gates the
+// no-lock bundled fallback so a declared non-canonical pin never silently
+// composes the binary's embedded content.
+func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string) (string, error) {
 	if isGitHubTreeURL(ref) {
 		_, subpath, _ := parseGitHubTreeURL(ref)
-		cacheDir, err := resolveInstalledRemoteImport(ref, cityRoot)
+		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot)
 		if err != nil {
 			return "", err
 		}
@@ -894,7 +898,7 @@ func resolveImportPackRef(ref, declDir, cityRoot string) (string, error) {
 	}
 	if isRemoteInclude(ref) {
 		_, subpath, _ := parseRemoteInclude(ref)
-		cacheDir, err := resolveInstalledRemoteImport(ref, cityRoot)
+		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot)
 		if err != nil {
 			return "", err
 		}

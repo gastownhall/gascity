@@ -3,7 +3,8 @@
 // Helpers for locating the gastown pack content that gc materializes into
 // the user-global repo cache. The gastown example city composes the pack via
 // a pinned public import (committed packs.lock); the gc binary self-heals
-// the cache for bundled locked sources from its embedded copy, so the cache
+// the cache for bundled sources locked at their canonical pin from its
+// embedded copy, so the cache
 // — not a city-local packs/ directory — is where materialized pack
 // artifacts live.
 package acceptance_test
