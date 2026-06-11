@@ -459,6 +459,14 @@ func doSupervisorStart(stdout, stderr io.Writer) int {
 }
 
 func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
+	delegation, delegated, err := supervisorSystemdDelegation()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if delegated {
+		return delegatedSupervisorStart(delegation, stdout, stderr, jsonOut)
+	}
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
 		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
@@ -527,6 +535,23 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 }
 
 func ensureSupervisorRunning(stdout, stderr io.Writer) int {
+	delegation, delegated, err := supervisorSystemdDelegation()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if delegated {
+		// The operator-managed unit owns install and start; never write
+		// or load gc's own service files in delegated mode.
+		if supervisorAliveHook() != 0 {
+			return 0
+		}
+		if err := runDelegatedSystemctl(delegation, "start"); err != nil {
+			fmt.Fprintf(stderr, "gc: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return waitForSupervisorReady(stderr)
+	}
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
 		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1

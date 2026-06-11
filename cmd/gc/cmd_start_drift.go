@@ -272,9 +272,9 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			PackDrifted:  res.PackDrift,
 		})
 		if flags.KillSwitchActive {
-			fmt.Fprintln(stderr, "error: supervisor binary drift; auto-restart disabled by [daemon].auto_restart_on_drift in city.toml. Restart manually with 'systemctl --user restart gascity-supervisor'.") //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "error: supervisor binary drift; auto-restart disabled by [daemon].auto_restart_on_drift in city.toml. Restart manually with '%s'.\n", supervisorRestartGuidance()) //nolint:errcheck // best-effort stderr
 		} else {
-			fmt.Fprintln(stderr, "error: supervisor binary drift; rerun 'gc start' (or 'systemctl --user restart gascity-supervisor') to apply changes.") //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "error: supervisor binary drift; rerun 'gc start' (or '%s') to apply changes.\n", supervisorRestartGuidance()) //nolint:errcheck // best-effort stderr
 		}
 		return 1, false
 	case res.Restart:
@@ -284,11 +284,16 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			SupervisorID: status.BuildID,
 			PackDrifted:  res.PackDrift,
 		})
+		delegation, delegated, derr := supervisorSystemdDelegation()
+		if derr != nil {
+			fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: %v\n", derr) //nolint:errcheck // best-effort stderr
+			return 1, false
+		}
 		serviceName := supervisorSystemdServiceName()
-		systemdManaged := supervisorSystemctlActive(serviceName)
+		systemdManaged := !delegated && supervisorSystemctlActive(serviceName)
 		launchdLabel := supervisorLaunchdLabel()
-		launchdManaged := supervisorRuntimeGOOS == "darwin" && supervisorLaunchdActive(launchdLabel)
-		if exeErr != nil && !systemdManaged && !launchdManaged {
+		launchdManaged := !delegated && supervisorRuntimeGOOS == "darwin" && supervisorLaunchdActive(launchdLabel)
+		if exeErr != nil && !delegated && !systemdManaged && !launchdManaged {
 			// We can't safely auto-restart a supervisor whose
 			// /proc/<pid>/exe we can't read — the kernel readlink is
 			// the only reliable way to learn which binary to spawn,
@@ -317,6 +322,8 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 		}
 		mode := "direct"
 		switch {
+		case delegated:
+			mode = "systemd-delegated"
 		case systemdManaged:
 			mode = "systemd-managed"
 		case launchdManaged:
@@ -324,15 +331,24 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 		}
 		fmt.Fprintf(stdout, "Restarting supervisor (%s)...", mode) //nolint:errcheck // best-effort stdout
 		t0 := time.Now()
-		if err := restartSupervisor(spec, restartHelpersHook()); err != nil {
-			fmt.Fprintln(stdout)                                               //nolint:errcheck // best-effort stdout
-			fmt.Fprintf(stderr, "error: supervisor restart failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		var restartErr error
+		if delegated {
+			// try-restart: restart only if the unit is running. The drift
+			// path only fires when a supervisor is alive, and a stopped
+			// delegated unit must stay stopped — its operator owns starts.
+			restartErr = runDelegatedSystemctl(delegation, "try-restart")
+		} else {
+			restartErr = restartSupervisor(spec, restartHelpersHook())
+		}
+		if restartErr != nil {
+			fmt.Fprintln(stdout)                                                      //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stderr, "error: supervisor restart failed: %v\n", restartErr) //nolint:errcheck // best-effort stderr
 			return 1, false
 		}
 		// Wait for the new supervisor to come up.
 		if err := PollReady(newHTTPSupervisorClient(baseURL), driftReadyTimeout); err != nil {
-			fmt.Fprintln(stdout)                                                                                                                                                              //nolint:errcheck // best-effort stdout
-			fmt.Fprintf(stderr, "error: supervisor restart timed out after %s; check 'systemctl --user status gascity-supervisor' for details. Last known pid=%d.\n", driftReadyTimeout, pid) //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stdout)                                                                                                                                                  //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stderr, "error: supervisor restart timed out after %s; check '%s' for details. Last known pid=%d.\n", driftReadyTimeout, supervisorStatusGuidance(), pid) //nolint:errcheck // best-effort stderr
 			return 1, false
 		}
 		fmt.Fprintf(stdout, " ready (%s).\n", humanizeReadyDuration(time.Since(t0))) //nolint:errcheck // best-effort stdout
