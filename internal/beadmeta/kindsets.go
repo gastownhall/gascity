@@ -75,12 +75,10 @@ func IsControlKind(kind string) bool {
 //     definition site; control beads are never worker-executed, so none of
 //     these kinds can honor gc.output_json_required.
 //
-// Known gap (pre-existing, unchanged by the unification): KindDrain
-// controls do not reconcile their enclosing scope when they close.
-// Current topologies cover this because the fanout control that spawns
-// drain/tally-bearing fragments blocks on every fragment sink and reconciles
-// the same scope on close, but a drain/tally bead that is the last-closing
-// member of a scope with no such backstop would strand the scope latch.
+// Drain controls reconcile their enclosing scope on terminal close
+// (reconcileClosedDrainScope in internal/dispatch/drain.go), matching the
+// fanout/retry/ralph close-time behavior, so exemption from scope-check
+// pairing never strands a scope latch.
 var ScopeCheckExemptKinds = []string{
 	KindScope,
 	KindScopeCheck,

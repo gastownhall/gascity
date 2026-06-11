@@ -1179,3 +1179,128 @@ func assertFormulaStepMetadata(t *testing.T, store beads.Store, rootID, key, wan
 	}
 	t.Fatalf("no child of %s has metadata %s=%q; beads=%+v", rootID, key, want, all)
 }
+
+// TestProcessDrainTerminalCloseReconcilesEnclosingScope pins the
+// fanout/retry/ralph parity fix: when a scoped drain control reaches a
+// terminal close and it was the scope's last open member, the drain must
+// reconcile its enclosing scope (closing the body) instead of relying on
+// another control's close-time backstop.
+func TestProcessDrainTerminalCloseReconcilesEnclosingScope(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "empty parent", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.input_convoy_id":  parent.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := store.Create(beads.Bead{
+		Title: "scope body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.iter",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain, err := store.Create(beads.Bead{
+		Title: "drain",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "drain",
+			"gc.root_bead_id":        root.ID,
+			"gc.scope_ref":           "demo.iter",
+			"gc.scope_role":          "control",
+			"gc.drain_context":       "separate",
+			"gc.drain_formula":       "drain-item",
+			"gc.drain_member_access": "read",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(scoped empty drain): %v", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	if drain.Status != "closed" || drain.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("drain = status %q outcome %q, want closed/pass", drain.Status, drain.Metadata["gc.outcome"])
+	}
+	body = mustGetBead(t, store, body.ID)
+	if body.Status != "closed" {
+		t.Fatalf("scope body status = %q, want closed (drain terminal close must reconcile the scope)", body.Status)
+	}
+	if got := body.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("scope body gc.outcome = %q, want pass", got)
+	}
+}
+
+// TestProcessDrainFailureCloseAbortsEnclosingScope pins the fail half of the
+// scope-reconcile parity: a scoped drain that fail-closes (limit exceeded)
+// must abort its enclosing scope like any failed scope member — body closed
+// with outcome fail — rather than leaving the scope to a backstop.
+func TestProcessDrainFailureCloseAbortsEnclosingScope(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	rootID := drain.Metadata["gc.root_bead_id"]
+	body, err := store.Create(beads.Bead{
+		Title: "scope body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": rootID,
+			"gc.step_ref":     "demo.iter",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{
+		"gc.scope_ref":       "demo.iter",
+		"gc.scope_role":      "control",
+		"gc.drain_max_units": "1",
+	} {
+		if err := store.SetMetadata(drain.ID, k, v); err != nil {
+			t.Fatalf("SetMetadata(%s): %v", k, err)
+		}
+	}
+
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(scoped limit exceeded): %v", err)
+	}
+	if result.Action != "drain-limit-exceeded" {
+		t.Fatalf("Action = %q, want drain-limit-exceeded", result.Action)
+	}
+	body = mustGetBead(t, store, body.ID)
+	if body.Status != "closed" {
+		t.Fatalf("scope body status = %q, want closed (failed scoped drain must abort the scope)", body.Status)
+	}
+	if got := body.Metadata["gc.outcome"]; got != "fail" {
+		t.Fatalf("scope body gc.outcome = %q, want fail", got)
+	}
+}
