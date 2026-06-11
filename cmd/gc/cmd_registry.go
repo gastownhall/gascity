@@ -43,6 +43,7 @@ type registryPublishOptions struct {
 	Version       string
 	Ref           string
 	Description   string
+	Token         string
 	SessionCookie string
 	CSRFToken     string
 	DryRun        bool
@@ -54,6 +55,7 @@ type registryPublishOptions struct {
 func newRegistryPublishCmd(stdout, stderr io.Writer) *cobra.Command {
 	opts := registryPublishOptions{
 		RegistryURL:   registryFirstNonEmpty(os.Getenv("GC_REGISTRY_URL"), defaultRegistryPublishURL),
+		Token:         os.Getenv("GC_REGISTRY_TOKEN"),
 		SessionCookie: os.Getenv("GC_REGISTRY_SESSION"),
 		CSRFToken:     os.Getenv("GC_REGISTRY_CSRF_TOKEN"),
 		Validate:      true,
@@ -79,6 +81,7 @@ path, pack name, and version to the registry API.`,
 	cmd.Flags().StringVar(&opts.Version, "version", "", "release version; defaults to [pack].version")
 	cmd.Flags().StringVar(&opts.Ref, "ref", "", "release ref label; defaults to the upstream branch name")
 	cmd.Flags().StringVar(&opts.Description, "description", "", "release description; defaults to [pack].description")
+	cmd.Flags().StringVar(&opts.Token, "token", opts.Token, "registry API token; defaults to GC_REGISTRY_TOKEN")
 	cmd.Flags().StringVar(&opts.SessionCookie, "session-cookie", opts.SessionCookie, "registry_session cookie value or Cookie header")
 	cmd.Flags().StringVar(&opts.CSRFToken, "csrf-token", opts.CSRFToken, "registry CSRF token")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "print the publish request without submitting")
@@ -107,6 +110,7 @@ func doRegistryPublish(packRoot string, opts registryPublishOptions, stdout, std
 	}
 
 	auth := registryPublishAuth{
+		Token:         strings.TrimSpace(opts.Token),
 		SessionCookie: strings.TrimSpace(opts.SessionCookie),
 		CSRFToken:     strings.TrimSpace(opts.CSRFToken),
 	}
@@ -120,8 +124,8 @@ func doRegistryPublish(packRoot string, opts registryPublishOptions, stdout, std
 			return 1
 		}
 	}
-	if auth.SessionCookie == "" || auth.CSRFToken == "" {
-		fmt.Fprintln(stderr, "gc registry publish: authentication required; set GC_REGISTRY_SESSION and GC_REGISTRY_CSRF_TOKEN, pass --session-cookie/--csrf-token, or use --dev-auth against a local registry") //nolint:errcheck
+	if !auth.hasCredentials() {
+		fmt.Fprintln(stderr, "gc registry publish: authentication required; set GC_REGISTRY_TOKEN, pass --token, set GC_REGISTRY_SESSION and GC_REGISTRY_CSRF_TOKEN, or use --dev-auth against a local registry") //nolint:errcheck
 		return 1
 	}
 
@@ -357,8 +361,14 @@ func normalizeRegistryPublishBaseURL(raw string) (string, error) {
 }
 
 type registryPublishAuth struct {
+	Token         string
 	SessionCookie string
 	CSRFToken     string
+}
+
+func (a registryPublishAuth) hasCredentials() bool {
+	return strings.TrimSpace(a.Token) != "" ||
+		(strings.TrimSpace(a.SessionCookie) != "" && strings.TrimSpace(a.CSRFToken) != "")
 }
 
 func registryPublishDevAuth(ctx context.Context, client *http.Client, baseURL, handle string) (registryPublishAuth, error) {
@@ -450,8 +460,12 @@ func submitRegistryPublishRequest(ctx context.Context, client *http.Client, base
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-CSRF-Token", auth.CSRFToken)
-	req.Header.Set("Cookie", registryPublishCookieHeader(auth.SessionCookie))
+	if strings.TrimSpace(auth.Token) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(auth.Token))
+	} else {
+		req.Header.Set("X-CSRF-Token", auth.CSRFToken)
+		req.Header.Set("Cookie", registryPublishCookieHeader(auth.SessionCookie))
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return registryPublishSubmitted{}, fmt.Errorf("submitting publish request: %w", err)

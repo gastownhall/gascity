@@ -115,6 +115,52 @@ func TestSubmitRegistryPublishRequestSendsAuthenticatedPayload(t *testing.T) {
 	}
 }
 
+func TestSubmitRegistryPublishRequestSendsBearerToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer gcr_test_token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if got := r.Header.Get("X-CSRF-Token"); got != "" {
+			t.Fatalf("csrf = %q, want empty with bearer auth", got)
+		}
+		if got := r.Header.Get("Cookie"); got != "" {
+			t.Fatalf("cookie = %q, want empty with bearer auth", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"publishRequest": {
+				"id": "prq_token",
+				"status": "pending_review",
+				"requestedName": "demo-pack",
+				"requestedVersion": "0.2.0",
+				"repository": {"fullName": "gastownhall/demo-packs"}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	submitted, err := submitRegistryPublishRequest(
+		t.Context(),
+		server.Client(),
+		server.URL,
+		registryPublishRequest{
+			RepoURL:          "https://github.com/gastownhall/demo-packs",
+			Commit:           strings.Repeat("1", 40),
+			PackPath:         "packs/demo",
+			RequestedName:    "demo-pack",
+			RequestedVersion: "0.2.0",
+		},
+		registryPublishAuth{Token: "gcr_test_token"},
+		true,
+	)
+	if err != nil {
+		t.Fatalf("submitRegistryPublishRequest: %v", err)
+	}
+	if submitted.ID != "prq_token" {
+		t.Fatalf("submitted = %+v", submitted)
+	}
+}
+
 func TestRegistryPublishDevAuthFetchesLocalSession(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

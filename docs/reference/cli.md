@@ -2734,6 +2734,7 @@ gc registry publish <path-to-pack-root> [flags]
 | `--ref` | string |  | release ref label; defaults to the upstream branch name |
 | `--registry-url` | string | `https://registry.gascity.com` | registry app base URL |
 | `--session-cookie` | string |  | registry_session cookie value or Cookie header |
+| `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN |
 | `--validate` | bool | `true` | ask the registry to validate the request immediately |
 | `--version` | string |  | release version; defaults to [pack].version |
 
