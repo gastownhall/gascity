@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -8,8 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/graphv2"
 )
@@ -930,6 +933,100 @@ func TestProcessDrainExclusiveFailsClosedForInvalidItemFormula(t *testing.T) {
 		if got := strings.TrimSpace(after.Metadata["gc.exclusive_drain_reservation"]); got != "" {
 			t.Fatalf("member %s reservation = %q, want released", member.ID, got)
 		}
+	}
+}
+
+func TestIsSharedDrainExecutableStepExcludesControlAndTopologyKinds(t *testing.T) {
+	t.Parallel()
+	excluded := append(append([]string{}, beadmeta.ControlKinds...), beadmeta.WorkflowTopologyKinds...)
+	for _, kind := range excluded {
+		step := &formula.RecipeStep{Metadata: map[string]string{beadmeta.KindMetadataKey: kind}}
+		if isSharedDrainExecutableStep(step) {
+			t.Errorf("isSharedDrainExecutableStep(kind=%q) = true, want false", kind)
+		}
+		padded := &formula.RecipeStep{Metadata: map[string]string{beadmeta.KindMetadataKey: " " + kind + " "}}
+		if isSharedDrainExecutableStep(padded) {
+			t.Errorf("isSharedDrainExecutableStep(kind=%q padded) = true, want false", kind)
+		}
+	}
+	if isSharedDrainExecutableStep(nil) {
+		t.Error("isSharedDrainExecutableStep(nil) = true, want false")
+	}
+	for _, step := range []*formula.RecipeStep{
+		{},
+		{Metadata: map[string]string{}},
+		{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindTask}},
+	} {
+		if !isSharedDrainExecutableStep(step) {
+			t.Errorf("isSharedDrainExecutableStep(%+v) = false, want true", step)
+		}
+	}
+}
+
+func TestStampDrainItemRecipeSharedSkipsControlStep(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	content := `
+formula = "drain-item"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Work {{convoy_id}}"
+
+[steps.on_complete]
+for_each = "output.voters"
+bond = "mol-voter"
+`
+	if err := os.WriteFile(filepath.Join(dir, "drain-item.formula.toml"), []byte(strings.TrimSpace(content)+"\n"), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), "drain-item", []string{dir}, map[string]string{graphv2.ConvoyIDVar: "unit-1"})
+	if err != nil {
+		t.Fatalf("CompileWithoutRuntimeVarValidation: %v", err)
+	}
+	control := beads.Bead{ID: "drain-1", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:         beadmeta.KindDrain,
+		beadmeta.DrainContextMetadataKey: beadmeta.DrainContextShared,
+	}}
+	unit := beads.Bead{ID: "unit-1"}
+	member := beads.Bead{ID: "member-1"}
+	row := &drainManifestRow{Index: 0, ItemRootKey: "item-key-1"}
+	stampDrainItemRecipe(recipe, control, unit, member, 1, row, "drain-item", nil)
+
+	stepsByKind := make(map[string]*formula.RecipeStep)
+	var workStep *formula.RecipeStep
+	for i := range recipe.Steps {
+		step := &recipe.Steps[i]
+		if kind := step.Metadata[beadmeta.KindMetadataKey]; kind != "" {
+			stepsByKind[kind] = step
+		}
+		if strings.HasSuffix(step.ID, ".work") || step.ID == "work" {
+			workStep = step
+		}
+	}
+	for _, kind := range []string{beadmeta.KindFanout} {
+		step, ok := stepsByKind[kind]
+		if !ok {
+			t.Fatalf("compiled recipe has no %s step; steps=%+v", kind, recipe.Steps)
+		}
+		if got := step.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != "" {
+			t.Errorf("%s step gc.continuation_group = %q, want unset", kind, got)
+		}
+		if got := step.Metadata[beadmeta.SessionAffinityMetadataKey]; got != "" {
+			t.Errorf("%s step gc.session_affinity = %q, want unset", kind, got)
+		}
+	}
+	if workStep == nil {
+		t.Fatalf("compiled recipe has no work step; steps=%+v", recipe.Steps)
+	}
+	if got, want := workStep.Metadata[beadmeta.ContinuationGroupMetadataKey], "drain:drain-1"; got != want {
+		t.Errorf("work step gc.continuation_group = %q, want %q", got, want)
+	}
+	if got, want := workStep.Metadata[beadmeta.SessionAffinityMetadataKey], "require"; got != want {
+		t.Errorf("work step gc.session_affinity = %q, want %q", got, want)
 	}
 }
 

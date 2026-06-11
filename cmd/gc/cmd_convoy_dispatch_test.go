@@ -1547,7 +1547,7 @@ func TestPropagateDynamicScopeMetadataNonControlRoles(t *testing.T) {
 		step := &formula.RecipeStep{
 			ID: "frag.step",
 			Metadata: map[string]string{
-				beadmeta.KindMetadataKey:      beadmeta.KindTally,
+				beadmeta.KindMetadataKey:      beadmeta.KindDrain,
 				beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleTeardown,
 			},
 		}
@@ -1561,7 +1561,7 @@ func TestPropagateDynamicScopeMetadataNonControlRoles(t *testing.T) {
 		step := &formula.RecipeStep{
 			ID: "frag.step",
 			Metadata: map[string]string{
-				beadmeta.KindMetadataKey: beadmeta.KindTally,
+				beadmeta.KindMetadataKey: beadmeta.KindDrain,
 			},
 		}
 		propagateDynamicScopeMetadata(step, beads.Bead{ID: "gc-source"})

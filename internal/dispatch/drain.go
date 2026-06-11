@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -751,6 +752,13 @@ func stampDrainItemRecipe(recipe *formula.Recipe, control, unit, member beads.Be
 	}
 }
 
+// isSharedDrainExecutableStep reports whether a drain item recipe step is
+// worker-executable work that should carry shared-drain continuation
+// metadata (gc.continuation_group, gc.session_affinity). Control-dispatcher
+// steps (beadmeta.ControlKinds) and workflow-topology anchors
+// (beadmeta.WorkflowTopologyKinds) are infrastructure the control dispatcher
+// or graph routing owns, never session-affine worker work, so they are
+// excluded.
 func isSharedDrainExecutableStep(step *formula.RecipeStep) bool {
 	if step == nil {
 		return false
@@ -759,12 +767,7 @@ func isSharedDrainExecutableStep(step *formula.RecipeStep) bool {
 	if step.Metadata != nil {
 		kind = strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey])
 	}
-	switch kind {
-	case "workflow", "workflow-finalize", "scope", "spec", "drain", "check", "fanout", "retry-eval", "scope-check", "retry", "ralph":
-		return false
-	default:
-		return true
-	}
+	return !beadmeta.IsControlKind(kind) && !slices.Contains(beadmeta.WorkflowTopologyKinds, kind)
 }
 
 func sharedDrainContinuationGroup(control beads.Bead) string {
