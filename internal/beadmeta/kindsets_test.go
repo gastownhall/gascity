@@ -87,6 +87,44 @@ func TestKindSetRelationships(t *testing.T) {
 	}
 }
 
+// TestScopeCheckExemptKindsComposition pins ScopeCheckExemptKinds to its
+// declared composition — (ControlKinds \ {retry, ralph, retry-eval}) ∪
+// {scope, spec} — so a new control kind forces an explicit decision about
+// scope-check pairing instead of silently drifting one of the injection
+// predicates (the drift this set was introduced to end; see ga-e154xo).
+func TestScopeCheckExemptKindsComposition(t *testing.T) {
+	if dup := firstDuplicate(ScopeCheckExemptKinds); dup != "" {
+		t.Errorf("ScopeCheckExemptKinds contains duplicate %q", dup)
+	}
+
+	var derived []string
+	for _, k := range ControlKinds {
+		switch k {
+		case KindRetry, KindRalph, KindRetryEval:
+			continue
+		}
+		derived = append(derived, k)
+	}
+	derived = append(derived, KindScope, KindSpec)
+	slices.Sort(derived)
+	got := slices.Clone(ScopeCheckExemptKinds)
+	slices.Sort(got)
+	if !slices.Equal(got, derived) {
+		t.Errorf("ScopeCheckExemptKinds = %v\nwant (ControlKinds \\ {retry, ralph, retry-eval}) ∪ {scope, spec} = %v", got, derived)
+	}
+
+	for _, k := range ScopeCheckExemptKinds {
+		if !IsScopeCheckExemptKind(k) {
+			t.Errorf("IsScopeCheckExemptKind(%q) = false, want true", k)
+		}
+	}
+	for _, k := range []string{KindRetry, KindRalph, KindRetryEval, KindTask, KindCleanup, KindRun, KindRetryRun, KindWorkflow, KindWisp, "", "nonsense"} {
+		if IsScopeCheckExemptKind(k) {
+			t.Errorf("IsScopeCheckExemptKind(%q) = true, want false", k)
+		}
+	}
+}
+
 func firstDuplicate(set []string) string {
 	seen := make(map[string]struct{}, len(set))
 	for _, k := range set {

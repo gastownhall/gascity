@@ -249,8 +249,11 @@ func markRalphBodyOutputSinks(steps []*Step) {
 		if step == nil {
 			continue
 		}
-		switch step.Metadata[beadmeta.KindMetadataKey] {
-		case "scope", "scope-check", "workflow-finalize", "fanout", "check", "ralph", "spec":
+		// Control/structural kinds are never worker-executed, so they cannot
+		// honor gc.output_json_required. KindRalph is additionally exempt
+		// here: a nested ralph control's output contract is owned by its own
+		// OnComplete, not by the enclosing body.
+		if kind := step.Metadata[beadmeta.KindMetadataKey]; beadmeta.IsScopeCheckExemptKind(kind) || kind == beadmeta.KindRalph {
 			continue
 		}
 		if step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {

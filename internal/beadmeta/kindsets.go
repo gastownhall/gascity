@@ -48,6 +48,55 @@ func IsControlKind(kind string) bool {
 	return slices.Contains(ControlKinds, kind)
 }
 
+// ScopeCheckExemptKinds lists the gc.kind values that never receive a paired
+// scope-check control, even when the step carries gc.scope_ref. It is exactly
+// (ControlKinds \ {KindRetry, KindRalph, KindRetryEval}) ∪ {KindScope,
+// KindSpec}; TestScopeCheckExemptKindsComposition pins the composition.
+//
+// Rationale per member: KindScope is the scope latch itself; KindSpec marks
+// frozen step-spec sidecars (bookkeeping, not work); the remaining members are
+// control kinds whose terminal scope reconciliation is owned by the control
+// runtime (fanout reconciles its enclosing scope on close, scope-check IS the
+// reconciler, workflow-finalize runs at root level, and check beads are closed
+// by their owning ralph control, which reconciles). KindRetry and KindRalph
+// stay non-exempt on purpose: their controls pair with scope-checks in
+// addition to their own close-time reconciliation (NDI redundancy), and the
+// scope-check's isRetryAttemptSubject branch depends on that pairing.
+//
+// Consumers (the judgment of WHEN to inject stays at each site):
+//
+//   - formula.needsScopeCheck — compile-path injection (internal/formula/graph.go)
+//   - formula.recipeStepNeedsScopeCheck — dynamic-fragment injection
+//     (internal/formula/fragment.go)
+//   - dispatch.attemptRecipeStepNeedsScopeCheck — attempt-recipe injection
+//     (internal/dispatch/control.go)
+//   - formula.markRalphBodyOutputSinks — ralph body output-sink marking
+//     (internal/formula/ralph.go) additionally exempts KindRalph at its
+//     definition site; control beads are never worker-executed, so none of
+//     these kinds can honor gc.output_json_required.
+//
+// Known gap (pre-existing, unchanged by the unification): KindDrain
+// controls do not reconcile their enclosing scope when they close.
+// Current topologies cover this because the fanout control that spawns
+// drain/tally-bearing fragments blocks on every fragment sink and reconciles
+// the same scope on close, but a drain/tally bead that is the last-closing
+// member of a scope with no such backstop would strand the scope latch.
+var ScopeCheckExemptKinds = []string{
+	KindScope,
+	KindScopeCheck,
+	KindWorkflowFinalize,
+	KindFanout,
+	KindCheck,
+	KindDrain,
+	KindSpec,
+}
+
+// IsScopeCheckExemptKind reports whether kind is a member of
+// ScopeCheckExemptKinds.
+func IsScopeCheckExemptKind(kind string) bool {
+	return slices.Contains(ScopeCheckExemptKinds, kind)
+}
+
 // StructuralGraphKinds lists graph-node kinds that structure a compiled
 // workflow but are never dispatched as control beads — the ProcessControl
 // switch hard-errors on them by design. KindRun and KindRetryRun are v1-era

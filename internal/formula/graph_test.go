@@ -212,6 +212,57 @@ func TestApplyGraphControlsSimpleRalphInsideScopeDoesNotCreateRunScopeCheck(t *t
 	}
 }
 
+// TestNeedsScopeCheckTracksBeadmetaExemptKinds keeps the compile-path
+// scope-check predicate in lockstep with beadmeta.ScopeCheckExemptKinds: every
+// exempt kind is skipped, every non-exempt kind with a scope_ref still gets a
+// paired scope-check, and the teardown-role guard is kind-independent.
+func TestNeedsScopeCheckTracksBeadmetaExemptKinds(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range beadmeta.ScopeCheckExemptKinds {
+		step := &Step{
+			ID: "subject",
+			Metadata: map[string]string{
+				beadmeta.ScopeRefMetadataKey: "body",
+				beadmeta.KindMetadataKey:     kind,
+			},
+		}
+		if needsScopeCheck(step) {
+			t.Errorf("needsScopeCheck(kind=%q) = true, want false (exempt kind)", kind)
+		}
+	}
+
+	for _, kind := range []string{"", beadmeta.KindTask, beadmeta.KindRetry, beadmeta.KindRalph, beadmeta.KindCleanup} {
+		step := &Step{
+			ID: "subject",
+			Metadata: map[string]string{
+				beadmeta.ScopeRefMetadataKey: "body",
+				beadmeta.KindMetadataKey:     kind,
+			},
+		}
+		if !needsScopeCheck(step) {
+			t.Errorf("needsScopeCheck(kind=%q) = false, want true (non-exempt kind)", kind)
+		}
+	}
+
+	teardown := &Step{
+		ID: "subject",
+		Metadata: map[string]string{
+			beadmeta.ScopeRefMetadataKey:  "body",
+			beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleTeardown,
+		},
+	}
+	if needsScopeCheck(teardown) {
+		t.Error("needsScopeCheck(teardown role) = true, want false")
+	}
+	if needsScopeCheck(nil) {
+		t.Error("needsScopeCheck(nil) = true, want false")
+	}
+	if needsScopeCheck(&Step{ID: "no-scope"}) {
+		t.Error("needsScopeCheck(no scope_ref) = true, want false")
+	}
+}
+
 func findGraphStepByID(steps []*Step, id string) *Step {
 	for _, step := range steps {
 		if step != nil && step.ID == id {

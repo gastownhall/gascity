@@ -917,12 +917,7 @@ func attemptRecipeStepNeedsScopeCheck(step formula.RecipeStep) bool {
 	if step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 		return false
 	}
-	switch step.Metadata[beadmeta.KindMetadataKey] {
-	case "scope", "scope-check", "workflow-finalize", "fanout", "check", "spec":
-		return false
-	default:
-		return true
-	}
+	return !beadmeta.IsScopeCheckExemptKind(step.Metadata[beadmeta.KindMetadataKey])
 }
 
 func loadAttemptRouteConfig(cityPath string) *config.City {
@@ -1391,11 +1386,8 @@ func latestAttemptFromCandidates(control beads.Bead, candidates []beads.Bead) be
 		if latestAttemptCandidateIsControlInfrastructure(kind) {
 			continue
 		}
-		switch kind {
-		case beadmeta.KindScope:
-			if controlKind != "ralph" {
-				continue
-			}
+		if kind == beadmeta.KindScope && controlKind != "ralph" {
+			continue
 		}
 
 		ref := b.Metadata[beadmeta.StepRefMetadataKey]
