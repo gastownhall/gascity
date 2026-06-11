@@ -29,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sdnotify"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -1068,6 +1069,16 @@ func stopManagedCityPreservingSessions(mc *managedCity, _ string, stderr io.Writ
 	return stopErr
 }
 
+// notifySdState reports supervisor lifecycle state to a notify-aware
+// service manager (systemd Type=notify) via sd_notify. It is a plain
+// no-op when NOTIFY_SOCKET is unset; send failures are logged but
+// never affect supervisor operation.
+func notifySdState(stderr io.Writer, state string) {
+	if _, err := sdnotify.Notify(state); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: sd_notify %s: %v\n", state, err) //nolint:errcheck
+	}
+}
+
 // runSupervisor is the main supervisor loop. It acquires the lock,
 // starts a control socket, reads the registry, starts CityRuntimes,
 // and runs until canceled.
@@ -1264,6 +1275,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 
 	fmt.Fprintln(stdout, "Supervisor started.") //nolint:errcheck
 
+	// Tell a notify-aware service manager (systemd Type=notify) that
+	// startup is complete: flock held, control socket and API serving.
+	notifySdState(stderr, sdnotify.Ready)
+
 	// Reconciliation loop.
 	interval := supCfg.Supervisor.PatrolIntervalDuration()
 	ticker := time.NewTicker(interval)
@@ -1278,6 +1293,11 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			}
 		}()
 		reconcileCities(reg, registry, supCfg.Publication, stdout, stderr)
+		// Pet the service-manager watchdog (WatchdogSec=) only after a
+		// reconcile cycle completes; a panic above skips this, so a
+		// wedged reconcile loop surfaces as a watchdog timeout even
+		// while the API stays responsive.
+		notifySdState(stderr, sdnotify.Watchdog)
 	}
 
 	// Initial reconcile.
@@ -1301,6 +1321,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 				close(req.done)
 			}
 		case <-ctx.Done():
+			notifySdState(stderr, sdnotify.Stopping)
 			// Shutdown all cities. Collect under lock, then stop outside
 			// to avoid blocking API requests during graceful shutdown.
 			var toStop map[string]*managedCity
