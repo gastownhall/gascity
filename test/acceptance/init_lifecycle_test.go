@@ -74,9 +74,11 @@ func TestInitMinimal(t *testing.T) {
 }
 
 // TestInitGastown verifies that gc init --from with the gastown example
-// materializes all required packs before config load succeeds.
-// This is the regression test for Bug 4 (2026-03-18): gastown packs
-// not materialized during gc init.
+// wires the gastown pack so config load succeeds. This is the regression
+// test for Bug 4 (2026-03-18): gastown packs not available during gc init.
+// The pack now arrives via the pinned public import (resolved from the
+// repo cache) rather than a city-local packs/ copy, so the assertions
+// cover the pinned import, the lock entry, and composition results.
 func TestInitGastown(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
@@ -85,19 +87,44 @@ func TestInitGastown(t *testing.T) {
 		t.Fatal("city.toml not created")
 	}
 
-	// The critical assertion: packs must be materialized.
-	if !c.HasFile("packs/gastown/pack.toml") {
-		t.Fatal("packs/gastown/pack.toml not materialized — Bug 4 regression")
+	// The gastown pack is wired via the pinned public import.
+	packToml := c.ReadFile("pack.toml")
+	if !strings.Contains(packToml, `source = "`+config.PublicGastownPackSource+`"`) {
+		t.Fatalf("pack.toml missing pinned public gastown source:\n%s", packToml)
 	}
-	// Verify gastown-specific artifacts exist.
-	if !c.HasFile("packs/gastown/agents") {
-		t.Fatal("gastown agents not materialized")
+	if !strings.Contains(packToml, `version = "`+config.PublicGastownPackVersion+`"`) {
+		t.Fatalf("pack.toml missing pinned public gastown version:\n%s", packToml)
 	}
-	if !c.HasFile("packs/gastown/formulas") {
-		t.Fatal("gastown formulas not materialized")
+
+	packsLock := c.ReadFile("packs.lock")
+	if !strings.Contains(packsLock, `[packs."`+config.PublicGastownPackSource+`"]`) {
+		t.Fatalf("packs.lock missing pinned public gastown source:\n%s", packsLock)
 	}
-	if !c.HasFile("packs/gastown/assets/scripts") {
-		t.Fatal("gastown scripts not materialized")
+
+	// The critical assertion: composition must surface the gastown agents
+	// from the resolved import — Bug 4 regression.
+	out, err := c.GC("config", "explain")
+	if err != nil {
+		t.Fatalf("gc config explain failed: %v\n%s", err, out)
+	}
+	agentsListed := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		name, ok := strings.CutPrefix(strings.TrimSpace(line), "Agent: ")
+		if !ok {
+			continue
+		}
+		// Qualified names may carry an import-binding prefix
+		// (e.g. gastown.mayor); index by the unqualified tail.
+		name = strings.TrimSpace(name)
+		if i := strings.LastIndex(name, "."); i >= 0 {
+			name = name[i+1:]
+		}
+		agentsListed[name] = true
+	}
+	for _, agent := range []string{"mayor", "deacon", "boot"} {
+		if !agentsListed[agent] {
+			t.Errorf("gastown agent %q missing from gc config explain — Bug 4 regression:\n%s", agent, out)
+		}
 	}
 }
 

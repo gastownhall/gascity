@@ -11,5 +11,11 @@
 name = "gastown"
 schema = 2
 
+# The gastown pack comes from the public gascity-packs registry, pinned to
+# a release commit. The gc binary bundles the same content (via the
+# gascity-packs Go module), so init and start resolve this import offline
+# from the primed repo cache. scripts/update-bundled-gastown-pack keeps the
+# pin in lockstep with the registry release and the module dependency.
 [imports.gastown]
-source = "packs/gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:31382fc6dd86b747d19687f6028d8bcd85e059a7"

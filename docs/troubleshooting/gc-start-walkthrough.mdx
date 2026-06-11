@@ -138,7 +138,7 @@ The reported `buildID` should match `gc version`.
 ```text
 FATAL: agent 'mayor': duplicate name
        (from packs/mypack/pack.toml [agent #2]
-        and packs/gastown/agents/mayor/agent.toml)
+        and the imported gastown pack's agents/mayor/agent.toml)
        pack v1 → v2 mismatch
 ```
 
@@ -267,7 +267,7 @@ Add the pack to `city.toml`'s `includes` list:
 
 ```toml
 [city]
-includes = ["packs/gastown"]   # or the path to the pack that declares the agent
+includes = ["packs/my-pack"]   # or the path to the pack that declares the agent
 ```
 
 If the template name is misspelled, fix the spelling. Verify with:

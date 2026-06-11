@@ -22,7 +22,7 @@ import (
 // the default tier because the role-detection regex looked for a literal
 // "crew" substring that the SDK session-name primitive never produces.
 func TestTmuxThemeScriptDrivesByScopeTier(t *testing.T) {
-	themeScript := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "tmux-theme.sh")
+	themeScript := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "tmux-theme.sh")
 	if _, err := os.Stat(themeScript); err != nil {
 		t.Fatalf("tmux-theme.sh not found at %s: %v", themeScript, err)
 	}
@@ -146,7 +146,7 @@ exit 0
 // pack-portability — a custom pack with different roles should be
 // themed correctly without forking this script.
 func TestTmuxThemeScriptHasNoHardcodedRoleNames(t *testing.T) {
-	themeScript := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "tmux-theme.sh")
+	themeScript := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "tmux-theme.sh")
 	body, err := os.ReadFile(themeScript)
 	if err != nil {
 		t.Fatalf("read tmux-theme.sh: %v", err)

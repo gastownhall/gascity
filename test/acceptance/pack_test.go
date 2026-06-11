@@ -16,12 +16,16 @@ import (
 
 // TestGastownPackMaterialization groups tests that verify materialized gastown
 // pack properties (permissions, completeness), sharing a single gc init call.
+// The gastown pack arrives via the pinned public import, so its content is
+// materialized into the user-global repo cache rather than a city-local
+// packs/ directory.
 func TestGastownPackMaterialization(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	packDir := gastownCachePackDir(t, c)
 
 	t.Run("GastownScriptsExecutable", func(t *testing.T) {
-		scriptsDir := filepath.Join(c.Dir, "packs", "gastown", "assets", "scripts")
+		scriptsDir := filepath.Join(packDir, "assets", "scripts")
 		entries, err := os.ReadDir(scriptsDir)
 		if err != nil {
 			t.Fatalf("reading gastown scripts dir: %v", err)
@@ -38,26 +42,34 @@ func TestGastownPackMaterialization(t *testing.T) {
 				continue
 			}
 			if info.Mode()&0o111 == 0 {
-				t.Errorf("packs/gastown/assets/scripts/%s is not executable (mode %o)", e.Name(), info.Mode())
+				t.Errorf("cached gastown assets/scripts/%s is not executable (mode %o)", e.Name(), info.Mode())
 			}
 		}
 		if count == 0 {
-			t.Fatal("no .sh scripts found in packs/gastown/assets/scripts/")
+			t.Fatal("no .sh scripts found in cached gastown assets/scripts/")
 		}
 	})
 
 	t.Run("Completeness", func(t *testing.T) {
-		expected := []string{
-			"packs/gastown/pack.toml",
-			"packs/gastown/agents",
-			"packs/gastown/template-fragments",
-			"packs/gastown/formulas",
-			"packs/gastown/assets/scripts",
-			"packs/gastown/commands",
+		// City-side wiring: the import pin and lock entry replace the old
+		// city-local packs/gastown materialization.
+		for _, rel := range []string{"pack.toml", "packs.lock"} {
+			if !c.HasFile(rel) {
+				t.Errorf("missing: %s", rel)
+			}
 		}
-		for _, e := range expected {
-			if !c.HasFile(e) {
-				t.Errorf("missing: %s", e)
+		// Cached pack content.
+		expected := []string{
+			"pack.toml",
+			"agents",
+			"template-fragments",
+			"formulas",
+			filepath.Join("assets", "scripts"),
+			"commands",
+		}
+		for _, rel := range expected {
+			if _, err := os.Stat(filepath.Join(packDir, rel)); err != nil {
+				t.Errorf("missing cached pack artifact %s: %v", rel, err)
 			}
 		}
 	})

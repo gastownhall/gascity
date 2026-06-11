@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The bundled gastown pack is now a Go module dependency, not a checked-in
+  copy.** `examples/gastown/packs/gastown` is gone; the gc binary embeds the
+  pack from `github.com/gastownhall/gascity-packs` (pinned in go.mod to the
+  registry release commit), and the example city composes gastown through
+  the pinned public registry import plus a committed `packs.lock` — the same
+  shape `gc init` writes — resolved offline from the bundled synthetic
+  cache. `scripts/update-bundled-gastown-pack` no longer writes a vendored
+  tree; it bumps the go.mod pin, the `PublicGastownPack*` constants, and the
+  example pins from the latest registry release, and `--check` verifies the
+  pinned module content against the registry hash. The gastown integration
+  tests in `examples/gastown` now run against the module-embedded bytes, so
+  a runtime/pack mismatch fails in gascity CI.
+
 - **The bundled maintenance pack was folded into the core pack, and builtin
   packs are no longer implicitly included.** There is now one builtin pack —
   core — carrying everything any city needs: the gc-* skills, default worker

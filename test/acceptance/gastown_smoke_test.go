@@ -76,10 +76,10 @@ func TestGastownSmoke(t *testing.T) {
 	})
 
 	t.Run("AllPromptTemplatesRender", func(t *testing.T) {
-		packsDir := filepath.Join(c.Dir, "packs")
+		packDir := gastownCachePackDir(t, c)
 		count := 0
 
-		err := filepath.Walk(packsDir, func(path string, info os.FileInfo, err error) error {
+		err := filepath.Walk(packDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
@@ -87,7 +87,7 @@ func TestGastownSmoke(t *testing.T) {
 				return nil
 			}
 
-			rel, _ := filepath.Rel(c.Dir, path)
+			rel, _ := filepath.Rel(packDir, path)
 			t.Run(rel, func(t *testing.T) {
 				data, err := os.ReadFile(path)
 				if err != nil {
@@ -111,15 +111,15 @@ func TestGastownSmoke(t *testing.T) {
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("walking packs dir: %v", err)
+			t.Fatalf("walking gastown pack cache dir: %v", err)
 		}
 		if count == 0 {
-			t.Fatal("no .template.md files found in packs/")
+			t.Fatal("no .template.md files found in the cached gastown pack")
 		}
 	})
 
 	t.Run("AllFormulasParse", func(t *testing.T) {
-		packsDir := filepath.Join(c.Dir, "packs")
+		packDir := gastownCachePackDir(t, c)
 		count := 0
 
 		type formulaStep struct {
@@ -132,7 +132,7 @@ func TestGastownSmoke(t *testing.T) {
 			Steps       []formulaStep `toml:"steps"`
 		}
 
-		err := filepath.Walk(packsDir, func(path string, info os.FileInfo, err error) error {
+		err := filepath.Walk(packDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
@@ -140,7 +140,7 @@ func TestGastownSmoke(t *testing.T) {
 				return nil
 			}
 
-			// Only consider formulas under a packs/<pack>/formulas/ tree.
+			// Only consider formulas under the pack's formulas/ tree.
 			// Other TOML siblings (pack.toml, agents/*/agent.toml,
 			// commands/*/command.toml, doctor/*/doctor.toml, orders/*)
 			// must not be treated as formulas.
@@ -152,7 +152,7 @@ func TestGastownSmoke(t *testing.T) {
 				return nil
 			}
 
-			rel, _ := filepath.Rel(c.Dir, path)
+			rel, _ := filepath.Rel(packDir, path)
 			t.Run(rel, func(t *testing.T) {
 				data, err := os.ReadFile(path)
 				if err != nil {
@@ -171,18 +171,18 @@ func TestGastownSmoke(t *testing.T) {
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("walking packs dir: %v", err)
+			t.Fatalf("walking gastown pack cache dir: %v", err)
 		}
 		if count == 0 {
-			t.Fatal("no formula .toml files found in packs/")
+			t.Fatal("no formula .toml files found in the cached gastown pack")
 		}
 	})
 
 	t.Run("AllScriptsExecutable", func(t *testing.T) {
-		packsDir := filepath.Join(c.Dir, "packs")
+		packDir := gastownCachePackDir(t, c)
 		count := 0
 
-		err := filepath.Walk(packsDir, func(path string, info os.FileInfo, err error) error {
+		err := filepath.Walk(packDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
@@ -190,7 +190,7 @@ func TestGastownSmoke(t *testing.T) {
 				return nil
 			}
 
-			rel, _ := filepath.Rel(c.Dir, path)
+			rel, _ := filepath.Rel(packDir, path)
 			t.Run(rel, func(t *testing.T) {
 				if info.Mode()&0o111 == 0 {
 					t.Errorf("script %s is not executable (mode %o)", rel, info.Mode())
@@ -200,10 +200,10 @@ func TestGastownSmoke(t *testing.T) {
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("walking packs dir: %v", err)
+			t.Fatalf("walking gastown pack cache dir: %v", err)
 		}
 		if count == 0 {
-			t.Fatal("no .sh scripts found in packs/")
+			t.Fatal("no .sh scripts found in the cached gastown pack")
 		}
 	})
 

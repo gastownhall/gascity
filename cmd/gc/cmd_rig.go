@@ -96,9 +96,9 @@ check remains informational.`,
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
   gc rig add /path/to/master-repo --default-branch master
-  gc rig add ./my-project --include packs/gastown
+  gc rig add ./my-project --include gastown
   gc rig add ./my-project --include packs/planner --include packs/architect
-  gc rig add ./my-project --include packs/gastown --start-suspended
+  gc rig add ./my-project --include gastown --start-suspended
   gc rig add /path/to/existing --adopt`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {

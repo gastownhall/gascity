@@ -197,15 +197,18 @@ func TestRegression_GastownConfig(t *testing.T) {
 
 // TestRegression_GastownPackArtifacts groups regression tests that validate
 // materialized pack artifacts (formulas, prompts, git excludes) on a plain
-// gastown city. They share a single gc init call.
+// gastown city. The pack arrives via the pinned public import, so the
+// artifacts live in the user-global repo cache rather than a city-local
+// packs/ directory. They share a single gc init call.
 func TestRegression_GastownPackArtifacts(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	packDir := gastownCachePackDir(t, c)
 
 	// PR #3044: invalid TOML escape in a formula file broke 5 CI tests.
 	t.Run("FormulasParse", func(t *testing.T) {
 		formulaDirs := []string{
-			filepath.Join(c.Dir, "packs", "gastown", "formulas"),
+			filepath.Join(packDir, "formulas"),
 		}
 
 		count := 0
@@ -224,13 +227,13 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 
 				data, readErr := os.ReadFile(path)
 				if readErr != nil {
-					t.Errorf("reading %s: %v", relPath(c.Dir, path), readErr)
+					t.Errorf("reading %s: %v", relPath(packDir, path), readErr)
 					return nil
 				}
 
 				var raw map[string]interface{}
 				if _, parseErr := toml.Decode(string(data), &raw); parseErr != nil {
-					t.Errorf("invalid TOML in %s: %v (PR #3044 regression)", relPath(c.Dir, path), parseErr)
+					t.Errorf("invalid TOML in %s: %v (PR #3044 regression)", relPath(packDir, path), parseErr)
 				}
 				return nil
 			})
@@ -248,7 +251,7 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 	// PR #2939: prompt referenced nonexistent /ralph-loop slash command.
 	t.Run("PromptsRender", func(t *testing.T) {
 		packDirs := []string{
-			filepath.Join(c.Dir, "packs", "gastown"),
+			packDir,
 		}
 
 		count := 0
@@ -267,17 +270,17 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 
 				data, readErr := os.ReadFile(path)
 				if readErr != nil {
-					t.Errorf("reading %s: %v", relPath(c.Dir, path), readErr)
+					t.Errorf("reading %s: %v", relPath(packDir, path), readErr)
 					return nil
 				}
 
 				if len(data) == 0 {
-					t.Errorf("%s is empty", relPath(c.Dir, path))
+					t.Errorf("%s is empty", relPath(packDir, path))
 					return nil
 				}
 
 				if strings.Contains(string(data), "/ralph-loop") {
-					t.Errorf("%s contains /ralph-loop reference (PR #2939 regression)", relPath(c.Dir, path))
+					t.Errorf("%s contains /ralph-loop reference (PR #2939 regression)", relPath(packDir, path))
 				}
 				return nil
 			})
@@ -295,7 +298,8 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 	// PR #3289: .beads/ and .claude/commands/ blocked gt done.
 	t.Run("GtDoneNotBlockedByInfraFiles", func(t *testing.T) {
 		overlayDirs := []string{
-			filepath.Join(c.Dir, "packs", "gastown", "overlays", "default"),
+			filepath.Join(packDir, "overlays", "default"),
+			filepath.Join(packDir, "overlay"),
 		}
 
 		beadsExcluded := false
@@ -309,7 +313,7 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 			}
 		}
 
-		scriptsDir := filepath.Join(c.Dir, "packs", "gastown", "assets", "scripts")
+		scriptsDir := filepath.Join(packDir, "assets", "scripts")
 		if entries, err := os.ReadDir(scriptsDir); err == nil {
 			for _, e := range entries {
 				if strings.HasSuffix(e.Name(), ".sh") {

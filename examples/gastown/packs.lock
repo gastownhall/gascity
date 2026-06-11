@@ -1,0 +1,6 @@
+schema = 1
+
+[packs]
+[packs."https://github.com/gastownhall/gascity-packs/tree/main/gastown"]
+version = "sha:31382fc6dd86b747d19687f6028d8bcd85e059a7"
+commit = "31382fc6dd86b747d19687f6028d8bcd85e059a7"
