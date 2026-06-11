@@ -76,7 +76,7 @@ var initConventionDirs = cityinit.InitConventionDirs()
 // for non-interactive paths). doInit uses it to decide which config to write.
 type wizardConfig struct {
 	interactive      bool   // true if the wizard ran with user interaction
-	configName       string // canonical values: "minimal", "gastown", or "custom"
+	configName       string // canonical values: "minimal", "gastown", "gascity", or "custom"
 	defaultProvider  string // selected default provider key
 	providers        []string
 	provider         string // compatibility mirror for older internal callers
@@ -142,7 +142,8 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 	fmt.Fprintln(stdout, "Choose a config template:")                               //nolint:errcheck // best-effort stdout
 	fmt.Fprintln(stdout, "  1. minimal   — default coding agent (default)")         //nolint:errcheck // best-effort stdout
 	fmt.Fprintln(stdout, "  2. gastown   — multi-agent orchestration pack")         //nolint:errcheck // best-effort stdout
-	fmt.Fprintln(stdout, "  3. custom    — empty workspace, configure it yourself") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "  3. gascity   — planning & implementation skills pack")  //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "  4. custom    — empty workspace, configure it yourself") //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "Template [1]: ")                                           //nolint:errcheck // best-effort stdout
 
 	configChoice := readLine(br)
@@ -153,7 +154,9 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 		configName = "minimal"
 	case "2", "gastown":
 		configName = "gastown"
-	case "3", "custom":
+	case "3", "gascity":
+		configName = "gascity"
+	case "4", "custom":
 		configName = "custom"
 	default:
 		fmt.Fprintf(stdout, "Unknown template %q, using minimal.\n", configChoice) //nolint:errcheck // best-effort stdout
@@ -601,7 +604,7 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 	if template == "custom" && (legacyChanged || defaultChanged || providersChanged) {
 		return wizardConfig{}, "", fmt.Errorf("--template custom cannot be combined with provider flags")
 	}
-	if (template == "minimal" || template == "gastown") && defaultProvider == "" {
+	if (template == "minimal" || template == "gastown" || template == "gascity") && defaultProvider == "" {
 		return wizardConfig{}, "", fmt.Errorf("--template %s requires --default-provider", template)
 	}
 
@@ -667,7 +670,7 @@ func normalizeInitTemplate(template string, supplied bool) (string, error) {
 		return "minimal", nil
 	}
 	switch template {
-	case "minimal", "gastown", "custom":
+	case "minimal", "gastown", "gascity", "custom":
 		return template, nil
 	default:
 		if supplied {
@@ -1261,6 +1264,8 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		cfg = config.EmptyCity(cityName)
 	case wiz.configName == "gastown":
 		cfg = config.GastownCityWithProviders(cityName, defaultProvider, providers)
+	case wiz.configName == "gascity":
+		cfg = config.GascityCityWithProviders(cityName, defaultProvider, providers)
 	case defaultProvider != "" || len(providers) > 0:
 		cfg = config.WizardCityWithProviders(cityName, defaultProvider, providers)
 	case wiz.startCommand != "":

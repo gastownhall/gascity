@@ -61,14 +61,27 @@ func All() []Pack {
 		{Name: "bd", Subpath: "examples/bd", FS: bd.PackFS},
 		{Name: "dolt", Subpath: "examples/bd/dolt", FS: dolt.PackFS},
 		{Name: "gastown", Subpath: "examples/gastown/packs/gastown", FS: gascitypacks.Gastown()},
+		// The gascity planning pack never lived in gascity.git: it is
+		// public-registry-only (empty Subpath), served solely through the
+		// PublicRepository alias.
+		{Name: "gascity", Subpath: "", FS: gascitypacks.Gascity()},
 	}
 }
 
 // Source returns the canonical remote import source for a bundled pack.
+// Packs that never lived in gascity.git (empty Subpath) are addressed by
+// their public registry source.
 func Source(name string) (string, bool) {
 	pack, ok := ByName(name)
 	if !ok {
 		return "", false
+	}
+	if pack.Subpath == "" {
+		publicSubpath, ok := publicSubpathForPack(pack.Name)
+		if !ok {
+			return "", false
+		}
+		return PublicRepository + "//" + publicSubpath, true
 	}
 	return Repository + "//" + pack.Subpath, true
 }
@@ -113,11 +126,13 @@ func syntheticPackLayouts() []syntheticPackLayout {
 	packs := All()
 	layouts := make([]syntheticPackLayout, 0, len(packs)+3)
 	for _, pack := range packs {
-		layouts = append(layouts, syntheticPackLayout{
-			Repository: Repository,
-			Subpath:    pack.Subpath,
-			Pack:       pack,
-		})
+		if pack.Subpath != "" {
+			layouts = append(layouts, syntheticPackLayout{
+				Repository: Repository,
+				Subpath:    pack.Subpath,
+				Pack:       pack,
+			})
+		}
 		for _, legacySubpath := range legacySubpathsForPack(pack.Name) {
 			layouts = append(layouts, syntheticPackLayout{
 				Repository: Repository,
@@ -147,7 +162,7 @@ func legacySubpathsForPack(name string) []string {
 
 func publicSubpathForPack(name string) (string, bool) {
 	switch name {
-	case "gastown":
+	case "gastown", "gascity":
 		return name, true
 	default:
 		return "", false

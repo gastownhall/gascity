@@ -103,6 +103,49 @@ func TestSyncLockUsesBundledFallbackForPublicGastownWhenRemoteUnavailable(t *tes
 	}
 }
 
+func TestSyncLockUsesBundledFallbackForPublicGascityWhenRemoteUnavailable(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+
+	oldRunGit := runGit
+	t.Cleanup(func() { runGit = oldRunGit })
+	runGit = func(_ string, args ...string) (string, error) {
+		return "", fmt.Errorf("network unavailable for git %s", strings.Join(args, " "))
+	}
+
+	imports := map[string]config.Import{
+		"gascity": {
+			Source:  config.PublicGascityPackSource,
+			Version: config.PublicGascityPackVersion,
+		},
+	}
+	lock, err := SyncLock(city, imports, InstallResolveIfNeeded)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	pack, ok := lock.Packs[config.PublicGascityPackSource]
+	if !ok {
+		t.Fatalf("lock packs = %#v, want public gascity source", lock.Packs)
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	if _, err := InstallLocked(city); err != nil {
+		t.Fatalf("InstallLocked: %v", err)
+	}
+	cacheDir, err := RepoCachePath(config.PublicGascityPackSource, pack.Commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "gascity", "pack.toml")); err != nil {
+		t.Fatalf("public gascity synthetic cache missing pack.toml: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "gascity", "skills", "plan", "SKILL.md")); err != nil {
+		t.Fatalf("public gascity synthetic cache missing plan skill: %v", err)
+	}
+}
+
 func TestCheckInstalledReportsMissingCache(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()

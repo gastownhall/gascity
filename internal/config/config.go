@@ -4782,6 +4782,22 @@ func GastownCity(name, provider, startCommand string) City {
 
 // GastownCityWithProviders returns a Gas Town city whose default provider is
 // selected from an explicit built-in provider catalog.
+// GascityCityWithProviders returns a minimal managed city that imports the
+// public gascity planning/implementation skills pack: a single mayor agent
+// plus [imports.gascity] pinned to the registry release. The pack ships
+// skills and formulas only (no agents), so the city shape matches the
+// minimal template with the pack layered on top.
+func GascityCityWithProviders(name, defaultProvider string, providers []string) City {
+	city := WizardCityWithProviders(name, defaultProvider, providers)
+	city.Imports = map[string]Import{
+		"gascity": {
+			Source:  PublicGascityPackSource,
+			Version: PublicGascityPackVersion,
+		},
+	}
+	return city
+}
+
 func GastownCityWithProviders(name, defaultProvider string, providers []string) City {
 	ws := Workspace{
 		Name:            name,

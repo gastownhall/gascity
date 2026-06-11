@@ -24,6 +24,7 @@ func TestAllAndSourceAreDeterministic(t *testing.T) {
 		"bd=examples/bd",
 		"dolt=examples/bd/dolt",
 		"gastown=examples/gastown/packs/gastown",
+		"gascity=",
 	}
 	if strings.Join(first, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("All = %v, want %v", first, want)
@@ -34,8 +35,13 @@ func TestAllAndSourceAreDeterministic(t *testing.T) {
 		if !ok {
 			t.Fatalf("Source(%q) ok = false, want true", pack.Name)
 		}
-		if source != Repository+"//"+pack.Subpath {
-			t.Fatalf("Source(%q) = %q, want canonical source", pack.Name, source)
+		wantSource := Repository + "//" + pack.Subpath
+		if pack.Subpath == "" {
+			// Public-registry-only packs are addressed by the public source.
+			wantSource = PublicRepository + "//" + pack.Name
+		}
+		if source != wantSource {
+			t.Fatalf("Source(%q) = %q, want %q", pack.Name, source, wantSource)
 		}
 	}
 }
