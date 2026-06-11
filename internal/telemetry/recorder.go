@@ -52,6 +52,7 @@ type recorderInstruments struct {
 	nudgeTotal           metric.Int64Counter
 	configReloadTotal    metric.Int64Counter
 	controllerTotal      metric.Int64Counter
+	supervisorTotal      metric.Int64Counter
 	bdTotal              metric.Int64Counter
 	slingTotal           metric.Int64Counter
 
@@ -117,6 +118,9 @@ func initInstruments() {
 		)
 		inst.controllerTotal, _ = m.Int64Counter("gc.controller.lifecycle.total",
 			metric.WithDescription("Total controller lifecycle events"),
+		)
+		inst.supervisorTotal, _ = m.Int64Counter("gc.supervisor.lifecycle.total",
+			metric.WithDescription("Total supervisor lifecycle events"),
 		)
 		inst.bdTotal, _ = m.Int64Counter("gc.bd.calls.total",
 			metric.WithDescription("Total bd CLI command invocations"),
@@ -402,6 +406,22 @@ func RecordControllerLifecycle(ctx context.Context, event string) {
 	)
 	emit(ctx, "controller.lifecycle", otellog.SeverityInfo,
 		otellog.String("event", event),
+	)
+}
+
+// RecordSupervisorStarted records a supervisor startup with restart-cause
+// attribution (metrics + log event). previousExit classifies how the
+// previous supervisor instance exited: "clean", "crash", or "unknown".
+func RecordSupervisorStarted(ctx context.Context, previousExit string) {
+	initInstruments()
+	inst.supervisorTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("event", "started"),
+			attribute.String("previous_exit", previousExit),
+		),
+	)
+	emit(ctx, "supervisor.started", otellog.SeverityInfo,
+		otellog.String("previous_exit", previousExit),
 	)
 }
 

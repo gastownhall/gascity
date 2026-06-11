@@ -184,13 +184,20 @@ func sameOpenFile(a, b *os.File) (bool, error) {
 	return os.SameFile(aInfo, bInfo), nil
 }
 
+// supervisorLockPath returns the path of the supervisor instance lock
+// file. The file's existence (independent of the flock held on it) is
+// evidence that a supervisor instance ran on this machine before.
+func supervisorLockPath() string {
+	return filepath.Join(supervisor.RuntimeDir(), "supervisor.lock")
+}
+
 // acquireSupervisorLock takes an exclusive flock on the supervisor lock file.
 func acquireSupervisorLock() (*os.File, error) {
 	dir := supervisor.RuntimeDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("creating runtime dir: %w", err)
 	}
-	path := filepath.Join(dir, "supervisor.lock")
+	path := supervisorLockPath()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("opening supervisor lock: %w", err)
@@ -369,6 +376,32 @@ func requestSupervisorShutdown(stderr io.Writer, rec events.Recorder, shutdownCt
 		cancel()
 	}
 	return repeatedDestructive
+}
+
+// emitSupervisorStarted records the supervisor.started event with
+// restart-cause attribution and mirrors it on the OTel log path.
+// previousExit is one of the supervisor.PreviousExit* classifications
+// describing how the previous supervisor instance exited.
+func emitSupervisorStarted(stderr io.Writer, rec events.Recorder, previousExit string) {
+	// Plain-text breadcrumb to stderr -> ~/.gc/supervisor.log, mirroring
+	// the shutdown-attribution breadcrumb so operators can correlate
+	// start cause with the previous exit without parsing events.jsonl.
+	fmt.Fprintf(stderr, "gc supervisor: started: previous_exit=%s\n", previousExit) //nolint:errcheck
+	if rec != nil {
+		payload := api.SupervisorStartedPayload{PreviousExit: previousExit}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: marshal started event: %v\n", err) //nolint:errcheck
+		} else {
+			rec.Record(events.Event{
+				Type:    events.SupervisorStarted,
+				Actor:   "supervisor",
+				Subject: "supervisor",
+				Payload: raw,
+			})
+		}
+	}
+	telemetry.RecordSupervisorStarted(context.Background(), previousExit)
 }
 
 func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestShutdown func(supervisorShutdownMode, shutdownTrigger) bool, requestReconcile func(), stderr io.Writer) {
@@ -1062,12 +1095,24 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		}
 	}
 
+	// Capture prior-instance evidence before acquireSupervisorLock
+	// (re)creates the lock file: its existence means a supervisor ran
+	// on this machine before, which lets the restart-cause derivation
+	// distinguish a crashed prior instance from a first start.
+	_, lockStatErr := os.Stat(supervisorLockPath())
+	priorInstanceRan := lockStatErr == nil
+
 	lock, err := acquireSupervisorLock()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	defer lock.Close() //nolint:errcheck
+
+	// Holding the instance lock, consume the clean-shutdown handoff
+	// token the previous instance's STOPPING path left behind (if any)
+	// and classify how that instance exited.
+	previousExit := supervisor.ConsumePreviousExit(supervisor.DefaultHome(), priorInstanceRan)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1080,6 +1125,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		registry.SetSupervisorRecorder(supFR)
 		defer supFR.Close() //nolint:errcheck
 	}
+	emitSupervisorStarted(stderr, registry.SupervisorEventRecorder(), previousExit)
 	requestShutdown := func(mode supervisorShutdownMode, trigger shutdownTrigger) bool {
 		return requestSupervisorShutdown(stderr, registry.SupervisorEventRecorder(), shutdownCtl, cancel, mode, trigger)
 	}
@@ -1293,6 +1339,11 @@ func runSupervisor(stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "gc supervisor: %v\n", shutErr) //nolint:errcheck
 			}
 			shut.finish(shutErr)
+			// STOPPING path complete — leave the clean-shutdown handoff
+			// token for the next instance's restart-cause derivation.
+			if err := supervisor.WriteShutdownMarker(supervisor.DefaultHome()); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
+			}
 			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
 			return supervisorShutdownExitCode(shutErr)
 		}

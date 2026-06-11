@@ -83,6 +83,12 @@ const (
 	ConvoyClosed            = "convoy.closed"
 	ControllerStarted       = "controller.started"
 	ControllerStopped       = "controller.stopped"
+	// SupervisorStarted fires once per supervisor startup, after the
+	// instance lock is acquired. Its payload classifies how the previous
+	// supervisor instance exited (clean, crash, or unknown), derived from
+	// the clean-shutdown handoff token the STOPPING path leaves behind,
+	// so flap alerts can distinguish a crash loop from deploy restarts.
+	SupervisorStarted = "supervisor.started"
 	// SupervisorShutdownRequested fires when the supervisor's main loop
 	// observes a shutdown trigger (signal or socket stop) and is about to
 	// cancel the supervisor context. Carries attribution so operators can
@@ -187,7 +193,7 @@ var KnownEventTypes = []string{
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
-	SupervisorShutdownRequested, SupervisorRequest,
+	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
