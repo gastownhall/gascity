@@ -367,10 +367,16 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	// invocation, so JSON formats (codex/gemini) stay one valid document rather
 	// than two concatenated objects. See clock_inject.go.
 	emittedHookContext := false
+	var injectPrefix string
 	if inject {
+		// Read the provider hook input once (UserPromptSubmit JSON on stdin,
+		// pipe-only — see readHookStdin) and build the shared inject prefix:
+		// the clock line plus, when context pressure crosses its threshold,
+		// the context-usage guidance (see context_inject.go).
+		injectPrefix = clockInjectLine() + contextInjectLine(readHookStdin())
 		defer func() {
-			if !emittedHookContext {
-				emitClockInject(hookFormat, stdout)
+			if !emittedHookContext && injectPrefix != "" {
+				_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix)
 			}
 		}()
 	}
@@ -457,7 +463,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		// Fold the clock into the nudge so a single provider-formatted payload
 		// carries both; this is the one place the combined context is written.
 		emittedHookContext = true
-		writeErr = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", clockInjectLine()+out)
+		writeErr = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix+out)
 	} else {
 		_, writeErr = io.WriteString(stdout, out)
 	}

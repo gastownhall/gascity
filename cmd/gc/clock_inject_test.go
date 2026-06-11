@@ -44,31 +44,33 @@ func TestFormatClockLineInvalidTZFallsBackToLocal(t *testing.T) {
 	}
 }
 
-func TestEmitClockInjectClaude(t *testing.T) {
+func TestClockInjectPrefixClaude(t *testing.T) {
 	t.Setenv("GC_INJECT_CLOCK", "")
 	var buf bytes.Buffer
-	emitClockInject("", &buf)
+	if line := clockInjectLine(); line != "" {
+		_ = writeProviderHookContextForEvent(&buf, "", "UserPromptSubmit", line)
+	}
 	if !strings.Contains(buf.String(), "Current time: ") {
-		t.Errorf("emitClockInject (claude) should emit a clock line, got %q", buf.String())
+		t.Errorf("clock inject prefix (claude) should emit a clock line, got %q", buf.String())
 	}
 }
 
-func TestEmitClockInjectDisabled(t *testing.T) {
+func TestClockInjectPrefixDisabled(t *testing.T) {
 	t.Setenv("GC_INJECT_CLOCK", "0")
-	var buf bytes.Buffer
-	emitClockInject("", &buf)
-	if buf.Len() != 0 {
-		t.Errorf("emitClockInject disabled should emit nothing, got %q", buf.String())
+	if line := clockInjectLine(); line != "" {
+		t.Errorf("clock inject disabled should produce no line, got %q", line)
 	}
 }
 
-func TestEmitClockInjectCodexIsJSON(t *testing.T) {
+func TestClockInjectPrefixCodexIsJSON(t *testing.T) {
 	t.Setenv("GC_INJECT_CLOCK", "")
 	var buf bytes.Buffer
-	emitClockInject("codex", &buf)
+	if line := clockInjectLine(); line != "" {
+		_ = writeProviderHookContextForEvent(&buf, "codex", "UserPromptSubmit", line)
+	}
 	s := buf.String()
 	if !strings.Contains(s, "hookSpecificOutput") || !strings.Contains(s, "Current time:") {
-		t.Errorf("codex format should be JSON with additionalContext, got %q", s)
+		t.Errorf("codex inject prefix should be a JSON hook document with the clock line, got %q", s)
 	}
 }
 
