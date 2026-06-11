@@ -154,3 +154,31 @@ func TestContextInjectLastNonEmptyModelWins(t *testing.T) {
 		t.Errorf("70%% of 1M is advisory, not urgent: %q", got)
 	}
 }
+
+// Bare claude-opus-4-8 is a 1M-context model (no [1m] suffix in the transcript).
+func TestContextInjectBareOpus48Is1M(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	p := writeTranscript(t, usageLine("claude-opus-4-8", 10_000, 680_000, 10_000))
+	got := contextInjectLine(hookInputFor(p))
+	if !strings.Contains(got, "700k/1000k") {
+		t.Errorf("bare opus-4-8 must resolve to the 1M window: %q", got)
+	}
+}
+
+// Sidecar/compaction call on a smaller-window model must not shrink the
+// main-loop session's window: max-over-models wins. (The observed 782k/200k
+// bug: a Fable session with bare-opus sidecar entries, newest entry opus.)
+func TestContextInjectSidecarDoesNotShrinkWindow(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	// Newest entry classifies 200k but carries the live (high) token count; an
+	// earlier entry is the 1M main-loop model. Window must be 1M (max), so 700k
+	// reads as ~70% (advisory), not ~350% of 200k.
+	p := writeTranscript(t,
+		usageLine("claude-fable-5", 10_000, 680_000, 10_000),   // main loop, 1M
+		usageLine("claude-haiku-4-5", 10_000, 680_000, 10_000), // 200k-classified, newest, high tokens
+	)
+	got := contextInjectLine(hookInputFor(p))
+	if !strings.Contains(got, "700k/1000k") {
+		t.Errorf("a 200k-classified newest entry must not shrink the 1M session window: %q", got)
+	}
+}

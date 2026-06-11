@@ -65,31 +65,34 @@ func contextInjectLine(hookInput []byte) string {
 	if err := json.Unmarshal(hookInput, &in); err != nil || strings.TrimSpace(in.TranscriptPath) == "" {
 		return ""
 	}
-	tokens, model, ok := lastTranscriptUsage(in.TranscriptPath)
+	tokens, models, ok := lastTranscriptUsage(in.TranscriptPath)
 	if !ok {
 		return ""
 	}
-	return contextUsageMessage(tokens, contextWindowTokens(model))
+	return contextUsageMessage(tokens, contextWindowTokens(models))
 }
 
 // lastTranscriptUsage reads the tail of a provider transcript (JSONL) and
-// returns the context footprint of the most recent usage entry: prompt-side
-// input tokens + cache reads + cache writes ≈ current context size.
-func lastTranscriptUsage(path string) (tokens int, model string, ok bool) {
+// returns the context footprint of the most recent usage entry (prompt-side
+// input tokens + cache reads + cache writes ≈ current context size) plus every
+// non-empty model string seen — the window is the MAX over those (see
+// contextWindowTokens), so a smaller-window sidecar/compaction call logged in
+// the same transcript can't shrink the main-loop session's window.
+func lastTranscriptUsage(path string) (tokens int, models []string, ok bool) {
 	const tailBytes = 2 << 20 // last 2MiB is ample for the newest entries
 	f, err := os.Open(path)   //nolint:gosec // path comes from the provider hook input
 	if err != nil {
-		return 0, "", false
+		return 0, nil, false
 	}
 	defer f.Close() //nolint:errcheck // read-only
 	if st, err := f.Stat(); err == nil && st.Size() > tailBytes {
 		if _, err := f.Seek(st.Size()-tailBytes, io.SeekStart); err != nil {
-			return 0, "", false
+			return 0, nil, false
 		}
 	}
 	data, err := io.ReadAll(io.LimitReader(f, tailBytes))
 	if err != nil {
-		return 0, "", false
+		return 0, nil, false
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		if !strings.Contains(line, `"usage"`) {
@@ -108,32 +111,53 @@ func lastTranscriptUsage(path string) (tokens int, model string, ok bool) {
 		if u.InputTokens == 0 && u.CacheReadInputTokens == 0 && u.CacheCreationInputTokens == 0 {
 			continue
 		}
+		// Tokens: the LAST qualifying entry is the live context size (after a
+		// compaction the newest entry reads low again).
 		tokens = u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
-		// Track the last NON-EMPTY model string: usage entries don't always
-		// carry the model (tool-result turns, synthetic entries), and the
-		// newest usage entry having an empty model must not flip a 1M session
-		// to the 200k default — that would fire the urgent tier at ~20% of a
-		// 1M window.
 		if m := entry.Message.Model; m != "" {
-			model = m
+			models = append(models, m)
 		}
-		ok = true // keep scanning: we want the LAST qualifying entry
+		ok = true
 	}
-	return tokens, model, ok
+	return tokens, models, ok
 }
 
-// contextWindowTokens resolves the model's context window. 1M-class models
-// are detected from the model string; everything else gets a conservative
-// 200k default. GC_CONTEXT_WINDOW_TOKENS overrides both.
-func contextWindowTokens(model string) int {
+// contextWindowTokens resolves the session's context window as the MAX window
+// of any model it ran (they share one context), so a 200k-window sidecar or
+// compaction call (e.g. a bare claude-opus-4-8 entry inside a Fable session)
+// can't flip a 1M session to the 200k default and fire the urgent tier at
+// ~20% of real usage. GC_CONTEXT_WINDOW_TOKENS overrides — gc-managed
+// deployments that know the launch model should pin it for determinism.
+func contextWindowTokens(models []string) int {
 	if v := strings.TrimSpace(os.Getenv("GC_CONTEXT_WINDOW_TOKENS")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
 	}
+	best := 0
+	for _, m := range models {
+		if w := classifyWindow(m); w > best {
+			best = w
+		}
+	}
+	if best == 0 {
+		return 200_000
+	}
+	return best
+}
+
+// classifyWindow maps one model string to its context window. 1M families:
+// Opus 4.6/4.7/4.8, Sonnet 4.6, Fable, Mythos, and an explicit [1m] launch
+// suffix; everything else (Haiku, older models, unrecognized) is a
+// conservative 200k. Kept simple/substring rather than a strict table so a
+// dated-suffix variant still matches; pin GC_CONTEXT_WINDOW_TOKENS when a new
+// model's window isn't yet recognized here.
+func classifyWindow(model string) int {
 	ml := strings.ToLower(model)
-	if strings.Contains(ml, "[1m]") || strings.Contains(ml, "fable") || strings.Contains(ml, "mythos") {
-		return 1_000_000
+	for _, s := range []string{"[1m]", "fable", "mythos", "opus-4-6", "opus-4-7", "opus-4-8", "sonnet-4-6"} {
+		if strings.Contains(ml, s) {
+			return 1_000_000
+		}
 	}
 	return 200_000
 }
