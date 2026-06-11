@@ -2525,18 +2525,7 @@ name = "demo-pack"
 schema = 1
 `)
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("Chdir(%q): %v", dir, err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(cwd); err != nil {
-			t.Fatalf("restore cwd: %v", err)
-		}
-	})
+	t.Chdir(dir)
 
 	prevCityFlag := cityFlag
 	prevRigFlag := rigFlag
@@ -2732,18 +2721,7 @@ name = "demo-pack"
 schema = 1
 `)
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("Chdir(%q): %v", dir, err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(cwd); err != nil {
-			t.Fatalf("restore cwd: %v", err)
-		}
-	})
+	t.Chdir(dir)
 
 	prevCityFlag := cityFlag
 	prevRigFlag := rigFlag

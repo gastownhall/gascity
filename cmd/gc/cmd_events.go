@@ -315,15 +315,18 @@ func openEventsScope(apiURLOverride string, stderr io.Writer) (eventsAPIScope, i
 }
 
 func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
-	cityPath, cfg, err := resolveDashboardContext()
-	if err != nil {
-		return eventsAPIScope{}, err
-	}
-
-	cityName := resolvedEventsCityName(cityPath, cfg)
 	if override := strings.TrimSpace(apiURLOverride); override != "" {
 		localSupervisorAPI := matchesLocalSupervisorAPI(override)
-		cityName = resolvedExplicitEventsCityName(override, cityPath, cityName)
+		// Try local city context for display (soft fail — no-city and remote-
+		// only scenarios must both work when --api is explicit).
+		var cityPath, cityName string
+		if cp, cfg, cityErr := resolveDashboardContext(); cityErr == nil {
+			cityPath = cp
+			cityName = resolvedEventsCityName(cp, cfg)
+			if localSupervisorAPI {
+				cityName = resolvedManagedEventsCityName(cp, cityName)
+			}
+		}
 		return eventsAPIScope{
 			apiURL:             strings.TrimRight(override, "/"),
 			cityName:           cityName,
@@ -332,6 +335,13 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 			localSupervisorAPI: localSupervisorAPI,
 		}, nil
 	}
+
+	cityPath, cfg, err := resolveDashboardContext()
+	if err != nil {
+		return eventsAPIScope{}, err
+	}
+
+	cityName := resolvedEventsCityName(cityPath, cfg)
 
 	if supervisorAliveHook() != 0 {
 		cityName = resolvedManagedEventsCityName(cityPath, cityName)
@@ -375,13 +385,6 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 		cityPath,
 		"gc supervisor start",
 	)
-}
-
-func resolvedExplicitEventsCityName(apiURLOverride, cityPath, fallback string) string {
-	if !matchesLocalSupervisorAPI(apiURLOverride) {
-		return fallback
-	}
-	return resolvedManagedEventsCityName(cityPath, fallback)
 }
 
 func matchesLocalSupervisorAPI(apiURLOverride string) bool {
