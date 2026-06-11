@@ -110,6 +110,7 @@ func gasTownExpectedSessions(agents []gasTownAgent) []string {
 func renderGasTownToml(cityName string, agents []gasTownAgent) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[workspace]\nname = %s\n", quote(cityName))
+	fmt.Fprintf(&b, "includes = [\".gc/system/packs/core\"]\n")
 	fmt.Fprintf(&b, "\n[beads]\nprovider = \"file\"\n")
 	fmt.Fprintf(&b, "\n[daemon]\npatrol_interval = \"100ms\"\n")
 

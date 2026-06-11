@@ -8,5 +8,5 @@ const (
 
 	// PublicGastownPackVersion pins fresh init output to the registry release
 	// content commit from gastownhall/gascity-packs main.
-	PublicGastownPackVersion = "sha:1f45471e8bdc5dece030dfc99406ca7d3d45f9c0"
+	PublicGastownPackVersion = "sha:31382fc6dd86b747d19687f6028d8bcd85e059a7"
 )

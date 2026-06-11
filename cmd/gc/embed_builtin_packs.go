@@ -313,15 +313,25 @@ func builtinIncludePathForPack(name string) string {
 
 // builtinIncludesForProvider mirrors requiredBuiltinIncludePaths for a city
 // whose city.toml has not been written yet: gc init computes the canonical
-// builtin include list straight from the provider value it is about to
-// write. GC_BEADS overrides and the managed exec-wrapper normalization never
-// apply at init time.
+// builtin include list straight from the provider value in play.
 func builtinIncludesForProvider(provider string) []string {
 	includes := []string{builtinIncludePathForPack("core")}
 	if providerUsesBdStoreContract(strings.TrimSpace(provider)) {
 		includes = append(includes, builtinIncludePathForPack("bd"))
 	}
 	return includes
+}
+
+// builtinIncludesForInit resolves the beads provider the same way
+// command-time store selection does — GC_BEADS env first, then the
+// about-to-be-written city.toml provider — so init writes exactly the
+// includes the builtin-pack-includes doctor check will later enforce.
+func builtinIncludesForInit(cityProvider string) []string {
+	provider := strings.TrimSpace(os.Getenv("GC_BEADS"))
+	if provider == "" {
+		provider = cityProvider
+	}
+	return builtinIncludesForProvider(provider)
 }
 
 // packExists checks if a pack.toml exists in the given directory.

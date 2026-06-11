@@ -1094,6 +1094,13 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 	rewriteInitPromptTemplates(cfg)
 	packCfg, cityCfg := splitInitConfig(cityName, cfg)
 	applyInitPackTemplateExtras(&packCfg, templatePack)
+	// Builtin packs compose only through explicit includes: write the
+	// canonical city-relative paths for this city's providers into
+	// city.toml (mirrors doInit; gc doctor --fix repairs them later).
+	cityCfg.Workspace.SetLegacyIncludes(appendUniqueStrings(
+		cityCfg.Workspace.LegacyIncludes(),
+		builtinIncludesForInit(cityCfg.Beads.Provider)...,
+	))
 	var rigSiteBindings []config.Rig
 	if hasInitRigSiteBindings(cityCfg.Rigs) {
 		rigSiteBindings = append([]config.Rig(nil), cityCfg.Rigs...)
@@ -1291,7 +1298,7 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// portable pack.toml.
 	cityCfg.Workspace.SetLegacyIncludes(appendUniqueStrings(
 		cityCfg.Workspace.LegacyIncludes(),
-		builtinIncludesForProvider(cityCfg.Beads.Provider)...,
+		builtinIncludesForInit(cityCfg.Beads.Provider)...,
 	))
 	content, err := cityCfg.Marshal()
 	if err != nil {
