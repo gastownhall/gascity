@@ -750,10 +750,10 @@ func wakeDemandOverridesSleepSuppression(
 	if hasExplicitSleepIntent {
 		return false
 	}
-	hasDemand := poolDesired[template] > 0 || eval.HasAssignedWork
 	if eval.HasAssignedWork {
 		return true
 	}
+	hasDemand := poolDesired[template] > 0
 	if hasDemand && policy.Class == config.SessionSleepNonInteractive {
 		return true
 	}
@@ -2277,14 +2277,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		name := target.session.Metadata["session_name"]
 		decision := awakeDecisions[name]
 		if decision.ShouldWake && !pendingInteractionReady(sp, name) && target.session.Metadata["pin_awake"] != "true" && configWakeSuppressed(*target.session, policy, sp, clk) {
-			// Active demand (poolDesired > 0 or direct assigned work)
-			// overrides sleep suppression for non-interactive sessions
+			// Direct assigned work overrides sleep suppression for every
+			// sleep class — the assignment is session-specific, so a pool
+			// sibling cannot serve it. Pool-scale demand (poolDesired > 0)
+			// overrides suppression only for non-interactive sessions
 			// (matching the old evaluateWakeReasons behavior). Min-active
 			// city-stop revival is also config demand: stale detach metadata
 			// from before gc stop must not cancel the post-start guarantee.
-			// Other interactive sessions honor their idle window regardless
-			// of demand — an idle chat session should still sleep to release
-			// resources.
+			// Interactive sessions honor their idle window against
+			// pool-scale demand — an idle chat session should still sleep
+			// to release resources.
 			// Explicit sleep_intent always wins — if the session has
 			// signaled it wants to sleep, honor that regardless of demand.
 			template := normalizedSessionTemplate(*target.session, cfg)

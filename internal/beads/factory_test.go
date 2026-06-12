@@ -13,6 +13,7 @@ import (
 )
 
 func TestOpenStoreAtForCityEligibleNativeReturnsInjectedNativeStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := "/city"
 	native := NewMemStore()
 
@@ -47,6 +48,7 @@ func TestOpenStoreAtForCityEligibleNativeReturnsInjectedNativeStore(t *testing.T
 }
 
 func TestOpenStoreAtForCityIneligibleProviderSkipsPreflight(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot: "/city",
 		Provider:  "unknown",
@@ -72,6 +74,7 @@ func TestOpenStoreAtForCityIneligibleProviderSkipsPreflight(t *testing.T) {
 }
 
 func TestOpenStoreAtForCityContextDriftFallsBackWithPreflightDiagnostic(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := "/city"
 	var bdOpened bool
 
@@ -144,6 +147,7 @@ func TestOpenStoreAtForCityForceFallbackSkipsPreflightAndNativeOpen(t *testing.T
 }
 
 func TestOpenStoreAtForCityNativeOpenFailureFallsBackWithDiagnostic(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := "/city"
 	fallback := NewMemStore()
 	var bdOpened bool
@@ -184,6 +188,7 @@ func TestOpenStoreAtForCityNativeOpenFailureFallsBackWithDiagnostic(t *testing.T
 }
 
 func TestOpenStoreAtForCityExecBdContractFallbackUsesExecStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := "/city"
 	provider := "exec:/tmp/gc-beads-bd.sh"
 	execStore := NewMemStore()
@@ -220,6 +225,7 @@ func TestOpenStoreAtForCityExecBdContractFallbackUsesExecStore(t *testing.T) {
 }
 
 func TestOpenStoreAtForCityExecutableHooksBlockNativeStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := t.TempDir()
 	hooksDir := filepath.Join(scope, ".beads", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
@@ -260,6 +266,7 @@ func TestOpenStoreAtForCityExecutableHooksBlockNativeStore(t *testing.T) {
 }
 
 func TestOpenStoreAtForCityGCStampedHooksDoNotBlockNativeStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := t.TempDir()
 	hooksDir := filepath.Join(scope, ".beads", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
@@ -301,6 +308,7 @@ func TestOpenStoreAtForCityGCStampedHooksDoNotBlockNativeStore(t *testing.T) {
 }
 
 func TestOpenStoreAtForCityEmbeddedStampMarkerStillBlocksNativeStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := t.TempDir()
 	hooksDir := filepath.Join(scope, ".beads", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
