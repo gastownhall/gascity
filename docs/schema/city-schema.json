@@ -961,7 +961,7 @@
         },
         "delete_after_close": {
           "type": "string",
-          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". Empty defers to any controller-managed\ndefault for the policy type (e.g. order_tracking defaults to 7d)."
+          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". ApplyBeadPolicyDefaults fills in a\nnon-empty default for recognized policy types (order_tracking: \"7d\"),\nso this field is populated after config load even when the city.toml\nomits it."
         }
       },
       "additionalProperties": false,

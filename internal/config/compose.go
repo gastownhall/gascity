@@ -610,6 +610,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 	}
 	ApplyAgentDefaults(root)
+	ApplyBeadPolicyDefaults(root)
 
 	// Canonicalize duration-or-"off" session sleep fields after all config
 	// layers have been applied so runtime consumers can trust the values.

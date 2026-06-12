@@ -1301,8 +1301,10 @@ type BeadPolicyConfig struct {
 	Storage string `toml:"storage,omitempty" jsonschema:"enum=history,enum=no_history,enum=ephemeral"`
 	// DeleteAfterClose deletes matching GC-owned beads after they have been
 	// closed for this duration. Accepts Go duration syntax plus whole-day "d"
-	// units, e.g. "7d" or "1d12h". Empty defers to any controller-managed
-	// default for the policy type (e.g. order_tracking defaults to 7d).
+	// units, e.g. "7d" or "1d12h". ApplyBeadPolicyDefaults fills in a
+	// non-empty default for recognized policy types (order_tracking: "7d"),
+	// so this field is populated after config load even when the city.toml
+	// omits it.
 	DeleteAfterClose string `toml:"delete_after_close,omitempty"`
 }
 
@@ -4070,6 +4072,31 @@ func ApplyAgentDefaults(cfg *City) {
 				cfg.Agents[i].DefaultSlingFormula = &formula
 			}
 		}
+	}
+}
+
+// defaultOrderTrackingDeleteAfterClose is the default closed-bead TTL applied
+// when [beads.policies.order_tracking].delete_after_close is unset. Cities
+// that never configure the field get automated cleanup with this retention
+// window. The value matches the runtime fallback in cmd/gc.
+const defaultOrderTrackingDeleteAfterClose = "7d"
+
+// ApplyBeadPolicyDefaults fills in controller-managed defaults for bead
+// policies that have sane non-empty defaults. Call after all config
+// composition layers have been merged so user-supplied values take
+// precedence. Currently:
+//   - [beads.policies.order_tracking].delete_after_close defaults to "7d".
+func ApplyBeadPolicyDefaults(cfg *City) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Beads.Policies == nil {
+		cfg.Beads.Policies = make(map[string]BeadPolicyConfig)
+	}
+	p := cfg.Beads.Policies["order_tracking"]
+	if p.DeleteAfterClose == "" {
+		p.DeleteAfterClose = defaultOrderTrackingDeleteAfterClose
+		cfg.Beads.Policies["order_tracking"] = p
 	}
 }
 
