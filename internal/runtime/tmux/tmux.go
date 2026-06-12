@@ -1864,15 +1864,16 @@ func (t *Tmux) FindAgentPane(session string) (string, error) {
 			}
 		}
 
-		// Shell with agent descendant
-		for _, shell := range supportedShells {
-			if paneCmd == shell && hasDescendantWithNames(panePID, processNames, 0) {
-				return paneID, nil
-			}
-		}
-
 		// Version-as-argv[0] (e.g., "2.1.30") — check real binary name
 		if processMatchesNames(panePID, processNames) {
+			return paneID, nil
+		}
+
+		// Descendant walk: agents under shells ("bash -c 'exec claude'")
+		// or wrapper roots (systemd-run when GC_AGENT_SLICE is set) keep
+		// the shell/wrapper as pane_current_command — same unconditional
+		// descendant fallback as IsRuntimeRunning.
+		if hasDescendantWithNames(panePID, processNames, 0) {
 			return paneID, nil
 		}
 	}
@@ -2496,10 +2497,17 @@ func (t *Tmux) resolveSessionProcessNames(session string) []string {
 // Useful for waiting until a shell has started a new process (e.g., claude).
 // Returns nil when a non-excluded command is detected, or error on timeout.
 //
+// Known pane-root wrappers (see wrapperCommands, e.g. systemd-run under
+// GC_AGENT_SLICE) are treated as excluded regardless of excludeCommands: a
+// wrapped pane reports the wrapper as pane_current_command for the pane's
+// whole lifetime, so first sight of the wrapper does not mean the agent
+// command has appeared.
+//
 // Includes an IsAgentAlive fallback: when the pane command stays as a shell
-// (e.g., "bash"), the agent may be running as a descendant process via a
-// wrapper script (e.g., "bash -c 'exec claude'"). In this case, pane_current_command
-// never changes from "bash", but IsAgentAlive detects the descendant.
+// (e.g., "bash") or a wrapper root, the agent may be running as a descendant
+// process (e.g., "bash -c 'exec claude'", or systemd-run's scope child). In
+// these cases pane_current_command never changes, but IsAgentAlive detects
+// the descendant.
 func (t *Tmux) WaitForCommand(ctx context.Context, session string, excludeCommands []string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -2517,8 +2525,10 @@ func (t *Tmux) WaitForCommand(ctx context.Context, session string, excludeComman
 			}
 			continue
 		}
-		// Check if current command is NOT in the exclude list
-		excluded := false
+		// Check if current command is NOT in the exclude list. Wrapper
+		// roots count as excluded: they hide the agent command for the
+		// pane's lifetime, so they must never satisfy the wait directly.
+		excluded := isWrapperCommand(cmd)
 		for _, exc := range excludeCommands {
 			if cmd == exc {
 				excluded = true
@@ -2528,8 +2538,9 @@ func (t *Tmux) WaitForCommand(ctx context.Context, session string, excludeComman
 		if !excluded {
 			return nil
 		}
-		// Fallback: if pane command is still a shell, check whether the
-		// agent is running as a descendant (handles bash-wrapped agents).
+		// Fallback: the pane command is still a shell or a wrapper root;
+		// check whether the agent is running as a descendant (handles
+		// bash-wrapped agents and systemd-run scope children).
 		if t.IsAgentAlive(session) {
 			return nil
 		}

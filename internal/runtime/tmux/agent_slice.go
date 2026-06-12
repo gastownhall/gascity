@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -31,10 +32,33 @@ const AgentSliceEnv = "GC_AGENT_SLICE"
 // Test-overridable.
 var agentSliceProbeTimeout = 5 * time.Second
 
+// wrapperCommands lists pane-root wrapper binaries produced by pane-command
+// wrapping. A wrapped pane reports the wrapper as pane_current_command for
+// the pane's whole lifetime, so command-wait and detection paths must treat
+// these like shells: the agent is identified through descendant inspection,
+// never by the pane command itself.
+var wrapperCommands = []string{"systemd-run"}
+
+// isWrapperCommand reports whether cmd is a known pane-root wrapper binary
+// (see wrapperCommands).
+func isWrapperCommand(cmd string) bool {
+	for _, w := range wrapperCommands {
+		if cmd == w {
+			return true
+		}
+	}
+	return false
+}
+
 // probeAgentSliceSupport verifies that systemd-run exists and the systemd
 // user manager responds by running a no-op command in a transient scope on
-// the target slice. This exercises the exact mechanism used for pane
-// commands, so success here means pane wrapping will work.
+// the target slice. The probe runs in the gc process's environment, while
+// pane commands execute with the tmux server's environment. gc normally
+// spawns the tmux server itself, so the server inherits gc's environment
+// and the probe is representative — but a pre-existing server whose global
+// environment lacks a reachable user bus (XDG_RUNTIME_DIR,
+// DBUS_SESSION_BUS_ADDRESS) can still fail wrapped spawns after a
+// successful probe here.
 func probeAgentSliceSupport(slice string) error {
 	if _, err := exec.LookPath("systemd-run"); err != nil {
 		return fmt.Errorf("systemd-run not found: %w", err)
@@ -60,7 +84,7 @@ func probeAgentSliceSupport(slice string) error {
 // unwrapped (graceful fallback).
 type agentSliceWrapper struct {
 	probe func(slice string) error // test seam; nil means probeAgentSliceSupport
-	warn  io.Writer                // test seam; nil means os.Stderr
+	warn  io.Writer                // test seam; nil means the standard logger
 	once  sync.Once
 	ok    bool
 }
@@ -78,12 +102,13 @@ func (w *agentSliceWrapper) wrap(slice, command string) string {
 			probe = probeAgentSliceSupport
 		}
 		if err := probe(slice); err != nil {
-			out := w.warn
-			if out == nil {
-				out = os.Stderr
-			}
-			_, _ = fmt.Fprintf(out, "gc: %s=%q set but transient user scopes are unavailable; pane commands run unwrapped: %v\n",
+			msg := fmt.Sprintf("%s=%q set but transient user scopes are unavailable; pane commands run unwrapped: %v",
 				AgentSliceEnv, slice, err)
+			if w.warn != nil {
+				_, _ = fmt.Fprintln(w.warn, "gc: "+msg)
+			} else {
+				log.Printf("tmux agent slice: %s", msg)
+			}
 			return
 		}
 		w.ok = true

@@ -787,3 +787,19 @@ func TestIsNoServerErrorRecognizesSentinel(t *testing.T) {
 		t.Fatal("isNoServerError(ErrNoServer) = false, want true")
 	}
 }
+
+// TestProcessAliveWrappedPane pins the wrapped-pane liveness contract
+// (GC_AGENT_SLICE): a pane whose root command is systemd-run — not an agent
+// name, a shell, or a known interpreter — still counts as alive when the
+// agent runs as its descendant, via processAlive's unconditional descendant
+// fallback.
+func TestProcessAliveWrappedPane(t *testing.T) {
+	snapshot := newProcessSnapshot([]processRuntimeState{
+		{PID: "100", PPID: "1", Command: "systemd-run", Args: "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet -- sh -c claude"},
+		{PID: "101", PPID: "100", Command: "claude", Args: "claude"},
+	})
+	pane := paneRuntimeState{Command: "systemd-run", PID: "100"}
+	if !pane.processAlive(processNameSet([]string{"claude"}), snapshot) {
+		t.Fatal("processAlive = false for systemd-run pane with claude child, want true (descendant fallback)")
+	}
+}

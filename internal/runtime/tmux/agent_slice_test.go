@@ -1,9 +1,15 @@
 package tmux
 
 import (
+	"context"
 	"errors"
+	"os"
+	osexec "os/exec"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newSliceTestTmux returns a Tmux backed by a fakeExecutor with the agent
@@ -118,10 +124,20 @@ func TestAgentSliceProbeFailureFallsBackPlainWithWarning(t *testing.T) {
 		t.Fatalf("NewSessionWithCommand (second): %v", err)
 	}
 
-	for i, call := range exec.calls[:2] {
-		if call[len(call)-1] != "claude" && call[0] == "new-session" {
-			t.Fatalf("call %d pane command = %q, want plain %q", i, call[len(call)-1], "claude")
+	// Recorded argv carries global flags first (-u, optional -L <socket>);
+	// scan for the new-session token rather than relying on position.
+	newSessionCalls := 0
+	for i, call := range exec.calls {
+		if !slices.Contains(call, "new-session") {
+			continue
 		}
+		newSessionCalls++
+		if got := call[len(call)-1]; got != "claude" {
+			t.Fatalf("new-session call %d pane command = %q, want plain %q", i, got, "claude")
+		}
+	}
+	if newSessionCalls != 2 {
+		t.Fatalf("recorded %d new-session calls, want 2 (assertion must not pass vacuously)", newSessionCalls)
 	}
 	if probeCalls != 1 {
 		t.Fatalf("probe called %d times, want 1 (result must be cached)", probeCalls)
@@ -162,4 +178,145 @@ func TestAgentSliceQuotesEmbeddedSingleQuotes(t *testing.T) {
 	if got != want {
 		t.Fatalf("pane command = %q, want %q", got, want)
 	}
+}
+
+// TestFindAgentPane_WrappedPane pins the detection contract for panes whose
+// root command is a wrapper such as systemd-run (GC_AGENT_SLICE): none of the
+// direct-name, shell-descendant, or version-as-argv[0] checks match the
+// wrapper process, so FindAgentPane must identify the agent through the
+// unconditional descendant walk, mirroring IsRuntimeRunning.
+func TestFindAgentPane_WrappedPane(t *testing.T) {
+	// Real process tree: the test binary spawns "sleep 60", standing in for
+	// systemd-run spawning the agent. The fake executor reports the pane
+	// command as "systemd-run" with the test binary's PID, so only the
+	// descendant fallback can identify the agent pane.
+	agent := osexec.Command("sleep", "60")
+	if err := agent.Start(); err != nil {
+		t.Fatalf("starting agent stand-in: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = agent.Process.Kill()
+		_ = agent.Wait()
+	})
+
+	panePID := strconv.Itoa(os.Getpid())
+	deadline := time.Now().Add(5 * time.Second)
+	for !hasDescendantWithNames(panePID, []string{"sleep"}, 0) {
+		if time.Now().After(deadline) {
+			t.Fatal("sleep child never became visible to the process-tree walk")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	exec := &fakeExecutor{outs: []string{
+		// list-panes -s: a user's split pane plus the wrapped agent pane.
+		// The bogus PID has no live process, so the first pane cannot match.
+		"%1\tvim\t999999999\n%2\tsystemd-run\t" + panePID,
+		// show-environment GT_PROCESS_NAMES
+		"GT_PROCESS_NAMES=sleep",
+	}}
+	tm := NewTmux()
+	tm.exec = exec
+
+	paneID, err := tm.FindAgentPane("gc-test-wrapped")
+	if err != nil {
+		t.Fatalf("FindAgentPane: %v", err)
+	}
+	if paneID != "%2" {
+		t.Fatalf("FindAgentPane = %q, want %q (wrapped agent pane via descendant fallback)", paneID, "%2")
+	}
+}
+
+// wrappedWaitExecutor simulates a pane whose root command is the systemd-run
+// wrapper for the pane's whole lifetime. The agent descendant becomes visible
+// to the process-tree walk only after livePIDAfter pane-PID requests: earlier
+// requests return a dead PID with no descendants, modeling the startup window
+// where systemd-run exists but the agent has not exec'd yet.
+type wrappedWaitExecutor struct {
+	deadPID      string
+	livePID      string
+	livePIDAfter int
+	pidRequests  int
+}
+
+func (e *wrappedWaitExecutor) execute(args []string) (string, error) {
+	// args carry global flags first (-u, optional -L <socket>); scan for the
+	// subcommand token.
+	for _, a := range args {
+		switch a {
+		case "display-message":
+			switch args[len(args)-1] {
+			case "#{pane_current_command}":
+				return "systemd-run", nil
+			case "#{pane_pid}":
+				e.pidRequests++
+				if e.pidRequests <= e.livePIDAfter {
+					return e.deadPID, nil
+				}
+				return e.livePID, nil
+			}
+			return "", nil
+		case "show-environment":
+			return "GT_PROCESS_NAMES=sleep", nil
+		}
+	}
+	return "", nil
+}
+
+func (e *wrappedWaitExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// TestWaitForCommand_WrappedPane pins the startup-wait contract for wrapper
+// roots (systemd-run under GC_AGENT_SLICE): the pane reports the wrapper as
+// pane_current_command for its whole lifetime, so WaitForCommand must not
+// treat first sight of the wrapper as "agent command appeared". It must keep
+// polling until the agent is detectable as a pane descendant, and time out
+// when no agent ever appears.
+func TestWaitForCommand_WrappedPane(t *testing.T) {
+	// Real process tree: the test binary spawns "sleep 60" standing in for
+	// the agent, as in TestFindAgentPane_WrappedPane.
+	agent := osexec.Command("sleep", "60")
+	if err := agent.Start(); err != nil {
+		t.Fatalf("starting agent stand-in: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = agent.Process.Kill()
+		_ = agent.Wait()
+	})
+
+	livePID := strconv.Itoa(os.Getpid())
+	deadline := time.Now().Add(5 * time.Second)
+	for !hasDescendantWithNames(livePID, []string{"sleep"}, 0) {
+		if time.Now().After(deadline) {
+			t.Fatal("sleep child never became visible to the process-tree walk")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Run("times out when no agent descendant ever appears", func(t *testing.T) {
+		exec := &wrappedWaitExecutor{deadPID: "999999999", livePID: "999999999"}
+		tm := NewTmux()
+		tm.exec = exec
+
+		err := tm.WaitForCommand(context.Background(), "gc-test-wrapped-wait", supportedShells, 250*time.Millisecond)
+		if err == nil {
+			t.Fatal("WaitForCommand returned nil on wrapper sighting; want timeout while no agent descendant exists")
+		}
+	})
+
+	t.Run("returns once the agent descendant appears", func(t *testing.T) {
+		// The first two liveness probes see a dead pane PID (agent not yet
+		// exec'd inside the scope); later probes see the live tree.
+		exec := &wrappedWaitExecutor{deadPID: "999999999", livePID: livePID, livePIDAfter: 2}
+		tm := NewTmux()
+		tm.exec = exec
+
+		if err := tm.WaitForCommand(context.Background(), "gc-test-wrapped-wait", supportedShells, 10*time.Second); err != nil {
+			t.Fatalf("WaitForCommand: %v (agent descendant was live)", err)
+		}
+		if exec.pidRequests < 3 {
+			t.Fatalf("pane PID requested %d times, want >= 3 (wait must keep polling until the descendant appears)", exec.pidRequests)
+		}
+	})
 }
