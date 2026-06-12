@@ -3679,6 +3679,11 @@ Tail the machine-wide supervisor log file.
 
 Shows recent log output from background and service-managed supervisor runs.
 
+When GC_SUPERVISOR_LOG_TEE=0 is set in this shell, the supervisor may be
+writing only to the service manager's log: an existing log file is still
+tailed (with a staleness warning), and when the file is absent the command
+points at the service manager's log instead.
+
 ```
 gc supervisor logs [flags]
 ```
@@ -3710,6 +3715,12 @@ Run the machine-wide supervisor in the foreground.
 This is the canonical long-running control loop. It reads ~/.gc/cities.toml
 for registered cities, manages them from one process, and hosts the shared
 API server.
+
+Output is teed into ~/.gc/supervisor.log so 'gc supervisor logs' works
+regardless of how the supervisor was invoked. Set GC_SUPERVISOR_LOG_TEE=0
+in the supervisor's environment to disable the tee when the service manager
+already captures output (e.g. a hand-managed systemd unit with
+StandardOutput=journal).
 
 ```
 gc supervisor run

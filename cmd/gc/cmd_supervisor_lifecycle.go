@@ -395,7 +395,13 @@ func newSupervisorRunCmd(stdout, stderr io.Writer) *cobra.Command {
 
 This is the canonical long-running control loop. It reads ~/.gc/cities.toml
 for registered cities, manages them from one process, and hosts the shared
-API server.`,
+API server.
+
+Output is teed into ~/.gc/supervisor.log so 'gc supervisor logs' works
+regardless of how the supervisor was invoked. Set GC_SUPERVISOR_LOG_TEE=0
+in the supervisor's environment to disable the tee when the service manager
+already captures output (e.g. a hand-managed systemd unit with
+StandardOutput=journal).`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doSupervisorRun(stdout, stderr) != 0 {
@@ -694,7 +700,12 @@ func newSupervisorLogsCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Tail the supervisor log file",
 		Long: `Tail the machine-wide supervisor log file.
 
-Shows recent log output from background and service-managed supervisor runs.`,
+Shows recent log output from background and service-managed supervisor runs.
+
+When GC_SUPERVISOR_LOG_TEE=0 is set in this shell, the supervisor may be
+writing only to the service manager's log: an existing log file is still
+tailed (with a staleness warning), and when the file is absent the command
+points at the service manager's log instead.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doSupervisorLogs(numLines, follow, stdout, stderr) != 0 {
@@ -708,34 +719,62 @@ Shows recent log output from background and service-managed supervisor runs.`,
 	return cmd
 }
 
+// supervisorLogsJournalCmd builds the journalctl invocation for the
+// gc-managed systemd unit, mirroring the requested -n/-f flags.
+func supervisorLogsJournalCmd(numLines int, follow bool) string {
+	journalCmd := fmt.Sprintf("journalctl --user -u %s -n %d", supervisorSystemdServiceName(), numLines)
+	if follow {
+		journalCmd += " -f"
+	}
+	return journalCmd
+}
+
 // supervisorLogsTeeDisabledHint builds the operator-facing pointer printed by
 // `gc supervisor logs` when GC_SUPERVISOR_LOG_TEE=0 disables the supervisor
-// log tee: the tee file is not being written, so direct the operator at the
-// service manager's log instead (journalctl on linux).
+// log tee and no log file exists: there is nothing to tail, so direct the
+// operator at the service manager's log instead (journalctl on linux).
 func supervisorLogsTeeDisabledHint(goos string, numLines int, follow bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "gc supervisor logs: log tee is disabled (%s=0); supervisor output goes to the service manager log\n", supervisorLogTeeEnv)
 	if goos == "linux" {
-		journalCmd := fmt.Sprintf("journalctl --user -u %s -n %d", supervisorSystemdServiceName(), numLines)
-		if follow {
-			journalCmd += " -f"
-		}
-		fmt.Fprintf(&b, "gc supervisor logs: try: %s\n", journalCmd)
+		fmt.Fprintf(&b, "gc supervisor logs: try: %s\n", supervisorLogsJournalCmd(numLines, follow))
+	}
+	return b.String()
+}
+
+// supervisorLogsTeeDisabledWarning builds the warning printed before tailing
+// an existing log file while GC_SUPERVISOR_LOG_TEE=0 is set in the CLI's
+// environment. The file may still be live: manual `gc supervisor start`,
+// `gc start` restarts, and gc-generated service units all write it via
+// fd/unit redirection regardless of the env, and a service unit's
+// Environment= is invisible to this process.
+func supervisorLogsTeeDisabledWarning(goos, logPath string, numLines int, follow bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "gc supervisor logs: warning: %s=0 is set in this environment; if the supervisor honors it, %s is stale\n", supervisorLogTeeEnv, logPath)
+	if goos == "linux" {
+		fmt.Fprintf(&b, "gc supervisor logs: service manager log: %s\n", supervisorLogsJournalCmd(numLines, follow))
 	}
 	return b.String()
 }
 
 func doSupervisorLogs(numLines int, follow bool, stdout, stderr io.Writer) int {
-	if supervisorLogTeeDisabled() {
-		// The tee file is not being written, so tailing it would show stale
-		// (or no) output. Point the operator at the service manager's log.
-		fmt.Fprint(stderr, supervisorLogsTeeDisabledHint(goruntime.GOOS, numLines, follow)) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	logPath := supervisorLogPath()
 	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		if supervisorLogTeeDisabled() {
+			// No log file and the tee is disabled in this shell: nothing to
+			// tail, so point the operator at the service manager's log.
+			fmt.Fprint(stderr, supervisorLogsTeeDisabledHint(goruntime.GOOS, numLines, follow)) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		fmt.Fprintf(stderr, "gc supervisor logs: log file not found: %s\n", logPath) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if supervisorLogTeeDisabled() {
+		// The file exists even though this shell disables the tee. Most
+		// deployment shapes write it via fd/unit redirection independent of
+		// the env, so the file is likely live; warn and tail instead of
+		// misdirecting incident debugging away from real logs.
+		fmt.Fprint(stderr, supervisorLogsTeeDisabledWarning(goruntime.GOOS, logPath, numLines, follow)) //nolint:errcheck // best-effort stderr
 	}
 
 	args := []string{"-n", fmt.Sprintf("%d", numLines)}

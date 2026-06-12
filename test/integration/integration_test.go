@@ -995,6 +995,7 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, "BEADS_DOLT_PASSWORD")
 	env = filterEnv(env, "GC_SUPERVISOR_ENV")
 	env = filterEnv(env, "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL")
+	env = filterEnv(env, "GC_SUPERVISOR_LOG_TEE")
 	env = filterEnv(env, "DOLT_HOST")
 	env = filterEnv(env, "DOLT_PORT")
 	env = filterEnv(env, "DOLT_USER")
