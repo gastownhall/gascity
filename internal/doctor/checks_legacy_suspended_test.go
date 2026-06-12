@@ -257,6 +257,102 @@ suspended = true
 	}
 }
 
+// Regression for the ga-lurp5d follow-up review: the rewrite's temp file is
+// created 0600 by os.CreateTemp, so an applied fix must preserve the original
+// file mode rather than narrowing 0644 or widening a restrictive 0600 to 0644 —
+// matching the sibling rewriteWithoutDeprecatedAttachmentFields fixer.
+func TestLegacySuspendedFieldCheck_Fix_PreservesFileMode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		perm os.FileMode
+	}{
+		{"0644", 0o644},
+		{"0600", 0o600},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "city.toml")
+			if err := os.WriteFile(path, []byte("[workspace]\nname = \"demo\"\nsuspended = true\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, tc.perm); err != nil {
+				t.Fatal(err)
+			}
+
+			c := NewLegacySuspendedFieldCheck(&config.City{
+				Workspace: config.Workspace{Suspended: true},
+			})
+			if err := c.Fix(&CheckContext{CityPath: dir}); err != nil {
+				t.Fatalf("Fix: %v", err)
+			}
+
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != tc.perm {
+				t.Fatalf("post-fix mode = %04o, want %04o", got, tc.perm)
+			}
+			rewritten, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(rewritten), "suspended_on_start = true") {
+				t.Fatalf("fix did not rewrite legacy field; got:\n%s", rewritten)
+			}
+		})
+	}
+}
+
+// Regression for the ga-lurp5d follow-up review: `gc doctor --fix` must
+// rename the legacy field through a symlinked city.toml, preserving the
+// link and updating the checkout target instead of replacing the link
+// with a divorced regular file that strands the stale content.
+func TestLegacySuspendedFieldCheck_Fix_WritesThroughCityTomlSymlink(t *testing.T) {
+	t.Parallel()
+	cityDir := t.TempDir()
+	checkoutDir := filepath.Join(cityDir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(checkoutDir, "city.toml")
+	original := "[workspace]\nname = \"demo\"\nsuspended = true\n"
+	if err := os.WriteFile(target, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cityDir, "city.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewLegacySuspendedFieldCheck(&config.City{
+		Workspace: config.Workspace{Suspended: true},
+	})
+	if err := c.Fix(&CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("city.toml symlink was replaced by a %v entry; fix must write through the link", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "suspended_on_start = true") {
+		t.Fatalf("symlink target not rewritten:\n%s", got)
+	}
+	if strings.Contains(got, "suspended = true") {
+		t.Fatalf("symlink target still carries the legacy field:\n%s", got)
+	}
+}
+
 func TestLegacySuspendedFieldCheck_Fix_MissingFileIsNoOp(t *testing.T) {
 	dir := t.TempDir()
 	c := NewLegacySuspendedFieldCheck(&config.City{})

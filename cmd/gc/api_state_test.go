@@ -3573,3 +3573,254 @@ func TestStoreMetadataSignatureChangesOnRigSuspensionFlip(t *testing.T) {
 		t.Fatalf("signature unchanged across rig suspension flip:\n%s", before)
 	}
 }
+
+func TestConfigMutationSnapshotRestoresThroughSymlinks(t *testing.T) {
+	cityDir := t.TempDir()
+	checkoutDir := filepath.Join(cityDir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	links := make(map[string]string) // link path -> target path
+	for link, target := range map[string]string{
+		filepath.Join(cityDir, "city.toml"):        filepath.Join(checkoutDir, "city.toml"),
+		filepath.Join(cityDir, ".gc", "site.toml"): filepath.Join(checkoutDir, "site.toml"),
+	} {
+		if err := os.WriteFile(target, []byte("original = true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		links[link] = target
+	}
+
+	snapshot, err := captureConfigMutationSnapshot(cityDir)
+	if err != nil {
+		t.Fatalf("captureConfigMutationSnapshot: %v", err)
+	}
+
+	for _, target := range links {
+		if err := os.WriteFile(target, []byte("mutated = true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := snapshot.restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	for link, target := range links {
+		info, err := os.Lstat(link)
+		if err != nil {
+			t.Fatalf("Lstat %s: %v", link, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%s symlink was replaced by a %v entry; restore must write through the link", link, info.Mode())
+		}
+		data, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatalf("ReadFile %s: %v", target, err)
+		}
+		if string(data) != "original = true\n" {
+			t.Fatalf("%s target content = %q, want original bytes restored", link, data)
+		}
+	}
+}
+
+func TestConfigMutationSnapshotRestoresSymlinkedAgentTomlTarget(t *testing.T) {
+	cityDir := t.TempDir()
+	checkoutDir := filepath.Join(cityDir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(cityDir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// agents/worker/agent.toml is symlinked to an operator file checked out of
+	// the agents/ tree (the ga-lurp5d "linked into a repo" case). The forward
+	// agent mutation path writes/removes the resolved target, so a rollback must
+	// restore the target bytes — SnapshotTree only preserves the link entry.
+	target := filepath.Join(checkoutDir, "worker-agent.toml")
+	original := []byte("provider = \"claude\"\n")
+	if err := os.WriteFile(target, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(agentDir, "agent.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	snapshot, err := captureConfigMutationSnapshot(cityDir)
+	if err != nil {
+		t.Fatalf("captureConfigMutationSnapshot: %v", err)
+	}
+
+	// A suspend writes through the link, mutating the resolved target content.
+	if err := os.WriteFile(target, []byte("provider = \"claude\"\nsuspended = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := snapshot.restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat %s: %v", link, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s symlink was replaced by a %v entry; restore must write through the link", link, info.Mode())
+	}
+	if got, err := os.Readlink(link); err != nil || got != target {
+		t.Fatalf("agent.toml symlink target = %q, %v; want %q", got, err, target)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", target, err)
+	}
+	if string(data) != string(original) {
+		t.Fatalf("agent.toml target content = %q, want original bytes %q restored", data, original)
+	}
+}
+
+func TestConfigMutationSnapshotRecreatesRemovedSymlinkedAgentTomlTarget(t *testing.T) {
+	cityDir := t.TempDir()
+	checkoutDir := filepath.Join(cityDir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(cityDir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// An empty resume/delete removes the resolved target through the link. The
+	// rollback must recreate the operator's target bytes, not leave a dangling
+	// link with the durable config gone.
+	target := filepath.Join(checkoutDir, "worker-agent.toml")
+	original := []byte("provider = \"claude\"\n")
+	if err := os.WriteFile(target, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(agentDir, "agent.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	snapshot, err := captureConfigMutationSnapshot(cityDir)
+	if err != nil {
+		t.Fatalf("captureConfigMutationSnapshot: %v", err)
+	}
+
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := snapshot.restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat %s: %v", link, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s symlink was replaced by a %v entry; restore must keep the link", link, info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile restored %s: %v", target, err)
+	}
+	if string(data) != string(original) {
+		t.Fatalf("agent.toml target content = %q, want original bytes %q recreated", data, original)
+	}
+}
+
+func TestControllerStateSuspendRestoresSymlinkedAgentTomlTargetWhenRefreshFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"city1\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("write pack.toml: %v", err)
+	}
+	checkoutDir := filepath.Join(cityDir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatalf("mkdir checkout: %v", err)
+	}
+	agentDir := filepath.Join(cityDir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are the worker.\n"), 0o644); err != nil {
+		t.Fatalf("write prompt.template.md: %v", err)
+	}
+
+	// agents/worker/agent.toml is symlinked to a checked-out operator file.
+	agentTarget := filepath.Join(checkoutDir, "worker-agent.toml")
+	originalAgent := []byte("provider = \"claude\"\n")
+	if err := os.WriteFile(agentTarget, originalAgent, 0o644); err != nil {
+		t.Fatalf("write agent target: %v", err)
+	}
+	agentLink := filepath.Join(agentDir, "agent.toml")
+	if err := os.Symlink(agentTarget, agentLink); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	resolvedAgentTarget, err := fsys.ResolveSymlinks(fsys.OSFS{}, agentLink)
+	if err != nil {
+		t.Fatalf("resolve agent symlink: %v", err)
+	}
+
+	original := []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	cs := newControllerState(context.Background(), &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
+	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	// The suspend write renames a temp file onto the resolved agent.toml target;
+	// corrupt city.toml at that moment so the post-mutation refresh fails and
+	// the rollback path runs.
+	cs.editor = configedit.NewEditor(&corruptCityAfterRenameFS{
+		triggerPath: resolvedAgentTarget,
+		cityToml:    tomlPath,
+	}, tomlPath)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+
+	err = cs.SuspendAgent("worker")
+	if err == nil {
+		t.Fatal("SuspendAgent should fail when refreshing the updated snapshot fails")
+	}
+	if !strings.Contains(err.Error(), "refreshing updated city config") {
+		t.Fatalf("SuspendAgent error = %v, want refresh failure after mutation", err)
+	}
+
+	info, err := os.Lstat(agentLink)
+	if err != nil {
+		t.Fatalf("Lstat agent symlink: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("agent.toml symlink was replaced by a %v entry after rollback", info.Mode())
+	}
+	gotAgent, err := os.ReadFile(agentTarget)
+	if err != nil {
+		t.Fatalf("read restored agent target: %v", err)
+	}
+	if string(gotAgent) != string(originalAgent) {
+		t.Fatalf("agent.toml target = %q, want rollback to %q", gotAgent, originalAgent)
+	}
+	if cs.configDirty.Load() {
+		t.Fatal("SuspendAgent should not mark config dirty after rollback")
+	}
+}

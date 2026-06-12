@@ -183,9 +183,16 @@ func loadCityPackConfigForEditFS(fs fsys.FS, packPath string) (*initPackConfig, 
 		return nil, err
 	}
 	cfg := initPackConfig{}
-	if _, err := toml.Decode(string(data), &cfg); err != nil {
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("loading pack config %q: %w", packPath, err)
 	}
+	// Fold the legacy [agents] alias into [agent_defaults] before any rewrite:
+	// marshalInitPackConfig emits only [agent_defaults], so without this the
+	// suspend/resume rewrite would silently drop an [agents] table even though
+	// the key-loss guard recognizes it. Mirrors parse-time normalization.
+	config.FoldAgentDefaultsAlias(&cfg.AgentDefaults, cfg.AgentsDefaults, md)
+	cfg.AgentsDefaults = config.AgentDefaults{}
 	return &cfg, nil
 }
 
@@ -197,7 +204,19 @@ func writeCityPackConfigForEditFS(fs fsys.FS, packPath string, cfg *initPackConf
 	if err != nil {
 		return err
 	}
-	return fsys.WriteFileIfChangedAtomic(fs, packPath, content, 0o644)
+	// Resolve before the rename: a symlinked pack.toml must keep its
+	// link, with the write landing in the checked-in target.
+	writePath, err := fsys.ResolveSymlinks(fs, packPath)
+	if err != nil {
+		return err
+	}
+	// Refuse the rewrite when the on-disk pack.toml carries keys this binary
+	// does not recognize: marshalInitPackConfig round-trips a reduced struct
+	// and would silently drop newer or manual keys at the checked-in target.
+	if err := config.GuardRewriteKeyLoss[initPackConfig](fs, writePath); err != nil {
+		return err
+	}
+	return fsys.WriteFileIfChangedAtomic(fs, writePath, content, 0o644)
 }
 
 func updateRootPackAgentSuspended(fs fsys.FS, cityPath string, cityCfg *config.City, name string, suspended bool) (bool, error) {

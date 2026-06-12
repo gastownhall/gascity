@@ -355,12 +355,12 @@ func validateCityExternalEndpointChange(cityPath string, targetState contract.Co
 
 func snapshotCityTopologyFiles(fs fsys.FS, cityPath string, plans []cityRigEndpointPlan) ([]fileSnapshot, error) {
 	snapshots := make([]fileSnapshot, 0, len(plans)+3)
-	cityToml, err := snapshotCityTomlForRollback(fs, cityPath)
+	cityToml, err := snapshotResolvedFile(fs, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		return nil, err
 	}
 	snapshots = append(snapshots, cityToml)
-	siteToml, err := snapshotOptionalFile(fs, config.SiteBindingPath(cityPath))
+	siteToml, err := snapshotResolvedFile(fs, config.SiteBindingPath(cityPath))
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +400,7 @@ func snapshotCityManagedPortFiles(fs fsys.FS, cityPath string, plans []cityRigEn
 			continue
 		}
 		seen[path] = struct{}{}
-		snap, err := snapshotOptionalFile(fs, path)
+		snap, err := snapshotResolvedFile(fs, path)
 		if err != nil {
 			return nil, err
 		}

@@ -1720,6 +1720,92 @@ func TestSyncConfiguredDoltPortFilesWarnsOnRigPortFileRewrite(t *testing.T) {
 	}
 }
 
+func TestWriteDoltPortFileWritesThroughSymlink(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	targetDir := filepath.Join(t.TempDir(), "ports")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "dolt-server.port")
+	if err := os.WriteFile(target, []byte("3307\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(beadsDir, "dolt-server.port")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	var warn bytes.Buffer
+	writeDoltPortFile(dir, "3311", "city", &warn)
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("dolt-server.port symlink was replaced by a %v entry; rewrite must write through the link", info.Mode())
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, target))); got != "3311" {
+		t.Fatalf("target port = %q, want 3311", got)
+	}
+	if out := warn.String(); !strings.Contains(out, "3307") || !strings.Contains(out, "3311") {
+		t.Fatalf("warning = %q, want old and new ports", out)
+	}
+}
+
+func TestRemoveDoltPortFileClearsThroughSymlink(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	targetDir := filepath.Join(t.TempDir(), "ports")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "dolt-server.port")
+	if err := os.WriteFile(target, []byte("3311\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(beadsDir, "dolt-server.port")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	removeDoltPortFile(dir)
+
+	// The best-effort lifecycle mirror cleanup must preserve the operator's
+	// link and clear only the resolved target.
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("dolt-server.port symlink was replaced by a %v entry; cleanup must clear through the link", info.Mode())
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("target stat err = %v, want resolved target removed", err)
+	}
+
+	// A later publication must write through the preserved link.
+	var warn bytes.Buffer
+	writeDoltPortFile(dir, "3320", "city", &warn)
+	info, err = os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link after re-publish: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("after re-publish, link mode = %v; want symlink preserved", info.Mode())
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, target))); got != "3320" {
+		t.Fatalf("re-published target port = %q, want 3320", got)
+	}
+}
+
 func TestSyncConfiguredDoltPortFilesSilentOnNoChange(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "quiet")

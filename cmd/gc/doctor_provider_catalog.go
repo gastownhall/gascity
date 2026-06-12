@@ -180,6 +180,10 @@ func missingBuiltinProviderRefs(refs []config.ProviderReference) []string {
 	return out
 }
 
+// appendBuiltinProviderAliases is exempt from config.ResolveCityRewritePath:
+// os.WriteFile truncates through a symlinked city.toml and the append keeps
+// every existing byte, so neither link identity nor unknown keys are at
+// risk. Switching this to a temp-file + rename write revokes the exemption.
 func appendBuiltinProviderAliases(cityPath string, providers []string) error {
 	if len(providers) == 0 {
 		return nil

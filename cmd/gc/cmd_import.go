@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
+	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/spf13/cobra"
 )
 
@@ -39,6 +40,7 @@ type cityPackManifest struct {
 	Pack                  config.PackMeta                `toml:"pack"`
 	Imports               map[string]config.Import       `toml:"imports,omitempty"`
 	AgentDefaults         config.AgentDefaults           `toml:"agent_defaults,omitempty"`
+	AgentsDefaults        config.AgentDefaults           `toml:"agents,omitempty" jsonschema:"-"`
 	Defaults              cityPackDefaults               `toml:"defaults,omitempty"`
 	DefaultRigImportOrder []string                       `toml:"-"`
 	Agents                []config.Agent                 `toml:"agent,omitempty"`
@@ -50,6 +52,7 @@ type cityPackManifest struct {
 	Doctor                []config.PackDoctorEntry       `toml:"doctor,omitempty"`
 	Commands              []config.PackCommandEntry      `toml:"commands,omitempty"`
 	Global                config.PackGlobal              `toml:"global,omitempty"`
+	Pricing               []pricing.ModelPricing         `toml:"pricing,omitempty"`
 }
 
 type cityPackDefaults struct {
@@ -73,6 +76,7 @@ type cityPackManifestBody struct {
 	Doctor        []config.PackDoctorEntry       `toml:"doctor,omitempty"`
 	Commands      []config.PackCommandEntry      `toml:"commands,omitempty"`
 	Global        config.PackGlobal              `toml:"global,omitempty"`
+	Pricing       []pricing.ModelPricing         `toml:"pricing,omitempty"`
 }
 
 func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1329,9 +1333,17 @@ func loadCityPackManifestFS(fs fsys.FS, cityPath string) (*cityPackManifest, err
 	}
 
 	var manifest cityPackManifest
-	if _, err := toml.Decode(string(data), &manifest); err != nil {
+	md, err := toml.Decode(string(data), &manifest)
+	if err != nil {
 		return nil, fmt.Errorf("parsing pack.toml: %w", err)
 	}
+	// Fold the legacy [agents] alias into [agent_defaults] before any rewrite:
+	// the manifest body emits only [agent_defaults], so without this the
+	// import-manifest rewrite would silently drop an [agents] table even though
+	// the key-loss guard recognizes it. Mirrors parse-time normalization and the
+	// gc agent suspend/resume edit path.
+	config.FoldAgentDefaultsAlias(&manifest.AgentDefaults, manifest.AgentsDefaults, md)
+	manifest.AgentsDefaults = config.AgentDefaults{}
 	if manifest.Pack.Name == "" {
 		manifest.Pack.Name = defaultCityPackName(fs, cityPath)
 	}
@@ -1382,6 +1394,7 @@ func writeCityPackManifest(fs fsys.FS, cityPath string, manifest *cityPackManife
 		Doctor:        manifest.Doctor,
 		Commands:      manifest.Commands,
 		Global:        manifest.Global,
+		Pricing:       manifest.Pricing,
 	}
 	if err := toml.NewEncoder(&buf).Encode(body); err != nil {
 		return fmt.Errorf("encoding pack.toml: %w", err)
@@ -1389,7 +1402,21 @@ func writeCityPackManifest(fs fsys.FS, cityPath string, manifest *cityPackManife
 	if err := writeOrderedDefaultRigImports(&buf, manifest); err != nil {
 		return err
 	}
-	return fsys.WriteFileAtomic(fs, filepath.Join(cityPath, "pack.toml"), buf.Bytes(), 0o644)
+	// Resolve before the rename: pack.toml may be a symlink into a
+	// checked-out repo, and renaming over the unresolved path would
+	// replace the link with a regular file and strand the stale manifest
+	// in the checked-in target.
+	writePath, err := fsys.ResolveSymlinks(fs, filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		return err
+	}
+	// Refuse the rewrite when the on-disk pack.toml carries keys this binary
+	// does not recognize: the manifest round-trip would silently drop newer
+	// or manual keys at the checked-in target.
+	if err := config.GuardRewriteKeyLoss[cityPackManifest](fs, writePath); err != nil {
+		return err
+	}
+	return fsys.WriteFileAtomic(fs, writePath, buf.Bytes(), 0o644)
 }
 
 func writeOrderedDefaultRigImports(buf *bytes.Buffer, manifest *cityPackManifest) error {

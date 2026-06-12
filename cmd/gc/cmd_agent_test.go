@@ -570,6 +570,140 @@ name = "mayor"
 	}
 }
 
+func TestDoAgentSuspendRootPackPreservesPricing(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	// Root pack.toml carries a [[pricing]] table, which compose.go parses and
+	// merges. Suspending a root-pack agent rewrites pack.toml through a reduced
+	// struct; the rewrite must preserve pricing rather than refusing the write
+	// (false key-loss positive) or silently dropping it.
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+
+[[pricing]]
+provider = "claude"
+model = "claude-opus-4-8"
+last_verified = "2026-06-01"
+
+[pricing.tier]
+prompt_usd_per_1m = 15.0
+completion_usd_per_1m = 75.0
+
+[[agent]]
+name = "mayor"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentSuspend(fs, "/city", "mayor", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packToml := string(fs.Files["/city/pack.toml"])
+	if !strings.Contains(packToml, `suspended = true`) {
+		t.Fatalf("pack.toml missing suspended = true:\n%s", packToml)
+	}
+	for _, want := range []string{
+		"[[pricing]]",
+		`provider = "claude"`,
+		`model = "claude-opus-4-8"`,
+		`last_verified = "2026-06-01"`,
+		"prompt_usd_per_1m",
+		"completion_usd_per_1m",
+	} {
+		if !strings.Contains(packToml, want) {
+			t.Fatalf("pack.toml dropped pricing field %q after suspend:\n%s", want, packToml)
+		}
+	}
+}
+
+func TestDoAgentSuspendRootPackCanonicalizesAgentsAlias(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	// Root pack.toml carries the legacy [agents] alias for [agent_defaults].
+	// Suspending a root-pack agent rewrites pack.toml through a reduced struct;
+	// the rewrite must canonicalize the alias into [agent_defaults] rather than
+	// silently dropping it (the key-loss class this PR exists to prevent).
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+
+[agents]
+append_fragments = ["shared"]
+
+[[agent]]
+name = "mayor"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentSuspend(fs, "/city", "mayor", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packToml := string(fs.Files["/city/pack.toml"])
+	if !strings.Contains(packToml, `suspended = true`) {
+		t.Fatalf("pack.toml missing suspended = true:\n%s", packToml)
+	}
+	// The alias value survives, canonicalized under [agent_defaults].
+	if !strings.Contains(packToml, "[agent_defaults]") || !strings.Contains(packToml, `append_fragments = ["shared"]`) {
+		t.Fatalf("pack.toml dropped the [agents] alias value:\n%s", packToml)
+	}
+	// The legacy alias table name is not re-emitted.
+	if strings.Contains(packToml, "[agents]") {
+		t.Fatalf("pack.toml still contains the legacy [agents] table:\n%s", packToml)
+	}
+}
+
+func TestDoAgentSuspendRootPackMergesAgentsAliasPreferringCanonical(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	// Both [agent_defaults] and the legacy [agents] alias are present. The
+	// rewrite must keep canonical values winning on overlapping keys while the
+	// alias only fills gaps, matching parse-time normalization.
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+
+[agent_defaults]
+provider = "canonical"
+
+[agents]
+provider = "alias"
+append_fragments = ["from-alias"]
+
+[[agent]]
+name = "mayor"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentSuspend(fs, "/city", "mayor", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packToml := string(fs.Files["/city/pack.toml"])
+	if !strings.Contains(packToml, `provider = "canonical"`) {
+		t.Fatalf("pack.toml lost canonical provider precedence:\n%s", packToml)
+	}
+	if strings.Contains(packToml, `provider = "alias"`) {
+		t.Fatalf("pack.toml let the alias provider override canonical:\n%s", packToml)
+	}
+	if !strings.Contains(packToml, `append_fragments = ["from-alias"]`) {
+		t.Fatalf("pack.toml dropped the gap-filling alias value:\n%s", packToml)
+	}
+	if strings.Contains(packToml, "[agents]") {
+		t.Fatalf("pack.toml still contains the legacy [agents] table:\n%s", packToml)
+	}
+}
+
 func TestStrictFatalLoadConfigWarningsKeepsMixedTableWarningsFatal(t *testing.T) {
 	warnings := []string{
 		`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
@@ -1232,5 +1366,124 @@ name = "test-city"
 	}
 	if !molecule.IsGraphApplyEnabled() {
 		t.Fatalf("molecule.IsGraphApplyEnabled() = false, want true")
+	}
+}
+
+// Regression for the ga-lurp5d follow-up review: the CLI fallback for
+// `gc agent suspend`/`gc agent resume` re-marshals pack.toml for
+// pack-declared agents; when pack.toml is a symlink (e.g., into a
+// checked-out repo) the rewrite must write through the link instead of
+// replacing it with a regular file and stranding the stale config in the
+// checked-in target.
+func TestDoAgentSuspendWritesThroughPackTomlSymlink(t *testing.T) {
+	t.Parallel()
+	cityDir := t.TempDir()
+	checkoutDir := filepath.Join(cityDir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(checkoutDir, "pack.toml")
+	src := `[pack]
+name = "test-city"
+schema = 2
+
+[providers.claude]
+base = "builtin:claude"
+
+[[agent]]
+name = "worker"
+provider = "claude"
+`
+	if err := os.WriteFile(target, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cityDir, "pack.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doAgentSuspend(fsys.OSFS{}, cityDir, "worker", &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("pack.toml symlink was replaced by a %v entry; suspend must write through the link", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if !strings.Contains(string(data), "suspended = true") {
+		t.Fatalf("symlink target missing suspended = true:\n%s", data)
+	}
+}
+
+// Regression for the ga-lurp5d follow-up review: the CLI fallback for
+// `gc agent suspend` re-marshals pack.toml through the reduced initPackConfig
+// struct, which would silently drop keys this gc binary does not recognize. A
+// symlinked pack.toml carrying an unknown key must make the rewrite refuse
+// rather than strand a reduced manifest at the checked-in target.
+func TestDoAgentSuspendRefusesPackTomlUnknownKeys(t *testing.T) {
+	t.Parallel()
+	cityDir := t.TempDir()
+	checkoutDir := filepath.Join(cityDir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(checkoutDir, "pack.toml")
+	src := `[pack]
+name = "test-city"
+schema = 2
+
+[providers.claude]
+base = "builtin:claude"
+
+[[agent]]
+name = "worker"
+provider = "claude"
+
+[future_unknown_section]
+knob = "keep-me"
+`
+	if err := os.WriteFile(target, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cityDir, "pack.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doAgentSuspend(fsys.OSFS{}, cityDir, "worker", &stdout, &stderr); code == 0 {
+		t.Fatalf("code = 0, want non-zero refusal; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "future_unknown_section") {
+		t.Fatalf("stderr = %q, want mention of future_unknown_section", stderr.String())
+	}
+	// The symlink and its content must survive an aborted rewrite.
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("pack.toml symlink was replaced by a %v entry", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if string(data) != src {
+		t.Fatalf("pack.toml was rewritten despite refusal:\n%s", data)
 	}
 }

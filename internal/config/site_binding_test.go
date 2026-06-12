@@ -72,10 +72,7 @@ func TestPersistRigSiteBindings(t *testing.T) {
 
 func TestPersistRigSiteBindings_PreservesWorkspaceIdentity(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Files[SiteBindingPath("/city")] = []byte(`
-workspace_name = "site-city"
-workspace_prefix = "sc"
-`)
+	fs.Files[SiteBindingPath("/city")] = []byte("workspace_name = \"site-city\"\nworkspace_prefix = \"sc\"\n")
 	cfg := []Rig{{Name: "frontend", Path: "/tmp/frontend"}}
 
 	if err := PersistRigSiteBindings(fs, "/city", cfg); err != nil {
@@ -94,6 +91,80 @@ workspace_prefix = "sc"
 	}
 	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "frontend" {
 		t.Fatalf("binding.Rigs = %+v, want preserved workspace identity plus frontend rig", binding.Rigs)
+	}
+}
+
+func TestPersistWorkspaceSiteBindingWritesThroughSiteTomlSymlink(t *testing.T) {
+	dir := t.TempDir()
+	targetDir := filepath.Join(dir, "checkout")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "site.toml")
+	if err := os.WriteFile(target, []byte("workspace_name = \"old-site\"\nworkspace_prefix = \"os\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDir := filepath.Join(dir, "city")
+	link := SiteBindingPath(cityDir)
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := PersistWorkspaceSiteBinding(fsys.OSFS{}, cityDir, "new-site", "ns"); err != nil {
+		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("site.toml symlink was replaced by a %v entry; rewrite must write through the link", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if got := string(data); !strings.Contains(got, `workspace_name = "new-site"`) || !strings.Contains(got, `workspace_prefix = "ns"`) {
+		t.Fatalf("target content = %q, want updated workspace binding", got)
+	}
+}
+
+func TestPersistWorkspaceSiteBindingRemovesSiteTomlSymlinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	targetDir := filepath.Join(dir, "checkout")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "site.toml")
+	if err := os.WriteFile(target, []byte("workspace_name = \"old-site\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDir := filepath.Join(dir, "city")
+	link := SiteBindingPath(cityDir)
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := PersistWorkspaceSiteBinding(fsys.OSFS{}, cityDir, "", ""); err != nil {
+		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("site.toml symlink was replaced by a %v entry; empty binding removal must preserve the link", info.Mode())
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("target stat err = %v, want removed target", err)
 	}
 }
 

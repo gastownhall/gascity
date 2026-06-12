@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/overlay"
+	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/spf13/cobra"
 )
 
@@ -66,6 +67,7 @@ type initPackConfig struct {
 	Doctor         []config.PackDoctorEntry       `toml:"doctor,omitempty"`
 	Commands       []config.PackCommandEntry      `toml:"commands,omitempty"`
 	Global         config.PackGlobal              `toml:"global,omitempty"`
+	Pricing        []pricing.ModelPricing         `toml:"pricing,omitempty"`
 }
 
 var initConventionDirs = cityinit.InitConventionDirs()
@@ -802,6 +804,7 @@ func marshalInitPackConfig(cfg initPackConfig) ([]byte, error) {
 		Doctor        []config.PackDoctorEntry       `toml:"doctor,omitempty"`
 		Commands      []config.PackCommandEntry      `toml:"commands,omitempty"`
 		Global        *config.PackGlobal             `toml:"global,omitempty"`
+		Pricing       []pricing.ModelPricing         `toml:"pricing,omitempty"`
 	}
 
 	encCfg := encodedInitPackConfig{
@@ -821,6 +824,7 @@ func marshalInitPackConfig(cfg initPackConfig) ([]byte, error) {
 		Providers:     cfg.Providers,
 		Doctor:        cfg.Doctor,
 		Commands:      cfg.Commands,
+		Pricing:       cfg.Pricing,
 	}
 	if !isZeroValue(cfg.AgentDefaults) {
 		encCfg.AgentDefaults = &cfg.AgentDefaults

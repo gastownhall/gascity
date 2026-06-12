@@ -2791,18 +2791,28 @@ func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefault
 	}
 }
 
-func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
+// FoldAgentDefaultsAlias folds a legacy [agents] alias table into the canonical
+// [agent_defaults] target so a struct round-trip that emits only
+// [agent_defaults] does not silently drop the alias. When both tables are
+// present the canonical values win on overlapping keys and the alias only fills
+// gaps; when only the alias is present its values become the canonical defaults.
+// meta must be the toml.MetaData from decoding the same document. Callers are
+// responsible for clearing their own alias field afterward.
+func FoldAgentDefaultsAlias(canonical *AgentDefaults, alias AgentDefaults, meta toml.MetaData) {
 	if meta.IsDefined("agent_defaults") {
 		if meta.IsDefined("agents") {
-			mergeAgentDefaultsAliasPreferCanonical(&cfg.AgentDefaults, cfg.AgentsDefaults, meta)
+			mergeAgentDefaultsAliasPreferCanonical(canonical, alias, meta)
 		}
-		cfg.AgentsDefaults = AgentDefaults{}
 		return
 	}
 	if meta.IsDefined("agents") {
-		cfg.AgentDefaults = cfg.AgentsDefaults
-		cfg.AgentsDefaults = AgentDefaults{}
+		*canonical = alias
 	}
+}
+
+func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
+	FoldAgentDefaultsAlias(&cfg.AgentDefaults, cfg.AgentsDefaults, meta)
+	cfg.AgentsDefaults = AgentDefaults{}
 }
 
 const (

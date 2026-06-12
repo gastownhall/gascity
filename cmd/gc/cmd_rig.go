@@ -789,12 +789,12 @@ func boundImportsMap(imports []config.BoundImport) map[string]config.Import {
 
 func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) ([]fileSnapshot, error) {
 	snapshots := make([]fileSnapshot, 0, len(cfg.Rigs)*3+5)
-	cityToml, err := snapshotCityTomlForRollback(fs, cityPath)
+	cityToml, err := snapshotResolvedFile(fs, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		return nil, err
 	}
 	snapshots = append(snapshots, cityToml)
-	siteToml, err := snapshotOptionalFile(fs, config.SiteBindingPath(cityPath))
+	siteToml, err := snapshotResolvedFile(fs, config.SiteBindingPath(cityPath))
 	if err != nil {
 		return nil, err
 	}
@@ -804,7 +804,7 @@ func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) 
 		return nil, err
 	}
 	snapshots = append(snapshots, citySnapshots...)
-	cityPort, err := snapshotOptionalFile(fs, filepath.Join(cityPath, ".beads", "dolt-server.port"))
+	cityPort, err := snapshotResolvedFile(fs, filepath.Join(cityPath, ".beads", "dolt-server.port"))
 	if err != nil {
 		return nil, err
 	}
@@ -825,7 +825,7 @@ func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) 
 			return nil, err
 		}
 		snapshots = append(snapshots, rigSnapshots...)
-		rigPort, err := snapshotOptionalFile(fs, filepath.Join(rigPath, ".beads", "dolt-server.port"))
+		rigPort, err := snapshotResolvedFile(fs, filepath.Join(rigPath, ".beads", "dolt-server.port"))
 		if err != nil {
 			return nil, err
 		}

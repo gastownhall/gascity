@@ -542,15 +542,48 @@ func isAgentPatchOnlyIdentity(p config.AgentPatch) bool {
 	return true
 }
 
+// resolveAgentTomlTarget resolves a convention agent.toml path through any
+// symlink so atomic rewrites land on the checked-in target instead of replacing
+// the link entry. A non-symlink path is returned cleaned; a missing or dangling
+// link resolves to its would-be target so a suspend can still create it.
+func resolveAgentTomlTarget(fs fsys.FS, agentTomlPath, name string) (string, error) {
+	target, err := fsys.ResolveSymlinks(fs, agentTomlPath)
+	if err != nil {
+		return "", fmt.Errorf("resolving agents/%s/agent.toml: %w", name, err)
+	}
+	return target, nil
+}
+
+// removeAgentTomlConvention clears the durable agent.toml convention content.
+// When agent.toml is a symlink into a checked-in target, the resolved target is
+// removed so the durable content is cleared at its real location; the operator's
+// link is intentionally left in place (edits act on the target, not the link).
+// A now-dangling link is treated as "no durable config" by every reader and is
+// rewritten through on the next suspend. Missing files are not an error.
+func removeAgentTomlConvention(fs fsys.FS, agentTomlPath, name string) error {
+	target, err := resolveAgentTomlTarget(fs, agentTomlPath, name)
+	if err != nil {
+		return err
+	}
+	if err := fs.Remove(target); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing agents/%s/agent.toml: %w", name, err)
+	}
+	return nil
+}
+
 // WriteLocalDiscoveredAgentSuspended writes the suspended state to
 // agents/<name>/agent.toml using an atomic temp-file rename. When
 // suspended is false and the file would become empty (no other fields),
-// it is removed instead.
+// the durable content is cleared instead.
 //
 // Decoding into map[string]any (rather than a typed struct) preserves
 // any user-set fields the caller didn't ask about. TOML comments and
 // key ordering are not preserved — that is a limitation of the
 // underlying decode/encode round trip, not this helper.
+//
+// Writes and removals resolve a symlinked agent.toml to its checked-in target
+// first, so a linked config is updated/cleared at the target rather than having
+// the link replaced by a regular file (the ga-lurp5d symlink-clobber class).
 func WriteLocalDiscoveredAgentSuspended(fs fsys.FS, cityRoot string, agent config.Agent, suspended bool) error {
 	agentTomlPath := filepath.Join(cityRoot, "agents", agent.Name, "agent.toml")
 
@@ -576,17 +609,18 @@ func WriteLocalDiscoveredAgentSuspended(fs fsys.FS, cityRoot string, agent confi
 	}
 
 	if len(values) == 0 {
-		if err := fs.Remove(agentTomlPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("removing agents/%s/agent.toml: %w", agent.Name, err)
-		}
-		return nil
+		return removeAgentTomlConvention(fs, agentTomlPath, agent.Name)
 	}
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(values); err != nil {
 		return fmt.Errorf("encoding agents/%s/agent.toml: %w", agent.Name, err)
 	}
-	if err := fsys.WriteFileAtomic(fs, agentTomlPath, buf.Bytes(), 0o644); err != nil {
+	writePath, err := resolveAgentTomlTarget(fs, agentTomlPath, agent.Name)
+	if err != nil {
+		return err
+	}
+	if err := fsys.WriteFileAtomic(fs, writePath, buf.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("writing agents/%s/agent.toml: %w", agent.Name, err)
 	}
 	return nil
@@ -770,7 +804,11 @@ func WriteLocalDiscoveredAgentConfig(fs fsys.FS, cityRoot string, agent config.A
 	if err := toml.NewEncoder(&buf).Encode(values); err != nil {
 		return cleanupFreshScaffold(fmt.Errorf("encoding agents/%s/agent.toml: %w", agent.Name, err))
 	}
-	if err := fsys.WriteFileAtomic(fs, filepath.Join(agentDir, "agent.toml"), buf.Bytes(), 0o644); err != nil {
+	writePath, err := resolveAgentTomlTarget(fs, filepath.Join(agentDir, "agent.toml"), agent.Name)
+	if err != nil {
+		return cleanupFreshScaffold(err)
+	}
+	if err := fsys.WriteFileAtomic(fs, writePath, buf.Bytes(), 0o644); err != nil {
 		return cleanupFreshScaffold(fmt.Errorf("writing agents/%s/agent.toml: %w", agent.Name, err))
 	}
 	return nil
@@ -849,17 +887,18 @@ func writeLocalDiscoveredAgentUpdate(fs fsys.FS, cityRoot string, agent config.A
 	// An empty merged convention config means there is no durable agent.toml
 	// content to preserve; the prompt scaffold still defines the agent.
 	if len(values) == 0 {
-		if err := fs.Remove(agentTomlPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("removing agents/%s/agent.toml: %w", agent.Name, err)
-		}
-		return nil
+		return removeAgentTomlConvention(fs, agentTomlPath, agent.Name)
 	}
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(values); err != nil {
 		return fmt.Errorf("encoding agents/%s/agent.toml: %w", agent.Name, err)
 	}
-	if err := fsys.WriteFileAtomic(fs, agentTomlPath, buf.Bytes(), 0o644); err != nil {
+	writePath, err := resolveAgentTomlTarget(fs, agentTomlPath, agent.Name)
+	if err != nil {
+		return err
+	}
+	if err := fsys.WriteFileAtomic(fs, writePath, buf.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("writing agents/%s/agent.toml: %w", agent.Name, err)
 	}
 	return nil

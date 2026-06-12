@@ -1023,15 +1023,7 @@ func parsePackConfigWithMetadata(data []byte, source string) (PackConfig, toml.M
 }
 
 func normalizePackAgentDefaultsAlias(cfg *PackConfig, meta toml.MetaData) {
-	if !meta.IsDefined("agents") {
-		cfg.AgentsDefaults = AgentDefaults{}
-		return
-	}
-	if meta.IsDefined("agent_defaults") {
-		mergeAgentDefaultsAliasPreferCanonical(&cfg.AgentDefaults, cfg.AgentsDefaults, meta)
-	} else {
-		cfg.AgentDefaults = cfg.AgentsDefaults
-	}
+	FoldAgentDefaultsAlias(&cfg.AgentDefaults, cfg.AgentsDefaults, meta)
 	cfg.AgentsDefaults = AgentDefaults{}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // LegacySuspendedFieldCheck warns when city.toml carries the
@@ -139,7 +140,24 @@ func renameLegacySuspendedInCityTOML(path string) (int, error) {
 	if changes == 0 {
 		return 0, nil
 	}
-	return changes, writeFileAtomic(path, []byte(out), 0o644)
+	// Resolve-only, like the formulas-dir strip: the rename is a lossless
+	// line edit, so the key-loss guard in config.ResolveCityRewritePath
+	// would falsely refuse it whenever unrelated unknown keys are present.
+	// Renaming over the unresolved path would replace a symlinked
+	// city.toml with a regular file and strand the stale content in the
+	// checked-in target. The write keeps the original file mode — a temp
+	// file's default 0600 must not survive the rename, and a restrictive
+	// 0600 city.toml must not be widened to 0644 — matching the sibling
+	// rewriteWithoutDeprecatedAttachmentFields fixer.
+	writePath, err := fsys.ResolveSymlinks(fsys.OSFS{}, path)
+	if err != nil {
+		return 0, err
+	}
+	info, err := os.Stat(writePath)
+	if err != nil {
+		return 0, err
+	}
+	return changes, fsys.WriteFileAtomic(fsys.OSFS{}, writePath, []byte(out), info.Mode().Perm())
 }
 
 // rewriteLegacySuspended is the pure-string form of
@@ -226,33 +244,4 @@ func classifySection(name string, isArrayOfTables bool) sectionKind {
 	default:
 		return sectionOther
 	}
-}
-
-// writeFileAtomic writes data to path via temp + rename so a crash
-// mid-write can't leave a half-rewritten city.toml. Sibling-file path
-// (no leading dot) so the write lands on the same filesystem as the
-// target and rename is atomic.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-	tmp, err := os.CreateTemp(dir, base+".doctorfix.*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return os.Rename(tmpName, path)
 }

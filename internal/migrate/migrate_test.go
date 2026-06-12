@@ -303,6 +303,36 @@ legacy_unknown = "silently dropped before strict migration validation"
 	}
 }
 
+func TestMigrateRejectsUnknownCityTomlKeys(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["../packs/gastown"]
+
+[agent_defaults]
+future_unknown = "written by a newer gc, silently dropped by this rewrite"
+`)
+
+	beforeCity := readFile(t, filepath.Join(cityDir, "city.toml"))
+
+	_, err := Apply(cityDir, Options{})
+	if err == nil {
+		t.Fatal("expected Apply to refuse a city.toml with unknown keys")
+	}
+	if !strings.Contains(err.Error(), "agent_defaults.future_unknown") {
+		t.Fatalf("error = %v, want the unknown key named", err)
+	}
+	if !strings.Contains(err.Error(), "refusing to rewrite") {
+		t.Fatalf("error = %v, want key-loss refusal with remediation", err)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "city.toml")); got != beforeCity {
+		t.Fatalf("city.toml changed after refusal:\n%s", got)
+	}
+}
+
 func TestMigrateMovesExistingRootDefaultRigImportsToCityToml(t *testing.T) {
 	t.Parallel()
 

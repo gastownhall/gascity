@@ -953,6 +953,93 @@ func TestWriteDoltPortFileStrictUsesAtomicWrite(t *testing.T) {
 	}
 }
 
+func TestWriteDoltPortFileStrictWritesThroughSymlink(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	targetDir := filepath.Join(t.TempDir(), "ports")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "dolt-server.port")
+	if err := os.WriteFile(target, []byte("3307\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(beadsDir, "dolt-server.port")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeDoltPortFileStrict(fsys.OSFS{}, dir, "3311"); err != nil {
+		t.Fatalf("writeDoltPortFileStrict: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("dolt-server.port symlink was replaced by a %v entry; rewrite must write through the link", info.Mode())
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, target))); got != "3311" {
+		t.Fatalf("target port = %q, want 3311", got)
+	}
+}
+
+func TestRemoveDoltPortFileStrictClearsThroughSymlink(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	targetDir := filepath.Join(t.TempDir(), "ports")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "dolt-server.port")
+	if err := os.WriteFile(target, []byte("3311\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(beadsDir, "dolt-server.port")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeDoltPortFileStrict(dir); err != nil {
+		t.Fatalf("removeDoltPortFileStrict: %v", err)
+	}
+
+	// The operator's link must survive; only the resolved target is cleared.
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("dolt-server.port symlink was replaced by a %v entry; cleanup must clear through the link", info.Mode())
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("target stat err = %v, want resolved target removed", err)
+	}
+
+	// A later publication must write through the preserved link to the
+	// operator's target instead of recreating a regular file at the link path.
+	if err := writeDoltPortFileStrict(fsys.OSFS{}, dir, "3320"); err != nil {
+		t.Fatalf("re-publish writeDoltPortFileStrict: %v", err)
+	}
+	info, err = os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link after re-publish: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("after re-publish, link mode = %v; want symlink preserved", info.Mode())
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, target))); got != "3320" {
+		t.Fatalf("re-published target port = %q, want 3320", got)
+	}
+}
+
 func TestSyncRigEndpointCompatConfigUsesAtomicWrite(t *testing.T) {
 	fs := fsys.NewFake()
 	cityDir := "/city"
@@ -993,6 +1080,183 @@ func TestRestoreSnapshotUsesAtomicWrite(t *testing.T) {
 	}
 	if got := string(fs.Files[snap.path]); got != "updated = true\n" {
 		t.Fatalf("restored file = %q", got)
+	}
+}
+
+// setupSymlinkedCityToml creates cityDir/city.toml as a symlink into a
+// checkout directory holding the original content, mirroring the ga-lurp5d
+// production layout where city.toml links into a checked-out repo.
+const symlinkedCityTomlOriginal = "[workspace]\nname = \"test-city\"\n"
+
+func setupSymlinkedCityToml(t *testing.T) (cityDir, link, target string) {
+	t.Helper()
+	dir := t.TempDir()
+	checkoutDir := filepath.Join(dir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target = filepath.Join(checkoutDir, "city.toml")
+	if err := os.WriteFile(target, []byte(symlinkedCityTomlOriginal), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDir = filepath.Join(dir, "city")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link = filepath.Join(cityDir, "city.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir, link, target
+}
+
+// assertCityTomlSymlinkRestored fails the test unless link is still a symlink
+// and target holds the original content after a rollback restore.
+func assertCityTomlSymlinkRestored(t *testing.T, link, target, original string) {
+	t.Helper()
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("city.toml symlink was replaced by a %v entry; rollback must restore through the link", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if string(data) != original {
+		t.Fatalf("target content = %q, want restored original %q", data, original)
+	}
+}
+
+// Regression test for the ga-lurp5d follow-up: a failed endpoint change must
+// roll back a symlinked city.toml by restoring the link target, not by
+// replacing the link with a regular file.
+func TestRigEndpointRollbackRestoresThroughCityTomlSymlink(t *testing.T) {
+	fs := fsys.OSFS{}
+	cityDir, link, target := setupSymlinkedCityToml(t)
+	scopeRoot := filepath.Join(cityDir, "rig")
+	if err := os.MkdirAll(scopeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshots, err := snapshotRigEndpointFiles(fs, cityDir, scopeRoot)
+	if err != nil {
+		t.Fatalf("snapshotRigEndpointFiles: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("[workspace]\nname = \"mutated\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreSnapshots(fs, snapshots); err != nil {
+		t.Fatalf("restoreSnapshots: %v", err)
+	}
+	assertCityTomlSymlinkRestored(t, link, target, symlinkedCityTomlOriginal)
+}
+
+// Regression for the attempt-3 review's consistency finding: cmd-side
+// rollback snapshots must resolve every captured file the way the API-side
+// capture does, not just city.toml — restoring a symlinked .gc/site.toml
+// must write the link target, not replace the link with a regular file.
+func TestRigEndpointRollbackRestoresThroughSiteTomlSymlink(t *testing.T) {
+	fs := fsys.OSFS{}
+	original := "name = \"bound-site\"\n"
+	cityDir, _, _ := setupSymlinkedCityToml(t)
+	checkout := filepath.Join(cityDir, "site-checkout")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(checkout, "site.toml")
+	if err := os.WriteFile(target, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := config.SiteBindingPath(cityDir)
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	scopeRoot := filepath.Join(cityDir, "rig")
+	if err := os.MkdirAll(scopeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshots, err := snapshotRigEndpointFiles(fs, cityDir, scopeRoot)
+	if err != nil {
+		t.Fatalf("snapshotRigEndpointFiles: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("name = \"mutated\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreSnapshots(fs, snapshots); err != nil {
+		t.Fatalf("restoreSnapshots: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("site.toml symlink was replaced by a %v entry; rollback must restore through the link", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if string(data) != original {
+		t.Fatalf("target content = %q, want restored original %q", data, original)
+	}
+}
+
+func TestRigEndpointRollbackRestoresAfterSiteBindingForwardWriteThroughSymlink(t *testing.T) {
+	fs := fsys.OSFS{}
+	original := "workspace_name = \"bound-site\"\nworkspace_prefix = \"bs\"\n"
+	cityDir, _, _ := setupSymlinkedCityToml(t)
+	checkout := filepath.Join(cityDir, "site-checkout")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(checkout, "site.toml")
+	if err := os.WriteFile(target, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := config.SiteBindingPath(cityDir)
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	scopeRoot := filepath.Join(cityDir, "rig")
+	if err := os.MkdirAll(scopeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshots, err := snapshotRigEndpointFiles(fs, cityDir, scopeRoot)
+	if err != nil {
+		t.Fatalf("snapshotRigEndpointFiles: %v", err)
+	}
+	if err := config.PersistWorkspaceSiteBinding(fs, cityDir, "mutated-site", "ms"); err != nil {
+		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
+	}
+	if err := restoreSnapshots(fs, snapshots); err != nil {
+		t.Fatalf("restoreSnapshots: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("site.toml symlink was replaced by a %v entry; rollback must restore the effective linked state", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if string(data) != original {
+		t.Fatalf("target content = %q, want restored original %q", data, original)
 	}
 }
 

@@ -1376,17 +1376,24 @@ func writeDoltPortFile(dir, port, scopeLabel string, warn io.Writer) {
 		}
 		fmt.Fprintf(warn, "WARN: %s .beads/dolt-server.port rewrite %s → %s (managed city port)\n", label, existing, trimmedPort) //nolint:errcheck // best-effort stderr
 	}
-	if err := ensureBeadsDir(fsys.OSFS{}, filepath.Dir(portFile)); err != nil {
+	writePath, err := resolveDoltPortFileWritePath(fsys.OSFS{}, portFile)
+	if err != nil {
 		return
 	}
-	_ = fsys.WriteFileAtomic(fsys.OSFS{}, portFile, []byte(trimmedPort+"\n"), 0o644)
+	if err := ensureBeadsDir(fsys.OSFS{}, filepath.Dir(writePath)); err != nil {
+		return
+	}
+	_ = fsys.WriteFileAtomic(fsys.OSFS{}, writePath, []byte(trimmedPort+"\n"), 0o644)
 }
 
 func removeDoltPortFile(dir string) {
 	if dir == "" {
 		return
 	}
-	_ = os.Remove(filepath.Join(dir, ".beads", "dolt-server.port"))
+	// Resolve through any operator symlink so cleanup clears the target and
+	// preserves the link, mirroring writeDoltPortFile's symlink-preserving
+	// write path (ga-lurp5d). Best-effort: ignore the resolve/remove error.
+	_ = removeResolvedDoltPortFile(fsys.OSFS{}, dir)
 }
 
 func removeScopeLocalDoltServerArtifacts(dir string) error {

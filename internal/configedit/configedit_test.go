@@ -545,6 +545,126 @@ schema = 2
 	}
 }
 
+// setupSymlinkedConventionAgent builds a schema-2 city with a convention
+// "worker" whose agents/worker/agent.toml is a symlink into a separate
+// checked-in location. It returns the city.toml path, the agent.toml link
+// path, and the resolved checked-in target path.
+func setupSymlinkedConventionAgent(t *testing.T, agentTomlBody string) (cityTOML, link, target string) {
+	t.Helper()
+	dir := t.TempDir()
+	cityTOML = writeTOML(t, dir, `[workspace]
+name = "test-city"
+`)
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(dir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are the worker.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	checkedIn := filepath.Join(dir, "checked-in")
+	if err := os.MkdirAll(checkedIn, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target = filepath.Join(checkedIn, "worker.agent.toml")
+	if err := os.WriteFile(target, []byte(agentTomlBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link = filepath.Join(agentDir, "agent.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	return cityTOML, link, target
+}
+
+func assertStillSymlink(t *testing.T, link string) {
+	t.Helper()
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat %q: %v", link, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%q symlink was replaced by a regular file", link)
+	}
+}
+
+func TestSuspendAgent_LocalDiscovered_SymlinkedAgentTomlWritesThroughLink(t *testing.T) {
+	cityTOML, link, target := setupSymlinkedConventionAgent(t, "provider = \"codex\"\n")
+
+	ed := configedit.NewEditor(fsys.OSFS{}, cityTOML)
+	if err := ed.SuspendAgent("worker"); err != nil {
+		t.Fatalf("SuspendAgent: %v", err)
+	}
+
+	assertStillSymlink(t, link)
+	got := string(mustReadFile(t, target))
+	if !strings.Contains(got, "suspended = true") {
+		t.Fatalf("checked-in target = %q, want suspended = true written through the link", got)
+	}
+	if !strings.Contains(got, `provider = "codex"`) {
+		t.Fatalf("checked-in target = %q, want provider preserved", got)
+	}
+}
+
+func TestResumeAgent_LocalDiscovered_SymlinkedAgentTomlEmptyClearsTarget(t *testing.T) {
+	// Only the suspended flag is durable, so resume empties the config and the
+	// resolved checked-in target is cleared. The operator's link is left in
+	// place (edits act on the target, not the link).
+	cityTOML, link, target := setupSymlinkedConventionAgent(t, "suspended = true\n")
+
+	ed := configedit.NewEditor(fsys.OSFS{}, cityTOML)
+	if err := ed.ResumeAgent("worker"); err != nil {
+		t.Fatalf("ResumeAgent: %v", err)
+	}
+
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("checked-in target should be cleared on empty resume, stat err = %v", err)
+	}
+	assertStillSymlink(t, link)
+	cfg := readExpandedTOML(t, cityTOML)
+	if findAgent(t, cfg, "worker").Suspended {
+		t.Fatal("worker should not be suspended after resume")
+	}
+}
+
+func TestUpdateAgent_LocalDiscovered_SymlinkedAgentTomlWritesThroughLink(t *testing.T) {
+	cityTOML, link, target := setupSymlinkedConventionAgent(t, "provider = \"codex\"\n")
+
+	ed := configedit.NewEditor(fsys.OSFS{}, cityTOML)
+	if err := ed.UpdateAgent("worker", configedit.AgentUpdate{Provider: "claude"}); err != nil {
+		t.Fatalf("UpdateAgent: %v", err)
+	}
+
+	assertStillSymlink(t, link)
+	got := string(mustReadFile(t, target))
+	if !strings.Contains(got, `provider = "claude"`) {
+		t.Fatalf("checked-in target = %q, want provider updated through the link", got)
+	}
+}
+
+func TestWriteLocalDiscoveredAgentConfig_SymlinkedAgentTomlWritesThroughLink(t *testing.T) {
+	cityTOML, link, target := setupSymlinkedConventionAgent(t, "provider = \"codex\"\n")
+	cityRoot := filepath.Dir(cityTOML)
+
+	agent := config.Agent{
+		Name:     "worker",
+		Provider: "claude",
+		Scope:    "city",
+	}
+	if err := configedit.WriteLocalDiscoveredAgentConfig(fsys.OSFS{}, cityRoot, agent); err != nil {
+		t.Fatalf("WriteLocalDiscoveredAgentConfig: %v", err)
+	}
+
+	assertStillSymlink(t, link)
+	got := string(mustReadFile(t, target))
+	if !strings.Contains(got, `provider = "claude"`) {
+		t.Fatalf("checked-in target = %q, want provider written through the link", got)
+	}
+}
+
 // TestSuspendAgent_PackDeclaredAgentUsesPatch ensures that an [[agent]]
 // explicitly declared in the city's pack.toml is suspended via
 // [[patches.agent]] in city.toml — not via agents/<name>/agent.toml,

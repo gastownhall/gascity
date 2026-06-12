@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 )
 
@@ -605,5 +606,126 @@ func TestDoDoctorSkipsImportStateCheckWhenCityConfigInvalid(t *testing.T) {
 	}
 	if !strings.Contains(out, "city-config") {
 		t.Fatalf("doctor output missing city config failure:\n%s", out)
+	}
+}
+
+// Regression for the ga-lurp5d follow-up review: the packv2 import-state
+// rewrite re-marshals pack.toml; when pack.toml is a symlink (e.g., into a
+// checked-out repo) the rewrite must write through the link instead of
+// replacing it with a regular file and stranding the stale manifest in the
+// checked-in target.
+func TestRewriteLegacyPublicPackImportsWritesThroughPackTomlSymlink(t *testing.T) {
+	t.Parallel()
+	cityDir := t.TempDir()
+	checkoutDir := filepath.Join(cityDir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(checkoutDir, "pack.toml")
+	src := `[pack]
+name = "demo"
+schema = 1
+
+[imports.gastown]
+source = ".gc/system/packs/gastown"
+`
+	if err := os.WriteFile(target, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cityDir, "pack.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := rewriteLegacyPublicPackImportsFS(fsys.OSFS{}, cityDir, map[string]wave1PublicPackImportTarget{
+		"gastown": {
+			Binding: "gastown",
+			Import:  config.Import{Source: "https://packages.example/gastown.git", Version: "^1.2"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("rewriteLegacyPublicPackImportsFS: %v", err)
+	}
+	if !changed {
+		t.Fatal("rewriteLegacyPublicPackImportsFS reported no change, want pack.toml rewrite")
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("pack.toml symlink was replaced by a %v entry; rewrite must write through the link", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "https://packages.example/gastown.git") {
+		t.Fatalf("symlink target missing migrated import source:\n%s", text)
+	}
+	if strings.Contains(text, ".gc/system/packs/gastown") {
+		t.Fatalf("symlink target still contains legacy import source:\n%s", text)
+	}
+}
+
+// Regression for the ga-lurp5d follow-up review: the packv2 import-state
+// rewrite re-marshals pack.toml through the reduced cityPackManifest struct,
+// which would silently drop keys this gc binary does not recognize. A pack.toml
+// carrying an unknown key must make the rewrite refuse rather than strand a
+// reduced manifest at the checked-in target.
+func TestRewriteLegacyPublicPackImportsRefusesPackTomlUnknownKeys(t *testing.T) {
+	t.Parallel()
+	cityDir := t.TempDir()
+	checkoutDir := filepath.Join(cityDir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(checkoutDir, "pack.toml")
+	src := `[pack]
+name = "demo"
+schema = 1
+
+[imports.gastown]
+source = ".gc/system/packs/gastown"
+
+[future_unknown_section]
+knob = "keep-me"
+`
+	if err := os.WriteFile(target, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cityDir, "pack.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := rewriteLegacyPublicPackImportsFS(fsys.OSFS{}, cityDir, map[string]wave1PublicPackImportTarget{
+		"gastown": {
+			Binding: "gastown",
+			Import:  config.Import{Source: "https://packages.example/gastown.git", Version: "^1.2"},
+		},
+	})
+	if err == nil {
+		t.Fatal("rewriteLegacyPublicPackImportsFS succeeded, want refusal for unknown key")
+	}
+	if !strings.Contains(err.Error(), "future_unknown_section") {
+		t.Fatalf("error = %v, want mention of future_unknown_section", err)
+	}
+	// The symlink and its content must survive an aborted rewrite.
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("pack.toml symlink was replaced by a %v entry", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if string(data) != src {
+		t.Fatalf("pack.toml was rewritten despite refusal:\n%s", data)
 	}
 }

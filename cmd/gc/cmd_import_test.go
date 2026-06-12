@@ -93,7 +93,7 @@ name = "mayor"
 scope = "city"
 
 [providers.default]
-type = "claude"
+base = "builtin:claude"
 
 [[commands]]
 name = "status"
@@ -145,6 +145,7 @@ session_live = ["echo hi"]
 		`append_fragments = ["pack-fragment"]`,
 		`name = "mayor"`,
 		`[providers.default]`,
+		`base = "builtin:claude"`,
 		`[[commands]]`,
 		`session_live = ["echo hi"]`,
 		`[imports.tools]`,
@@ -152,6 +153,58 @@ session_live = ["echo hi"]
 		if !strings.Contains(text, want) {
 			t.Fatalf("pack.toml missing %q:\n%s", want, text)
 		}
+	}
+}
+
+// Regression for the ga-lurp5d follow-up review: gc import add rewrites
+// pack.toml through the reduced cityPackManifest struct. When the on-disk
+// pack.toml carries a key this gc binary does not recognize, the rewrite must
+// refuse rather than silently drop it (the city.toml rewrite guard's contract,
+// now extended to pack.toml).
+func TestDoImportAddRefusesUnknownPackTomlKeys(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	original := `[pack]
+name = "demo"
+schema = 1
+
+[future_unknown_section]
+knob = "keep-me"
+`
+	writePackToml(t, dir, original)
+
+	prevResolve := resolveImportVersion
+	prevConstraint := defaultImportConstraint
+	prevSync := syncImports
+	t.Cleanup(func() {
+		resolveImportVersion = prevResolve
+		defaultImportConstraint = prevConstraint
+		syncImports = prevSync
+	})
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
+	}
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{Schema: packman.LockfileSchema}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, "https://github.com/example/tools.git", "", "", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("code = 0, want non-zero refusal; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "future_unknown_section") {
+		t.Fatalf("stderr = %q, want mention of future_unknown_section", stderr.String())
+	}
+	// The pack.toml must survive an aborted rewrite unchanged.
+	data, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(pack.toml): %v", err)
+	}
+	if string(data) != original {
+		t.Fatalf("pack.toml was rewritten despite refusal:\n%s", data)
 	}
 }
 
@@ -2256,6 +2309,119 @@ scope = "city"
 	}
 	if got, want := imp.Version, "^1.2"; got != want {
 		t.Fatalf("Version = %q, want %q", got, want)
+	}
+}
+
+// The pack rewrite key-loss guards must not refuse legitimate packs: every
+// section the gc binary recognizes has to decode cleanly into the structs the
+// writers round-trip (initPackConfig for gc agent suspend, cityPackManifest for
+// import-manifest rewrites). This pins zero false positives for the known pack
+// schema, so the guards fire only on genuinely unknown keys. The fixture must
+// include the sections where the reduced structs historically diverged from
+// config.PackConfig — the legacy [agents] alias and [[pricing]] — because those
+// are the keys the guards would otherwise flag as unrecognized.
+func TestGuardPackRewriteKeyLossAcceptsKnownPackSchema(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	packPath := filepath.Join(dir, "pack.toml")
+	src := `[pack]
+name = "full-pack"
+schema = 1
+version = "1.0.0"
+description = "exercises known sections"
+
+[imports.gastown]
+source = "https://example/gastown.git"
+version = "^1.2"
+
+[agent_defaults]
+provider = "claude"
+
+[agents]
+append_fragments = ["legacy-alias"]
+
+[defaults.rig.imports.review]
+source = "https://example/review.git"
+
+[providers.claude]
+base = "builtin:claude"
+
+[[pricing]]
+provider = "claude"
+model = "claude-opus-4-8"
+last_verified = "2026-06-01"
+
+[pricing.tier]
+prompt_usd_per_1m = 15.0
+completion_usd_per_1m = 75.0
+
+[[agent]]
+name = "worker"
+provider = "claude"
+`
+	if err := os.WriteFile(packPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.GuardRewriteKeyLoss[initPackConfig](fsys.OSFS{}, packPath); err != nil {
+		t.Fatalf("GuardRewriteKeyLoss[initPackConfig] = %v, want nil for known schema", err)
+	}
+	if err := config.GuardRewriteKeyLoss[cityPackManifest](fsys.OSFS{}, packPath); err != nil {
+		t.Fatalf("GuardRewriteKeyLoss[cityPackManifest] = %v, want nil for known schema", err)
+	}
+}
+
+// An import-manifest rewrite must round-trip [[pricing]] (which compose.go
+// consumes) and canonicalize the legacy [agents] alias into [agent_defaults],
+// rather than refusing the rewrite or silently dropping recognized data. This
+// pins the cityPackManifest reduced struct as a faithful superset of the pack
+// schema it guards.
+func TestWriteCityPackManifestPreservesPricingAndFoldsAgentsAlias(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 1
+
+[agents]
+append_fragments = ["legacy-alias"]
+
+[[pricing]]
+provider = "claude"
+model = "claude-opus-4-8"
+last_verified = "2026-06-01"
+
+[pricing.tier]
+prompt_usd_per_1m = 15.0
+completion_usd_per_1m = 75.0
+`)
+
+	manifest, err := loadCityPackManifestFS(fs, "/city")
+	if err != nil {
+		t.Fatalf("loadCityPackManifestFS: %v", err)
+	}
+	if err := writeCityPackManifest(fs, "/city", manifest); err != nil {
+		t.Fatalf("writeCityPackManifest: %v", err)
+	}
+
+	out := string(fs.Files["/city/pack.toml"])
+	for _, want := range []string{
+		"[[pricing]]",
+		`provider = "claude"`,
+		`model = "claude-opus-4-8"`,
+		`last_verified = "2026-06-01"`,
+		"prompt_usd_per_1m",
+		"completion_usd_per_1m",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rewritten pack.toml dropped %q:\n%s", want, out)
+		}
+	}
+	// The alias value survives, canonicalized under [agent_defaults]; the legacy
+	// [agents] table name is not re-emitted.
+	if !strings.Contains(out, "[agent_defaults]") || !strings.Contains(out, `append_fragments = ["legacy-alias"]`) {
+		t.Fatalf("rewritten pack.toml dropped the [agents] alias value:\n%s", out)
+	}
+	if strings.Contains(out, "[agents]") {
+		t.Fatalf("rewritten pack.toml still contains the legacy [agents] table:\n%s", out)
 	}
 }
 

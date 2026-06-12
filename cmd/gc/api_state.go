@@ -1334,6 +1334,15 @@ func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, er
 	}
 
 	capture := func(path string) error {
+		// Snapshot at the resolved symlink target: restore writes with a
+		// temp-file + rename, and renaming over the unresolved path would
+		// replace a symlinked config with a regular file (the ga-lurp5d
+		// failure mode). Resolve-only — restores write the original bytes
+		// back, so the key-loss rewrite guard does not apply.
+		path, err := fsys.ResolveSymlinks(fsys.OSFS{}, path)
+		if err != nil {
+			return err
+		}
 		data, err := os.ReadFile(path)
 		switch {
 		case err == nil:
@@ -1366,6 +1375,40 @@ func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, er
 		return nil, fmt.Errorf("snapshotting agent scaffolds: %w", err)
 	}
 	snapshot.agentTree = agentTree
+
+	// SnapshotTree preserves a symlinked agents/<name>/agent.toml as a link
+	// entry but never the bytes behind it, while the forward agent mutation
+	// path (WriteLocalDiscoveredAgentSuspended / removeAgentTomlConvention)
+	// writes or removes the *resolved target*. Capture the resolved-target
+	// bytes here — symmetric with city.toml/site.toml above — so restore()
+	// rewrites the operator's checked-out agent.toml content after the tree
+	// restore re-creates the link, closing the ga-lurp5d rollback gap.
+	agentsDir := filepath.Join(cityPath, "agents")
+	agentEntries, err := os.ReadDir(agentsDir)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("listing agents for symlinked agent.toml snapshot: %w", err)
+	}
+	for _, entry := range agentEntries {
+		if !entry.IsDir() {
+			continue
+		}
+		agentTomlPath := filepath.Join(agentsDir, entry.Name(), "agent.toml")
+		info, lstatErr := os.Lstat(agentTomlPath)
+		if lstatErr != nil {
+			if os.IsNotExist(lstatErr) {
+				continue
+			}
+			return nil, fmt.Errorf("inspecting agents/%s/agent.toml: %w", entry.Name(), lstatErr)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			// Regular-file agent.toml content is captured and restored by the
+			// tree snapshot; only symlinked targets need separate handling.
+			continue
+		}
+		if err := capture(agentTomlPath); err != nil {
+			return nil, err
+		}
+	}
 
 	return snapshot, nil
 }
