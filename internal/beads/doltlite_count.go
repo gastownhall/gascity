@@ -17,20 +17,23 @@ import (
 // (gascity#3253), mirroring the hydration-free status counter from #3211.
 //
 // Count answers only the query shapes it can satisfy exactly with column and
-// EXISTS predicates. The read path narrows metadata queries with approximate
-// LIKE matching and applies the exact match in Go, so a metadata query cannot
-// be counted exactly in SQL and returns ErrCountUnsupported. The wisp and
-// both tiers also return ErrCountUnsupported because a union count would
-// double-count ids that List dedupes, and CreatedBefore/ParentID filters
-// return ErrCountUnsupported because List applies them with Go-side semantics a
-// single COUNT cannot reproduce. Limited queries are excluded because the
-// Counter contract is List cardinality parity, not full-result total
-// cardinality. UpdatedBefore is also excluded, but as an over-conservative
-// exclusion pending cleanup of the duplicate SQL/Go filter: queryIssueTable
-// already emits an exact COALESCE(updated_at, created_at) predicate for it, so
-// a COUNT could reproduce it — the redundant Go-side re-filter is what
-// currently keeps it out. Callers fall back to List for those shapes, exactly
-// as the Counter contract specifies.
+// EXISTS predicates. TierIssues counts span the durable issues table plus the
+// non-ephemeral (no_history) wisps rows the aligned List merges in (#3444),
+// deduped by id exactly as List dedupes. The read path narrows metadata
+// queries with approximate LIKE matching and applies the exact match in Go,
+// so a metadata query cannot be counted exactly in SQL and returns
+// ErrCountUnsupported. The wisp and both tiers also return
+// ErrCountUnsupported because their tier filters and unions are still applied
+// List-side, and CreatedBefore/ParentID filters return ErrCountUnsupported
+// because List applies them with Go-side semantics a single COUNT cannot
+// reproduce. Limited queries are excluded because the Counter contract is
+// List cardinality parity, not full-result total cardinality. UpdatedBefore
+// is also excluded, but as an over-conservative exclusion pending cleanup of
+// the duplicate SQL/Go filter: queryIssueTable already emits an exact
+// COALESCE(updated_at, created_at) predicate for it, so a COUNT could
+// reproduce it — the redundant Go-side re-filter is what currently keeps it
+// out. Callers fall back to List for those shapes, exactly as the Counter
+// contract specifies.
 func (s *DoltliteReadStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
 	if err := query.Validate(); err != nil {
 		return 0, err
@@ -41,15 +44,66 @@ func (s *DoltliteReadStore) Count(ctx context.Context, query ListQuery, excludeT
 	if !doltliteCountSupported(query) {
 		return 0, fmt.Errorf("bd count: %w", ErrCountUnsupported)
 	}
+	total, issuesWhere, issuesArgs, err := s.countIssuesTier(ctx, query, excludeTypes)
+	if err != nil {
+		return 0, err
+	}
+	wisps, err := s.countDurableWisps(ctx, query, excludeTypes, issuesWhere, issuesArgs)
+	if err != nil {
+		return 0, err
+	}
+	return total + wisps, nil
+}
+
+// countIssuesTier counts the durable issues-table component of a TierIssues
+// query and returns the predicates it used so the wisps component can dedupe
+// against exactly the rows List's issues-table pass returns.
+func (s *DoltliteReadStore) countIssuesTier(ctx context.Context, query ListQuery, excludeTypes []string) (int, []string, []any, error) {
 	tables := doltliteIssueTables
 	where, args := doltliteCountWhere(query, tables, excludeTypes)
+	if flags := s.storageFlagExprsFor(tables); flags.ephemeral != "0" {
+		where = append(where, flags.ephemeral+" = 0")
+	}
 	sqlText := "SELECT COUNT(*) FROM " + tables.issues + " i"
 	if len(where) > 0 {
 		sqlText += " WHERE " + strings.Join(where, " AND ")
 	}
 	var n int
 	if err := s.db.QueryRowContext(ctx, sqlText, args...).Scan(&n); err != nil {
-		return 0, fmt.Errorf("bd count: %w", err)
+		return 0, nil, nil, fmt.Errorf("bd count: %w", err)
+	}
+	return n, where, args, nil
+}
+
+// countDurableWisps counts the non-ephemeral (no_history) wisps rows the
+// aligned TierIssues List merges in (#3444). Legacy snapshots without the
+// wisps storage-flag columns contribute nothing: every row there is
+// ephemeral. Rows whose id the issues-table pass already counted are
+// excluded, mirroring List's cross-table seen-map dedupe.
+func (s *DoltliteReadStore) countDurableWisps(ctx context.Context, query ListQuery, excludeTypes []string, issuesWhere []string, issuesArgs []any) (int, error) {
+	tables := doltliteWispTables
+	if !s.tableExists(tables.issues) {
+		return 0, nil
+	}
+	flags := s.storageFlagExprsFor(tables)
+	tierWhere, skipTable := doltliteTierPredicate(TierIssues, tables, flags)
+	if skipTable {
+		return 0, nil
+	}
+	where, args := doltliteCountWhere(query, tables, excludeTypes)
+	if tierWhere != "" {
+		where = append(where, tierWhere)
+	}
+	dedupe := "SELECT i.id FROM " + doltliteIssueTables.issues + " i"
+	if len(issuesWhere) > 0 {
+		dedupe += " WHERE " + strings.Join(issuesWhere, " AND ")
+	}
+	where = append(where, "i.id NOT IN ("+dedupe+")")
+	args = append(args, issuesArgs...)
+	sqlText := "SELECT COUNT(*) FROM " + tables.issues + " i WHERE " + strings.Join(where, " AND ")
+	var n int
+	if err := s.db.QueryRowContext(ctx, sqlText, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("bd count (wisps): %w", err)
 	}
 	return n, nil
 }

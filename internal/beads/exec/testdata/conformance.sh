@@ -85,6 +85,7 @@ create)
 	ref=$(echo "$input" | jq -r '.ref // ""')
 	description=$(echo "$input" | jq -r '.description // ""')
 	ephemeral=$(echo "$input" | jq -r '.ephemeral // false')
+	no_history=$(echo "$input" | jq -r '.no_history // false')
 	defer_until=$(echo "$input" | jq -r '.defer_until // ""')
 	created_at=$(now)
 
@@ -114,6 +115,7 @@ create)
 		--arg description "$description" \
 		--argjson labels "$labels" \
 		--argjson ephemeral "$ephemeral" \
+		--argjson no_history "$no_history" \
 		--arg defer_until "$defer_until" \
 		'{
         id: $id,
@@ -128,7 +130,8 @@ create)
         needs: $needs,
         description: $description,
         labels: $labels,
-        ephemeral: $ephemeral
+        ephemeral: $ephemeral,
+        no_history: $no_history
       } + (if $defer_until == "" then {} else {defer_until: $defer_until} end)' >"$STATE_ROOT/$id.json"
 
 	# Output the created bead (normalized: meta: labels → .metadata map).

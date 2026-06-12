@@ -26,6 +26,7 @@ type createRequest struct {
 	From        string            `json:"from,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
 	Ephemeral   bool              `json:"ephemeral,omitempty"`
+	NoHistory   bool              `json:"no_history,omitempty"`
 	DeferUntil  *time.Time        `json:"defer_until,omitempty"`
 }
 
@@ -67,6 +68,7 @@ type beadWire struct {
 	Labels      []string                   `json:"labels"`
 	Metadata    map[string]json.RawMessage `json:"metadata,omitempty"`
 	Ephemeral   bool                       `json:"ephemeral,omitempty"`
+	NoHistory   bool                       `json:"no_history,omitempty"`
 	DeferUntil  *time.Time                 `json:"defer_until,omitempty"`
 }
 
@@ -85,6 +87,7 @@ func marshalCreate(b beads.Bead) ([]byte, error) {
 		From:        b.From,
 		Metadata:    b.Metadata,
 		Ephemeral:   b.Ephemeral,
+		NoHistory:   b.NoHistory,
 		DeferUntil:  b.DeferUntil,
 	}
 	return json.Marshal(r)

@@ -750,6 +750,49 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatal("Tx(nil) returned nil, want error")
 		}
 	})
+
+	// ListStorageTierContract pins query.go's TierMode row filter across
+	// every Store backend (#3045, #3444): TierIssues keeps history and
+	// no-history rows and drops only ephemeral ones; TierWisps keeps
+	// no-history and ephemeral rows; TierBoth unions all three. Backends
+	// must agree on these cardinalities or API list totals silently shift
+	// with backend selection.
+	t.Run("ListStorageTierContract", func(t *testing.T) {
+		s := newStore()
+		if _, err := s.Create(beads.Bead{Title: "tier-history", Labels: []string{"tier-contract"}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Create(beads.Bead{Title: "tier-no-history", Labels: []string{"tier-contract"}, NoHistory: true}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Create(beads.Bead{Title: "tier-ephemeral", Labels: []string{"tier-contract"}, Ephemeral: true}); err != nil {
+			t.Fatal(err)
+		}
+
+		issues, err := s.List(beads.ListQuery{Label: "tier-contract"})
+		if err != nil {
+			t.Fatalf("List issues tier: %v", err)
+		}
+		if got := titlesOf(issues); !containsAll(got, "tier-history", "tier-no-history") {
+			t.Errorf("issues tier titles = %v, want [tier-history tier-no-history]", got)
+		}
+
+		wisps, err := s.List(beads.ListQuery{Label: "tier-contract", TierMode: beads.TierWisps})
+		if err != nil {
+			t.Fatalf("List wisps tier: %v", err)
+		}
+		if got := titlesOf(wisps); !containsAll(got, "tier-ephemeral", "tier-no-history") {
+			t.Errorf("wisps tier titles = %v, want [tier-ephemeral tier-no-history]", got)
+		}
+
+		both, err := s.List(beads.ListQuery{Label: "tier-contract", TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatalf("List both tiers: %v", err)
+		}
+		if got := titlesOf(both); !containsAll(got, "tier-ephemeral", "tier-history", "tier-no-history") {
+			t.Errorf("both tier titles = %v, want [tier-ephemeral tier-history tier-no-history]", got)
+		}
+	})
 }
 
 // RunMetadataTests runs conformance tests for metadata absent-vs-empty

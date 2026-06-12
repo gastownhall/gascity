@@ -86,6 +86,7 @@ br_object_to_gc() {
   local obj="$1"
   local parent_id="" key value rest key_hex value_hex
   local ephemeral=false
+  local no_history=false
   local -a kept_labels=()
   local -a needs=()
   local metadata='{}'
@@ -115,6 +116,9 @@ br_object_to_gc() {
       gc:ephemeral)
         ephemeral=true
         ;;
+      gc:no-history)
+        no_history=true
+        ;;
       *)
         kept_labels+=("$label")
         ;;
@@ -131,6 +135,7 @@ br_object_to_gc() {
     --argjson needs "$needs_json" \
     --argjson metadata "$metadata" \
     --argjson ephemeral "$ephemeral" \
+    --argjson no_history "$no_history" \
     '{
       id: .id,
       title: .title,
@@ -146,7 +151,8 @@ br_object_to_gc() {
       description: (.description // ""),
       labels: $labels,
       metadata: $metadata,
-      ephemeral: $ephemeral
+      ephemeral: $ephemeral,
+      no_history: $no_history
     }'
 }
 
@@ -209,6 +215,10 @@ case "$op" in
 
     if [ "$(echo "$input" | jq -r '.ephemeral // false')" = "true" ]; then
       all_labels+=("gc:ephemeral")
+    fi
+
+    if [ "$(echo "$input" | jq -r '.no_history // false')" = "true" ]; then
+      all_labels+=("gc:no-history")
     fi
 
     # Build create command.

@@ -144,13 +144,17 @@ The script assigns `id`, `status`, `created_at`, and `updated_at` on `create`.
 On `create` the provider defaults a missing `type` to `task` before calling the
 script; on every read it normalizes a missing or empty `status` to `open`.
 `metadata` values may be any JSON type but are coerced to strings.
-Preserve `ephemeral` and `defer_until` on every read path so the provider can
-keep run beads out of normal work queries.
+Preserve `ephemeral`, `no_history`, and `defer_until` on every read path so the
+provider can keep run beads out of normal work queries. `no_history=true` marks
+durable work that carries no version-control history: unlike `ephemeral` beads
+it stays visible in issues-tier reads, and also appears in wisps-tier queries.
+Backends without native columns for these bits may store them internally (e.g.
+a private label) but must round-trip them as the matching JSON fields.
 
 The **create request** is a subset (`title`, `type`, `priority`, `labels`,
 `parent_id`, `ref`, `needs`, `description`, `assignee`, `from`, `metadata`,
-`ephemeral`, `defer_until`). The **update request** carries only the fields
-being changed (`title`, `status`, `type`, `priority`, `description`,
+`ephemeral`, `no_history`, `defer_until`). The **update request** carries only
+the fields being changed (`title`, `status`, `type`, `priority`, `description`,
 `parent_id`, `assignee`, plus `labels`/`remove_labels` and a `metadata`
 overlay); omitted fields are left unchanged, and `labels` appends rather than
 replaces. `dep-list` returns objects of `{ "issue_id", "depends_on_id", "type" }`.
