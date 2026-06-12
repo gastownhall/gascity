@@ -187,6 +187,15 @@ const (
 	LegacyWorkDirMetadataKey = "work_dir"
 )
 
+// OptionMetadataPrefix is the dynamic non-"gc."-prefixed key prefix under
+// which provider option choices are stored as opt_<OptionsSchema key> (e.g.
+// opt_model, opt_effort) on session and work beads. The suffix is open-world
+// (a pack-authored OptionsSchema key), so it is declared as a prefix, not
+// enumerated — the non-gc sibling of FormulaVarPrefix. Like the directory
+// keys above, it is not in KnownMetadataPrefixes because the drift guard's
+// key-shape rule only covers the gc. namespace.
+const OptionMetadataPrefix = "opt_"
+
 // KnownMetadataKeys lists every engine-owned bead-metadata key this package
 // declares. The guard test asserts every gc.* metadata literal used in non-test
 // Go resolves to a member of this slice (or a KnownMetadataPrefixes entry).
