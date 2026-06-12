@@ -841,7 +841,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	c.Stderr = stderr
 	if err := c.Run(); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = fmt.Errorf("%w: %v", ctxErr, err)
+			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
 		return setupCommandFailure(err, stdout, stderr)
 	}
