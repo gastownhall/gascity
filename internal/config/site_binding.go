@@ -355,6 +355,10 @@ func WriteCityAndRigSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City) 
 // city.toml is changed, both files are restored before the error is returned.
 func AppendRigAndWriteSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City, newRig Rig) error {
 	cityRoot := filepath.Dir(tomlPath)
+	writePath, err := ResolveCityRewritePath(fs, tomlPath)
+	if err != nil {
+		return err
+	}
 
 	// Serialize only the new rig block, stripping path (it belongs in site.toml).
 	rigForCity := newRig
@@ -369,12 +373,12 @@ func AppendRigAndWriteSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City
 		return fmt.Errorf("serializing new rig block: %w", err)
 	}
 
-	existing, err := fs.ReadFile(tomlPath)
+	existing, err := fs.ReadFile(writePath)
 	if err != nil {
-		return fmt.Errorf("reading %s: %w", tomlPath, err)
+		return fmt.Errorf("reading %s: %w", writePath, err)
 	}
 
-	snapshot, err := snapshotCityAndSiteFiles(fs, tomlPath, SiteBindingPath(cityRoot))
+	snapshot, err := snapshotCityAndSiteFiles(fs, writePath, SiteBindingPath(cityRoot))
 	if err != nil {
 		return err
 	}
@@ -387,7 +391,7 @@ func AppendRigAndWriteSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City
 	content = append(content, '\n')
 	content = append(content, rigBuf.Bytes()...)
 
-	if err := fsys.WriteFileIfChangedAtomic(fs, tomlPath, content, 0o644); err != nil {
+	if err := fsys.WriteFileIfChangedAtomic(fs, writePath, content, 0o644); err != nil {
 		return err
 	}
 	if err := persistRigSiteBindings(fs, cityRoot, cfg.Rigs, nil); err != nil {

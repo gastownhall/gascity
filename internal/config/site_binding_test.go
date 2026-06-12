@@ -180,6 +180,66 @@ path = "/srv/frontend"
 	}
 }
 
+func TestAppendRigAndWriteSiteBindingsForEditPreservesCityTomlSymlink(t *testing.T) {
+	dir := t.TempDir()
+	repoDir := filepath.Join(dir, "repo")
+	cityDir := filepath.Join(dir, "city")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	repoCityPath := filepath.Join(repoDir, "city.toml")
+	liveCityPath := filepath.Join(cityDir, "city.toml")
+	original := []byte(`[workspace]
+name = "test-city"
+`)
+	if err := os.WriteFile(repoCityPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "repo", "city.toml"), liveCityPath); err != nil {
+		t.Fatal(err)
+	}
+
+	newRig := Rig{Name: "frontend", Path: "/srv/frontend"}
+	cfg := &City{
+		Workspace: Workspace{Name: "test-city"},
+		Rigs:      []Rig{newRig},
+	}
+	if err := AppendRigAndWriteSiteBindingsForEdit(fsys.OSFS{}, liveCityPath, cfg, newRig); err != nil {
+		t.Fatalf("AppendRigAndWriteSiteBindingsForEdit: %v", err)
+	}
+
+	info, err := os.Lstat(liveCityPath)
+	if err != nil {
+		t.Fatalf("Lstat(live city.toml): %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("live city.toml was replaced with a regular file")
+	}
+
+	rewritten, err := os.ReadFile(repoCityPath)
+	if err != nil {
+		t.Fatalf("ReadFile(repo city.toml): %v", err)
+	}
+	if !strings.Contains(string(rewritten), `name = "frontend"`) {
+		t.Fatalf("repo city.toml did not receive appended rig:\n%s", rewritten)
+	}
+	if strings.Contains(string(rewritten), `path = "/srv/frontend"`) {
+		t.Fatalf("repo city.toml should not contain machine-local rig path:\n%s", rewritten)
+	}
+
+	binding, err := LoadSiteBinding(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "frontend" || binding.Rigs[0].Path != "/srv/frontend" {
+		t.Fatalf("site binding rigs = %+v, want frontend=/srv/frontend", binding.Rigs)
+	}
+}
+
 func TestApplySiteBindingsForEdit_KeepsLegacyPath(t *testing.T) {
 	fs := fsys.NewFake()
 	cfg := &City{
