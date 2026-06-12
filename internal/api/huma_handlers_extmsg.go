@@ -240,6 +240,7 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 		Conversation: input.Body.Conversation,
 		SessionID:    sessionID,
 		AgentName:    agentName,
+		Replace:      input.Body.Replace,
 		Metadata:     input.Body.Metadata,
 		Now:          time.Now(),
 	})

@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -1396,4 +1397,123 @@ func derefBool(p *bool) bool {
 		return false
 	}
 	return *p
+}
+
+// ExtMsgBindSpec describes a bind or handoff request for an external
+// conversation. Exactly one of SessionID and AgentName must be set;
+// Replace rebinds a conversation whose active binding targets someone
+// else instead of conflicting.
+type ExtMsgBindSpec struct {
+	Conversation extmsg.ConversationRef
+	SessionID    string
+	AgentName    string
+	Replace      bool
+}
+
+// BindExtMsgConversation binds an external conversation to a session or a
+// configured agent via POST /v0/extmsg/bind and returns the resulting
+// binding record.
+func (c *Client) BindExtMsgConversation(spec ExtMsgBindSpec) (extmsg.SessionBindingRecord, error) {
+	if err := c.requireCityScope(); err != nil {
+		return extmsg.SessionBindingRecord{}, err
+	}
+	conv := genclientConversationRef(spec.Conversation)
+	body := genclient.PostV0CityByCityNameExtmsgBindJSONRequestBody{Conversation: &conv}
+	if spec.SessionID != "" {
+		body.SessionId = &spec.SessionID
+	}
+	if spec.AgentName != "" {
+		body.AgentName = &spec.AgentName
+	}
+	if spec.Replace {
+		body.Replace = &spec.Replace
+	}
+	resp, err := c.cw.PostV0CityByCityNameExtmsgBindWithResponse(context.Background(), c.cityName, nil, body)
+	if err != nil {
+		return extmsg.SessionBindingRecord{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return extmsg.SessionBindingRecord{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return extmsg.SessionBindingRecord{}, err
+	}
+	if resp.JSON200 == nil {
+		return extmsg.SessionBindingRecord{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return extmsgBindingRecordFromWire(*resp.JSON200), nil
+}
+
+// UnbindExtMsgConversation removes active external-conversation bindings
+// via POST /v0/extmsg/unbind, filtered by conversation and/or session ID
+// and agent name. It returns the bindings that were ended.
+func (c *Client) UnbindExtMsgConversation(conversation *extmsg.ConversationRef, sessionID, agentName string) ([]extmsg.SessionBindingRecord, error) {
+	if err := c.requireCityScope(); err != nil {
+		return nil, err
+	}
+	body := genclient.PostV0CityByCityNameExtmsgUnbindJSONRequestBody{}
+	if conversation != nil {
+		conv := genclientConversationRef(*conversation)
+		body.Conversation = &conv
+	}
+	if sessionID != "" {
+		body.SessionId = &sessionID
+	}
+	if agentName != "" {
+		body.AgentName = &agentName
+	}
+	resp, err := c.cw.PostV0CityByCityNameExtmsgUnbindWithResponse(context.Background(), c.cityName, nil, body)
+	if err != nil {
+		return nil, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return nil, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return nil, err
+	}
+	if resp.JSON200 == nil || resp.JSON200.Unbound == nil {
+		return nil, nil
+	}
+	out := make([]extmsg.SessionBindingRecord, 0, len(*resp.JSON200.Unbound))
+	for _, record := range *resp.JSON200.Unbound {
+		out = append(out, extmsgBindingRecordFromWire(record))
+	}
+	return out, nil
+}
+
+func genclientConversationRef(ref extmsg.ConversationRef) genclient.ConversationRef {
+	out := genclient.ConversationRef{
+		ScopeId:        ref.ScopeID,
+		Provider:       ref.Provider,
+		AccountId:      ref.AccountID,
+		ConversationId: ref.ConversationID,
+		Kind:           genclient.ConversationKind(ref.Kind),
+	}
+	if ref.ParentConversationID != "" {
+		out.ParentConversationId = &ref.ParentConversationID
+	}
+	return out
+}
+
+func extmsgBindingRecordFromWire(record genclient.SessionBindingRecord) extmsg.SessionBindingRecord {
+	return extmsg.SessionBindingRecord{
+		ID:            record.ID,
+		SchemaVersion: int(record.SchemaVersion),
+		Conversation: extmsg.ConversationRef{
+			ScopeID:              record.Conversation.ScopeId,
+			Provider:             record.Conversation.Provider,
+			AccountID:            record.Conversation.AccountId,
+			ConversationID:       record.Conversation.ConversationId,
+			ParentConversationID: derefStr(record.Conversation.ParentConversationId),
+			Kind:                 extmsg.ConversationKind(record.Conversation.Kind),
+		},
+		SessionID:         record.SessionID,
+		AgentName:         record.AgentName,
+		Status:            extmsg.BindingStatus(record.Status),
+		BoundAt:           record.BoundAt,
+		ExpiresAt:         record.ExpiresAt,
+		BindingGeneration: record.BindingGeneration,
+		Metadata:          record.Metadata,
+	}
 }

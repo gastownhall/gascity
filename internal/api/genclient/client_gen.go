@@ -1186,6 +1186,9 @@ type ExtMsgBindInputBody struct {
 	// Metadata Optional binding metadata.
 	Metadata *map[string]string `json:"metadata,omitempty"`
 
+	// Replace Rebind (handoff) a conversation whose active binding targets someone else instead of returning a conflict.
+	Replace *bool `json:"replace,omitempty"`
+
 	// SessionId Session ID to bind (mutually exclusive with agent_name).
 	SessionId *string `json:"session_id,omitempty"`
 }

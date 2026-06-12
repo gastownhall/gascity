@@ -117,10 +117,23 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 		if err != nil {
 			return err
 		}
-		if active != nil {
-			if active.SessionID != sessionID || active.AgentName != agentName {
+		if active != nil && (active.SessionID != sessionID || active.AgentName != agentName) {
+			if !input.Replace {
 				return fmt.Errorf("%w: conversation already bound to %s", ErrBindingConflict, bindingTarget(*active))
 			}
+			// Handoff: end the active binding and fall through to create
+			// the new one under the same conversation lock.
+			if err := s.endActiveBindingLocked(ctx, caller, *active, now); err != nil {
+				return err
+			}
+			if s.delivery != nil && active.SessionID != "" {
+				if err := s.delivery.ClearForConversation(ctx, active.SessionID, active.Conversation); err != nil {
+					return err
+				}
+			}
+			active = nil
+		}
+		if active != nil {
 			// Coalesce the rebind's writes — optional session-name backfill,
 			// binding metadata, and transcript membership — into one commit so a
 			// rebind costs a single DOLT_COMMIT instead of 2-4 (gastownhall/gascity#3735).
@@ -429,32 +442,8 @@ func (s *bindingService) Unbind(ctx context.Context, caller Caller, input Unbind
 			if !matchesFilter(*active) {
 				return nil
 			}
-			if err := s.store.SetMetadata(active.ID, "last_touched_at", formatTime(now)); err != nil {
-				return fmt.Errorf("update binding %s metadata: %w", active.ID, err)
-			}
-			if s.transcript != nil {
-				if err := s.transcript.removeMembershipLocked(RemoveMembershipInput{
-					Caller:       caller,
-					Conversation: active.Conversation,
-					SessionID:    bindingMembershipKey(*active),
-					Owner:        MembershipOwnerBinding,
-					Now:          now,
-				}); err != nil {
-					return wrapTranscriptSyncError("remove transcript membership after unbind", err)
-				}
-			}
-			if err := s.store.Close(active.ID); err != nil {
-				if s.transcript != nil {
-					_, _ = s.transcript.ensureMembershipLocked(EnsureMembershipInput{
-						Caller:         caller,
-						Conversation:   active.Conversation,
-						SessionID:      bindingMembershipKey(*active),
-						BackfillPolicy: MembershipBackfillSinceJoin,
-						Owner:          MembershipOwnerBinding,
-						Now:            now,
-					})
-				}
-				return fmt.Errorf("close binding %s: %w", active.ID, err)
+			if err := s.endActiveBindingLocked(ctx, caller, *active, now); err != nil {
+				return err
 			}
 			active.Status = BindingEnded
 			if active.Metadata == nil {
@@ -959,6 +948,43 @@ func decodeBindingBead(b beads.Bead) (SessionBindingRecord, error) {
 		BindingGeneration: parseInt64(b.Metadata, "binding_generation"),
 		Metadata:          decodePrefixedMetadata(b.Metadata),
 	}, nil
+}
+
+// endActiveBindingLocked terminates an active binding while the caller
+// holds the conversation's binding lock: it stamps last_touched_at,
+// removes the binding-owned transcript membership, and closes the binding
+// bead (re-ensuring the membership when the close fails). Clearing
+// delivery contexts stays with the callers — Unbind reports the ended
+// binding even when the subsequent clear fails.
+func (s *bindingService) endActiveBindingLocked(_ context.Context, caller Caller, active SessionBindingRecord, now time.Time) error {
+	if err := s.store.SetMetadata(active.ID, "last_touched_at", formatTime(now)); err != nil {
+		return fmt.Errorf("update binding %s metadata: %w", active.ID, err)
+	}
+	if s.transcript != nil {
+		if err := s.transcript.removeMembershipLocked(RemoveMembershipInput{
+			Caller:       caller,
+			Conversation: active.Conversation,
+			SessionID:    bindingMembershipKey(active),
+			Owner:        MembershipOwnerBinding,
+			Now:          now,
+		}); err != nil {
+			return wrapTranscriptSyncError("remove transcript membership after unbind", err)
+		}
+	}
+	if err := s.store.Close(active.ID); err != nil {
+		if s.transcript != nil {
+			_, _ = s.transcript.ensureMembershipLocked(EnsureMembershipInput{
+				Caller:         caller,
+				Conversation:   active.Conversation,
+				SessionID:      bindingMembershipKey(active),
+				BackfillPolicy: MembershipBackfillSinceJoin,
+				Owner:          MembershipOwnerBinding,
+				Now:            now,
+			})
+		}
+		return fmt.Errorf("close binding %s: %w", active.ID, err)
+	}
+	return nil
 }
 
 // bindingTarget renders the bound endpoint for error messages: the agent
