@@ -75,7 +75,7 @@ func TestGastownPackMaterialization(t *testing.T) {
 	})
 
 	t.Run("CoreScriptsExecutable", func(t *testing.T) {
-		scriptsDir := filepath.Join(c.Dir, ".gc", "system", "packs", "core", "assets", "scripts")
+		scriptsDir := filepath.Join(cachePackDirByName(t, c, "core"), "assets", "scripts")
 		entries, err := os.ReadDir(scriptsDir)
 		if err != nil {
 			t.Fatalf("reading core pack scripts dir: %v", err)

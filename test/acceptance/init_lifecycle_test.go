@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
@@ -42,6 +43,14 @@ func TestMain(m *testing.M) {
 	}
 
 	testEnv = helpers.NewEnv(gcBinary, gcHome, runtimeDir)
+
+	// In-process config loads and packman cache lookups must resolve the
+	// same isolated GC_HOME the subprocess env uses. internal/testenv
+	// scrubs GC_HOME at test-binary init, so opt back in explicitly here;
+	// otherwise pinned bundled imports cannot resolve the repo cache.
+	if err := os.Setenv("GC_HOME", gcHome); err != nil {
+		panic("acceptance: setting GC_HOME: " + err.Error())
+	}
 
 	code := m.Run()
 
@@ -135,13 +144,24 @@ func TestInitGastown(t *testing.T) {
 func TestInitGastownResumeAfterFailure(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 
-	// Simulate partial PackV2 init: manifests exist but no packs.lock.
+	// Simulate partial PackV2 init: manifests exist but no packs.lock. A
+	// real init writes the required builtin imports (core for this beads
+	// provider) alongside the requested pack, so mirror that manifest shape
+	// at the running binary's canonical pins.
 	c.WriteConfig(`[workspace]
 name = "partial"
 `)
+	coreSource, ok := builtinpacks.Source("core")
+	if !ok {
+		t.Fatal("builtinpacks has no core source")
+	}
 	packToml := `[pack]
 name = "partial"
 schema = 2
+
+[imports.core]
+source = "` + coreSource + `"
+version = "` + config.BundledSourcePinnedVersion(coreSource) + `"
 
 [imports.gastown]
 source = "` + config.PublicGastownPackSource + `"

@@ -85,12 +85,13 @@ func CityAlreadyInitializedFS(fs fsys.FS, cityPath string) bool {
 }
 
 // CityHasScaffoldFS reports whether cityPath has the runtime scaffold.
+// .gc/system is not required: per-city .gc/system/packs is retired, so a
+// city missing that directory must still be recognized and resumable.
 func CityHasScaffoldFS(fs fsys.FS, cityPath string) bool {
 	requiredDirs := []string{
 		filepath.Join(cityPath, citylayout.RuntimeRoot),
 		filepath.Join(cityPath, citylayout.RuntimeRoot, "cache"),
 		filepath.Join(cityPath, citylayout.RuntimeRoot, "runtime"),
-		filepath.Join(cityPath, citylayout.RuntimeRoot, "system"),
 	}
 	for _, dir := range requiredDirs {
 		fi, err := fs.Stat(dir)

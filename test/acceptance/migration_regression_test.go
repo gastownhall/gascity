@@ -100,8 +100,9 @@ func TestRegression_GastownConfig(t *testing.T) {
 	})
 
 	// Each pack owns its dog outright: gastown ships the themed utility
-	// dog and the dolt pack ships its own Dolt-maintenance dog. The
-	// maintenance fallback dog and the fallback-resolution mechanism were
+	// dog and the dolt pack ships its own Dolt-maintenance dog, re-exported
+	// through the bd pack's [imports.dolt] binding so it surfaces as bd.dog.
+	// The maintenance fallback dog and the fallback-resolution mechanism were
 	// removed, so the two coexist under distinct binding-qualified names.
 	t.Run("PacksOwnTheirDogs", func(t *testing.T) {
 		dogsByBinding := make(map[string]config.Agent)
@@ -111,10 +112,10 @@ func TestRegression_GastownConfig(t *testing.T) {
 			}
 		}
 		if len(dogsByBinding) != 2 {
-			t.Errorf("dogs by binding = %v, want gastown + dolt", dogsByBinding)
+			t.Errorf("dogs by binding = %v, want gastown + bd", dogsByBinding)
 		}
-		if _, ok := dogsByBinding["dolt"]; !ok {
-			t.Error("dolt pack dog missing")
+		if _, ok := dogsByBinding["bd"]; !ok {
+			t.Error("dolt maintenance dog (binding bd) missing")
 		}
 		dog, ok := dogsByBinding["gastown"]
 		if !ok {
