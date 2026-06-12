@@ -17,11 +17,12 @@
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_MIMOCODE_HOOK_VERSION = 1;
+const GC_MIMOCODE_HOOK_VERSION = 2;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
@@ -116,8 +117,20 @@ function providerSessionEnv(sessionID) {
   return env;
 }
 
+// Gas City's transcript discovery (sessionlog.DefaultMimoCodeSearchPaths)
+// reads ~/.local/share/gascity/mimocode-transcripts, so mirroring defaults
+// to that path; GC_MIMOCODE_TRANSCRIPT_DIR overrides it (test harnesses).
+function defaultTranscriptDir() {
+  const home = os.homedir() || "";
+  if (!home) {
+    return "";
+  }
+  return path.join(home, ".local", "share", "gascity", "mimocode-transcripts");
+}
+
 async function mirrorTranscript(directory, client, sessionID) {
-  const exportDir = process.env.GC_MIMOCODE_TRANSCRIPT_DIR || "";
+  const exportDir =
+    process.env.GC_MIMOCODE_TRANSCRIPT_DIR || defaultTranscriptDir();
   const safeID = safeSessionID(sessionID);
   if (!exportDir || !safeID || !client?.session) {
     return;

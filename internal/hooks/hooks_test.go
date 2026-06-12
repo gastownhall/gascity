@@ -1536,9 +1536,10 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	mimocodeHooks := string(fs.Files["/work/.mimocode/plugin/gascity.js"])
 	for _, want := range []string{
 		"Gas City hooks for MiMo Code.",
-		"const GC_MIMOCODE_HOOK_VERSION = 1",
+		"const GC_MIMOCODE_HOOK_VERSION = 2",
 		`process.env.GC_BIN || "gc"`,
-		"GC_MIMOCODE_TRANSCRIPT_DIR",
+		"process.env.GC_MIMOCODE_TRANSCRIPT_DIR || defaultTranscriptDir()",
+		`path.join(home, ".local", "share", "gascity", "mimocode-transcripts")`,
 		`"experimental.session.compacting"`,
 		`runWithWarning(directory, "handoff", "--auto", "context cycle")`,
 		"output.context.push(handoff)",
@@ -1985,16 +1986,20 @@ func TestInstallOpenCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
 
 func TestMimoCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for MiMo Code.
-const GC_MIMOCODE_HOOK_VERSION = 1;
+const GC_MIMOCODE_HOOK_VERSION = 2;
 const GC_BIN = process.env.GC_BIN || "gc";
 `)
-	stale := []byte(`// Gas City hooks for MiMo Code.
+	versionless := []byte(`// Gas City hooks for MiMo Code.
 const GC_BIN = process.env.GC_BIN || "gc";
 `)
-	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 1"), []byte("GC_MIMOCODE_HOOK_VERSION = 2"), 1)
+	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 2"), []byte("GC_MIMOCODE_HOOK_VERSION = 1"), 1)
+	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 2"), []byte("GC_MIMOCODE_HOOK_VERSION = 3"), 1)
 
-	if !mimocodeHookNeedsUpgrade(stale) {
+	if !mimocodeHookNeedsUpgrade(versionless) {
 		t.Fatal("versionless managed MiMo Code hook did not request upgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(stale) {
+		t.Fatal("stale MiMo Code hook version did not request upgrade")
 	}
 	if mimocodeHookNeedsUpgrade(current) {
 		t.Fatal("current MiMo Code hook version requested upgrade")
@@ -2021,7 +2026,7 @@ export default async function gascityPlugin() {
 	if data == string(legacy) {
 		t.Fatal("stale MiMo Code managed plugin was preserved; expected managed upgrade")
 	}
-	if !strings.Contains(data, "const GC_MIMOCODE_HOOK_VERSION = 1") {
+	if !strings.Contains(data, "const GC_MIMOCODE_HOOK_VERSION = 2") {
 		t.Errorf("upgraded MiMo Code plugin missing version marker:\n%s", data)
 	}
 	backup := string(fs.Files["/work/.mimocode/plugin/gascity.js.bak"])

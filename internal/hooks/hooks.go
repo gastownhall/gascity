@@ -34,7 +34,7 @@ var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "op
 const (
 	managedPiHookVersion       = 7
 	managedOpenCodeHookVersion = 5
-	managedMimoCodeHookVersion = 1
+	managedMimoCodeHookVersion = 2
 	managedOmpHookVersion      = 2
 )
 
