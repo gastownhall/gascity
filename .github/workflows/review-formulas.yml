@@ -91,7 +91,7 @@ jobs:
               - 'cmd/gc/**'
               - 'examples/bd/**'
               - 'examples/dolt/**'
-              - 'examples/gastown/packs/**'
+              - 'examples/gastown/**'
               - 'scripts/test-integration-shard'
               - 'test/agents/**'
               - 'test/integration/**'
