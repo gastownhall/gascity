@@ -289,8 +289,40 @@ func TestResolveEndpoints_AllUnset_Disabled(t *testing.T) {
 	}
 }
 
+func TestResolveEndpoints_SDKDisabledWinsOverEndpoints(t *testing.T) {
+	// Case-insensitive per the OTel spec for boolean env vars; beats both
+	// the GC vars and the standard endpoint fallback.
+	t.Setenv(EnvSDKDisabled, "TRUE")
+	t.Setenv(EnvMetricsURL, "http://vm:8428/opentelemetry/api/v1/push")
+	t.Setenv(EnvLogsURL, "")
+	t.Setenv(EnvOTLPEndpoint, "http://collector:4318")
+
+	_, _, enabled := resolveEndpoints()
+	if enabled {
+		t.Error("expected telemetry disabled when OTEL_SDK_DISABLED=true")
+	}
+}
+
+func TestResolveEndpoints_SDKDisabledFalseKeepsTelemetryOn(t *testing.T) {
+	t.Setenv(EnvSDKDisabled, "false")
+	t.Setenv(EnvMetricsURL, "")
+	t.Setenv(EnvLogsURL, "")
+	t.Setenv(EnvOTLPEndpoint, "http://collector:4318")
+
+	_, _, enabled := resolveEndpoints()
+	if !enabled {
+		t.Error("expected telemetry enabled when OTEL_SDK_DISABLED is not true")
+	}
+}
+
 func TestNewResource_HonorsOTELResourceAttributes(t *testing.T) {
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=prod,gc.city=testcity")
+	// No GC context vars: inherited gc.* labels flow through unchanged, as
+	// in a process without an identity of its own (controller topology).
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_CITY", "")
 
 	res, err := newResource(context.Background(), "test-svc", "0.0.1")
 	if err != nil {
@@ -312,6 +344,33 @@ func TestNewResource_HonorsOTELResourceAttributes(t *testing.T) {
 	}
 }
 
+func TestNewResource_OwnGCIdentityWinsOverInheritedEnv(t *testing.T) {
+	// A session env carries the spawning agent's identity labels via
+	// OTEL_RESOURCE_ATTRIBUTES; a gc process with its own GC context must
+	// export its own identity, not the spawner's.
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "gc.agent=a,team=platform")
+	t.Setenv("GC_ALIAS", "b")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_CITY", "")
+
+	res, err := newResource(context.Background(), "test-svc", "0.0.1")
+	if err != nil {
+		t.Fatalf("newResource error: %v", err)
+	}
+
+	attrs := make(map[string]string)
+	for _, kv := range res.Attributes() {
+		attrs[string(kv.Key)] = kv.Value.Emit()
+	}
+	if got := attrs["gc.agent"]; got != "b" {
+		t.Errorf("gc.agent = %q, want own identity %q to win over inherited env", got, "b")
+	}
+	if got := attrs["team"]; got != "platform" {
+		t.Errorf("team = %q, want %q preserved", got, "platform")
+	}
+}
+
 func TestNewResource_ExplicitServiceIdentityWinsOverEnv(t *testing.T) {
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=env-svc,service.version=9.9.9")
 
@@ -330,6 +389,69 @@ func TestNewResource_ExplicitServiceIdentityWinsOverEnv(t *testing.T) {
 	if got := attrs["service.version"]; got != "0.0.1" {
 		t.Errorf("service.version = %q, want explicit %q to win over env", got, "0.0.1")
 	}
+}
+
+func TestNewResource_ExplicitServiceNameWinsOverOTELServiceName(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+	t.Setenv("OTEL_SERVICE_NAME", "env-svc")
+
+	res, err := newResource(context.Background(), "test-svc", "0.0.1")
+	if err != nil {
+		t.Fatalf("newResource error: %v", err)
+	}
+
+	for _, kv := range res.Attributes() {
+		if string(kv.Key) == "service.name" && kv.Value.Emit() != "test-svc" {
+			t.Errorf("service.name = %q, want explicit %q to win over OTEL_SERVICE_NAME", kv.Value.Emit(), "test-svc")
+		}
+	}
+}
+
+func TestNewResource_ToleratesMalformedResourceAttributes(t *testing.T) {
+	// A trailing comma makes the env detector report ErrPartialResource
+	// alongside a usable resource; the malformed segment is dropped and the
+	// valid attributes survive.
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=prod,")
+
+	res, err := newResource(context.Background(), "test-svc", "0.0.1")
+	if err != nil {
+		t.Fatalf("newResource error: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil resource for partial detection")
+	}
+
+	attrs := make(map[string]string)
+	for _, kv := range res.Attributes() {
+		attrs[string(kv.Key)] = kv.Value.Emit()
+	}
+	if got := attrs["deployment.environment"]; got != "prod" {
+		t.Errorf("deployment.environment = %q, want %q", got, "prod")
+	}
+	if got := attrs["service.name"]; got != "test-svc" {
+		t.Errorf("service.name = %q, want %q", got, "test-svc")
+	}
+}
+
+func TestInit_MalformedResourceAttributesStillReturnsProvider(t *testing.T) {
+	resetInitState(t)
+	t.Setenv(EnvMetricsURL, "")
+	t.Setenv(EnvLogsURL, "")
+	t.Setenv(EnvOTLPEndpoint, "http://127.0.0.1:1")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "a=b,")
+
+	p, err := Init(context.Background(), "test-svc", "0.0.1")
+	if err != nil {
+		t.Fatalf("Init error: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil provider despite malformed OTEL_RESOURCE_ATTRIBUTES")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	// Best-effort flush to a dead endpoint; the export error is expected.
+	_ = p.Shutdown(ctx)
 }
 
 func TestProvider_Shutdown_ConcurrentSafe(t *testing.T) {

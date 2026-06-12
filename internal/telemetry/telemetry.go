@@ -11,9 +11,21 @@
 // When both GC_OTEL_*_URL vars are unset, the standard OpenTelemetry
 // OTEL_EXPORTER_OTLP_ENDPOINT is honored as a fallback: signal URLs are
 // derived by appending the OTLP/HTTP paths /v1/metrics and /v1/logs.
+// The per-signal OTEL_EXPORTER_OTLP_METRICS_ENDPOINT and
+// OTEL_EXPORTER_OTLP_LOGS_ENDPOINT vars are not consulted.
 // Standard resource env vars (OTEL_RESOURCE_ATTRIBUTES, OTEL_SERVICE_NAME)
 // are merged into the exported resource; explicitly passed service
-// name/version take precedence on conflict.
+// name/version take precedence on conflict. Setting OTEL_SDK_DISABLED=true
+// keeps telemetry off regardless of any endpoint var.
+//
+// gc re-injects GC_-prefixed vars and the derived BD_OTEL_* vars into the
+// agent session environments it creates, but not the standard
+// OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_SDK_DISABLED vars: nested sessions
+// see those only through ambient inheritance (tmux server env, shell
+// profiles). Standard-endpoint deployments that want nested gc and Claude
+// Code sessions to keep exporting should set the vars machine-wide, e.g.
+// in shell profiles or the supervisor service env
+// (GC_SUPERVISOR_ENV=OTEL_EXPORTER_OTLP_ENDPOINT).
 //
 // Telemetry is best-effort: initialization errors are returned but do not
 // affect normal gc operation — callers should log and continue.
@@ -23,6 +35,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -50,8 +63,17 @@ const (
 	// EnvOTLPEndpoint is the standard OpenTelemetry base endpoint env var.
 	// It is honored as a fallback when neither GC_OTEL_METRICS_URL nor
 	// GC_OTEL_LOGS_URL is set: signal URLs are derived from it by appending
-	// the standard OTLP/HTTP paths /v1/metrics and /v1/logs.
+	// the standard OTLP/HTTP paths /v1/metrics and /v1/logs. The per-signal
+	// OTEL_EXPORTER_OTLP_{METRICS,LOGS}_ENDPOINT vars are not consulted, and
+	// the derived URLs override the exporter's own env handling.
 	EnvOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
+
+	// EnvSDKDisabled is the standard OpenTelemetry kill switch. When set to
+	// "true" (case-insensitive), telemetry stays disabled regardless of any
+	// endpoint var — the escape hatch for environments where
+	// OTEL_EXPORTER_OTLP_ENDPOINT is exported machine-wide for other
+	// applications.
+	EnvSDKDisabled = "OTEL_SDK_DISABLED"
 
 	// DefaultMetricsURL is VictoriaMetrics' OTLP push endpoint.
 	DefaultMetricsURL = "http://localhost:8428/opentelemetry/api/v1/push"
@@ -120,7 +142,12 @@ func ResetForTest() {
 // is set, the unset one falls back to its package default. When both are
 // unset, the standard OTEL_EXPORTER_OTLP_ENDPOINT is used as the base URL
 // for both signals with /v1/metrics and /v1/logs appended.
+// OTEL_SDK_DISABLED=true disables telemetry regardless of endpoint vars.
 func resolveEndpoints() (metricsURL, logsURL string, enabled bool) {
+	if strings.EqualFold(os.Getenv(EnvSDKDisabled), "true") {
+		return "", "", false
+	}
+
 	metricsURL = os.Getenv(EnvMetricsURL)
 	logsURL = os.Getenv(EnvLogsURL)
 
@@ -144,7 +171,10 @@ func resolveEndpoints() (metricsURL, logsURL string, enabled bool) {
 //
 // Standard resource env vars (OTEL_RESOURCE_ATTRIBUTES, OTEL_SERVICE_NAME)
 // are honored via resource.WithFromEnv and override detected host/OS
-// attributes; the explicitly passed service name/version win on conflict.
+// attributes. The process's own GC identity labels (gc.agent, gc.rig,
+// gc.city from the GC context vars) are applied after the env detector so
+// they win over identity labels inherited from a spawning process; the
+// explicitly passed service name/version win last on conflict.
 // service.instance.id (a fresh UUID, per the OTel semantic conventions) is
 // required for correctness, not just attribution: gc counters are cumulative
 // per process, and many gc processes run concurrently on one host — without
@@ -152,23 +182,33 @@ func resolveEndpoints() (metricsURL, logsURL string, enabled bool) {
 // rate queries over the merged series are meaningless. It is applied with
 // the service identity, after WithFromEnv, so an inherited
 // OTEL_RESOURCE_ATTRIBUTES value can never override per-process uniqueness.
+// Malformed OTEL_RESOURCE_ATTRIBUTES segments are dropped, not fatal: the
+// detector reports them via resource.ErrPartialResource alongside a usable
+// resource, and the OTel spec says to continue with the valid attributes.
 func newResource(ctx context.Context, serviceName, serviceVersion string) (*resource.Resource, error) {
 	instanceID, err := uuid.NewRandom()
 	if err != nil {
 		return nil, fmt.Errorf("generating service.instance.id: %w", err)
 	}
-	res, err := resource.New(ctx,
+	opts := []resource.Option{
 		resource.WithHost(),
 		resource.WithOS(),
 		resource.WithFromEnv(),
-		resource.WithAttributes(
-			semconv.ServiceName(serviceName),
-			semconv.ServiceVersion(serviceVersion),
-			semconv.ServiceInstanceID(instanceID.String()),
-		),
-	)
+	}
+	if identity := gcIdentityAttrs(); len(identity) > 0 {
+		opts = append(opts, resource.WithAttributes(identity...))
+	}
+	opts = append(opts, resource.WithAttributes(
+		semconv.ServiceName(serviceName),
+		semconv.ServiceVersion(serviceVersion),
+		semconv.ServiceInstanceID(instanceID.String()),
+	))
+	res, err := resource.New(ctx, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("creating OTel resource: %w", err)
+		if !errors.Is(err, resource.ErrPartialResource) {
+			return nil, fmt.Errorf("creating OTel resource: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "gc: telemetry: %v (continuing with partial resource)\n", err) //nolint:errcheck // best-effort stderr
 	}
 	return res, nil
 }
@@ -179,7 +219,8 @@ func newResource(ctx context.Context, serviceName, serviceVersion string) (*reso
 //
 // Returns (nil, nil) if none of GC_OTEL_METRICS_URL, GC_OTEL_LOGS_URL, and
 // OTEL_EXPORTER_OTLP_ENDPOINT is set, so that telemetry is strictly opt-in.
-// Set any of them to activate.
+// Set any of them to activate. OTEL_SDK_DISABLED=true forces (nil, nil)
+// even when an endpoint var is set.
 //
 // When a GC_OTEL_*_URL var activates telemetry, defaults are used for the
 // unset endpoint:
