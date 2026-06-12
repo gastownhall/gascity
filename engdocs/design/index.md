@@ -32,5 +32,5 @@ lives in the [Architecture](../architecture/index.md) section.
 | `external-messaging-shared-threads` | Implemented | Transcript-backed shared-thread model with membership replay and speaker-only group routing |
 | `worker-conformance` | Proposed | Canonical WorkerCore/WorkerInference contract, transcript-first conformance, and migration toward `internal/worker` |
 | `two-minute-ci-blacksmith` | Proposed | Planner-driven Blacksmith CI architecture targeting two-minute required PR feedback |
-| `runtime-provider-packs` | Proposed | Runtime providers and builtin agent-provider specs as external pack modules; cloudflare-first PoC |
+| `runtime-provider-packs` | Proposed | Runtime providers as pack-shipped executables speaking a versioned protocol (RPP); agent-provider specs as pack TOML; cloudflare-first PoC |
 | `packv2/` | Historical / rollout ledger | PackV2 engineering design notes moved out of public docs; use user-facing guides and generated reference for current authoring guidance |

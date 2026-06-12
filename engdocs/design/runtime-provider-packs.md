@@ -2,15 +2,26 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed |
+| Status | Proposed — revised after delivery-independence decision (2026-06-12) |
 | Date | 2026-06-12 |
 | Author(s) | Julian, Claude |
 | Issue | `ga-1symz6` (epic); PoC PRs `ga-fse3es` → `ga-ghbts9` → `ga-h504e5` → `ga-6qwfkb` |
 | Related | [packv2/doc-pack-v2.md](packv2/doc-pack-v2.md), [provider-inheritance.md](provider-inheritance.md), PR #3335 (gastown pack as Go module) |
 
 Plan for moving runtime providers and builtin agent-provider definitions
-out of the gascity core and into packs consumed as external dependencies,
-plus the scoped first PoC.
+out of the gascity core and into packs, plus the scoped first PoC.
+
+**Governing requirement (decided 2026-06-12): true delivery
+independence.** Users must receive provider/runtime updates without a
+new `gc` release. This rules out any in-process Go design — Go
+statically links everything into the `gc` binary, so external Go
+modules only decouple *source*, not *delivery* (every pin bump still
+requires a gc rebuild and release). The architecture below is therefore
+protocol-based: a runtime provider is an **executable shipped by a
+pack**, speaking a versioned wire protocol to `gc`. An earlier revision
+of this doc proposed Go-module extraction (`runtimeapi` nested module +
+provider modules in gascity-packs); it is preserved under
+*Alternatives considered*.
 
 ## Problem
 
@@ -21,8 +32,8 @@ and all three grow by editing core:
    acp,t3bridge,cloudflare,hybrid,auto}`) implement `runtime.Provider`
    and are selected by a hardcoded string switch in
    [`cmd/gc/providers.go`](../../cmd/gc/providers.go) (`newSessionProviderByName`).
-   There is no registry; adding a runtime means editing the switch and
-   shipping a new `gc`.
+   There is no registry; adding or fixing a runtime means editing the
+   switch and shipping a new `gc`.
 2. **Builtin agent providers** (claude, codex, gemini, kiro, mimo,
    opencode, …) are ~780 LOC of declarative Go structs in
    [`internal/worker/builtin/profiles.go`](../../internal/worker/builtin/profiles.go).
@@ -31,8 +42,8 @@ and all three grow by editing core:
    TOML with inheritance (`base = "builtin:claude"`) already exists as a
    user-facing surface.
 3. **Service/bridge providers** (discord, telegram — `ga-aiefhz`) are
-   already moving to packs via `[[service]]`; they are prior art, not
-   part of this plan.
+   already moving to packs via `[[service]]`; they are prior art for
+   this design, not part of its scope.
 
 For this fork specifically, `internal/runtime/t3bridge` (~2.8k LOC) and
 `cmd/gc/template_resolve_t3bridge.go` are fork-owned behavior living
@@ -41,175 +52,251 @@ say to isolate behind small ownership boundaries.
 
 ## Survey findings (June 2026)
 
-- **The runtime contract is already self-contained.** The root
-  `internal/runtime` package (~7k LOC: `runtime.go`, `provider_core.go`,
-  `dialog.go`, `liveness.go`, `probe.go`, `fingerprint.go`, `beacon.go`,
-  `mcp.go`, `process_control.go`, `fake.go`, …) imports **only stdlib**,
-  with one exception: `staging.go` imports `internal/overlay`.
+- **The out-of-process seam already exists.** The `exec:` provider
+  ([`internal/runtime/exec`](../../internal/runtime/exec/exec.go), 595
+  LOC) delegates every operation to a user-supplied executable:
+  `script <op> <args...>` with session config as JSON on stdin, exit
+  code 0 = success, 1 = error (stderr carries the message), **2 =
+  unknown operation, treated as success for forward compatibility**
+  (the git credential-helper pattern). It already handles startup-watch
+  event streaming (`json.go`) and TTY-inherited attach. t3bridge was
+  originally wired this way (the `gc-session-t3` legacy `exec:` alias in
+  `cmd/gc/providers.go` still recognizes it).
+- **Pack-shipped long-lived processes already exist.** `[[service]]`
+  with `kind = "proxy_process"`
+  ([`internal/config/service.go`](../../internal/config/service.go))
+  gives controller-supervised processes with managed state roots
+  (`.gc/services/{name}`), health paths, and pack provenance — the
+  lifecycle mechanism a long-lived runtime sidecar needs.
+- **Trust boundary is unchanged.** Cities already execute pack-shipped
+  code (commands/, doctor/, scripts/, services). A pack-shipped runtime
+  executable introduces no new trust surface.
 - **A conformance suite exists.** `internal/runtime/runtimetest`
-  (`RunProviderTests` / `RunLifecycleTests` / `RunSessionTests`) imports
-  only the contract package — external implementations can run it as-is
-  once it is importable.
+  (`RunProviderTests` / `RunLifecycleTests` / `RunSessionTests`)
+  imports only the contract package; the exec provider already passes
+  it, so protocol-level conformance is a matter of pointing the suite
+  at a proxy provider wrapping an arbitrary executable.
 - **Coupling gradient across providers** (non-test LOC):
   `hybrid` 218 and `cloudflare` 503 import *only* the contract;
   `exec` 595, `subprocess` 659, `auto` 356, `acp` 1711 are middling;
   `tmux` 6187, `k8s` 2089, `t3bridge` 2839 also pull in
-  `internal/{beads,events,citylayout}`.
-- **The external-module precedent already shipped.** PR #3335
-  (`5a23df317`) consumes `github.com/gastownhall/gascity-packs` as a
-  pinned Go module (embedded pack bytes via `gascitypacks.Gastown()`),
-  with a pin-bump script and hermetic integration tests. That repo
-  already hosts nested adapter modules (slack-*).
-- **Pack registry prior art**: `work/default-pack-registry` (commit
-  `052164dcf`) moves bundled default packs into the import registry —
-  the loading mechanism Track B needs.
+  `internal/{beads,events,citylayout}` (t3bridge uses
+  `beads.CachingStore` — an out-of-process t3bridge reaches the ledger
+  via the `bd` CLI / gc API instead).
+- **Pack delivery precedents.** PR #3335 (`5a23df317`) consumes
+  gascity-packs as a pinned module; `work/default-pack-registry`
+  (`052164dcf`) moves bundled packs into the import registry; the
+  telegram pack plan (`ga-aiefhz`) ships a node bridge with pinned deps
+  installed by a pack doctor step — the same distribution shape runtime
+  packs need.
 - **Pack v2** ([doc-pack-v2.md](packv2/doc-pack-v2.md)) defines packs as
   declarative trees (agents, formulas, commands, services, doctor,
-  `[providers.x]` settings). Packs do not carry compiled Go code; a
-  "runtime pack" therefore means *a Go module that may sit alongside
-  pack content*, consumed like gascity-packs is today.
+  `[providers.x]` settings). Top-level pack surface is controlled;
+  new sections require explicit design.
 
 ## Goals
 
-- Runtime providers become external Go modules implementing a stable
-  contract, registered by name, conformance-tested against the shared
-  suite, and pinned in `go.mod` like gascity-packs.
+- **A runtime provider update reaches users without a gc release**:
+  bump the pack pin in the city (`packs.lock`), re-run the pack install
+  step, done.
+- Runtime providers become pack-shipped executables speaking a
+  versioned protocol, registered by name, conformance-tested by a
+  harness the pack's own CI can run.
 - Builtin agent-provider specs become pack-delivered TOML resolved
-  through the existing provider-inheritance chain.
-- Core keeps only: the contract, the registry, the composition/routing
-  layers (`auto`, transport selection), and whatever providers we
-  deliberately keep builtin (at minimum `fake`/`fail` for tests).
+  through the existing provider-inheritance chain (Track B).
+- Core keeps only: the protocol client (proxy provider), the registry,
+  the composition/routing layers (`auto`, transport selection), and the
+  providers we deliberately keep builtin (`fake`/`fail` for tests;
+  `tmux`/`subprocess`/`acp` until there is a concrete reason to move
+  them).
 - Fork-specific providers (t3bridge) end up outside upstream-owned
-  trees, making `upstream/main` merges cheap.
+  trees — ideally owned and shipped by the T3 Code repo itself.
 
 ## Non-goals
 
-- No `go plugin` / dlopen-style dynamic loading. Linkage stays
-  compile-time; "external" means *external module*, not runtime-loaded
-  binary. (`exec:<script>` remains the escape hatch for truly dynamic
-  runtimes.)
-- No change to how cities *select* a runtime (`session = "tmux"` etc.).
+- No Go `plugin` / dlopen dynamic loading (toolchain-locked,
+  platform-fragile).
+- No change to how cities *select* a runtime (`session = "<name>"`).
 - Service packs (discord/telegram) — already covered by `[[service]]`.
+- Moving tmux/subprocess/acp out of core (revisit after the PoC).
 
 ## Target architecture
 
 ```
-github.com/gastownhall/gascity/runtimeapi      (nested module, contract)
-    ├── runtime contract types + Provider interface + fake
-    └── runtimetest/ conformance suite
-            ▲                        ▲
-            │                        │
-github.com/gastownhall/gascity      provider modules
-  internal/runtime → aliases          (e.g. gascity-packs/runtime-cloudflare,
-  registry + builtins                  later: runtime-t3bridge)
-  cmd/gc registers external                  ▲
-  providers via pinned imports ──────────────┘
+city.toml: session = "cloudflare"
+        │
+        ▼
+runtime registry (core)  ── builtin Go providers (tmux, fake, …)
+        │                      registered from core
+        ▼
+pack-declared runtime ("cloudflare" from runtime-cloudflare pack)
+        │
+        ▼
+proxy provider (core, evolved exec:) ── speaks RPP over fork/exec
+        │                               or supervised sidecar
+        ▼
+pack-shipped executable (gc-runtime-cloudflare)
+   installed/updated by the pack, versioned by the pack,
+   never linked into gc
 ```
 
-Dependency graph is acyclic: `runtimeapi` has no deps; provider modules
-depend only on `runtimeapi`; gascity depends on both. This avoids the
-module cycle that would arise if providers imported the gascity module
-itself.
+### The Runtime Provider Protocol (RPP)
 
-### Track A — runtime providers as modules
+RPP v0 **is** the existing exec contract, formalized and versioned:
 
-1. **Registry seam.** `Register(name, factory)` keyed by the existing
-   selection names, plus prefix handling for `exec:`. The
-   `newSessionProviderByName` switch becomes a lookup; each builtin
-   registers from its own file so a later module split is mechanical.
-2. **Contract module.** Promote the root `internal/runtime` package +
-   `runtimetest` to a nested module `runtimeapi/` (own `go.mod`, no
-   dependencies). `internal/runtime` becomes type aliases re-exporting
-   it, so the ~hundreds of existing import sites (and upstream diffs)
-   stay untouched. `staging.go` (the one `internal/overlay` dependent)
-   stays behind in `internal/runtime`.
-3. **Provider modules.** Each extracted provider is a Go module
-   depending only on `runtimeapi`, running `runtimetest` conformance in
-   its own CI, optionally paired with pack content (docs, doctor
-   checks). Hosted in gascity-packs as nested modules
-   (`runtime-<name>/`), following the slack-* precedent.
-4. **Consumption.** gascity pins provider modules in `go.mod` and
-   registers them in one small file (`cmd/gc/runtime_packs.go`) — the
-   single fork-owned divergence point for fork-only providers.
+- `executable <op> <args...>`, JSON on stdin where the op takes
+  structured input, JSON or plain text on stdout per op.
+- Exit codes 0/1/2 as today; 2 keeps unknown ops forward-compatible.
+- One new op: `protocol` — returns
+  `{"version": 0, "capabilities": [...]}` so the proxy can answer
+  gc's optional-capability probes (dialog handling, idle-wait,
+  activity reporting, …) without trial-and-error. A missing `protocol`
+  op (exit 2) means "v0, no optional capabilities" — every existing
+  `exec:` script remains valid.
+- The per-op fork/exec model is v0. A long-lived sidecar mode
+  (JSON-RPC over stdio, supervised via `[[service]]
+  kind = "proxy_process"`) is the documented evolution for stateful or
+  latency-sensitive runtimes; it is **not** in the PoC.
+
+The protocol document is the contract. Go types stay in
+`internal/runtime` — nothing is exported, no alias shims, no public Go
+API commitment, and the upstream diff stays small.
+
+### Pack surface
+
+A pack declares runtimes by name:
+
+```toml
+# pack.toml
+[runtimes.cloudflare]
+command = "scripts/gc-runtime-cloudflare"   # pack-relative, or PATH name
+protocol = 0
+```
+
+City composition registers pack-declared runtimes into the runtime
+registry; `session = "cloudflare"` resolves through the registry to a
+proxy provider bound to that executable. Name collisions with builtin
+providers are errors (no silent shadowing). A pack `doctor/` check
+verifies the executable is installed and `protocol`-handshakes.
+
+### Distribution
+
+Packs are declarative trees and must not carry per-platform compiled
+binaries. A runtime pack ships one of:
+
+- a **script** (sh/node/python) run directly — works today;
+- **source + pinned install step** (`go install module@version`,
+  `npm ci`) executed by the pack's install/doctor flow — the telegram
+  pack precedent;
+- a **pinned release-artifact fetch** (goreleaser URL + checksum) for
+  compiled providers — later wave, needs a checksummed fetch helper.
+
+The PoC uses the second form: a nested Go module in gascity-packs whose
+binary is installed by the pack. The module depends on **nothing from
+gascity** — the protocol is the contract.
+
+### Conformance
+
+`runtimetest` already validates any `runtime.Provider`; pointing it at
+the proxy provider validates any executable. The PoC wraps this as
+`gc runtime check <name|command>` so a runtime pack's CI conformance
+step is: install gc, install the pack executable, run
+`gc runtime check ./gc-runtime-cloudflare`. No Go imports required.
 
 ### Track B — agent provider specs as pack TOML
 
-Convert `internal/worker/builtin/profiles.go` into `[providers.x]` TOML
-shipped in gascity-packs and loaded through the bundled-import registry
-(`work/default-pack-registry` mechanism). Bootstrap constraint: provider
-resolution must work offline before pack composition, so the embedded
-module bytes (not network fetch) are the source. This track has a much
-larger blast radius (every resolution path in `internal/config/resolve.go`)
-and ships **after** Track A proves the consumption pattern.
+Unchanged by the pivot (it was always declarative): convert
+`internal/worker/builtin/profiles.go` into `[providers.x]` TOML shipped
+in gascity-packs and loaded through the bundled-import registry
+(`work/default-pack-registry` mechanism). Bootstrap constraint:
+provider resolution must work offline before pack composition, so the
+embedded module bytes (not network fetch) are the source. Larger blast
+radius (every resolution path in `internal/config/resolve.go`); ships
+after Track A proves the pack-consumption pattern.
 
 ## PoC scope (first slice, Track A)
 
-**Extracted provider: `cloudflare`.** Rationale: zero coupling beyond
-the contract, ~500 LOC, genuinely remote semantics (HTTP to a Worker),
-and low blast radius — it only activates when explicitly selected.
-`hybrid` is smaller but is composition logic whose constructor wiring
-lives in core anyway; `t3bridge` is the strategic payoff but carries
-beads/events coupling and is load-bearing for the T3 integration — it
-graduates second, once the mechanism is proven.
+**Extracted provider: `cloudflare`.** Zero coupling beyond the
+contract, ~500 LOC, already speaks HTTP to a remote Worker (so
+per-op fork/exec overhead is noise), and low blast radius — it only
+activates when explicitly selected. `t3bridge` is the strategic payoff
+but is load-bearing for the T3 integration and needs a ledger-access
+story (bd CLI / gc API) — it graduates second, once the mechanism is
+proven.
 
 Four PRs, each independently green:
 
-| PR | Repo | Content | Risk |
-|---|---|---|---|
-| 1 | gascity | Registry: `internal/runtime/registry.go` (Register/Lookup, `exec:` prefix hook), builtins re-register, switch in `cmd/gc/providers.go` becomes lookup. Boundary test pins the contract package to stdlib-only (mirroring `worker_boundary_import_test.go`). Behavior-preserving. | Low |
-| 2 | gascity | Contract split: move root `internal/runtime` (minus `staging.go`) + `runtimetest` to nested module `runtimeapi/`; `internal/runtime` becomes aliases. `go.work` for local dev; parent `go.mod` requires `runtimeapi` via relative `replace` until first tag. | Medium (mechanical but wide) |
-| 3 | gascity-packs | `runtime-cloudflare/` nested module: provider code moved over, depends on `runtimeapi`, runs `runtimetest` conformance in packs CI. | Low |
-| 4 | gascity | Delete `internal/runtime/cloudflare`; pin `runtime-cloudflare` in `go.mod`; register in `cmd/gc/runtime_packs.go`. Existing cloudflare selection tests pass unchanged. | Low |
+| PR | Issue | Repo | Content | Risk |
+|---|---|---|---|---|
+| 1 | `ga-fse3es` | gascity | Registry: `internal/runtime/registry.go` (Register/Lookup, `exec:` prefix hook), builtins re-register from per-provider files, switch in `cmd/gc/providers.go` becomes lookup. Behavior-preserving. | Low |
+| 2 | `ga-ghbts9` | gascity | RPP v0: protocol spec doc (`engdocs/architecture/` or `docs/`), `protocol` handshake op + capability mapping in the exec/proxy provider, `gc runtime check` conformance command (wraps `runtimetest` against an arbitrary executable). Reference executable: fake-backed test script. | Medium |
+| 3 | `ga-h504e5` | gascity | Pack surface: `[runtimes.<name>]` in pack.toml, composition registers pack runtimes, collision rules, doctor handshake check. | Medium |
+| 4 | `ga-6qwfkb` | gascity-packs + gascity | `runtime-cloudflare` pack: nested Go module (no gascity deps) emitting `gc-runtime-cloudflare` speaking RPP v0, installed by the pack, `gc runtime check` green in packs CI. gascity deletes `internal/runtime/cloudflare`; `session = "cloudflare"` resolves via the pack. | Low |
 
 PoC exit criteria:
 
-- `gc` builds with cloudflare resolved from the external module; a city
-  with `session = "cloudflare"` behaves identically (existing tests).
-- `runtimetest` conformance runs green inside the provider module's CI,
-  outside the gascity module.
+- A city with the runtime-cloudflare pack and `session = "cloudflare"`
+  behaves as today (existing selection tests adapted).
+- **Delivery-independence demo**: bump the runtime-cloudflare pack
+  version in a city, observe the new provider behavior with the same
+  `gc` binary.
+- `gc runtime check` runs green in gascity-packs CI against the
+  installed executable, with no Go imports from gascity.
 - `go vet ./...`, fast unit baseline, and the sharded suites pass at
   each PR boundary.
-- A written t3bridge extraction checklist derived from the PoC (what
-  beads/events surfaces it needs from the contract or via injection).
+- A written t3bridge extraction checklist: which ops it needs, ledger
+  access via bd CLI / gc API, and whether T3 Code hosts the executable.
 
 ## Alternatives considered
 
-- **`pkg/runtime` in the gascity module, providers depend on gascity.**
-  Creates a module cycle (gascity ⇄ provider) the moment `gc` links a
-  provider. Go tolerates module-graph cycles but tagging/MVS hygiene is
-  painful; rejected.
-- **Standalone `gascity-runtime` repo for the contract.** Cleanest
-  release engineering, but a third repo to coordinate during the
-  fast-iteration phase. The nested `runtimeapi/` module keeps contract
-  changes and their gascity consumers in one PR; we can graduate it to
-  its own repo later without changing the import path strategy
-  (path would change, aliases confine the blast radius).
-- **`exec:` script packs only.** Already works today with zero new
-  mechanism, but abandons type safety, conformance testing, and the
-  in-process providers we actually need to maintain (tmux, k8s).
-- **Go `plugin` package.** Platform-fragile, version-locked, rejected.
+- **Go-module extraction (previous revision of this doc):** nested
+  `runtimeapi` contract module + provider modules in gascity-packs,
+  pinned in go.mod like the gastown pack. Gives independent *source*
+  maintenance and clean fork isolation, but every provider update still
+  requires a pin bump and a gc rebuild/release — it fails the governing
+  delivery-independence requirement. Rejected 2026-06-12. (If a future
+  provider needs in-process performance, this remains the fallback
+  shape; PR 1's registry serves both.)
+- **`pkg/runtime` in the gascity module, providers depend on gascity:**
+  module cycle the moment gc links a provider; rejected.
+- **Go `plugin` package:** exact-toolchain-match requirement makes it
+  unshippable; rejected.
+- **Long-lived sidecar protocol first (go-plugin style JSON-RPC):**
+  strictly more capable but strictly more machinery; v0 per-op exec
+  already exists, passes conformance, and covers the PoC. Sidecar mode
+  is the documented evolution, gated on a concrete stateful runtime
+  needing it.
 
 ## Risks
 
-- **Interface stability.** `runtime.Provider` is 18 methods plus 7
-  optional capability interfaces; promoting it to a public module makes
-  changes breaking. Mitigation: the optional-interface pattern already
-  in place is the extension mechanism; `runtimeapi` stays v0 during the
-  PoC window.
-- **Nested-module tagging.** Same-repo nested modules need
-  `runtimeapi/vX.Y.Z`-style tags and a pin-bump flow; reuse the
-  `scripts/update-bundled-gastown-pack` pattern.
-- **Upstream drift.** The alias shim in `internal/runtime` is a wide but
-  mechanical diff against upstream. If upstreaming the registry+contract
-  split is viable, propose it early — it is role-free SDK infrastructure
-  and passes the Primitive Test.
+- **Protocol stability.** Once packs ship against RPP v0 it is a
+  compatibility surface. Mitigations: exit-2 forward compatibility is
+  inherited from the exec contract; `protocol` handshake carries the
+  version; the spec doc is the contract and changes go through design
+  review.
+- **Per-op fork/exec overhead.** Health patrol and status paths poll
+  `IsRunning`/`Peek`; each call is a process spawn. The existing exec
+  provider already lives this life; cloudflare adds HTTP latency that
+  dwarfs it. Measure during the PoC; the sidecar mode is the escape
+  hatch.
+- **Distribution friction.** `go install`-based packs require a Go
+  toolchain on the host. Acceptable for the PoC (dev-tool audience);
+  the checksummed release-artifact fetch is the general answer and is
+  scoped out deliberately.
+- **Capability fidelity.** `runtime.Provider` has 7 optional extension
+  interfaces; the proxy must map handshake capabilities to them
+  accurately or gc will silently skip features. The conformance command
+  must assert declared capabilities actually work.
 
 ## Follow-ups after the PoC
 
-1. **t3bridge extraction** (fork payoff): provider module outside
-   upstream-owned trees + `cmd/gc/runtime_packs.go` registration;
-   `template_resolve_t3bridge.go` and the legacy `exec:` alias move
-   behind the same boundary.
-2. `hybrid`, then `k8s` extraction; `tmux`/`subprocess`/`acp` stay
-   builtin until there is a concrete reason to move them.
-3. Track B: builtin agent-provider TOML via the bundled-import registry.
+1. **t3bridge extraction** (fork payoff): RPP executable owned by the
+   T3 Code repo (or a t3 pack), ledger access via bd CLI / gc API;
+   `template_resolve_t3bridge.go` and the legacy `exec:` alias retire
+   behind the pack boundary.
+2. Sidecar (long-lived) protocol mode when a stateful runtime needs it;
+   `[[service]] kind = "proxy_process"` supplies supervision.
+3. Checksummed release-artifact distribution for compiled providers.
+4. Track B: builtin agent-provider TOML via the bundled-import
+   registry.
+5. Revisit `k8s`/`hybrid` extraction against the proven protocol.
