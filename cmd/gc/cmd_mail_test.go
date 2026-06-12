@@ -4522,3 +4522,19 @@ func TestCmdMailSendAllPositionalBodyHonouredWhenSubjectFlagSet(t *testing.T) {
 		t.Errorf("Description = %q, want %q (--all positional body was dropped)", msg.Description, "positional body")
 	}
 }
+
+func TestCmdMailSendAllFlagBodyWinsOverPositional(t *testing.T) {
+	// When both -m and a positional body are present with --all, -m wins.
+	cityPath := mailSendTestCity(t, "worker")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"positional body"}, false, true, "controller", "", "subject", "flag body", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend --all = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	msg := mailSendTestFindMessage(t, cityPath)
+	if msg.Description != "flag body" {
+		t.Errorf("Description = %q, want %q (--all -m flag body should win over positional)", msg.Description, "flag body")
+	}
+}
