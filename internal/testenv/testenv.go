@@ -45,22 +45,29 @@
 // deliberately set (via its own `env FOO=bar` line) reach the subcommand.
 // Testscript owns the child env fully, so there is no leak risk.
 //
-// Production Dolt port guard: a Dolt port var (BEADS_DOLT_SERVER_PORT or
-// GC_DOLT_PORT) carrying ProdDoltPort that would survive into the process —
-// passthrough-preserved in go-test mode, or any value in testscript
-// subcommand mode — makes init() panic instead, unless the paired Dolt host
-// var survives with a non-local value (3307 is Dolt's default port, so
-// external-server fixtures like db.example.com:3307 are legitimate). Test
-// debris (testrig, tt, my_db databases) inside the production Dolt store
-// traced back to test clients reaching the local server on port 3307
+// Production Dolt port guard: a Dolt port var (BEADS_DOLT_SERVER_PORT,
+// GC_DOLT_PORT, or BEADS_DOLT_PORT) carrying ProdDoltPort that would survive
+// into the process — passthrough-preserved in go-test mode, or any value in
+// testscript subcommand mode — makes init() panic instead, unless the paired
+// Dolt host var survives with a non-local value (3307 is Dolt's default
+// port, so external-server fixtures like db.example.com:3307 are
+// legitimate). Port values are matched numerically the way consumers parse
+// them, so "03307" and "+3307" also refuse. BEADS_DOLT_PORT has no paired
+// host var — the beads library consumes it on multiple paths, as a legacy
+// server-port alias as well as for local/auto-started servers, so its
+// effective host cannot be proven from env pairing — and the guard fails
+// closed: it is treated as implicitly local and no host value disarms it.
+// Test debris (testrig, tt, my_db databases) inside the production Dolt
+// store traced back to test clients reaching the local server on port 3307
 // (ga-4c2ss6). For the rare legitimate case, set ProdDoltPortOptOutVar
 // (GC_ALLOW_PROD_DOLT_PORT_IN_TESTS) to "1".
 package testenv
 
 import (
-	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -88,12 +95,17 @@ const PassthroughVar = "GC_TESTENV_PASSTHROUGH"
 // package init except for names listed in PassthroughVar.
 //
 // Adding a new env var that names a city path, session identity, bead store,
-// or managed Dolt target? Add it here too. Test-gate vars (GC_FAST_UNIT,
-// GC_REAL_PROCESS_SIGNAL_TESTS, GC_DOLT_REAL_BINARY, ...) do NOT belong here;
-// they're how tests opt into expensive paths.
+// or managed Dolt target? Add it here too. Every key and non-empty value of
+// doltPortVars MUST appear here: refuseProdDoltPort models post-scrub
+// survival via the passthrough list, which is only exact for vars this scrub
+// actually unsets. TestDoltPortVarsAreLeakVectors enforces that pairing.
+// Test-gate vars (GC_FAST_UNIT, GC_REAL_PROCESS_SIGNAL_TESTS,
+// GC_DOLT_REAL_BINARY, ...) do NOT belong here; they're how tests opt into
+// expensive paths.
 var LeakVectorVars = []string{
 	"BEADS_DIR",
 	"BEADS_DOLT_PASSWORD",
+	"BEADS_DOLT_PORT",
 	"BEADS_DOLT_SERVER_HOST",
 	"BEADS_DOLT_SERVER_PORT",
 	"BEADS_DOLT_SERVER_USER",
@@ -132,31 +144,51 @@ const ProdDoltPort = "3307"
 const ProdDoltPortOptOutVar = "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS"
 
 // doltPortVars maps each env var that selects a Dolt server port to the env
-// var that selects the matching Dolt server host.
+// var that selects the matching Dolt server host. An empty host var name
+// means the port var has no host pairing: BEADS_DOLT_PORT feeds multiple
+// beads code paths — a legacy server-port alias as well as local/auto-start
+// inputs — so its effective host cannot be proven from any env pairing. The
+// guard fails closed and treats it as implicitly local; no surviving host
+// value can disarm it. Every key and non-empty value here MUST also appear
+// in LeakVectorVars so the guard's survival model matches the scrub;
+// TestDoltPortVarsAreLeakVectors enforces that pairing.
 var doltPortVars = map[string]string{
+	"BEADS_DOLT_PORT":        "",
 	"BEADS_DOLT_SERVER_PORT": "BEADS_DOLT_SERVER_HOST",
 	"GC_DOLT_PORT":           "GC_DOLT_HOST",
 }
 
 // isLocalDoltHost reports whether a Dolt host value targets the local
 // machine: empty (clients default to localhost), "localhost", a loopback
-// address, or an unspecified address.
+// address, or an unspecified address, including bracketed IPv6 literals
+// like "[::1]". Mirrors the canonical contract.DoltHostIsLocal
+// (internal/beads/contract/connection.go) — kept as a stdlib-only copy so
+// this package, blank-imported by every test binary, links no domain
+// packages. TestIsLocalDoltHostMatchesCanonicalClassifier pins the two
+// classifiers together.
 func isLocalDoltHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
 	if host == "" || host == "localhost" {
 		return true
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return addr.IsLoopback() || addr.IsUnspecified()
 }
 
 // refuseProdDoltPort panics when a Dolt port var that will outlive init()
 // points at the local production Dolt server. survives reports whether the
 // named var survives the scrub: always in testscript subcommand mode,
-// passthrough-listed only in go-test mode. A paired host var that survives
-// with a non-local value disarms the guard for that pair — 3307 is Dolt's
-// default port, so external-server fixtures use it legitimately.
-// ProdDoltPortOptOutVar set to "1" disables the guard entirely.
+// passthrough-listed only in go-test mode. Port values are parsed with
+// strconv.Atoi the way consumers do, so numeric equivalents of ProdDoltPort
+// like "03307" and "+3307" fire too; unparsable values never reach a server
+// and are skipped. A paired host var that survives with a non-local value
+// disarms the guard for that pair — 3307 is Dolt's default port, so
+// external-server fixtures use it legitimately. A port var with no paired
+// host var is implicitly local and is never disarmed. ProdDoltPortOptOutVar
+// set to "1" disables the guard entirely.
 func refuseProdDoltPort(survives func(name string) bool) {
 	if os.Getenv(ProdDoltPortOptOutVar) == "1" {
 		return
@@ -165,11 +197,12 @@ func refuseProdDoltPort(survives func(name string) bool) {
 		if !survives(portVar) {
 			continue
 		}
-		if strings.TrimSpace(os.Getenv(portVar)) != ProdDoltPort {
+		port, err := strconv.Atoi(strings.TrimSpace(os.Getenv(portVar)))
+		if err != nil || strconv.Itoa(port) != ProdDoltPort {
 			continue
 		}
 		host := ""
-		if survives(hostVar) {
+		if hostVar != "" && survives(hostVar) {
 			host = os.Getenv(hostVar)
 		}
 		if !isLocalDoltHost(host) {

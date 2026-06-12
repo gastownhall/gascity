@@ -155,15 +155,21 @@ func TestInitSkipsScrubInTestscriptSubcommandMode(t *testing.T) {
 // a test process. The guard fires only for values that would outlive the
 // scrub — passthrough-preserved vars in go-test mode, and all vars in
 // testscript subcommand mode (where the scrub is skipped) — and only when the
-// effective Dolt host is local (unset, scrubbed, localhost, or loopback).
-// External hosts on 3307 (Dolt's default port) are legitimate fixtures.
-// Setting GC_ALLOW_PROD_DOLT_PORT_IN_TESTS=1 opts out for the rare
-// legitimate case.
+// effective Dolt host is local (unset, scrubbed, localhost, loopback, or
+// unspecified, including bracketed IPv6 forms like "[::1]"). Port values are
+// matched numerically the way consumers parse them, so "03307" and "+3307"
+// also refuse while unparsable values pass through. BEADS_DOLT_PORT feeds
+// multiple beads code paths — a legacy server-port alias as well as
+// local/auto-start inputs — so no env pairing proves its effective host; the
+// guard fails closed, treats it as implicitly local, and no surviving host
+// value disarms it. External hosts on 3307 (Dolt's default port) are
+// legitimate fixtures. Setting GC_ALLOW_PROD_DOLT_PORT_IN_TESTS=1 opts out
+// for the rare legitimate case.
 func TestInitRefusesProdDoltPort(t *testing.T) {
 	if os.Getenv("GC_TESTENV_CHILD") == "1" {
 		// Child: report the Dolt host/port vars as the parent's env shaped them.
 		var lines []string
-		for _, name := range []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT"} {
+		for _, name := range []string{"BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT"} {
 			lines = append(lines, name+"="+os.Getenv(name))
 		}
 		os.Stdout.WriteString(strings.Join(lines, "\n") + "\n") //nolint:errcheck
@@ -207,6 +213,26 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 			wantPanic: true,
 		},
 		{
+			name: "passthrough zero-padded prod port panics",
+			bin:  exe,
+			env: []string{
+				// Consumers parse the port with strconv.Atoi, so "03307"
+				// reaches the production server just like "3307".
+				"GC_TESTENV_PASSTHROUGH=BEADS_DOLT_SERVER_PORT",
+				"BEADS_DOLT_SERVER_PORT=03307",
+			},
+			wantPanic: true,
+		},
+		{
+			name: "passthrough plus-signed prod port panics",
+			bin:  exe,
+			env: []string{
+				"GC_TESTENV_PASSTHROUGH=GC_DOLT_PORT",
+				"GC_DOLT_PORT=+3307",
+			},
+			wantPanic: true,
+		},
+		{
 			name: "passthrough non-prod port survives",
 			bin:  exe,
 			env: []string{
@@ -214,6 +240,17 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 				"BEADS_DOLT_SERVER_PORT=3308",
 			},
 			wantOutput: []string{"BEADS_DOLT_SERVER_PORT=3308\n"},
+		},
+		{
+			name: "passthrough unparsable port value survives",
+			bin:  exe,
+			env: []string{
+				// strconv.Atoi rejects "3307x", so consumers never use it to
+				// reach a server and the guard must not refuse it.
+				"GC_TESTENV_PASSTHROUGH=BEADS_DOLT_SERVER_PORT",
+				"BEADS_DOLT_SERVER_PORT=3307x",
+			},
+			wantOutput: []string{"BEADS_DOLT_SERVER_PORT=3307x\n"},
 		},
 		{
 			name: "passthrough external host allows prod port",
@@ -235,6 +272,46 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 				"GC_TESTENV_PASSTHROUGH=BEADS_DOLT_SERVER_HOST,BEADS_DOLT_SERVER_PORT",
 				"BEADS_DOLT_SERVER_HOST=127.0.0.1",
 				"BEADS_DOLT_SERVER_PORT=3307",
+			},
+			wantPanic: true,
+		},
+		{
+			name: "passthrough bracketed IPv6 loopback host refuses prod port",
+			bin:  exe,
+			env: []string{
+				"GC_TESTENV_PASSTHROUGH=BEADS_DOLT_SERVER_HOST,BEADS_DOLT_SERVER_PORT",
+				"BEADS_DOLT_SERVER_HOST=[::1]",
+				"BEADS_DOLT_SERVER_PORT=3307",
+			},
+			wantPanic: true,
+		},
+		{
+			name: "passthrough bracketed unspecified host refuses prod port",
+			bin:  exe,
+			env: []string{
+				"GC_TESTENV_PASSTHROUGH=BEADS_DOLT_SERVER_HOST,BEADS_DOLT_SERVER_PORT",
+				"BEADS_DOLT_SERVER_HOST=[::]",
+				"BEADS_DOLT_SERVER_PORT=3307",
+			},
+			wantPanic: true,
+		},
+		{
+			name: "passthrough GC bracketed IPv6 loopback host refuses prod port",
+			bin:  exe,
+			env: []string{
+				"GC_TESTENV_PASSTHROUGH=GC_DOLT_HOST,GC_DOLT_PORT",
+				"GC_DOLT_HOST=[::1]",
+				"GC_DOLT_PORT=3307",
+			},
+			wantPanic: true,
+		},
+		{
+			name: "passthrough GC bracketed unspecified host refuses prod port",
+			bin:  exe,
+			env: []string{
+				"GC_TESTENV_PASSTHROUGH=GC_DOLT_HOST,GC_DOLT_PORT",
+				"GC_DOLT_HOST=[::]",
+				"GC_DOLT_PORT=3307",
 			},
 			wantPanic: true,
 		},
@@ -262,6 +339,38 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 				"GC_DOLT_HOST=city-db.example.com\n",
 				"GC_DOLT_PORT=3307\n",
 			},
+		},
+		{
+			name: "passthrough BEADS_DOLT_PORT prod port panics",
+			bin:  exe,
+			env: []string{
+				"GC_TESTENV_PASSTHROUGH=BEADS_DOLT_PORT",
+				"BEADS_DOLT_PORT=3307",
+			},
+			wantPanic: true,
+		},
+		{
+			name: "passthrough BEADS_DOLT_PORT non-prod port survives",
+			bin:  exe,
+			env: []string{
+				"GC_TESTENV_PASSTHROUGH=BEADS_DOLT_PORT",
+				"BEADS_DOLT_PORT=3308",
+			},
+			wantOutput: []string{"BEADS_DOLT_PORT=3308\n"},
+		},
+		{
+			name: "passthrough external host does not disarm BEADS_DOLT_PORT",
+			bin:  exe,
+			env: []string{
+				// BEADS_DOLT_PORT feeds multiple beads code paths — a legacy
+				// server-port alias as well as local/auto-start inputs — so no
+				// env pairing proves its effective host; a surviving external
+				// server host must not disarm its guard.
+				"GC_TESTENV_PASSTHROUGH=BEADS_DOLT_SERVER_HOST,BEADS_DOLT_PORT",
+				"BEADS_DOLT_SERVER_HOST=city-db.example.com",
+				"BEADS_DOLT_PORT=3307",
+			},
+			wantPanic: true,
 		},
 		{
 			name: "opt-out allows prod port through passthrough",
@@ -313,6 +422,27 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 				"BEADS_DOLT_SERVER_HOST=localhost",
 				"BEADS_DOLT_SERVER_PORT=3307",
 			},
+			wantPanic: true,
+		},
+		{
+			name: "subcommand mode bracketed IPv6 loopback host refuses prod port",
+			bin:  fakeGC,
+			env: []string{
+				"BEADS_DOLT_SERVER_HOST=[::1]",
+				"BEADS_DOLT_SERVER_PORT=3307",
+			},
+			wantPanic: true,
+		},
+		{
+			name:      "subcommand mode BEADS_DOLT_PORT refuses prod port",
+			bin:       fakeGC,
+			env:       []string{"BEADS_DOLT_PORT=3307"},
+			wantPanic: true,
+		},
+		{
+			name:      "subcommand mode zero-padded BEADS_DOLT_PORT refuses prod port",
+			bin:       fakeGC,
+			env:       []string{"BEADS_DOLT_PORT=03307"},
 			wantPanic: true,
 		},
 		{
