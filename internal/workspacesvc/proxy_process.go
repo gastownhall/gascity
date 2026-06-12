@@ -208,6 +208,9 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 	cmd.Env = append(cmd.Env,
 		"GC_SERVICE_NAME="+p.svc.Name,
 		"GC_SERVICE_STATE_ROOT="+p.absStateRoot,
+		// Scaffolded at 0700 by ensureStateRoot; the sanctioned home for
+		// pack-managed credentials (bot tokens etc.).
+		"GC_SERVICE_SECRETS_DIR="+filepath.Join(p.absStateRoot, "secrets"),
 		"GC_SERVICE_RUN_ROOT="+filepath.Join(p.absStateRoot, "run"),
 		"GC_SERVICE_SOCKET="+p.socketPath,
 		"GC_SERVICE_URL_PREFIX="+citylayout.PublicServiceMountPath(p.rt.CityName(), p.svc.Name),
