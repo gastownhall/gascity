@@ -15,7 +15,8 @@ import (
 // TestRunSupervisorEmitsSdNotifyLifecycle verifies that when
 // NOTIFY_SOCKET is set (systemd Type=notify), runSupervisor emits
 // READY=1 once the control socket and API are up, WATCHDOG=1 on each
-// healthy reconcile cycle, and STOPPING=1 when shutdown begins.
+// healthy reconcile cycle, RELOADING=1 followed by READY=1 around a
+// reload-triggered reconcile, and STOPPING=1 when shutdown begins.
 func TestRunSupervisorEmitsSdNotifyLifecycle(t *testing.T) {
 	gcHome := shortTempDir(t, "gc-home-")
 	runtimeDir := shortTempDir(t, "gc-run-")
@@ -76,6 +77,35 @@ func TestRunSupervisorEmitsSdNotifyLifecycle(t *testing.T) {
 	}
 	if got := readDatagram(); got != "WATCHDOG=1" {
 		t.Fatalf("second datagram = %q, want WATCHDOG=1 from initial reconcile", got)
+	}
+
+	sigCh <- syscall.SIGHUP
+
+	// Ticker reconciles may interleave WATCHDOG=1 datagrams before the
+	// reload branch runs; drain until RELOADING=1 arrives.
+	reloadDeadline := time.Now().Add(10 * time.Second)
+	var reload []string
+	for time.Now().Before(reloadDeadline) {
+		got := readDatagram()
+		reload = append(reload, got)
+		if got == "RELOADING=1" {
+			break
+		}
+		if got != "WATCHDOG=1" {
+			t.Fatalf("unexpected datagram %q while waiting for RELOADING=1 (saw %v)", got, reload)
+		}
+	}
+	if len(reload) == 0 || reload[len(reload)-1] != "RELOADING=1" {
+		t.Fatalf("never received RELOADING=1 after SIGHUP; saw %v; stdout=%q stderr=%q", reload, stdout.String(), stderr.String())
+	}
+	// All notify sends happen on the single supervisor loop goroutine,
+	// so the reload's own reconcile pet and its READY=1 completion
+	// follow RELOADING=1 with no ticker interleave.
+	if got := readDatagram(); got != "WATCHDOG=1" {
+		t.Fatalf("datagram after RELOADING=1 = %q, want WATCHDOG=1 from reload reconcile", got)
+	}
+	if got := readDatagram(); got != "READY=1" {
+		t.Fatalf("datagram after reload reconcile = %q, want READY=1 reload completion", got)
 	}
 
 	sigCh <- syscall.SIGTERM

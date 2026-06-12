@@ -18,6 +18,9 @@ const (
 	Ready = "READY=1"
 	// Watchdog updates the service watchdog timestamp (WatchdogSec=).
 	Watchdog = "WATCHDOG=1"
+	// Reloading tells the service manager that a configuration reload
+	// has begun; per sd_notify(3) the reload ends with a Ready send.
+	Reloading = "RELOADING=1"
 	// Stopping tells the service manager that shutdown has begun.
 	Stopping = "STOPPING=1"
 )

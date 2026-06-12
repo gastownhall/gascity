@@ -1308,6 +1308,12 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		case <-ticker.C:
 			safeReconcile()
 		case req := <-reconcileCh:
+			// Reload-triggered reconcile (SIGHUP or the "reload" socket
+			// command): bracket it with RELOADING=1/READY=1 so a
+			// notify-aware service manager sees the reload lifecycle.
+			// Ticker and initial reconciles are not reloads and must
+			// not emit RELOADING.
+			notifySdState(stderr, sdnotify.Reloading)
 			safeReconcile()
 			// Also poke all running cities so they immediately reconcile
 			// their agents (e.g. after a child process was killed).
@@ -1317,6 +1323,8 @@ func runSupervisor(stdout, stderr io.Writer) int {
 					v.cs.Poke()
 				}
 			}
+			// Per sd_notify(3) a reload ends with READY=1.
+			notifySdState(stderr, sdnotify.Ready)
 			if req.done != nil {
 				close(req.done)
 			}
