@@ -286,42 +286,35 @@ verify_index_definition() {
     fi
 }
 
-status_index_rows() {
-    local output="$1"
+index_rows_for() {
+    local output="$1" name="$2"
 
-    printf '%s\n' "$output" | awk -F, -v idx="$STATUS_INDEX_NAME" 'NR > 1 && $3 == idx { count++ } END { print count + 0 }'
+    printf '%s\n' "$output" | awk -F, -v idx="$name" 'NR > 1 && $3 == idx { count++ } END { print count + 0 }'
 }
+
+verify_single_column_index() {
+    local output="$1" name="$2" col="$3"
+    local count
+
+    count=$(index_rows_for "$output" "$name")
+    if [ "$count" -ne 1 ]; then
+        die "index $name has $count column rows; expected exactly 1 for ($col)"
+    fi
+
+    printf '%s\n' "$output" | awk -F, -v idx="$name" -v c="$col" 'NR > 1 && $3 == idx && $4 == "1" && $5 == c { found = 1 } END { exit found ? 0 : 1 }' \
+        || die "index $name exists but does not match ($col)"
+}
+
+status_index_rows() { index_rows_for "$1" "$STATUS_INDEX_NAME"; }
 
 verify_status_index_definition() {
-    local output="$1"
-    local count
-
-    count=$(status_index_rows "$output")
-    if [ "$count" -ne 1 ]; then
-        die "index $STATUS_INDEX_NAME has $count column rows; expected exactly 1 for ($STATUS_INDEX_COLUMNS)"
-    fi
-
-    printf '%s\n' "$output" | awk -F, -v idx="$STATUS_INDEX_NAME" 'NR > 1 && $3 == idx && $4 == "1" && $5 == "status" { found = 1 } END { exit found ? 0 : 1 }' \
-        || die "index $STATUS_INDEX_NAME exists but does not match ($STATUS_INDEX_COLUMNS)"
+    verify_single_column_index "$1" "$STATUS_INDEX_NAME" "$STATUS_INDEX_COLUMNS"
 }
 
-defer_until_index_rows() {
-    local output="$1"
-
-    printf '%s\n' "$output" | awk -F, -v idx="$DEFER_UNTIL_INDEX_NAME" 'NR > 1 && $3 == idx { count++ } END { print count + 0 }'
-}
+defer_until_index_rows() { index_rows_for "$1" "$DEFER_UNTIL_INDEX_NAME"; }
 
 verify_defer_until_index_definition() {
-    local output="$1"
-    local count
-
-    count=$(defer_until_index_rows "$output")
-    if [ "$count" -ne 1 ]; then
-        die "index $DEFER_UNTIL_INDEX_NAME has $count column rows; expected exactly 1 for ($DEFER_UNTIL_INDEX_COLUMNS)"
-    fi
-
-    printf '%s\n' "$output" | awk -F, -v idx="$DEFER_UNTIL_INDEX_NAME" 'NR > 1 && $3 == idx && $4 == "1" && $5 == "defer_until" { found = 1 } END { exit found ? 0 : 1 }' \
-        || die "index $DEFER_UNTIL_INDEX_NAME exists but does not match ($DEFER_UNTIL_INDEX_COLUMNS)"
+    verify_single_column_index "$1" "$DEFER_UNTIL_INDEX_NAME" "$DEFER_UNTIL_INDEX_COLUMNS"
 }
 
 commit_schema_change() {
