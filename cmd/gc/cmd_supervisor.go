@@ -381,12 +381,19 @@ func requestSupervisorShutdown(stderr io.Writer, rec events.Recorder, shutdownCt
 // emitSupervisorStarted records the supervisor.started event with
 // restart-cause attribution and mirrors it on the OTel log path.
 // previousExit is one of the supervisor.PreviousExit* classifications
-// describing how the previous supervisor instance exited.
-func emitSupervisorStarted(stderr io.Writer, rec events.Recorder, previousExit string) {
+// describing how the previous supervisor instance exited. detail, when
+// non-nil, explains an otherwise ambiguous classification (an unknown
+// from an unremovable handoff token); it is surfaced only on the stderr
+// breadcrumb — the wire payload carries the classification alone.
+func emitSupervisorStarted(stderr io.Writer, rec events.Recorder, previousExit string, detail error) {
 	// Plain-text breadcrumb to stderr -> ~/.gc/supervisor.log, mirroring
 	// the shutdown-attribution breadcrumb so operators can correlate
 	// start cause with the previous exit without parsing events.jsonl.
-	fmt.Fprintf(stderr, "gc supervisor: started: previous_exit=%s\n", previousExit) //nolint:errcheck
+	if detail != nil {
+		fmt.Fprintf(stderr, "gc supervisor: started: previous_exit=%s reason=%v\n", previousExit, detail) //nolint:errcheck
+	} else {
+		fmt.Fprintf(stderr, "gc supervisor: started: previous_exit=%s\n", previousExit) //nolint:errcheck
+	}
 	if rec != nil {
 		payload := api.SupervisorStartedPayload{PreviousExit: previousExit}
 		raw, err := json.Marshal(payload)
@@ -1112,7 +1119,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// Holding the instance lock, consume the clean-shutdown handoff
 	// token the previous instance's STOPPING path left behind (if any)
 	// and classify how that instance exited.
-	previousExit := supervisor.ConsumePreviousExit(supervisor.DefaultHome(), priorInstanceRan)
+	previousExit, previousExitDetail := supervisor.ConsumePreviousExit(supervisor.DefaultHome(), priorInstanceRan)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1125,7 +1132,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		registry.SetSupervisorRecorder(supFR)
 		defer supFR.Close() //nolint:errcheck
 	}
-	emitSupervisorStarted(stderr, registry.SupervisorEventRecorder(), previousExit)
+	emitSupervisorStarted(stderr, registry.SupervisorEventRecorder(), previousExit, previousExitDetail)
 	requestShutdown := func(mode supervisorShutdownMode, trigger shutdownTrigger) bool {
 		return requestSupervisorShutdown(stderr, registry.SupervisorEventRecorder(), shutdownCtl, cancel, mode, trigger)
 	}

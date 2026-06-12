@@ -11,6 +11,13 @@ import (
 // Previous-exit classifications carried by the supervisor.started event.
 // They describe how the previous supervisor instance on this machine
 // exited, derived from the clean-shutdown handoff token below.
+//
+// Attribution is best-effort across binary up/downgrades and
+// misattributes at most one start per mixed-version window: a
+// token-unaware binary neither writes nor consumes the token, so its
+// crash can be masked by a stale token from an earlier token-aware
+// clean stop, and its clean stop reads as a crash on the next
+// token-aware start. Both directions self-correct after one full cycle.
 const (
 	// PreviousExitClean means the previous instance completed its
 	// orderly STOPPING path and left the handoff token behind.
@@ -61,18 +68,26 @@ func WriteShutdownMarker(home string) error {
 // previous instance exists (the supervisor lock file, observed before
 // this instance recreated it); with the token absent it distinguishes a
 // crashed prior instance from a first start.
-func ConsumePreviousExit(home string, priorInstanceRan bool) string {
+//
+// detail is non-nil only when the token could not be removed for a
+// reason other than absence (permissions, IO error). The class is then
+// PreviousExitUnknown — the classification refuses to guess — and the
+// detail distinguishes an unremovable stale token from a true first
+// start. The unremoved token stays armed, so a later start that does
+// remove it reports a stale clean; surfacing the detail keeps that
+// window observable.
+func ConsumePreviousExit(home string, priorInstanceRan bool) (class string, detail error) {
 	err := os.Remove(ShutdownMarkerPath(home))
 	switch {
 	case err == nil:
-		return PreviousExitClean
+		return PreviousExitClean, nil
 	case !os.IsNotExist(err):
 		// The token may exist but cannot be removed (permissions, IO
 		// error). Refuse to guess a classification.
-		return PreviousExitUnknown
+		return PreviousExitUnknown, fmt.Errorf("removing shutdown handoff token: %w", err)
 	case priorInstanceRan:
-		return PreviousExitCrash
+		return PreviousExitCrash, nil
 	default:
-		return PreviousExitUnknown
+		return PreviousExitUnknown, nil
 	}
 }

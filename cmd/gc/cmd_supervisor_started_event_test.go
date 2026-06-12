@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +26,7 @@ func TestEmitSupervisorStartedRecordsTypedEvent(t *testing.T) {
 			var stderr bytes.Buffer
 			rec := events.NewFake()
 
-			emitSupervisorStarted(&stderr, rec, cause)
+			emitSupervisorStarted(&stderr, rec, cause, nil)
 
 			wantLine := "gc supervisor: started: previous_exit=" + cause + "\n"
 			if got := stderr.String(); got != wantLine {
@@ -58,7 +59,7 @@ func TestEmitSupervisorStartedRecordsTypedEvent(t *testing.T) {
 func TestEmitSupervisorStartedWithoutRecorderStillLogs(t *testing.T) {
 	var stderr bytes.Buffer
 
-	emitSupervisorStarted(&stderr, nil, supervisor.PreviousExitUnknown)
+	emitSupervisorStarted(&stderr, nil, supervisor.PreviousExitUnknown, nil)
 
 	wantLine := "gc supervisor: started: previous_exit=unknown\n"
 	if got := stderr.String(); got != wantLine {
@@ -66,13 +67,40 @@ func TestEmitSupervisorStartedWithoutRecorderStillLogs(t *testing.T) {
 	}
 }
 
+func TestEmitSupervisorStartedIncludesDetailReason(t *testing.T) {
+	var stderr bytes.Buffer
+	rec := events.NewFake()
+
+	emitSupervisorStarted(&stderr, rec, supervisor.PreviousExitUnknown,
+		errors.New("removing shutdown handoff token: permission denied"))
+
+	wantLine := "gc supervisor: started: previous_exit=unknown reason=removing shutdown handoff token: permission denied\n"
+	if got := stderr.String(); got != wantLine {
+		t.Fatalf("stderr = %q, want %q", got, wantLine)
+	}
+	// The detail is breadcrumb-only: the wire payload carries the
+	// classification alone.
+	if len(rec.Events) != 1 {
+		t.Fatalf("recorded events = %d, want 1", len(rec.Events))
+	}
+	var payload api.SupervisorStartedPayload
+	if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+		t.Fatalf("Unmarshal payload: %v", err)
+	}
+	if payload.PreviousExit != supervisor.PreviousExitUnknown {
+		t.Fatalf("payload.PreviousExit = %q, want %q", payload.PreviousExit, supervisor.PreviousExitUnknown)
+	}
+}
+
 // TestRunSupervisorEmitsStartedEventWithRestartCause runs the supervisor
-// twice through a full start → SIGTERM → stop cycle and verifies the
-// restart-cause handoff: the first start (no prior instance) reports
+// three times through full start → SIGTERM → stop cycles and verifies
+// the restart-cause handoff: the first start (no prior instance) reports
 // previous_exit=unknown, the clean shutdown leaves the handoff token,
 // the second start consumes the token (checked while it is running,
 // before its own clean stop re-arms the token) and reports
-// previous_exit=clean.
+// previous_exit=clean, and the third start — after the re-armed token is
+// deleted to simulate a crash, with the prior runs' lock file still
+// present — reports previous_exit=crash.
 func TestRunSupervisorEmitsStartedEventWithRestartCause(t *testing.T) {
 	gcHome := shortTempDir(t, "gc-home-")
 	runtimeDir := shortTempDir(t, "gc-run-")
@@ -145,6 +173,15 @@ func TestRunSupervisorEmitsStartedEventWithRestartCause(t *testing.T) {
 		t.Fatalf("shutdown handoff token after second clean stop: %v", err)
 	}
 
+	// Simulate a crash before the third start: delete the re-armed
+	// handoff token. The supervisor lock file from the prior runs
+	// remains, so the third start sees prior-instance evidence without
+	// a token and classifies the previous exit as a crash.
+	if err := os.Remove(markerPath); err != nil {
+		t.Fatalf("removing handoff token to simulate crash: %v", err)
+	}
+	runOnce(nil)
+
 	data, err := os.ReadFile(filepath.Join(supervisor.RuntimeDir(), "events.jsonl"))
 	if err != nil {
 		t.Fatalf("reading supervisor events log: %v", err)
@@ -167,7 +204,7 @@ func TestRunSupervisorEmitsStartedEventWithRestartCause(t *testing.T) {
 		}
 		causes = append(causes, payload.PreviousExit)
 	}
-	want := []string{supervisor.PreviousExitUnknown, supervisor.PreviousExitClean}
+	want := []string{supervisor.PreviousExitUnknown, supervisor.PreviousExitClean, supervisor.PreviousExitCrash}
 	if len(causes) != len(want) {
 		t.Fatalf("supervisor.started causes = %v, want %v", causes, want)
 	}
