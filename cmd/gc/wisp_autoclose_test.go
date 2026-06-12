@@ -282,6 +282,48 @@ func (s staleCachedWispStore) Handles() beads.StoreHandles {
 	}
 }
 
+func TestWispAutocloseTraversesChildrenViaLiveHandle(t *testing.T) {
+	mem := beads.NewMemStore()
+	_, _ = mem.Create(beads.Bead{Title: "work item"})                                // gc-1
+	_, _ = mem.Create(beads.Bead{Title: "wisp", Type: "molecule", ParentID: "gc-1"}) // gc-2
+	_ = mem.Close("gc-1")
+	store := tierNarrowListWispStore{MemStore: mem}
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, "gc-1", &stdout)
+
+	if !strings.Contains(stdout.String(), "Auto-closed molecule gc-2 on gc-1") {
+		t.Fatalf("stdout = %q, want auto-close message for live-listed child", stdout.String())
+	}
+	b, err := mem.Get("gc-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "closed" {
+		t.Fatalf("wisp Status = %q, want closed", b.Status)
+	}
+}
+
+// tierNarrowListWispStore returns no rows from raw List calls while its Live
+// handle reads the full MemStore — the shape of a tier-narrow raw store that
+// cannot see ephemeral-tier attachments. Autoclose child traversal must read
+// through the Live handle to find them.
+type tierNarrowListWispStore struct {
+	*beads.MemStore
+}
+
+func (s tierNarrowListWispStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, nil
+}
+
+func (s tierNarrowListWispStore) Handles() beads.StoreHandles {
+	return beads.StoreHandles{
+		Cached: s,
+		Live:   s.MemStore,
+		Writer: s.MemStore,
+	}
+}
+
 func TestWispAutocloseSkipsAlreadyClosed(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{Title: "work item"})                                // gc-1

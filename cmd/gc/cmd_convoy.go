@@ -1786,9 +1786,12 @@ func convoyAutocloseStoreRoot(cwd string) string {
 }
 
 // autocloseCityPathForStoreRoot resolves the runtime city for bd hook cleanup.
-// The hook-projected store root identifies the bead that just closed, so prefer
-// filesystem discovery from that root over an inherited GC_CITY from the
-// supervising process.
+// Precedence: a city.toml-backed discovery result from the store root wins
+// outright; otherwise a validated explicit GC_CITY from the supervising
+// process is preferred over a legacy `.gc/`-only discovery result (an external
+// rig checkout with runtime state but no city.toml); the legacy runtime root
+// is used when no explicit city is set; cityForStoreDir is the final fallback
+// when discovery fails entirely.
 func autocloseCityPathForStoreRoot(storeRoot string) string {
 	if cityPath, err := findCity(storeRoot); err == nil {
 		if _, statErr := os.Stat(filepath.Join(cityPath, "city.toml")); statErr == nil {

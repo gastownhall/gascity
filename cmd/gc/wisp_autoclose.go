@@ -56,12 +56,16 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 // preferred, with child traversal as a fallback for legacy data. Called from
 // the bd on_close hook to ensure attached wisps don't outlive their parent work
 // bead. All errors are silently swallowed — this is best-effort infrastructure.
+// Parent lookup and child traversal both read through the Live handle: the
+// hook fires for closed and ephemeral-tier beads that cached or tier-narrow
+// raw reads can miss, and an attachment missed here outlives its parent — the
+// leak class this hook exists to drain.
 func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
 	parent, err := beads.HandlesFor(store).Live.Get(beadID)
 	if err != nil {
 		return
 	}
-	attachments, err := collectAttachedBeads(parent, store, store)
+	attachments, err := collectAttachedBeads(parent, store, beads.HandlesFor(store).Live)
 	if err == nil || len(attachments) > 0 {
 		for _, attached := range attachments {
 			closed, err := closeAttachedWispSubtree(store, attached)

@@ -1636,7 +1636,7 @@ func orderWispMetadataDescendants(reader beads.LiveReader, rootID string, includ
 		return nil, nil
 	}
 	query := beads.ListQuery{
-		Metadata:      map[string]string{"gc.root_bead_id": rootID},
+		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		IncludeClosed: includeClosed,
 	}
 	descendants, err := reader.List(query)
@@ -2292,8 +2292,8 @@ func orderTrackingClosedReferenceTime(b beads.Bead) time.Time {
 	return b.CreatedAt
 }
 
-func sweepStaleOrderWispSubtrees(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}, initiator string) (int, error) {
-	return sweepStaleOrderWispSubtreesMode(store, cutoff, onlyOrders, initiator, false)
+func sweepStaleOrderWispSubtrees(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}) (int, error) {
+	return sweepStaleOrderWispSubtreesMode(store, cutoff, onlyOrders, orderTrackingSweepMetadataInitiator, false)
 }
 
 func sweepStaleOrderWispSubtreesMode(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}, initiator string, dryRun bool) (int, error) {
@@ -2360,6 +2360,13 @@ func sweepStaleOrderWispSubtreesMode(store beads.Store, cutoff time.Time, onlyOr
 	return closeStaleOrderWispIDs(store, ordered, initiator)
 }
 
+// closeStaleOrderWispIDs closes ids via Store.CloseAll with the sweep's audit
+// metadata. The legacy path pre-orders ids with closeorder.Order; the batch
+// path passes them unordered and is safe only because BdStore.CloseAll issues
+// `bd close --force`, which closes blocked beads regardless of in-batch order
+// (a non-forced wrong-order batch silently skips blocked beads while exiting
+// 0). That flag, pinned by TestBdCloseArgsAlwaysForce, is what keeps the
+// unordered batch correct on stores that enforce blocks dependencies.
 func closeStaleOrderWispIDs(store beads.Store, ids []string, initiator string) (int, error) {
 	metadata := map[string]string{
 		"order_tracking_sweep": orderTrackingSweepMetadataReason,
@@ -2381,25 +2388,40 @@ func staleOrderWispSubtreeBatchCloseIDs(store beads.Store, cutoff time.Time, onl
 		return nil, false, fmt.Errorf("include-wisps requires at least one order name")
 	}
 	all, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-		CreatedBefore: time.Now().Add(24 * time.Hour),
+		// The batch sweep deliberately scans every bead once and groups
+		// candidate roots with their descendants in memory, instead of issuing
+		// the per-root queries the walk path needs. Closed beads are included
+		// so the ParentID closure can traverse closed intermediates down to
+		// the open descendants beneath them, matching the walk path's
+		// IncludeClosed per-node queries.
+		AllowScan:     true,
+		IncludeClosed: true,
 	})
 	if err != nil {
-		return nil, false, fmt.Errorf("listing open wisp candidates for order-wisp batch sweep: %w", err)
+		return nil, false, fmt.Errorf("listing wisp candidates for order-wisp batch sweep: %w", err)
 	}
 	if len(all) == 0 {
 		return nil, false, nil
 	}
 
 	descendantsByRoot := make(map[string][]beads.Bead)
+	openStampedByRoot := make(map[string]struct{})
+	childrenByParent := make(map[string][]beads.Bead)
 	for _, bead := range all {
-		if bead.ID == "" || bead.Status == "closed" {
+		if bead.ID == "" {
 			continue
 		}
-		rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+		if parentID := strings.TrimSpace(bead.ParentID); parentID != "" && parentID != bead.ID {
+			childrenByParent[parentID] = append(childrenByParent[parentID], bead)
+		}
+		rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 		if rootID == "" {
 			continue
 		}
 		descendantsByRoot[rootID] = append(descendantsByRoot[rootID], bead)
+		if bead.Status != "closed" {
+			openStampedByRoot[rootID] = struct{}{}
+		}
 	}
 
 	handled := false
@@ -2412,7 +2434,13 @@ func staleOrderWispSubtreeBatchCloseIDs(store beads.Store, cutoff time.Time, onl
 		if beadLabelsContain(root.Labels, labelOrderTracking) {
 			continue
 		}
-		name, ok := orderNameFromTrackingBead(root)
+		// Force-close roots are matched on the order-run:<name> label only,
+		// matching the legacy path's staleOrderWispRoots selection. The
+		// order:<title> fallback in orderNameFromTrackingBead exists for legacy
+		// tracking beads; honoring it here would make a workflow root that was
+		// never order-poured force-closable just because its title collides
+		// with a swept order name.
+		name, ok := orderNameFromOrderRunLabel(root)
 		if !ok {
 			continue
 		}
@@ -2426,7 +2454,7 @@ func staleOrderWispSubtreeBatchCloseIDs(store beads.Store, cutoff time.Time, onl
 			continue
 		}
 		descendants := descendantsByRoot[root.ID]
-		if len(descendants) == 0 && !isOrderRootOnlyWispCandidate(root) {
+		if _, hasOpenStamped := openStampedByRoot[root.ID]; !hasOpenStamped && !isOrderRootOnlyWispCandidate(root) {
 			// Legacy graph-v2 wisps may only expose descendants through deps.
 			return nil, false, nil
 		}
@@ -2434,6 +2462,7 @@ func staleOrderWispSubtreeBatchCloseIDs(store beads.Store, cutoff time.Time, onl
 		subtree := make([]beads.Bead, 0, 1+len(descendants))
 		subtree = append(subtree, root)
 		subtree = append(subtree, descendants...)
+		subtree = appendParentChainDescendants(subtree, childrenByParent)
 		if !openSubtreeOlderThan(subtree, cutoff) {
 			continue
 		}
@@ -2446,6 +2475,44 @@ func staleOrderWispSubtreeBatchCloseIDs(store beads.Store, cutoff time.Time, onl
 		}
 	}
 	return ids, handled, nil
+}
+
+// appendParentChainDescendants unions a metadata-stamped subtree with every
+// bead reachable from it over ParentID edges. Partially-stamped molecules
+// carry open ParentID-only children that the gc.root_bead_id grouping cannot
+// see; without this union a fresh un-stamped child would no longer veto the
+// root's close and a stale one would be stranded open under a closed root —
+// the leak class the sweep drains. Closed children are appended and traversed
+// too: an open un-stamped descendant can hide behind a closed intermediate (a
+// lingering nudge/mail chore parented under an already-closed step is the
+// production shape), and only a closed-inclusive index reaches it — the walk
+// path resolves the identical shape through its IncludeClosed per-node
+// queries. Appending closed beads is safe because openSubtreeOlderThan and
+// staleOrderWispSubtreeCloseIDs both filter on status. The closure walks the
+// in-memory index built from the batch List, so it adds no store round-trips.
+func appendParentChainDescendants(subtree []beads.Bead, childrenByParent map[string][]beads.Bead) []beads.Bead {
+	seen := make(map[string]struct{}, len(subtree))
+	queue := make([]string, 0, len(subtree))
+	for _, b := range subtree {
+		if b.ID == "" {
+			continue
+		}
+		seen[b.ID] = struct{}{}
+		queue = append(queue, b.ID)
+	}
+	for len(queue) > 0 {
+		parentID := queue[0]
+		queue = queue[1:]
+		for _, child := range childrenByParent[parentID] {
+			if _, ok := seen[child.ID]; ok {
+				continue
+			}
+			seen[child.ID] = struct{}{}
+			subtree = append(subtree, child)
+			queue = append(queue, child.ID)
+		}
+	}
+	return subtree
 }
 
 func staleOrderWispRoots(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}) ([]beads.Bead, error) {
@@ -2467,35 +2534,42 @@ func staleOrderWispRoots(store beads.Store, cutoff time.Time, onlyOrders map[str
 	return roots, nil
 }
 
+// collectOrderWispSubtree returns the root plus every descendant the sweep
+// reasons about, as the union of two views: the gc.root_bead_id membership
+// set (stamped members regardless of edge linkage) and the authoritative
+// ParentID/graph walk seeded with those members. Neither view alone is
+// complete — the membership query cannot see the un-stamped ParentID-only
+// children of a partially-stamped molecule (the same gap documented on
+// storeHasOpenDescendants), and the walk cannot see stamped members linked by
+// neither ParentID nor an owned dependency edge. Trusting the metadata set
+// alone would let a fresh un-stamped child slip past the freshness veto and a
+// stale one be stranded open under a closed root, the leak class this sweep
+// drains, so the walk always runs.
 func collectOrderWispSubtree(store beads.Store, root beads.Bead) ([]beads.Bead, error) {
 	if root.ID == "" {
 		return nil, nil
 	}
 	reader := beads.HandlesFor(store).Live
+	seen := map[string]struct{}{root.ID: {}}
+	out := []beads.Bead{root}
+	queue := []string{root.ID}
 	if orderWispMayHaveGraphDependents(root) {
 		metadataDescendants, err := orderWispMetadataDescendants(reader, root.ID, true)
 		if err != nil {
 			return nil, err
 		}
-		if len(metadataDescendants) > 0 {
-			out := []beads.Bead{root}
-			seen := map[string]struct{}{root.ID: {}}
-			for _, descendant := range metadataDescendants {
-				if descendant.ID == "" {
-					continue
-				}
-				if _, ok := seen[descendant.ID]; ok {
-					continue
-				}
-				seen[descendant.ID] = struct{}{}
-				out = append(out, descendant)
+		for _, descendant := range metadataDescendants {
+			if descendant.ID == "" {
+				continue
 			}
-			return out, nil
+			if _, ok := seen[descendant.ID]; ok {
+				continue
+			}
+			seen[descendant.ID] = struct{}{}
+			out = append(out, descendant)
+			queue = append(queue, descendant.ID)
 		}
 	}
-	seen := map[string]struct{}{root.ID: {}}
-	out := []beads.Bead{root}
-	queue := []string{root.ID}
 	for len(queue) > 0 {
 		parentID := queue[0]
 		queue = queue[1:]
@@ -2589,11 +2663,26 @@ func openSubtreeOlderThan(subtree []beads.Bead, cutoff time.Time) bool {
 	return true
 }
 
-func orderNameFromTrackingBead(b beads.Bead) (string, bool) {
+// orderNameFromOrderRunLabel resolves an order name from the order-run:<name>
+// label only. Paths that select beads for destructive action (force-close root
+// matching) must use this instead of orderNameFromTrackingBead so a bead can
+// never be selected on its title alone.
+func orderNameFromOrderRunLabel(b beads.Bead) (string, bool) {
 	for _, label := range b.Labels {
 		if name, ok := strings.CutPrefix(label, "order-run:"); ok && name != "" {
 			return name, true
 		}
+	}
+	return "", false
+}
+
+// orderNameFromTrackingBead resolves an order name from the order-run:<name>
+// label, falling back to the legacy order:<name> title prefix used by old
+// tracking beads. The fallback is for tracking-bead selection and retention
+// bucketing only; force-close root matching uses orderNameFromOrderRunLabel.
+func orderNameFromTrackingBead(b beads.Bead) (string, bool) {
+	if name, ok := orderNameFromOrderRunLabel(b); ok {
+		return name, true
 	}
 	if name, ok := strings.CutPrefix(b.Title, "order:"); ok && name != "" {
 		return name, true
