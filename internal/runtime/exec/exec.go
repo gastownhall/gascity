@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -26,6 +27,14 @@ type Provider struct {
 	script       string
 	timeout      time.Duration
 	startTimeout time.Duration // used only for Start(); includes readiness polling
+
+	// RPP handshake result, resolved lazily once per instance (see
+	// handshake.go). The error is cached alongside the info so a broken
+	// `protocol` op degrades probes to the zero-capability floor instead
+	// of re-running on every call.
+	handshakeOnce sync.Once
+	handshakeInfo runtime.ProtocolInfo
+	handshakeErr  error
 }
 
 type startupWatchEvent struct {
@@ -387,9 +396,20 @@ func (p *Provider) IsRunning(name string) bool {
 	return strings.TrimSpace(out) == "true"
 }
 
-// IsAttached always returns false — the exec provider does not support
-// attach detection.
-func (p *Provider) IsAttached(_ string) bool { return false }
+// IsAttached reports terminal attachment via `script is-attached <name>`
+// when the executable declared the report-attachment capability in its
+// protocol handshake; otherwise it is always false. Op errors read as
+// not attached.
+func (p *Provider) IsAttached(name string) bool {
+	if !p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment) {
+		return false
+	}
+	out, err := p.run(nil, "is-attached", name)
+	if err != nil {
+		return false
+	}
+	return out == "true"
+}
 
 // Attach connects the terminal to the session: script attach <name>
 func (p *Provider) Attach(name string) error {
@@ -496,11 +516,15 @@ func (p *Provider) RunLive(_ string, _ runtime.Config) error {
 	return nil // exec providers don't support live re-apply yet
 }
 
-// Capabilities reports exec provider capabilities. The exec provider
-// delegates everything to a user-supplied script and does not natively
-// support attachment or activity detection.
+// Capabilities reports exec provider capabilities as declared by the
+// executable's protocol handshake (zero capabilities for scripts without
+// a `protocol` op, or when the handshake failed — the failure stays
+// observable via Protocol).
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
-	return runtime.ProviderCapabilities{}
+	return runtime.ProviderCapabilities{
+		CanReportAttachment: p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment),
+		CanReportActivity:   p.handshakeCapability(runtime.ProtocolCapabilityReportActivity),
+	}
 }
 
 // SleepCapability reports that exec-backed sessions support timed-only idle

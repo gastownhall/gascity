@@ -58,6 +58,34 @@ care about.
 | `peek` | `script peek <name> <lines>` | — | captured text |
 | `list-running` | `script list-running <prefix>` | — | one name per line |
 | `get-last-activity` | `script get-last-activity <name>` | — | RFC3339 or empty |
+| `protocol` | `script protocol` | — | handshake JSON (see below) |
+| `is-attached` | `script is-attached <name>` | — | `true` or `false` |
+
+### Protocol Handshake (`protocol`)
+
+The `protocol` operation declares which Runtime Provider Protocol version
+the script speaks and which optional capabilities it implements:
+
+```json
+{"version": 0, "capabilities": ["report-attachment", "report-activity"]}
+```
+
+Scripts that do not implement `protocol` (exit 2) are treated as version 0
+with no optional capabilities — every pre-handshake script remains valid.
+Unknown capability strings are ignored, so scripts may declare
+capabilities for newer Gas City versions without breaking older ones.
+Malformed handshake JSON is an error: capability probes fall back to the
+no-capability behavior and the failure is reported by conformance and
+doctor checks.
+
+Capabilities:
+
+| Capability | Effect |
+|------------|--------|
+| `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. |
+| `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. |
+
+The handshake runs once per provider instance and is cached.
 
 ### Start Config (JSON on stdin)
 
