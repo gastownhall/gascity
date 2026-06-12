@@ -726,7 +726,13 @@ func TestContainsPromptIndicator(t *testing.T) {
 		{name: "claude prompt with text", content: "❯ run tests", want: true},
 		{name: "boxed grok prompt", content: "│ ❯ ", want: true},
 		{name: "boxed grok prompt with text", content: "│ ❯ start working", want: true},
+		// gemini renders an ASCII "> " prompt followed by placeholder text
+		// (gastownhall/gascity#2874); the dialog poller must see it as ready so
+		// it stops burning the 8s-per-handler budget and the start deadline.
+		{name: "gemini ascii prompt with placeholder", content: "> Type your message or @path/to/file", want: true},
+		{name: "boxed gemini ascii prompt", content: "│ > Type your message or @path/to/file              │", want: true},
 		{name: "codex numbered menu row", content: "› 1. Update now (runs `bun install -g @openai/codex`)", want: false},
+		{name: "ascii numbered menu row", content: "> 1. Update now", want: false},
 		{name: "empty content", content: "", want: false},
 		{name: "no prompt", content: "loading...", want: false},
 		{name: "blank lines only", content: "\n\n", want: false},

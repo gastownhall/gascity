@@ -3809,6 +3809,78 @@ func TestValidateNonNegativeDurationsRejectsNegativeDoltStopTimeout(t *testing.T
 	}
 }
 
+// --- DoltLockReleaseTimeout tests ---
+
+func TestDoltConfigDoltLockReleaseTimeoutDefault(t *testing.T) {
+	d := DoltConfig{}
+	got := d.DoltLockReleaseTimeoutDuration()
+	if got != DefaultDoltLockReleaseTimeout {
+		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want %v", got, DefaultDoltLockReleaseTimeout)
+	}
+}
+
+func TestDoltConfigDoltLockReleaseTimeoutCustom(t *testing.T) {
+	d := DoltConfig{DoltLockReleaseTimeout: "90s"}
+	got := d.DoltLockReleaseTimeoutDuration()
+	if got != 90*time.Second {
+		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want 90s", got)
+	}
+}
+
+func TestDoltConfigDoltLockReleaseTimeoutZero(t *testing.T) {
+	d := DoltConfig{DoltLockReleaseTimeout: "0s"}
+	got := d.DoltLockReleaseTimeoutDuration()
+	if got != 0 {
+		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want 0", got)
+	}
+}
+
+func TestDoltConfigDoltLockReleaseTimeoutInvalid(t *testing.T) {
+	d := DoltConfig{DoltLockReleaseTimeout: "not-a-duration"}
+	got := d.DoltLockReleaseTimeoutDuration()
+	if got != DefaultDoltLockReleaseTimeout {
+		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want %v (default for invalid)", got, DefaultDoltLockReleaseTimeout)
+	}
+}
+
+func TestParseDoltLockReleaseTimeout(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[dolt]
+dolt_lock_release_timeout = "2m"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Dolt.DoltLockReleaseTimeout != "2m" {
+		t.Errorf("Dolt.DoltLockReleaseTimeout = %q, want %q", cfg.Dolt.DoltLockReleaseTimeout, "2m")
+	}
+	got := cfg.Dolt.DoltLockReleaseTimeoutDuration()
+	if got != 2*time.Minute {
+		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want 2m", got)
+	}
+}
+
+func TestValidateNonNegativeDurationsRejectsNegativeDoltLockReleaseTimeout(t *testing.T) {
+	cfg := &City{}
+	cfg.Dolt.DoltLockReleaseTimeout = "-1s"
+	err := ValidateNonNegativeDurations(cfg, "city.toml")
+	if err == nil {
+		t.Fatal("ValidateNonNegativeDurations() = nil, want error for negative dolt_lock_release_timeout")
+	}
+	if !strings.Contains(err.Error(), "dolt_lock_release_timeout") ||
+		!strings.Contains(err.Error(), "must not be negative") ||
+		!strings.Contains(err.Error(), `"-1s"`) {
+		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
+	}
+}
+
 func TestDaemonDoltStartAddressInUseRetryDefault(t *testing.T) {
 	d := DaemonConfig{}
 	got := d.DoltStartAddressInUseRetryWindowDuration()

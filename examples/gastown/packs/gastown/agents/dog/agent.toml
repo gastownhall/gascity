@@ -1,7 +1,0 @@
-scope = "city"
-wake_mode = "fresh"
-work_dir = ".gc/agents/dogs/{{.AgentBase}}"
-nudge = "Check your hook for work assignments."
-idle_timeout = "2h"
-min_active_sessions = 0
-max_active_sessions = 3

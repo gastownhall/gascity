@@ -30,7 +30,7 @@ import (
 // Plus regression coverage for the dog pool (now generic *-N) and the
 // single-member no-op case (cycle target == self -> no switch).
 func TestCycleScriptGroupsBySeparator(t *testing.T) {
-	cycleScript := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "cycle.sh")
+	cycleScript := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "cycle.sh")
 	if _, err := os.Stat(cycleScript); err != nil {
 		t.Fatalf("cycle.sh not found at %s: %v", cycleScript, err)
 	}

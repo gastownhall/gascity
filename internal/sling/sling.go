@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -133,6 +134,18 @@ type SlingDeps struct {
 	// DirectSessionResolver optionally materializes direct graph assignee
 	// targets to concrete session bead IDs.
 	DirectSessionResolver func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error)
+}
+
+// graphrouteDeps projects the graph-routing subset of SlingDeps into
+// graphroute.Deps. Store, city name, and config travel as explicit
+// parameters on every graphroute entry point, so only these three
+// fields cross the boundary.
+func (deps SlingDeps) graphrouteDeps() graphroute.Deps {
+	return graphroute.Deps{
+		CityPath:              deps.CityPath,
+		Resolver:              deps.Resolver,
+		DirectSessionResolver: deps.DirectSessionResolver,
+	}
 }
 
 // SlingResult holds the structured output of a sling operation.
@@ -1173,8 +1186,8 @@ func WorkflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.Cit
 	if strings.TrimSpace(storeDir) == "" || strings.TrimSpace(cityPath) == "" {
 		return ""
 	}
-	storeDir = NormalizePathForCompare(storeDir)
-	cityPath = NormalizePathForCompare(cityPath)
+	storeDir = pathutil.NormalizePathForCompare(storeDir)
+	cityPath = pathutil.NormalizePathForCompare(cityPath)
 	if storeDir == cityPath {
 		cityName = strings.TrimSpace(cityName)
 		if cityName == "" {
@@ -1190,7 +1203,7 @@ func WorkflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.Cit
 		if !filepath.IsAbs(rigPath) {
 			rigPath = filepath.Join(cityPath, rigPath)
 		}
-		if SamePath(rigPath, storeDir) {
+		if pathutil.SamePath(rigPath, storeDir) {
 			return "rig:" + rig.Name
 		}
 	}
@@ -1226,7 +1239,7 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		SlingTracef("instantiate validate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
-	graphWorkflow := IsCompiledGraphWorkflow(recipe)
+	graphWorkflow := graphroute.IsCompiledGraphWorkflow(recipe)
 	if graphWorkflow {
 		stampGraphV2RootMetadata(recipe, formulaName, opts.Vars, scopeKind, scopeRef)
 		sourceBeadID = ""
@@ -1236,7 +1249,7 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		}
 	}
 	SlingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
-	if err := ApplyGraphRouting(recipe, &a, a.QualifiedName(), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, deps.Store, deps.CityName, deps.Cfg, deps); err != nil {
+	if err := graphroute.ApplyGraphRouting(recipe, &a, a.QualifiedName(), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, deps.Store, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}

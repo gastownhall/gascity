@@ -70,7 +70,7 @@ func TestEnsureRepoInCacheUsesExistingCloneWhenCheckoutMatches(t *testing.T) {
 		if reflect.DeepEqual(args, []string{"rev-parse", "HEAD"}) {
 			return "abc123", nil
 		}
-		if reflect.DeepEqual(args, []string{"status", "--porcelain", "--ignored"}) {
+		if reflect.DeepEqual(args, []string{"status", "--porcelain"}) {
 			return "", nil
 		}
 		return "", fmt.Errorf("unexpected git call: %v", args)
@@ -86,7 +86,7 @@ func TestEnsureRepoInCacheUsesExistingCloneWhenCheckoutMatches(t *testing.T) {
 	}
 	want := [][]string{
 		{"rev-parse", "HEAD"},
-		{"status", "--porcelain", "--ignored"},
+		{"status", "--porcelain"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("git calls = %#v, want %#v", calls, want)
@@ -138,7 +138,7 @@ func TestEnsureRepoInCacheRepairsDirtyMatchingCheckout(t *testing.T) {
 	}
 	want := [][]string{
 		{"rev-parse", "HEAD"},
-		{"status", "--porcelain", "--ignored"},
+		{"status", "--porcelain"},
 		{"reset", "--hard", "--quiet", "abc123"},
 		{"clean", "-ffdx", "--quiet"},
 	}
@@ -244,7 +244,7 @@ func TestEnsureRepoInCacheReclonesInvalidExistingCache(t *testing.T) {
 	}
 	want := [][]string{
 		{"rev-parse", "HEAD"},
-		{"status", "--porcelain", "--ignored"},
+		{"status", "--porcelain"},
 		{"clone", "--quiet", "https://github.com/example/repo", path},
 		{"checkout", "--quiet", "abc123"},
 	}

@@ -348,6 +348,57 @@ func WriteCityAndRigSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City) 
 	return writeCityAndRigSiteBindingsForEdit(fs, tomlPath, cfg, nil)
 }
 
+// AppendRigAndWriteSiteBindingsForEdit appends a new [[rigs]] block to
+// city.toml without re-serializing the whole file, preserving all existing
+// comments. cfg must include newRig (with its path) so that the site binding
+// (.gc/site.toml) is kept consistent. If the site binding write fails after
+// city.toml is changed, both files are restored before the error is returned.
+func AppendRigAndWriteSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City, newRig Rig) error {
+	cityRoot := filepath.Dir(tomlPath)
+
+	// Serialize only the new rig block, stripping path (it belongs in site.toml).
+	rigForCity := newRig
+	rigForCity.Path = ""
+	type rigBlock struct {
+		Rigs []Rig `toml:"rigs"`
+	}
+	var rigBuf bytes.Buffer
+	enc := toml.NewEncoder(&rigBuf)
+	enc.Indent = ""
+	if err := enc.Encode(rigBlock{Rigs: []Rig{rigForCity}}); err != nil {
+		return fmt.Errorf("serializing new rig block: %w", err)
+	}
+
+	existing, err := fs.ReadFile(tomlPath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", tomlPath, err)
+	}
+
+	snapshot, err := snapshotCityAndSiteFiles(fs, tomlPath, SiteBindingPath(cityRoot))
+	if err != nil {
+		return err
+	}
+
+	content := make([]byte, len(existing))
+	copy(content, existing)
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		content = append(content, '\n')
+	}
+	content = append(content, '\n')
+	content = append(content, rigBuf.Bytes()...)
+
+	if err := fsys.WriteFileIfChangedAtomic(fs, tomlPath, content, 0o644); err != nil {
+		return err
+	}
+	if err := persistRigSiteBindings(fs, cityRoot, cfg.Rigs, nil); err != nil {
+		if restoreErr := snapshot.restore(fs); restoreErr != nil {
+			return fmt.Errorf("writing .gc/site.toml failed and restoring city.toml/site binding failed: %w", errors.Join(err, restoreErr))
+		}
+		return fmt.Errorf("writing .gc/site.toml failed; restored city.toml and previous site binding, fix the site binding write error and retry: %w", err)
+	}
+	return nil
+}
+
 // WriteCityAndRigSiteBindingsForEditRemovingRigs writes city.toml and
 // .gc/site.toml while removing bindings for rig names that were intentionally
 // deleted from the city config.
@@ -361,11 +412,17 @@ func writeCityAndRigSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City, 
 	if err != nil {
 		return err
 	}
-	snapshot, err := snapshotCityAndSiteFiles(fs, tomlPath, SiteBindingPath(cityRoot))
+	// cityRoot intentionally stays the symlink's directory even when
+	// city.toml links elsewhere: that is where the city's .gc/ state lives.
+	writePath, err := ResolveCityRewritePath(fs, tomlPath)
 	if err != nil {
 		return err
 	}
-	if err := fsys.WriteFileIfChangedAtomic(fs, tomlPath, content, 0o644); err != nil {
+	snapshot, err := snapshotCityAndSiteFiles(fs, writePath, SiteBindingPath(cityRoot))
+	if err != nil {
+		return err
+	}
+	if err := fsys.WriteFileIfChangedAtomic(fs, writePath, content, 0o644); err != nil {
 		return err
 	}
 	if err := persistRigSiteBindings(fs, cityRoot, cfg.Rigs, removedRigNames); err != nil {
@@ -375,6 +432,57 @@ func writeCityAndRigSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City, 
 		return fmt.Errorf("writing .gc/site.toml failed; restored city.toml and previous site binding, fix the site binding write error and retry: %w", err)
 	}
 	return nil
+}
+
+// ResolveCityRewritePath returns the path an edit-rewrite of city.toml must
+// write to. city.toml may be a symlink (e.g., into a checked-out repo):
+// renaming a temp file over the link would replace the link itself, so the
+// rewrite must follow the chain and write at the final target instead. It
+// also refuses the rewrite when the current on-disk content would lose keys
+// in the round-trip (see guardCityRewriteKeyLoss). Every code path that
+// rewrites an existing city.toml must resolve through this helper.
+func ResolveCityRewritePath(fs fsys.FS, tomlPath string) (string, error) {
+	writePath, err := fsys.ResolveSymlinks(fs, tomlPath)
+	if err != nil {
+		return "", fmt.Errorf("resolving %s for rewrite: %w", tomlPath, err)
+	}
+	if err := guardCityRewriteKeyLoss(fs, writePath); err != nil {
+		return "", err
+	}
+	return writePath, nil
+}
+
+// guardCityRewriteKeyLoss refuses to rewrite a city.toml whose current
+// on-disk content contains keys this gc binary does not recognize: the
+// struct round-trip would silently drop them (ga-lurp5d dropped
+// agent_defaults.provider and beads.bd_compatibility in production this
+// way). A missing file is fine — there is nothing to lose. An unparsable
+// file is also refused: callers load the config from this same path before
+// mutating it, so unparsable content here means the file changed underneath
+// us and a rewrite would destroy whatever is there now.
+func guardCityRewriteKeyLoss(fs fsys.FS, path string) error {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reading %s before rewrite: %w", path, err)
+	}
+	var cfg City
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return fmt.Errorf("refusing to rewrite %s: current content does not parse, rewriting would destroy it: %w", path, err)
+	}
+	undecoded := md.Undecoded()
+	if len(undecoded) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(undecoded))
+	for _, key := range undecoded {
+		keys = append(keys, key.String())
+	}
+	sort.Strings(keys)
+	return fmt.Errorf("refusing to rewrite %s: it contains keys this gc binary does not recognize and the rewrite would silently drop them: %s (upgrade gc or remove the keys, then retry)", path, strings.Join(keys, ", "))
 }
 
 func rigNameSet(names []string) map[string]struct{} {

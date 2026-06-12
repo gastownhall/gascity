@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -94,16 +95,31 @@ func TestExamplePacks_PackArtifacts(t *testing.T) {
 		c := helpers.NewCity(t, testEnv)
 		c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
-		expected := []string{
-			"packs/gastown/pack.toml",
-			"packs/gastown/agents",
-			"packs/gastown/template-fragments",
-			"packs/gastown/formulas",
-			"packs/gastown/assets/scripts",
-		}
-		for _, rel := range expected {
+		// The gastown pack arrives via the pinned public import, not a
+		// city-local packs/ copy: the city carries the import pin plus the
+		// lock entry, and the pack content is materialized into the
+		// user-global repo cache.
+		for _, rel := range []string{"city.toml", "pack.toml", "packs.lock"} {
 			if !c.HasFile(rel) {
 				t.Errorf("missing expected artifact: %s", rel)
+			}
+		}
+		packToml := c.ReadFile("pack.toml")
+		if !strings.Contains(packToml, `source = "`+config.PublicGastownPackSource+`"`) {
+			t.Errorf("pack.toml missing pinned public gastown source:\n%s", packToml)
+		}
+
+		packDir := gastownCachePackDir(t, c)
+		expected := []string{
+			"pack.toml",
+			"agents",
+			"template-fragments",
+			"formulas",
+			filepath.Join("assets", "scripts"),
+		}
+		for _, rel := range expected {
+			if _, err := os.Stat(filepath.Join(packDir, rel)); err != nil {
+				t.Errorf("missing expected cached pack artifact %s: %v", rel, err)
 			}
 		}
 	})

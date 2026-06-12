@@ -7,11 +7,16 @@
 package acceptance_test
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	gascitypacks "github.com/gastownhall/gascity-packs"
+
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 )
 
 // TestWorktreeBranchNamespacing verifies that worktree-setup.sh creates
@@ -23,12 +28,8 @@ func TestWorktreeBranchNamespacing(t *testing.T) {
 	git(t, repoDir, "init")
 	git(t, repoDir, "commit", "--allow-empty", "-m", "initial")
 
-	// Find the worktree-setup script from examples.
-	scriptSrc := filepath.Join(findModuleRoot(t), "examples", "gastown",
-		"packs", "gastown", "scripts", "worktree-setup.sh")
-	if _, err := os.Stat(scriptSrc); err != nil {
-		t.Skipf("worktree-setup.sh not found: %v", err)
-	}
+	// Use the worktree-setup script from the embedded gastown pack.
+	scriptSrc := worktreeSetupScript(t)
 
 	// Create two different target paths (simulating two cities).
 	city1WT := filepath.Join(t.TempDir(), "city1", "worktrees", "refinery")
@@ -72,11 +73,7 @@ func TestWorktreeIdempotent(t *testing.T) {
 	git(t, repoDir, "init")
 	git(t, repoDir, "commit", "--allow-empty", "-m", "initial")
 
-	scriptSrc := filepath.Join(findModuleRoot(t), "examples", "gastown",
-		"packs", "gastown", "scripts", "worktree-setup.sh")
-	if _, err := os.Stat(scriptSrc); err != nil {
-		t.Skipf("worktree-setup.sh not found: %v", err)
-	}
+	scriptSrc := worktreeSetupScript(t)
 
 	wt := filepath.Join(t.TempDir(), "worktree")
 
@@ -101,11 +98,7 @@ func TestWorktreeBeadRedirect(t *testing.T) {
 	git(t, repoDir, "init")
 	git(t, repoDir, "commit", "--allow-empty", "-m", "initial")
 
-	scriptSrc := filepath.Join(findModuleRoot(t), "examples", "gastown",
-		"packs", "gastown", "scripts", "worktree-setup.sh")
-	if _, err := os.Stat(scriptSrc); err != nil {
-		t.Skipf("worktree-setup.sh not found: %v", err)
-	}
+	scriptSrc := worktreeSetupScript(t)
 
 	wt := filepath.Join(t.TempDir(), "worktree")
 	runScript(t, scriptSrc, repoDir, wt, "polecat")
@@ -152,20 +145,20 @@ func currentBranch(t *testing.T, dir string) string {
 	return git(t, dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
-func findModuleRoot(t *testing.T) string {
+// worktreeSetupScript materializes worktree-setup.sh from the gastown pack
+// embedded in the gc binary (via the gascity-packs module) into a temp dir
+// and returns its path. The checked-in example no longer carries a pack
+// copy, so the embedded bytes are the source of truth.
+func worktreeSetupScript(t *testing.T) string {
 	t.Helper()
-	dir, err := os.Getwd()
+	const rel = "assets/scripts/worktree-setup.sh"
+	data, err := fs.ReadFile(gascitypacks.Gastown(), rel)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("reading embedded gastown %s: %v", rel, err)
 	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatal("go.mod not found")
-		}
-		dir = parent
+	dst := filepath.Join(t.TempDir(), "worktree-setup.sh")
+	if err := os.WriteFile(dst, data, builtinpacks.MaterializedFileMode(rel)); err != nil {
+		t.Fatalf("materializing %s: %v", rel, err)
 	}
+	return dst
 }

@@ -5,7 +5,7 @@
 # beads, backup freshness, orphan databases, and zombie Dolt processes.
 #
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_HOST, GC_DOLT_USER,
-#              GC_DOLT_PASSWORD
+#              GC_DOLT_PASSWORD, GC_DOLT_RIG_LIST_TIMEOUT_SECS
 set -e
 
 : "${GC_DOLT_USER:=root}"
@@ -18,8 +18,12 @@ metadata_files() {
   if command -v gc >/dev/null 2>&1; then
     # Bound the gc rig list call: if gc is itself in a bad state (the
     # failure mode this patrol is meant to detect) we must not block
-    # here. Degrade to the fallback rig scan below.
-    rig_paths=$(run_bounded 5 gc rig list --json 2>/dev/null \
+    # here. Degrade to the fallback rig scan below. The bound (default in
+    # runtime.sh, shared with the compact command) must absorb a
+    # slow-but-healthy gc on a busy host (~16s observed) because the
+    # fallback scan only sees the city directory and silently drops
+    # external rig databases (gascity#2740).
+    rig_paths=$(run_bounded "$GC_DOLT_RIG_LIST_TIMEOUT_SECS" gc rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else

@@ -72,6 +72,36 @@ func TestAliveWithCmdlineAcceptsMatchingLivePID(t *testing.T) {
 	}
 }
 
+func TestCmdlineReturnsOwnArgv(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("cmdline detection uses /proc on linux")
+	}
+
+	argv, err := Cmdline(os.Getpid())
+	if err != nil {
+		t.Fatalf("Cmdline(%d): %v", os.Getpid(), err)
+	}
+	if len(argv) == 0 || !strings.Contains(filepath.Base(argv[0]), "pidutil") {
+		t.Fatalf("Cmdline(%d) = %v, want test binary argv", os.Getpid(), argv)
+	}
+}
+
+func TestNormalizeArgv(t *testing.T) {
+	got := NormalizeArgv([]string{"cut", "", "-d", " ", "\t ", "-f", "1"})
+	want := []string{"cut", "-d", "-f", "1"}
+	if len(got) != len(want) {
+		t.Fatalf("NormalizeArgv = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("NormalizeArgv = %q, want %q", got, want)
+		}
+	}
+	if out := NormalizeArgv(nil); len(out) != 0 {
+		t.Fatalf("NormalizeArgv(nil) = %q, want empty", out)
+	}
+}
+
 func TestArgvContainsSequence(t *testing.T) {
 	argv := []string{"gc", "nudge", "poll", "--city", "/tmp/city"}
 	cases := []struct {

@@ -801,7 +801,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -3300,6 +3300,10 @@ export type SupervisorHealthOutputBody = {
      */
     cities_total: number;
     /**
+     * SHA-256 hex digest of the first managed city's packs.lock contents, for single-city deployments (mirrors the startup field's first-city semantics). Drift checkers compare this against the committed lockfile copy. Omitted when no city is registered, the city has no packs.lock, or the lockfile is unreadable (read error logged server-side) — treat absence as unknown, not as proof there is no lockfile.
+     */
+    packs_lock_sha256?: string;
+    /**
      * First-city startup info for single-city deployments.
      */
     startup?: SupervisorStartup;
@@ -3369,6 +3373,13 @@ export type SupervisorShutdownPayload = {
      * Which path triggered the shutdown.
      */
     source: 'signal' | 'socket_stop';
+};
+
+export type SupervisorStartedPayload = {
+    /**
+     * How the previous supervisor instance exited: clean (it completed its STOPPING path and left the shutdown handoff token), crash (a prior instance ran but left no token), or unknown (no evidence of a prior instance).
+     */
+    previous_exit: 'clean' | 'crash' | 'unknown';
 };
 
 export type SupervisorStartup = {
@@ -3540,6 +3551,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSupervisorRequest) | ({
     type: 'supervisor.shutdown_requested';
 } & TypedEventStreamEnvelopeSupervisorShutdownRequested) | ({
+    type: 'supervisor.started';
+} & TypedEventStreamEnvelopeSupervisorStarted) | ({
     type: 'worker.operation';
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
@@ -4442,6 +4455,20 @@ export type TypedEventStreamEnvelopeSupervisorShutdownRequested = {
 };
 
 /**
+ * TypedEventStreamEnvelope supervisor.started
+ */
+export type TypedEventStreamEnvelopeSupervisorStarted = {
+    actor: string;
+    message?: string;
+    payload: SupervisorStartedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.started';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope worker.operation
  */
 export type TypedEventStreamEnvelopeWorkerOperation = {
@@ -4587,6 +4614,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSupervisorRequest) | ({
     type: 'supervisor.shutdown_requested';
 } & TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested) | ({
+    type: 'supervisor.started';
+} & TypedTaggedEventStreamEnvelopeSupervisorStarted) | ({
     type: 'worker.operation';
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
@@ -5549,6 +5578,21 @@ export type TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested = {
     subject?: string;
     ts: string;
     type: 'supervisor.shutdown_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope supervisor.started
+ */
+export type TypedTaggedEventStreamEnvelopeSupervisorStarted = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SupervisorStartedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.started';
     workflow?: WorkflowEventProjection;
 };
 

@@ -394,7 +394,7 @@ func extractRigFlag(args []string) (string, []string) {
 }
 
 // resolveBdScopeTarget determines the canonical scope root for a bd command.
-// Priority: explicit rig name > bead prefix auto-detection > enclosing rig > city root.
+// Priority: explicit rig name > bead prefix auto-detection > GC_RIG env > enclosing rig > city root.
 func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string) (execStoreTarget, error) {
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if rigName != "" {
@@ -438,6 +438,21 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 				return target, nil
 			}
 		}
+	}
+
+	// Honor GC_RIG env (set by the controller on every rig agent) when no
+	// explicit --rig flag was given and no bead-ID in the args matched a
+	// specific store. This is a weaker signal than an explicit flag or a
+	// bead-prefix hit, but a stronger default than cwd: the controller sets
+	// GC_RIG reliably, while cwd detection fails for polecat worktrees (they
+	// live under .gc/worktrees/, not the configured rig path).
+	// Priority: explicit --rig > bead-prefix detect > GC_RIG env > cwd > city.
+	if gcRig := strings.TrimSpace(os.Getenv("GC_RIG")); gcRig != "" {
+		if rig, ok := rigByName(cfg, gcRig); ok && strings.TrimSpace(rig.Path) != "" {
+			return bdRigScopeTarget(cityPath, rig), nil
+		}
+		// GC_RIG names an unknown or unbound rig — fall through to cwd/city
+		// rather than erroring, so cross-city queries still work from rig agents.
 	}
 
 	if rig, ok, err := bdRigFromCwd(cfg, cityPath); err != nil {

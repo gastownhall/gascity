@@ -67,6 +67,10 @@
 #     (default: 120) — wall-clock bound for remote compare-and-push
 #                     after local compaction. Push failures are recorded for
 #                     repair but do not fail local compaction.
+#   GC_DOLT_RIG_LIST_TIMEOUT_SECS
+#     (default: 30) — wall-clock bound for `gc rig list --json` rig
+#                     discovery. Shared with the health command; the
+#                     default lives in runtime.sh.
 #   GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS
 #     (default: 172800) — maximum age for automatic pending remote-push retry.
 #                       Older markers require manual review before push.
@@ -257,6 +261,14 @@ case "$push_timeout" in
     ;;
 esac
 
+case "$GC_DOLT_RIG_LIST_TIMEOUT_SECS" in
+  ''|*[!0-9]*|0)
+    printf 'compact: invalid GC_DOLT_RIG_LIST_TIMEOUT_SECS=%s (must be a positive integer)\n' \
+      "$GC_DOLT_RIG_LIST_TIMEOUT_SECS" >&2
+    exit 2
+    ;;
+esac
+
 case "$pending_push_max_age_secs" in
   ''|*[!0-9]*)
     printf 'compact: invalid GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS=%s (must be a non-negative integer)\n' \
@@ -314,10 +326,17 @@ quarantine_dir="$PACK_STATE_DIR/compact-quarantine"
 
 # DB discovery uses rig metadata.json files first (authoritative), with a
 # filesystem-scan fallback when gc itself is unavailable.
+#
+# The rig-list bound must absorb a slow-but-healthy gc on a busy host
+# (~16s observed): the fallback scan only sees the city directory, so a
+# premature timeout silently drops every external rig database from
+# compaction (gascity#2740). The default lives in runtime.sh, shared with
+# the health command.
+rig_list_timeout="$GC_DOLT_RIG_LIST_TIMEOUT_SECS"
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
   if command -v gc >/dev/null 2>&1; then
-    if rig_json=$(run_bounded 5 gc rig list --json 2>/dev/null); then
+    if rig_json=$(run_bounded "$rig_list_timeout" gc rig list --json 2>/dev/null); then
       rig_paths=$(printf '%s\n' "$rig_json" \
         | if command -v jq >/dev/null 2>&1; then
             jq -r '.rigs[].path' 2>/dev/null
@@ -333,7 +352,7 @@ metadata_files() {
     else
       rig_status=$?
       if [ "$rig_status" -eq 124 ]; then
-        printf 'compact: gc rig list timed out after 5s; falling back to local filesystem metadata scan\n' >&2
+        printf 'compact: gc rig list timed out after %ss; falling back to local filesystem metadata scan\n' "$rig_list_timeout" >&2
       else
         printf 'compact: gc rig list failed rc=%s; falling back to local filesystem metadata scan\n' "$rig_status" >&2
       fi

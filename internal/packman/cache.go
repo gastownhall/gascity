@@ -187,7 +187,13 @@ func checkoutExistingCache(cachePath, commit string) error {
 }
 
 func cachedRepoDirty(cachePath string) (bool, error) {
-	status, err := runGit(cachePath, "status", "--porcelain", "--ignored")
+	// Intentionally NOT --ignored: gitignored build artifacts written into
+	// the cache in place (e.g. Python __pycache__/*.pyc from running a cached
+	// pack's scripts, or a stray .DS_Store) are not local modifications to the
+	// pack's tracked content and must not count as "dirty" — they recur and
+	// would otherwise wedge the city behind a perpetual "run gc import install"
+	// gate (vp-gny3). A reinstall's `git clean -ffdx` still clears them.
+	status, err := runGit(cachePath, "status", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("checking cached repo worktree status: %w", err)
 	}

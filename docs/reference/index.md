@@ -16,6 +16,7 @@ description: CLI, config, formula, and provider reference material.
 - [Formula Files](/reference/formula)
 - [Exec Session Provider](/reference/exec-session-provider)
 - [Exec Beads Provider](/reference/exec-beads-provider)
+- [Tmux Agent Slice (GC_AGENT_SLICE)](/reference/tmux-agent-slice)
 
 The config and CLI references are generated from code and should be regenerated
 when the schema or Cobra surface changes. The API and `gc events` contracts are

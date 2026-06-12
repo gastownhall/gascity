@@ -154,6 +154,15 @@ func TestRecordControllerLifecycle(t *testing.T) {
 	RecordControllerLifecycle(ctx, "stopped")
 }
 
+func TestRecordSupervisorStarted(t *testing.T) {
+	resetInstruments(t)
+	ctx := context.Background()
+
+	RecordSupervisorStarted(ctx, "clean")
+	RecordSupervisorStarted(ctx, "crash")
+	RecordSupervisorStarted(ctx, "unknown")
+}
+
 func TestRecordBDCall(t *testing.T) {
 	resetInstruments(t)
 	ctx := context.Background()

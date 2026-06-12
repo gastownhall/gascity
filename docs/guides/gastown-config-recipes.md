@@ -24,7 +24,7 @@ schema = 2
 
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 ```
 
 ```toml
@@ -34,7 +34,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 ```
 
 ```bash
@@ -52,7 +52,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -70,7 +70,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -124,7 +124,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 
 [[rigs.patches]]
 agent = "gastown.refinery"
@@ -189,7 +189,8 @@ includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 base = "builtin:claude"
 
 [defaults.rig.imports.gastown]
-source = "packs/gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 
 [daemon]
 patrol_interval = "30s"
@@ -218,8 +219,8 @@ formula_v2 = true
 #        nudge = "Check your hook and mail, then act accordingly."
 #        work_dir = ".gc/worktrees/myproject/crew/wolf"
 #        idle_timeout = "4h"
-#        prompt_template = "packs/gastown/assets/prompts/crew.template.md"
-#        pre_start = ["{{.CityRoot}}/packs/gastown/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+#        prompt_template = "prompts/crew.template.md"   # copied from the gastown pack
+#        pre_start = ["{{.CityRoot}}/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
 #
 #      tmux theming comes from the gastown pack's [global] session_live hooks,
 #      so crew members need no session_setup wiring of their own.
@@ -250,11 +251,18 @@ formula_v2 = true
 name = "gastown"
 schema = 2
 
+# Pinned public registry import; resolved offline from the gc binary's
+# bundled copy. The gastown pack is no longer a local directory.
 [imports.gastown]
-source = "packs/gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 ```
 
-### `packs/gastown/pack.toml` — the reusable defaults
+### The gastown pack — the reusable defaults
+
+The pack itself lives in the gascity-packs registry
+(github.com/gastownhall/gascity-packs, `gastown/`); its pack.toml looks
+like this:
 
 ```toml
 # Gas Town — domain-specific coding workflow pack.

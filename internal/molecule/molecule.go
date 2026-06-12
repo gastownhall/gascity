@@ -30,6 +30,11 @@ type Options struct {
 	// these values take precedence.
 	Vars map[string]string
 
+	// ExternalDeps wires recipe steps to already-existing bead IDs.
+	// These deps are embedded at create time so readiness and assignment are
+	// correct before the recipe becomes visible to workers.
+	ExternalDeps []ExternalDep
+
 	// ParentID attaches the molecule to an existing bead. When set, the
 	// root bead's ParentID is set to this value.
 	ParentID string
@@ -504,6 +509,11 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	embeddedDeps := make(map[string]bool)
 	pendingAssignees := make(map[string]string)
 	graphWorkflow := preservesGraphActionTypes(recipe)
+	externalDepsByStep, err := groupExternalDeps(opts.ExternalDeps)
+	if err != nil {
+		return nil, err
+	}
+	recipeParentByStep := recipeParentDeps(recipe.Deps)
 
 	for i, step := range recipe.Steps {
 		// For RootOnly recipes, only create the root bead.
@@ -531,6 +541,16 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				b.Needs = append(b.Needs, dep.Type+":"+dependsOnBeadID)
 			}
 			embeddedDeps[dep.StepID+"|"+dep.DependsOnID+"|"+dep.Type] = true
+		}
+		for _, dep := range externalDepsByStep[step.ID] {
+			if dep.Type == "parent-child" {
+				continue
+			}
+			if dep.Type == "blocks" {
+				b.Needs = append(b.Needs, dep.DependsOnID)
+			} else {
+				b.Needs = append(b.Needs, dep.Type+":"+dep.DependsOnID)
+			}
 		}
 		// Root bead overrides.
 		if step.IsRoot {
@@ -571,6 +591,12 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 					if parentBeadID, ok := idMapping[dep.DependsOnID]; ok {
 						b.ParentID = parentBeadID
 					}
+					break
+				}
+			}
+			for _, dep := range externalDepsByStep[step.ID] {
+				if b.ParentID == "" && recipeParentByStep[step.ID] == "" && dep.Type == "parent-child" && dep.DependsOnID != "" {
+					b.ParentID = dep.DependsOnID
 					break
 				}
 			}
@@ -661,6 +687,24 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if err := store.DepAdd(fromID, toID, dep.Type); err != nil {
 				markFailed(store, createdIDs)
 				return nil, fmt.Errorf("wiring dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+			}
+		}
+	}
+	for stepID, deps := range externalDepsByStep {
+		if recipeParentByStep[stepID] != "" {
+			continue
+		}
+		fromID, fromOK := idMapping[stepID]
+		if !fromOK {
+			continue
+		}
+		for _, dep := range deps {
+			if dep.Type != "parent-child" {
+				continue
+			}
+			if err := store.DepAdd(fromID, dep.DependsOnID, dep.Type); err != nil {
+				markFailed(store, createdIDs)
+				return nil, fmt.Errorf("wiring external dep %s->%s: %w", stepID, dep.DependsOnID, err)
 			}
 		}
 	}

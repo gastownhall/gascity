@@ -1580,7 +1580,9 @@ gc import
 | [gc import check](#gc-import-check) | Validate installed pack import state |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
+| [gc import prune](#gc-import-prune) | Remove unreferenced clones from the global pack cache |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
+| [gc import status](#gc-import-status) | Report declared imports and packs.lock pins |
 | [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
 | [gc import why](#gc-import-why) | Explain why an import is present |
 
@@ -1651,6 +1653,32 @@ gc import list [flags]
 |------|------|---------|-------------|
 | `--tree` | bool |  | Show the import dependency tree |
 
+## gc import prune
+
+Remove unreferenced clones from the machine-wide pack cache.
+
+The pack cache (~/.gc/cache/repos) is shared by every city on the machine and
+is keyed by (source, commit), so commit churn accumulates stale clones over
+time. A clone is "referenced" when some city's packs.lock still pins it; prune
+keeps every referenced clone and removes only the rest.
+
+By default prune considers every city in the supervisor registry plus the city
+resolved from the current directory; pass --all-cities to reference the full
+registry set and ignore the current directory. Prune is a dry run unless
+--apply is given. The --keep-days guard never removes an unreferenced clone
+whose directory was modified more recently than N days ago, protecting
+in-flight installs from a race.
+
+```
+gc import prune [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all-cities` | bool |  | Reference every city in the supervisor registry, ignoring the current directory |
+| `--apply` | bool |  | Delete unreferenced clones (default: dry run) |
+| `--keep-days` | int | `7` | Never prune unreferenced clones modified within this many days |
+
 ## gc import remove
 
 Remove a pack import
@@ -1658,6 +1686,23 @@ Remove a pack import
 ```
 gc import remove <name>
 ```
+
+## gc import status
+
+Report declared imports and packs.lock pins.
+
+Covers every import scope (root pack [imports.*], [defaults.rig.imports.*],
+and rig-scoped [rigs.imports.*]) plus the full packs.lock closure and the
+lockfile content hash. With --json the output is a stable machine-readable
+document for drift checkers.
+
+```
+gc import status [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON result |
 
 ## gc import upgrade
 
@@ -2726,9 +2771,9 @@ gc rig add /path/to/project
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
   gc rig add /path/to/master-repo --default-branch master
-  gc rig add ./my-project --include packs/gastown
+  gc rig add ./my-project --include gastown
   gc rig add ./my-project --include packs/planner --include packs/architect
-  gc rig add ./my-project --include packs/gastown --start-suspended
+  gc rig add ./my-project --include gastown --start-suspended
   gc rig add /path/to/existing --adopt
 ```
 
@@ -3652,6 +3697,11 @@ Tail the machine-wide supervisor log file.
 
 Shows recent log output from background and service-managed supervisor runs.
 
+When GC_SUPERVISOR_LOG_TEE=0 is set in this shell, the supervisor may be
+writing only to the service manager's log: an existing log file is still
+tailed (with a staleness warning), and when the file is absent the command
+points at the service manager's log instead.
+
 ```
 gc supervisor logs [flags]
 ```
@@ -3683,6 +3733,12 @@ Run the machine-wide supervisor in the foreground.
 This is the canonical long-running control loop. It reads ~/.gc/cities.toml
 for registered cities, manages them from one process, and hosts the shared
 API server.
+
+Output is teed into ~/.gc/supervisor.log so 'gc supervisor logs' works
+regardless of how the supervisor was invoked. Set GC_SUPERVISOR_LOG_TEE=0
+in the supervisor's environment to disable the tee when the service manager
+already captures output (e.g. a hand-managed systemd unit with
+StandardOutput=journal).
 
 ```
 gc supervisor run
@@ -3725,6 +3781,13 @@ most callers that need deterministic cleanup want (e.g., integration
 tests that then expect to remove temp directories without racing
 against lingering supervisor / controller subprocesses).
 
+When GC_SUPERVISOR_SYSTEMD_UNIT is set, stop is delegated to
+'systemctl [--user] stop &lt;unit&gt;' instead of the control-socket stop.
+The systemctl invocation is synchronous and bounded by --wait-timeout
+whether or not --wait is set, gc then verifies a previously-running
+supervisor actually exited (failing with its PID when the unit does
+not manage it), and stop with nothing running still exits 1.
+
 ```
 gc supervisor stop [flags]
 ```
@@ -3733,7 +3796,7 @@ gc supervisor stop [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL summary |
 | `--wait` | bool |  | Wait for the supervisor to finish stopping all managed cities and release its socket before returning |
-| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set |
+| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set (in delegated mode, bounds the synchronous systemctl stop regardless of --wait) |
 
 ## gc supervisor uninstall
 

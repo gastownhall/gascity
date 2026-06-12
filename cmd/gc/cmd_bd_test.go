@@ -284,6 +284,98 @@ func TestResolveBdScopeTargetUsesRedirectedWorktreeRig(t *testing.T) {
 	}
 }
 
+// TestResolveBdScopeTargetUsesGCRIGEnv covers the bug where GC_RIG env (set by
+// the controller on every rig agent) was silently ignored, causing gc bd list to
+// hit the city HQ database and return empty results instead of rig-scoped results.
+// See gastownhall/gascity#gcy-6ul.
+func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
+	setCwd(t, t.TempDir())
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(_ string, _ execStoreTarget, _ string) bool { return false }
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gascity"},
+		Rigs: []config.Rig{
+			{Name: "chatehr", Path: filepath.Join("rigs", "chatehr"), Prefix: "ch"},
+			{Name: "wren", Path: filepath.Join("rigs", "wren"), Prefix: "projectwrenunity"},
+		},
+	}
+
+	t.Run("GC_RIG env routes to rig when no flag and no bead-id args", func(t *testing.T) {
+		t.Setenv("GC_RIG", "chatehr")
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list", "--assignee=chatehr/gastown.refinery", "--status=open"})
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		want := execStoreTarget{
+			ScopeRoot: filepath.Join(cityDir, "rigs", "chatehr"),
+			ScopeKind: "rig",
+			Prefix:    "ch",
+			RigName:   "chatehr",
+		}
+		if got != want {
+			t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("explicit --rig flag overrides GC_RIG env", func(t *testing.T) {
+		t.Setenv("GC_RIG", "chatehr")
+		got, err := resolveBdScopeTarget(cfg, cityDir, "wren", []string{"list"})
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		want := execStoreTarget{
+			ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+			ScopeKind: "rig",
+			Prefix:    "projectwrenunity",
+			RigName:   "wren",
+		}
+		if got != want {
+			t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("bead-id prefix detection wins over GC_RIG env", func(t *testing.T) {
+		t.Setenv("GC_RIG", "chatehr")
+		// Restore bdBeadExists to return true for a wren bead
+		origProbe2 := bdBeadExists
+		defer func() { bdBeadExists = origProbe2 }()
+		bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
+			return beadID == "projectwrenunity-0xk" && target.RigName == "wren"
+		}
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "projectwrenunity-0xk"})
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		want := execStoreTarget{
+			ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+			ScopeKind: "rig",
+			Prefix:    "projectwrenunity",
+			RigName:   "wren",
+		}
+		if got != want {
+			t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("unknown GC_RIG env falls through to city root", func(t *testing.T) {
+		t.Setenv("GC_RIG", "nonexistent-rig")
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"})
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		// Must land on city root, not the (unknown) GC_RIG rig.
+		if got.ScopeKind != "city" {
+			t.Fatalf("resolveBdScopeTarget() ScopeKind = %q, want %q", got.ScopeKind, "city")
+		}
+		if got.ScopeRoot != cityDir {
+			t.Fatalf("resolveBdScopeTarget() ScopeRoot = %q, want %q", got.ScopeRoot, cityDir)
+		}
+	})
+}
+
 func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 	cityDir := t.TempDir()
 	worktreeDir := filepath.Join(cityDir, ".gc", "worktrees", "frontend", "polecats", "polecat-1")

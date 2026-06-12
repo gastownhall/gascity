@@ -20,6 +20,9 @@ fi
 mode="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+# shellcheck source=lib/test-slice.sh
+source "$repo_root/scripts/lib/test-slice.sh"
+gc_test_slice_reexec "$repo_root/scripts/test-local-parallel" "$@"
 
 # GC_DOLT_PORT / BEADS_DOLT_SERVER_PORT point bd at the live shared city Dolt
 # server. They must never reach `go test`, or every bd-forking test writes to
@@ -180,6 +183,7 @@ printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
     TMPDIR="${TMPDIR:-/tmp}" \
     OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \
     OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" \
+    GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
     GOPATH="${TEST_LOCAL_GOPATH}" \
     GOCACHE="${TEST_LOCAL_GOCACHE}" \

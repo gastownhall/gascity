@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# test-slice-enroll-test — self-test for scripts/lib/test-slice.sh.
+#
+# Exercises the gascity-test.slice auto-enrollment decision matrix with fake
+# systemd-run/systemctl binaries on a fully controlled PATH, including every
+# plain-execution fallback that must keep CI and non-systemd hosts unaffected.
+#
+# Run directly:    scripts/test-slice-enroll-test
+# Run via go test: go test ./scripts -run TestSliceEnroll
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+lib="$repo_root/scripts/lib/test-slice.sh"
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/gc-test-slice-enroll.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+
+failures=0
+fail() {
+  echo "FAIL: $*" >&2
+  failures=$((failures + 1))
+}
+
+if [[ ! -f "$lib" ]]; then
+  echo "FAIL: missing $lib" >&2
+  exit 1
+fi
+
+# The wrapper must stay shellcheck-clean (and so must this suite).
+if command -v shellcheck >/dev/null 2>&1; then
+  if ! shellcheck "$lib" "${BASH_SOURCE[0]}"; then
+    fail "shellcheck reported issues"
+  fi
+else
+  echo "note: shellcheck not installed; skipping lint" >&2
+fi
+
+# The real test entrypoints must stay wired to the lib: each sources
+# test-slice.sh and re-execs through gc_test_slice_reexec.
+# test-docker-session and this suite are intentionally absent: Docker
+# workloads are confined by the Docker daemon's cgroups, not the user
+# slice, and this suite exercises gc_test_slice_reexec against fake
+# toolboxes, so wrapping the suite itself would defeat its scenarios.
+for entrypoint in go-test-observable test-go-test-shard test-integration-shard test-local-parallel; do
+  path="$repo_root/scripts/$entrypoint"
+  if ! grep -qF 'lib/test-slice.sh' "$path" || ! grep -qF 'gc_test_slice_reexec' "$path"; then
+    fail "wiring: scripts/$entrypoint does not enroll via lib/test-slice.sh"
+  fi
+done
+
+# Entrypoint under test: enrolls exactly like the real test runners do.
+entry="$work/entry"
+cat >"$entry" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+source "$lib"
+gc_test_slice_reexec "\$0" "\$@"
+echo "plain-run:\$*"
+EOF
+chmod +x "$entry"
+
+# cgroup fixtures: the lib reads GC_TEST_SLICE_CGROUP_FILE (defaulting to
+# /proc/self/cgroup) so this suite behaves identically whether or not it
+# already runs inside gascity-test.slice itself.
+cgroup_outside="$work/cgroup-outside"
+printf '0::/user.slice/user-1000.slice/session-1.scope\n' >"$cgroup_outside"
+cgroup_inside="$work/cgroup-inside"
+printf '0::/user.slice/user-1000.slice/user@1000.service/gascity-test.slice/run-r0.scope\n' >"$cgroup_inside"
+
+# Fully controlled PATH per scenario: real bash/grep/true plus fakes, so the
+# host's systemd never leaks into a scenario.
+make_toolbox() {
+  local dir="$1"
+  local tool
+  mkdir -p "$dir"
+  for tool in bash grep true; do
+    # type -P forces a PATH lookup; command -v would answer "true" for the
+    # builtin and produce a self-referencing symlink.
+    ln -sf "$(type -P "$tool")" "$dir/$tool"
+  done
+}
+
+write_fake_systemctl_ok() {
+  local path="$1" log="$2"
+  cat >"$path" <<FAKE
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log"
+printf 'UNIT FILE          STATE  PRESET\n'
+printf 'gascity-test.slice static -\n'
+printf '\n1 unit files listed.\n'
+FAKE
+  chmod +x "$path"
+}
+
+write_fake_systemctl_down() {
+  local path="$1" log="$2"
+  cat >"$path" <<FAKE
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log"
+printf 'Failed to connect to bus: No medium found\n' >&2
+exit 1
+FAKE
+  chmod +x "$path"
+}
+
+write_fake_systemctl_no_unit() {
+  local path="$1" log="$2"
+  cat >"$path" <<FAKE
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log"
+printf '0 unit files listed.\n'
+exit 1
+FAKE
+  chmod +x "$path"
+}
+
+write_fake_systemd_run_ok() {
+  local path="$1" log="$2"
+  cat >"$path" <<FAKE
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log"
+while [[ \$# -gt 0 && "\$1" != "--" ]]; do shift; done
+if [[ \$# -gt 0 ]]; then shift; fi
+exec "\$@"
+FAKE
+  chmod +x "$path"
+}
+
+write_fake_systemd_run_broken() {
+  local path="$1" log="$2"
+  cat >"$path" <<FAKE
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log"
+exit 7
+FAKE
+  chmod +x "$path"
+}
+
+# new_scenario <name>: builds a toolbox dir plus empty fake logs, and leaves
+# the paths in scen_bin/sdr_log/sct_log for the caller.
+scen_bin=""
+sdr_log=""
+sct_log=""
+new_scenario() {
+  local dir="$work/$1"
+  scen_bin="$dir/bin"
+  sdr_log="$dir/systemd-run.log"
+  sct_log="$dir/systemctl.log"
+  make_toolbox "$scen_bin"
+  : >"$sdr_log"
+  : >"$sct_log"
+}
+
+# run_entry <scenario> <cgroup-file> [VAR=value ...]: runs the entrypoint
+# with the scenario toolbox as the entire PATH and captures stdout.
+run_entry() {
+  local name="$1" cgroup_file="$2"
+  shift 2
+  if ! out="$(env -u GC_TEST_NO_SLICE -u GC_TEST_SLICE_ENROLLED \
+    PATH="$scen_bin" \
+    GC_TEST_SLICE_CGROUP_FILE="$cgroup_file" \
+    "$@" \
+    "$entry" alpha beta)"; then
+    fail "$name: entry exited non-zero"
+  fi
+  if [[ "$out" != "plain-run:alpha beta" ]]; then
+    fail "$name: unexpected output: $out"
+  fi
+}
+
+expect_log_lines() {
+  local name="$1" log="$2" want="$3"
+  local got
+  got="$(wc -l <"$log" | tr -d '[:space:]')"
+  if [[ "$got" != "$want" ]]; then
+    fail "$name: expected $want invocation(s) in $(basename "$log"), got $got: $(tr '\n' ';' <"$log")"
+  fi
+}
+
+probe_args="--user --slice=gascity-test.slice --scope --collect --quiet -- true"
+
+# Scenario: explicit opt-out runs plain without touching systemd at all.
+new_scenario opt-out
+write_fake_systemctl_ok "$scen_bin/systemctl" "$sct_log"
+write_fake_systemd_run_ok "$scen_bin/systemd-run" "$sdr_log"
+run_entry opt-out "$cgroup_outside" GC_TEST_NO_SLICE=1
+expect_log_lines opt-out "$sdr_log" 0
+expect_log_lines opt-out "$sct_log" 0
+
+# Scenario: no systemd-run on PATH runs plain (e.g. macOS, minimal CI).
+new_scenario no-systemd-run
+write_fake_systemctl_ok "$scen_bin/systemctl" "$sct_log"
+run_entry no-systemd-run "$cgroup_outside"
+expect_log_lines no-systemd-run "$sct_log" 0
+
+# Scenario: user manager not responding runs plain.
+new_scenario manager-down
+write_fake_systemctl_down "$scen_bin/systemctl" "$sct_log"
+write_fake_systemd_run_ok "$scen_bin/systemd-run" "$sdr_log"
+run_entry manager-down "$cgroup_outside"
+expect_log_lines manager-down "$sdr_log" 0
+
+# Scenario: slice unit not provisioned runs plain (e.g. CI runners).
+new_scenario no-unit
+write_fake_systemctl_no_unit "$scen_bin/systemctl" "$sct_log"
+write_fake_systemd_run_ok "$scen_bin/systemd-run" "$sdr_log"
+run_entry no-unit "$cgroup_outside"
+expect_log_lines no-unit "$sdr_log" 0
+
+# Scenario: scope allocation failing falls back to plain execution after the
+# pre-flight probe (containers can pass the unit check yet fail systemd-run).
+new_scenario probe-fails
+write_fake_systemctl_ok "$scen_bin/systemctl" "$sct_log"
+write_fake_systemd_run_broken "$scen_bin/systemd-run" "$sdr_log"
+run_entry probe-fails "$cgroup_outside"
+expect_log_lines probe-fails "$sdr_log" 1
+if [[ "$(head -n1 "$sdr_log")" != "$probe_args" ]]; then
+  fail "probe-fails: unexpected probe args: $(head -n1 "$sdr_log")"
+fi
+
+# Scenario: already inside the slice (nested runner) runs plain without
+# re-wrapping, even with no guard env vars (parallel runners use env -i).
+new_scenario in-slice
+write_fake_systemctl_ok "$scen_bin/systemctl" "$sct_log"
+write_fake_systemd_run_ok "$scen_bin/systemd-run" "$sdr_log"
+run_entry in-slice "$cgroup_inside"
+expect_log_lines in-slice "$sdr_log" 0
+
+# Scenario: the re-exec guard alone stops a second wrap.
+new_scenario enrolled-guard
+write_fake_systemctl_ok "$scen_bin/systemctl" "$sct_log"
+write_fake_systemd_run_ok "$scen_bin/systemd-run" "$sdr_log"
+run_entry enrolled-guard "$cgroup_outside" GC_TEST_SLICE_ENROLLED=1
+expect_log_lines enrolled-guard "$sdr_log" 0
+
+# Scenario: all checks pass, so the entrypoint re-execs itself exactly once
+# inside the slice (one probe plus one real invocation, no recursion).
+new_scenario wrap
+write_fake_systemctl_ok "$scen_bin/systemctl" "$sct_log"
+write_fake_systemd_run_ok "$scen_bin/systemd-run" "$sdr_log"
+run_entry wrap "$cgroup_outside"
+expect_log_lines wrap "$sdr_log" 2
+if [[ "$(head -n1 "$sdr_log")" != "$probe_args" ]]; then
+  fail "wrap: unexpected probe args: $(head -n1 "$sdr_log")"
+fi
+want_wrap_args="--user --slice=gascity-test.slice --scope --collect --quiet -- $entry alpha beta"
+if [[ "$(sed -n 2p "$sdr_log")" != "$want_wrap_args" ]]; then
+  fail "wrap: unexpected wrap args: $(sed -n 2p "$sdr_log")"
+fi
+if ! grep -qF -- "--user list-unit-files gascity-test.slice" "$sct_log"; then
+  fail "wrap: expected a '--user list-unit-files gascity-test.slice' systemctl probe: $(tr '\n' ';' <"$sct_log")"
+fi
+
+if [[ "$failures" -ne 0 ]]; then
+  echo "test-slice-enroll-test: $failures failure(s)" >&2
+  exit 1
+fi
+echo "test-slice-enroll-test: all scenarios passed"

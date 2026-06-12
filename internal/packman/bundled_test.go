@@ -172,7 +172,7 @@ func TestEnsureBundledCacheMaterializeFailureIncludesRecoveryCause(t *testing.T)
 		switch strings.Join(args, " ") {
 		case "rev-parse HEAD":
 			return commit, nil
-		case "status --porcelain --ignored":
+		case "status --porcelain":
 			return "", nil
 		default:
 			return "", fmt.Errorf("unexpected git call: %v", args)

@@ -148,6 +148,17 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		return report, err
 	}
 
+	// Lock-keyed singleton guard (gastownhall/gascity#3174). Dolt holds an
+	// exclusive flock on each database's `.dolt/noms/LOCK` until its chunk
+	// journal is flushed and the store is closed; TCP teardown happens
+	// earlier. Waiting on the lock — not the port — guarantees a prior
+	// instance has finished writing before we bind the same data_dir. If the
+	// lock is still held after the configured window, fail closed: refusing
+	// to start is recoverable, a corrupted noms journal is not.
+	if err := waitForManagedDoltDataDirLockFree(layout.DataDir, managedDoltLockReleaseTimeoutFn(cityPath)); err != nil {
+		return report, fmt.Errorf("refusing to start dolt sql-server for %s: %w", layout.DataDir, err)
+	}
+
 	currentPort := portNum
 	// retryWindow is resolved once before the loop so an in-progress
 	// city.toml edit cannot change the wait policy mid-flight.
@@ -271,6 +282,12 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	return report, fmt.Errorf("dolt server could not find a free port after repeated address-in-use failures (last port %d)", report.Port)
 }
 
+// managedDoltLockReleaseTimeoutFn resolves the configured wait window for
+// dolt's on-disk exclusive store lock in the start guard. Package-level var
+// so tests can shim the window without writing a city.toml. Production
+// points at resolveManagedDoltLockReleaseTimeout.
+var managedDoltLockReleaseTimeoutFn = resolveManagedDoltLockReleaseTimeout
+
 // managedDoltStartAddressInUseRetryWindowFn resolves the configured retry window for
 // the address-in-use loop in startManagedDoltProcessWithOptions. It is a
 // package-level var so tests can shim the resolution without writing a
@@ -376,6 +393,9 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 	if managedDoltTestWatchdogEnabled() {
 		return startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath, logFile)
 	}
+	if managedDoltScopeWatchdogEnabled() {
+		return startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePath, logFile)
+	}
 	cmd := exec.Command("dolt", "sql-server", "--config", configFile)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -393,7 +413,7 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 	if err != nil {
 		return managedDoltStartedProcess{}, err
 	}
-	watchdogExecutable, err := managedDoltTestWatchdogExecutable()
+	watchdogExecutable, err := managedDoltWatchdogExecutable()
 	if err != nil {
 		_ = os.Remove(disarmFile)
 		return managedDoltStartedProcess{}, err
@@ -467,7 +487,10 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 	return started, nil
 }
 
-func managedDoltTestWatchdogExecutable() (string, error) {
+// managedDoltWatchdogExecutable resolves the gc binary to re-exec as a
+// managed-dolt watchdog. It serves both the test watchdog and the
+// production scope watchdog (dolt_scope_watchdog.go).
+func managedDoltWatchdogExecutable() (string, error) {
 	executable, executableErr := managedDoltTestExecutable()
 	if executableErr == nil && strings.TrimSpace(executable) != "" {
 		return executable, nil
@@ -475,16 +498,16 @@ func managedDoltTestWatchdogExecutable() (string, error) {
 	fallback := strings.TrimSpace(os.Args[0])
 	if fallback == "" {
 		if executableErr != nil {
-			return "", fmt.Errorf("resolve dolt test watchdog executable: os.Executable: %w", executableErr)
+			return "", fmt.Errorf("resolve dolt watchdog executable: os.Executable: %w", executableErr)
 		}
-		return "", fmt.Errorf("resolve dolt test watchdog executable: os.Executable returned empty path")
+		return "", fmt.Errorf("resolve dolt watchdog executable: os.Executable returned empty path")
 	}
 	if filepath.IsAbs(fallback) {
 		return fallback, nil
 	}
 	abs, err := filepath.Abs(fallback)
 	if err != nil {
-		return "", fmt.Errorf("resolve dolt test watchdog executable from argv %q: %w", fallback, err)
+		return "", fmt.Errorf("resolve dolt watchdog executable from argv %q: %w", fallback, err)
 	}
 	return abs, nil
 }
@@ -819,6 +842,14 @@ func resolveDoltArchiveLevel(explicit int) int {
 // managedDoltStopPollInterval, matching the stop/unregister path: without the
 // clamp a sub-100ms configured grace would still sleep a fixed ~100ms before
 // the first re-check, sending SIGKILL well past the intended deadline.
+//
+// When cityPath is known, SIGKILL is additionally gated on the dolt exclusive
+// store lock being free (gastownhall/gascity#3174): a holder is mid-flush,
+// and killing it tears the noms journal. The wait is extended by the
+// lock-release window while the lock is held; if the process still holds it
+// after that, the function returns an error instead of killing. An empty
+// cityPath (test watchdog, recovery cleanup without a city) keeps the legacy
+// unconditional SIGKILL.
 func terminateManagedDoltPID(cityPath string, pid int) error {
 	if pid <= 0 {
 		return nil
@@ -837,9 +868,31 @@ func terminateManagedDoltPID(cityPath string, pid int) error {
 		}
 		time.Sleep(pollInterval)
 	}
+	if dataDir := terminateManagedDoltDataDir(cityPath); dataDir != "" {
+		if err := waitManagedDoltSIGKILLLockGate(pid, dataDir, pidAlive, gracePeriod, managedDoltLockReleaseTimeoutFn(cityPath), pollInterval); err != nil {
+			return err
+		}
+		if !pidAlive(pid) {
+			return nil
+		}
+	}
 	_ = process.Signal(syscall.SIGKILL)
 	time.Sleep(250 * time.Millisecond)
 	return nil
+}
+
+// terminateManagedDoltDataDir resolves the managed data dir for the SIGKILL
+// lock gate in terminateManagedDoltPID. Returns "" when no city is known so
+// callers without a layout keep the legacy unconditional SIGKILL.
+func terminateManagedDoltDataDir(cityPath string) string {
+	if strings.TrimSpace(cityPath) == "" {
+		return ""
+	}
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		return ""
+	}
+	return layout.DataDir
 }
 
 func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {

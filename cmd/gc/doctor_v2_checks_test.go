@@ -1449,6 +1449,48 @@ prefix = "lc"
 	}
 }
 
+// Regression test for ga-lurp5d: the workspace-identity fix rewrites
+// city.toml; when city.toml is a symlink (e.g., into a checked-out repo)
+// the rewrite must write through the link instead of replacing it with a
+// regular file.
+func TestV2WorkspaceNameFixWritesThroughCityTomlSymlink(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	checkoutDir := filepath.Join(cityDir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(checkoutDir, "city.toml")
+	if err := os.WriteFile(target, []byte("[workspace]\nname = \"legacy-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cityDir, "city.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	registerV2DeprecationChecks(d)
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, true)
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("city.toml symlink was replaced by a %v entry; fix must write through the link", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if strings.Contains(string(data), "legacy-city") {
+		t.Fatalf("workspace identity should be migrated out of the symlink target:\n%s", data)
+	}
+}
+
 func TestV2DeprecationChecksWarnOnLegacyTemplateSuffix(t *testing.T) {
 	t.Parallel()
 

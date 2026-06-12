@@ -303,7 +303,7 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		return ControlResult{}, ErrControlPending
 	}
 
-	if subject.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeFail {
+	if beadOutcomeFailed(subject) {
 		snapshot, err := loadScopeSnapshotForControl(store, rootID, scopeRef, body, subject, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, err
@@ -626,6 +626,30 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 	}
 
 	return skipped, nil
+}
+
+// beadOutcomeFailed reports whether a closed bead counts as failed for
+// scope-abort and outcome-aggregation purposes. gc.outcome=fail is always a
+// failure. For beads that opted into gc.on_fail=abort_scope, the
+// worker-result contract is fail-closed (mirroring the retry metadata
+// firewall in classifyRetryAttempt): a bare close with no gc.outcome, or an
+// unknown gc.outcome value, is treated as a failure rather than as success.
+// Retry-managed attempt subjects are exempt — their contract violations are
+// classified by retry-eval as transient retries, not scope aborts.
+func beadOutcomeFailed(subject beads.Bead) bool {
+	outcome := strings.TrimSpace(subject.Metadata[beadmeta.OutcomeMetadataKey])
+	if outcome == beadmeta.OutcomeFail {
+		return true
+	}
+	if strings.TrimSpace(subject.Metadata[beadmeta.OnFailMetadataKey]) != "abort_scope" || isRetryAttemptSubject(subject) {
+		return false
+	}
+	switch outcome {
+	case beadmeta.OutcomePass, beadmeta.OutcomeSkipped:
+		return false
+	default:
+		return true
+	}
 }
 
 func isRetryAttemptSubject(subject beads.Bead) bool {
@@ -1065,7 +1089,7 @@ func reconcileTerminalScopedMemberWithOptions(store beads.Store, bead beads.Bead
 		return ControlResult{}, fmt.Errorf("%s: loading scope body for %s: %w", bead.ID, scopeRef, err)
 	}
 
-	if bead.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeFail {
+	if beadOutcomeFailed(bead) {
 		snapshot, err := loadScopeSnapshotWithBody(store, rootID, scopeRef, body)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: loading scope snapshot for %s: %w", bead.ID, scopeRef, err)
@@ -1430,7 +1454,7 @@ func resolveFinalizeOutcome(store beads.Store, beadID string) (string, error) {
 		if blocker.Status != "closed" {
 			return "", fmt.Errorf("%w: blocker %s is still open", errFinalizePending, blocker.ID)
 		}
-		if blocker.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeFail {
+		if beadOutcomeFailed(blocker) {
 			outcome = beadmeta.OutcomeFail
 		}
 	}

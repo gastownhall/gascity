@@ -126,6 +126,18 @@ type RequestFailedPayload struct {
 // IsEventPayload marks RequestFailedPayload as an events.Payload variant.
 func (RequestFailedPayload) IsEventPayload() {}
 
+// SupervisorStartedPayload classifies how the previous supervisor
+// instance exited, recorded once per supervisor startup. The cause is
+// derived from the clean-shutdown handoff token the previous instance's
+// STOPPING path leaves behind (and which every startup consumes), so
+// flap alerts can distinguish a crash loop from deploy restarts.
+type SupervisorStartedPayload struct {
+	PreviousExit string `json:"previous_exit" enum:"clean,crash,unknown" doc:"How the previous supervisor instance exited: clean (it completed its STOPPING path and left the shutdown handoff token), crash (a prior instance ran but left no token), or unknown (no evidence of a prior instance)."`
+}
+
+// IsEventPayload marks SupervisorStartedPayload as an events.Payload variant.
+func (SupervisorStartedPayload) IsEventPayload() {}
+
 // SupervisorShutdownPayload attributes a supervisor shutdown trigger so
 // operators can diagnose why the supervisor exited without scraping
 // macOS unified log or launchd state. Recorded immediately before the
@@ -507,6 +519,7 @@ func init() {
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStopped, events.NoPayload{})
+	events.RegisterPayload(events.SupervisorStarted, SupervisorStartedPayload{})
 	events.RegisterPayload(events.SupervisorShutdownRequested, SupervisorShutdownPayload{})
 	events.RegisterPayload(events.SupervisorRequest, SupervisorRequestPayload{})
 	events.RegisterPayload(events.CitySuspended, events.NoPayload{})

@@ -96,9 +96,9 @@ check remains informational.`,
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
   gc rig add /path/to/master-repo --default-branch master
-  gc rig add ./my-project --include packs/gastown
+  gc rig add ./my-project --include gastown
   gc rig add ./my-project --include packs/planner --include packs/architect
-  gc rig add ./my-project --include packs/gastown --start-suspended
+  gc rig add ./my-project --include gastown --start-suspended
   gc rig add /path/to/existing --adopt`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -537,8 +537,17 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 			return config.Rig{}, 1
 		}
 
-		if err := writeCityConfigForEditFS(fs, tomlPath, nextCfg); err != nil {
-			writeRigAddRollbackError(fs, stderr, snapshots, "writing config", err)
+		var writeErr error
+		if !reAdd {
+			// Surgical append: preserve existing comments by appending only the
+			// new [[rigs]] block instead of re-serializing the whole file.
+			newRig := nextCfg.Rigs[len(nextCfg.Rigs)-1]
+			writeErr = config.AppendRigAndWriteSiteBindingsForEdit(fs, tomlPath, nextCfg, newRig)
+		} else {
+			writeErr = writeCityConfigForEditFS(fs, tomlPath, nextCfg)
+		}
+		if writeErr != nil {
+			writeRigAddRollbackError(fs, stderr, snapshots, "writing config", writeErr)
 			return config.Rig{}, 1
 		}
 	}

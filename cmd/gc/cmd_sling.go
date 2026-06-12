@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -1197,23 +1198,23 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			if sessionName != "" {
 				// Mirror graphroute's root #2843 session stamp so this CLI-local
 				// decorator stays in sync. Non-root steps already delegate to
-				// graphroute via assignGraphStepRoute.
+				// graphroute.AssignGraphStepRoute.
 				step.Metadata[beadmeta.SessionNameMetadataKey] = sessionName
 			}
 			continue
 		}
-		if sling.IsWorkflowTopologyKind(step.Metadata[beadmeta.KindMetadataKey]) {
+		if graphroute.IsWorkflowTopologyKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			continue
 		}
 		binding, err := resolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, routeVars, defaultRoute, routingRigContext, store, cityName, cityPath, cfg)
 		if err != nil {
 			return err
 		}
-		if isControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
-			assignGraphStepRoute(step, binding, &controlRoute)
+		if graphroute.IsControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
+			graphroute.AssignGraphStepRoute(step, binding, &controlRoute)
 			continue
 		}
-		assignGraphStepRoute(step, binding, nil)
+		graphroute.AssignGraphStepRoute(step, binding, nil)
 	}
 	return nil
 }
@@ -1243,8 +1244,8 @@ func workflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.Cit
 	return ""
 }
 
-// graphRouteBinding is an alias for sling.GraphRouteBinding.
-type graphRouteBinding = sling.GraphRouteBinding
+// graphRouteBinding is an alias for graphroute.GraphRouteBinding.
+type graphRouteBinding = graphroute.GraphRouteBinding
 
 type graphStepTarget struct {
 	value        string

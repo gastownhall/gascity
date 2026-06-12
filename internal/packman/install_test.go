@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -644,6 +645,99 @@ func TestSyncLockAllowsMultipleSubpathsFromSameRepoWithSharedClone(t *testing.T)
 	}
 	if lock.Packs["file:///tmp/repo.git//packs/b"].Commit != "aaaa" {
 		t.Fatalf("subpath b commit = %q, want aaaa", lock.Packs["file:///tmp/repo.git//packs/b"].Commit)
+	}
+}
+
+func TestEnsureBundledPacksCurrentRepairsStaleSyntheticCache(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+
+	source, ok := builtinpacks.Source("core")
+	if !ok {
+		t.Fatal("no bundled core source")
+	}
+	commit := "abc123def456abc123def456abc123def456abc123de"
+	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
+		Schema: LockfileSchema,
+		Packs:  map[string]LockedPack{source: {Version: "1.0.0", Commit: commit}},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	// Write a synthetic cache with a stale content hash, simulating a cache
+	// produced by a different binary version (the binary-upgrade skew case).
+	cacheDir, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+	staleMarker := `.gc-bundled-pack-cache.toml`
+	stalePath := filepath.Join(cacheDir, staleMarker)
+	staleData := `schema = 1
+repository = "https://github.com/gastownhall/gascity.git"
+commit = "` + commit + `"
+content_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+`
+	if err := os.WriteFile(stalePath, []byte(staleData), 0o644); err != nil {
+		t.Fatalf("WriteFile(stale marker): %v", err)
+	}
+	// Confirm the cache is stale before the repair.
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err == nil {
+		t.Fatal("expected stale cache to fail validation before repair")
+	}
+
+	if err := EnsureBundledPacksCurrent(city); err != nil {
+		t.Fatalf("EnsureBundledPacksCurrent: %v", err)
+	}
+
+	// After repair the cache must pass validation.
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err != nil {
+		t.Fatalf("ValidateSyntheticRepo after repair: %v", err)
+	}
+}
+
+func TestEnsureBundledPacksCurrentSkipsNonBundledPacks(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	stubCachedPackGit(t)
+
+	// Non-bundled pack in packs.lock — should not be cloned by
+	// EnsureBundledPacksCurrent.
+	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
+		Schema: LockfileSchema,
+		Packs: map[string]LockedPack{
+			"https://example.com/a.git": {Version: "1.0.0", Commit: "aaaa"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	var cloned []string
+	prev := runGit
+	runGit = func(_ string, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "clone" {
+			cloned = append(cloned, args[len(args)-2])
+		}
+		return prev("", args...)
+	}
+	t.Cleanup(func() { runGit = prev })
+
+	if err := EnsureBundledPacksCurrent(city); err != nil {
+		t.Fatalf("EnsureBundledPacksCurrent: %v", err)
+	}
+	if len(cloned) != 0 {
+		t.Fatalf("cloned %d non-bundled repos, want 0", len(cloned))
+	}
+}
+
+func TestEnsureBundledPacksCurrentNoLockfile(t *testing.T) {
+	city := t.TempDir()
+	if err := EnsureBundledPacksCurrent(city); err != nil {
+		t.Fatalf("EnsureBundledPacksCurrent with no lockfile: %v", err)
 	}
 }
 

@@ -509,7 +509,10 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 
 		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1"})
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		// Generous deadline: exec-backed providers fork subprocesses per
+		// call, which can take seconds on loaded CI runners. Healthy
+		// providers deliver in milliseconds regardless.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		w, err := p.Watch(ctx, 0)
@@ -531,7 +534,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p, cleanup := newProvider(t)
 		defer cleanup()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		w, err := p.Watch(ctx, 0)
@@ -572,7 +575,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 		lastSeq := all[len(all)-1].Seq
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		// Watch after the last existing event.

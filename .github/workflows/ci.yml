@@ -91,10 +91,11 @@ jobs:
               - 'go.mod'
               - 'internal/beads/**'
             packs:
-              - 'examples/gastown/packs/**'
+              - 'examples/gastown/**'
               - 'internal/config/pack.go'
               - 'internal/config/compose.go'
               - 'cmd/gc/embed_builtin_packs.go'
+              - 'scripts/update-bundled-gastown-pack'
             worker:
               - 'go.mod'
               - 'go.sum'
@@ -124,7 +125,7 @@ jobs:
               - 'Makefile'
               - 'cmd/gc/**'
               - 'internal/**'
-              - 'examples/gastown/packs/**'
+              - 'examples/gastown/**'
             integration:
               - 'go.mod'
               - 'go.sum'
@@ -134,7 +135,7 @@ jobs:
               - 'scripts/test-integration-shard'
               - 'scripts/test-go-test-shard'
               - 'scripts/go-test-observable'
-              - 'examples/gastown/packs/**'
+              - 'examples/gastown/**'
             # Cross-cutting core paths. A change here is folded into every
             # gated output above, forcing a full union run. Beads is the
             # universal persistence substrate, events the universal observation
@@ -954,6 +955,24 @@ jobs:
         run: make install-tools
       - name: Pack compatibility tests
         run: make test-acceptance
+      # The gastown pack ships via the gascity-packs Go module, so a routine
+      # go.mod bump can silently desync the embedded pack bytes from the
+      # provenance pins in internal/config/public_packs.go and the
+      # examples/gastown import. This check fails when any pin drifts from
+      # the latest registry release; every in-repo test stays green after
+      # such a drift, so this is the only automated guard.
+      - name: Bundled gastown pack pin check
+        timeout-minutes: 10
+        run: |
+          for attempt in 1 2 3; do
+            if scripts/update-bundled-gastown-pack --check; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
       - name: Live registry smoke
         timeout-minutes: 12
         run: |

@@ -258,6 +258,7 @@ TEST_ENV = env -i \
 	TMPDIR="$${TMPDIR:-/tmp}" \
 	OBSERVABLE_TEST_LOG="$${OBSERVABLE_TEST_LOG-}" \
 	OBSERVABLE_FAILURE_LINES="$${OBSERVABLE_FAILURE_LINES-}" \
+	GC_TEST_NO_SLICE="$${GC_TEST_NO_SLICE-}" \
 	XDG_RUNTIME_DIR="$$XDG_RUNTIME_DIR" \
 	GOPATH="$(GOPATH_VAL)" \
 	GOCACHE="$(GOCACHE_VAL)" \
@@ -326,7 +327,7 @@ test-pack-registry-live:
 	$(TEST_ENV) CGO_ENABLED=0 GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test ./cmd/gc -run '^TestPackRegistryLiveGascityPacksCatalog$$' -count=1
 	$(TEST_ENV) CGO_ENABLED=0 GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test -tags acceptance_a -timeout 10m ./test/acceptance -run '^TestPackRegistryLiveImportsEveryCatalogPack$$' -count=1
 
-## update-bundled-gastown-pack: sync the embedded gastown pack to the latest registry release
+## update-bundled-gastown-pack: pin the gastown module/constants/example to the latest registry release
 update-bundled-gastown-pack:
 	scripts/update-bundled-gastown-pack
 

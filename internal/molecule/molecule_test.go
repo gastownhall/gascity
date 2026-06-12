@@ -183,6 +183,21 @@ func assertGraphPlanEdgeCount(t *testing.T, plan *beads.GraphApplyPlan, fromKey,
 	}
 }
 
+func assertStoreDep(t *testing.T, store beads.Store, issueID, dependsOnID, depType string) {
+	t.Helper()
+
+	deps, err := store.DepList(issueID, "down")
+	if err != nil {
+		t.Fatalf("DepList(%s): %v", issueID, err)
+	}
+	for _, dep := range deps {
+		if dep.DependsOnID == dependsOnID && dep.Type == depType {
+			return
+		}
+	}
+	t.Fatalf("dependencies for %s = %+v, want %s dependency on %s", issueID, deps, depType, dependsOnID)
+}
+
 func TestBuildRecipeApplyPlanReviewQuorumSubstitutesSynthesisTarget(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 
@@ -481,6 +496,41 @@ func TestInstantiateSimple(t *testing.T) {
 	}
 }
 
+func TestInstantiateExternalDepsCreateBlockingDeps(t *testing.T) {
+	store := beads.NewMemStore()
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(false)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+	blocker, err := store.Create(beads.Bead{Title: "Blocker", Type: "task"})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.step", Title: "Work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{
+		ExternalDeps: []ExternalDep{
+			{StepID: "wf", DependsOnID: blocker.ID, Type: "blocks"},
+			{StepID: "wf.step", DependsOnID: blocker.ID, Type: "blocks"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	assertStoreDep(t, store, result.RootID, blocker.ID, "blocks")
+	assertStoreDep(t, store, result.IDMapping["wf.step"], blocker.ID, "blocks")
+}
+
 func TestInstantiateUsesGraphApplyStoreWhenAvailable(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 	prev := IsGraphApplyEnabled()
@@ -526,6 +576,42 @@ func TestInstantiateUsesGraphApplyStoreWhenAvailable(t *testing.T) {
 	if !hasParentChild {
 		t.Fatalf("edges = %+v, want at least one parent-child edge", store.plan.Edges)
 	}
+}
+
+func TestInstantiateGraphApplyIncludesExternalDeps(t *testing.T) {
+	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+	blocker, err := store.Create(beads.Bead{Title: "Blocker", Type: "task"})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.step", Title: "Work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	if _, err := Instantiate(context.Background(), store, recipe, Options{
+		ExternalDeps: []ExternalDep{
+			{StepID: "wf", DependsOnID: blocker.ID, Type: "blocks"},
+			{StepID: "wf.step", DependsOnID: blocker.ID, Type: "blocks"},
+		},
+	}); err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if store.plan == nil {
+		t.Fatal("ApplyGraphPlan was not called")
+	}
+	assertGraphPlanEdgeCount(t, store.plan, "wf", "", blocker.ID, "blocks", 1)
+	assertGraphPlanEdgeCount(t, store.plan, "wf.step", "", blocker.ID, "blocks", 1)
 }
 
 func TestInstantiateRetriesTransientGraphApplyBeforeFallback(t *testing.T) {

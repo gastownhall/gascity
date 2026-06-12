@@ -2597,6 +2597,37 @@ mode = "unanimous"
 	}
 }
 
+func TestParseTOML_RemovedTallyRejectedInLoopBody(t *testing.T) {
+	tomlData := `
+formula = "mol-tally-removed-loop"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "vote-loop"
+title = "Vote loop"
+
+[steps.loop]
+count = 2
+
+[[steps.loop.body]]
+id = "ask"
+title = "Ask voters"
+
+[steps.loop.body.tally]
+mode = "majority"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want loud rejection of removed [steps.loop.body.tally]")
+	}
+	if !strings.Contains(err.Error(), "steps.tally was removed from the SDK; aggregate votes in your pack instead") {
+		t.Fatalf("ParseTOML error = %v, want removed-tally rejection", err)
+	}
+}
+
 func TestParseJSON_RemovedTallyRejected(t *testing.T) {
 	jsonData := `{
   "formula": "mol-tally-removed",
@@ -2622,6 +2653,39 @@ func TestParseJSON_RemovedTallyRejected(t *testing.T) {
 	_, err := p.Parse([]byte(jsonData))
 	if err == nil {
 		t.Fatal("Parse succeeded, want loud rejection of removed \"tally\" step field")
+	}
+	if !strings.Contains(err.Error(), "steps.tally was removed from the SDK; aggregate votes in your pack instead") {
+		t.Fatalf("Parse error = %v, want removed-tally rejection", err)
+	}
+}
+
+func TestParseJSON_RemovedTallyRejectedInChildren(t *testing.T) {
+	jsonData := `{
+  "formula": "mol-tally-removed-child",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {
+      "id": "parent",
+      "title": "Parent",
+      "children": [
+        {
+          "id": "ask",
+          "title": "Ask voters",
+          "tally": {
+            "vote_field": "answer",
+            "mode": "majority"
+          }
+        }
+      ]
+    }
+  ]
+}`
+
+	p := NewParser()
+	_, err := p.Parse([]byte(jsonData))
+	if err == nil {
+		t.Fatal("Parse succeeded, want loud rejection of removed nested \"tally\" step field")
 	}
 	if !strings.Contains(err.Error(), "steps.tally was removed from the SDK; aggregate votes in your pack instead") {
 		t.Fatalf("Parse error = %v, want removed-tally rejection", err)

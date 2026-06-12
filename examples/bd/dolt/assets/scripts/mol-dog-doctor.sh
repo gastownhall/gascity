@@ -20,7 +20,6 @@ USER="${GC_DOLT_USER:-root}"
 # precedence; otherwise derive from the legacy seconds knob (default 1s ->
 # 1000ms) for backward compatibility.
 LATENCY_WARN_MS="${GC_DOCTOR_LATENCY_WARN_MS:-$(( ${GC_DOCTOR_LATENCY_WARN_S:-1} * 1000 ))}"
-CONN_MAX="${GC_DOCTOR_CONN_MAX:-50}"
 CONN_WARN_PCT="${GC_DOCTOR_CONN_WARN_PCT:-80}"
 BACKUP_STALE_S="${GC_DOCTOR_BACKUP_STALE_S:-43200}"  # 2x 6h backup interval
 BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
@@ -30,6 +29,18 @@ dolt_sql() {
         run_bounded 10 \
         dolt --host "$HOST" --port "$PORT" --user "$USER" --no-tls sql "$@"
 }
+
+# CONN_MAX: explicit override > server @@GLOBAL.max_connections > fallback.
+if [ -n "${GC_DOCTOR_CONN_MAX:-}" ]; then
+    CONN_MAX="$GC_DOCTOR_CONN_MAX"
+else
+    _server_max=$(dolt_sql -r csv -q "SELECT @@GLOBAL.max_connections" 2>/dev/null | tail -1 || true)
+    case "${_server_max:-}" in
+        ''|*[!0-9]*) CONN_MAX=256 ;;
+        *) CONN_MAX="$_server_max" ;;
+    esac
+    unset _server_max
+fi
 
 file_mtime() {
     file_path="$1"

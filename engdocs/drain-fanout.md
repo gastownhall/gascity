@@ -114,6 +114,26 @@ Depends on `on_item_failure`:
   with a partial-success outcome after all items finish.
 - `"skip_remaining"` — no new items start after the first failure.
 
+**Q: Do drain items respect dependencies between convoy members?**
+
+Yes. New drains materialize members in dependency order, and a member that
+depends on another in-manifest member gets its item workflow blocked on that
+blocker's item-workflow root from creation time. Dependencies on beads outside
+the drain manifest are embedded as-is and represent genuine waits.
+
+Two upgrade-path caveats for drain manifests persisted before dependency
+ordering existed:
+
+- Enforcement is best-effort: in separate context a dependent item can start
+  inside a bounded window before the projection sweep wires its blocker edge;
+  in shared context a dependent-first legacy manifest order runs the dependent
+  before its blocker, permanently for that drain (the pre-ordering concurrency
+  semantics).
+- A drain stalled by an intermediate pre-fix build that embedded raw
+  source-member dependency edges does not heal automatically. Run
+  `gc convoy control <drain-id>` once; the control pass repairs the embedded
+  edges and the drain resumes.
+
 **Q: Is there a `max_units` limit?**
 
 In v0, `max_units` must be between 1 and 100. If unset, the drain expands

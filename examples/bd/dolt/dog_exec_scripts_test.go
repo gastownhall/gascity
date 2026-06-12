@@ -172,6 +172,7 @@ func (f compactScriptFixture) run(t *testing.T, mode string, extraEnv ...string)
 		"GC_DOLT_COMPACT_ONLY_DBS",
 		"GC_DOLT_COMPACT_REMOTE",
 		"GC_DOLT_COMPACT_BARE_GC",
+		"GC_DOLT_RIG_LIST_TIMEOUT_SECS",
 		"GC_FAKE_DOLT_COMPACT_MODE",
 		"GC_FAKE_DOLT_COUNT_FILE",
 		"GC_FAKE_DOLT_STATE_FILE",
@@ -873,6 +874,30 @@ func TestCompactScriptDefaultThresholdIs2000(t *testing.T) {
 	}
 	if strings.Contains(string(data), "DOLT_RESET") || strings.Contains(string(data), "DOLT_COMMIT") {
 		t.Fatalf("default-threshold compact must not flatten a 600-commit db:\n%s", data)
+	}
+}
+
+func TestCompactScriptToleratesSlowRigListDiscovery(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	// `gc rig list --json` regularly takes longer than the old 5s discovery
+	// bound on busy hosts. When the bound expires the script silently falls
+	// back to a city-only filesystem scan that misses external rig
+	// databases, so they are never compacted (gascity#2740). Answer after
+	// 7s and require discovery to still use the rig list.
+	writeExecutable(t, filepath.Join(fixture.binDir, "gc"), `#!/bin/sh
+if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" ]; then
+  sleep 7
+  printf '{"rigs":[]}\n'
+  exit 0
+fi
+exit 0
+`)
+	out, err := fixture.run(t, "success")
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "falling back to local filesystem metadata scan") {
+		t.Fatalf("rig list answering within 30s must not trigger the filesystem fallback:\n%s", out)
 	}
 }
 
@@ -3946,6 +3971,82 @@ exit 0
 	}
 	if strings.Contains(string(gcLog), "prod_dev backup") {
 		t.Fatalf("fresh prod_dev backup should not be reported stale, log:\n%s", gcLog)
+	}
+}
+
+func TestDoctorScriptUsesServerMaxConnections(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		extraEnv  []string
+		want      string
+		wantQuery bool
+	}{
+		{
+			name:      "server value",
+			extraEnv:  []string{"GC_FAKE_MAX_CONNECTIONS=512", "GC_FAKE_CONN_COUNT=220"},
+			want:      "conns: 220/512",
+			wantQuery: true,
+		},
+		{
+			name:      "explicit override",
+			extraEnv:  []string{"GC_DOCTOR_CONN_MAX=100", "GC_FAKE_MAX_CONNECTIONS=512", "GC_FAKE_CONN_COUNT=70"},
+			want:      "conns: 70/100",
+			wantQuery: false,
+		},
+		{
+			name:      "malformed server value fallback",
+			extraEnv:  []string{"GC_FAKE_MAX_CONNECTIONS=not-a-number", "GC_FAKE_CONN_COUNT=220"},
+			want:      "conns: 220/256",
+			wantQuery: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			dataDir := filepath.Join(cityPath, "dolt-data")
+			if err := os.MkdirAll(dataDir, 0o755); err != nil {
+				t.Fatalf("mkdir data dir: %v", err)
+			}
+
+			binDir := t.TempDir()
+			queryLogPath := filepath.Join(binDir, "dolt-queries.log")
+			writeDogFakeGC(t, binDir)
+			writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf '%%s\n' "$*" >> %s
+case "$*" in
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    exit 0
+    ;;
+  *"SELECT @@GLOBAL.max_connections"*)
+    printf '@@GLOBAL.max_connections\n%%s\n' "${GC_FAKE_MAX_CONNECTIONS:-512}"
+    exit 0
+    ;;
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n%%s\n' "${GC_FAKE_CONN_COUNT:-1}"
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\n'
+    exit 0
+    ;;
+esac
+exit 0
+`, shellQuote(queryLogPath)))
+
+			out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, tc.extraEnv...)
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("doctor summary mismatch: want %q, output:\n%s", tc.want, out)
+			}
+			queryLog, err := os.ReadFile(queryLogPath)
+			if err != nil {
+				t.Fatalf("read fake dolt query log: %v", err)
+			}
+			hasQuery := strings.Contains(string(queryLog), "SELECT @@GLOBAL.max_connections")
+			if hasQuery != tc.wantQuery {
+				t.Fatalf("max_connections query presence = %v, want %v, log:\n%s", hasQuery, tc.wantQuery, queryLog)
+			}
+		})
 	}
 }
 

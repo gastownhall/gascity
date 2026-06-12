@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -895,6 +896,15 @@ func reloadWarningsFromError(err error) []string {
 func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadResult, error) {
 	if err := ensureLegacyNamedPacksCached(cityRoot); err != nil {
 		return nil, fmt.Errorf("fetching packs: %w", err)
+	}
+	// Re-materialize any bundled pack synthetic caches that were written by a
+	// different binary version. The config loader's strict content-hash check
+	// rejects caches whose hash was produced by a binary whose embedded pack
+	// content differs from the running controller (e.g., after "gc import install"
+	// runs with a newer on-disk binary). EnsureBundledPacksCurrent repairs stale
+	// caches from the running binary's embedded packs before the loader validates.
+	if err := packman.EnsureBundledPacksCurrent(cityRoot); err != nil {
+		return nil, fmt.Errorf("refreshing bundled pack caches: %w", err)
 	}
 
 	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter()); err != nil {

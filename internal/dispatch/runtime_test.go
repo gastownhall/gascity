@@ -446,6 +446,255 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	}
 }
 
+// scopeCheckAbortScopeFixture builds the canonical scope topology used by the
+// gc.on_fail=abort_scope contract tests: a scope body, a closed subject member
+// (metadata supplied by the caller), the subject's scope-check control, and a
+// downstream member + control wired the way graph compile rewires them
+// (downstream blocks on the subject's scope-check, not on the subject).
+func scopeCheckAbortScopeFixture(t *testing.T, store beads.Store, subjectMeta map[string]string) (control, futureMember, futureControl, body beads.Bead) {
+	t.Helper()
+	body = mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	meta := map[string]string{
+		"gc.root_bead_id": "wf-1",
+		"gc.scope_ref":    "body",
+		"gc.scope_role":   "member",
+	}
+	for k, v := range subjectMeta {
+		meta[k] = v
+	}
+	subject := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "preflight",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: meta,
+	})
+	control = mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for preflight",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	futureMember = mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.on_fail":      "abort_scope",
+		},
+	})
+	futureControl = mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	mustDepAdd(t, store, control.ID, subject.ID, "blocks")
+	mustDepAdd(t, store, body.ID, control.ID, "blocks")
+	mustDepAdd(t, store, futureMember.ID, control.ID, "blocks")
+	mustDepAdd(t, store, futureControl.ID, futureMember.ID, "blocks")
+	return control, futureMember, futureControl, body
+}
+
+// Regression test for gastownhall/gascity#1657: a scoped step that opted into
+// gc.on_fail=abort_scope and closes without an affirmative gc.outcome (the
+// worker-result contract violation — e.g. `bd close --reason "FAIL: ..."`)
+// must abort the scope. Downstream steps must be closed as skipped and must
+// NOT appear in ready-work queries, so no pool worker can claim and run them.
+func TestProcessScopeCheckAbortScopeNormalizesFailureContract(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		subjectMeta map[string]string
+	}{
+		{
+			name: "bare close without outcome",
+			subjectMeta: map[string]string{
+				"gc.on_fail":   "abort_scope",
+				"close_reason": "FAIL: subagent returned non-zero",
+			},
+		},
+		{
+			name: "unknown outcome value",
+			subjectMeta: map[string]string{
+				"gc.on_fail": "abort_scope",
+				"gc.outcome": "banana",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := beads.NewMemStore()
+			control, futureMember, futureControl, body := scopeCheckAbortScopeFixture(t, store, tc.subjectMeta)
+
+			result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+			if err != nil {
+				t.Fatalf("ProcessControl(scope-check): %v", err)
+			}
+			if !result.Processed || result.Action != "scope-fail" {
+				t.Fatalf("result = %+v, want processed scope-fail", result)
+			}
+			if result.Skipped != 2 {
+				t.Fatalf("skipped = %d, want 2", result.Skipped)
+			}
+
+			bodyAfter := mustGetBead(t, store, body.ID)
+			if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "fail" {
+				t.Fatalf("body = status %q outcome %q, want closed/fail", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
+			}
+			for _, beadID := range []string{futureMember.ID, futureControl.ID} {
+				member := mustGetBead(t, store, beadID)
+				if member.Status != "closed" || member.Metadata["gc.outcome"] != "skipped" {
+					t.Fatalf("%s = status %q outcome %q, want closed/skipped", beadID, member.Status, member.Metadata["gc.outcome"])
+				}
+			}
+			// The issue's repro assertion: with the subject's scope-check
+			// closed, the downstream member's dependencies are satisfied —
+			// only its skipped close keeps it out of ready-work queries.
+			if mustReadyContains(t, store, futureMember.ID) {
+				t.Fatalf("downstream member %s is claimable after abort_scope failure", futureMember.ID)
+			}
+		})
+	}
+}
+
+// Scoped members that did NOT opt into gc.on_fail=abort_scope keep the
+// legacy lenient contract: a bare close advances the scope, and an
+// affirmative pass never aborts even with the opt-in present.
+func TestProcessScopeCheckAbortScopeAffirmativeAndLegacyOutcomes(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		subjectMeta map[string]string
+	}{
+		{
+			name:        "bare close without on_fail keeps legacy pass behavior",
+			subjectMeta: map[string]string{"close_reason": "FAIL: subagent returned non-zero"},
+		},
+		{
+			name: "pass outcome with abort_scope does not abort",
+			subjectMeta: map[string]string{
+				"gc.on_fail": "abort_scope",
+				"gc.outcome": "pass",
+			},
+		},
+		{
+			name: "skipped outcome with abort_scope does not abort",
+			subjectMeta: map[string]string{
+				"gc.on_fail": "abort_scope",
+				"gc.outcome": "skipped",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := beads.NewMemStore()
+			control, futureMember, _, body := scopeCheckAbortScopeFixture(t, store, tc.subjectMeta)
+
+			result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+			if err != nil {
+				t.Fatalf("ProcessControl(scope-check): %v", err)
+			}
+			if !result.Processed || result.Action != "continue" {
+				t.Fatalf("result = %+v, want processed continue", result)
+			}
+			memberAfter := mustGetBead(t, store, futureMember.ID)
+			if memberAfter.Status != "open" {
+				t.Fatalf("downstream member status = %q, want open", memberAfter.Status)
+			}
+			bodyAfter := mustGetBead(t, store, body.ID)
+			if bodyAfter.Status != "open" {
+				t.Fatalf("body status = %q, want open while members remain", bodyAfter.Status)
+			}
+			if !mustReadyContains(t, store, futureMember.ID) {
+				t.Fatalf("downstream member %s should be claimable after scope continues", futureMember.ID)
+			}
+		})
+	}
+}
+
+// Retry-managed attempt subjects are exempt from the fail-closed abort_scope
+// contract: a bare-closed nested-retry attempt (gc.logical_bead_id +
+// gc.attempt, with the opt-in hardcoded at dispatch) must keep routing
+// through retry-eval as a transient contract violation, not abort its
+// iteration scope. An explicit gc.outcome=fail still counts as failed. The
+// opt-in match itself is whitespace-tolerant so formula-authored variants
+// cannot silently keep the legacy lenient contract.
+func TestBeadOutcomeFailedRetryAttemptExemptionAndOptInTrim(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		meta map[string]string
+		want bool
+	}{
+		{
+			name: "bare-closed retry attempt is exempt from fail-closed",
+			meta: map[string]string{
+				"gc.on_fail":         "abort_scope",
+				"gc.logical_bead_id": "ga-logical-1",
+				"gc.attempt":         "1",
+			},
+			want: false,
+		},
+		{
+			name: "explicit fail on retry attempt still counts as failed",
+			meta: map[string]string{
+				"gc.on_fail":         "abort_scope",
+				"gc.logical_bead_id": "ga-logical-1",
+				"gc.attempt":         "1",
+				"gc.outcome":         "fail",
+			},
+			want: true,
+		},
+		{
+			name: "whitespace-padded opt-in still fail-closes a bare close",
+			meta: map[string]string{
+				"gc.on_fail": " abort_scope ",
+			},
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			subject := beads.Bead{
+				ID:       "ga-subject-1",
+				Status:   "closed",
+				Metadata: tc.meta,
+			}
+			if got := beadOutcomeFailed(subject); got != tc.want {
+				t.Fatalf("beadOutcomeFailed = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSkipOpenScopeMembersBatchesDependencyChecksAndUpdates(t *testing.T) {
 	t.Parallel()
 
@@ -1372,6 +1621,73 @@ func TestReconcileTerminalScopedMemberReusesResolvedBodyForFailingScope(t *testi
 	}
 }
 
+// Regression test for gastownhall/gascity#1657, reconcile-path symmetry: a
+// scoped member with gc.on_fail=abort_scope reconciled after a bare close
+// (no gc.outcome) must abort the scope instead of treating the close as pass.
+func TestReconcileTerminalScopedMemberAbortScopeBareCloseAbortsScope(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "failed step",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.on_fail":      "abort_scope",
+			"close_reason":    "FAIL: subagent returned non-zero",
+		},
+	})
+	openStep := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "later step",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+
+	result, err := reconcileTerminalScopedMember(store, failed)
+	if err != nil {
+		t.Fatalf("reconcileTerminalScopedMember(bare close): %v", err)
+	}
+	if result.Action != "scope-fail" {
+		t.Fatalf("action = %q, want scope-fail", result.Action)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", result.Skipped)
+	}
+	bodyAfter := mustGetBead(t, store, body.ID)
+	if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("body = status %q outcome %q, want closed/fail", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
+	}
+	openAfter := mustGetBead(t, store, openStep.ID)
+	if openAfter.Status != "closed" || openAfter.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("open step = status %q outcome %q, want closed/skipped", openAfter.Status, openAfter.Metadata["gc.outcome"])
+	}
+}
+
 func TestReconcileTerminalScopedMemberReusesResolvedBodyForPassingScope(t *testing.T) {
 	t.Parallel()
 
@@ -1809,6 +2125,56 @@ func TestProcessWorkflowFinalizeClosesWorkflow(t *testing.T) {
 	}
 	if got := rootAfter.Metadata["gc.outcome"]; got != "fail" {
 		t.Fatalf("workflow outcome = %q, want fail", got)
+	}
+}
+
+// Regression test for gastownhall/gascity#1657, finalize sibling site: a
+// workflow-finalize blocker with gc.on_fail=abort_scope that closed bare (no
+// gc.outcome) must fail the workflow instead of finalizing it green.
+func TestProcessWorkflowFinalizeAbortScopeBareCloseFailsWorkflow(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	sink := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "sink step",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.on_fail":      "abort_scope",
+			"close_reason":    "FAIL: subagent returned non-zero",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+
+	mustDepAdd(t, store, finalizer.ID, sink.ID, "blocks")
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("workflow result = %+v, want processed workflow-fail", result)
+	}
+	rootAfter := mustGetBead(t, store, workflow.ID)
+	if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("workflow = status %q outcome %q, want closed/fail", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
 	}
 }
 
@@ -7141,6 +7507,59 @@ func TestProcessFanoutFailsWhenSourceFailed(t *testing.T) {
 	result, err := ProcessControl(store, fanout, ProcessOptions{})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout fail): %v", err)
+	}
+	if !result.Processed || result.Action != "fanout-fail" {
+		t.Fatalf("result = %+v, want processed fanout-fail", result)
+	}
+
+	fanoutAfter := mustGetBead(t, store, fanout.ID)
+	if fanoutAfter.Status != "closed" || fanoutAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("fanout = status %q outcome %q, want closed/fail", fanoutAfter.Status, fanoutAfter.Metadata["gc.outcome"])
+	}
+}
+
+// Regression test for gastownhall/gascity#1657, fanout sibling site: a fanout
+// whose abort_scope source closed bare (no gc.outcome) must fail instead of
+// attempting expansion against the missing required output.
+func TestProcessFanoutFailsWhenAbortScopeSourceClosedBare(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "survey",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.survey",
+			"gc.on_fail":      "abort_scope",
+			"close_reason":    "FAIL: subagent returned non-zero",
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Expand fanout for survey",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.survey",
+			"gc.for_each":     "output.items",
+			"gc.bond":         "expansion-review",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	result, err := ProcessControl(store, fanout, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(fanout bare-failed source): %v", err)
 	}
 	if !result.Processed || result.Action != "fanout-fail" {
 		t.Fatalf("result = %+v, want processed fanout-fail", result)
