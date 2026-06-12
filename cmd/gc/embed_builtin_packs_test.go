@@ -703,6 +703,233 @@ func TestEnsureBuiltinRuntimeAssetsPrunesRetiredSystemPacks(t *testing.T) {
 	}
 }
 
+// TestPruneRetiredSystemPacksWaitsForLegacyIncludeMigration pins the legacy
+// upgrade window ordering: on a city whose city.toml still composes builtin
+// packs through .gc/system/packs includes, pruning must NOT delete the tree.
+// Deleting it before the include migration leaves the city silently
+// composing without those packs (dangling V1 includes skip with only a log
+// line) until someone runs "gc doctor --fix". The tree is preserved and a
+// once-per-city warning points at the doctor migration; once the includes
+// are migrated the next prune removes the tree.
+func TestPruneRetiredSystemPacksWaitsForLegacyIncludeMigration(t *testing.T) {
+	city := t.TempDir()
+	legacyToml := "[workspace]\nincludes = [\".gc/system/packs/core\"]\n\n[beads]\nprovider = \"file\"\n"
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(legacyToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(city, citylayout.SystemPacksRoot, "core")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "pack.toml"), []byte("[pack]\nname = \"core\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var warnings bytes.Buffer
+	pruneRetiredSystemPacks(city, &warnings)
+
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("stat %s err = %v; the prune ran before the include migration", stale, err)
+	}
+	if !strings.Contains(warnings.String(), `run "gc doctor --fix"`) {
+		t.Errorf("preserved-tree warning does not point at the doctor migration: %q", warnings.String())
+	}
+
+	// Once per city per process: a second gated prune does not re-warn.
+	var second bytes.Buffer
+	pruneRetiredSystemPacks(city, &second)
+	if second.Len() != 0 {
+		t.Errorf("second gated prune re-warned: %q", second.String())
+	}
+
+	// After the migration strips the legacy includes, the prune proceeds.
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pruneRetiredSystemPacks(city, io.Discard)
+	if _, err := os.Stat(filepath.Join(city, citylayout.SystemPacksRoot)); !os.IsNotExist(err) {
+		t.Errorf("stat retired %s err = %v, want IsNotExist after migration", citylayout.SystemPacksRoot, err)
+	}
+}
+
+// TestPruneRetiredSystemPacksGatesOnEveryCompositionRoute pins the widened
+// prune gate: city config can compose through the retired tree on more
+// routes than root workspace.includes — default-rig includes, rig includes,
+// city / rig / default-rig import sources, the same surfaces in pack.toml,
+// and any of these hosted in a local config fragment (fragments merge
+// workspace includes / default-rig includes additively and concatenate
+// [[rigs]]). The post-prune failure mode for rig includes and local-path
+// import sources is a citywide hard config-load failure, and for workspace
+// routes a silent core drop, so the gate must preserve the tree for every
+// route until the reference is migrated.
+func TestPruneRetiredSystemPacksGatesOnEveryCompositionRoute(t *testing.T) {
+	const fragmentName = "legacy-fragment.toml"
+	cases := []struct {
+		name     string
+		cityToml string
+		packToml string
+		fragment string
+		wantKept bool
+	}{
+		{
+			name:     "workspace-default-rig-includes",
+			cityToml: "[workspace]\ndefault_rig_includes = [\".gc/system/packs/core\"]\n",
+			wantKept: true,
+		},
+		{
+			name:     "rig-includes",
+			cityToml: "[workspace]\n\n[[rigs]]\nname = \"demo\"\npath = \"demo\"\nincludes = [\".gc/system/packs/core\"]\n",
+			wantKept: true,
+		},
+		{
+			name:     "rig-import-source",
+			cityToml: "[workspace]\n\n[[rigs]]\nname = \"demo\"\npath = \"demo\"\n\n[rigs.imports.core]\nsource = \".gc/system/packs/core\"\n",
+			wantKept: true,
+		},
+		{
+			name:     "city-import-source",
+			cityToml: "[workspace]\n\n[imports.core]\nsource = \".gc/system/packs/core\"\n",
+			wantKept: true,
+		},
+		{
+			name:     "default-rig-import-source",
+			cityToml: "[workspace]\n\n[defaults.rig.imports.core]\nsource = \".gc/system/packs/core\"\n",
+			wantKept: true,
+		},
+		{
+			name:     "pack-toml-import-source",
+			cityToml: "[workspace]\n",
+			packToml: "[pack]\nname = \"demo\"\nschema = 2\n\n[imports.core]\nsource = \".gc/system/packs/core\"\n",
+			wantKept: true,
+		},
+		{
+			name:     "pack-toml-pack-includes",
+			cityToml: "[workspace]\n",
+			packToml: "[pack]\nname = \"demo\"\nschema = 2\nincludes = [\".gc/system/packs/core\"]\n",
+			wantKept: true,
+		},
+		{
+			name:     "fragment-workspace-includes",
+			cityToml: "include = [\"" + fragmentName + "\"]\n\n[workspace]\n",
+			fragment: "[workspace]\nincludes = [\".gc/system/packs/core\"]\n",
+			wantKept: true,
+		},
+		{
+			name:     "fragment-rig-import-source",
+			cityToml: "include = [\"" + fragmentName + "\"]\n\n[workspace]\n",
+			fragment: "[[rigs]]\nname = \"demo\"\npath = \"demo\"\n\n[rigs.imports.core]\nsource = \".gc/system/packs/core\"\n",
+			wantKept: true,
+		},
+		{
+			name:     "clean-fragment-and-rig-prunes",
+			cityToml: "include = [\"" + fragmentName + "\"]\n\n[workspace]\n\n[[rigs]]\nname = \"demo\"\npath = \"demo\"\n",
+			fragment: "[workspace]\n",
+			wantKept: false,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			city := t.TempDir()
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(tt.cityToml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tt.packToml != "" {
+				if err := os.WriteFile(filepath.Join(city, "pack.toml"), []byte(tt.packToml), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.fragment != "" {
+				if err := os.WriteFile(filepath.Join(city, fragmentName), []byte(tt.fragment), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stale := filepath.Join(city, citylayout.SystemPacksRoot, "core")
+			if err := os.MkdirAll(stale, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			var warnings bytes.Buffer
+			pruneRetiredSystemPacks(city, &warnings)
+
+			if tt.wantKept {
+				if _, err := os.Stat(stale); err != nil {
+					t.Fatalf("stat %s err = %v; the prune deleted a tree this route still composes through", stale, err)
+				}
+				if !strings.Contains(warnings.String(), `run "gc doctor --fix"`) {
+					t.Errorf("preserved-tree warning does not point at the doctor migration: %q", warnings.String())
+				}
+				return
+			}
+			if _, err := os.Stat(filepath.Join(city, citylayout.SystemPacksRoot)); !os.IsNotExist(err) {
+				t.Errorf("stat retired %s err = %v, want IsNotExist for a config without legacy references", citylayout.SystemPacksRoot, err)
+			}
+			if warnings.Len() != 0 {
+				t.Errorf("clean config emitted a preserved-tree warning: %q", warnings.String())
+			}
+		})
+	}
+}
+
+// TestPruneRetiredSystemPacksFailsClosedOnUninspectableFragment pins the
+// fail-closed contract for config fragments: when city.toml references a
+// fragment the gate cannot inspect — missing, unreadable, or a remote
+// include entry — the prune must preserve the (inert) tree silently. The
+// fragment may declare legacy .gc/system/packs references the gate cannot
+// see, and deleting the tree on a guess would reproduce the silent
+// degraded window the gate exists to prevent.
+func TestPruneRetiredSystemPacksFailsClosedOnUninspectableFragment(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		include string
+	}{
+		{name: "missing-local-fragment", include: "missing-fragment.toml"},
+		{name: "remote-fragment", include: "https://github.com/example/config//fragment.toml"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			city := t.TempDir()
+			cityToml := "include = [\"" + tt.include + "\"]\n\n[workspace]\n"
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cityToml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			stale := filepath.Join(city, citylayout.SystemPacksRoot, "core")
+			if err := os.MkdirAll(stale, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			var warnings bytes.Buffer
+			pruneRetiredSystemPacks(city, &warnings)
+
+			if _, err := os.Stat(stale); err != nil {
+				t.Fatalf("stat %s err = %v; prune must fail closed for a fragment it cannot inspect", stale, err)
+			}
+			if warnings.Len() != 0 {
+				t.Errorf("uninspectable fragment emitted a warning (expected silent preserve): %q", warnings.String())
+			}
+		})
+	}
+}
+
+// TestPruneRetiredSystemPacksKeepsTreeWhenManifestUnreadable pins the
+// fail-closed contract for the destructive prune: when city.toml exists but
+// cannot be parsed, the prune must leave the retired tree alone (it is
+// inert) rather than risk stripping composition state it cannot inspect.
+func TestPruneRetiredSystemPacksKeepsTreeWhenManifestUnreadable(t *testing.T) {
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace\nnot toml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(city, citylayout.SystemPacksRoot, "core")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pruneRetiredSystemPacks(city, io.Discard)
+
+	if _, err := os.Stat(stale); err != nil {
+		t.Errorf("stat %s err = %v; prune must not delete the tree under an unreadable manifest", stale, err)
+	}
+}
+
 // TestEnsureBuiltinRuntimeAssetsRehydratesCorruptedCache pins the
 // self-healing contract that replaced per-city materialization refresh:
 // stale or corrupted bundled-source cache content is detected on the next
@@ -731,6 +958,55 @@ func TestEnsureBuiltinRuntimeAssetsRehydratesCorruptedCache(t *testing.T) {
 	}
 	if string(got) != want {
 		t.Fatalf("corrupted cached script was not rehydrated to embedded content; got:\n%s", got)
+	}
+}
+
+// TestEnsureBuiltinRuntimeAssetsRehydratesEvictedOptionalLockedBundledCache
+// pins the ready-fast-path repair of optional locked bundled imports. Once a
+// city is readied, EnsureBuiltinRuntimeAssets short-circuits on the ready fast
+// path, and that fast path validates only the required builtin sources
+// (core/bd). gastown is bundled but never required, so an eviction of its
+// synthetic cache after the city is ready would otherwise be skipped by the
+// fast path, leaving config load to fail on the locked-but-missing cache. The
+// fast path must also validate every canonical bundled source pinned in
+// packs.lock and re-hydrate gastown here.
+func TestEnsureBuiltinRuntimeAssetsRehydratesEvictedOptionalLockedBundledCache(t *testing.T) {
+	clearGCEnv(t) // isolated GC_HOME so eviction never touches the shared test cache
+	city := t.TempDir()
+
+	// Pin the optional gastown bundled source in packs.lock at its canonical
+	// commit; the runtime preflight hydrates it as a locked bundled import
+	// even though a default bd-provider city requires only core and bd.
+	source := config.PublicGastownPackSource
+	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
+	writePreflightImportLock(t, city, commit)
+
+	// Ready the city: hydrate required core/bd plus the locked bundled
+	// gastown source and mark the runtime state ready.
+	materializeBuiltinPacksForTest(t, city)
+
+	cachePath, err := packman.RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath(gastown): %v", err)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+		t.Fatalf("gastown cache invalid after ready: %v", err)
+	}
+
+	// Evict only the optional bundled cache. The required core/bd caches stay
+	// valid, so the ready fast path's requiredBuiltinSourcesUsable check still
+	// passes — the only thing that can force re-hydration is validating the
+	// locked bundled sources too.
+	if err := os.RemoveAll(cachePath); err != nil {
+		t.Fatalf("evicting gastown cache: %v", err)
+	}
+
+	if err := EnsureBuiltinRuntimeAssets(city, io.Discard); err != nil {
+		t.Fatalf("EnsureBuiltinRuntimeAssets after optional cache eviction: %v", err)
+	}
+
+	if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+		t.Fatalf("optional locked bundled cache not rehydrated after ready fast path: %v", err)
 	}
 }
 

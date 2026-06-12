@@ -11,11 +11,14 @@ import (
 )
 
 // IsBuiltinSystemPackInclude reports whether a workspace include entry is a
-// canonical builtin system-pack include (".gc/system/packs/<name>"). These
-// are the supported V2 form for composing the packs bundled with the gc
-// binary: gc init writes them into city.toml and gc doctor --fix repairs
-// them. They are exempt from PackV1 workspace.includes deprecation and
-// enforcement, and migration tooling must leave them in city.toml.
+// canonical builtin system-pack include (".gc/system/packs/<name>"). This is
+// a retired transitional surface: older gc binaries wrote these includes into
+// city.toml to compose the bundled packs, but the supported V2 form is now a
+// pinned [imports.<name>] entry. They remain exempt from PackV1
+// workspace.includes deprecation and enforcement, and migration tooling
+// preserves them, so a city authored by an older binary keeps composing until
+// `gc doctor --fix` converts each one to a pinned [imports] entry and prunes
+// the .gc/system/packs tree.
 func IsBuiltinSystemPackInclude(entry string) bool {
 	cleaned := path.Clean(filepath.ToSlash(strings.TrimSpace(entry)))
 	rest, ok := strings.CutPrefix(cleaned, citylayout.SystemPacksRoot+"/")
@@ -100,8 +103,9 @@ func DetectLegacyV1Surfaces(cfg *City, source string) []string {
 	}
 	// Direct raw-field access is intentional here: detection runs before pack
 	// expansion, and the accessors are used by post-parse migration paths.
-	// Canonical builtin system-pack includes are the supported V2 form and
-	// are not flagged.
+	// Canonical builtin system-pack includes are a retired transitional
+	// surface that `gc doctor --fix` converts to [imports]; they stay
+	// non-fatal here so an older-binary city keeps composing until then.
 	if len(NonBuiltinWorkspaceIncludes(cfg.Workspace.Includes)) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: workspace.includes is deprecated in v2; use [imports]. "+

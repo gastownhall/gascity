@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func TestResolveLockedRemoteImportAcceptsBundledSyntheticCache(t *testing.T) {
@@ -112,6 +113,55 @@ func TestResolveImportPackRefAcceptsPublicGastownSyntheticCache(t *testing.T) {
 	want := filepath.Join(cacheDir, "gastown")
 	if got != want {
 		t.Fatalf("import path = %q, want %q", got, want)
+	}
+}
+
+// TestLoadWithIncludes_RigBundledImportSelfHealsOfflineWithoutLock pins the
+// rig-scope analog of the city-scope no-lock bundled fallback: a rig-scoped
+// [rigs.*.imports.*] entry naming a bundled source at its canonical pin must
+// compose from the binary's embedded content when packs.lock is absent,
+// exactly like the byte-identical source declared at city scope. It guards
+// against rig imports resolving through the legacy resolvePackRef (which only
+// consults packs.lock and the retired include cache, then hard-errors) instead
+// of the bundled-aware resolveImportPackRef.
+func TestLoadWithIncludes_RigBundledImportSelfHealsOfflineWithoutLock(t *testing.T) {
+	home, cityDir := setupBundledImportTest(t)
+	source := PublicGastownPackSource
+	commit := strings.TrimPrefix(PublicGastownPackVersion, "sha:")
+	cacheDir := bundledRepoCacheDir(home, source, commit)
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+		t.Fatalf("materialize synthetic repo: %v", err)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", fmt.Sprintf(`
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = %q
+version = %q
+`, source, PublicGastownPackVersion))
+
+	// Intentionally no packs.lock: the rig-scoped bundled import must
+	// self-heal from embedded content offline, just like a city import does
+	// before the first `gc import install` writes the lock.
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes with no packs.lock: %v", err)
+	}
+
+	var fromBinding int
+	for _, a := range explicitAgents(cfg.Agents) {
+		if strings.Contains(a.QualifiedName(), "gs.") {
+			fromBinding++
+		}
+	}
+	if fromBinding == 0 {
+		t.Fatalf("rig bundled import composed no agents under the gs binding offline; agents=%+v", explicitAgents(cfg.Agents))
 	}
 }
 
@@ -462,4 +512,73 @@ func TestResolveInstalledRemoteImportRejectsDeclaredNonCanonicalPinWithoutLock(t
 	if _, err := resolveInstalledRemoteImport(source, BundledSourcePinnedVersion(source), cityDir); err != nil {
 		t.Fatalf("canonical declared pin should fall back to embedded content: %v", err)
 	}
+}
+
+// TestSupersededBundledPinErrorsRecommendDoctorFix pins the upgrade
+// remediation UX: a city pinned at a SUPERSEDED canonical public pin (one an
+// older gc release wrote as canonical) hard-fails config load when nothing
+// is cached for that commit. The error must lead with the offline repair
+// purpose-built for this case — "gc doctor --fix" re-pins to the current
+// canonical and serves embedded content — and keep "gc import install" as
+// the exact-commit network fallback. Without the doctor pointer, every
+// public-pin bump strands such cities on a network-only resolution path,
+// the exact outcome the superseded-pin machinery exists to prevent.
+func TestSupersededBundledPinErrorsRecommendDoctorFix(t *testing.T) {
+	if len(SupersededPublicGastownPackVersions) == 0 {
+		t.Skip("no superseded public gastown pins in this release")
+	}
+	superseded := SupersededPublicGastownPackVersions[0]
+	source, ok := builtinpacks.CanonicalImportSource("gastown")
+	if !ok {
+		t.Fatal("bundled gastown pack not registered")
+	}
+
+	assertDoctorFirstRemediation := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected superseded pin without cache to fail")
+		}
+		if !strings.Contains(err.Error(), "superseded canonical") {
+			t.Fatalf("error = %v, want the superseded-pin diagnosis", err)
+		}
+		if !strings.Contains(err.Error(), `run "gc doctor --fix"`) {
+			t.Fatalf("error = %v, want gc doctor --fix as the primary (offline) remediation", err)
+		}
+		if !strings.Contains(err.Error(), `"gc import install"`) {
+			t.Fatalf("error = %v, want gc import install as the exact-commit fallback", err)
+		}
+	}
+
+	t.Run("locked but not cached", func(t *testing.T) {
+		_, cityDir := setupBundledImportTest(t)
+		writeBundledImportLock(t, cityDir, source, strings.TrimPrefix(superseded, "sha:"))
+		_, err := resolveInstalledRemoteImport(source, superseded, cityDir)
+		assertDoctorFirstRemediation(t, err)
+	})
+
+	t.Run("missing packs.lock", func(t *testing.T) {
+		_, cityDir := setupBundledImportTest(t)
+		_, err := resolveInstalledRemoteImport(source, superseded, cityDir)
+		assertDoctorFirstRemediation(t, err)
+	})
+
+	t.Run("missing packs.lock entry", func(t *testing.T) {
+		_, cityDir := setupBundledImportTest(t)
+		writeBundledImportLock(t, cityDir, "https://github.com/example/other.git", "0123456789abcdef0123456789abcdef01234567")
+		_, err := resolveInstalledRemoteImport(source, superseded, cityDir)
+		assertDoctorFirstRemediation(t, err)
+	})
+
+	// A deliberate user pin at a commit that was never canonical keeps the
+	// plain install remediation — the doctor re-pin would not honor it.
+	t.Run("non-superseded pin stays plain", func(t *testing.T) {
+		_, cityDir := setupBundledImportTest(t)
+		_, err := resolveInstalledRemoteImport(source, "sha:0123456789abcdef0123456789abcdef01234567", cityDir)
+		if err == nil || !strings.Contains(err.Error(), `run "gc import install"`) {
+			t.Fatalf("err = %v, want the plain gc import install remediation", err)
+		}
+		if strings.Contains(err.Error(), "gc doctor --fix") {
+			t.Fatalf("err = %v, must not recommend the doctor re-pin for a deliberate non-canonical pin", err)
+		}
+	})
 }

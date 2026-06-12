@@ -227,6 +227,24 @@ func SupersededBundledPinTarget(source, version string) (string, bool) {
 	return "", false
 }
 
+// notCachedRemediation returns the remediation clause for an import whose
+// pinned content is not in the repo cache. The default is the plain install
+// command. When the pin is a superseded canonical pin — one an older gc
+// release wrote as canonical — the clause leads with "gc doctor --fix",
+// which re-pins to the current canonical version offline and serves
+// embedded content; "gc import install" stays the fallback because it
+// fetches the exact superseded commit over the network. Without the doctor
+// pointer every public-pin bump would strand such cities on a network-only
+// resolution path, the outcome the superseded-pin machinery exists to
+// prevent.
+func notCachedRemediation(source, version string) string {
+	current, ok := SupersededBundledPinTarget(source, version)
+	if !ok {
+		return `run "gc import install"`
+	}
+	return fmt.Sprintf("pinned at superseded canonical %s; run \"gc doctor --fix\" to re-pin to the current canonical %s (offline), or \"gc import install\" to fetch this exact commit", version, current)
+}
+
 // IsBundledSourceAtCanonicalPin reports whether commit is the canonical
 // pinned commit the running binary pre-seeds for a bundled source. Only
 // the canonical pin is served from embedded content; pinning a bundled
@@ -288,7 +306,7 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (str
 			if cacheDir, ok := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
 				return cacheDir, nil
 			}
-			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); run \"gc import install\"", source)
+			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); %s", source, notCachedRemediation(source, declaredVersion))
 		}
 		return "", fmt.Errorf("reading packs.lock: %w", err)
 	}
@@ -302,7 +320,7 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (str
 		if cacheDir, ok := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
 			return cacheDir, nil
 		}
-		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run \"gc import install\"", source)
+		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); %s", source, notCachedRemediation(source, declaredVersion))
 	}
 
 	cacheRoot, err := GlobalRepoCacheRoot()
@@ -393,7 +411,7 @@ func validateInstalledRemoteCache(source, cacheDir, commit string) error {
 		// path, so validate it with the ordinary remote-cache contract below.
 	}
 	if gitutil.MissingCheckoutMarker(gitInfo, gitStatErr) {
-		return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
+		return fmt.Errorf("remote import %s is locked but not cached at %s; %s", source, cacheDir, notCachedRemediation(source, "sha:"+commit))
 	}
 	if gitStatErr != nil {
 		return fmt.Errorf("checking cached import %s: %w", source, gitStatErr)

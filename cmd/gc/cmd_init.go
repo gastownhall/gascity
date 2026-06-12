@@ -380,7 +380,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "deprecated alias for --default-provider")
 	cmd.Flags().StringVar(&defaultProviderFlag, "default-provider", "", "default readiness-aware provider to select from --providers")
 	cmd.Flags().StringArrayVar(&providersFlag, "providers", nil, "readiness-aware providers to write to city.toml (repeatable or comma-separated)")
-	cmd.Flags().StringVar(&templateFlag, "template", "", "non-interactive template to write: minimal, gastown, or custom")
+	cmd.Flags().StringVar(&templateFlag, "template", "", "non-interactive template to write: minimal, gastown, gascity, or custom")
 	cmd.Flags().StringVar(&bootstrapProfileFlag, "bootstrap-profile", "", "bootstrap profile to apply for hosted/container defaults")
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
@@ -674,7 +674,7 @@ func normalizeInitTemplate(template string, supplied bool) (string, error) {
 		return template, nil
 	default:
 		if supplied {
-			return "", fmt.Errorf("unknown template %q (expected one of: minimal, gastown, custom)", template)
+			return "", fmt.Errorf("unknown template %q (expected one of: minimal, gastown, gascity, custom)", template)
 		}
 		return "minimal", nil
 	}

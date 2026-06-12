@@ -1818,7 +1818,7 @@ gc init --file city.toml --preserve-existing .
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
-| `--template` | string |  | non-interactive template to write: minimal, gastown, or custom |
+| `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, or custom |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
 ## gc lint

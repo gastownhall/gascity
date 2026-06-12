@@ -159,9 +159,13 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		cityCfg.Agents = nil
 	}
 
-	// Canonical builtin system-pack includes (.gc/system/packs/<name>) are
-	// the supported V2 form written by gc init; they stay in city.toml.
-	// Only other entries are legacy PackV1 includes to migrate.
+	// Canonical builtin system-pack includes (.gc/system/packs/<name>) are a
+	// retired transitional surface that `gc doctor --fix` converts to pinned
+	// [imports] entries. `gc migrate` deliberately preserves them in city.toml
+	// so a city authored by an older binary keeps composing through the
+	// migrate step; the follow-up `gc doctor --fix` completes the conversion.
+	// Only the other entries are legacy PackV1 includes that migrate rewrites
+	// here.
 	builtinIncludes := make([]string, 0, len(cityCfg.Workspace.LegacyIncludes()))
 	for _, inc := range cityCfg.Workspace.LegacyIncludes() {
 		if config.IsBuiltinSystemPackInclude(inc) {

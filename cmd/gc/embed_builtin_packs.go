@@ -64,7 +64,7 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 		pruneRetiredSystemPacks(cityPath, warningWriter)
 		return nil
 	}
-	if state.ready && requiredBuiltinSourcesUsable(cityPath) {
+	if state.ready && requiredBuiltinSourcesUsable(cityPath) && lockedBundledImportsUsable(cityPath) {
 		return nil
 	}
 	state.ready = false
@@ -270,14 +270,56 @@ exec %q "$@"
 // Builtin packs are no longer materialized per city; everything resolves
 // from the user-global cache. Removal failures only warn — a leftover
 // tree is inert.
+//
+// The prune is gated on the legacy reference migration: while the city's
+// manifests still compose through the retired tree on ANY route —
+// workspace includes, default-rig includes, rig includes, or city / rig /
+// default-rig import sources, whether declared in city.toml, pack.toml,
+// or a local config fragment — deleting the tree would either silently
+// strip those packs from composition (dangling V1 workspace includes skip
+// with only a log line) or hard-fail config load citywide (rig includes
+// and local-path import sources do not skip). Until the migration has
+// happened the tree is preserved and a once-per-city warning points at
+// the doctor repair. The gate fails closed: an unreadable or unparseable
+// city.toml, and any referenced fragment that cannot be inspected
+// (unreadable, unparseable, or remote), preserve the inert tree rather
+// than risk deleting composition state the gate cannot see.
 func pruneRetiredSystemPacks(cityPath string, warningWriter io.Writer) {
 	root := filepath.Join(cityPath, citylayout.SystemPacksRoot)
 	if _, err := os.Lstat(root); err != nil {
 		return
 	}
+	scan, ok := collectLegacySystemPacksRefs(cityPath)
+	if !ok || len(scan.Uninspectable) > 0 {
+		return
+	}
+	if len(scan.Refs) > 0 {
+		warnLegacySystemPacksPreserved(cityPath, warningWriter)
+		return
+	}
 	if err := os.RemoveAll(root); err != nil {
 		emitBuiltinRuntimeWarning(warningWriter, fmt.Errorf("pruning retired %s: %w", citylayout.SystemPacksRoot, err))
 	}
+}
+
+// legacyIncludePruneWarningCache dedups the preserved-legacy-tree warning
+// to once per city per process.
+var legacyIncludePruneWarningCache sync.Map
+
+// warnLegacySystemPacksPreserved emits the once-per-city migration pointer
+// for a legacy tree preserved by the prune gate. Silent loaders
+// (io.Discard) must not consume the once-per-city slot: commands often
+// pre-load config quietly before the user-visible load, and the warning
+// has to reach the visible one.
+func warnLegacySystemPacksPreserved(cityPath string, w io.Writer) {
+	if w == nil || w == io.Discard {
+		return
+	}
+	key := normalizePathForCompare(cityPath)
+	if _, alreadyWarned := legacyIncludePruneWarningCache.LoadOrStore(key, struct{}{}); alreadyWarned {
+		return
+	}
+	fmt.Fprintf(w, "warning: city config still composes builtin packs through legacy %s references; run \"gc doctor --fix\" to migrate to [imports] (the retired tree is preserved until then)\n", citylayout.SystemPacksRoot) //nolint:errcheck // best-effort warning emission
 }
 
 func emitBuiltinRuntimeWarning(w io.Writer, err error) {

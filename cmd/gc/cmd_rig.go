@@ -266,8 +266,8 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	// that comparison use the resolvable path (gascity#3137).
 	includes = canonicalizeBuiltinPackIncludes(fs, cityPath, includes, cfg.Packs)
 
-	explicitRigImports := boundImportsFromLegacySources(includes, cfg.Packs)
-	if err := ensureBundledRigImportsInstalled(cityPath, explicitRigImports); err != nil {
+	explicitRigImports, commitRigImports, err := ensureBundledRigImportsInstalled(cityPath, boundImportsFromLegacySources(includes, cfg.Packs))
+	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: installing bundled rig imports: %v\n", err) //nolint:errcheck // best-effort stderr
 		return config.Rig{}, 1
 	}
@@ -363,7 +363,15 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 				fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
 				return config.Rig{}, 1
 			}
-			defaultRigImports = composeDefaultRigImports(rootDefaultRigImports, cfg.Workspace.LegacyDefaultRigIncludes(), cfg.Packs)
+			// Default-rig imports take the same pin/cache hardening as
+			// explicit --include imports: a version-less bundled source
+			// arriving from root-pack defaults or legacy
+			// default_rig_includes must not persist version-less.
+			defaultRigImports, commitRigImports, err = ensureBundledRigImportsInstalled(cityPath, composeDefaultRigImports(rootDefaultRigImports, cfg.Workspace.LegacyDefaultRigIncludes(), cfg.Packs))
+			if err != nil {
+				fmt.Fprintf(stderr, "gc rig add: installing bundled rig imports: %v\n", err) //nolint:errcheck // best-effort stderr
+				return config.Rig{}, 1
+			}
 			if len(defaultRigImports) > 0 {
 				rig.Imports = boundImportsMap(defaultRigImports)
 			}
@@ -556,6 +564,18 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 			return config.Rig{}, 1
 		}
 	}
+
+	// Persist packs.lock and materialize bundled rig imports only after the
+	// city config write succeeds, so the lockfile honors the same
+	// "city.toml written last" contract: any earlier failure leaves
+	// packs.lock untouched, and a failure here rolls back through the
+	// snapshot (which now covers packs.lock).
+	if commitRigImports != nil {
+		if err := commitRigImports(); err != nil {
+			writeRigAddRollbackError(fs, stderr, snapshots, "installing bundled rig imports", err)
+			return config.Rig{}, 1
+		}
+	}
 	cfg = nextCfg
 
 	allRigs := collectRigRoutes(cityPath, cfg)
@@ -684,39 +704,59 @@ func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []str
 	return out
 }
 
-// ensureBundledRigImportsInstalled pins and caches any bundled-source rig
-// imports so the new rig composes offline without a manual
-// "gc import install".
-func ensureBundledRigImportsInstalled(cityPath string, imports []config.BoundImport) error {
+// ensureBundledRigImportsInstalled pins any bundled-source rig imports so
+// the new rig composes offline without a manual "gc import install". It
+// returns a copy of imports with version-less bundled entries pinned at the
+// canonical bundled version, plus a commit function that persists packs.lock
+// and materializes the imports into the cache. The commit is deferred — and
+// is nil when there are no bundled imports to persist — so the packs.lock
+// write obeys the same "city.toml written last" atomicity contract as the
+// rest of rig add: the lockfile is mutated only after the city config write
+// succeeds, and the rig-add rollback snapshot covers it. Resolution (which
+// only reads packs.lock and hydrates the shared repo cache) still happens
+// eagerly here so any resolution error is surfaced before mutation begins.
+//
+// The input slice is not modified, and callers must persist the returned
+// slice so the city.toml rig import carries the same pin the lockfile
+// records: a version-less import resolves as "latest" if packs.lock is
+// regenerated or lost, and "gc import upgrade" treats it as unconstrained —
+// either path silently replaces the builtin the user asked for.
+func ensureBundledRigImportsInstalled(cityPath string, imports []config.BoundImport) ([]config.BoundImport, func() error, error) {
+	pinned := append([]config.BoundImport(nil), imports...)
 	declared := make(map[string]config.Import)
-	for _, bound := range imports {
-		if builtinpacks.IsSource(bound.Import.Source) {
-			imp := bound.Import
-			if strings.TrimSpace(imp.Version) == "" {
-				imp.Version = bundledSourcePinnedVersion(imp.Source)
-			}
-			declared[bound.Binding] = imp
+	for i := range pinned {
+		if !builtinpacks.IsSource(pinned[i].Import.Source) {
+			continue
 		}
+		if strings.TrimSpace(pinned[i].Import.Version) == "" {
+			pinned[i].Import.Version = bundledSourcePinnedVersion(pinned[i].Import.Source)
+		}
+		declared[pinned[i].Binding] = pinned[i].Import
 	}
 	if len(declared) == 0 {
-		return nil
+		return pinned, nil, nil
 	}
 	existing, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	for name, imp := range declared {
 		existing[name] = imp
 	}
 	lock, err := syncImports(cityPath, existing, packman.InstallResolveIfNeeded)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
-		return err
+	commit := func() error {
+		if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
+			return err
+		}
+		if _, err := installLockedImports(cityPath); err != nil {
+			return err
+		}
+		return nil
 	}
-	_, err = installLockedImports(cityPath)
-	return err
+	return pinned, commit, nil
 }
 
 func boundImportsFromLegacySources(sources []string, packs map[string]config.PackSource) []config.BoundImport {
@@ -833,12 +873,20 @@ func boundImportsMap(imports []config.BoundImport) map[string]config.Import {
 }
 
 func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) ([]fileSnapshot, error) {
-	snapshots := make([]fileSnapshot, 0, len(cfg.Rigs)*3+5)
+	snapshots := make([]fileSnapshot, 0, len(cfg.Rigs)*3+6)
 	cityToml, err := snapshotResolvedFile(fs, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		return nil, err
 	}
 	snapshots = append(snapshots, cityToml)
+	// packs.lock is written by the deferred bundled-rig-import commit after
+	// the city config write, so it must be covered by the rollback snapshot
+	// to keep rig add atomic across the lockfile.
+	packsLock, err := snapshotOptionalFile(fs, filepath.Join(cityPath, "packs.lock"))
+	if err != nil {
+		return nil, err
+	}
+	snapshots = append(snapshots, packsLock)
 	siteToml, err := snapshotResolvedFile(fs, config.SiteBindingPath(cityPath))
 	if err != nil {
 		return nil, err

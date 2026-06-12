@@ -778,6 +778,24 @@ func (imp *Import) ImportIsTransitive() bool {
 	return *imp.Transitive
 }
 
+// HasDefaultOptionSemantics reports whether the import carries the
+// default option semantics: not exported, transitive resolution enabled,
+// and shadow handling empty or "warn". This is the option half of the
+// reuse policy composition applies when deciding whether an existing
+// same-source binding can stand in for a converted legacy include
+// (existingDefaultImportBindingForSource); the doctor migration's
+// same-source dedup shares it so the two policies cannot drift.
+func (imp *Import) HasDefaultOptionSemantics() bool {
+	if imp.Export {
+		return false
+	}
+	if imp.Transitive != nil && !*imp.Transitive {
+		return false
+	}
+	shadow := strings.TrimSpace(imp.Shadow)
+	return shadow == "" || shadow == "warn"
+}
+
 // BoundImport preserves the user-visible binding name associated with an
 // import when edit paths need ordered root-pack defaults.
 type BoundImport struct {
@@ -798,7 +816,7 @@ func AddLegacyImports(target map[string]Import, includes []string, packs map[str
 		if _, exists := existingDefaultImportBindingForSource(target, source); exists {
 			continue
 		}
-		binding := uniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
+		binding := UniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
 		target[binding] = Import{Source: source}
 		changed = true
 	}
@@ -812,7 +830,7 @@ func AddOrderedLegacyImports(target map[string]Import, order []string, includes 
 		source := legacyImportSourceFor(include, packs)
 		binding, exists := existingDefaultImportBindingForSource(target, source)
 		if !exists {
-			binding = uniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
+			binding = UniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
 			target[binding] = Import{Source: source}
 			changed = true
 		}
@@ -878,21 +896,21 @@ func existingDefaultImportBindingForSource(target map[string]Import, source stri
 		if imp.Source != source {
 			continue
 		}
-		if strings.TrimSpace(imp.Version) != "" || imp.Export {
+		if strings.TrimSpace(imp.Version) != "" {
 			continue
 		}
-		if imp.Transitive != nil && !*imp.Transitive {
-			continue
-		}
-		shadow := strings.TrimSpace(imp.Shadow)
-		if shadow == "" || shadow == "warn" {
+		if imp.HasDefaultOptionSemantics() {
 			return binding, true
 		}
 	}
 	return "", false
 }
 
-func uniqueLegacyImportBinding(target map[string]Import, base string) string {
+// UniqueLegacyImportBinding returns base when no import occupies it in
+// target, or the first free "base-N" (N ≥ 2) suffix — the binding
+// allocation policy for converting legacy includes into imports when the
+// natural binding collides with an existing import.
+func UniqueLegacyImportBinding(target map[string]Import, base string) string {
 	if base == "" {
 		base = "import"
 	}

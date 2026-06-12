@@ -251,7 +251,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					continue
 				}
 
-				impDir, err := resolvePackRef(imp.Source, cityRoot, cityRoot)
+				impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot)
 				if err != nil {
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
@@ -1222,9 +1222,8 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 
 	// Process V2 [imports.X] entries. These are named bindings that
 	// produce agents with qualified names (bindingName.agentName).
-	// Local-path imports are resolved now; remote imports require
-	// gc import install to have already cached them (future work).
-	// Process in sorted order for deterministic output.
+	// Resolution mechanics are described at the resolveImportPackRef call
+	// site below. Process in sorted order for deterministic output.
 	importNames := make([]string, 0, len(tc.Imports))
 	for name := range tc.Imports {
 		importNames = append(importNames, name)
@@ -1234,10 +1233,12 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	for _, bindingName := range importNames {
 		imp := tc.Imports[bindingName]
 
-		// Resolve the import source. For now, only local paths are
-		// supported. Remote sources require the cache populated by
-		// gc import install (which we don't have yet).
-		impDir, err := resolvePackRef(imp.Source, topoDir, cityRoot)
+		// Resolve the import source through the V2-aware resolver: local
+		// paths resolve directly, packs.lock authoritatively resolves
+		// remote sources, and a bundled source at its canonical pin
+		// self-heals from the binary's embedded content when the lock is
+		// absent or lacks the entry — matching city- and rig-scope imports.
+		impDir, err := resolveImportPackRef(imp.Source, imp.Version, topoDir, cityRoot)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: %w", bindingName, err)
 		}

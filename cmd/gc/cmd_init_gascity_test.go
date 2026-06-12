@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -40,5 +42,47 @@ func TestDoInitWithGascityTemplate(t *testing.T) {
 	}
 	if imp.Version != config.PublicGascityPackVersion {
 		t.Errorf("gascity import version = %q, want %q", imp.Version, config.PublicGascityPackVersion)
+	}
+}
+
+// TestInitTemplateHelpAndErrorAdvertiseAcceptedTemplates keeps the public
+// --template flag help and the unknown-template error synchronized with the
+// set normalizeInitTemplate accepts. gascity regressed here once: the parser
+// accepted it but both strings omitted it, making it undiscoverable from the
+// command contract.
+func TestInitTemplateHelpAndErrorAdvertiseAcceptedTemplates(t *testing.T) {
+	accepted := []string{"minimal", "gastown", "gascity", "custom"}
+
+	// Every advertised template round-trips through the normalizer.
+	for _, tmpl := range accepted {
+		got, err := normalizeInitTemplate(tmpl, true)
+		if err != nil {
+			t.Errorf("normalizeInitTemplate(%q, true) error = %v, want nil", tmpl, err)
+		}
+		if got != tmpl {
+			t.Errorf("normalizeInitTemplate(%q, true) = %q, want %q", tmpl, got, tmpl)
+		}
+	}
+
+	// The --template flag help advertises every accepted template.
+	flag := newInitCmd(io.Discard, io.Discard).Flags().Lookup("template")
+	if flag == nil {
+		t.Fatal("init command has no --template flag")
+	}
+	for _, tmpl := range accepted {
+		if !strings.Contains(flag.Usage, tmpl) {
+			t.Errorf("--template flag help %q missing accepted template %q", flag.Usage, tmpl)
+		}
+	}
+
+	// The unknown-template error advertises every accepted template.
+	_, err := normalizeInitTemplate("definitely-not-a-template", true)
+	if err == nil {
+		t.Fatal("normalizeInitTemplate(unknown, true) = nil error, want unknown-template error")
+	}
+	for _, tmpl := range accepted {
+		if !strings.Contains(err.Error(), tmpl) {
+			t.Errorf("unknown-template error %q missing accepted template %q", err.Error(), tmpl)
+		}
 	}
 }
