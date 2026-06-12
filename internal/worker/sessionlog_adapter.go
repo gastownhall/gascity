@@ -79,6 +79,12 @@ func (a SessionLogAdapter) TailMeta(path string) (*sessionlog.TailMeta, error) {
 	return sessionlog.ExtractTailMetaFromSearchPaths(a.SearchPaths, path)
 }
 
+// TailUsage reads per-invocation token usage entries from the tail of a
+// discovered transcript path, validating it against the search-path roots.
+func (a SessionLogAdapter) TailUsage(path string) ([]sessionlog.TailUsage, error) {
+	return sessionlog.ExtractTailUsageFromSearchPaths(a.SearchPaths, path)
+}
+
 // TailActivity reads the transcript tail activity without loading full history.
 func (a SessionLogAdapter) TailActivity(path string) (TailActivity, error) {
 	meta, err := a.TailMeta(path)

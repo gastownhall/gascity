@@ -1620,6 +1620,34 @@ func (m *Manager) PersistSessionKey(id, sessionKey string) error {
 	})
 }
 
+// MetadataKeyInvocationUsageCursor stores the identity of the most recently
+// telemetry-recorded invocation for a session: the provider message id
+// (msg_*) when the transcript carries one, otherwise the transcript entry
+// UUID. It prevents double-counting of the gc.agent.tokens.* counters
+// across prompt operations: handles are rebuilt per gc process, so the
+// dedup cursor must live on the session bead, not in memory.
+const MetadataKeyInvocationUsageCursor = "invocation_usage_cursor"
+
+// PersistInvocationUsageCursor stores the invocation-usage telemetry cursor
+// on an existing session. Unlike PersistSessionKey it overwrites any
+// existing value — the cursor advances with every recorded invocation.
+// Empty id or cursor is a no-op.
+func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
+	cursor = strings.TrimSpace(cursor)
+	if id == "" || cursor == "" {
+		return nil
+	}
+	return withSessionMutationLock(id, func() error {
+		if _, _, err := m.sessionBead(id); err != nil {
+			return err
+		}
+		if err := m.store.SetMetadata(id, MetadataKeyInvocationUsageCursor, cursor); err != nil {
+			return fmt.Errorf("storing invocation usage cursor: %w", err)
+		}
+		return nil
+	})
+}
+
 // sessionNameFor derives the tmux session name from a bead ID.
 // Uses the "s-" prefix to avoid collision with agent sessions.
 func sessionNameFor(beadID string) string {

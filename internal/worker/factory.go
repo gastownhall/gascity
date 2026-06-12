@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -25,6 +26,9 @@ type FactoryConfig struct {
 	Recorder              events.Recorder
 	ResolveTransport      func(template, provider string) string
 	ResolveSessionRuntime SessionRuntimeResolver
+	// Pricing estimates per-invocation cost for telemetry. Nil falls back
+	// to the registry built from shipped defaults.
+	Pricing *pricing.Registry
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
@@ -36,6 +40,7 @@ type Factory struct {
 	searchPaths           []string
 	recorder              events.Recorder
 	resolveSessionRuntime SessionRuntimeResolver
+	pricing               *pricing.Registry
 }
 
 // NewFactory constructs a Factory backed by a session.Manager configured for
@@ -55,16 +60,16 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	default:
 		manager = sessionpkg.NewManager(cfg.Store, cfg.Provider)
 	}
-	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.Recorder, cfg.ResolveSessionRuntime)
+	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.Recorder, cfg.ResolveSessionRuntime, cfg.Pricing)
 }
 
 // NewFactoryFromManager wraps an already-constructed session manager behind the
 // worker boundary. Primarily useful in tests.
 func NewFactoryFromManager(manager *sessionpkg.Manager, searchPaths []string) (*Factory, error) {
-	return newFactory(manager, nil, nil, searchPaths, nil, nil)
+	return newFactory(manager, nil, nil, searchPaths, nil, nil, nil)
 }
 
-func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime.Provider, searchPaths []string, recorder events.Recorder, resolveRuntime SessionRuntimeResolver) (*Factory, error) {
+func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime.Provider, searchPaths []string, recorder events.Recorder, resolveRuntime SessionRuntimeResolver, registry *pricing.Registry) (*Factory, error) {
 	if manager == nil {
 		return nil, fmt.Errorf("%w: manager is required", ErrHandleConfig)
 	}
@@ -75,6 +80,7 @@ func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime
 		searchPaths:           append([]string(nil), searchPaths...),
 		recorder:              recorder,
 		resolveSessionRuntime: resolveRuntime,
+		pricing:               registry,
 	}, nil
 }
 
@@ -92,6 +98,7 @@ func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 		SearchPaths: append([]string(nil), f.searchPaths...),
 		Recorder:    f.recorder,
 		Session:     spec,
+		Pricing:     f.pricing,
 	})
 }
 

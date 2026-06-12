@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -247,19 +248,24 @@ type SessionHandleConfig struct {
 	Adapter     SessionLogAdapter
 	Recorder    events.Recorder
 	Session     SessionSpec
+	// Pricing estimates per-invocation cost for telemetry. Nil falls back
+	// to the registry built from shipped defaults.
+	Pricing *pricing.Registry
 }
 
 // SessionHandle is the production worker handle backed by session.Manager.
 type SessionHandle struct {
-	mu          sync.Mutex
-	manager     *sessionpkg.Manager
-	adapter     SessionLogAdapter
-	recorder    events.Recorder
-	searchPaths []string
-	session     SessionSpec
-	sessionID   string
-	history     *HistorySnapshot
-	historyRaw  historyGeneration
+	mu             sync.Mutex
+	manager        *sessionpkg.Manager
+	adapter        SessionLogAdapter
+	recorder       events.Recorder
+	searchPaths    []string
+	session        SessionSpec
+	sessionID      string
+	history        *HistorySnapshot
+	historyRaw     historyGeneration
+	pricing        *pricing.Registry
+	invTelemetryMu sync.Mutex
 }
 
 var (

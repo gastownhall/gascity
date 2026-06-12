@@ -56,6 +56,11 @@ func NewSessionHandle(cfg SessionHandleConfig) (*SessionHandle, error) {
 		recorder = events.Discard
 	}
 
+	registry := cfg.Pricing
+	if registry == nil {
+		registry = defaultPricingRegistry()
+	}
+
 	return &SessionHandle{
 		manager:     cfg.Manager,
 		adapter:     adapter,
@@ -63,6 +68,7 @@ func NewSessionHandle(cfg SessionHandleConfig) (*SessionHandle, error) {
 		searchPaths: searchPaths,
 		session:     spec,
 		sessionID:   strings.TrimSpace(spec.ID),
+		pricing:     registry,
 	}, nil
 }
 

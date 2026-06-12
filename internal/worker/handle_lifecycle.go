@@ -257,6 +257,9 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 	defer func() {
 		event.payload.Queued = boolPointer(result.Queued)
 		event.finish(err)
+		if err == nil {
+			h.recordInvocationTelemetry(ctx)
+		}
 	}()
 
 	if strings.TrimSpace(req.Text) == "" {
@@ -298,6 +301,9 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Delivered)
 		event.finish(err)
+		if err == nil {
+			h.recordInvocationTelemetry(ctx)
+		}
 	}()
 
 	if strings.TrimSpace(req.Text) == "" {
