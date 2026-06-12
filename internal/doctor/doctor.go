@@ -1,8 +1,10 @@
 package doctor
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"time"
 )
 
 // Report summarizes the results of a doctor run.
@@ -28,6 +30,13 @@ type Report struct {
 // Doctor runs registered health checks and reports results.
 type Doctor struct {
 	checks []Check
+	// CheckTimeout bounds each individual check's Run. Zero (the default)
+	// preserves the historical unbounded behavior. When a check exceeds
+	// the bound it is abandoned and reported as a timed-out advisory error
+	// so one wedged check (e.g. a store read stuck behind a saturated data
+	// plane) cannot stall the entire doctor run and hide every check
+	// registered after it.
+	CheckTimeout time.Duration
 }
 
 // Register adds a check to the doctor's check list.
@@ -67,10 +76,13 @@ func (d *Doctor) run(ctx *CheckContext, w io.Writer, fix, stream bool) *Report {
 
 	r := &Report{}
 	for _, c := range d.checks {
-		result := c.Run(ctx)
+		result := d.boundedRun(c, ctx)
 
-		// Attempt fix if requested and the check supports it.
-		if fix && result.Status != StatusOK && c.CanFix() {
+		// Attempt fix if requested and the check supports it. A timed-out
+		// check is skipped: its Run never completed, so its failure state
+		// is unknown and a fix (plus the verifying re-run) could wedge the
+		// loop the same way the check did.
+		if fix && result.Status != StatusOK && !result.TimedOut && c.CanFix() {
 			if err := c.Fix(ctx); err == nil {
 				// Re-run to verify the fix worked.
 				result = c.Run(ctx)
@@ -87,7 +99,9 @@ func (d *Doctor) run(ctx *CheckContext, w io.Writer, fix, stream bool) *Report {
 
 		if stream {
 			printResult(w, result, ctx.Verbose)
-			if r, ok := c.(Renderer); ok {
+			// Skip extras for a timed-out check: its Run goroutine may
+			// still be mutating internal state RenderExtras would read.
+			if r, ok := c.(Renderer); ok && !result.TimedOut {
 				r.RenderExtras(ctx, w)
 			}
 		}
@@ -109,6 +123,39 @@ func (d *Doctor) run(ctx *CheckContext, w io.Writer, fix, stream bool) *Report {
 		}
 	}
 	return r
+}
+
+// boundedRun executes one check under the doctor's per-check timeout.
+// Zero timeout runs the check inline (historical behavior). Otherwise the
+// check runs in a goroutine against a context whose Output is a private
+// buffer: on completion the buffer is flushed to the real writer (keeping a
+// check's incidental output grouped before its result line); on timeout the
+// goroutine is abandoned with its private buffer, so a still-running check
+// can never interleave writes with — or race against — the rest of the run.
+func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
+	if d.CheckTimeout <= 0 {
+		return c.Run(ctx)
+	}
+	var buf bytes.Buffer
+	checkCtx := *ctx
+	checkCtx.Output = &buf
+	done := make(chan *CheckResult, 1)
+	go func() { done <- c.Run(&checkCtx) }()
+	select {
+	case result := <-done:
+		if buf.Len() > 0 && ctx.Output != nil {
+			buf.WriteTo(ctx.Output) //nolint:errcheck // best-effort output
+		}
+		return result
+	case <-time.After(d.CheckTimeout):
+		return &CheckResult{
+			Name:     c.Name(),
+			Status:   StatusError,
+			Severity: SeverityAdvisory,
+			TimedOut: true,
+			Message:  fmt.Sprintf("timed out after %s and was abandoned (outcome unknown); re-run alone or raise --check-timeout", d.CheckTimeout),
+		}
+	}
 }
 
 // printResult writes a single check result line to w.

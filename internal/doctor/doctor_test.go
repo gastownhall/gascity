@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mockCheck is a configurable Check for testing the runner.
@@ -15,11 +16,16 @@ type mockCheck struct {
 	msg      string
 	canFix   bool
 	fixErr   error
-	fixed    bool // set by Fix
+	fixed    bool          // set by Fix
+	delay    time.Duration // sleep inside Run, for timeout tests
+	fixCalls int           // incremented by Fix
 }
 
 func (m *mockCheck) Name() string { return m.name }
 func (m *mockCheck) Run(_ *CheckContext) *CheckResult {
+	if m.delay > 0 {
+		time.Sleep(m.delay)
+	}
 	st := m.status
 	if m.fixed {
 		st = StatusOK
@@ -33,6 +39,7 @@ func (m *mockCheck) Run(_ *CheckContext) *CheckResult {
 }
 func (m *mockCheck) CanFix() bool { return m.canFix }
 func (m *mockCheck) Fix(_ *CheckContext) error {
+	m.fixCalls++
 	if m.fixErr != nil {
 		return m.fixErr
 	}
@@ -537,4 +544,100 @@ func TestPrintSummary_AdvisoryRenderedSeparately(t *testing.T) {
 	if got := buf.String(); strings.Contains(got, "advisory") {
 		t.Errorf("summary = %q, must not include 'advisory' when all failures are blocking", got)
 	}
+}
+
+// TestRunCheckTimeoutAbandonsWedgedCheck guards the per-check timeout: one
+// wedged check must not stall the run — it reports as a timed-out advisory
+// error and every check registered after it still executes.
+func TestRunCheckTimeoutAbandonsWedgedCheck(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	wedged := &mockCheck{name: "wedged", status: StatusOK, delay: 5 * time.Second}
+	after := &mockCheck{name: "after", status: StatusOK, msg: "ran"}
+	d.Register(wedged)
+	d.Register(after)
+
+	var buf bytes.Buffer
+	start := time.Now()
+	report := d.Run(&CheckContext{}, &buf, false)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("run took %s; the wedged check was not abandoned", elapsed)
+	}
+
+	if len(report.Results) != 2 {
+		t.Fatalf("Results = %d, want 2 (check after the wedge must still run)", len(report.Results))
+	}
+	got := report.Results[0]
+	if !got.TimedOut || got.Status != StatusError || got.Severity != SeverityAdvisory {
+		t.Fatalf("wedged result = %+v, want TimedOut StatusError SeverityAdvisory", got)
+	}
+	if !strings.Contains(got.Message, "timed out") {
+		t.Fatalf("wedged message = %q, want a timeout explanation", got.Message)
+	}
+	if report.Results[1].Name != "after" || report.Results[1].Status != StatusOK {
+		t.Fatalf("after result = %+v, want it to have run normally", report.Results[1])
+	}
+	if report.Failed != 1 || report.BlockingFailed != 0 || report.Passed != 1 {
+		t.Fatalf("report = %+v, want 1 advisory failure + 1 pass", report)
+	}
+	if out := buf.String(); !strings.Contains(out, "wedged") || !strings.Contains(out, "after") {
+		t.Fatalf("output = %q, want both check lines", out)
+	}
+}
+
+// TestRunCheckTimeoutZeroIsUnbounded pins the default: CheckTimeout zero runs
+// checks inline with no bound, preserving historical behavior for embedders
+// that never set the field.
+func TestRunCheckTimeoutZeroIsUnbounded(t *testing.T) {
+	d := &Doctor{}
+	slow := &mockCheck{name: "slow", status: StatusOK, delay: 30 * time.Millisecond}
+	d.Register(slow)
+
+	var buf bytes.Buffer
+	report := d.Run(&CheckContext{}, &buf, false)
+	if report.Passed != 1 || len(report.Results) != 1 || report.Results[0].TimedOut {
+		t.Fatalf("report = %+v, want the slow check to complete unbounded", report)
+	}
+}
+
+// TestRunCheckTimeoutSkipsFixForTimedOutCheck: a timed-out check's failure
+// state is unknown, so --fix must not attempt remediation (whose verifying
+// re-run could wedge the loop the same way the check did).
+func TestRunCheckTimeoutSkipsFixForTimedOutCheck(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	wedged := &mockCheck{name: "wedged", status: StatusError, delay: 5 * time.Second, canFix: true}
+	d.Register(wedged)
+
+	var buf bytes.Buffer
+	report := d.Run(&CheckContext{}, &buf, true)
+	if wedged.fixCalls != 0 {
+		t.Fatalf("fixCalls = %d, want 0 (no fix for a timed-out check)", wedged.fixCalls)
+	}
+	if report.Fixed != 0 {
+		t.Fatalf("report.Fixed = %d, want 0", report.Fixed)
+	}
+}
+
+// TestRunCheckTimeoutFlushesCompletedCheckOutput: a check that completes
+// within the bound and wrote to ctx.Output must have that output reach the
+// real writer (the private abandonment buffer is an implementation detail).
+func TestRunCheckTimeoutFlushesCompletedCheckOutput(t *testing.T) {
+	d := &Doctor{CheckTimeout: time.Second}
+	d.Register(&outputWritingCheck{mockCheck{name: "writer", status: StatusOK}})
+
+	var buf bytes.Buffer
+	d.Run(&CheckContext{}, &buf, false)
+	if out := buf.String(); !strings.Contains(out, "incidental diagnostic") {
+		t.Fatalf("output = %q, want the check's incidental ctx.Output write flushed", out)
+	}
+}
+
+// outputWritingCheck writes to ctx.Output during Run, like checks that
+// surface fix-time diagnostics.
+type outputWritingCheck struct{ mockCheck }
+
+func (o *outputWritingCheck) Run(ctx *CheckContext) *CheckResult {
+	if ctx.Output != nil {
+		fmt.Fprintln(ctx.Output, "incidental diagnostic") //nolint:errcheck // test writer
+	}
+	return o.mockCheck.Run(ctx)
 }
