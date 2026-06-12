@@ -2947,7 +2947,7 @@
             "type": "string"
           },
           "target": {
-            "description": "Target agent for preview compilation.",
+            "description": "Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).",
             "minLength": 1,
             "type": "string"
           },
@@ -19965,13 +19965,13 @@
             }
           },
           {
-            "description": "Target agent for preview compilation.",
+            "description": "Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).",
             "explode": false,
             "in": "query",
             "name": "target",
             "required": true,
             "schema": {
-              "description": "Target agent for preview compilation.",
+              "description": "Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).",
               "type": "string"
             }
           }
@@ -20214,13 +20214,13 @@
             }
           },
           {
-            "description": "Target agent for preview compilation.",
+            "description": "Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).",
             "explode": false,
             "in": "query",
             "name": "target",
             "required": true,
             "schema": {
-              "description": "Target agent for preview compilation.",
+              "description": "Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).",
               "type": "string"
             }
           }

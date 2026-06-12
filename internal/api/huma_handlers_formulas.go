@@ -140,6 +140,14 @@ func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawSc
 	if target == "" {
 		return nil, huma.Error400BadRequest("target is required")
 	}
+	// Workflow roots persist the routed agent identity as gc.routed_to
+	// (ga-eld2x / #2763), and run-detail clients echo that identity back as
+	// the preview target. A configured agent identity has no bead-store
+	// entry, so resolve it against the city config and let the graph.v2
+	// preview substitute a synthetic input convoy instead of failing the
+	// bead lookup. Targets that match neither a bead nor a configured agent
+	// keep the existing not-found error.
+	_, targetIsRoutingIdentity := findAgentByQualifiedTemplate(s.state.Config(), target)
 
 	paths, status, msg := s.formulaSearchPaths(scopeKind, scopeRef)
 	if status != 200 {
@@ -156,7 +164,7 @@ func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawSc
 	if scopeKind == "rig" {
 		store = s.state.BeadStore(scopeRef)
 	}
-	detail, err := buildFormulaDetail(ctx, store, name, paths, target, vars, validateRuntimeVars)
+	detail, err := buildFormulaDetail(ctx, store, name, paths, target, targetIsRoutingIdentity, vars, validateRuntimeVars)
 	if err != nil {
 		if errors.Is(err, errFormulaNotWorkflow) || errors.Is(err, errFormulaNotFound) {
 			return nil, huma.Error404NotFound(err.Error())

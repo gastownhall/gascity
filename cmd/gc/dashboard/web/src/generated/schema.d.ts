@@ -2903,7 +2903,7 @@ export interface components {
             scope_kind?: string;
             /** @description Scope reference. */
             scope_ref?: string;
-            /** @description Target agent for preview compilation. */
+            /** @description Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value). */
             target: string;
             /** @description Variable name-to-value overrides applied to the compiled preview. */
             vars?: {
@@ -9649,7 +9649,7 @@ export interface operations {
                 scope_kind?: string;
                 /** @description Scope reference. */
                 scope_ref?: string;
-                /** @description Target agent for preview compilation. */
+                /** @description Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value). */
                 target: string;
             };
             header?: never;
@@ -9772,7 +9772,7 @@ export interface operations {
                 scope_kind?: string;
                 /** @description Scope reference. */
                 scope_ref?: string;
-                /** @description Target agent for preview compilation. */
+                /** @description Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value). */
                 target: string;
             };
             header?: never;

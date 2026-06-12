@@ -408,8 +408,12 @@ func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Be
 }
 
 // PreparePreviewInvocation validates graph.v2 preview inputs without creating
-// input convoys or workflow roots.
-func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, userVars map[string]string) (Invocation, error) {
+// input convoys or workflow roots. targetIsRoutingIdentity marks targetID as
+// a configured agent identity (for example a workflow root's gc.routed_to
+// value) rather than a bead or convoy ID; routing identities have no
+// bead-store entry, so the preview substitutes a synthetic input convoy
+// instead of resolving the target through the store.
+func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, targetIsRoutingIdentity bool, userVars map[string]string) (Invocation, error) {
 	resolved, parser, err := loadFormulaWithParser(formulaName, searchPaths)
 	if err != nil {
 		return Invocation{}, fmt.Errorf("loading formula %q: %w", formulaName, err)
@@ -458,9 +462,14 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 	if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, true); err != nil {
 		return Invocation{}, err
 	}
-	inputConvoyID, err := PreviewInputConvoyID(store, targetID)
-	if err != nil {
-		return Invocation{}, err
+	var inputConvoyID string
+	if targetIsRoutingIdentity {
+		inputConvoyID = PreviewInputConvoyIDForRoutingIdentity(targetID)
+	} else {
+		inputConvoyID, err = PreviewInputConvoyID(store, targetID)
+		if err != nil {
+			return Invocation{}, err
+		}
 	}
 	inv.Targeted = true
 	inv.InputConvoy = inputConvoyID
@@ -517,6 +526,17 @@ func PreviewInputConvoyID(store beads.Store, targetID string) (string, error) {
 		return target.ID, nil
 	}
 	return previewInputConvoyPrefix + target.ID, nil
+}
+
+// PreviewInputConvoyIDForRoutingIdentity returns the synthetic read-only
+// input convoy ID a graph.v2 preview should use when the preview target is a
+// routing identity (a configured agent identity, for example a workflow
+// root's gc.routed_to value) rather than a bead or convoy ID. Routing
+// identities have no bead-store entry, so the preview substitutes the same
+// synthetic preview-input-convoy value a non-convoy bead target receives,
+// without a store lookup.
+func PreviewInputConvoyIDForRoutingIdentity(targetID string) string {
+	return previewInputConvoyPrefix + strings.TrimSpace(targetID)
 }
 
 // LockKey serializes process-local graph.v2 materialization for a deterministic

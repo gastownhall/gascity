@@ -171,7 +171,7 @@ func buildFormulaRuns(state State, formulaName, requestedScopeKind, requestedSco
 	}, nil
 }
 
-func buildFormulaDetail(ctx context.Context, store beads.Store, name string, paths []string, target string, vars map[string]string, validateRuntimeVars bool) (*formulaDetailResponse, error) {
+func buildFormulaDetail(ctx context.Context, store beads.Store, name string, paths []string, target string, targetIsRoutingIdentity bool, vars map[string]string, validateRuntimeVars bool) (*formulaDetailResponse, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("%w: %q not in search paths", errFormulaNotFound, name)
 	}
@@ -180,7 +180,7 @@ func buildFormulaDetail(ctx context.Context, store beads.Store, name string, pat
 	if err != nil {
 		return nil, err
 	}
-	compileVars, err := formulaDetailPreviewVars(ctx, store, name, paths, resolved, target, vars, validateRuntimeVars)
+	compileVars, err := formulaDetailPreviewVars(ctx, store, name, paths, resolved, target, targetIsRoutingIdentity, vars, validateRuntimeVars)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +262,7 @@ func buildFormulaDetail(ctx context.Context, store beads.Store, name string, pat
 	return resp, nil
 }
 
-func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name string, paths []string, resolved *formula.Formula, target string, vars map[string]string, validateRuntimeVars bool) (map[string]string, error) {
+func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name string, paths []string, resolved *formula.Formula, target string, targetIsRoutingIdentity bool, vars map[string]string, validateRuntimeVars bool) (map[string]string, error) {
 	if resolved == nil || !formula.UsesGraphCompiler(resolved) {
 		return vars, nil
 	}
@@ -303,9 +303,14 @@ func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name strin
 		if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, true); err != nil {
 			return nil, err
 		}
-		inputConvoyID, err := graphv2.PreviewInputConvoyID(store, target)
-		if err != nil {
-			return nil, err
+		var inputConvoyID string
+		if targetIsRoutingIdentity {
+			inputConvoyID = graphv2.PreviewInputConvoyIDForRoutingIdentity(target)
+		} else {
+			inputConvoyID, err = graphv2.PreviewInputConvoyID(store, target)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if out == nil {
 			out = make(map[string]string, 1)
@@ -313,7 +318,7 @@ func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name strin
 		out[graphv2.ConvoyIDVar] = inputConvoyID
 		return out, nil
 	}
-	inv, err := graphv2.PreparePreviewInvocation(ctx, store, name, paths, target, vars)
+	inv, err := graphv2.PreparePreviewInvocation(ctx, store, name, paths, target, targetIsRoutingIdentity, vars)
 	if err != nil {
 		return nil, err
 	}

@@ -1155,7 +1155,7 @@ export type FormulaPreviewBody = {
      */
     scope_ref?: string;
     /**
-     * Target agent for preview compilation.
+     * Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).
      */
     target: string;
     /**
@@ -8265,7 +8265,7 @@ export type GetV0CityByCityNameFormulaByNameData = {
          */
         scope_ref?: string;
         /**
-         * Target agent for preview compilation.
+         * Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).
          */
         target: string;
     };
@@ -8394,7 +8394,7 @@ export type GetV0CityByCityNameFormulasByNameData = {
          */
         scope_ref?: string;
         /**
-         * Target agent for preview compilation.
+         * Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).
          */
         target: string;
     };
