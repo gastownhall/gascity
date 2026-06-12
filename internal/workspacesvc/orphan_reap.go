@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // Orphaned service processes are survivors of a previous supervisor hard
@@ -20,57 +22,121 @@ import (
 // duplicates never accumulate.
 //
 // Matching queries live process-table state only — no pid or status files.
-// A process is reaped only when all three hold:
+// A process is signaled only while every rule of the orphan identity holds
+// (see orphanIdentity.matchesLive):
 //
-//  1. it has re-parented to init (ppid 1), so no live supervisor owns it;
-//  2. its command line is exactly the service's configured command; and
-//  3. its environment carries GC_SERVICE_NAME=<service>, proving a gc
-//     supervisor spawned it as this service rather than a coincidental
-//     same-argv process.
+//  1. it is alive and not a zombie;
+//  2. it has re-parented to init (ppid 1), so no live supervisor owns it;
+//  3. its command line is exactly the service's configured command; and
+//  4. its environment carries GC_SERVICE_NAME=<service> and
+//     GC_SERVICE_STATE_ROOT=<this instance's state root>, proving a gc
+//     supervisor spawned it as this city's instance of the service rather
+//     than a coincidental same-argv process or a sibling city's
+//     still-serving orphan of the same service.
+//
+// Rule 2 is only meaningful when the sweeping process is not itself init,
+// so the sweep is skipped entirely when running as pid 1 (see
+// findOrphanedServiceProcessesFrom).
+//
+// A separately-scoped cleanup with different matching rules
+// (GC_HOME/registry scoping instead of service-name + state-root +
+// exact-argv + ppid 1) runs at supervisor start and warm refresh — see
+// cleanupSupervisorWorkspaceServices in cmd/gc/cmd_supervisor_lifecycle.go.
+// Keep the two mechanisms in mind when changing either.
 
 // orphanReapTermWait bounds how long the sweep waits after SIGTERM before
 // escalating to SIGKILL.
 const orphanReapTermWait = proxyProcessShutdownWait
 
+// orphanIdentity is the full identity a process must match before the sweep
+// may signal it: the service's name, the spawning instance's absolute state
+// root, and the configured command.
+type orphanIdentity struct {
+	serviceName string
+	stateRoot   string
+	command     []string
+}
+
+// newOrphanIdentity builds the sweep identity for one service instance.
+// stateRoot must be the instance's absolute state root — the value the
+// spawn path exports as GC_SERVICE_STATE_ROOT. command is normalized with
+// the same empty/whitespace-argument rule pidutil.Cmdline applies to live
+// process command lines, so a configured command containing such arguments
+// still matches its own orphans.
+func newOrphanIdentity(serviceName, stateRoot string, command []string) orphanIdentity {
+	return orphanIdentity{
+		serviceName: serviceName,
+		stateRoot:   stateRoot,
+		command:     pidutil.NormalizeArgv(command),
+	}
+}
+
+// matchesLive reports whether pid currently satisfies every identity rule:
+// alive and not a zombie, re-parented to init (ppid 1), command line equal
+// to the service command, and environment carrying both the service-name
+// and state-root markers. The same predicate runs at scan time, on every
+// escalation wait pass, and immediately before SIGKILL — mirroring
+// cleanupSupervisorWorkspaceServices's re-read-before-kill precedent — so a
+// pid recycled at any point is dropped rather than signaled. Any read
+// failure counts as a mismatch: the sweep never signals a process it cannot
+// prove is still the orphan.
+func (id orphanIdentity) matchesLive(pid int) bool {
+	if !pidutil.Alive(pid) {
+		return false
+	}
+	if ppid, err := processParentPID(pid); err != nil || ppid != 1 {
+		return false
+	}
+	if !processCmdlineEquals(pid, id.command) {
+		return false
+	}
+	return processEnvironMatchesService(pid, id.serviceName, id.stateRoot)
+}
+
 // reapOrphanedServiceProcesses terminates orphaned survivors of previous
-// hard exits that match the service's command-line signature. Best-effort:
-// scan or signal failures are logged and never block the spawn; on hosts
-// without /proc the sweep is a no-op.
-func reapOrphanedServiceProcesses(serviceName string, command []string) {
-	pids := findOrphanedServiceProcesses(serviceName, command)
+// hard exits that match the service instance's identity. Best-effort: scan
+// or signal failures are logged and never block the spawn; on hosts without
+// /proc the sweep is a no-op.
+func reapOrphanedServiceProcesses(id orphanIdentity) {
+	pids := findOrphanedServiceProcesses(id)
 	if len(pids) == 0 {
 		return
 	}
-	log.Printf("workspacesvc: terminating %d orphaned process(es) for service %q: %v", len(pids), serviceName, pids)
-	terminateOrphanedProcesses(serviceName, pids)
+	log.Printf("workspacesvc: terminating %d orphaned process(es) for service %q: %v", len(pids), id.serviceName, pids)
+	terminateOrphanedProcesses(id, pids)
 }
 
-// findOrphanedServiceProcesses scans /proc for ppid-1 processes whose
-// command line equals command and whose environment marks them as spawns of
-// serviceName. Processes that exit mid-scan or whose records are unreadable
-// are skipped.
-func findOrphanedServiceProcesses(serviceName string, command []string) []int {
-	if len(command) == 0 {
+// findOrphanedServiceProcesses scans /proc for processes matching id.
+// Processes that exit mid-scan or whose records are unreadable are skipped.
+func findOrphanedServiceProcesses(id orphanIdentity) []int {
+	return findOrphanedServiceProcessesFrom(os.Getpid(), id)
+}
+
+// findOrphanedServiceProcessesFrom is the scan body with the sweeping
+// process's pid made explicit so tests can cover the pid-1 guard. When the
+// sweeper is itself init (pid 1 — gc as a container entrypoint), every live
+// supervised child also has ppid 1, so the orphan test would match healthy
+// processes (including a sibling city's children and publication-context
+// replacements started before the old instance closes). Orphans of a
+// previous supervisor cannot exist in that case — pid 1 dying tears down
+// the pid namespace — so the sweep finds nothing by definition. An identity
+// without a state root is incomplete and matches nothing rather than
+// matching too broadly.
+func findOrphanedServiceProcessesFrom(self int, id orphanIdentity) []int {
+	if len(id.command) == 0 || id.stateRoot == "" || self == 1 {
 		return nil
 	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
 	}
-	self := os.Getpid()
 	var pids []int
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil || pid == self {
 			continue
 		}
-		if ppid, err := processParentPID(pid); err != nil || ppid != 1 {
-			continue
-		}
-		if !processCmdlineEquals(pid, command) {
-			continue
-		}
-		if !processEnvironHasServiceMarker(pid, serviceName) {
+		if !id.matchesLive(pid) {
 			continue
 		}
 		pids = append(pids, pid)
@@ -80,44 +146,64 @@ func findOrphanedServiceProcesses(serviceName string, command []string) []int {
 
 // terminateOrphanedProcesses sends SIGTERM to each pid (preferring its
 // process group, which the spawn path creates via Setpgid), waits briefly,
-// then SIGKILLs stragglers.
-func terminateOrphanedProcesses(serviceName string, pids []int) {
+// then SIGKILLs stragglers. The full identity is re-verified on every wait
+// pass and once more immediately before SIGKILL, so a pid recycled after
+// SIGTERM is dropped rather than SIGKILLed.
+func terminateOrphanedProcesses(id orphanIdentity, pids []int) {
 	for _, pid := range pids {
 		signalProcessOrGroup(pid, syscall.SIGTERM)
 	}
 	remaining := pids
 	deadline := time.Now().Add(orphanReapTermWait)
 	for time.Now().Before(deadline) {
-		remaining = liveProcesses(remaining)
+		remaining = liveMatchingOrphans(remaining, id)
 		if len(remaining) == 0 {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	remaining = liveProcesses(remaining)
+	remaining = liveMatchingOrphans(remaining, id)
 	if len(remaining) == 0 {
 		return
 	}
-	log.Printf("workspacesvc: SIGKILL %d orphaned straggler(s) for service %q: %v", len(remaining), serviceName, remaining)
+	log.Printf("workspacesvc: SIGKILL %d orphaned straggler(s) for service %q: %v", len(remaining), id.serviceName, remaining)
 	for _, pid := range remaining {
 		signalProcessOrGroup(pid, syscall.SIGKILL)
 	}
 }
 
 // signalProcessOrGroup signals the process group led by pid, falling back
-// to the process itself when pid is not a group leader.
+// to the process itself when pid is not a group leader. Unsafe targets are
+// refused outright.
 func signalProcessOrGroup(pid int, sig syscall.Signal) {
+	if unsafeSignalTarget(pid) {
+		log.Printf("workspacesvc: refusing to signal unsafe orphan-reap target pid %d", pid)
+		return
+	}
 	if err := syscall.Kill(-pid, sig); err == nil {
 		return
 	}
 	_ = syscall.Kill(pid, sig)
 }
 
-// liveProcesses filters pids down to those that still exist.
-func liveProcesses(pids []int) []int {
+// unsafeSignalTarget reports whether pid must never be signaled: init,
+// nonpositive pids (kill(2) broadcast and current-group semantics), and the
+// sweeper's own process group. The scan cannot produce such pids today;
+// this mirrors processgroup.Terminate's refusal so kill-adjacent code stays
+// safe under future refactors.
+func unsafeSignalTarget(pid int) bool {
+	return pid <= 1 || pid == syscall.Getpgrp()
+}
+
+// liveMatchingOrphans filters pids down to those that still match the full
+// orphan identity. Re-checking here — not just at scan time — keeps a
+// recycled same-uid pid (and via kill(-pid) its group) from being
+// SIGKILLed, and lets a slow-reaped zombie drop out instead of pinning the
+// full escalation wait.
+func liveMatchingOrphans(pids []int, id orphanIdentity) []int {
 	live := pids[:0]
 	for _, pid := range pids {
-		if err := syscall.Kill(pid, 0); err == nil || err == syscall.EPERM {
+		if id.matchesLive(pid) {
 			live = append(live, pid)
 		}
 	}
@@ -143,14 +229,18 @@ func processParentPID(pid int) (int, error) {
 	return strconv.Atoi(fields[1])
 }
 
-// processCmdlineEquals reports whether /proc/<pid>/cmdline equals command
-// argv-for-argv.
+// processCmdlineEquals reports whether the process's command line equals
+// command argv-for-argv.
 func processCmdlineEquals(pid int, command []string) bool {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	argv, err := pidutil.Cmdline(pid)
 	if err != nil {
 		return false
 	}
-	argv := strings.Split(strings.TrimRight(string(data), "\x00"), "\x00")
+	return argvEquals(argv, command)
+}
+
+// argvEquals reports whether argv equals command argv-for-argv.
+func argvEquals(argv, command []string) bool {
 	if len(argv) != len(command) {
 		return false
 	}
@@ -162,20 +252,31 @@ func processCmdlineEquals(pid int, command []string) bool {
 	return true
 }
 
-// processEnvironHasServiceMarker reports whether the process was spawned
-// with GC_SERVICE_NAME=<serviceName>. /proc/<pid>/environ is readable only
-// for same-uid processes, which doubles as the ownership check; unreadable
-// or unmarked processes are never reaped.
-func processEnvironHasServiceMarker(pid int, serviceName string) bool {
+// processEnvironMatchesService reports whether the process was spawned with
+// both GC_SERVICE_NAME=<serviceName> and GC_SERVICE_STATE_ROOT=<stateRoot>.
+// The state root scopes matching to this city's instance of the service: it
+// is config-derived — stable across supervisor restarts but unique per
+// city+service — so a sibling city running the same service name and
+// command never matches. (GC_SERVICE_SOCKET would not work as the ownership
+// key: it is freshly allocated per instance, so no orphan would ever
+// match.) /proc/<pid>/environ is readable only for same-uid processes,
+// which doubles as the ownership check; unreadable or unmarked processes
+// are never reaped.
+func processEnvironMatchesService(pid int, serviceName, stateRoot string) bool {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
 	if err != nil {
 		return false
 	}
-	marker := "GC_SERVICE_NAME=" + serviceName
+	nameMarker := "GC_SERVICE_NAME=" + serviceName
+	rootMarker := "GC_SERVICE_STATE_ROOT=" + stateRoot
+	var nameOK, rootOK bool
 	for _, kv := range strings.Split(string(data), "\x00") {
-		if kv == marker {
-			return true
+		switch kv {
+		case nameMarker:
+			nameOK = true
+		case rootMarker:
+			rootOK = true
 		}
 	}
-	return false
+	return nameOK && rootOK
 }

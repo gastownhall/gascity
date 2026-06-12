@@ -209,6 +209,12 @@ func supervisorWorkspaceServiceStateRoots(scope supervisorWorkspaceServiceCleanu
 	return roots
 }
 
+// cleanupSupervisorWorkspaceServices terminates workspace-service processes
+// owned by this supervisor's GC_HOME/registry scope. A second sweep with
+// different matching rules (service-name + state-root + exact-argv +
+// ppid 1) runs before every proxy_process spawn — see
+// internal/workspacesvc/orphan_reap.go. Keep the two mechanisms in mind
+// when changing either.
 func cleanupSupervisorWorkspaceServices(scope supervisorWorkspaceServiceCleanupScope) error {
 	procs, err := findSupervisorWorkspaceServiceProcesses(scope)
 	if err != nil {
