@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -466,6 +468,78 @@ func TestCreateActiveTestTempRootSentinelFreeAfterClose(t *testing.T) {
 	exists, held := aliveSentinelHeld(root)
 	if !exists || held {
 		t.Errorf("aliveSentinelHeld(%s) after close = (exists=%v, held=%v); want (true, false)", root, exists, held)
+	}
+}
+
+// captureSweepStderr runs fn with os.Stderr redirected to a pipe and returns
+// what fn wrote. Safe here because this test does not call t.Parallel, so no
+// parallel test can write to the swapped stderr.
+func captureSweepStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = old }()
+	fn()
+	os.Stderr = old
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing stderr pipe writer: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil {
+		t.Fatalf("reading captured stderr: %v", err)
+	}
+	return string(out)
+}
+
+// TestSweepOrphanLogsRemovalReason verifies every removal emits one stderr
+// line naming the removed path and the branch that justified it, so a future
+// recurrence of ga-djbcqt is attributable without gate-log forensics.
+func TestSweepOrphanLogsRemovalReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		setup      func(t *testing.T, dir string)
+		wantReason string
+	}{
+		{
+			name: "free sentinel",
+			setup: func(t *testing.T, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, testAliveSentinelName), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantReason: "free sentinel",
+		},
+		{
+			name:       "legacy dir without sentinel",
+			setup:      func(*testing.T, string) {},
+			wantReason: "legacy: pid dead, no active marker",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			pid := nonLivePID(t)
+			dir := pidPrefixedTestDir(root, "pfx", pid)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tt.setup(t, dir)
+			backdatePastSweepAge(t, dir)
+
+			got := captureSweepStderr(t, func() { sweepOrphanPIDPrefixedDirs(root, "pfx") })
+
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Fatalf("sweepOrphanPIDPrefixedDirs did not remove %s: %v", dir, err)
+			}
+			if !strings.Contains(got, dir) || !strings.Contains(got, tt.wantReason) {
+				t.Errorf("sweep stderr = %q; want it to name %q with reason %q", got, dir, tt.wantReason)
+			}
+		})
 	}
 }
 

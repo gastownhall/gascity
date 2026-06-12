@@ -162,6 +162,7 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 		}
 		path := filepath.Join(root, e.Name())
 		exists, held := aliveSentinelHeld(path)
+		var reason string
 		switch {
 		case held:
 			// Creator (possibly in another PID namespace) is still alive.
@@ -170,6 +171,7 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 			// Sentinel present but unlocked: the creator is gone. Remove
 			// even though the active-root marker is still there — crashed
 			// runs never clear their marker.
+			reason = "free sentinel"
 		default:
 			// Legacy dir without a sentinel: fall back to PID liveness and
 			// the active-root marker.
@@ -179,7 +181,11 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 			if _, err := os.Stat(filepath.Join(path, testActiveTempRootMarker)); err == nil {
 				continue
 			}
+			reason = "legacy: pid dead, no active marker"
 		}
+		// Name each removal so a recurrence of ga-djbcqt is attributable
+		// from run logs instead of gate-log forensics.
+		fmt.Fprintf(os.Stderr, "cmd/gc test sweep: removing %s (%s)\n", path, reason)
 		_ = os.RemoveAll(path)
 	}
 }
