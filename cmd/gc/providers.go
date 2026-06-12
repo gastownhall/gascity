@@ -22,14 +22,9 @@ import (
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
-	sessioncloudflare "github.com/gastownhall/gascity/internal/runtime/cloudflare"
-	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
-	sessionsubprocess "github.com/gastownhall/gascity/internal/runtime/subprocess"
-	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -114,7 +109,10 @@ func providerStateDir(providerName, cityPath string) string {
 	return filepath.Join(supervisor.RuntimeDir(), providerName, hex.EncodeToString(sum[:4]))
 }
 
-// newSessionProviderByName constructs a runtime.Provider from a provider name.
+// newSessionProviderByName constructs a runtime.Provider from a provider name
+// by resolving it through runtimeRegistry (see cmd/gc/runtime_registry.go for
+// the builtin registrations and internal/runtime/REQUIREMENTS.md for the
+// selection contract).
 // cityName is used to auto-default the tmux socket when none is configured.
 // cityPath is used to isolate socket-based providers per city.
 // Returns error instead of os.Exit, making it safe for the hot-reload path.
@@ -127,44 +125,7 @@ func providerStateDir(providerName, cityPath string) string {
 //   - "k8s" → native Kubernetes provider (client-go)
 //   - default → real tmux provider
 func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-	if strings.HasPrefix(name, "exec:") {
-		script := strings.TrimPrefix(name, "exec:")
-		if isLegacyT3BridgeExecScript(script) {
-			return sessiont3bridge.NewProvider(), nil
-		}
-		return sessionexec.NewProvider(script), nil
-	}
-	switch name {
-	case "fake":
-		return runtime.NewFake(), nil
-	case "fail":
-		return runtime.NewFailFake(), nil
-	case "subprocess":
-		if cityPath != "" {
-			return sessionsubprocess.NewProviderWithDir(providerStateDir("subprocess", cityPath)), nil
-		}
-		return sessionsubprocess.NewProvider(), nil
-	case "acp":
-		cfg := sessionacp.Config{
-			HandshakeTimeout:  sc.ACP.HandshakeTimeoutDuration(),
-			NudgeBusyTimeout:  sc.ACP.NudgeBusyTimeoutDuration(),
-			OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
-		}
-		if cityPath != "" {
-			return sessionacp.NewProviderWithDir(providerStateDir("acp", cityPath), cfg), nil
-		}
-		return sessionacp.NewProvider(cfg), nil
-	case "t3bridge":
-		return sessiont3bridge.NewProvider(), nil
-	case "cloudflare":
-		return sessioncloudflare.NewProvider()
-	case "k8s":
-		return sessionk8s.NewProvider()
-	case "hybrid":
-		return newHybridProvider(sc, cityName, cityPath)
-	default:
-		return sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
-	}
+	return runtimeRegistry.New(name, sc, cityName, cityPath)
 }
 
 func isLegacyT3BridgeExecScript(script string) bool {

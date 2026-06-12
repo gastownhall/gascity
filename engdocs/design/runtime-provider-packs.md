@@ -7,6 +7,7 @@
 | Author(s) | Julian, Claude |
 | Issue | `ga-1symz6` (epic); PoC PRs `ga-fse3es` → `ga-ghbts9` → `ga-h504e5` → `ga-6qwfkb` |
 | Related | [packv2/doc-pack-v2.md](packv2/doc-pack-v2.md), [provider-inheritance.md](provider-inheritance.md), PR #3335 (gastown pack as Go module) |
+| Behavior ledger | `internal/runtime/REQUIREMENTS.md` — ARCP reconciliation ledger; behavior rows, code, and tests move together. This doc owns direction; the ledger owns behavior. |
 
 Plan for moving runtime providers and builtin agent-provider definitions
 out of the gascity core and into packs, plus the scoped first PoC.
@@ -228,7 +229,7 @@ Four PRs, each independently green:
 
 | PR | Issue | Repo | Content | Risk |
 |---|---|---|---|---|
-| 1 | `ga-fse3es` | gascity | Registry: `internal/runtime/registry.go` (Register/Lookup, `exec:` prefix hook), builtins re-register from per-provider files, switch in `cmd/gc/providers.go` becomes lookup. Behavior-preserving. | Low |
+| 1 | `ga-fse3es` | gascity | Registry: `internal/runtime/registry/` (Register/RegisterPrefix/fallback; collisions are errors), builtin registrations in `cmd/gc/runtime_registry.go`, switch in `cmd/gc/providers.go` becomes lookup. Stdlib-only boundary test on the contract package. Behavior-preserving. **Landed on this branch.** | Low |
 | 2 | `ga-ghbts9` | gascity | RPP v0: protocol spec doc (`engdocs/architecture/` or `docs/`), `protocol` handshake op + capability mapping in the exec/proxy provider, `gc runtime check` conformance command (wraps `runtimetest` against an arbitrary executable). Reference executable: fake-backed test script. | Medium |
 | 3 | `ga-h504e5` | gascity | Pack surface: `[runtimes.<name>]` in pack.toml, composition registers pack runtimes, collision rules, doctor handshake check. | Medium |
 | 4 | `ga-6qwfkb` | gascity-packs + gascity | `runtime-cloudflare` pack: nested Go module (no gascity deps) emitting `gc-runtime-cloudflare` speaking RPP v0, installed by the pack, `gc runtime check` green in packs CI. gascity deletes `internal/runtime/cloudflare`; `session = "cloudflare"` resolves via the pack. | Low |
