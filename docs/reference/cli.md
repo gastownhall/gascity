@@ -2753,6 +2753,7 @@ gc registry publish <path-to-pack-root> [flags]
 | `--dev-auth` | bool |  | create a local dev-auth session before submitting; localhost only |
 | `--dev-auth-handle` | string | `local-cli` | dev-auth handle when --dev-auth is used |
 | `--dry-run` | bool |  | print the publish request without submitting |
+| `--name` | string |  | registry pack name; defaults to [pack].name |
 | `--ref` | string |  | release ref label; defaults to the upstream branch name |
 | `--registry-url` | string | `https://registry.gascity.com` | registry app base URL |
 | `--session-cookie` | string |  | registry_session cookie value or Cookie header |

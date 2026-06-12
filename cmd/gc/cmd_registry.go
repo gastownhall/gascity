@@ -45,6 +45,7 @@ func newRegistryCmd(stdout, stderr io.Writer) *cobra.Command {
 
 type registryPublishOptions struct {
 	RegistryURL   string
+	Name          string
 	Version       string
 	Ref           string
 	Description   string
@@ -83,6 +84,7 @@ path, pack name, and version to the registry API.`,
 		},
 	}
 	cmd.Flags().StringVar(&opts.RegistryURL, "registry-url", opts.RegistryURL, "registry app base URL")
+	cmd.Flags().StringVar(&opts.Name, "name", "", "registry pack name; defaults to [pack].name")
 	cmd.Flags().StringVar(&opts.Version, "version", "", "release version; defaults to [pack].version")
 	cmd.Flags().StringVar(&opts.Ref, "ref", "", "release ref label; defaults to the upstream branch name")
 	cmd.Flags().StringVar(&opts.Description, "description", "", "release description; defaults to [pack].description")
@@ -261,13 +263,17 @@ func buildRegistryPublishRequest(packRoot string, opts registryPublishOptions) (
 	if version == "" {
 		return registryPublishRequest{}, errors.New("release version is required; set [pack].version or pass --version")
 	}
+	name := strings.TrimSpace(registryFirstNonEmpty(opts.Name, manifest.Pack.Name))
+	if name == "" {
+		return registryPublishRequest{}, errors.New("pack name is required; set [pack].name or pass --name")
+	}
 	ref := strings.TrimSpace(registryFirstNonEmpty(opts.Ref, upstreamBranch))
 	description := strings.TrimSpace(registryFirstNonEmpty(opts.Description, manifest.Pack.Description))
 	return registryPublishRequest{
 		RepoURL:              repoURL,
 		Commit:               commit,
 		PackPath:             packPath,
-		RequestedName:        strings.TrimSpace(manifest.Pack.Name),
+		RequestedName:        name,
 		RequestedVersion:     version,
 		RequestedRef:         ref,
 		RequestedDescription: description,

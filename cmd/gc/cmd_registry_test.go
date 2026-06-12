@@ -42,6 +42,33 @@ func TestBuildRegistryPublishRequestUsesCleanPushedGitHubHead(t *testing.T) {
 	}
 }
 
+func TestBuildRegistryPublishRequestAcceptsWebFormFieldOverrides(t *testing.T) {
+	_, packDir := setupRegistryPublishRepo(t)
+
+	request, err := buildRegistryPublishRequest(packDir, registryPublishOptions{
+		Name:        "renamed-demo-pack",
+		Version:     "1.2.3",
+		Ref:         "release/v1.2.3",
+		Description: "Operator supplied release note.",
+	})
+	if err != nil {
+		t.Fatalf("buildRegistryPublishRequest: %v", err)
+	}
+
+	if request.RequestedName != "renamed-demo-pack" {
+		t.Fatalf("RequestedName = %q", request.RequestedName)
+	}
+	if request.RequestedVersion != "1.2.3" {
+		t.Fatalf("RequestedVersion = %q", request.RequestedVersion)
+	}
+	if request.RequestedRef != "release/v1.2.3" {
+		t.Fatalf("RequestedRef = %q", request.RequestedRef)
+	}
+	if request.RequestedDescription != "Operator supplied release note." {
+		t.Fatalf("RequestedDescription = %q", request.RequestedDescription)
+	}
+}
+
 func TestBuildRegistryPublishRequestRejectsDirtyTree(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
 	if err := os.WriteFile(filepath.Join(packDir, "README.md"), []byte("dirty\n"), 0o644); err != nil {
