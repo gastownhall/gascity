@@ -261,11 +261,7 @@ show_wisps_indexes() {
     dolt_sql_csv "USE \`$DOLT_DB\`; SHOW INDEX FROM wisps;"
 }
 
-index_rows() {
-    local output="$1"
-
-    printf '%s\n' "$output" | awk -F, -v idx="$INDEX_NAME" 'NR > 1 && $3 == idx { count++ } END { print count + 0 }'
-}
+index_rows() { index_rows_for "$1" "$INDEX_NAME"; }
 
 verify_index_definition() {
     local output="$1"
