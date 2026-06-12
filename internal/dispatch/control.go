@@ -856,14 +856,11 @@ func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *form
 	return control, dep, true
 }
 
-// buildAttemptRecipeTallyControl re-mints the tally control for a re-spawned
-// attempt step whose source declares on_complete + tally. It mirrors the
-// compile-time shape injected by formula.ApplyGraphControls: a gc.kind=tally
-// step keyed to the source ref that blocks on the re-minted fanout and
-// carries no scope membership metadata (the enclosing scope waits on it via
-// the rewritten blocks dep instead). Callers must only invoke it for sources
-// that also received a fanout control, since the tally dispatcher resolves
-// the fanout by ref before aggregating.
+// applyAttemptRecipeScopeChecks re-mints paired scope-check controls for the
+// scoped steps of a re-spawned attempt recipe, mirroring the compile-time
+// shape injected by formula.ApplyGraphControls: each scope-check blocks on
+// its subject step, and deps that waited on the subject are rewritten to
+// wait on the scope-check instead.
 func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 	if recipe == nil || len(recipe.Steps) == 0 {
 		return
