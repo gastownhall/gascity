@@ -13,6 +13,14 @@ this tool:
   5. updates the examples/gastown pins (pack.toml, city.toml, packs.lock).
 
 --check verifies all of the above without modifying the checkout.
+
+Note on the go.mod version form: `go get module@commit` resolves to whatever
+version Go derives for that commit -- a tag pointing at exactly that commit,
+or a pseudo-version. When the registry release commit differs from the
+module's tagged commit, the operator may hand-finish go.mod to a
+content-identical tagged version afterwards. --check validates the pinned
+module's *content* against the registry hash, not the version string, so
+both forms pass.
 """
 
 from __future__ import annotations
