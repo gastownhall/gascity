@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
@@ -84,6 +86,15 @@ func TestInit_WiresResourceWithInstanceID(t *testing.T) {
 	// export is best-effort, so Init succeeds without a live backend.
 	t.Setenv(EnvMetricsURL, "http://127.0.0.1:1/v1/metrics")
 	t.Setenv(EnvLogsURL, "")
+
+	// Init mutates the process-global meter and logger providers; restore
+	// them so later tests never observe these shut-down providers.
+	prevMeter := otel.GetMeterProvider()
+	prevLogger := global.GetLoggerProvider()
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prevMeter)
+		global.SetLoggerProvider(prevLogger)
+	})
 
 	p, err := Init(context.Background(), "test-svc", "0.0.1")
 	if err != nil {
