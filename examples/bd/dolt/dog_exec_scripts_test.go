@@ -628,6 +628,17 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_HASHOF_DB"*)
+    if [ "$mode" = "absorbed_ws_db_hash_drift" ] || [ "$mode" = "absorbed_ws_db_hash_drift_system_table" ]; then
+      # Standing uncommitted working-set state absorbed by the flatten's -Am:
+      # the committed root legitimately differs across the flatten while HEAD
+      # never moves and every per-table working-set hash stays stable.
+      if [ "$(current_head)" = "compactcommit" ]; then
+        print_cell hash-root-after-absorb
+      else
+        print_cell hash-root-before
+      fi
+      exit 0
+    fi
     if [ "$mode" = "ignored_table_db_hash_drift" ]; then
       case "$query" in
         *"DOLT_HASHOF_DB('HEAD')"*)
@@ -816,6 +827,18 @@ case "$query" in
       print_cell 10
     fi
     exit 0
+    ;;
+  *"DOLT_DIFF_STAT"*)
+    if [ "$mode" = "absorbed_ws_db_hash_drift" ]; then
+      print_cell beads
+      exit 0
+    fi
+    if [ "$mode" = "absorbed_ws_db_hash_drift_system_table" ]; then
+      print_cell dolt_schemas
+      exit 0
+    fi
+    printf 'unexpected DOLT_DIFF_STAT query: %%s\n' "$query" >&2
+    exit 64
     ;;
   *"DOLT_RESET"*)
     if [[ "$query" == *"--hard"* ]]; then
@@ -2391,6 +2414,68 @@ func TestCompactScriptPinsDatabaseHashToCommittedRoot(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "DOLT_GC") {
 		t.Fatalf("compact must reach full GC when the committed root is stable:\n%s", string(data))
+	}
+}
+
+// Production incident (hq, 2026-06-12, second mode): a bd writer left one
+// uncommitted cell in a tracked table's working set before the compact ran.
+// Per-table verification compares working-set values, so it passed; but the
+// flatten's -Am committed that standing state, so the committed root at the
+// flatten head differs from the pre-flight HEAD root with no HEAD movement —
+// the database-hash check quarantined a by-design absorption. When per-table
+// verification passed and DOLT_DIFF_STAT(pre-flight head, flatten head) is
+// confined to verified tables, the drift is proven to be absorbed working-set
+// state: defer and retry, exactly like the proven writer-race paths.
+func TestCompactScriptDefersAbsorbedWorkingSetDbHashDrift(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "absorbed_ws_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("absorbed working-set drift must defer, not fail: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "absorbed working-set state") ||
+		!strings.Contains(out, "deferring, will retry next run") {
+		t.Fatalf("output missing absorbed working-set defer message:\n%s", out)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("absorbed working-set drift must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if reason := compactMarkerValue(t, pendingGC, "reason"); reason != "writer race during flatten deferred full GC" {
+		t.Fatalf("absorbed working-set defer should record pending-GC retry marker, got reason %q", reason)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("absorbed working-set defer must skip GC this run:\n%s", string(data))
+	}
+}
+
+// The absorbed-working-set proof must stay narrow: a committed-root drift that
+// touches anything OUTSIDE the verified table set (system tables such as
+// dolt_schemas, or a table the preflight never verified) is unexplained and
+// keeps the fail-closed quarantine.
+func TestCompactScriptStillQuarantinesDbHashDriftBeyondVerifiedTables(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "absorbed_ws_db_hash_drift_system_table", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("root drift beyond verified tables must remain a blocking failure:\n%s", out)
+	}
+	if !strings.Contains(out, "value hash changed without row-count increase") {
+		t.Fatalf("output missing same-count db hash drift quarantine notice:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten value hash changed without row-count increase" {
+		t.Fatalf("quarantine reason should identify db hash drift, got %q", reason)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("unexplained db root drift must block full GC:\n%s", string(data))
 	}
 }
 

@@ -1014,6 +1014,43 @@ verify_counts() {
   return "$fail"
 }
 
+# db_root_drift_within_verified_tables — prove a committed-root drift benign.
+# Reached only after per-table verification has PASSED: every verified table's
+# working-set value matches the pre-flight snapshot. The flatten's -Am commits
+# the working set by design, so standing uncommitted changes on a tracked
+# table (e.g. a writer's cursor cell) move the committed root across the
+# flatten with no HEAD movement — indistinguishable from corruption by the
+# aggregate hash alone. DOLT_DIFF_STAT between the pre-flight head and the
+# flatten head names exactly which tables differ; if every one is in the
+# verified set, their current values are already proven equal to the
+# pre-flight snapshot and the drift is absorbed working-set state. Any table
+# outside the verified set (system tables such as dolt_schemas), an empty
+# diff, or a probe failure fails closed.
+db_root_drift_within_verified_tables() {
+  db="$1"
+  from="$2"
+  to="$3"
+  preflight_file="$4"
+  [ -n "$from" ] && [ -n "$to" ] || return 1
+  stat_tmp=$(mktemp)
+  if ! dolt_query "$db" \
+    "SELECT table_name FROM DOLT_DIFF_STAT('$from', '$to')" \
+    > "$stat_tmp" 2>/dev/null; then
+    rm -f "$stat_tmp"
+    return 1
+  fi
+  drift_tables=$(awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$stat_tmp")
+  rm -f "$stat_tmp"
+  [ -n "$drift_tables" ] || return 1
+  for drift_t in $drift_tables; do
+    if ! awk -v t="$drift_t" '$1 == t {found=1} END {exit !found}' "$preflight_file"; then
+      return 1
+    fi
+  done
+  db_root_drift_proven_tables="$drift_tables"
+  return 0
+}
+
 oldgen_has_files() {
   db="$1"
   oldgen_dir="$DOLT_DATA_DIR/$db/.dolt/noms/oldgen"
@@ -2182,6 +2219,24 @@ flatten_database() {
       rm -f "$preflight_tmp"
       return 1
     else
+      # Per-table verification passed, no row gain, no HEAD movement — the
+      # remaining benign explanation is standing uncommitted working-set
+      # state on a tracked table that the flatten's -Am committed (observed
+      # on a production hq: one dirty cursor cell in `config`). Prove it by
+      # confining the root diff to the verified table set; defer exactly as
+      # the proven writer-race paths do. Anything else stays quarantined.
+      if db_root_drift_within_verified_tables "$db" "$head" "$flatten_head" "$preflight_tmp"; then
+        printf 'compact: db=%s committed-root drift confined to verified table(s) [%s] via DOLT_DIFF_STAT(%s..%s) with per-table verification passed — absorbed working-set state committed by the flatten, not corruption; deferring, will retry next run\n' \
+          "$db" "${db_root_drift_proven_tables:-}" "$head" "$flatten_head" >&2
+        if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+          "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+          "$compacted_from_head" "$local_branch" "$remote_branch"; then
+          rm -f "$preflight_tmp"
+          return 1
+        fi
+        rm -f "$preflight_tmp"
+        return 0
+      fi
       printf 'compact: db=%s value hash changed without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
       write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed without row-count increase" || {
