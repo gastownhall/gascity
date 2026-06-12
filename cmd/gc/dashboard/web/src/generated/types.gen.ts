@@ -423,6 +423,7 @@ export type BeadsDiagnostic = {
 export type BindingStatus = 'active' | 'ended';
 
 export type BoundEventPayload = {
+    agent_name?: string;
     conversation_id: string;
     provider: string;
     session_id: string;
@@ -929,6 +930,10 @@ export type ExtMsgAdapterUnregisterInputBody = {
 
 export type ExtMsgBindInputBody = {
     /**
+     * Configured agent identity to bind; its live session is resolved at delivery time, cold-waking one when none is live (mutually exclusive with session_id).
+     */
+    agent_name?: string;
+    /**
      * Conversation to bind.
      */
     conversation?: ConversationRef;
@@ -939,9 +944,9 @@ export type ExtMsgBindInputBody = {
         [key: string]: string;
     };
     /**
-     * Session ID to bind.
+     * Session ID to bind (mutually exclusive with agent_name).
      */
-    session_id: string;
+    session_id?: string;
 };
 
 export type ExtMsgGroupEnsureInputBody = {
@@ -1067,13 +1072,17 @@ export type ExtMsgUnbindBody = {
 
 export type ExtMsgUnbindInputBody = {
     /**
-     * Conversation to unbind (nil = all).
+     * Configured agent identity to unbind.
+     */
+    agent_name?: string;
+    /**
+     * Conversation to unbind (nil = filter by session_id/agent_name).
      */
     conversation?: ConversationRef;
     /**
      * Session ID to unbind.
      */
-    session_id: string;
+    session_id?: string;
 };
 
 export type ExternalActor = {
@@ -1287,6 +1296,7 @@ export type InboundEventPayload = {
     actor: string;
     conversation_id: string;
     provider: string;
+    target_agent?: string;
     target_session: string;
 };
 
@@ -1294,6 +1304,7 @@ export type InboundResult = {
     Binding: SessionBindingRecord;
     GroupRoute: GroupRouteDecision;
     Message: ExternalInboundMessage;
+    TargetAgentName: string;
     TargetSessionID: string;
     TranscriptEntry: ConversationTranscriptRecord;
 };
@@ -2547,6 +2558,7 @@ export type SessionAgentListResponse = {
 };
 
 export type SessionBindingRecord = {
+    AgentName: string;
     BindingGeneration: number;
     BoundAt: string;
     Conversation: ConversationRef;

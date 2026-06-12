@@ -1214,6 +1214,9 @@
       "BoundEventPayload": {
         "additionalProperties": false,
         "properties": {
+          "agent_name": {
+            "type": "string"
+          },
           "conversation_id": {
             "type": "string"
           },
@@ -2504,6 +2507,10 @@
       "ExtMsgBindInputBody": {
         "additionalProperties": false,
         "properties": {
+          "agent_name": {
+            "description": "Configured agent identity to bind; its live session is resolved at delivery time, cold-waking one when none is live (mutually exclusive with session_id).",
+            "type": "string"
+          },
           "conversation": {
             "$ref": "#/components/schemas/ConversationRef",
             "description": "Conversation to bind."
@@ -2516,14 +2523,10 @@
             "type": "object"
           },
           "session_id": {
-            "description": "Session ID to bind.",
-            "minLength": 1,
+            "description": "Session ID to bind (mutually exclusive with agent_name).",
             "type": "string"
           }
         },
-        "required": [
-          "session_id"
-        ],
         "type": "object"
       },
       "ExtMsgGroupEnsureInputBody": {
@@ -2706,19 +2709,19 @@
       "ExtMsgUnbindInputBody": {
         "additionalProperties": false,
         "properties": {
+          "agent_name": {
+            "description": "Configured agent identity to unbind.",
+            "type": "string"
+          },
           "conversation": {
             "$ref": "#/components/schemas/ConversationRef",
-            "description": "Conversation to unbind (nil = all)."
+            "description": "Conversation to unbind (nil = filter by session_id/agent_name)."
           },
           "session_id": {
             "description": "Session ID to unbind.",
-            "minLength": 1,
             "type": "string"
           }
         },
-        "required": [
-          "session_id"
-        ],
         "type": "object"
       },
       "ExternalActor": {
@@ -3378,6 +3381,9 @@
           "provider": {
             "type": "string"
           },
+          "target_agent": {
+            "type": "string"
+          },
           "target_session": {
             "type": "string"
           }
@@ -3402,6 +3408,9 @@
           "Message": {
             "$ref": "#/components/schemas/ExternalInboundMessage"
           },
+          "TargetAgentName": {
+            "type": "string"
+          },
           "TargetSessionID": {
             "type": "string"
           },
@@ -3414,7 +3423,8 @@
           "Binding",
           "GroupRoute",
           "TranscriptEntry",
-          "TargetSessionID"
+          "TargetSessionID",
+          "TargetAgentName"
         ],
         "type": "object"
       },
@@ -6240,6 +6250,9 @@
       "SessionBindingRecord": {
         "additionalProperties": false,
         "properties": {
+          "AgentName": {
+            "type": "string"
+          },
           "BindingGeneration": {
             "format": "int64",
             "type": "integer"
@@ -6287,6 +6300,7 @@
           "Conversation",
           "SessionID",
           "SessionName",
+          "AgentName",
           "Status",
           "BoundAt",
           "ExpiresAt",

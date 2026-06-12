@@ -41,6 +41,21 @@ func (s *Server) extmsgEmitEvent() func(string, string, events.Payload) {
 	}
 }
 
+// extmsgResolveSessionSelector builds the OutboundDeps session-selector
+// resolver: it maps a selector — a configured agent identity, session name,
+// alias, or concrete session bead ID — to the concrete ID of a live session,
+// without materializing one. HandleOutbound uses it to authorize publishes on
+// agent-bound conversations.
+func (s *Server) extmsgResolveSessionSelector() func(ctx context.Context, selector string) (string, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil
+	}
+	return func(ctx context.Context, selector string) (string, error) {
+		return s.resolveSessionTargetIDWithContext(ctx, store, selector, apiSessionResolveOptions{})
+	}
+}
+
 func extmsgHandleLabel(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {

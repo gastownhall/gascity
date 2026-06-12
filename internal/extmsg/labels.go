@@ -22,6 +22,7 @@ const (
 	labelBindingConversationPrefix = "extmsg:binding:conv:v1:"
 	labelBindingSessionPrefix      = "extmsg:binding:session:v1:"
 	labelBindingSessionNamePrefix  = "extmsg:binding:sessionname:v1:"
+	labelBindingAgentPrefix        = "extmsg:binding:agent:v1:"
 	labelDeliveryRoutePrefix       = "extmsg:delivery:route:v1:"
 	labelDeliverySessionPrefix     = "extmsg:delivery:session:v1:"
 	labelGroupRootPrefix           = "extmsg:group:root:v1:"
@@ -58,6 +59,10 @@ func bindingSessionLabel(sessionID string) string {
 // can find every binding owned by a name even after the original bead closes.
 func bindingSessionNameLabel(sessionName string) string {
 	return labelBindingSessionNamePrefix + strings.TrimSpace(sessionName)
+}
+
+func bindingAgentLabel(agentName string) string {
+	return labelBindingAgentPrefix + strings.TrimSpace(agentName)
 }
 
 func deliveryRouteLabel(ref ConversationRef, sessionID string) string {

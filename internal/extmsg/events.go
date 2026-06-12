@@ -10,12 +10,14 @@ import "github.com/gastownhall/gascity/internal/events"
 
 // InboundEventPayload is emitted on events.ExtMsgInbound ("extmsg.inbound").
 // Actor is the inbound speaker's display name; TargetSession is the
-// resolved recipient session (empty if no routing match).
+// resolved recipient session and TargetAgent the bound agent identity for
+// agent-bound conversations (both empty if no routing match).
 type InboundEventPayload struct {
 	Provider       string `json:"provider"`
 	ConversationID string `json:"conversation_id"`
 	Actor          string `json:"actor"`
 	TargetSession  string `json:"target_session"`
+	TargetAgent    string `json:"target_agent,omitempty"`
 }
 
 // IsEventPayload marks InboundEventPayload as an events.Payload variant.
@@ -49,11 +51,12 @@ type OutboundChannelMismatchPayload struct {
 func (OutboundChannelMismatchPayload) IsEventPayload() {}
 
 // BoundEventPayload is emitted on events.ExtMsgBound (binding a
-// conversation to a session).
+// conversation to a session or to a configured agent identity).
 type BoundEventPayload struct {
 	Provider       string `json:"provider"`
 	ConversationID string `json:"conversation_id"`
 	SessionID      string `json:"session_id"`
+	AgentName      string `json:"agent_name,omitempty"`
 }
 
 // IsEventPayload marks BoundEventPayload as an events.Payload variant.

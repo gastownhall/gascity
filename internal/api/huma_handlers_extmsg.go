@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -104,9 +106,10 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
 	deps := extmsg.OutboundDeps{
-		Services:  *svc,
-		Registry:  reg,
-		EmitEvent: s.extmsgEmitEvent(),
+		Services:               *svc,
+		Registry:               reg,
+		EmitEvent:              s.extmsgEmitEvent(),
+		ResolveSessionSelector: s.extmsgResolveSessionSelector(),
 	}
 
 	result, err := extmsg.HandleOutbound(ctx, deps, caller, extmsg.OutboundRequest{
@@ -167,10 +170,37 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 		return nil, err
 	}
 
+	// Exactly one of session_id and agent_name — conditional requiredness
+	// the schema can't express, enforced here (see ExtMsgInboundInput).
+	sessionID := strings.TrimSpace(input.Body.SessionID)
+	agentName := strings.TrimSpace(input.Body.AgentName)
+	switch {
+	case sessionID == "" && agentName == "":
+		return nil, huma.Error400BadRequest("session_id or agent_name is required")
+	case sessionID != "" && agentName != "":
+		return nil, huma.Error400BadRequest("session_id and agent_name are mutually exclusive")
+	}
+	if agentName != "" {
+		// Agent bindings are resolved at delivery time, so the name must
+		// map to a configured named-session identity — the only identity
+		// the delivery layer can cold-wake a session for. Persist the
+		// configured identity so the binding stays unambiguous even when
+		// a later config change makes the bare name ambiguous.
+		spec, ok, err := s.findNamedSessionSpecForTarget(s.state.CityBeadStore(), agentName)
+		if err != nil {
+			return nil, huma.Error400BadRequest(fmt.Sprintf("resolving agent %q: %s", agentName, err))
+		}
+		if !ok {
+			return nil, huma.Error400BadRequest(fmt.Sprintf("agent %q does not resolve to a configured named session; agent bindings require a named-session-backed agent", agentName))
+		}
+		agentName = spec.Identity
+	}
+
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
 	binding, err := svc.Bindings.Bind(ctx, caller, extmsg.BindInput{
 		Conversation: input.Body.Conversation,
-		SessionID:    input.Body.SessionID,
+		SessionID:    sessionID,
+		AgentName:    agentName,
 		Metadata:     input.Body.Metadata,
 		Now:          time.Now(),
 	})
@@ -185,10 +215,15 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 		}
 	}
 
-	s.extmsgEmitEvent()(events.ExtMsgBound, input.Body.SessionID, extmsg.BoundEventPayload{
+	subject := sessionID
+	if subject == "" {
+		subject = agentName
+	}
+	s.extmsgEmitEvent()(events.ExtMsgBound, subject, extmsg.BoundEventPayload{
 		Provider:       input.Body.Conversation.Provider,
 		ConversationID: input.Body.Conversation.ConversationID,
-		SessionID:      input.Body.SessionID,
+		SessionID:      sessionID,
+		AgentName:      agentName,
 	})
 	out := &ExtMsgBindOutput{}
 	out.Body = binding
@@ -202,18 +237,29 @@ func (s *Server) humaHandleExtMsgUnbind(ctx context.Context, input *ExtMsgUnbind
 		return nil, err
 	}
 
+	sessionID := strings.TrimSpace(input.Body.SessionID)
+	agentName := strings.TrimSpace(input.Body.AgentName)
+	if input.Body.Conversation == nil && sessionID == "" && agentName == "" {
+		return nil, huma.Error400BadRequest("conversation, session_id, or agent_name is required")
+	}
+
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
 	unbound, err := svc.Bindings.Unbind(ctx, caller, extmsg.UnbindInput{
 		Conversation: input.Body.Conversation,
-		SessionID:    input.Body.SessionID,
+		SessionID:    sessionID,
+		AgentName:    agentName,
 		Now:          time.Now(),
 	})
 	if err != nil {
 		return nil, huma.Error422UnprocessableEntity(err.Error())
 	}
 
-	s.extmsgEmitEvent()(events.ExtMsgUnbound, input.Body.SessionID, extmsg.UnboundEventPayload{
-		SessionID: input.Body.SessionID,
+	subject := sessionID
+	if subject == "" {
+		subject = agentName
+	}
+	s.extmsgEmitEvent()(events.ExtMsgUnbound, subject, extmsg.UnboundEventPayload{
+		SessionID: sessionID,
 		Count:     len(unbound),
 	})
 	out := &ExtMsgUnbindOutput{}

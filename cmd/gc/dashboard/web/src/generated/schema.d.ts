@@ -2348,6 +2348,7 @@ export interface components {
          */
         BindingStatus: "active" | "ended";
         BoundEventPayload: {
+            agent_name?: string;
             conversation_id: string;
             provider: string;
             session_id: string;
@@ -2758,14 +2759,16 @@ export interface components {
             provider: string;
         };
         ExtMsgBindInputBody: {
+            /** @description Configured agent identity to bind; its live session is resolved at delivery time, cold-waking one when none is live (mutually exclusive with session_id). */
+            agent_name?: string;
             /** @description Conversation to bind. */
             conversation?: components["schemas"]["ConversationRef"];
             /** @description Optional binding metadata. */
             metadata?: {
                 [key: string]: string;
             };
-            /** @description Session ID to bind. */
-            session_id: string;
+            /** @description Session ID to bind (mutually exclusive with agent_name). */
+            session_id?: string;
         };
         ExtMsgGroupEnsureInputBody: {
             /** @description Default handle for the group. */
@@ -2837,10 +2840,12 @@ export interface components {
             unbound: components["schemas"]["SessionBindingRecord"][] | null;
         };
         ExtMsgUnbindInputBody: {
-            /** @description Conversation to unbind (nil = all). */
+            /** @description Configured agent identity to unbind. */
+            agent_name?: string;
+            /** @description Conversation to unbind (nil = filter by session_id/agent_name). */
             conversation?: components["schemas"]["ConversationRef"];
             /** @description Session ID to unbind. */
-            session_id: string;
+            session_id?: string;
         };
         ExternalActor: {
             display_name: string;
@@ -3018,12 +3023,14 @@ export interface components {
             actor: string;
             conversation_id: string;
             provider: string;
+            target_agent?: string;
             target_session: string;
         };
         InboundResult: {
             Binding: components["schemas"]["SessionBindingRecord"];
             GroupRoute: components["schemas"]["GroupRouteDecision"];
             Message: components["schemas"]["ExternalInboundMessage"];
+            TargetAgentName: string;
             TargetSessionID: string;
             TranscriptEntry: components["schemas"]["ConversationTranscriptRecord"];
         };
@@ -3939,6 +3946,7 @@ export interface components {
             agents: components["schemas"]["AgentMapping"][] | null;
         };
         SessionBindingRecord: {
+            AgentName: string;
             /** Format: int64 */
             BindingGeneration: number;
             /** Format: date-time */
