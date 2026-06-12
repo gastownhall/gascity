@@ -5339,7 +5339,7 @@ func TestCityRuntimeRun_RetriesConvergenceStartupUntilIndexPopulated(t *testing.
 
 	deadline := time.After(5 * time.Second)
 	for {
-		if scope := cr.convScopes[""]; scope != nil && scope.adapter.activeIndex != nil {
+		if scope := cr.convScope(""); scope != nil && scope.adapter.indexReady.Load() {
 			cancel()
 			break
 		}

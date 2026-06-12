@@ -87,7 +87,9 @@ func (cr *CityRuntime) initConvergenceHandler() {
 		scopes[rigName] = cr.newConvergenceScope(
 			rigName, store, rigStorePaths[rigName], cr.cfg.FormulaLayers.SearchPaths(rigName))
 	}
+	cr.convScopesMu.Lock()
 	cr.convScopes = scopes
+	cr.convScopesMu.Unlock()
 }
 
 // newConvergenceScope wires a store adapter and convergence handler for a

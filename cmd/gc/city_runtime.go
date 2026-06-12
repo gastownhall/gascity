@@ -110,6 +110,7 @@ type CityRuntime struct {
 	fsPressureEpisodeLogged    bool
 
 	convScopes          map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
+	convScopesMu        sync.RWMutex                 // guards convScopes map pointer
 	convergenceReqCh    chan convergenceRequest      // receives CLI commands from controller.sock
 	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
@@ -870,6 +871,14 @@ func (d *tickDebouncer) cancelPending() {
 // fired returns the channel that emits when a debounced fire is due.
 func (d *tickDebouncer) fired() <-chan struct{} {
 	return d.fireCh
+}
+
+// convScope returns the convergence scope for the given rig name under a read
+// lock so callers outside the run() goroutine can safely read the map.
+func (cr *CityRuntime) convScope(rig string) *convergenceScope {
+	cr.convScopesMu.RLock()
+	defer cr.convScopesMu.RUnlock()
+	return cr.convScopes[rig]
 }
 
 func convergenceStartupComplete(cr *CityRuntime) bool {
