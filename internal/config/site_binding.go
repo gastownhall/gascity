@@ -348,6 +348,57 @@ func WriteCityAndRigSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City) 
 	return writeCityAndRigSiteBindingsForEdit(fs, tomlPath, cfg, nil)
 }
 
+// AppendRigAndWriteSiteBindingsForEdit appends a new [[rigs]] block to
+// city.toml without re-serializing the whole file, preserving all existing
+// comments. cfg must include newRig (with its path) so that the site binding
+// (.gc/site.toml) is kept consistent. If the site binding write fails after
+// city.toml is changed, both files are restored before the error is returned.
+func AppendRigAndWriteSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City, newRig Rig) error {
+	cityRoot := filepath.Dir(tomlPath)
+
+	// Serialize only the new rig block, stripping path (it belongs in site.toml).
+	rigForCity := newRig
+	rigForCity.Path = ""
+	type rigBlock struct {
+		Rigs []Rig `toml:"rigs"`
+	}
+	var rigBuf bytes.Buffer
+	enc := toml.NewEncoder(&rigBuf)
+	enc.Indent = ""
+	if err := enc.Encode(rigBlock{Rigs: []Rig{rigForCity}}); err != nil {
+		return fmt.Errorf("serializing new rig block: %w", err)
+	}
+
+	existing, err := fs.ReadFile(tomlPath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", tomlPath, err)
+	}
+
+	snapshot, err := snapshotCityAndSiteFiles(fs, tomlPath, SiteBindingPath(cityRoot))
+	if err != nil {
+		return err
+	}
+
+	content := make([]byte, len(existing))
+	copy(content, existing)
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		content = append(content, '\n')
+	}
+	content = append(content, '\n')
+	content = append(content, rigBuf.Bytes()...)
+
+	if err := fsys.WriteFileIfChangedAtomic(fs, tomlPath, content, 0o644); err != nil {
+		return err
+	}
+	if err := persistRigSiteBindings(fs, cityRoot, cfg.Rigs, nil); err != nil {
+		if restoreErr := snapshot.restore(fs); restoreErr != nil {
+			return fmt.Errorf("writing .gc/site.toml failed and restoring city.toml/site binding failed: %w", errors.Join(err, restoreErr))
+		}
+		return fmt.Errorf("writing .gc/site.toml failed; restored city.toml and previous site binding, fix the site binding write error and retry: %w", err)
+	}
+	return nil
+}
+
 // WriteCityAndRigSiteBindingsForEditRemovingRigs writes city.toml and
 // .gc/site.toml while removing bindings for rig names that were intentionally
 // deleted from the city config.

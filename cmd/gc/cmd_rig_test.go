@@ -108,6 +108,48 @@ func TestDoRigAdd_Basic(t *testing.T) {
 	}
 }
 
+func TestDoRigAdd_PreservesComments(t *testing.T) {
+	cityPath := t.TempDir()
+	cityToml := `# This is a city-level rationale comment.
+[workspace]
+name = "my-city"
+
+# Pack rationale: core tools are required.
+[packs.core]
+source = ".gc/system/packs/core"
+`
+	writeSchema2RigCity(t, cityPath, "my-city", cityToml, "")
+
+	rigPath := filepath.Join(t.TempDir(), "backend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		"# This is a city-level rationale comment.",
+		"# Pack rationale: core tools are required.",
+		"backend",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("city.toml missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestDoRigAddSqliteCityCreatesBdBackedRig(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(t.TempDir(), "tincan")
