@@ -1,0 +1,13 @@
+{
+  "name": "gc-openclaw-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Gas City extmsg adapter that hosts openclaw channel connectors (PoC: iMessage)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "openclaw": "2026.6.5"
+  }
+}

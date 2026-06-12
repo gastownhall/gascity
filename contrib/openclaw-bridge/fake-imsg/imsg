@@ -1,0 +1,189 @@
+#!/usr/bin/env node
+// Fake `imsg` CLI for Linux demos of the openclaw iMessage connector.
+//
+// Speaks the protocol the openclaw imessage extension expects from the real
+// imsg bridge (github.com/steipete/imsg) on macOS:
+//   - `imsg rpc --json`        line-delimited JSON-RPC 2.0 daemon over stdio
+//   - `imsg status --json`     capability probe (single JSONL object)
+//   - `imsg rpc --help`        probe handshake (must exit 0)
+//   - `imsg send-rich --help`  capability probe for `--file`
+//
+// Instead of Messages.app, this fake is backed by two files under
+// $FAKE_IMSG_DIR (default /tmp/fake-imsg):
+//   inbox.jsonl  — append a line to simulate an incoming iMessage.
+//                  Either a JSON object ({"text": "...", "sender": "+1555...",
+//                  "is_group": false, ...}) or a plain-text line.
+//   outbox.jsonl — every `send` RPC is appended here as one JSON record.
+
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import readline from 'node:readline'
+import crypto from 'node:crypto'
+
+// Default is per-user: a fixed shared /tmp path would let another local user
+// pre-create it and plant symlinks/messages.
+const dir = process.env.FAKE_IMSG_DIR || path.join(os.tmpdir(), `fake-imsg-${process.getuid?.() ?? 'user'}`)
+const inboxPath = path.join(dir, 'inbox.jsonl')
+const outboxPath = path.join(dir, 'outbox.jsonl')
+const defaultSender = process.env.FAKE_IMSG_SENDER || '+15551234567'
+const selfHandle = process.env.FAKE_IMSG_SELF || '+15550000000'
+
+const argv = process.argv.slice(2)
+const cmd = argv[0] ?? ''
+
+if (cmd === 'rpc' && argv.includes('--help')) {
+  console.log('imsg rpc — line-delimited JSON-RPC 2.0 over stdio\n\nUsage: imsg rpc --json [--db <path>]')
+  process.exit(0)
+}
+if (cmd === 'send-rich' && argv.includes('--help')) {
+  console.log('Usage: imsg send-rich --chat <guid> --text <text> [--file <path>] --json')
+  process.exit(0)
+}
+if (cmd === 'status' && argv.includes('--json')) {
+  console.log(JSON.stringify({
+    advanced_features: true,
+    v2_ready: true,
+    selectors: { private_api: true },
+    rpc_methods: ['chats.list', 'messages.history', 'watch.subscribe', 'watch.unsubscribe', 'send', 'typing', 'read'],
+  }))
+  process.exit(0)
+}
+if (cmd === 'rpc' && argv.includes('--json')) {
+  runDaemon()
+} else if (argv.includes('--json')) {
+  // One-shot subcommands (tapback/edit/send-attachment/...) — accept and ack.
+  console.log(JSON.stringify({ success: true, guid: newGuid() }))
+  process.exit(0)
+} else {
+  console.log('fake imsg — see contrib/openclaw-bridge/README.md')
+  process.exit(0)
+}
+
+function newGuid() {
+  return crypto.randomUUID().toUpperCase()
+}
+
+function runDaemon() {
+  fs.mkdirSync(dir, { recursive: true })
+  for (const p of [inboxPath, outboxPath]) {
+    if (!fs.existsSync(p)) fs.writeFileSync(p, '')
+  }
+
+  let rowid = 1000
+  let inboxOffset = fs.statSync(inboxPath).size // only new lines count
+  let inboxRemainder = '' // partial line carried across polls (writers may not be atomic)
+  let watching = false
+  let watchTimer = null
+
+  const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\n')
+
+  const buildMessage = (line) => {
+    let o = {}
+    const trimmed = line.trim()
+    if (!trimmed) return null
+    if (trimmed.startsWith('{')) {
+      try {
+        o = JSON.parse(trimmed)
+      } catch {
+        o = { text: trimmed }
+      }
+    } else {
+      o = { text: trimmed }
+    }
+    const isGroup = o.is_group === true
+    const sender = typeof o.sender === 'string' && o.sender ? o.sender : defaultSender
+    rowid += 1
+    return {
+      id: o.id ?? rowid,
+      guid: o.guid ?? newGuid(),
+      chat_id: o.chat_id ?? 42,
+      chat_identifier: o.chat_identifier ?? (isGroup ? 'chat42' : sender),
+      sender,
+      destination_caller_id: selfHandle,
+      is_from_me: false,
+      text: typeof o.text === 'string' ? o.text : '',
+      created_at: new Date().toISOString(),
+      is_group: isGroup,
+      ...(o.reply_to_id != null ? { reply_to_id: o.reply_to_id } : {}),
+      ...(Array.isArray(o.participants) ? { participants: o.participants } : {}),
+      ...(typeof o.chat_name === 'string' ? { chat_name: o.chat_name } : {}),
+    }
+  }
+
+  const pollInbox = () => {
+    let size
+    try {
+      size = fs.statSync(inboxPath).size
+    } catch {
+      return
+    }
+    if (size < inboxOffset) {
+      inboxOffset = 0 // file truncated/rotated
+      inboxRemainder = ''
+    }
+    if (size === inboxOffset) return
+    const fd = fs.openSync(inboxPath, 'r')
+    const buf = Buffer.alloc(size - inboxOffset)
+    fs.readSync(fd, buf, 0, buf.length, inboxOffset)
+    fs.closeSync(fd)
+    inboxOffset = size
+    const chunks = (inboxRemainder + buf.toString('utf8')).split('\n')
+    inboxRemainder = chunks.pop() ?? '' // last segment has no newline yet — wait for the rest
+    for (const line of chunks) {
+      const message = buildMessage(line)
+      if (!message) continue
+      out({ jsonrpc: '2.0', method: 'message', params: { message } })
+      process.stderr.write(`[fake-imsg] inbound notification: ${message.sender}: ${message.text}\n`)
+    }
+  }
+
+  const handlers = {
+    'chats.list': () => ({ chats: [] }),
+    'messages.history': () => ({ messages: [] }),
+    'watch.subscribe': () => {
+      if (!watching) {
+        watching = true
+        watchTimer = setInterval(pollInbox, 200)
+      }
+      return { subscription: 1 }
+    },
+    'watch.unsubscribe': () => {
+      watching = false
+      if (watchTimer) clearInterval(watchTimer)
+      return { ok: true }
+    },
+    send: (params) => {
+      const guid = newGuid()
+      const record = { ts: new Date().toISOString(), guid, params }
+      fs.appendFileSync(outboxPath, JSON.stringify(record) + '\n')
+      const target = params?.to ?? params?.chat_guid ?? params?.chat_identifier ?? `chat_id:${params?.chat_id}`
+      process.stderr.write(`[fake-imsg] SEND to ${target}: ${params?.text}\n`)
+      return { guid, status: 'sent' }
+    },
+    typing: () => ({ ok: true }),
+    read: () => ({ ok: true }),
+    'chats.markUnread': () => ({ ok: true }),
+  }
+
+  const rl = readline.createInterface({ input: process.stdin })
+  rl.on('line', (line) => {
+    let req
+    try {
+      req = JSON.parse(line)
+    } catch {
+      return
+    }
+    if (!req || typeof req !== 'object' || req.id === undefined) return
+    const handler = handlers[req.method]
+    if (handler) {
+      out({ jsonrpc: '2.0', id: req.id, result: handler(req.params) })
+    } else {
+      out({ jsonrpc: '2.0', id: req.id, error: { code: -32601, message: `method not found: ${req.method}` } })
+    }
+  })
+  rl.on('close', () => {
+    if (watchTimer) clearInterval(watchTimer)
+    process.exit(0)
+  })
+}

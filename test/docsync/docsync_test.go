@@ -109,6 +109,10 @@ func allDocsMarkdownFiles(root string) ([]string, error) {
 				return err
 			}
 			if d.IsDir() {
+				name := d.Name()
+				if path != dirRoot && (strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules") {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			ext := filepath.Ext(path)
