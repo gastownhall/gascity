@@ -37,7 +37,13 @@ const ACCOUNT = env('BRIDGE_ACCOUNT_ID', 'default')
 const PORT = Number(env('BRIDGE_PORT', '8931'))
 const API_ROOT = env('TELEGRAM_API_ROOT', 'https://api.telegram.org').replace(/\/+$/, '')
 
-const log = (...args) => console.log('[tg-bridge]', ...args)
+// Telegram's API design puts the token in every URL (/bot<token>/...), so
+// transport errors can embed it in their messages. Strip it from anything
+// that leaves the process: logs AND the error metadata reported back to gc
+// (receipts land in durable transcripts).
+const redact = (v) => String(v).split(TOKEN).join('<token>')
+const log = (...args) => console.log('[tg-bridge]', ...args.map(redact))
+const logError = (...args) => console.error('[tg-bridge]', ...args.map(redact))
 
 // Minimal OpenClawConfig literal — the only config the connector code needs.
 // apiRoot flows into the grammY client, so the same bridge runs against the
@@ -63,7 +69,7 @@ const oc = await loadTelegramConnector()
 // 1. Handshake against the Bot API exactly like openclaw's gateway would.
 const probe = await oc.probeTelegram(TOKEN, 15000, { apiRoot: API_ROOT })
 if (!probe || probe.ok !== true) {
-  console.error('[tg-bridge] telegram probe failed:', JSON.stringify(probe))
+  logError('telegram probe failed:', JSON.stringify(probe))
   process.exit(1)
 }
 log(`telegram probe ok: @${probe.bot?.username ?? '?'} via ${API_ROOT}`)
@@ -119,7 +125,7 @@ async function pollUpdates() {
       // The Bot API daemon being unreachable is fatal after sustained failure;
       // exit loudly instead of staying registered with gc as a zombie adapter.
       if (failures >= 10) {
-        console.error('[tg-bridge] getUpdates failing persistently:', err.message)
+        logError('getUpdates failing persistently:', err.message)
         process.exit(1)
       }
       log(`getUpdates failed (${failures}/10):`, err.message)
@@ -226,7 +232,7 @@ async function handlePublish(pub) {
       conversation: conv,
       delivered: false,
       failure_kind: 'transient',
-      metadata: { error: String(err?.message ?? err) },
+      metadata: { error: redact(err?.message ?? err) },
     }
   }
 }
