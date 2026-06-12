@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
@@ -271,14 +272,39 @@ func resolveImportRoot() (string, error) {
 	if raw, ok := resolveExplicitImportPathEnv(); ok {
 		return validateImportRootPath(raw)
 	}
-	if cityPath, err := resolveCity(); err == nil {
-		return cityPath, nil
-	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
+	// Explicit rig/dir signals carry user intent and outrank cwd inference:
+	// route them through the registered-city machinery first, exactly as
+	// --city does above. Only pure cwd inference may use the nearest-marker
+	// walk below.
+	if hasExplicitRigOrDirSignal() {
+		if cityPath, err := resolveCity(); err == nil {
+			return cityPath, nil
+		}
+		return findPackRoot(cwd)
+	}
+	if root, ok, err := findNearestImportRoot(cwd); ok || err != nil {
+		return root, err
+	}
+	if cityPath, err := resolveCity(); err == nil {
+		return cityPath, nil
+	}
 	return findPackRoot(cwd)
+}
+
+func hasExplicitRigOrDirSignal() bool {
+	if strings.TrimSpace(rigFlag) != "" {
+		return true
+	}
+	for _, key := range []string{"GC_RIG", "GC_DIR"} {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveExplicitImportPathEnv() (string, bool) {
@@ -320,6 +346,33 @@ func findPackRoot(dir string) (string, error) {
 		abs = parent
 	}
 	return "", fmt.Errorf("could not find city or pack root from %s", dir)
+}
+
+// findNearestImportRoot walks dir upward to the nearest directory holding an
+// explicit config marker: pack.toml or city.toml. Bare .gc/ runtime
+// directories are deliberately not markers — stale rig worktrees and the
+// supervisor's global runtime root must fall through to resolveCity(), whose
+// registered-rig guards and legacy-runtime rules know how to resolve them.
+// The walk is bounded by the same ceilings as implicit city discovery.
+func findNearestImportRoot(dir string) (string, bool, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", false, err
+	}
+	ceilings := implicitCityDiscoveryCeilings()
+	for {
+		if packExists(abs) || citylayout.HasCityConfig(abs) {
+			return abs, true, nil
+		}
+		if isCityDiscoveryCeiling(abs, ceilings) {
+			return "", false, nil
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return "", false, nil
+		}
+		abs = parent
+	}
 }
 
 type importScopeState struct {
@@ -389,7 +442,11 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 	if err != nil {
 		return nil, err
 	}
-	for name, imp := range packManifest.Imports {
+	rootImports := copyImports(packManifest.Imports)
+	if err := applyCityRootImportOverridesFS(fs, cityPath, rootImports); err != nil {
+		return nil, err
+	}
+	for name, imp := range rootImports {
 		all["pack:"+name] = imp
 	}
 	defaults, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
@@ -420,12 +477,12 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 }
 
 func collectInspectableImportsFS(fs fsys.FS, cityPath string, scope *importScopeState) (map[string]config.Import, error) {
-	imports := make(map[string]config.Import, len(scope.imports))
-	for name, imp := range scope.imports {
-		imports[name] = imp
-	}
+	imports := copyImports(scope.imports)
 	if !scope.isRootPackScope() {
 		return imports, nil
+	}
+	if err := applyCityRootImportOverridesFS(fs, cityPath, imports); err != nil {
+		return nil, err
 	}
 	defaults, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
 	if err != nil {
@@ -439,6 +496,53 @@ func collectInspectableImportsFS(fs fsys.FS, cityPath string, scope *importScope
 		imports[key] = bound.Import
 	}
 	return imports, nil
+}
+
+func copyImports(imports map[string]config.Import) map[string]config.Import {
+	out := make(map[string]config.Import, len(imports))
+	for name, imp := range imports {
+		out[name] = imp
+	}
+	return out
+}
+
+func applyCityRootImportOverridesFS(fs fsys.FS, cityPath string, imports map[string]config.Import) error {
+	overrides, err := loadCityRootImportsFS(fs, cityPath)
+	if err != nil {
+		return err
+	}
+	for name, imp := range overrides {
+		imports[name] = imp
+	}
+	return nil
+}
+
+// loadCityRootImportsFS returns the root-level [imports] entries from
+// city.toml, or nil when no city.toml exists.
+func loadCityRootImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import, error) {
+	if _, err := fs.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	cfg, err := loadCityImportManifestFS(fs, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	return cfg.Imports, nil
+}
+
+// cityRootImportExistsFS reports whether city.toml's root [imports] table
+// defines name. City entries own the effective root import wholesale, so the
+// add/remove write paths must consult this before mutating pack.toml.
+func cityRootImportExistsFS(fs fsys.FS, cityPath, name string) (bool, error) {
+	overrides, err := loadCityRootImportsFS(fs, cityPath)
+	if err != nil {
+		return false, err
+	}
+	_, ok := overrides[name]
+	return ok, nil
 }
 
 func lookupInspectableImport(target string, imports map[string]config.Import) (config.Import, bool) {
@@ -519,6 +623,17 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 		fmt.Fprintf(stderr, "gc import add: import %q already exists\n", name) //nolint:errcheck
 		return 1
 	}
+	if scope.isRootPackScope() {
+		cityOwned, err := cityRootImportExistsFS(fs, cityPath, name)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc import add: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		if cityOwned {
+			fmt.Fprintf(stderr, "gc import add: import %q is defined by city.toml [imports], which overrides pack.toml; edit city.toml instead\n", name) //nolint:errcheck
+			return 1
+		}
+	}
 
 	version := versionFlag
 	if gitBacked {
@@ -573,16 +688,34 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 		return 1
 	}
 	if _, exists := scope.imports[name]; !exists {
-		removed, err := removeRootDefaultRigImportFS(fs, cityPath, scope, name)
+		removed, err := removeCityRootImportFS(fs, cityPath, scope, name)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc import remove: %v\n", err) //nolint:errcheck
 			return 1
+		}
+		if !removed {
+			removed, err = removeRootDefaultRigImportFS(fs, cityPath, scope, name)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc import remove: %v\n", err) //nolint:errcheck
+				return 1
+			}
 		}
 		if !removed {
 			fmt.Fprintf(stderr, "gc import remove: import %q not found\n", name) //nolint:errcheck
 			return 1
 		}
 	} else {
+		if scope.isRootPackScope() {
+			cityOwned, err := cityRootImportExistsFS(fs, cityPath, name)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc import remove: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			if cityOwned {
+				fmt.Fprintf(stderr, "gc import remove: import %q is overridden by city.toml [imports]; remove the city.toml entry first\n", name) //nolint:errcheck
+				return 1
+			}
+		}
 		delete(scope.imports, name)
 	}
 
@@ -608,6 +741,34 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 	}
 	fmt.Fprintf(stdout, "Removed import %q\n", name) //nolint:errcheck
 	return 0
+}
+
+// removeCityRootImportFS removes a root import owned by city.toml [imports].
+// City-only root imports are visible in list/why output, so remove must be
+// able to delete them; they live in city.toml, so the save is redirected
+// there, mirroring removeRootDefaultRigImportFS.
+func removeCityRootImportFS(fs fsys.FS, cityPath string, scope *importScopeState, name string) (bool, error) {
+	if !scope.isRootPackScope() {
+		return false, nil
+	}
+	if _, err := fs.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	cfg, err := loadCityImportManifestFS(fs, cityPath)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := cfg.Imports[name]; !ok {
+		return false, nil
+	}
+	delete(cfg.Imports, name)
+	scope.save = func() error {
+		return writeCityImportManifestFS(fs, cityPath, cfg)
+	}
+	return true, nil
 }
 
 func removeRootDefaultRigImportFS(fs fsys.FS, cityPath string, scope *importScopeState, name string) (bool, error) {
