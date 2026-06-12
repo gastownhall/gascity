@@ -336,7 +336,7 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			// try-restart: restart only if the unit is running. The drift
 			// path only fires when a supervisor is alive, and a stopped
 			// delegated unit must stay stopped — its operator owns starts.
-			restartErr = runDelegatedSystemctl(delegation, "try-restart")
+			restartErr = runDelegatedSystemctlTimeout(delegation, "try-restart", delegatedSystemctlJobTimeout)
 		} else {
 			restartErr = restartSupervisor(spec, restartHelpersHook())
 		}

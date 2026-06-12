@@ -13,12 +13,17 @@ type lifecycleActionJSON struct {
 	CityName      string `json:"city_name,omitempty"`
 	CityPath      string `json:"city_path,omitempty"`
 	SupervisorPID int    `json:"supervisor_pid,omitempty"`
-	Wait          *bool  `json:"wait,omitempty"`
-	Force         *bool  `json:"force,omitempty"`
-	Async         *bool  `json:"async,omitempty"`
-	Soft          *bool  `json:"soft,omitempty"`
-	Outcome       string `json:"outcome,omitempty"`
-	Revision      string `json:"revision,omitempty"`
+	// PIDSource names the non-socket evidence a delegated start trusted
+	// when the control socket stayed unreachable ("service_manager" or
+	// "api"), mirroring `gc supervisor status --json`'s pid_source.
+	// Empty when SupervisorPID came from the socket.
+	PIDSource string `json:"pid_source,omitempty"`
+	Wait      *bool  `json:"wait,omitempty"`
+	Force     *bool  `json:"force,omitempty"`
+	Async     *bool  `json:"async,omitempty"`
+	Soft      *bool  `json:"soft,omitempty"`
+	Outcome   string `json:"outcome,omitempty"`
+	Revision  string `json:"revision,omitempty"`
 }
 
 func writeLifecycleActionJSON(stdout io.Writer, payload lifecycleActionJSON) error {

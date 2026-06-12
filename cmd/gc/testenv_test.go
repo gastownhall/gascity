@@ -52,6 +52,13 @@ var liveTestEnvVars = []string{
 	"GC_PROVIDER",
 	"GC_READY_PROMPT_PREFIX",
 	"GC_STARTUP_PROMPT_DELIVERED",
+	// Inherited systemd delegation env makes existing lifecycle tests
+	// take the delegated branch and exec PATH-resolved systemctl against
+	// the operator's real unit (including stop). The dynamic GC_* environ
+	// scan in liveEnvKeysForTests already catches these today; listing
+	// them pins the protection explicitly.
+	"GC_SUPERVISOR_SYSTEMD_SCOPE",
+	"GC_SUPERVISOR_SYSTEMD_UNIT",
 }
 
 // inheritedCityRoutingEnvVars lists GC_* variables that an outer gc-managed
@@ -101,6 +108,8 @@ func TestClearProcessLiveEnvForTestsUnsetsInheritedState(t *testing.T) {
 		"GC_RIG",
 		"GC_RIG_ROOT",
 		"GC_SESSION_NAME",
+		"GC_SUPERVISOR_SYSTEMD_SCOPE",
+		"GC_SUPERVISOR_SYSTEMD_UNIT",
 	}
 	preserved := []string{
 		"GC_FAST_UNIT",

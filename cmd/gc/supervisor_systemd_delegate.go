@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -51,6 +52,69 @@ const (
 // managed. Package var so tests can shrink the wait.
 var delegatedStopVerifyTimeout = 5 * time.Second
 
+// delegatedSystemctlJobTimeout bounds the delegated `systemctl start`
+// and `systemctl try-restart` invocations. systemctl waits for the
+// unit's job synchronously, so without a CLI-side bound a unit with
+// TimeoutStartSec=infinity or a wedged manager/D-Bus connection holds
+// `gc supervisor start`, `gc start`, and drift remediation forever —
+// the failure mode the bounded delegated stop already defends against.
+// The budget sits above systemd's default 90s job timeout so a
+// default-configured unit surfaces systemd's own diagnostic first.
+// Killing systemctl at the bound does not cancel the job: it keeps
+// running inside systemd, and the readiness/verification polls that
+// follow pick up a late start on their own. Package var so tests can
+// shrink the wait.
+var delegatedSystemctlJobTimeout = 2 * time.Minute
+
+// hostSystemctlDirs lists the standard system binary directories a
+// PATH-resolved systemctl must not come from while running inside a
+// test binary. Tests that exercise delegated paths install an
+// argv-recording shim in a temp dir (installFakeDelegatedSystemctl);
+// resolving past it means the test is about to drive the host's real
+// systemd.
+var hostSystemctlDirs = []string{
+	"/bin/",
+	"/sbin/",
+	"/usr/bin/",
+	"/usr/sbin/",
+	"/usr/local/bin/",
+	"/usr/local/sbin/",
+}
+
+// delegatedSystemctlPath resolves the systemctl binary the delegated
+// paths exec. Delegated paths intentionally bypass the
+// supervisorSystemctlRun hook (see delegatedUnitActive), so the PATH
+// shim is the only test seam; this resolver backstops it by refusing —
+// in test binaries only — to return the host's real systemctl. Same
+// must-defend hazard class as guardSupervisorSocketDir: a test that
+// reaches a delegated exec without the shim installed would stop or
+// restart the operator's production supervisor unit. Production
+// behavior is unchanged (exec.Command performs the same PATH lookup).
+func delegatedSystemctlPath() string {
+	resolved, err := exec.LookPath("systemctl")
+	if err != nil {
+		// Let exec.Command surface its standard not-found error.
+		return "systemctl"
+	}
+	guardDelegatedSystemctlPath(resolved)
+	return resolved
+}
+
+// guardDelegatedSystemctlPath panics when a test binary resolved
+// systemctl into a host system directory instead of a test-installed
+// PATH shim. No-op outside test binaries.
+func guardDelegatedSystemctlPath(resolved string) {
+	if !isTestBinary() {
+		return
+	}
+	dir := filepath.Dir(resolved) + string(filepath.Separator)
+	for _, sys := range hostSystemctlDirs {
+		if dir == sys {
+			panic("delegated systemctl exec: refusing to run host systemctl (" + resolved + ") from a test binary; install a fake via installFakeDelegatedSystemctl or unset " + supervisorSystemdUnitEnv)
+		}
+	}
+}
+
 // systemdDelegation names the operator-managed systemd unit that owns the
 // supervisor lifecycle, plus the manager scope it lives in ("system" or
 // "user").
@@ -62,11 +126,16 @@ type systemdDelegation struct {
 // supervisorSystemdDelegation reads the delegation env vars. ok is false
 // when GC_SUPERVISOR_SYSTEMD_UNIT is unset or blank. An unrecognized
 // scope value is an error rather than a silent fallback so a typo cannot
-// quietly target the system manager.
+// quietly target the system manager, and a non-Linux platform is an
+// error rather than a low-level "systemctl: executable file not found"
+// once a lifecycle path execs — delegation is a systemd contract.
 func supervisorSystemdDelegation() (systemdDelegation, bool, error) {
 	unit := strings.TrimSpace(os.Getenv(supervisorSystemdUnitEnv))
 	if unit == "" {
 		return systemdDelegation{}, false, nil
+	}
+	if supervisorRuntimeGOOS != "linux" {
+		return systemdDelegation{}, false, fmt.Errorf("%s is set but systemd delegation requires linux (running on %s); unset it and use the platform service manager", supervisorSystemdUnitEnv, supervisorRuntimeGOOS)
 	}
 	scope := strings.TrimSpace(os.Getenv(supervisorSystemdScopeEnv))
 	switch scope {
@@ -113,22 +182,18 @@ func (d systemdDelegation) commandHint(verb string) string {
 // fake systemctl (argv-recording) is the canonical test seam for them.
 // The bounded stop needs CommandContext+WaitDelay semantics the hook
 // cannot express, and the shim exercises the real exec path end to end.
+// delegatedSystemctlPath backstops the seam in test binaries.
 func delegatedUnitActive(d systemdDelegation) bool {
-	return exec.Command("systemctl", d.systemctlIsActiveArgs()...).Run() == nil
+	return exec.Command(delegatedSystemctlPath(), d.systemctlIsActiveArgs()...).Run() == nil
 }
 
-// runDelegatedSystemctl invokes systemctl (resolved via PATH) for verb
-// against the delegated unit, folding any output into the returned error
-// so operators see systemd's own diagnostic.
-func runDelegatedSystemctl(d systemdDelegation, verb string) error {
-	return runDelegatedSystemctlTimeout(d, verb, 0)
-}
-
-// runDelegatedSystemctlTimeout is runDelegatedSystemctl bounded by
-// timeout (unbounded when timeout <= 0). systemctl runs unit jobs
-// synchronously, so the bound keeps a wedged unit from holding the CLI
-// past its advertised budget; the unit's own job keeps running inside
-// systemd after the CLI gives up waiting.
+// runDelegatedSystemctlTimeout invokes systemctl (resolved via PATH) for
+// verb against the delegated unit, bounded by timeout (unbounded when
+// timeout <= 0), folding any output into the returned error so operators
+// see systemd's own diagnostic. systemctl runs unit jobs synchronously,
+// so the bound keeps a wedged unit from holding the CLI past its
+// advertised budget; the unit's own job keeps running inside systemd
+// after the CLI gives up waiting.
 func runDelegatedSystemctlTimeout(d systemdDelegation, verb string, timeout time.Duration) error {
 	args := d.systemctlArgs(verb)
 	ctx := context.Background()
@@ -137,7 +202,7 @@ func runDelegatedSystemctlTimeout(d systemdDelegation, verb string, timeout time
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	cmd := exec.CommandContext(ctx, "systemctl", args...)
+	cmd := exec.CommandContext(ctx, delegatedSystemctlPath(), args...)
 	// Don't let an inherited pipe from a systemctl child stretch the wait
 	// past the kill triggered by the context deadline.
 	cmd.WaitDelay = time.Second
@@ -157,9 +222,10 @@ func runDelegatedSystemctlTimeout(d systemdDelegation, verb string, timeout time
 // supervisorRestartGuidance returns the systemctl command operators
 // should run to restart the supervisor by hand: the delegated unit's
 // command when GC_SUPERVISOR_SYSTEMD_UNIT is configured, otherwise gc's
-// default user unit. An invalid delegation scope yields guidance naming
-// the bad value rather than silently pointing at the default unit. Used
-// by drift remediation messages.
+// own user unit via supervisorSystemdServiceName, which carries the
+// GC_HOME-isolation suffix when one applies. An invalid delegation
+// scope yields guidance naming the bad value rather than silently
+// pointing at the default unit. Used by drift remediation messages.
 func supervisorRestartGuidance() string {
 	d, ok, err := supervisorSystemdDelegation()
 	switch {
@@ -168,7 +234,7 @@ func supervisorRestartGuidance() string {
 	case ok:
 		return d.commandHint("restart")
 	}
-	return "systemctl --user restart gascity-supervisor"
+	return "systemctl --user restart " + supervisorSystemdServiceName()
 }
 
 // supervisorStatusGuidance is supervisorRestartGuidance for `systemctl
@@ -181,18 +247,26 @@ func supervisorStatusGuidance() string {
 	case ok:
 		return d.commandHint("status")
 	}
-	return "systemctl --user status gascity-supervisor"
+	return "systemctl --user status " + supervisorSystemdServiceName()
 }
 
 // delegatedSupervisorStart starts the supervisor by asking the
 // operator-managed systemd unit to start, then waits for the control
 // socket to answer — the same readiness contract as the fork path.
+//
+// A system-scope unit running under another uid (the documented default
+// topology) keeps its control socket unreachable from the operator's
+// shell, so a socket that never answers is not evidence the start
+// failed. After the socket poll times out, liveness falls back to the
+// same evidence chain `gc supervisor status` trusts (gascity#2984): the
+// delegated unit's is-active state, then the supervisor HTTP API. Only
+// when all three are silent does start report failure.
 func delegatedSupervisorStart(d systemdDelegation, stdout, stderr io.Writer, jsonOut bool) int {
 	if pid := supervisorAliveHook(); pid != 0 {
 		fmt.Fprintf(stderr, "gc supervisor start: supervisor already running (PID %d)\n", pid) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := runDelegatedSystemctl(d, "start"); err != nil {
+	if err := runDelegatedSystemctlTimeout(d, "start", delegatedSystemctlJobTimeout); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -212,8 +286,36 @@ func delegatedSupervisorStart(d systemdDelegation, stdout, stderr io.Writer, jso
 		}
 		time.Sleep(supervisorReadyPollInterval)
 	}
+	if pidSource := delegatedLivenessWithoutSocket(d); pidSource != "" {
+		if jsonOut {
+			return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor start", lifecycleActionJSON{
+				Command:   "supervisor start",
+				Action:    "start",
+				Message:   "Supervisor started.",
+				PIDSource: pidSource,
+			})
+		}
+		fmt.Fprintf(stdout, "Supervisor started (pid unavailable: control socket unreachable; liveness confirmed via %s)\n", pidSource) //nolint:errcheck // best-effort stdout
+		return 0
+	}
 	fmt.Fprintf(stderr, "gc supervisor start: supervisor did not become ready after '%s'; check '%s'\n", d.commandHint("start"), d.commandHint("status")) //nolint:errcheck // best-effort stderr
 	return 1
+}
+
+// delegatedLivenessWithoutSocket reports how a delegated supervisor
+// whose control socket is unreachable can still be confirmed live:
+// "service_manager" when the delegated unit is active, "api" when the
+// supervisor HTTP API answers, "" when neither does. The order and
+// naming mirror the supervisorStatusWithOptions fallback so start and
+// status agree about the same supervisor.
+func delegatedLivenessWithoutSocket(d systemdDelegation) string {
+	switch {
+	case delegatedUnitActive(d):
+		return "service_manager"
+	case supervisorAPIReachable():
+		return "api"
+	}
+	return ""
 }
 
 // delegatedSupervisorStop stops the supervisor by asking the

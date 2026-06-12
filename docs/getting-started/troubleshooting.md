@@ -394,10 +394,16 @@ GC_SUPERVISOR_SYSTEMD_SCOPE=system               # "system" (default) or "user"
 With the unit configured:
 
 - `gc supervisor start` and the `gc start` ensure path run
-  `systemctl [--user] start <unit>` and wait for the control socket to
-  answer. gc never writes, loads, or daemon-reloads its own service
-  files in delegated mode; `gc supervisor install` refuses to run, and
-  `gc supervisor uninstall` only removes gc's own legacy service.
+  `systemctl [--user] start <unit>` (bounded, so a wedged unit cannot
+  hold the CLI indefinitely) and wait for the control socket to answer.
+  When the socket stays unreachable — the usual situation for a
+  system-scope unit running under a different user — start falls back
+  to the same liveness evidence `gc supervisor status` trusts: an
+  active unit, then the supervisor HTTP API. Only when all three are
+  silent does start fail. gc never writes, loads, or daemon-reloads its
+  own service files in delegated mode; `gc supervisor install` refuses
+  to run, and `gc supervisor uninstall` only removes gc's own legacy
+  service.
 - `gc supervisor stop` runs `systemctl [--user] stop <unit>`
   synchronously, bounded by `--wait-timeout` (default 30s) whether or
   not `--wait` is set, then verifies a previously-running supervisor
@@ -421,6 +427,8 @@ With the unit configured:
 
 An invalid `GC_SUPERVISOR_SYSTEMD_SCOPE` value is a hard error on every
 lifecycle path; gc never silently falls back to the default unit.
+Setting `GC_SUPERVISOR_SYSTEMD_UNIT` on a non-Linux platform is the
+same kind of hard error — delegation is a systemd contract.
 
 ## JSONL Archive Push Failures
 
