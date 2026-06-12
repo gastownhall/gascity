@@ -70,15 +70,15 @@ func pinProbeSearchPath(t *testing.T, homeDir string) {
 	})
 }
 
-// stageProbeBinary installs a stub executable into homeDir's ~/.local/bin so
-// findProbeBinary resolves it.
-func stageProbeBinary(t *testing.T, homeDir, name string) {
+// stageMimoProbeBinary installs a stub mimo executable into homeDir's
+// ~/.local/bin so findProbeBinary resolves it.
+func stageMimoProbeBinary(t *testing.T, homeDir string) {
 	t.Helper()
 	userBin := filepath.Join(homeDir, ".local", "bin")
 	if err := os.MkdirAll(userBin, 0o755); err != nil {
 		t.Fatalf("mkdir user bin: %v", err)
 	}
-	writeExecutable(t, userBin, name, "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, userBin, "mimo", "#!/bin/sh\nexit 0\n")
 }
 
 func TestProbeMimoCodeNotInstalled(t *testing.T) {
@@ -95,7 +95,7 @@ func TestProbeMimoCodeNotInstalled(t *testing.T) {
 func TestProbeMimoCodeEnvKeyConfigured(t *testing.T) {
 	homeDir := t.TempDir()
 	pinProbeSearchPath(t, homeDir)
-	stageProbeBinary(t, homeDir, "mimo")
+	stageMimoProbeBinary(t, homeDir)
 	t.Setenv("XIAOMI_API_KEY", "test-key")
 
 	result := probeMimoCode(homeDir)
@@ -107,7 +107,7 @@ func TestProbeMimoCodeEnvKeyConfigured(t *testing.T) {
 func TestProbeMimoCodeNeedsAuthWithoutKeyOrCredentials(t *testing.T) {
 	homeDir := t.TempDir()
 	pinProbeSearchPath(t, homeDir)
-	stageProbeBinary(t, homeDir, "mimo")
+	stageMimoProbeBinary(t, homeDir)
 	t.Setenv("XIAOMI_API_KEY", "")
 
 	result := probeMimoCode(homeDir)
@@ -119,7 +119,7 @@ func TestProbeMimoCodeNeedsAuthWithoutKeyOrCredentials(t *testing.T) {
 func TestProbeMimoCodeAuthFileConfigured(t *testing.T) {
 	homeDir := t.TempDir()
 	pinProbeSearchPath(t, homeDir)
-	stageProbeBinary(t, homeDir, "mimo")
+	stageMimoProbeBinary(t, homeDir)
 	t.Setenv("XIAOMI_API_KEY", "")
 
 	authDir := filepath.Join(homeDir, ".local", "share", "mimocode")
@@ -139,7 +139,7 @@ func TestProbeMimoCodeAuthFileConfigured(t *testing.T) {
 func TestProbeMimoCodeEmptyAuthFileNeedsAuth(t *testing.T) {
 	homeDir := t.TempDir()
 	pinProbeSearchPath(t, homeDir)
-	stageProbeBinary(t, homeDir, "mimo")
+	stageMimoProbeBinary(t, homeDir)
 	t.Setenv("XIAOMI_API_KEY", "")
 
 	authDir := filepath.Join(homeDir, ".local", "share", "mimocode")
