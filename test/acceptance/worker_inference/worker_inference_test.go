@@ -1100,8 +1100,11 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		t.FailNow()
 	}
 
-	if liveSetup.Profile == workerpkg.ProfileAntigravityTmuxCLI {
-		reporter.Record(workertest.Unsupported(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "Antigravity CLI does not currently cancel an in-flight turn for interrupt_now").WithEvidence(map[string]string{
+	if liveSetup.Profile == workerpkg.ProfileAntigravityTmuxCLI || liveSetup.Profile == workerpkg.ProfileMimoCodeTmuxCLI {
+		// Both CLIs deliver the replacement input but let the interrupted
+		// turn run to completion (mimocode verified live 2026-06-12, same
+		// behavior the Antigravity conformance runs recorded).
+		reporter.Record(workertest.Unsupported(profileID, workertest.RequirementInferenceInterruptRecoverContinue, fmt.Sprintf("%s CLI does not currently cancel an in-flight turn for interrupt_now", liveSetup.Provider)).WithEvidence(map[string]string{
 			"profile":       string(liveSetup.Profile),
 			"provider":      liveSetup.Provider,
 			"submit_intent": "interrupt_now",

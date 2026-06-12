@@ -46,9 +46,9 @@ _Generated 2026-06-12 from 19 conformance report(s)._
 | `claude` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `codex` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `gemini` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
-| `kimi` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
+| `kimi` | 🔒 | ✅ | 🔒 | 🔒 | 🔒 | 🔒 |
 | `opencode` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
-| `mimocode` | ✅ | ✅ | ✅ | 🔒 | 🔒 | 🔒 |
+| `mimocode` | ✅ | ✅ | ✅ | ✅ | ✅ | ➖ |
 | `pi` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `antigravity` | 🔒 | ✅ | 🔒 | 🔒 | 🔒 | 🔒 |
 <!-- END GENERATED: worker-conformance-grid -->
@@ -147,13 +147,18 @@ python3 scripts/worker_conformance_grid.py \
 - Live continuation for hook-managed providers (`opencode`, `mimocode`,
   `kimi`, `pi`, `antigravity`) runs through the production hook chain:
   provider hook plugin → `gc prime --hook` → city-store session key →
-  resume flag. `mimocode` (model `xiaomi-token-plan-sgp/mimo-v2.5-pro`) and
-  `antigravity` have recorded live passes through that chain; `kimi`/`pi`
-  are wired identically and pending a credentialed run.
-- `mimocode` spawn/reset proofs run on the free `mimo/mimo-auto` tier;
-  continuation ran on `xiaomi-token-plan-sgp/mimo-v2.5-pro`.
+  resume flag. `mimocode` (model `xiaomi-token-plan-sgp/mimo-v2.5-pro`),
+  `kimi` (Ollama Cloud `kimi-k2.6`), and `antigravity` have recorded live
+  passes through that chain. `pi` is wired identically but its bootstrap
+  task times out on the verification host before resume mechanics engage.
+- `mimocode` spawn/reset/workspace/multi-turn proofs run on the free
+  `mimo/mimo-auto` tier; continuation ran on
+  `xiaomi-token-plan-sgp/mimo-v2.5-pro`.
 - `opencode` live runs are backed by the Gemini free-tier model on this host;
   task-completion timeouts there reflect model capability, not the
-  integration contract.
-- `antigravity` cannot cancel an in-flight turn (`WI-INT-001` ➖) — a
-  documented CLI limitation, discovered by this same conformance program.
+  integration contract. Its managed-city live tests (reset, workspace) also
+  need an `opencode` provider-readiness entry before `gc init --provider
+  opencode` accepts them.
+- `antigravity` and `mimocode` cannot cancel an in-flight turn
+  (`WI-INT-001` ➖) — documented CLI limitations, both discovered live by
+  this same conformance program.
