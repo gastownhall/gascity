@@ -1,0 +1,216 @@
+#!/usr/bin/env node
+// Fake Telegram Bot API server for Linux demos of the openclaw telegram
+// connector's outbound pipeline + the bridge's getUpdates inbound poll.
+//
+// Speaks the subset of https://core.telegram.org/bots/api the demo touches,
+// on http://127.0.0.1:$FAKE_TG_PORT/bot<TOKEN>/<method>:
+//   - getMe            probe handshake (probeTelegram / grammY)
+//   - getWebhookInfo   probe extras
+//   - deleteWebhook    accepted no-op
+//   - getUpdates       long-poll; serves updates synthesized from inbox.jsonl
+//   - sendMessage      records the send; this is openclaw's outbound landing
+//   - sendChatAction   accepted no-op (typing indicators)
+//
+// Instead of Telegram, this fake is backed by two files under $FAKE_TG_DIR
+// (default /tmp/fake-telegram-bot-api-<uid>):
+//   inbox.jsonl  — append a line to simulate an incoming message. Either a
+//                  JSON object ({"text": "...", "sender_id": 7113355,
+//                  "chat_id": 7113355, "chat_type": "private",
+//                  "username": "demo"}) or a plain-text line.
+//   outbox.jsonl — every sendMessage call is appended here as one record.
+
+import fs from 'node:fs'
+import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
+
+// Default is per-user: a fixed shared /tmp path would let another local user
+// pre-create it and plant symlinks/messages.
+const dir = process.env.FAKE_TG_DIR || path.join(os.tmpdir(), `fake-telegram-bot-api-${process.getuid?.() ?? 'user'}`)
+const inboxPath = path.join(dir, 'inbox.jsonl')
+const outboxPath = path.join(dir, 'outbox.jsonl')
+const PORT = Number(process.env.FAKE_TG_PORT || 8932)
+const TOKEN = process.env.FAKE_TG_TOKEN || '123456:TESTTOKEN'
+const defaultSenderId = Number(process.env.FAKE_TG_SENDER_ID || 7113355)
+
+fs.mkdirSync(dir, { recursive: true })
+for (const p of [inboxPath, outboxPath]) {
+  if (!fs.existsSync(p)) fs.writeFileSync(p, '')
+}
+
+const log = (...args) => process.stderr.write(`[fake-tg] ${args.join(' ')}\n`)
+
+// --- inbox.jsonl -> Telegram update objects -------------------------------
+
+const updates = [] // all synthesized updates, served by update_id offset
+let nextUpdateId = 100000
+let nextMessageId = 500
+let inboxOffset = fs.statSync(inboxPath).size // only new lines count
+let inboxRemainder = '' // partial line carried across polls (writers may not be atomic)
+
+function buildUpdate(line) {
+  let o = {}
+  const trimmed = line.trim()
+  if (!trimmed) return null
+  if (trimmed.startsWith('{')) {
+    try {
+      o = JSON.parse(trimmed)
+    } catch {
+      o = { text: trimmed }
+    }
+  } else {
+    o = { text: trimmed }
+  }
+  const senderId = Number(o.sender_id ?? defaultSenderId)
+  const chatId = Number(o.chat_id ?? senderId)
+  const chatType = typeof o.chat_type === 'string' ? o.chat_type : 'private'
+  nextUpdateId += 1
+  nextMessageId += 1
+  return {
+    update_id: nextUpdateId,
+    message: {
+      message_id: o.message_id ?? nextMessageId,
+      from: {
+        id: senderId,
+        is_bot: false,
+        first_name: o.first_name ?? 'Demo',
+        username: o.username ?? 'demo_user',
+      },
+      chat: { id: chatId, type: chatType },
+      date: Math.floor(Date.now() / 1000),
+      text: typeof o.text === 'string' ? o.text : '',
+      ...(o.reply_to_message_id != null
+        ? { reply_to_message: { message_id: Number(o.reply_to_message_id) } }
+        : {}),
+    },
+  }
+}
+
+function pollInbox() {
+  let size
+  try {
+    size = fs.statSync(inboxPath).size
+  } catch {
+    return
+  }
+  if (size < inboxOffset) {
+    inboxOffset = 0 // file truncated/rotated
+    inboxRemainder = ''
+  }
+  if (size === inboxOffset) return
+  const fd = fs.openSync(inboxPath, 'r')
+  const buf = Buffer.alloc(size - inboxOffset)
+  fs.readSync(fd, buf, 0, buf.length, inboxOffset)
+  fs.closeSync(fd)
+  inboxOffset = size
+  const chunks = (inboxRemainder + buf.toString('utf8')).split('\n')
+  inboxRemainder = chunks.pop() ?? '' // last segment has no newline yet — wait for the rest
+  for (const line of chunks) {
+    const update = buildUpdate(line)
+    if (!update) continue
+    updates.push(update)
+    log(`inbound update ${update.update_id}: ${update.message.from.id}: ${update.message.text}`)
+  }
+}
+setInterval(pollInbox, 200)
+
+// --- Bot API methods -------------------------------------------------------
+
+const botInfo = {
+  id: 123456,
+  is_bot: true,
+  first_name: 'FakeBot',
+  username: 'gc_fake_bot',
+  can_join_groups: true,
+  can_read_all_group_messages: false,
+  can_manage_bots: false,
+  supports_inline_queries: false,
+  can_connect_to_business: false,
+  has_main_web_app: false,
+  has_topics_enabled: false,
+  allows_users_to_create_topics: false,
+}
+
+let nextOutMessageId = 9000
+
+const methods = {
+  getMe: () => botInfo,
+  getWebhookInfo: () => ({ url: '', has_custom_certificate: false, pending_update_count: 0 }),
+  deleteWebhook: () => true,
+  sendChatAction: () => true,
+  getUpdates: async (params) => {
+    const offset = Number(params.offset ?? 0)
+    const timeoutMs = Math.min(Number(params.timeout ?? 0), 30) * 1000
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      const batch = updates.filter((u) => u.update_id >= offset).slice(0, 100)
+      if (batch.length > 0 || Date.now() >= deadline) return batch
+      await new Promise((r) => setTimeout(r, 100))
+    }
+  },
+  sendMessage: (params) => {
+    const chatId = Number(params.chat_id)
+    nextOutMessageId += 1
+    const record = {
+      ts: new Date().toISOString(),
+      chat_id: chatId,
+      text: params.text ?? '',
+      ...(params.parse_mode ? { parse_mode: params.parse_mode } : {}),
+      ...(params.reply_parameters?.message_id != null
+        ? { reply_to_message_id: Number(params.reply_parameters.message_id) }
+        : params.reply_to_message_id != null
+          ? { reply_to_message_id: Number(params.reply_to_message_id) }
+          : {}),
+    }
+    fs.appendFileSync(outboxPath, JSON.stringify(record) + '\n')
+    log(`SEND to ${chatId}: ${params.text}`)
+    return {
+      message_id: nextOutMessageId,
+      from: botInfo,
+      chat: { id: chatId, type: 'private' },
+      date: Math.floor(Date.now() / 1000),
+      text: params.text ?? '',
+    }
+  },
+}
+
+// --- HTTP server (grammY + probe + bridge all POST JSON or use the query) --
+
+const server = http.createServer((req, res) => {
+  const chunks = []
+  req.on('data', (c) => chunks.push(c))
+  req.on('end', async () => {
+    const reply = (status, body) => {
+      res.writeHead(status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(body))
+    }
+    try {
+      const url = new URL(req.url, `http://127.0.0.1:${PORT}`)
+      const m = url.pathname.match(/^\/bot([^/]+)\/(\w+)$/)
+      if (!m) return reply(404, { ok: false, error_code: 404, description: 'Not Found' })
+      if (m[1] !== TOKEN) return reply(401, { ok: false, error_code: 401, description: 'Unauthorized' })
+      const method = methods[m[2]]
+      if (!method) {
+        log(`unimplemented method called: ${m[2]}`)
+        return reply(404, { ok: false, error_code: 404, description: `fake bot-api: method ${m[2]} not implemented` })
+      }
+      const raw = Buffer.concat(chunks).toString('utf8')
+      let params = Object.fromEntries(url.searchParams)
+      if (raw) {
+        try {
+          params = { ...params, ...JSON.parse(raw) }
+        } catch {
+          // grammY only sends JSON for non-upload calls; anything else is unexpected
+          return reply(400, { ok: false, error_code: 400, description: 'fake bot-api: body must be JSON' })
+        }
+      }
+      reply(200, { ok: true, result: await method(params) })
+    } catch (err) {
+      reply(500, { ok: false, error_code: 500, description: String(err?.message ?? err) })
+    }
+  })
+})
+
+server.listen(PORT, '127.0.0.1', () => {
+  log(`listening on http://127.0.0.1:${PORT} (token ${TOKEN}, state ${dir})`)
+})

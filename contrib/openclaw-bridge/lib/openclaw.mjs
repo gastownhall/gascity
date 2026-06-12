@@ -40,6 +40,23 @@ export async function loadIMessageConnector() {
   }
 }
 
+// Loads the telegram connector surface. Unlike iMessage, everything the
+// bridge needs is on the extension's public entry module — no chunk scanning.
+// (Inbound is deliberately NOT loaded from openclaw: their telegram inbound
+// lives inside monitorTelegramProvider, the pairing/dispatch layer we don't
+// host. The bridge drives Telegram's getUpdates long-poll itself.)
+export async function loadTelegramConnector() {
+  const runtimeApi = await import(
+    pathToFileURL(path.join(distRoot, 'extensions', 'telegram', 'runtime-api.js')).href
+  )
+  return {
+    // outbound pipeline: markdown -> Telegram HTML, chunking, retries, receipts
+    sendMessageTelegram: runtimeApi.sendMessageTelegram,
+    // startup handshake: getMe against the (possibly overridden) Bot API root
+    probeTelegram: runtimeApi.probeTelegram,
+  }
+}
+
 // Finds a function exported (possibly under a mangled alias) from one of the
 // hash-named chunks in openclaw/dist. `hint` orders likely filenames first.
 async function resolveChunkExport(name, hint) {
