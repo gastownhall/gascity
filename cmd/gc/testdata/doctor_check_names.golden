@@ -29,6 +29,7 @@ provider-parity
 formula-requirements
 named-always-min-conflict
 instructions-file
+service-secrets-perms
 skill-collision
 order-firing-current
 codex-hooks-drift
