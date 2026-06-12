@@ -120,7 +120,7 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 	if err := writeWorkerHandleInstructions(root, resolved.InstructionsFile); err != nil {
 		return nil, err
 	}
-	if err := installLiveHandleProviderHooks(root, liveSetup.Profile); err != nil {
+	if err := installLiveHandleProviderHooks(root, gcHome, liveSetup.Profile); err != nil {
 		return nil, err
 	}
 
@@ -188,12 +188,17 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 	return harness, nil
 }
 
-func installLiveHandleProviderHooks(workDir string, profile workerpkg.Profile) error {
+func installLiveHandleProviderHooks(workDir, gcHome string, profile workerpkg.Profile) error {
 	switch profile {
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"opencode"})
 	case workerpkg.ProfileMimoCodeTmuxCLI:
 		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"mimocode"})
+	case workerpkg.ProfileKimiTmuxCLI:
+		if err := hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"kimi"}); err != nil {
+			return err
+		}
+		return appendKimiHooksToShareConfig(workDir, gcHome)
 	case workerpkg.ProfilePiTmuxCLI:
 		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"pi"})
 	case workerpkg.ProfileAntigravityTmuxCLI:
@@ -201,6 +206,49 @@ func installLiveHandleProviderHooks(workDir string, profile workerpkg.Profile) e
 	default:
 		return nil
 	}
+}
+
+// appendKimiHooksToShareConfig merges the overlay-managed kimi hook entries
+// into the staged share-dir config so the harness session actually runs them.
+//
+// Kimi CLI loads exactly one config file (kimi_cli config.load_config):
+// --config-file when given, else get_share_dir()/config.toml where
+// KIMI_SHARE_DIR overrides ~/.kimi. Hooks come only from that config's
+// [[hooks]] entries and run with cwd = the session work dir, which is why
+// the overlay command (`python3 .kimi/hooks/gascity-session-start.py`) is
+// workdir-relative and hooks.Install above still materializes the script
+// into the work dir. Production appends `--config-file .kimi/config.toml`
+// to the kimi launch command (appendKimiHookConfigArg in
+// cmd/gc/template_resolve.go) and relies on kimi's managed OAuth for auth;
+// the harness instead stages auth as providers/models in the share-dir
+// config (stageKimiAuth), which a hooks-only --config-file would replace
+// wholesale. Appending the overlay [[hooks]] block to the staged share
+// config gives the harness session a single config carrying both auth and
+// the SessionStart hook. TOML array-of-tables appended after the staged
+// [providers.*]/[models.*] tables stays valid.
+func appendKimiHooksToShareConfig(workDir, gcHome string) error {
+	hooksConfig, err := os.ReadFile(filepath.Join(workDir, ".kimi", "config.toml"))
+	if err != nil {
+		return fmt.Errorf("staging kimi hooks: reading overlay hook config: %w", err)
+	}
+	sharePath := filepath.Join(gcHome, ".kimi", "config.toml")
+	shareConfig, err := os.ReadFile(sharePath)
+	if err != nil {
+		return fmt.Errorf("staging kimi hooks: reading staged share config (kimi auth staging must run first): %w", err)
+	}
+	if strings.Contains(string(shareConfig), "gascity-session-start.py") {
+		return nil
+	}
+	if strings.Contains(string(shareConfig), "[[hooks]]") || strings.Contains(string(shareConfig), "\nhooks") {
+		// The host-home config fallback can carry its own hooks; appending
+		// the overlay block would produce a duplicate-key TOML conflict.
+		return fmt.Errorf("staging kimi hooks: staged share config already defines hooks (host-home fallback?); provide key-based auth via OLLAMA_API_KEY, KIMI_API_KEY, or GC_WORKER_INFERENCE_KIMI_CONFIG_TOML")
+	}
+	merged := append(append(shareConfig, '\n'), hooksConfig...)
+	if err := os.WriteFile(sharePath, merged, 0o600); err != nil {
+		return fmt.Errorf("staging kimi hooks: writing merged share config: %w", err)
+	}
+	return nil
 }
 
 func liveWorkerDebugf(format string, args ...any) {

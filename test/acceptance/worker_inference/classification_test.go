@@ -1145,12 +1145,53 @@ install_agent_hooks = ["antigravity"]`)
 func TestInstallLiveHandleProviderHooksAntigravity(t *testing.T) {
 	workDir := t.TempDir()
 
-	require.NoError(t, installLiveHandleProviderHooks(workDir, workerpkg.ProfileAntigravityTmuxCLI))
+	require.NoError(t, installLiveHandleProviderHooks(workDir, t.TempDir(), workerpkg.ProfileAntigravityTmuxCLI))
 
 	data, err := os.ReadFile(filepath.Join(workDir, ".agents", "hooks.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(data), `"gascity-prime"`)
 	require.Contains(t, string(data), `--hook-format antigravity`)
+}
+
+// TestInstallLiveHandleProviderHooksKimi covers the kimi staging contract:
+// the overlay hook script lands in the work dir (kimi runs hook commands
+// with cwd = the session work dir) and the overlay [[hooks]] block is merged
+// into the share-dir config kimi loads by default, preserving staged auth.
+func TestInstallLiveHandleProviderHooksKimi(t *testing.T) {
+	workDir := t.TempDir()
+	gcHome := t.TempDir()
+	sharePath := filepath.Join(gcHome, ".kimi", "config.toml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sharePath), 0o755))
+	stagedAuth := "default_model = \"kimi-for-coding\"\n\n[providers.kimi-for-coding]\ntype = \"kimi\"\napi_key = \"fake-kimi-key\"\n"
+	require.NoError(t, os.WriteFile(sharePath, []byte(stagedAuth), 0o600))
+
+	require.NoError(t, installLiveHandleProviderHooks(workDir, gcHome, workerpkg.ProfileKimiTmuxCLI))
+
+	hookScript, err := os.ReadFile(filepath.Join(workDir, ".kimi", "hooks", "gascity-session-start.py"))
+	require.NoError(t, err)
+	require.Contains(t, string(hookScript), "GC_PROVIDER_SESSION_ID")
+	require.Contains(t, string(hookScript), `"gc", "prime", "--hook"`)
+
+	merged, err := os.ReadFile(sharePath)
+	require.NoError(t, err)
+	require.Contains(t, string(merged), `api_key = "fake-kimi-key"`, "staged auth must survive the hook merge")
+	require.Contains(t, string(merged), `event = "SessionStart"`)
+	require.Contains(t, string(merged), "gascity-session-start.py")
+
+	// Idempotent: a second install must not duplicate the hook entry.
+	require.NoError(t, installLiveHandleProviderHooks(workDir, gcHome, workerpkg.ProfileKimiTmuxCLI))
+	again, err := os.ReadFile(sharePath)
+	require.NoError(t, err)
+	require.Equal(t, 1, strings.Count(string(again), "gascity-session-start.py"))
+}
+
+// TestInstallLiveHandleProviderHooksKimiRequiresStagedAuth pins the staging
+// order contract: kimi hook staging builds on the share-dir config written by
+// stageKimiAuth, so a missing config is a loud error, not a silent skip.
+func TestInstallLiveHandleProviderHooksKimiRequiresStagedAuth(t *testing.T) {
+	err := installLiveHandleProviderHooks(t.TempDir(), t.TempDir(), workerpkg.ProfileKimiTmuxCLI)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "auth staging must run first")
 }
 
 func TestInstallLiveProviderCommandOverride(t *testing.T) {

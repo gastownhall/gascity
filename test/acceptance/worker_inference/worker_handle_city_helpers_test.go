@@ -20,9 +20,18 @@ import (
 // passed by the session manager at create time. Those profiles need a real
 // on-disk city behind the live handle harness so the gc child spawned by the
 // plugin and the in-process session manager share the same bead store.
+//
+// The set mirrors the hook-managed providers in
+// internal/worker/provider_resume_test.go (hook-time GC_PROVIDER_SESSION_ID
+// is authoritative; no derived resume keys): opencode, mimocode, kimi, pi,
+// and antigravity. omp has no live harness profile today.
 func profileUsesHookSessionKeyPersistence(profile workerpkg.Profile) bool {
 	switch profile {
-	case workerpkg.ProfileOpenCodeTmuxCLI, workerpkg.ProfileMimoCodeTmuxCLI:
+	case workerpkg.ProfileOpenCodeTmuxCLI,
+		workerpkg.ProfileMimoCodeTmuxCLI,
+		workerpkg.ProfileKimiTmuxCLI,
+		workerpkg.ProfilePiTmuxCLI,
+		workerpkg.ProfileAntigravityTmuxCLI:
 		return true
 	default:
 		return false
@@ -84,6 +93,8 @@ prompt_template = "agents/%s/prompt.template.md"
 		return nil, fmt.Errorf("staging live handle city: writing probe prompt: %w", err)
 	}
 
+	restoreHome := restoreRealHomeDuring(env)
+	defer restoreHome()
 	initOut, initErr := runGCWithTimeout(liveBootstrapTimeout, env, "",
 		"init", "--file", cityTomlPath, "--skip-provider-readiness", cityDir)
 	if initErr != nil {
@@ -94,11 +105,32 @@ prompt_template = "agents/%s/prompt.template.md"
 	return openLiveHandleCityStore(cityDir)
 }
 
+// restoreRealHomeDuring temporarily points the env's HOME back at the real
+// user home and returns the undo func. gc's platform supervisor refuses HOME
+// overrides ("use GC_HOME for isolated runs"), but some provider harness envs
+// (antigravity) override HOME for the provider session itself — supervisor
+// lifecycle calls must run with the real HOME while the session keeps the
+// override.
+func restoreRealHomeDuring(env *helpers.Env) func() {
+	realHome, err := os.UserHomeDir()
+	if err != nil {
+		return func() {}
+	}
+	current := env.Get("HOME")
+	if current == "" || current == realHome {
+		return func() {}
+	}
+	env.With("HOME", realHome)
+	return func() { env.With("HOME", current) }
+}
+
 // teardownLiveHandleCityRuntime best-effort stops the supervisor-managed
 // runtime that gc init started for the harness city. The harness owns the
 // session lifecycle; a reconciling controller sharing the same bead store
 // would fight the test's stop/restart sequence.
 func teardownLiveHandleCityRuntime(env *helpers.Env, cityDir string) {
+	restoreHome := restoreRealHomeDuring(env)
+	defer restoreHome()
 	_, _ = runGCWithTimeout(liveShutdownTimeout, env, cityDir, "stop", cityDir)
 	_, _ = runGCWithTimeout(liveShutdownTimeout, env, cityDir, "unregister", cityDir)
 	_, _ = runGCWithTimeout(liveShutdownTimeout, env, "", "supervisor", "stop", "--wait")

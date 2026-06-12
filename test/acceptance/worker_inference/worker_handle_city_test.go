@@ -4,6 +4,7 @@ package workerinference_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -16,16 +17,20 @@ import (
 )
 
 func TestProfileUsesHookSessionKeyPersistence(t *testing.T) {
-	require.True(t, profileUsesHookSessionKeyPersistence(workerpkg.ProfileOpenCodeTmuxCLI))
-	require.True(t, profileUsesHookSessionKeyPersistence(workerpkg.ProfileMimoCodeTmuxCLI))
+	for _, profile := range []workerpkg.Profile{
+		workerpkg.ProfileOpenCodeTmuxCLI,
+		workerpkg.ProfileMimoCodeTmuxCLI,
+		workerpkg.ProfileKimiTmuxCLI,
+		workerpkg.ProfilePiTmuxCLI,
+		workerpkg.ProfileAntigravityTmuxCLI,
+	} {
+		require.True(t, profileUsesHookSessionKeyPersistence(profile), "profile %s persists its resume key via the provider hook plugin and must be city-backed", profile)
+	}
 
 	for _, profile := range []workerpkg.Profile{
 		workerpkg.ProfileClaudeTmuxCLI,
 		workerpkg.ProfileCodexTmuxCLI,
 		workerpkg.ProfileGeminiTmuxCLI,
-		workerpkg.ProfileKimiTmuxCLI,
-		workerpkg.ProfilePiTmuxCLI,
-		workerpkg.ProfileAntigravityTmuxCLI,
 	} {
 		require.False(t, profileUsesHookSessionKeyPersistence(profile), "profile %s must stay MemStore-backed", profile)
 	}
@@ -55,6 +60,51 @@ func stageShortModeMimoCodeSetup(t *testing.T) {
 		BinaryPath: "/bin/sh", // construction-only; never started
 	}
 	t.Setenv("XIAOMI_API_KEY", "short-mode-staging-key")
+}
+
+// stageShortModeKimiSetup points the harness at the kimi profile with a
+// construction-only provider binary; no provider session is ever launched.
+// Conflicting host auth env vars are cleared so stageKimiAuth deterministically
+// takes the KIMI_API_KEY branch and writes the native share-dir config.
+func stageShortModeKimiSetup(t *testing.T) {
+	t.Helper()
+	prevSetup := liveSetup
+	t.Cleanup(func() { liveSetup = prevSetup })
+	liveSetup = providerSetup{
+		Profile:    workerpkg.ProfileKimiTmuxCLI,
+		Provider:   "kimi",
+		BinaryPath: "/bin/sh", // construction-only; never started
+	}
+	t.Setenv("GC_WORKER_INFERENCE_KIMI_CONFIG_TOML", "")
+	t.Setenv("GC_WORKER_INFERENCE_KIMI_CONFIG_FILE", "")
+	t.Setenv("OLLAMA_API_KEY", "")
+	t.Setenv("KIMI_API_KEY", "short-mode-staging-key")
+}
+
+// TestNewLiveWorkerHandleHarnessKimiIsCityBacked proves the kimi-specific
+// staging chain minus the provider binary: a real city behind the harness,
+// the overlay hook script materialized into the work dir, and the overlay
+// [[hooks]] block merged into the staged share-dir config that kimi loads by
+// default (kimi reads hooks only from its loaded config file, not from
+// workdir dotfiles), without clobbering the staged auth.
+func TestNewLiveWorkerHandleHarnessKimiIsCityBacked(t *testing.T) {
+	requireLiveHandleCityDeps(t)
+	stageShortModeKimiSetup(t)
+
+	harness, err := newLiveWorkerHandleHarness(t)
+	require.NoError(t, err)
+
+	require.Equal(t, harness.workDir, harness.cityDir, "harness work dir must sit at the city root so cwd walk-up resolves the city")
+	require.FileExists(t, filepath.Join(harness.cityDir, "city.toml"))
+	require.IsType(t, &beads.FileStore{}, harness.store, "hook-managed profiles must use the shared city store, not MemStore")
+
+	require.FileExists(t, filepath.Join(harness.workDir, ".kimi", "hooks", "gascity-session-start.py"))
+
+	shareConfig, err := os.ReadFile(filepath.Join(harness.gcHome, ".kimi", "config.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(shareConfig), "gascity-session-start.py", "overlay SessionStart hook must be merged into the share-dir config kimi loads")
+	require.Contains(t, string(shareConfig), `api_key = "short-mode-staging-key"`, "staged auth must survive the hook merge")
+	require.Equal(t, filepath.Join(harness.gcHome, ".kimi"), harness.sessionEnv["KIMI_SHARE_DIR"])
 }
 
 func TestNewLiveWorkerHandleHarnessMimoCodeIsCityBacked(t *testing.T) {
