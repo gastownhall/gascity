@@ -51,6 +51,22 @@ async function gcFetch(method, p, body) {
 
 const oc = await loadIMessageConnector()
 
+// Mechanical inbound gating at the bridge edge (the one piece of openclaw's
+// dmPolicy worth keeping, as config): ALLOW_FROM is a comma-separated list
+// of iMessage handles (phone numbers / emails). Non-matching senders are
+// dropped with a log line and never reach gc. Unset/empty preserves
+// allow-all for demos. Entries and senders are compared in openclaw's
+// normalized handle form, so "+1 (555) 010-0001" matches "+15550100001".
+const ALLOW_FROM = new Set(
+  env('ALLOW_FROM', '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((h) => (oc.normalizeIMessageHandle(h) || h).toLowerCase()),
+)
+const senderAllowed = (sender) =>
+  ALLOW_FROM.size === 0 || ALLOW_FROM.has((oc.normalizeIMessageHandle(sender) || sender).toLowerCase())
+
 // 1. Handshake with the imsg CLI exactly like openclaw's gateway would.
 const probe = await oc.probeIMessage(15000, { cliPath: CLI })
 if (!probe || probe.ok !== true) {
@@ -107,6 +123,10 @@ async function onInbound(params) {
   const sender = typeof m.sender === 'string' ? m.sender : ''
   const text = typeof m.text === 'string' ? m.text : ''
   if (!sender || !text) return
+  if (!senderAllowed(sender)) {
+    log(`dropping inbound from unallowed sender ${sender}`)
+    return
+  }
   const isGroup = m.is_group === true
   const conversationId = oc.resolveIMessageInboundConversationId({
     isGroup,

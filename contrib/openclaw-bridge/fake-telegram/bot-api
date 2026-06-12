@@ -64,6 +64,7 @@ function buildUpdate(line) {
   const senderId = Number(o.sender_id ?? defaultSenderId)
   const chatId = Number(o.chat_id ?? senderId)
   const chatType = typeof o.chat_type === 'string' ? o.chat_type : 'private'
+  const threadId = o.message_thread_id != null ? Number(o.message_thread_id) : null
   nextUpdateId += 1
   nextMessageId += 1
   return {
@@ -76,9 +77,10 @@ function buildUpdate(line) {
         first_name: o.first_name ?? 'Demo',
         username: o.username ?? 'demo_user',
       },
-      chat: { id: chatId, type: chatType },
+      chat: { id: chatId, type: chatType, ...(chatType === 'supergroup' ? { is_forum: true } : {}) },
       date: Math.floor(Date.now() / 1000),
       text: typeof o.text === 'string' ? o.text : '',
+      ...(threadId != null ? { message_thread_id: threadId, is_topic_message: true } : {}),
       ...(o.reply_to_message_id != null
         ? { reply_to_message: { message_id: Number(o.reply_to_message_id) } }
         : {}),
@@ -133,6 +135,12 @@ const botInfo = {
 
 let nextOutMessageId = 9000
 
+// Forum topics, like real Telegram: createForumTopic only works in forum
+// supergroups (group chat ids are negative; positive ids are private chats),
+// and sendMessage to an unknown message_thread_id is rejected.
+const forumTopics = new Map() // chat_id -> Map(topic_id -> name)
+let nextTopicId = 40
+
 const methods = {
   getMe: () => botInfo,
   getWebhookInfo: () => ({ url: '', has_custom_certificate: false, pending_update_count: 0 }),
@@ -148,13 +156,39 @@ const methods = {
       await new Promise((r) => setTimeout(r, 100))
     }
   },
+  createForumTopic: (params) => {
+    const chatId = Number(params.chat_id)
+    const name = String(params.name ?? '')
+    if (!(chatId < 0)) {
+      const err = new Error('Bad Request: the chat is not a forum supergroup')
+      err.statusCode = 400
+      throw err
+    }
+    if (!name) {
+      const err = new Error('Bad Request: topic name is empty')
+      err.statusCode = 400
+      throw err
+    }
+    nextTopicId += 1
+    if (!forumTopics.has(chatId)) forumTopics.set(chatId, new Map())
+    forumTopics.get(chatId).set(nextTopicId, name)
+    log(`CREATE TOPIC in ${chatId}: ${nextTopicId} (${name})`)
+    return { message_thread_id: nextTopicId, name, icon_color: Number(params.icon_color ?? 0x6fb9f0) }
+  },
   sendMessage: (params) => {
     const chatId = Number(params.chat_id)
+    const threadId = params.message_thread_id != null ? Number(params.message_thread_id) : null
+    if (threadId != null && !forumTopics.get(chatId)?.has(threadId)) {
+      const err = new Error('Bad Request: message thread not found')
+      err.statusCode = 400
+      throw err
+    }
     nextOutMessageId += 1
     const record = {
       ts: new Date().toISOString(),
       chat_id: chatId,
       text: params.text ?? '',
+      ...(threadId != null ? { message_thread_id: threadId } : {}),
       ...(params.parse_mode ? { parse_mode: params.parse_mode } : {}),
       ...(params.reply_parameters?.message_id != null
         ? { reply_to_message_id: Number(params.reply_parameters.message_id) }
@@ -163,13 +197,14 @@ const methods = {
           : {}),
     }
     fs.appendFileSync(outboxPath, JSON.stringify(record) + '\n')
-    log(`SEND to ${chatId}: ${params.text}`)
+    log(`SEND to ${chatId}${threadId != null ? `#${threadId}` : ''}: ${params.text}`)
     return {
       message_id: nextOutMessageId,
       from: botInfo,
-      chat: { id: chatId, type: 'private' },
+      chat: { id: chatId, type: chatId < 0 ? 'supergroup' : 'private' },
       date: Math.floor(Date.now() / 1000),
       text: params.text ?? '',
+      ...(threadId != null ? { message_thread_id: threadId, is_topic_message: true } : {}),
     }
   },
 }
@@ -206,7 +241,8 @@ const server = http.createServer((req, res) => {
       }
       reply(200, { ok: true, result: await method(params) })
     } catch (err) {
-      reply(500, { ok: false, error_code: 500, description: String(err?.message ?? err) })
+      const code = Number(err?.statusCode) || 500
+      reply(code, { ok: false, error_code: code, description: String(err?.message ?? err) })
     }
   })
 })

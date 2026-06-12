@@ -54,6 +54,8 @@ export async function loadTelegramConnector() {
     sendMessageTelegram: runtimeApi.sendMessageTelegram,
     // startup handshake: getMe against the (possibly overridden) Bot API root
     probeTelegram: runtimeApi.probeTelegram,
+    // forum topics: backs gc's EnsureChildConversation contract
+    createForumTopicTelegram: runtimeApi.createForumTopicTelegram,
   }
 }
 

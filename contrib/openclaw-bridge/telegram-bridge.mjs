@@ -37,6 +37,22 @@ const ACCOUNT = env('BRIDGE_ACCOUNT_ID', 'default')
 const PORT = Number(env('BRIDGE_PORT', '8931'))
 const API_ROOT = env('TELEGRAM_API_ROOT', 'https://api.telegram.org').replace(/\/+$/, '')
 
+// Mechanical inbound gating at the bridge edge (the one piece of openclaw's
+// dmPolicy worth keeping, as config): ALLOW_FROM is a comma-separated list
+// of telegram user ids and/or usernames (with or without @). Non-matching
+// senders are dropped with a log line and never reach gc. Unset/empty
+// preserves allow-all for demos.
+const ALLOW_FROM = new Set(
+  env('ALLOW_FROM', '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase().replace(/^@/, ''))
+    .filter(Boolean),
+)
+const senderAllowed = (from) =>
+  ALLOW_FROM.size === 0 ||
+  ALLOW_FROM.has(String(from?.id ?? '').toLowerCase()) ||
+  ALLOW_FROM.has(String(from?.username ?? '').toLowerCase())
+
 // Telegram's API design puts the token in every URL (/bot<token>/...), so
 // transport errors can embed it in their messages. Strip it from anything
 // that leaves the process: logs AND the error metadata reported back to gc
@@ -134,10 +150,24 @@ async function pollUpdates() {
   }
 }
 
+// Child conversations are Telegram forum topics. The child conversation_id
+// encodes both halves of the platform address — "<chat_id>:topic:<thread_id>"
+// — so publish and inbound can recover (chat, message_thread_id) without any
+// bridge-side state surviving restarts.
+const childConversationId = (chatId, topicId) => `${chatId}:topic:${topicId}`
+const parseChildConversationId = (conversationId) => {
+  const m = /^(-?\d+):topic:(\d+)$/.exec(String(conversationId ?? ''))
+  return m ? { chatId: m[1], topicId: Number(m[2]) } : null
+}
+
 async function onInbound(update) {
   const m = update?.message
   if (!m || typeof m !== 'object') return
   if (m.from?.is_bot === true) return // never loop on bot traffic (incl. our own)
+  if (!senderAllowed(m.from)) {
+    log(`dropping inbound from unallowed sender ${m.from?.id ?? '?'} (@${m.from?.username ?? '?'})`)
+    return
+  }
   const text = typeof m.text === 'string' ? m.text : ''
   if (!text) {
     log(`skipping non-text update ${update.update_id} (media has no gc representation yet)`)
@@ -146,13 +176,24 @@ async function onInbound(update) {
   const chat = m.chat ?? {}
   if (chat.id == null) return
   const isDm = chat.type === 'private'
+  const topicId = m.is_topic_message === true && m.message_thread_id != null ? Number(m.message_thread_id) : null
 
   const conversation = {
     scope_id: SCOPE,
     provider: PROVIDER,
     account_id: ACCOUNT,
-    conversation_id: String(chat.id), // Telegram chat ids are the canonical conversation key
-    kind: isDm ? 'dm' : 'room',
+    // Telegram chat ids are the canonical conversation key; forum-topic
+    // messages address the child conversation instead, parented on the chat.
+    ...(topicId != null
+      ? {
+          conversation_id: childConversationId(chat.id, topicId),
+          parent_conversation_id: String(chat.id),
+          kind: 'thread',
+        }
+      : {
+          conversation_id: String(chat.id),
+          kind: isDm ? 'dm' : 'room',
+        }),
   }
   const from = m.from ?? {}
   const message = {
@@ -201,9 +242,47 @@ async function handleRequest(req, rawBody) {
     return { status: 200, body: await handlePublish(JSON.parse(rawBody)) }
   }
   if (req.method === 'POST' && req.url === '/child-conversation') {
-    return { status: 404, body: { error: 'child conversations unsupported' } }
+    return handleChildConversation(JSON.parse(rawBody))
   }
   return { status: 404, body: { error: 'not found' } }
+}
+
+// Implements gc's EnsureChildConversation contract (internal/extmsg
+// http_adapter.go): body {conversation, label}, success reply is the bare
+// child ConversationRef. The child is a Telegram forum topic, so the parent
+// must be a forum-enabled supergroup; anything else is a clean error.
+async function handleChildConversation(body) {
+  const parent = body?.conversation ?? {}
+  const label = typeof body?.label === 'string' && body.label.trim() !== '' ? body.label.trim() : 'gc workstream'
+  if (parseChildConversationId(parent.conversation_id)) {
+    return { status: 400, body: { error: 'nested child conversations unsupported (parent is already a forum topic)' } }
+  }
+  if (parent.kind === 'dm') {
+    return { status: 400, body: { error: 'child conversations unsupported for DMs (forum topics need a supergroup)' } }
+  }
+  const chatId = String(parent.conversation_id ?? '')
+  if (!chatId) {
+    return { status: 400, body: { error: 'conversation.conversation_id required' } }
+  }
+  try {
+    // Topic names are capped at 128 chars by the Bot API.
+    const topic = await oc.createForumTopicTelegram(chatId, label.slice(0, 128), { cfg: ocConfig })
+    log(`child-conversation ${chatId}: topic ${topic.topicId} (${JSON.stringify(topic.name)})`)
+    return {
+      status: 200,
+      body: {
+        scope_id: parent.scope_id ?? SCOPE,
+        provider: PROVIDER,
+        account_id: ACCOUNT,
+        conversation_id: childConversationId(chatId, topic.topicId),
+        parent_conversation_id: chatId,
+        kind: 'thread',
+      },
+    }
+  } catch (err) {
+    log(`child-conversation ${chatId} FAILED: ${err?.message ?? err}`)
+    return { status: 400, body: { error: redact(err?.message ?? err) } }
+  }
 }
 
 // Maps a gc PublishRequest onto the connector's send pipeline and returns the
@@ -212,14 +291,18 @@ async function handleRequest(req, rawBody) {
 // "transient", including permanently-bad targets.
 async function handlePublish(pub) {
   const conv = pub?.conversation ?? {}
-  const target = String(conv.conversation_id ?? '') // chat id, dm and room alike
+  // Child conversations carry the forum topic in the conversation id;
+  // everything else publishes straight to the chat.
+  const child = parseChildConversationId(conv.conversation_id)
+  const target = child ? child.chatId : String(conv.conversation_id ?? '')
   const replyTo = Number(pub?.reply_to_message_id)
   try {
     const result = await oc.sendMessageTelegram(target, pub?.text ?? '', {
       cfg: ocConfig,
+      ...(child ? { messageThreadId: child.topicId } : {}),
       ...(Number.isInteger(replyTo) && replyTo > 0 ? { replyToMessageId: replyTo } : {}),
     })
-    log(`publish -> ${target}: ${JSON.stringify(pub?.text ?? '')} (message_id=${result.messageId})`)
+    log(`publish -> ${target}${child ? `#${child.topicId}` : ''}: ${JSON.stringify(pub?.text ?? '')} (message_id=${result.messageId})`)
     return {
       message_id: result.messageId,
       conversation: conv,
@@ -258,7 +341,7 @@ async function register() {
     // PascalCase is correct here: extmsg.AdapterCapabilities is intentionally
     // untagged on the gc side (internal/extmsg/types.go) while the rest of
     // this request body is snake_case.
-    capabilities: { SupportsChildConversations: false, SupportsAttachments: false, MaxMessageLength: 0 },
+    capabilities: { SupportsChildConversations: true, SupportsAttachments: false, MaxMessageLength: 0 },
   })
 }
 

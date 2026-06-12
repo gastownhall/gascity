@@ -153,9 +153,11 @@ FAKE_TG_PID=$!
 wait_for 15 "fake Bot API" curl -fs "http://127.0.0.1:$FAKE_TG_PORT/bot$TOKEN/getMe"
 
 step "Start the bridge (openclaw telegram connector -> gc adapter)"
+# ALLOW_FROM gates inbound at the edge: only the demo user may reach gc.
 GC_CITY="$CITY_NAME" GC_BASE_URL="http://127.0.0.1:$SUPERVISOR_PORT" GC_SCOPE_ID="$CITY_NAME" \
   BRIDGE_PORT="$BRIDGE_PORT" TELEGRAM_BOT_TOKEN="$TOKEN" \
   TELEGRAM_API_ROOT="http://127.0.0.1:$FAKE_TG_PORT" \
+  ALLOW_FROM="$CHAT_ID" \
   node "$ROOT/telegram-bridge.mjs" > "$DEMO/bridge.log" 2>&1 &
 BRIDGE_PID=$!
 wait_for 30 "adapter registration" grep -q "registered adapter" "$DEMO/bridge.log"
@@ -196,6 +198,50 @@ tail -1 "$FAKE_TG_DIR/outbox.jsonl"
 
 step "Conversation transcript (gc extmsg fabric)"
 curl -fs "$BASE/extmsg/transcript?scope_id=$CITY_NAME&provider=telegram&account_id=default&conversation_id=$CHAT_ID&kind=dm" \
+  | python3 -c 'import json,sys; [print("  %2d %-9s %s" % (r["Sequence"], r["Kind"], r["Text"])) for r in json.load(sys.stdin)["items"]]'
+
+step "CHILD CONVERSATION: per-workstream forum topic in a supergroup"
+GROUP_ID="-1007113355" # negative id = group chat; the fake treats it as a forum supergroup
+GROUP_CONV="{\"scope_id\":\"$CITY_NAME\",\"provider\":\"telegram\",\"account_id\":\"default\",\"conversation_id\":\"$GROUP_ID\",\"kind\":\"room\"}"
+CHILD_JSON="$(curl -fsX POST "http://127.0.0.1:$BRIDGE_PORT/child-conversation" -H 'Content-Type: application/json' \
+  -d "{\"conversation\":$GROUP_CONV,\"label\":\"build-pipeline\"}")"
+CHILD_ID="$(printf '%s' "$CHILD_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["conversation_id"])')"
+printf '%s' "$CHILD_JSON" | python3 -c 'import json,sys; c=json.load(sys.stdin); assert c["kind"]=="thread" and c["parent_conversation_id"], c; print("child conversation: %s (parent %s)" % (c["conversation_id"], c["parent_conversation_id"]))'
+# DMs cannot host forum topics — the bridge must refuse cleanly, not 500.
+DM_CHILD_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$BRIDGE_PORT/child-conversation" \
+  -H 'Content-Type: application/json' -d "{\"conversation\":$CONV,\"label\":\"nope\"}")"
+[ "$DM_CHILD_STATUS" = "400" ] || die "child-conversation on a DM returned $DM_CHILD_STATUS, want 400"
+echo "child-conversation on a DM correctly rejected (400)"
+
+CHILD_CONV="{\"scope_id\":\"$CITY_NAME\",\"provider\":\"telegram\",\"account_id\":\"default\",\"conversation_id\":\"$CHILD_ID\",\"parent_conversation_id\":\"$GROUP_ID\",\"kind\":\"thread\"}"
+curl -fsX POST "$BASE/extmsg/bind" -H 'X-GC-Request: 1' -H 'Content-Type: application/json' \
+  -d "{\"session_id\":\"$SID\",\"conversation\":$CHILD_CONV}" >/dev/null
+echo "bound child conversation $CHILD_ID -> $SID"
+
+TOPIC_REPLY="**assistant:** Pipeline thread opened — tracking the build here."
+TOPIC_BODY="$(python3 -c 'import json,sys; print(json.dumps({"session_id": sys.argv[1], "conversation": json.loads(sys.argv[2]), "text": sys.argv[3]}))' "$SID" "$CHILD_CONV" "$TOPIC_REPLY")"
+curl -fsX POST "$BASE/extmsg/outbound" -H 'X-GC-Request: 1' -H 'Content-Type: application/json' -d "$TOPIC_BODY" >/dev/null
+wait_for 10 "topic delivery" grep -q "message_thread_id" "$FAKE_TG_DIR/outbox.jsonl"
+bold "delivered into the forum topic (note message_thread_id):"
+grep "message_thread_id" "$FAKE_TG_DIR/outbox.jsonl" | tail -1
+
+TOPIC_ID="${CHILD_ID##*:topic:}"
+python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1], "sender_id": int(sys.argv[2]), "chat_id": int(sys.argv[3]), "chat_type": "supergroup", "message_thread_id": int(sys.argv[4])}))' \
+  "Looks good, keep me posted in this thread." "$CHAT_ID" "$GROUP_ID" "$TOPIC_ID" >> "$FAKE_TG_DIR/inbox.jsonl"
+wait_for 30 "topic inbound" grep -qF "inbound $CHILD_ID" "$DEMO/bridge.log"
+grep -F "inbound $CHILD_ID" "$DEMO/bridge.log" | tail -1
+wait_for 30 "topic nudge" grep -q "keep me posted in this thread" "$NUDGE_LOG"
+
+step "ALLOW_FROM: an unallowed sender is dropped at the bridge edge"
+python3 -c 'import json,sys; print(json.dumps({"text": "ignore me, I am a stranger", "sender_id": 999999, "username": "stranger"}))' \
+  >> "$FAKE_TG_DIR/inbox.jsonl"
+wait_for 30 "edge drop" grep -q "dropping inbound from unallowed sender 999999" "$DEMO/bridge.log"
+grep "dropping inbound from unallowed sender 999999" "$DEMO/bridge.log" | tail -1
+grep -q "ignore me, I am a stranger" "$DEMO/bridge.log" && die "stranger text reached the inbound forward path"
+echo "stranger never reached gc (no inbound forward logged)"
+
+bold "child-conversation transcript (own thread, parented on the group chat):"
+curl -fs "$BASE/extmsg/transcript?scope_id=$CITY_NAME&provider=telegram&account_id=default&conversation_id=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CHILD_ID")&parent_conversation_id=$GROUP_ID&kind=thread" \
   | python3 -c 'import json,sys; [print("  %2d %-9s %s" % (r["Sequence"], r["Kind"], r["Text"])) for r in json.load(sys.stdin)["items"]]'
 
 bold ""

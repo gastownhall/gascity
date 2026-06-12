@@ -96,6 +96,7 @@ auto-detects remote-host wrappers) and start `bridge.mjs` with `GC_CITY`,
 | `BRIDGE_PORT` | `8930` | callback server gc publishes to |
 | `BRIDGE_PROVIDER` / `BRIDGE_ACCOUNT_ID` | `imessage` / `default` | adapter identity |
 | `IMSG_CLI_PATH` | `./fake-imsg/imsg` | imsg binary (must be an explicit path on non-Mac — openclaw rejects a bare `imsg` off-macOS) |
+| `ALLOW_FROM` | (empty = allow all) | comma-separated iMessage handles; other senders are dropped at the edge with a log line, never reaching gc |
 
 ## Findings (the actual point of the PoC)
 
@@ -194,6 +195,20 @@ Bot API servers — so the connector code path is identical to production.
 | `GC_SCOPE_ID` | `$GC_CITY` | `scope_id` stamped on every ConversationRef |
 | `BRIDGE_PORT` | `8931` | callback server gc publishes to |
 | `BRIDGE_PROVIDER` / `BRIDGE_ACCOUNT_ID` | `telegram` / `default` | adapter identity |
+| `ALLOW_FROM` | (empty = allow all) | comma-separated telegram user ids and/or usernames; other senders are dropped at the edge with a log line, never reaching gc |
+
+### Child conversations (forum topics)
+
+The telegram bridge implements gc's `EnsureChildConversation` contract
+(`POST /child-conversation`): the child of a supergroup room is a Telegram
+**forum topic**, created through openclaw's `createForumTopicTelegram`. The
+child `conversation_id` encodes the full platform address —
+`<chat_id>:topic:<message_thread_id>` — so publishes route into the topic
+(`messageThreadId`) and inbound topic messages map back to the child
+conversation (parented on the chat) without any bridge-side state. DMs and
+non-forum chats are refused with a clean 400. The fake Bot API implements
+`createForumTopic` + thread-aware `sendMessage` with real-API error shapes,
+and `demo-telegram.sh` exercises a per-workstream thread end to end.
 
 ### Telegram findings
 
