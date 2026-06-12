@@ -2347,6 +2347,159 @@ func TestWitnessStartupAndNoIdleReconcileWisps(t *testing.T) {
 	}
 }
 
+// gastownRolePrompts returns every gastown role's prompt template, keyed by role
+// name and valued by its packs/gastown-relative path (for renderGastownPromptForPack
+// / gastownRel). It globs agents/*/prompt.template.md so cross-role guards cover
+// newly added roles automatically instead of going stale against a hand-kept list.
+func gastownRolePrompts(t *testing.T) map[string]string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(packRoot(), "packs", "gastown", "agents", "*", "prompt.template.md"))
+	if err != nil {
+		t.Fatalf("glob role prompts: %v", err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("no gastown role prompt templates found under packs/gastown/agents")
+	}
+	prompts := make(map[string]string, len(matches))
+	for _, m := range matches {
+		role := filepath.Base(filepath.Dir(m))
+		prompts[role] = "packs/gastown/agents/" + role + "/prompt.template.md"
+	}
+	return prompts
+}
+
+// isWispHookCheckCommand reports whether a rendered prompt line is a wisp/molecule
+// hook-check: a `gc bd list`/`gc bd query` filtered to the molecule (or the
+// invalid wisp) type. These are the lookups that must request --json, because
+// bd's text list view hides ephemeral (wisp-table) rows — see the ga-p9g root
+// cause documented on TestAllRoleWispHookChecksUseJSON.
+func isWispHookCheckCommand(line string) bool {
+	if !strings.Contains(line, "gc bd list") && !strings.Contains(line, "gc bd query") {
+		return false
+	}
+	return strings.Contains(line, "--type=molecule") || strings.Contains(line, "--type=wisp")
+}
+
+// TestAllRoleWispHookChecksUseJSON is the cross-role regression guard for the
+// town-wide wisp-leak family (ga-p9g), generalizing the witness-only ga-7c6 fix
+// to every role prompt.
+//
+// Root cause (external bd v1.0.5, cmd/bd/list.go): wisps/molecules live in the
+// separate wisps table (migration 007). SearchIssues normally unions it, but the
+// *text* list path sets filter.SkipWisps=true as a perf optimization while the
+// *JSON* path never does. So `gc bd list … --type=molecule` in text form silently
+// returns "No issues found" while the same query with --json returns the wisp.
+// molecule/wisp are not bd "infra" types ({agent,rig,role,message}), so an
+// explicit --type filter cannot rescue the text path. A role whose patrol-wisp
+// reconciliation reads its hook in text form never sees its own wisp and pours a
+// duplicate on every restart.
+//
+// The in-repo SDK already defends against this — config hook-check queries use
+// --json (Agent.effectiveAssignedInProgressQuery), and internal/beads
+// BdStore.listWispsTier unions `bd query "ephemeral=true …"` precisely because
+// "the installed bd list surface does not expose ephemeral rows." This guard
+// extends that invariant to the gastown role prompts: every role's wisp/molecule
+// hook-check must request --json. It would have failed against the pre-fix witness
+// prompt, which reconciled wisps with text-form `gc bd list --type=molecule`.
+func TestAllRoleWispHookChecksUseJSON(t *testing.T) {
+	examined := 0
+	for role, rel := range gastownRolePrompts(t) {
+		rendered := renderGastownPromptForPack(t, rel,
+			"gastown/"+role, role, "demo", "gastown", "gastown.")
+		for i, line := range strings.Split(rendered, "\n") {
+			if !isWispHookCheckCommand(line) {
+				continue
+			}
+			examined++
+			if !strings.Contains(line, "--json") {
+				t.Errorf("%s prompt line %d runs a molecule/wisp hook-check without --json; "+
+					"bd's text list view hides wisp-table rows, so the lookup silently finds "+
+					"nothing and the role pours a duplicate wisp (ga-p9g):\n  %s",
+					role, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
+	// Guard against a vacuous pass: at least the witness/deacon/refinery patrol
+	// reconciliations issue molecule/wisp hook-checks. If the matcher stops
+	// finding any (template refactor, renamed command), fail loudly rather than
+	// silently certifying an invariant that examined nothing.
+	if examined == 0 {
+		t.Fatal("examined no molecule/wisp hook-check commands across any role prompt; " +
+			"isWispHookCheckCommand no longer matches the templates — this guard would pass vacuously")
+	}
+}
+
+// TestAllRoleWispHookChecksUseValidMoleculeType guards the type half of the same
+// invariant: patrol wisps are molecule-rooted (mol-*-patrol), so a hook-check must
+// filter --type=molecule, never --type=wisp. "wisp" is not a valid bd issue type —
+// bd rejects it outright (`invalid issue type "wisp"`) — so the query errors and
+// matches nothing, producing the same duplicate-wisp leak as the text-view bug.
+//
+// knownWispTypeOffenders are roles whose external prompt templates
+// (gastownhall/gascity-packs, the read-only module dependency this repo consumes)
+// still ship the invalid --type=wisp. They are tracked for an upstream fix
+// (deacon/refinery → --type=molecule, mirroring the witness ga-7c6 fix). The
+// allowlist is deliberately self-cleaning: each listed role must STILL use
+// --type=wisp, so once the pack dependency is bumped to a fixed version the
+// offending line disappears, this test fails, and the stale entry must be removed —
+// tightening the guard to enforce valid types for every role.
+func TestAllRoleWispHookChecksUseValidMoleculeType(t *testing.T) {
+	knownWispTypeOffenders := map[string]string{
+		"deacon":   "gascity-packs deacon prompt still uses gc bd list --type=wisp; fix upstream to --type=molecule",
+		"refinery": "gascity-packs refinery prompt still uses gc bd list --type=wisp; fix upstream to --type=molecule",
+	}
+	for role, rel := range gastownRolePrompts(t) {
+		rendered := renderGastownPromptForPack(t, rel,
+			"gastown/"+role, role, "demo", "gastown", "gastown.")
+		usesInvalidWispType := false
+		for _, line := range strings.Split(rendered, "\n") {
+			if strings.Contains(line, "gc bd") && strings.Contains(line, "--type=wisp") {
+				usesInvalidWispType = true
+				if _, known := knownWispTypeOffenders[role]; !known {
+					t.Errorf("%s prompt runs a gc bd command with invalid --type=wisp; "+
+						"\"wisp\" is not a bd issue type (bd: invalid issue type \"wisp\"), so the "+
+						"lookup matches nothing and the role pours a duplicate wisp — use "+
+						"--type=molecule (ga-p9g):\n  %s", role, strings.TrimSpace(line))
+				}
+			}
+		}
+		if reason, known := knownWispTypeOffenders[role]; known && !usesInvalidWispType {
+			t.Errorf("%s is allow-listed as a known --type=wisp offender (%q) but its prompt no "+
+				"longer uses --type=wisp; the upstream gascity-packs fix has landed — remove %q from "+
+				"knownWispTypeOffenders so this guard enforces valid wisp types for every role",
+				role, reason, role)
+		}
+	}
+}
+
+// TestIsWispHookCheckCommandMatchesWispLookups pins the matcher used by the
+// cross-role wisp guards, proving they are not vacuous: the pre-fix witness
+// lookup (text-form `gc bd list … --type=molecule`, the exact ga-p9g symptom) is
+// matched — so TestAllRoleWispHookChecksUseJSON would flag it for lacking --json —
+// while ordinary non-wisp commands and the wisp-pouring command are not matched.
+func TestIsWispHookCheckCommandMatchesWispLookups(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"prefix witness text-form (the bug)", `  gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule`, true},
+		{"fixed witness json-form", `  gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=0 --json | jq -r '.[].id'`, true},
+		{"deacon invalid wisp type", `  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id')`, true},
+		{"bd query ephemeral molecule", `gc bd query --json 'type=molecule AND ephemeral=true'`, false}, // no --type= flag form
+		{"plain assigned-work list (not a wisp lookup)", `gc bd list --assignee="$GC_AGENT" --status=in_progress`, false},
+		{"wisp pour, not a lookup", `WISP=$(gc bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')`, false},
+		{"prose mentioning wisps", "Wisp roots are `issue_type=molecule`; find them with gc bd.", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isWispHookCheckCommand(c.line); got != c.want {
+				t.Errorf("isWispHookCheckCommand(%q) = %v, want %v", c.line, got, c.want)
+			}
+		})
+	}
+}
+
 func TestGastownRigTargetShellExpressionsRenderForRigAndHQ(t *testing.T) {
 	tests := []struct {
 		name      string
