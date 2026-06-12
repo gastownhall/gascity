@@ -1,10 +1,10 @@
 # Release gate - native-store hook removal and in-process autoclose
 
-Gate bead: `ga-5mgv67`  
-Source build bead: `ga-frmdxd.2`  
-Review bead: `ga-4lpx1z`  
-PR: https://github.com/gastownhall/gascity/pull/3303  
-Branch: `builder/ga-frmdxd.2`  
+Gate bead: `ga-5mgv67`
+Source build bead: `ga-frmdxd.2`
+Review bead: `ga-4lpx1z`
+PR: https://github.com/gastownhall/gascity/pull/3303
+Branch: `builder/ga-frmdxd.2`
 Head under gate: `b4ededa76015ac514cefd36f856dd418599ec57b`
 
 `docs/PROJECT_MANIFEST.md` is not present in this checkout, matching prior
@@ -64,4 +64,3 @@ cmd/gc/hooks_test.go
 cmd/gc/lifecycle_coordination_test.go
 cmd/gc/molecule_autoclose_test.go
 ```
-
