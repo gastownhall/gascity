@@ -12,7 +12,7 @@ import (
 func TestControlKindsExact(t *testing.T) {
 	want := []string{
 		KindRetry, KindRalph, KindCheck, KindRetryEval, KindFanout,
-		KindTally, KindDrain, KindScopeCheck, KindWorkflowFinalize,
+		KindDrain, KindScopeCheck, KindWorkflowFinalize,
 	}
 	if !slices.Equal(ControlKinds, want) {
 		t.Errorf("ControlKinds = %v, want %v", ControlKinds, want)
@@ -38,11 +38,11 @@ func TestControlKindsExact(t *testing.T) {
 //     anchors topology — never two of those), except KindScope which is both a
 //     structural node and a topology anchor;
 //   - the graph-contract metadata trigger is exactly the structural kinds plus
-//     the control kinds minus {fanout, tally}. The fanout/tally exclusion is
-//     INTENTIONAL (commit 2531b9440): those kinds are engine-minted from
-//     [steps.on_complete] / [steps.tally] authoring surfaces, which formula
-//     validation catches via struct-field checks, so hand-written metadata
-//     coverage is not needed for them.
+//     the control kinds minus {fanout}. The fanout exclusion is INTENTIONAL
+//     (commit 2531b9440): that kind is engine-minted from the
+//     [steps.on_complete] authoring surface, which formula validation catches
+//     via struct-field checks, so hand-written metadata coverage is not
+//     needed for it.
 func TestKindSetRelationships(t *testing.T) {
 	if dup := firstDuplicate(ControlKinds); dup != "" {
 		t.Errorf("ControlKinds contains duplicate %q", dup)
@@ -74,7 +74,7 @@ func TestKindSetRelationships(t *testing.T) {
 	var derived []string
 	derived = append(derived, StructuralGraphKinds...)
 	for _, k := range ControlKinds {
-		if k == KindFanout || k == KindTally {
+		if k == KindFanout {
 			continue
 		}
 		derived = append(derived, k)
@@ -83,7 +83,7 @@ func TestKindSetRelationships(t *testing.T) {
 	got := slices.Clone(GraphContractMetadataKinds)
 	slices.Sort(got)
 	if !slices.Equal(got, derived) {
-		t.Errorf("GraphContractMetadataKinds = %v\nwant StructuralGraphKinds ∪ (ControlKinds \\ {fanout, tally}) = %v", got, derived)
+		t.Errorf("GraphContractMetadataKinds = %v\nwant StructuralGraphKinds ∪ (ControlKinds \\ {fanout}) = %v", got, derived)
 	}
 }
 

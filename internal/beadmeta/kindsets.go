@@ -10,16 +10,13 @@ import "slices"
 // execute" — whose behavior owner is the ProcessControl switch in
 // internal/dispatch/runtime.go (exactly one case per member; unknown kinds
 // hard-error). Every other control-routing predicate is, by intent, equal to
-// ControlKinds; two predicates currently lag it and carry explicit, documented
-// exclusions at their definition sites pending behavior-reviewed routing
-// fixes:
+// ControlKinds; graphroute.IsControlDispatcherKind is exactly equal to it,
+// and one predicate currently lags it with an explicit, documented exclusion
+// at its definition site pending a behavior-reviewed routing fix:
 //
-//   - graphroute.IsControlDispatcherKind excludes KindTally (PR #1194 added
-//     tally to compile and ProcessControl but never wired routing, so tally
-//     beads are currently routed to workers — tracked as a routing bug).
-//   - dispatch.isAttemptControlKind excludes KindTally and KindDrain (frozen
-//     2026-04-14 snapshot of the then-complete control set; later kinds were
-//     never added).
+//   - dispatch.isAttemptControlKind excludes KindDrain (frozen 2026-04-14
+//     snapshot of the then-complete control set; later kinds were never
+//     added).
 //
 // Three persisted kind values sit outside every set below: KindWisp (wisp
 // molecule roots), KindClosed (closed-marker beads), and KindTask (written on
@@ -45,7 +42,6 @@ var ControlKinds = []string{
 	KindCheck,
 	KindRetryEval,
 	KindFanout,
-	KindTally,
 	KindDrain,
 	KindScopeCheck,
 	KindWorkflowFinalize,
@@ -82,13 +78,13 @@ var WorkflowTopologyKinds = []string{
 // GraphContractMetadataKinds lists the gc.kind values that, when HAND-WRITTEN
 // in step metadata, imply graph.v2 semantics and therefore trigger the formula
 // compiler requirement (formula.metadataRequiresGraphContract derives from
-// this set). It is exactly StructuralGraphKinds ∪ (ControlKinds \ {fanout,
-// tally}): the fanout/tally exclusion is intentional — those kinds are
-// engine-minted from [steps.on_complete] / [steps.tally], which formula
-// validation catches via struct-field checks (commit 2531b9440), so metadata
-// coverage is unnecessary for them. KindDrain appears in both detection paths
-// (struct field and metadata) as belt-and-suspenders from PR #2784.
-// TestKindSetRelationships pins this composition.
+// this set). It is exactly StructuralGraphKinds ∪ (ControlKinds \ {fanout}):
+// the fanout exclusion is intentional — that kind is engine-minted from
+// [steps.on_complete], which formula validation catches via struct-field
+// checks (commit 2531b9440), so metadata coverage is unnecessary for it.
+// KindDrain appears in both detection paths (struct field and metadata) as
+// belt-and-suspenders from PR #2784. TestKindSetRelationships pins this
+// composition.
 var GraphContractMetadataKinds = []string{
 	KindScope,
 	KindCleanup,

@@ -90,34 +90,6 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		})
 	}
 
-	// Tally controls: injected after fanout; downstream refs rewritten to tally.
-	tallyControlByStep := make(map[string]string)
-	for _, step := range allSteps {
-		if step == nil || step.OnComplete == nil || step.Tally == nil {
-			continue
-		}
-		tallyID := step.ID + "-tally"
-		tallyControlByStep[step.ID] = tallyID
-		mode := step.Tally.Mode
-		if mode == "" {
-			mode = "majority"
-		}
-		tallyMeta := map[string]string{
-			beadmeta.KindMetadataKey:       beadmeta.KindTally,
-			beadmeta.ControlForMetadataKey: step.ID,
-			beadmeta.TallyModeMetadataKey:  mode,
-			beadmeta.VoteFieldMetadataKey:  step.Tally.VoteField,
-		}
-		controls = append(controls, &Step{
-			ID:       tallyID,
-			Title:    "Tally votes for " + step.Title,
-			Type:     "task",
-			Needs:    []string{step.ID + "-fanout"},
-			Metadata: tallyMeta,
-		})
-	}
-
-	rewriteGraphStepRefs(f.Steps, tallyControlByStep)
 	rewriteGraphStepRefs(f.Steps, scopeControlByStep)
 
 	f.Steps = append(f.Steps, controls...)
@@ -154,7 +126,7 @@ func needsScopeCheck(step *Step) bool {
 		return false
 	}
 	switch step.Metadata[beadmeta.KindMetadataKey] {
-	case "scope", "scope-check", "workflow-finalize", "fanout", "tally", "check", "drain", "spec":
+	case "scope", "scope-check", "workflow-finalize", "fanout", "check", "drain", "spec":
 		return false
 	default:
 		return true
