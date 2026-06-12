@@ -3051,17 +3051,43 @@ These commands read and write session metadata to coordinate lifecycle
 events (drain, restart) between agents and the controller. They are
 designed to be called from within running agent sessions, not by humans.
 
+The exception is "gc runtime check", which validates a Runtime Provider
+Protocol executable — run by humans and runtime-pack CIs.
+
 ```
 gc runtime
 ```
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc runtime check](#gc-runtime-check) | Validate an executable against the Runtime Provider Protocol |
 | [gc runtime drain](#gc-runtime-drain) | Signal a session to drain (wind down gracefully) |
 | [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
 | [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
 | [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (waits to be killed) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
+
+## gc runtime check
+
+Validate an executable against the Runtime Provider Protocol (RPP v0).
+
+Runs the protocol handshake, the required lifecycle round-trip
+(start, is-running, stop, idempotent stop), exercises every capability
+the handshake declares, and probes optional operations. Optional
+operations that are absent (exit 2) are reported but never fail the
+run; everything else that misbehaves does. Exits non-zero if any check
+fails, so a runtime pack's CI can gate on it directly.
+
+The protocol contract is docs/reference/exec-session-provider.md.
+
+```
+gc runtime check <executable> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--command` | string |  | session command sent in the start config (default "sleep 300") |
+| `--session-name` | string |  | session name for the conformance round-trip (default: generated unique name) |
 
 ## gc runtime drain
 

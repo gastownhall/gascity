@@ -178,7 +178,12 @@ responsibility. Session setup commands are the *script's* responsibility
 1. Start with `contrib/session-scripts/gc-session-screen` as a template.
 2. Implement the operations your backend supports.
 3. Return exit 2 for operations you don't support.
-4. Test with `GC_SESSION=exec:./your-script gc start <city>`.
+4. Validate with `gc runtime check ./your-script` — it runs the protocol
+   handshake, the required lifecycle round-trip (start, is-running, stop,
+   idempotent stop), exercises every capability the handshake declares,
+   and probes optional operations (absent ones are reported, not failed).
+   It exits non-zero if any check fails, so CI can gate on it.
+5. Test with `GC_SESSION=exec:./your-script gc start <city>`.
 
 ### Minimal script (start/stop/is-running only)
 
