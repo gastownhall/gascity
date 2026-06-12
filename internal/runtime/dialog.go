@@ -1003,6 +1003,7 @@ func sendDialogKeys(
 func ContainsRateLimitDialog(content string) bool {
 	return strings.Contains(content, "Usage limit reached") ||
 		strings.Contains(content, "You've hit your limit") ||
+		strings.Contains(content, "hit your session limit") ||
 		strings.Contains(content, "/rate-limit-options") ||
 		strings.Contains(content, "rate limit") ||
 		strings.Contains(content, "Rate limit")
@@ -1025,6 +1026,7 @@ func ContainsModelSwitchModal(content string) bool {
 func ContainsProviderRateLimitScreen(content string) bool {
 	if strings.Contains(content, "Usage limit reached") ||
 		strings.Contains(content, "You've hit your limit") ||
+		strings.Contains(content, "hit your session limit") ||
 		strings.Contains(content, "/rate-limit-options") {
 		return true
 	}
@@ -1074,6 +1076,21 @@ func lineContainsAll(content string, subs ...string) bool {
 		}
 	}
 	return false
+}
+
+// ContainsDismissableMidSessionDialog reports whether pane content shows a
+// blocking dialog that is safe to auto-dismiss on an arbitrary mid-session
+// screen. It deliberately composes only the high-confidence matchers: the
+// permissive startup forms (ContainsRateLimitDialog's bare "rate limit",
+// the single-phrase workspace-trust and API-key anchors) would read
+// ordinary scrollback that merely talks about those things as a dialog.
+// Callers use it as a cheap pre-check before running the full dismissal
+// chain, which re-verifies per dialog before sending any keys.
+func ContainsDismissableMidSessionDialog(content string) bool {
+	return containsClaudeResumeDialog(content) ||
+		containsCodexUpdateDialog(content) ||
+		containsCodexHookReviewDialog(content) ||
+		ContainsProviderRateLimitScreen(content)
 }
 
 // containsPromptIndicator checks whether any line in the content looks like a

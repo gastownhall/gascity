@@ -293,6 +293,14 @@ const (
 	// cheap pane read.
 	rateLimitPeekLines = 120
 
+	// stalledSessionDialogDismissTimeout bounds each dialog class when the
+	// reconciler runs the dismissal chain against a progress-stalled session
+	// that shows a known blocking dialog. Matches the startup-path budget
+	// (Tmux.AcceptStartupDialogs); the chain is only entered after a
+	// high-confidence peek match, so the common cost is a handful of pane
+	// reads, not the timeout.
+	stalledSessionDialogDismissTimeout = 8 * time.Second
+
 	// churnProductivityThreshold is how long a session must run to be
 	// considered productive. Sessions that survive past stabilityThreshold
 	// but die before this threshold are "churning" — alive long enough to

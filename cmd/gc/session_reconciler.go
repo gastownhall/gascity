@@ -2341,8 +2341,29 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 					}
 				}
-				holdsClaim := false
+				// A stalled session may be parked at a known blocking dialog -
+				// e.g. a provider rate-limit chooser, which never auto-dismisses
+				// and freezes the runtime while every liveness surface stays
+				// green. Dismissal is lossless where the fresh-restart recycle
+				// below is not, and it also recovers claim-holding sessions the
+				// recycle must never touch, so it preempts the claim and health
+				// gates. The peek is only a cheap high-confidence pre-check; the
+				// dismissal chain re-verifies per dialog before sending keys.
+				dialogDismissed := false
 				if !exempt {
+					if dp, ok := dialogCapableProvider(sp); ok {
+						if output, peekErr := peek(rateLimitPeekLines); peekErr == nil && runtime.ContainsDismissableMidSessionDialog(output) {
+							if derr := dp.DismissKnownDialogs(context.Background(), name, stalledSessionDialogDismissTimeout); derr != nil {
+								fmt.Fprintf(stderr, "session reconciler: dismissing stalled-session dialog for %s: %v\n", name, derr) //nolint:errcheck
+							} else {
+								dialogDismissed = true
+								fmt.Fprintf(stderr, "session reconciler: %s stalled at a known blocking dialog (no progress for >%s); dismissed instead of recycling\n", name, threshold) //nolint:errcheck
+							}
+						}
+					}
+				}
+				holdsClaim := false
+				if !exempt && !dialogDismissed {
 					has, err := sessionHasInProgressAssignedWorkForConfig(store, rigStores, infoByID[id], cfg)
 					if err != nil {
 						// Fail safe: an unreadable claim check must not recycle a
@@ -2356,7 +2377,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 				}
 				providerHealthy := true
-				if !exempt && !holdsClaim && tp.ResolvedProvider != nil {
+				if !exempt && !dialogDismissed && !holdsClaim && tp.ResolvedProvider != nil {
 					// Reuse the per-tick provider-health snapshot (#2962). Gate 1
 					// (provider RED) takes precedence: never recycle a session whose
 					// provider is red. Fail-open — absent/stale registry → healthy.
@@ -2364,7 +2385,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						providerHealthy = h
 					}
 				}
-				if sessionProgressStalled(threshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+				if !dialogDismissed && sessionProgressStalled(threshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
 					// Record the restart request on the typed snapshot only. This
 					// marker is decision-state consumed by the restart-request block
 					// below (which reads Info.RestartRequested off infoByID) and never
