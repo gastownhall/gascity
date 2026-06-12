@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -70,6 +71,7 @@ version = "^3.0"
 
 	want := fmt.Sprintf(`{
   "schema_version": "1",
+  "ok": true,
   "root": %[1]q,
   "packs_lock_path": %[2]q,
   "packs_lock_sha256": %[3]q,
@@ -219,6 +221,103 @@ version = "^1.4"
 	}
 	if !strings.Contains(out, "pack:tools\thttps://example.com/tools.git\t^1.4\tremote\t1.4.2\taaaa") {
 		t.Fatalf("missing pinned import line:\n%s", out)
+	}
+}
+
+// TestImportStatusJSONProductionRun exercises "gc import status --json"
+// through the full production CLI path — including the JSON contract
+// gate in run(), which rejects --json with json_unsupported unless the
+// command declares an embedded result schema — and validates the
+// emitted document against that schema. doImportStatus-level tests
+// bypass this gate, so only this test proves the machine-readable
+// drift surface is reachable in production. The fixture declares a
+// pinned remote, an unlocked remote, and a path import so the schema
+// validation covers every entry shape the command can emit.
+func TestImportStatusJSONProductionRun(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.4"
+
+[imports.local]
+source = "./packs/local"
+
+[imports.unlocked]
+source = "https://example.com/unlocked.git"
+version = "^9.9"
+`)
+	importStatusLockFixture(t, dir)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", dir, "import", "status", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(import status --json) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if strings.Contains(stdout.String(), "json_unsupported") {
+		t.Fatalf("production path rejected --json:\n%s", stdout.String())
+	}
+
+	var doc struct {
+		Imports []struct {
+			Kind string          `json:"kind"`
+			Pin  json.RawMessage `json:"pin"`
+		} `json:"imports"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("production document is not JSON: %v\n%s", err, stdout.String())
+	}
+	shapes := map[string]bool{}
+	for _, imp := range doc.Imports {
+		switch {
+		case imp.Kind == "path":
+			shapes["path"] = true
+		case len(imp.Pin) > 0:
+			shapes["pinned remote"] = true
+		default:
+			shapes["unlocked remote"] = true
+		}
+	}
+	for _, shape := range []string{"pinned remote", "unlocked remote", "path"} {
+		if !shapes[shape] {
+			t.Fatalf("fixture emitted no %s import entry, so the schema validation no longer covers that shape:\n%s", shape, stdout.String())
+		}
+	}
+
+	assertTopLevelOKTrue(t, stdout.Bytes())
+	validateJSONAgainstResultSchema(t, []string{"import", "status"}, stdout.Bytes())
+}
+
+// TestImportStatusJSONSchemaManifest asserts the --json-schema manifest
+// reports JSON support for "gc import status" with a valid embedded
+// result schema, so drift checkers can discover the contract.
+func TestImportStatusJSONSchemaManifest(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"import", "status", "--json-schema"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(import status --json-schema) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	var manifest struct {
+		Command       []string                   `json:"command"`
+		JSONSupported bool                       `json:"json_supported"`
+		Schemas       map[string]json.RawMessage `json:"schemas"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+		t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got := strings.Join(manifest.Command, " "); got != "import status" {
+		t.Fatalf("manifest command = %q, want \"import status\"", got)
+	}
+	if !manifest.JSONSupported {
+		t.Fatalf("manifest json_supported = false, want true:\n%s", stdout.String())
+	}
+	if !json.Valid(manifest.Schemas["result"]) {
+		t.Fatalf("result schema missing or invalid: %s", manifest.Schemas["result"])
 	}
 }
 

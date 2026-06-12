@@ -26,6 +26,9 @@ const importStatusSchemaVersion = "1"
 // rig-scoped), the packs.lock pin closure, and the lockfile content hash.
 type ImportStatusJSON struct {
 	SchemaVersion string `json:"schema_version"`
+	// OK is the top-level success discriminator every gc --json result
+	// document must carry (see schemas/import/status/result.schema.json).
+	OK bool `json:"ok"`
 	// Root is the absolute city or pack root the status was computed from.
 	Root string `json:"root"`
 	// PacksLockPath is the absolute path of the packs.lock file (which
@@ -133,19 +136,18 @@ func buildImportStatus(cityPath string) (*ImportStatusJSON, error) {
 	if err != nil {
 		return nil, err
 	}
-	lock, err := readImportLockfile(fs, cityPath)
-	if err != nil {
-		return nil, err
-	}
 
 	lockPath := filepath.Join(cityPath, packman.LockfileName)
 	status := &ImportStatusJSON{
 		SchemaVersion: importStatusSchemaVersion,
+		OK:            true,
 		Root:          cityPath,
 		PacksLockPath: lockPath,
-		Imports:       make([]ImportStatusEntry, 0, len(allImports)),
-		LockedPacks:   make([]ImportStatusLockedPack, 0, len(lock.Packs)),
 	}
+	// Read packs.lock once and derive both the hash and the pins from
+	// the same bytes: a concurrent atomic lockfile rewrite between two
+	// reads could otherwise emit a document whose packs_lock_sha256
+	// does not match its own pin set.
 	lockData, err := fs.ReadFile(lockPath)
 	switch {
 	case err == nil:
@@ -154,6 +156,12 @@ func buildImportStatus(cityPath string) (*ImportStatusJSON, error) {
 	case !os.IsNotExist(err):
 		return nil, fmt.Errorf("reading %s: %w", packman.LockfileName, err)
 	}
+	lock, err := packman.ParseLockfile(lockData)
+	if err != nil {
+		return nil, err
+	}
+	status.Imports = make([]ImportStatusEntry, 0, len(allImports))
+	status.LockedPacks = make([]ImportStatusLockedPack, 0, len(lock.Packs))
 
 	names := make([]string, 0, len(allImports))
 	for name := range allImports {

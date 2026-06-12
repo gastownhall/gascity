@@ -41,7 +41,7 @@ type SupervisorHealthOutput struct {
 		UptimeSec       int                `json:"uptime_sec" doc:"Supervisor uptime in seconds."`
 		CitiesTotal     int                `json:"cities_total" doc:"Total managed cities."`
 		CitiesRunning   int                `json:"cities_running" doc:"Cities currently running."`
-		PacksLockSHA256 string             `json:"packs_lock_sha256,omitempty" doc:"SHA-256 hex digest of the first managed city's packs.lock contents, for single-city deployments (mirrors the startup field's first-city semantics). Drift checkers compare this against the committed lockfile copy. Omitted when no city is registered or the city has no packs.lock."`
+		PacksLockSHA256 string             `json:"packs_lock_sha256,omitempty" doc:"SHA-256 hex digest of the first managed city's packs.lock contents, for single-city deployments (mirrors the startup field's first-city semantics). Drift checkers compare this against the committed lockfile copy. Omitted when no city is registered, the city has no packs.lock, or the lockfile is unreadable (read error logged server-side) — treat absence as unknown, not as proof there is no lockfile."`
 		Startup         *SupervisorStartup `json:"startup,omitempty" doc:"First-city startup info for single-city deployments."`
 	}
 }

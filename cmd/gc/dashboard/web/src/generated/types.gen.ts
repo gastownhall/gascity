@@ -3300,7 +3300,7 @@ export type SupervisorHealthOutputBody = {
      */
     cities_total: number;
     /**
-     * SHA-256 hex digest of the first managed city's packs.lock contents, for single-city deployments (mirrors the startup field's first-city semantics). Drift checkers compare this against the committed lockfile copy. Omitted when no city is registered or the city has no packs.lock.
+     * SHA-256 hex digest of the first managed city's packs.lock contents, for single-city deployments (mirrors the startup field's first-city semantics). Drift checkers compare this against the committed lockfile copy. Omitted when no city is registered, the city has no packs.lock, or the lockfile is unreadable (read error logged server-side) — treat absence as unknown, not as proof there is no lockfile.
      */
     packs_lock_sha256?: string;
     /**
