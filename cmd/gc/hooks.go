@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,19 +13,58 @@ import (
 // in-process and runs convoy/wisp/molecule autoclose natively.
 var beadEventHookNames = []string{"on_create", "on_update", "on_close"}
 
+// hookStampLine returns the version-stamp comment embedded in gc-managed hook
+// scripts so that installBeadHooks can distinguish them from user-authored hooks.
+func hookStampLine() string {
+	return fmt.Sprintf("# gc-hook-stamp: %s %s", date, commit)
+}
+
+// isGCManagedHook reports whether the hook content was written by gc (i.e.
+// contains a gc-hook-stamp line). Only gc-managed hooks are removed during
+// cleanup; user-authored hooks with the same filename are left untouched.
+func isGCManagedHook(content []byte) bool {
+	return parseHookStampDate(content) != ""
+}
+
+// parseHookStampDate extracts the build date from a hook script's stamp line.
+// Returns empty string if no stamp is found.
+func parseHookStampDate(content []byte) string {
+	for _, line := range bytes.Split(content, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("# gc-hook-stamp: ")) {
+			parts := bytes.Fields(line)
+			if len(parts) >= 3 {
+				return string(parts[2])
+			}
+		}
+	}
+	return ""
+}
+
 // installBeadHooks removes any gc-installed bead event-forwarding hooks from
 // dir/.beads/hooks/. The hook subprocess chain (gc event emit + gc convoy
 // autoclose + gc wisp autoclose + gc molecule autoclose) is replaced by the
 // controller's in-process CachingStore event path, which emits the same events
 // via its onChange callback and runs autoclose in runBeadCloseAutoclose.
 //
-// Non-gc hooks (e.g. git pre-commit hooks) in the directory are left
-// untouched. This function is idempotent: it is safe to call when the hooks
-// do not exist.
+// Only hooks that carry a gc-hook-stamp are removed; user-authored hooks with
+// the same filename are left untouched. This function is idempotent: it is
+// safe to call when the hooks do not exist.
 func installBeadHooks(dir, _ string) error {
 	hooksDir := filepath.Join(dir, ".beads", "hooks")
 	for _, filename := range beadEventHookNames {
-		if err := os.Remove(filepath.Join(hooksDir, filename)); err != nil && !os.IsNotExist(err) {
+		hookPath := filepath.Join(hooksDir, filename)
+		content, err := os.ReadFile(hookPath)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("reading bead event hook %s: %w", filename, err)
+		}
+		if !isGCManagedHook(content) {
+			continue
+		}
+		if err := os.Remove(hookPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("removing bead event hook %s: %w", filename, err)
 		}
 	}

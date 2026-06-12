@@ -18,7 +18,8 @@ func TestInstallBeadHooksRemovesExistingHooks(t *testing.T) {
 	}
 	for _, name := range beadEventHookNames {
 		p := filepath.Join(hooksDir, name)
-		if err := os.WriteFile(p, []byte("#!/bin/sh\necho old\n"), 0o755); err != nil {
+		gcContent := []byte("#!/bin/sh\n" + hookStampLine() + "\nexit 0\n")
+		if err := os.WriteFile(p, gcContent, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -65,6 +66,34 @@ func TestInstallBeadHooksIdempotentNoHooks(t *testing.T) {
 	}
 	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("second installBeadHooks: %v", err)
+	}
+}
+
+// TestInstallBeadHooksPreservesUserOwnedSameNameHook verifies that a hook file
+// with a standard bd hook name (e.g. on_create) but no gc-hook-stamp is not
+// removed by installBeadHooks — only gc-installed hooks are cleaned up.
+func TestInstallBeadHooksPreservesUserOwnedSameNameHook(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, ".beads", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	userHook := filepath.Join(hooksDir, "on_create")
+	userContent := []byte("#!/bin/sh\n# user-authored lifecycle hook\nexit 0\n")
+	if err := os.WriteFile(userHook, userContent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installBeadHooks(dir, ""); err != nil {
+		t.Fatalf("installBeadHooks: %v", err)
+	}
+
+	got, err := os.ReadFile(userHook)
+	if err != nil {
+		t.Fatalf("user-authored on_create hook was deleted: %v", err)
+	}
+	if string(got) != string(userContent) {
+		t.Errorf("user-authored on_create hook was modified; want %q got %q", userContent, got)
 	}
 }
 
