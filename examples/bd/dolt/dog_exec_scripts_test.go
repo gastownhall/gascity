@@ -627,7 +627,32 @@ case "$query" in
     print_cell rootcommit
     exit 0
     ;;
-  *"DOLT_HASHOF_DB()"*)
+  *"DOLT_HASHOF_DB"*)
+    if [ "$mode" = "ignored_table_db_hash_drift" ]; then
+      case "$query" in
+        *"DOLT_HASHOF_DB('HEAD')"*)
+          # Committed root: stable across the flatten (no versioned change).
+          print_cell "$(current_hash)"
+          ;;
+        *)
+          # Bare working-set hash: drifts between preflight and postflight
+          # because the ignored table churns, with no commit and no HEAD move.
+          calls_file="$state_file.bare-db-hash-calls"
+          calls=0
+          if [ -f "$calls_file" ]; then
+            calls="$(cat "$calls_file")"
+          fi
+          calls=$((calls + 1))
+          printf '%%s\n' "$calls" > "$calls_file"
+          if [ "$calls" -gt 1 ]; then
+            print_cell hash-workingset-drift
+          else
+            print_cell hash-workingset-base
+          fi
+          ;;
+      esac
+      exit 0
+    fi
     if [ "$mode" = "db_hash_failure" ]; then
       printf 'db hash exploded\n' >&2
       exit 48
@@ -684,7 +709,29 @@ case "$query" in
     print_cell hash-blocked-issues
     exit 0
     ;;
-  *"information_schema.tables"*)
+  *"DOLT_HASHOF_TABLE('wisps')"*)
+    if [ "$mode" = "ignored_table_drift" ] && [ "$(current_head)" = "compactcommit" ]; then
+      print_cell hash-wisps-after-churn
+      exit 0
+    fi
+    print_cell hash-wisps-before
+    exit 0
+    ;;
+  *"SHOW TABLES AS OF"*|*"information_schema.tables"*)
+    # ignored_table_* modes model the production hq incident: "wisps" is a
+    # dolt_ignore'd working-set-only table — visible in information_schema
+    # but absent from every commit root, so SHOW TABLES AS OF omits it.
+    if [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_table_db_hash_drift" ]; then
+      case "$query" in
+        *"SHOW TABLES AS OF"*)
+          print_cell beads
+          ;;
+        *)
+          print_cells beads wisps
+          ;;
+      esac
+      exit 0
+    fi
     if [ "$mode" = "table_discovery_failure" ]; then
       printf 'information_schema unavailable\n' >&2
       exit 43
@@ -733,6 +780,14 @@ case "$query" in
     exit 0
     ;;
   *"SELECT COUNT(*) FROM"*"notes"*)
+    print_cell 10
+    exit 0
+    ;;
+  *"SELECT COUNT(*) FROM"*"wisps"*)
+    if [ "$mode" = "ignored_table_drift" ] && [ "$(current_head)" = "compactcommit" ]; then
+      print_cell 11
+      exit 0
+    fi
     print_cell 10
     exit 0
     ;;
@@ -2275,6 +2330,67 @@ func TestCompactScriptStillQuarantinesGainAndHashDriftWithStableHead(t *testing.
 	}
 	if strings.Contains(string(data), "DOLT_GC") {
 		t.Fatalf("stable-HEAD gain+drift must block full GC:\n%s", string(data))
+	}
+}
+
+// Production incident (hq, 2026-06-12): bd marks its high-churn wisp tables
+// dolt_ignore'd, so they live only in the working set and exist in no commit
+// root. The flatten (soft reset + commit) cannot stage or touch them, yet they
+// were included in flatten integrity verification: concurrent wisp churn read
+// as gain+drift with a stable HEAD, and the Option A DOLT_DIFF preservation
+// probe structurally fails on a table that exists in no commit ("table not
+// found") — fail-closed permanent quarantine, GC starvation. Unversioned
+// tables must be excluded from flatten integrity verification: the
+// verification set is the tables committed at the stable pre-flight HEAD.
+func TestCompactScriptExcludesUnversionedTableChurnFromVerification(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "ignored_table_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("unversioned-table churn must not fail compaction: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "excluding unversioned table(s) from flatten verification") ||
+		!strings.Contains(out, "wisps") {
+		t.Fatalf("output missing unversioned-table exclusion notice:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("unversioned-table churn must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_HASHOF_TABLE('wisps')") {
+		t.Fatalf("unversioned table must not be count/hash-verified:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("compact must reach full GC after excluding unversioned churn:\n%s", string(data))
+	}
+}
+
+// Companion to the unversioned-table exclusion: the whole-database value hash
+// must be pinned to the committed root (DOLT_HASHOF_DB('HEAD')), not the bare
+// working-set hash, or dolt_ignore'd-table churn drifts the database hash with
+// no HEAD movement and quarantines via the same-count db-hash path.
+func TestCompactScriptPinsDatabaseHashToCommittedRoot(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "ignored_table_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("working-set db hash drift must not fail compaction: %v\n%s", err, out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("working-set db hash drift must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if !strings.Contains(string(data), "DOLT_HASHOF_DB('HEAD')") {
+		t.Fatalf("database value hash must be pinned to the committed root:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("compact must reach full GC when the committed root is stable:\n%s", string(data))
 	}
 }
 
