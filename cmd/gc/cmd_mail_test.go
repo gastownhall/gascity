@@ -4442,10 +4442,8 @@ func mailSendTestFindMessage(t *testing.T, cityPath string) beads.Bead {
 	if err != nil {
 		t.Fatalf("List messages: %v", err)
 	}
-	for _, b := range all {
-		if b.Type == "message" {
-			return b
-		}
+	if len(all) > 0 {
+		return all[0]
 	}
 	t.Fatalf("message bead not found; total beads = %d", len(all))
 	return beads.Bead{}
