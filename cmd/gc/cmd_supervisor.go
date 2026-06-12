@@ -97,7 +97,14 @@ request — shutdown continues asynchronously. Pass --wait to block
 until the supervisor socket is no longer answering, which is what
 most callers that need deterministic cleanup want (e.g., integration
 tests that then expect to remove temp directories without racing
-against lingering supervisor / controller subprocesses).`,
+against lingering supervisor / controller subprocesses).
+
+When GC_SUPERVISOR_SYSTEMD_UNIT is set, stop is delegated to
+'systemctl [--user] stop <unit>' instead of the control-socket stop.
+The systemctl invocation is synchronous and bounded by --wait-timeout
+whether or not --wait is set, gc then verifies a previously-running
+supervisor actually exited (failing with its PID when the unit does
+not manage it), and stop with nothing running still exits 1.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if stopSupervisorWithWaitJSON(stdout, stderr, wait, waitTimeout, jsonOut) != 0 {
@@ -107,7 +114,7 @@ against lingering supervisor / controller subprocesses).`,
 		},
 	}
 	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the supervisor to finish stopping all managed cities and release its socket before returning")
-	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "Maximum time to wait when --wait is set")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "Maximum time to wait when --wait is set (in delegated mode, bounds the synchronous systemctl stop regardless of --wait)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
@@ -696,6 +703,11 @@ func stopSupervisor(stdout, stderr io.Writer) int {
 // It also unloads the platform service (without removing the unit file) after
 // the supervisor acknowledges the destructive socket stop, so launchd/systemd
 // will not restart it when the process exits.
+//
+// When GC_SUPERVISOR_SYSTEMD_UNIT is set, the stop is redirected to the
+// delegated unit instead of the socket protocol. Callers that must stop
+// gc's OWN supervisor regardless of delegation (e.g. uninstall cleaning
+// up gc's legacy unit) use stopSupervisorViaSocket directly.
 func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration) int {
 	return stopSupervisorWithWaitJSON(stdout, stderr, wait, waitTimeout, false)
 }
@@ -707,8 +719,20 @@ func stopSupervisorWithWaitJSON(stdout, stderr io.Writer, wait bool, waitTimeout
 		return 1
 	}
 	if delegated {
-		return delegatedSupervisorStop(delegation, stdout, stderr, wait, jsonOut)
+		return delegatedSupervisorStop(delegation, stdout, stderr, wait, waitTimeout, jsonOut)
 	}
+	return stopSupervisorViaSocketJSON(stdout, stderr, wait, waitTimeout, jsonOut)
+}
+
+// stopSupervisorViaSocket drives the control-socket stop protocol against
+// gc's own supervisor, ignoring any configured systemd delegation. It is
+// the stop path for internal cleanup of gc-owned services (uninstall),
+// which must never stop the operator's delegated unit as a side effect.
+func stopSupervisorViaSocket(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration) int {
+	return stopSupervisorViaSocketJSON(stdout, stderr, wait, waitTimeout, false)
+}
+
+func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration, jsonOut bool) int {
 	sockPath, _ := runningSupervisorSocket()
 	if sockPath == "" {
 		fmt.Fprintln(stderr, "gc supervisor stop: supervisor is not running") //nolint:errcheck
@@ -832,12 +856,22 @@ func waitForSupervisorExitUntil(sockPath string, deadline time.Time) error {
 	}
 }
 
-func supervisorStatusWithOptions(stdout, _ io.Writer, asJSON bool) int {
+func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 	sockPath, pid := runningSupervisorSocket()
 	running := pid > 0
 	pidSource := ""
 	if pid > 0 {
 		pidSource = "control_socket"
+	}
+	// A broken delegation env (e.g. a GC_SUPERVISOR_SYSTEMD_SCOPE typo) must
+	// surface here: status is the first command operators and monitoring run
+	// against a delegated supervisor, every mutating lifecycle sibling
+	// hard-errors on the same typo, and the service-manager fallback below
+	// skips its unit probe when the scope is unparseable — without this
+	// diagnostic, the config error reads as a bare "not running".
+	_, _, delegationErr := supervisorSystemdDelegation()
+	if delegationErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor status: warning: %v\n", delegationErr) //nolint:errcheck
 	}
 	// Fallback liveness when the control socket is unreachable (gascity#2984):
 	// a launchd/systemd-managed supervisor may bind its socket at a path the
@@ -865,6 +899,9 @@ func supervisorStatusWithOptions(stdout, _ io.Writer, asJSON bool) int {
 			// Distinct diagnostic state (gascity#2984): running per service
 			// manager / API, but pid discovery via the socket failed.
 			payload["socket_status"] = "unreachable"
+		}
+		if delegationErr != nil {
+			payload["config_error"] = delegationErr.Error()
 		}
 		if err := writeCLIJSONLine(stdout, payload); err != nil {
 			return 1

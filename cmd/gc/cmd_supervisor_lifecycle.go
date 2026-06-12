@@ -97,8 +97,23 @@ var (
 	// supervisorServiceManagerActive reports whether the platform service
 	// manager (launchd on macOS, systemd --user on Linux) considers the
 	// supervisor running. Fallback liveness signal when the control-socket
-	// ping fails (gascity#2984).
+	// ping fails (gascity#2984). With GC_SUPERVISOR_SYSTEMD_UNIT set, the
+	// delegated unit is the only authoritative service-manager signal —
+	// gc's own user unit is irrelevant, and a system-scope unit (whose
+	// socket is typically unreachable from the operator's shell) must not
+	// be gated on per-user manager availability; the is-active probe
+	// degrades to false on its own when the manager is unreachable.
 	supervisorServiceManagerActive = func() bool {
+		d, delegated, err := supervisorSystemdDelegation()
+		if err != nil {
+			// Invalid scope: report nothing rather than probing a unit the
+			// operator did not configure; lifecycle commands surface the
+			// configuration error itself.
+			return false
+		}
+		if delegated {
+			return delegatedUnitActive(d)
+		}
 		switch supervisorRuntimeGOOS {
 		case "darwin":
 			return supervisorLaunchdActive(supervisorLaunchdLabel())
@@ -550,7 +565,13 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gc: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return waitForSupervisorReady(stderr)
+		if waitForSupervisorPID() != 0 {
+			return 0
+		}
+		// A delegated supervisor logs to the journal, not gc's fork-mode
+		// log file — point readiness-timeout diagnostics at the unit.
+		fmt.Fprintf(stderr, "gc: supervisor did not become ready after '%s'; check '%s'\n", delegation.commandHint("start"), delegation.commandHint("status")) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
 		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
@@ -844,6 +865,18 @@ starts on login.`,
 }
 
 func doSupervisorInstall(stdout, stderr io.Writer) int {
+	delegation, delegated, err := supervisorSystemdDelegation()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if delegated {
+		// The operator-managed unit owns the supervisor lifecycle;
+		// installing gc's own service alongside it would leave two
+		// service managers fighting over one supervisor.
+		fmt.Fprintf(stderr, "gc supervisor install: %s is set (delegated to unit %q); gc does not install its own service files in delegated mode. Unset %s to manage gc's own service.\n", supervisorSystemdUnitEnv, delegation.Unit, supervisorSystemdUnitEnv) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
 		fmt.Fprintf(stderr, "gc supervisor install: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
@@ -885,6 +918,17 @@ preserved sessions, then retry uninstall.`,
 }
 
 func doSupervisorUninstall(stdout, stderr io.Writer) int {
+	delegation, delegated, derr := supervisorSystemdDelegation()
+	if derr != nil {
+		fmt.Fprintf(stderr, "gc supervisor uninstall: %v\n", derr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if delegated {
+		// Uninstall is a legitimate migration step (removing gc's legacy
+		// unit after delegating), so warn rather than refuse: only
+		// gc-owned service files are touched, never the delegated unit.
+		fmt.Fprintf(stderr, "gc supervisor uninstall: warning: %s is set (delegated to unit %q); uninstall removes only gc's own service files and does not touch the delegated unit\n", supervisorSystemdUnitEnv, delegation.Unit) //nolint:errcheck // best-effort stderr
+	}
 	data, err := buildSupervisorServiceData()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor uninstall: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1744,7 +1788,10 @@ func uninstallSupervisorLaunchd(_ *supervisorServiceData, stdout, stderr io.Writ
 	path := supervisorLaunchdPlistPath()
 	active := supervisorLaunchdActive(supervisorLaunchdLabel())
 	if sockPath, _ := runningSupervisorSocket(); sockPath != "" {
-		if code := stopSupervisorWithWait(stdout, stderr, true, 30*time.Second); code != 0 {
+		// Socket-protocol stop, never the delegated redirect: uninstall is
+		// cleaning up gc's OWN service and must not stop an operator's
+		// delegated unit (or require systemctl on darwin) as a side effect.
+		if code := stopSupervisorViaSocket(stdout, stderr, true, 30*time.Second); code != 0 {
 			return code
 		}
 	} else if active {
@@ -1987,7 +2034,10 @@ func uninstallSupervisorSystemd(_ *supervisorServiceData, stdout, stderr io.Writ
 			fmt.Fprintf(stderr, "gc supervisor uninstall: systemd service %s is active but the control socket is unavailable; run 'gc supervisor start' to re-adopt sessions, then retry uninstall\n", service) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if code := stopSupervisorWithWait(stdout, stderr, true, 30*time.Second); code != 0 {
+		// Socket-protocol stop, never the delegated redirect: uninstall is
+		// cleaning up gc's OWN unit and must not stop an operator's
+		// delegated unit as a side effect.
+		if code := stopSupervisorViaSocket(stdout, stderr, true, 30*time.Second); code != 0 {
 			return code
 		}
 	}

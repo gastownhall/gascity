@@ -378,6 +378,50 @@ Scope and caveats:
   defaults, so a hand-edited unit at gc's service path stays journal-only
   only on hosts where gc never manages the unit.
 
+## Delegating the Supervisor Lifecycle to an Operator-Managed systemd Unit
+
+By default `gc` owns the supervisor lifecycle: `gc start` installs and
+starts a per-user service (`gascity-supervisor`), and binary-drift
+detection restarts that service directly. Hosts that run the supervisor
+under an operator-managed systemd unit instead — for example a hardened
+system service with its own restart policy — can delegate the lifecycle:
+
+```bash
+GC_SUPERVISOR_SYSTEMD_UNIT=gascity-prod.service  # unit that owns the supervisor
+GC_SUPERVISOR_SYSTEMD_SCOPE=system               # "system" (default) or "user"
+```
+
+With the unit configured:
+
+- `gc supervisor start` and the `gc start` ensure path run
+  `systemctl [--user] start <unit>` and wait for the control socket to
+  answer. gc never writes, loads, or daemon-reloads its own service
+  files in delegated mode; `gc supervisor install` refuses to run, and
+  `gc supervisor uninstall` only removes gc's own legacy service.
+- `gc supervisor stop` runs `systemctl [--user] stop <unit>`
+  synchronously, bounded by `--wait-timeout` (default 30s) whether or
+  not `--wait` is set, then verifies a previously-running supervisor
+  actually exited. A live supervisor the unit does not manage (common
+  mid-migration) fails the stop with its PID instead of reporting a
+  false "Supervisor stopped.", and stop with nothing running keeps the
+  legacy exit-1 "supervisor is not running" contract.
+- The `gc start` drift auto-restart runs `systemctl try-restart <unit>`
+  (a unit the operator stopped stays stopped) and fails unless the
+  restart verifiably resolved the drift: a supervisor that was not
+  replaced, a replacement still serving the drifted build (the unit's
+  `ExecStart` launches a stale binary), or an unverifiable post-restart
+  probe each fail instead of declaring "ready" while a stale supervisor
+  keeps serving.
+- `gc supervisor status` probes the delegated unit
+  (`systemctl [--user] is-active <unit>`) when the control socket is
+  unreachable — the usual situation for a system-scope unit running
+  under a different user — and reports a broken delegation config (a
+  warning in text mode, a `config_error` field in `--json`) instead of
+  a bare "not running".
+
+An invalid `GC_SUPERVISOR_SYSTEMD_SCOPE` value is a hard error on every
+lifecycle path; gc never silently falls back to the default unit.
+
 ## JSONL Archive Push Failures
 
 The core pack runs `jsonl-export` every 15 minutes to dump each bead

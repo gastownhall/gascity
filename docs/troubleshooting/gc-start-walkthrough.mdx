@@ -117,6 +117,12 @@ systemctl --user restart gascity-supervisor
 gc start
 ```
 
+If the supervisor lifecycle is delegated to an operator-managed unit via
+`GC_SUPERVISOR_SYSTEMD_UNIT` (see "Delegating the Supervisor Lifecycle"
+in the troubleshooting guide), restart that unit instead:
+`systemctl restart <unit>`, with `--user` for user-scope units. The
+drift messages print the exact command for the configured unit.
+
 Verify after restart:
 
 ```bash

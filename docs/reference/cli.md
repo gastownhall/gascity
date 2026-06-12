@@ -3781,6 +3781,13 @@ most callers that need deterministic cleanup want (e.g., integration
 tests that then expect to remove temp directories without racing
 against lingering supervisor / controller subprocesses).
 
+When GC_SUPERVISOR_SYSTEMD_UNIT is set, stop is delegated to
+'systemctl [--user] stop &lt;unit&gt;' instead of the control-socket stop.
+The systemctl invocation is synchronous and bounded by --wait-timeout
+whether or not --wait is set, gc then verifies a previously-running
+supervisor actually exited (failing with its PID when the unit does
+not manage it), and stop with nothing running still exits 1.
+
 ```
 gc supervisor stop [flags]
 ```
@@ -3789,7 +3796,7 @@ gc supervisor stop [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL summary |
 | `--wait` | bool |  | Wait for the supervisor to finish stopping all managed cities and release its socket before returning |
-| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set |
+| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set (in delegated mode, bounds the synchronous systemctl stop regardless of --wait) |
 
 ## gc supervisor uninstall
 

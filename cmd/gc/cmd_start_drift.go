@@ -351,6 +351,35 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			fmt.Fprintf(stderr, "error: supervisor restart timed out after %s; check '%s' for details. Last known pid=%d.\n", driftReadyTimeout, supervisorStatusGuidance(), pid) //nolint:errcheck // best-effort stderr
 			return 1, false
 		}
+		if delegated {
+			// `try-restart` no-ops successfully when the unit is inactive,
+			// and PollReady answers from whatever process serves /health —
+			// the OLD supervisor when the unit never managed it. A unit can
+			// also genuinely replace the process while its ExecStart still
+			// launches the drifted binary. Require evidence that the drift
+			// actually cleared — not merely that the process changed — and
+			// treat an unverifiable post-restart probe as failure, instead
+			// of reporting "ready" while a stale supervisor keeps serving.
+			vctx, vcancel := context.WithTimeout(context.Background(), 2*time.Second)
+			verifyStatus, verifyErr := newHTTPSupervisorClient(baseURL).Status(vctx)
+			vcancel()
+			if verifyErr != nil {
+				fmt.Fprintln(stdout)                                                                                                                                              //nolint:errcheck // best-effort stdout
+				fmt.Fprintf(stderr, "error: cannot verify supervisor after '%s': %v; check '%s'\n", delegation.commandHint("try-restart"), verifyErr, supervisorStatusGuidance()) //nolint:errcheck // best-effort stderr
+				return 1, false
+			}
+			verifyPID := supervisorAliveHook()
+			if verifyPID == pid && verifyStatus.BuildID == status.BuildID {
+				fmt.Fprintln(stdout)                                                                                                                                                                                                                                                                                                                    //nolint:errcheck // best-effort stdout
+				fmt.Fprintf(stderr, "error: supervisor was not replaced by '%s': PID %d still serving build %s; it is not managed by delegated unit %s — stop it with 'gc supervisor stop' (%s unset), or fix the delegation env\n", delegation.commandHint("try-restart"), verifyPID, verifyStatus.BuildID, delegation.Unit, supervisorSystemdUnitEnv) //nolint:errcheck // best-effort stderr
+				return 1, false
+			}
+			if DetectBinaryDrift(commit, verifyStatus) {
+				fmt.Fprintln(stdout)                                                                                                                                                                                                                                                                                                           //nolint:errcheck // best-effort stdout
+				fmt.Fprintf(stderr, "error: supervisor restarted by '%s' but still serves drifted build %s (local build %s); unit %s's ExecStart does not launch the updated gc binary — point the unit at the new binary, or fix the delegation env\n", delegation.commandHint("try-restart"), verifyStatus.BuildID, commit, delegation.Unit) //nolint:errcheck // best-effort stderr
+				return 1, false
+			}
+		}
 		fmt.Fprintf(stdout, " ready (%s).\n", humanizeReadyDuration(time.Since(t0))) //nolint:errcheck // best-effort stdout
 
 		// Re-print the Supervisor: line so the operator's last memory
