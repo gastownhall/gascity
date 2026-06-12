@@ -284,6 +284,9 @@ type City struct {
 	Services []Service `toml:"service,omitempty"`
 	// GitHub configures GitHub-facing repository monitors.
 	GitHub GitHubConfig `toml:"github,omitempty"`
+	// ExtMsg configures the external-messaging fabric (default routes
+	// for inbound conversations with no binding).
+	ExtMsg ExtMsgConfig `toml:"extmsg,omitempty"`
 	// AgentDefaults provides root city defaults for agents that don't override
 	// them (canonical TOML key: agent_defaults). Pack-local defaults use the
 	// same table shape in pack.toml. The runtime currently applies provider,

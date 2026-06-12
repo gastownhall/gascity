@@ -1169,6 +1169,10 @@
           "$ref": "#/$defs/GitHubConfig",
           "description": "GitHub configures GitHub-facing repository monitors."
         },
+        "extmsg": {
+          "$ref": "#/$defs/ExtMsgConfig",
+          "description": "ExtMsg configures the external-messaging fabric (default routes\nfor inbound conversations with no binding)."
+        },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
           "description": "AgentDefaults provides root city defaults for agents that don't override\nthem (canonical TOML key: agent_defaults). Pack-local defaults use the\nsame table shape in pack.toml. The runtime currently applies provider,\ndefault_sling_formula, and append_fragments; the attachment-list fields\nremain tombstones, and the other fields are parsed/composed but not yet\ninherited automatically."
@@ -1478,6 +1482,43 @@
       "additionalProperties": false,
       "type": "object",
       "description": "EventsRotationConfig holds file-backed events rotation settings."
+    },
+    "ExtMsgConfig": {
+      "properties": {
+        "default_route": {
+          "items": {
+            "$ref": "#/$defs/ExtMsgDefaultRoute"
+          },
+          "type": "array",
+          "description": "DefaultRoutes map inbound conversations that have no binding and no\ngroup route to a configured agent, keyed by provider and optionally\nnarrowed to one adapter account. The first matching inbound message\nbinds the conversation to the agent (an agent-name binding), so the\nroute is sticky until rebound or unbound."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ExtMsgConfig configures the external-messaging fabric."
+    },
+    "ExtMsgDefaultRoute": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider is the external messaging provider name as registered by\nthe adapter (e.g. \"telegram\"). Required."
+        },
+        "account_id": {
+          "type": "string",
+          "description": "AccountID narrows the route to one adapter account. Empty matches\nevery account of the provider that has no account-specific route."
+        },
+        "agent": {
+          "type": "string",
+          "description": "Agent is the configured agent identity to route to. It must resolve\nto a configured named session so the delivery layer can cold-wake a\nsession for it."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "provider",
+        "agent"
+      ],
+      "description": "ExtMsgDefaultRoute routes unbound inbound conversations from one external messaging provider (and optionally a single adapter account) to a configured agent."
     },
     "FormulasConfig": {
       "properties": {},

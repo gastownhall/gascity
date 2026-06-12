@@ -49,9 +49,10 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 	}
 
 	deps := extmsg.InboundDeps{
-		Services:  *svc,
-		Registry:  reg,
-		EmitEvent: s.extmsgEmitEvent(),
+		Services:                    *svc,
+		Registry:                    reg,
+		EmitEvent:                   s.extmsgEmitEvent(),
+		DefaultAgentForConversation: s.extmsgDefaultAgentForConversation(),
 	}
 
 	// Pre-normalized path.

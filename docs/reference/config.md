@@ -42,6 +42,7 @@ City is the top-level configuration for a Gas City instance.
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
+| `extmsg` | ExtMsgConfig |  |  | ExtMsg configures the external-messaging fabric (default routes for inbound conversations with no binding). |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides root city defaults for agents that don't override them (canonical TOML key: agent_defaults). Pack-local defaults use the same table shape in pack.toml. The runtime currently applies provider, default_sling_formula, and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
 | `pricing` | []ModelPricing |  |  | Pricing holds per-model cost rate overrides keyed by (provider, model). City-level entries override pack-level entries which override the defaults shipped with the pricing package. See internal/pricing for the estimation seam introduced by issue #1255 (1d). |
 
@@ -384,6 +385,24 @@ EventsRotationConfig holds file-backed events rotation settings.
 | `check_interval_records` | integer |  | `1024` | CheckIntervalRecords is the number of records between size checks. Defaults to DefaultEventsRotationCheckIntervalRecords. |
 | `check_interval_seconds` | integer |  | `60` | CheckIntervalSeconds is the time backstop between size checks. Defaults to DefaultEventsRotationCheckIntervalSeconds. |
 | `archive_retain_age` | string |  |  | ArchiveRetainAge is an optional Go duration. Empty keeps all archives. |
+
+## ExtMsgConfig
+
+ExtMsgConfig configures the external-messaging fabric.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `default_route` | []ExtMsgDefaultRoute |  |  | DefaultRoutes map inbound conversations that have no binding and no group route to a configured agent, keyed by provider and optionally narrowed to one adapter account. The first matching inbound message binds the conversation to the agent (an agent-name binding), so the route is sticky until rebound or unbound. |
+
+## ExtMsgDefaultRoute
+
+ExtMsgDefaultRoute routes unbound inbound conversations from one external messaging provider (and optionally a single adapter account) to a configured agent.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `provider` | string | **yes** |  | Provider is the external messaging provider name as registered by the adapter (e.g. "telegram"). Required. |
+| `account_id` | string |  |  | AccountID narrows the route to one adapter account. Empty matches every account of the provider that has no account-specific route. |
+| `agent` | string | **yes** |  | Agent is the configured agent identity to route to. It must resolve to a configured named session so the delivery layer can cold-wake a session for it. |
 
 ## FormulasConfig
 

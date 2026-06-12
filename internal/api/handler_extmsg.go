@@ -41,6 +41,32 @@ func (s *Server) extmsgEmitEvent() func(string, string, events.Payload) {
 	}
 }
 
+// extmsgDefaultAgentForConversation builds the InboundDeps default-route
+// resolver from [[extmsg.default_route]] config: it maps an unrouted
+// inbound conversation to the qualified identity of the configured agent.
+// A route naming an agent that does not resolve to a configured named
+// session is logged and skipped — the message stays unrouted rather than
+// failing the inbound on a config error.
+func (s *Server) extmsgDefaultAgentForConversation() func(extmsg.ConversationRef) string {
+	cfg := s.state.Config()
+	if cfg == nil || len(cfg.ExtMsg.DefaultRoutes) == 0 {
+		return nil
+	}
+	store := s.state.CityBeadStore()
+	return func(ref extmsg.ConversationRef) string {
+		agent := cfg.ExtMsgDefaultRouteAgent(ref.Provider, ref.AccountID)
+		if agent == "" {
+			return ""
+		}
+		spec, ok, err := s.findNamedSessionSpecForTarget(store, agent)
+		if err != nil || !ok {
+			log.Printf("extmsg: default-route agent %q for %s/%s does not resolve to a configured named session (err=%v)", agent, ref.Provider, ref.AccountID, err)
+			return ""
+		}
+		return spec.Identity
+	}
+}
+
 // extmsgResolveSessionSelector builds the OutboundDeps session-selector
 // resolver: it maps a selector — a configured agent identity, session name,
 // alias, or concrete session bead ID — to the concrete ID of a live session,

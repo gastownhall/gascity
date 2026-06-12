@@ -40,17 +40,64 @@ func (r *InboundResult) routed() bool {
 // InboundDeps bundles the dependencies for inbound processing.
 // The caller (HTTP handler) assembles deps from api.State, keeping
 // the orchestrator independent of the State interface.
+//
+// DefaultAgentForConversation returns the configured default agent
+// identity for an inbound conversation that resolved to no binding and
+// no group route ("" = no route configured). The API layer supplies the
+// config lookup; extmsg stays config-free. When it names an agent, the
+// pipeline binds the conversation to that agent (a sticky agent-name
+// binding) and routes the message to it.
 type InboundDeps struct {
-	Services  Services
-	Registry  *AdapterRegistry
-	EmitEvent func(eventType, subject string, payload events.Payload)
+	Services                    Services
+	Registry                    *AdapterRegistry
+	EmitEvent                   func(eventType, subject string, payload events.Payload)
+	DefaultAgentForConversation func(ref ConversationRef) string
+}
+
+// applyDefaultRoute binds an unrouted conversation to its configured
+// default agent and marks the result as routed to it. A concurrent bind
+// races benignly: on conflict the freshly active binding wins, whatever
+// its kind.
+func applyDefaultRoute(ctx context.Context, deps InboundDeps, result *InboundResult, ref ConversationRef, now time.Time) error {
+	if deps.DefaultAgentForConversation == nil {
+		return nil
+	}
+	agentName := deps.DefaultAgentForConversation(ref)
+	if agentName == "" {
+		return nil
+	}
+	caller := Caller{Kind: CallerController, ID: "extmsg-default-route"}
+	binding, err := deps.Services.Bindings.Bind(ctx, caller, BindInput{
+		Conversation: ref,
+		AgentName:    agentName,
+		Now:          now,
+	})
+	if err != nil {
+		if !errors.Is(err, ErrBindingConflict) {
+			return fmt.Errorf("binding default-route agent %q: %w", agentName, err)
+		}
+		active, rerr := deps.Services.Bindings.ResolveByConversation(ctx, ref)
+		if rerr != nil {
+			return fmt.Errorf("resolving binding after default-route conflict: %w", rerr)
+		}
+		if active == nil {
+			return nil
+		}
+		result.Binding = active
+		result.TargetSessionID = active.SessionID
+		result.TargetAgentName = active.AgentName
+		return nil
+	}
+	result.Binding = &binding
+	result.TargetAgentName = binding.AgentName
+	return nil
 }
 
 // HandleInbound processes a raw inbound payload through the full pipeline:
 //  1. Look up adapter by key.
 //  2. Verify and normalize the payload.
 //  3. Resolve binding for the conversation.
-//  4. If no binding, try group routing.
+//  4. If no binding, try group routing, then the configured default route.
 //  5. Append to transcript.
 //  6. Nudge all conversation members (not just the target).
 //  7. Emit event.
@@ -88,18 +135,26 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 		result.TargetAgentName = binding.AgentName
 	}
 
-	// Step 4: If no binding, try group routing.
+	// Step 4: If no binding, try group routing, then the default route.
 	if !result.routed() {
 		route, err := deps.Services.Groups.ResolveInbound(ctx, *msg)
 		if err != nil {
 			if !errors.Is(err, ErrGroupNotFound) && !errors.Is(err, ErrGroupRouteNotFound) {
 				return nil, fmt.Errorf("resolving group route: %w", err)
 			}
-			// No binding and no group route — return result with empty target.
-			return result, nil
+		} else {
+			result.GroupRoute = route
+			result.TargetSessionID = route.TargetSessionID
 		}
-		result.GroupRoute = route
-		result.TargetSessionID = route.TargetSessionID
+	}
+	if !result.routed() {
+		if err := applyDefaultRoute(ctx, deps, result, msg.Conversation, msg.ReceivedAt); err != nil {
+			return nil, err
+		}
+	}
+	if !result.routed() {
+		// No binding, no group route, no default route — empty target.
+		return result, nil
 	}
 
 	// Step 5: Append to transcript.
@@ -172,17 +227,26 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 		result.TargetAgentName = binding.AgentName
 	}
 
-	// Step 2: If no binding, try group routing.
+	// Step 2: If no binding, try group routing, then the default route.
 	if !result.routed() {
 		route, err := deps.Services.Groups.ResolveInbound(ctx, msg)
 		if err != nil {
 			if !errors.Is(err, ErrGroupNotFound) && !errors.Is(err, ErrGroupRouteNotFound) {
 				return nil, fmt.Errorf("resolving group route: %w", err)
 			}
-			return result, nil
+		} else {
+			result.GroupRoute = route
+			result.TargetSessionID = route.TargetSessionID
 		}
-		result.GroupRoute = route
-		result.TargetSessionID = route.TargetSessionID
+	}
+	if !result.routed() {
+		if err := applyDefaultRoute(ctx, deps, result, msg.Conversation, now); err != nil {
+			return nil, err
+		}
+	}
+	if !result.routed() {
+		// No binding, no group route, no default route — empty target.
+		return result, nil
 	}
 
 	// Step 3: Append to transcript.
