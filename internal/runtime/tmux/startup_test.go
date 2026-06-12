@@ -1567,6 +1567,26 @@ func TestDoStartSession_PreStartFailureIsFatal(t *testing.T) {
 	assertCallSequence(t, ops, []string{"runSetupCommand"})
 }
 
+func TestRunSetupCommandIncludesStderrOnFailure(t *testing.T) {
+	ops := &tmuxStartOps{tm: &Tmux{}}
+
+	err := ops.runSetupCommand(
+		context.Background(),
+		"printf 'OpenBao read failed for secret/path' >&2; exit 3",
+		map[string]string{},
+		time.Second,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "exit status 3") {
+		t.Fatalf("error = %q, want exit status", err)
+	}
+	if !strings.Contains(err.Error(), "stderr: OpenBao read failed for secret/path") {
+		t.Fatalf("error = %q, want stderr detail", err)
+	}
+}
+
 func TestDoStartSession_SetupEnvPassthrough(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult: true,

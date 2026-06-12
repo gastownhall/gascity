@@ -753,6 +753,7 @@ const (
 	maxReadyProbeTimeout     = 60 * time.Second
 	readyProbeSlack          = 5 * time.Second
 	startupPaneCaptureLines  = 80
+	setupCommandOutputLimit  = 4096
 )
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
@@ -834,7 +835,65 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	if o.tm.cfg.SocketName != "" {
 		c.Env = append(c.Env, "GC_TMUX_SOCKET="+o.tm.cfg.SocketName)
 	}
-	return c.Run()
+	stdout := newCommandOutputTail(setupCommandOutputLimit)
+	stderr := newCommandOutputTail(setupCommandOutputLimit)
+	c.Stdout = stdout
+	c.Stderr = stderr
+	if err := c.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = fmt.Errorf("%w: %v", ctxErr, err)
+		}
+		return setupCommandFailure(err, stdout, stderr)
+	}
+	return nil
+}
+
+type commandOutputTail struct {
+	limit   int
+	written int
+	buf     []byte
+}
+
+func newCommandOutputTail(limit int) *commandOutputTail {
+	return &commandOutputTail{limit: limit}
+}
+
+func (b *commandOutputTail) Write(p []byte) (int, error) {
+	b.written += len(p)
+	if b.limit <= 0 {
+		return len(p), nil
+	}
+	if len(p) >= b.limit {
+		b.buf = append(b.buf[:0], p[len(p)-b.limit:]...)
+		return len(p), nil
+	}
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.limit {
+		copy(b.buf, b.buf[len(b.buf)-b.limit:])
+		b.buf = b.buf[:b.limit]
+	}
+	return len(p), nil
+}
+
+func (b *commandOutputTail) Detail(label string) string {
+	text := strings.TrimSpace(string(b.buf))
+	if text == "" {
+		return ""
+	}
+	if b.written > len(b.buf) {
+		text = "... " + text
+	}
+	return label + ": " + text
+}
+
+func setupCommandFailure(err error, stdout, stderr *commandOutputTail) error {
+	if detail := stderr.Detail("stderr"); detail != "" {
+		return fmt.Errorf("%w; %s", err, detail)
+	}
+	if detail := stdout.Detail("stdout"); detail != "" {
+		return fmt.Errorf("%w; %s", err, detail)
+	}
+	return err
 }
 
 func startupReadyProbeTimeout(cfg runtime.Config) time.Duration {
