@@ -1081,6 +1081,7 @@ func gracefulStopAllWithForceSignal(
 				Type: events.SessionStopped, Actor: "gc", Subject: subject,
 				Payload: api.SessionLifecyclePayloadJSON(sessionID, template, "exited gracefully"),
 			})
+			telemetry.RecordAgentStop(context.Background(), name, "graceful-exit", nil)
 			continue
 		}
 		survivors = append(survivors, name)

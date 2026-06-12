@@ -17,8 +17,8 @@ import (
 // the current (noop) global MeterProvider during tests.
 func resetInstruments(t *testing.T) {
 	t.Helper()
-	instOnce = sync.Once{}
-	t.Cleanup(func() { instOnce = sync.Once{} })
+	ResetInstrumentsForTest()
+	t.Cleanup(ResetInstrumentsForTest)
 }
 
 // --- helper functions ---

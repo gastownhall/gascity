@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
 type wakeEvaluation struct {
@@ -714,6 +716,11 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 			for k, v := range accrual.Patch {
 				session.Metadata[k] = v
 			}
+			telemetry.RecordAgentQuarantine(context.Background(), firstNonEmptyGCString(
+				session.Metadata["agent_name"],
+				session.Metadata["session_name"],
+				session.Metadata["template"],
+			))
 		}
 	} else {
 		next := accrual.Patch["wake_attempts"]
@@ -802,6 +809,11 @@ func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock) {
 			for k, v := range accrual.Patch {
 				session.Metadata[k] = v
 			}
+			telemetry.RecordAgentQuarantine(context.Background(), firstNonEmptyGCString(
+				session.Metadata["agent_name"],
+				session.Metadata["session_name"],
+				session.Metadata["template"],
+			))
 		}
 		return
 	}

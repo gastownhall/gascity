@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
 )
 
@@ -432,6 +433,9 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 		Message: "handoff",
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "handoff"),
 	})
+	// sessionName is the bounded runtime session name, never a bead ID,
+	// so it is safe as a metric label.
+	telemetry.RecordAgentStop(context.Background(), sessionName, "handoff", nil)
 
 	fmt.Fprintf(stdout, "Handoff: sent mail %s to %s, killed session (reconciler will restart)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout
 	return 0

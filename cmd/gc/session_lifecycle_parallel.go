@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
 	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
@@ -1869,6 +1870,7 @@ func commitStartResultTraced(
 		Actor:   "gc",
 		Subject: tp.DisplayName(),
 	})
+	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), nil)
 	if trace != nil {
 		trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
 			"wave": wave,
@@ -2834,6 +2836,7 @@ func stopTargetsBounded(
 						Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
 						Payload: api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 					})
+					telemetry.RecordAgentStop(context.Background(), result.target.name, "stopped", nil)
 				}
 				logLifecycleWave(stderr, "stop", wave, waveStarted, 1)
 			}
@@ -2877,6 +2880,7 @@ func stopTargetsBounded(
 				Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
 				Payload: api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 			})
+			telemetry.RecordAgentStop(context.Background(), result.target.name, "stopped", nil)
 		}
 		logLifecycleWave(stderr, "stop", wave, waveStarted, len(waveTargets))
 	}

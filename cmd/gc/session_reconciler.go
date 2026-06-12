@@ -290,6 +290,9 @@ func finalizeDrainAckStoppedSession(
 		template = session.Metadata["template"]
 	}
 	recordStopped := func() {
+		// The metric reflects the stop itself, so it is recorded even when
+		// no event recorder is wired (matching every other stop call site).
+		telemetry.RecordAgentStop(context.Background(), name, "drain-ack", nil)
 		if rec == nil {
 			return
 		}
@@ -945,6 +948,19 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	trace *sessionReconcilerTraceCycle,
 	startOptions ...startExecutionOption,
 ) int {
+	// Every tick counts as a cycle, including ticks aborted by context
+	// cancellation after real work (e.g. starts) already executed — the
+	// counter means "cycles", not "cycles that ran to completion". started
+	// counts the planned wakes the tick actually executed. Stops are applied
+	// asynchronously (drain advance, drain-ack goroutines) and skips are
+	// per-session trace decisions; neither is aggregated at the tick
+	// boundary, so they are reported as 0 rather than invented (tracked for
+	// fidelity in ga-ebb62d). The ctx param may legitimately be nil here, so
+	// the metric uses context.Background().
+	startedThisTick := 0
+	defer func() {
+		telemetry.RecordReconcileCycle(context.Background(), startedThisTick, 0, 0)
+	}()
 	if ctx != nil && ctx.Err() != nil {
 		return 0
 	}
@@ -2535,6 +2551,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		clk, rec, startupTimeout, stdout, stderr, trace,
 		effectiveStartOptions...,
 	)
+	startedThisTick = plannedWakes
 	recordPhase(TraceSiteSessionReconcileStartExecution, "session_reconcile.execute_planned_starts", phaseStart, map[string]any{
 		"start_candidate_count": len(startCandidates),
 		"planned_wake_count":    plannedWakes,
