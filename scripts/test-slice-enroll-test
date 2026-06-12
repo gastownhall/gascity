@@ -38,6 +38,10 @@ fi
 
 # The real test entrypoints must stay wired to the lib: each sources
 # test-slice.sh and re-execs through gc_test_slice_reexec.
+# test-docker-session and this suite are intentionally absent: Docker
+# workloads are confined by the Docker daemon's cgroups, not the user
+# slice, and this suite exercises gc_test_slice_reexec against fake
+# toolboxes, so wrapping the suite itself would defeat its scenarios.
 for entrypoint in go-test-observable test-go-test-shard test-integration-shard test-local-parallel; do
   path="$repo_root/scripts/$entrypoint"
   if ! grep -qF 'lib/test-slice.sh' "$path" || ! grep -qF 'gc_test_slice_reexec' "$path"; then
