@@ -4075,11 +4075,12 @@ func ApplyAgentDefaults(cfg *City) {
 	}
 }
 
-// defaultOrderTrackingDeleteAfterClose is the default closed-bead TTL applied
-// when [beads.policies.order_tracking].delete_after_close is unset. Cities
-// that never configure the field get automated cleanup with this retention
-// window. The value matches the runtime fallback in cmd/gc.
-const defaultOrderTrackingDeleteAfterClose = "7d"
+// DefaultOrderTrackingDeleteAfterClose is the canonical default closed-bead
+// TTL for the order_tracking policy. Applied by ApplyBeadPolicyDefaults when
+// [beads.policies.order_tracking].delete_after_close is unset in city.toml.
+// cmd/gc/order_dispatch.go derives its runtime fallback from this constant so
+// both values stay in sync.
+const DefaultOrderTrackingDeleteAfterClose = "7d"
 
 // ApplyBeadPolicyDefaults fills in controller-managed defaults for bead
 // policies that have sane non-empty defaults. Call after all config
@@ -4095,7 +4096,7 @@ func ApplyBeadPolicyDefaults(cfg *City) {
 	}
 	p := cfg.Beads.Policies["order_tracking"]
 	if p.DeleteAfterClose == "" {
-		p.DeleteAfterClose = defaultOrderTrackingDeleteAfterClose
+		p.DeleteAfterClose = DefaultOrderTrackingDeleteAfterClose
 		cfg.Beads.Policies["order_tracking"] = p
 	}
 }

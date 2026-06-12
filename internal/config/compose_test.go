@@ -2477,3 +2477,41 @@ KIRO_AGENT_MODE = "headless"
 		t.Errorf("Command = %q, want kiro (from root)", kiro.Command)
 	}
 }
+
+func TestLoadWithIncludes_OrderTrackingDeleteAfterCloseDefaulted(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	p, ok := cfg.Beads.Policies["order_tracking"]
+	if !ok {
+		t.Fatal("order_tracking policy not present after LoadWithIncludes")
+	}
+	if p.DeleteAfterClose != DefaultOrderTrackingDeleteAfterClose {
+		t.Errorf("order_tracking.delete_after_close = %q, want %q", p.DeleteAfterClose, DefaultOrderTrackingDeleteAfterClose)
+	}
+}
+
+func TestLoadWithIncludes_OrderTrackingDeleteAfterCloseExplicitPreserved(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[beads.policies.order_tracking]
+delete_after_close = "48h"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	p := cfg.Beads.Policies["order_tracking"]
+	if p.DeleteAfterClose != "48h" {
+		t.Errorf("order_tracking.delete_after_close = %q, want 48h (explicit value must not be overridden)", p.DeleteAfterClose)
+	}
+}

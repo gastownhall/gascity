@@ -41,7 +41,6 @@ const (
 	orderTrackingSweepOrder                = "order-tracking-sweep"
 	orderTrackingBeadPolicyName            = "order_tracking"
 	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
-	defaultOrderTrackingDeleteAfterClose   = 7 * 24 * time.Hour
 	minClosedOrderTrackingRetained         = 10
 	legacyOrderTrackingRetentionBucket     = "\x00legacy-unscoped-order-tracking"
 	orderTrackingSweepWatchdogInterval     = 30 * time.Second
@@ -86,6 +85,12 @@ const (
 	// closed order-tracking beads deleted per watchdog invocation.
 	orderTrackingRetentionWatchdogDeleteBudget = 100
 )
+
+// defaultOrderTrackingDeleteAfterClose is derived from the canonical config
+// constant so both load-time defaults and the runtime fallback stay in sync.
+var defaultOrderTrackingDeleteAfterClose = config.BeadPolicyConfig{
+	DeleteAfterClose: config.DefaultOrderTrackingDeleteAfterClose,
+}.DeleteAfterCloseDuration()
 
 var (
 	// shellExecPostCancelWaitDelay is os/exec's pipe-close wait after
