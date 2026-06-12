@@ -2142,6 +2142,32 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session)
 
+	// 0. Dismiss any blocking mid-session dialog first. The token-ceiling
+	// resume selector, the periodic feedback prompt, and the provider
+	// session-limit chooser all absorb the next text input instead of
+	// passing it to the prompt, so a nudge sent into one is lost. Single
+	// peek, so a mid-turn session costs one capture-pane and no delay.
+	dismissed, err := runtime.DismissMidSessionDialogs(
+		context.Background(),
+		func(lines int) (string, error) { return t.CapturePane(target, lines) },
+		func(keys ...string) error {
+			for _, k := range keys {
+				if _, err := t.run("send-keys", "-t", target, k); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("dismissing mid-session dialog before nudge: %w", err)
+	}
+	if dismissed {
+		// Give the TUI a beat to retire the dialog before pasting, so the
+		// message lands at the prompt rather than in a closing overlay.
+		time.Sleep(500 * time.Millisecond)
+	}
+
 	// 1. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
