@@ -86,6 +86,27 @@ func TestManagedDoltDataDirLockHolderDetectsHeldLock(t *testing.T) {
 	}
 }
 
+func TestManagedDoltDataDirLockHolderDetectsHeldLockUnderGlobMetacharPath(t *testing.T) {
+	// A literal data-dir path containing glob metacharacters must not be
+	// treated as a pattern: an unmatched `[` makes filepath.Glob error out
+	// (silently dropping the probe) and `?`/`*` match the wrong paths —
+	// either way the guard would miss a held LOCK and re-open the #3174
+	// race for any city at such a path.
+	dataDir := filepath.Join(t.TempDir(), "city [prod ?*")
+	nomsDir := filepath.Join(dataDir, "dolt", ".dolt", "noms")
+	if err := os.MkdirAll(nomsDir, 0o755); err != nil {
+		t.Fatalf("mkdir noms dir: %v", err)
+	}
+	lockPath := filepath.Join(nomsDir, "LOCK")
+	if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
+		t.Fatalf("write lock file: %v", err)
+	}
+	holdFlock(t, lockPath)
+	if holder := managedDoltDataDirLockHolder(dataDir); holder != lockPath {
+		t.Fatalf("expected holder %q, got %q", lockPath, holder)
+	}
+}
+
 func TestManagedDoltDataDirLockHolderDetectsRootLevelLock(t *testing.T) {
 	dataDir := t.TempDir()
 	nomsDir := filepath.Join(dataDir, ".dolt", "noms")

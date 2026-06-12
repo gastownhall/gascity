@@ -333,6 +333,53 @@ func TestProviderLifecycleProcessEnvPropagatesManagedDoltListenerOverrides(t *te
 	}
 }
 
+func TestProviderLifecycleProcessEnvPropagatesDoltLockReleaseTimeout(t *testing.T) {
+	cityPath := t.TempDir()
+	normPath := normalizePathForCompare(cityPath)
+
+	cityDoltConfigs.Store(normPath, config.DoltConfig{DoltLockReleaseTimeout: "90s"})
+	t.Cleanup(func() { cityDoltConfigs.Delete(normPath) })
+
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	if got := env["GC_DOLT_LOCK_RELEASE_TIMEOUT_MS"]; got != "90000" {
+		t.Fatalf("GC_DOLT_LOCK_RELEASE_TIMEOUT_MS = %q, want %q", got, "90000")
+	}
+}
+
+func TestProviderLifecycleProcessEnvOmitsDoltLockReleaseTimeoutWhenUnset(t *testing.T) {
+	cityPath := t.TempDir()
+	normPath := normalizePathForCompare(cityPath)
+
+	cityDoltConfigs.Store(normPath, config.DoltConfig{})
+	t.Cleanup(func() { cityDoltConfigs.Delete(normPath) })
+
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	for _, entry := range envEntries {
+		if strings.HasPrefix(entry, "GC_DOLT_LOCK_RELEASE_TIMEOUT_MS=") {
+			t.Fatalf("GC_DOLT_LOCK_RELEASE_TIMEOUT_MS should not be set when DoltLockReleaseTimeout is empty, got %q", entry)
+		}
+	}
+}
+
+func TestCityDoltConfigHasLifecycleFieldsRecognizesDoltLockReleaseTimeout(t *testing.T) {
+	// A city that sets only [dolt].dolt_lock_release_timeout must register
+	// its dolt config — otherwise startBeadsLifecycle clears the registry
+	// entry and the value never reaches providerLifecycleProcessEnv.
+	if !cityDoltConfigHasLifecycleFields(config.DoltConfig{DoltLockReleaseTimeout: "90s"}) {
+		t.Fatal("cityDoltConfigHasLifecycleFields must recognize DoltLockReleaseTimeout")
+	}
+	if cityDoltConfigHasLifecycleFields(config.DoltConfig{}) {
+		t.Fatal("cityDoltConfigHasLifecycleFields must stay false for an empty config")
+	}
+}
+
 func TestProviderLifecycleProcessEnvOmitsArchiveLevelWhenNil(t *testing.T) {
 	cityPath := t.TempDir()
 	normPath := normalizePathForCompare(cityPath)

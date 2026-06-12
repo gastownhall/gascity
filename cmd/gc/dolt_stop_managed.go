@@ -76,7 +76,16 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	case info.PortHolderPID > 0 && info.PortHolderOwned && managedDoltProcessControllable(info.PortHolderPID, layout):
 		targetPID = info.PortHolderPID
 	}
+	lockWindow := managedDoltLockReleaseTimeoutFn(cityPath)
 	if targetPID <= 0 {
+		// No controllable server process, but a crashed server's flushing
+		// descendant can still hold the store lock. The stop contract says
+		// success means the data dir is released — fail closed instead of
+		// green-lighting a mid-flush data-dir consumer (backup, move,
+		// delete) keyed on stop's success (gastownhall/gascity#3174).
+		if err := waitForManagedDoltDataDirLockFree(layout.DataDir, lockWindow); err != nil {
+			return report, fmt.Errorf("no controllable dolt process, but the data dir is not yet released: %w", err)
+		}
 		if err := clearManagedDoltRuntime(layout, port); err != nil {
 			return report, err
 		}
@@ -100,7 +109,6 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	for managedStopPIDAlive(targetPID) && time.Now().Before(deadline) {
 		time.Sleep(pollInterval)
 	}
-	lockWindow := managedDoltLockReleaseTimeoutFn(cityPath)
 	if managedStopPIDAlive(targetPID) {
 		// The process outlived the SIGTERM grace. SIGKILL is only safe when
 		// the dolt exclusive store lock is free — a holder is mid-flush, and

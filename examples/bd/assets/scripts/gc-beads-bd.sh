@@ -17,10 +17,16 @@
 #   GC_DOLT_PORT  — dolt server port (default: ephemeral, hashed from city path)
 #   GC_DOLT_USER  — dolt user (default: root)
 #   GC_DOLT_PASSWORD — dolt password (default: empty)
-#   GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS — concurrent-start wait budget in milliseconds (default: 45000)
+#   GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS — concurrent-start wait budget in
+#       milliseconds (default: 75000 + 2× the lock-release window = 195000 at
+#       defaults, covering the start-flock winner's worst-case stop — 30s
+#       SIGTERM grace + SIGKILL lock gate + post-exit lock wait — plus the
+#       legacy 45s ready allowance)
 #   GC_DOLT_LOCK_RELEASE_TIMEOUT_MS — wait budget for dolt's on-disk exclusive
-#       store lock (<data_dir>/<db>/.dolt/noms/LOCK) to be released before
-#       start/stop fail closed, in milliseconds (default: 60000)
+#       store locks (<data_dir>/.dolt/noms/LOCK and
+#       <data_dir>/<db>/.dolt/noms/LOCK) to be released before start/stop
+#       fail closed, in milliseconds (default: 60000). gc projects
+#       [dolt].dolt_lock_release_timeout from city.toml into this variable.
 
 set -e
 
@@ -32,7 +38,7 @@ DOLT_USER="${GC_DOLT_USER:-root}"
 DOLT_PASSWORD="${GC_DOLT_PASSWORD:-}"
 DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
 LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
-CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-45000}"
+CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-}"
 LOCK_RELEASE_TIMEOUT_MS="${GC_DOLT_LOCK_RELEASE_TIMEOUT_MS:-60000}"
 BEADS_BACKEND="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
 
@@ -40,11 +46,17 @@ BEADS_BACKEND="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
 # subshells, so a lazily-set memo there would never persist. Without flock
 # the dolt store lock guard (gastownhall/gascity#3174) cannot probe and
 # falls back to the legacy fail-open behavior; warn once so the disabled
-# guard is visible.
+# guard is visible — but only for operations that reach the guard.
+# Status-style ops (health, probe, init, store bridge) never probe the
+# lock and would emit the warning on every invocation.
 FLOCK_AVAILABLE=true
 if ! command -v flock >/dev/null 2>&1; then
     FLOCK_AVAILABLE=false
-    echo "warning: flock unavailable; dolt store lock guard disabled (gastownhall/gascity#3174)" >&2
+    case "${1:-}" in
+        start|ensure-ready|stop|shutdown|recover)
+            echo "warning: flock unavailable; dolt store lock guard disabled (gastownhall/gascity#3174)" >&2
+            ;;
+    esac
 fi
 
 # Derived paths (set after GC_CITY_PATH validation).
@@ -1165,21 +1177,34 @@ kill_imposter() {
 }
 
 # dolt_data_lock_holder prints the path of the first dolt exclusive store
-# lock (<data_dir>/<db>/.dolt/noms/LOCK) held by a live process and returns 0,
-# or returns 1 when every lock is free. Dolt holds this flock until its chunk
+# lock (root-level <data_dir>/.dolt/noms/LOCK or per-database
+# <data_dir>/<db>/.dolt/noms/LOCK) held by a live process and returns 0, or
+# returns 1 when every lock is free. Dolt holds this flock until its chunk
 # journal is flushed and the store is closed — it is the authoritative
 # "safe to bind / safe to force-kill" signal (gastownhall/gascity#3174).
-# Without the flock binary the lock state cannot be probed; report free so
-# callers keep the legacy behavior.
+# A lock flock cannot probe (exit code other than 0 or 1, e.g. an unreadable
+# file) is skipped with a warning — fail open, matching the gc helper's
+# probe convention. Without the flock binary no lock state can be probed;
+# report free so callers keep the legacy behavior. Unlike the gc helper's
+# probe, the per-database glob does not match dot-prefixed database
+# directories; managed layouts never create them.
 dolt_data_lock_holder() {
-    local lock_file
+    local lock_file probe_err probe_status
     [ "$FLOCK_AVAILABLE" = "true" ] || return 1
     for lock_file in "$DATA_DIR"/.dolt/noms/LOCK "$DATA_DIR"/*/.dolt/noms/LOCK; do
         [ -f "$lock_file" ] || continue
-        if ! flock -n "$lock_file" true 2>/dev/null; then
-            printf '%s\n' "$lock_file"
-            return 0
-        fi
+        probe_status=0
+        probe_err=$(flock -n "$lock_file" true 2>&1) || probe_status=$?
+        case "$probe_status" in
+            0) ;;
+            1)
+                printf '%s\n' "$lock_file"
+                return 0
+                ;;
+            *)
+                echo "warning: cannot probe dolt store lock $lock_file: ${probe_err:-flock exit status $probe_status}; treating as free (gastownhall/gascity#3174)" >&2
+                ;;
+        esac
     done
     return 1
 }
@@ -1611,7 +1636,13 @@ wait_for_concurrent_start_ready() {
     timeout_ms="$CONCURRENT_START_READY_TIMEOUT_MS"
     case "$timeout_ms" in
         ''|*[!0-9]*)
-            timeout_ms=45000
+            # The start-flock winner's stop path can spend a 30s SIGTERM
+            # grace plus one lock-release window before SIGKILL and one more
+            # after exit before it launches. Cover that worst case plus the
+            # legacy 45s ready allowance, or a slow-but-recoverable winner
+            # stop hard-fails every concurrent starter
+            # (gastownhall/gascity#3174).
+            timeout_ms=$((75000 + 2 * $(lock_release_timeout_ms)))
             ;;
     esac
     if [ "$timeout_ms" -lt 500 ]; then
@@ -2887,6 +2918,11 @@ op_stop_impl() {
         fi
     fi
     if [ -z "$pid" ] || [ "$owned" != "true" ]; then
+        # No controllable process, but a crashed server's flushing descendant
+        # can still hold the store lock. The stop contract says success means
+        # the data dir is released — fail closed instead of green-lighting a
+        # mid-flush data-dir consumer (gastownhall/gascity#3174).
+        wait_dolt_data_lock_free || return 1
         # No process found — clean up state files.
         save_state 0 false
         rm -f "$PID_FILE"

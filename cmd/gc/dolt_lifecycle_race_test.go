@@ -214,6 +214,33 @@ func TestStopManagedDoltRefusesSIGKILLWhileLockHeld(t *testing.T) {
 	}
 }
 
+func TestStopManagedDoltNoControllablePIDStillGatesOnLockRelease(t *testing.T) {
+	city, lockPath := raceTestCity(t, "")
+	release := holdFlock(t, lockPath)
+	shimLockReleaseTimeout(t, 150*time.Millisecond)
+
+	// No PID file and no port holder: a crashed server left a flushing
+	// descendant behind. The stop contract says success means the data dir
+	// is released — stop must fail closed while the store lock is held, or
+	// anything keyed on stop's success (backup, move, delete) can act
+	// mid-flush (gastownhall/gascity#3174).
+	report, err := stopManagedDoltProcessWithOptions(city, "", false)
+	if err == nil {
+		t.Fatal("expected stop to fail while the store lock is held with no controllable pid")
+	}
+	if !strings.Contains(err.Error(), lockPath) {
+		t.Fatalf("expected error to name the held lock %q, got %v", lockPath, err)
+	}
+	if report.HadPID {
+		t.Fatal("expected no controllable pid in the report")
+	}
+
+	release()
+	if _, err := stopManagedDoltProcessWithOptions(city, "", false); err != nil {
+		t.Fatalf("expected stop to succeed once the lock is free, got %v", err)
+	}
+}
+
 func TestStopManagedDoltWaitsForLockReleaseAfterExit(t *testing.T) {
 	skipSlowCmdGCTest(t, "spawns real processes; run via make test-cmd-gc-process")
 	city, lockPath := raceTestCity(t, "[workspace]\nname = \"race-test\"\n\n[daemon]\ndolt_stop_timeout = \"5s\"\n")

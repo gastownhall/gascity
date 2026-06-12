@@ -26,24 +26,41 @@ import (
 const managedDoltDataDirLockPollInterval = 250 * time.Millisecond
 
 // managedDoltDataDirLockFiles returns the existing dolt exclusive store lock
-// files under dataDir: the per-database `<db>/.dolt/noms/LOCK` paths plus the
-// root-level `.dolt/noms/LOCK` when dataDir is itself a dolt directory.
+// files under dataDir: the root-level `.dolt/noms/LOCK` when dataDir is
+// itself a dolt directory, plus the per-database `<db>/.dolt/noms/LOCK`
+// paths. Candidates are stat'd directly — never globbed — because glob
+// metacharacters in the literal dataDir path (an unmatched `[` errors out, a
+// valid `[x]`/`?`/`*` matches the wrong directories) would silently disable
+// the guard and re-open the #3174 race for any city at such a path.
 func managedDoltDataDirLockFiles(dataDir string) []string {
 	dataDir = strings.TrimSpace(dataDir)
 	if dataDir == "" {
 		return nil
 	}
-	patterns := []string{
-		filepath.Join(dataDir, ".dolt", "noms", "LOCK"),
-		filepath.Join(dataDir, "*", ".dolt", "noms", "LOCK"),
-	}
 	var files []string
-	for _, pattern := range patterns {
-		matches, err := filepath.Glob(pattern)
-		if err != nil {
-			continue
+	appendLockCandidate := func(path string) {
+		_, err := os.Stat(path)
+		switch {
+		case err == nil:
+			files = append(files, path)
+		case errors.Is(err, os.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
+			// No store at this path — nothing to probe.
+		default:
+			// Unknowable lock state: fail open to keep the legacy behavior,
+			// but say so (the guard is silently disabled otherwise).
+			fmt.Fprintf(os.Stderr, "warning: cannot probe dolt store lock %s: %v; treating as free (gastownhall/gascity#3174)\n", path, err)
 		}
-		files = append(files, matches...)
+	}
+	appendLockCandidate(filepath.Join(dataDir, ".dolt", "noms", "LOCK"))
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
+			fmt.Fprintf(os.Stderr, "warning: cannot enumerate dolt databases under %s: %v; per-database store locks not probed (gastownhall/gascity#3174)\n", dataDir, err)
+		}
+		return files
+	}
+	for _, entry := range entries {
+		appendLockCandidate(filepath.Join(dataDir, entry.Name(), ".dolt", "noms", "LOCK"))
 	}
 	return files
 }
@@ -58,7 +75,7 @@ func managedDoltDataDirLockHolder(dataDir string) string {
 	for _, path := range managedDoltDataDirLockFiles(dataDir) {
 		f, err := os.Open(path) //nolint:gosec // path derives from the managed data dir layout
 		if err != nil {
-			// Vanishing between glob and open means the store was removed —
+			// Vanishing between enumeration and open means the store was removed —
 			// genuinely free. Anything else means the lock state is unknowable;
 			// fail open to keep the legacy behavior, but say so (the guard is
 			// silently disabled otherwise). Mirrors the disk-preflight

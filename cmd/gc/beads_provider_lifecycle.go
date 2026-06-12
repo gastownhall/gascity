@@ -101,7 +101,8 @@ func cityDoltConfigHasLifecycleFields(cfg config.DoltConfig) bool {
 		cfg.ArchiveLevel != nil ||
 		cfg.MaxConnections != 0 ||
 		cfg.ReadTimeoutMillis != 0 ||
-		cfg.WriteTimeoutMillis != 0
+		cfg.WriteTimeoutMillis != 0 ||
+		cfg.DoltLockReleaseTimeout != ""
 }
 
 func registerCityDoltConfig(cityPath string, cfg config.DoltConfig) {
@@ -2000,6 +2001,7 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		"GC_DOLT_MAX_CONNECTIONS",
 		"GC_DOLT_READ_TIMEOUT_MILLIS",
 		"GC_DOLT_WRITE_TIMEOUT_MILLIS",
+		"GC_DOLT_LOCK_RELEASE_TIMEOUT_MS",
 	} {
 		env = removeEnvKey(env, key)
 	}
@@ -2038,6 +2040,11 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		}
 		if dc.WriteTimeoutMillis > 0 {
 			env = append(env, fmt.Sprintf("GC_DOLT_WRITE_TIMEOUT_MILLIS=%d", dc.WriteTimeoutMillis))
+		}
+		// An explicit "0s" is meaningful (probe once, no wait), so gate on
+		// field presence rather than a non-zero duration.
+		if dc.DoltLockReleaseTimeout != "" {
+			env = append(env, fmt.Sprintf("GC_DOLT_LOCK_RELEASE_TIMEOUT_MS=%d", dc.DoltLockReleaseTimeoutDuration().Milliseconds()))
 		}
 	}
 	// `gc start` runs in the user's shell, which doesn't see vars set
