@@ -24,6 +24,11 @@ const (
 	GraphExecutionRigContextMetaKey = beadmeta.ExecutionRigContextMetadataKey
 )
 
+// poolWorkflowContinuationGroup is the continuation group value stamped on
+// pool-routed graph.v2 steps so preassignHookContinuationGroup keeps all steps
+// of a molecule on the same pool slot (fixes #2978).
+const poolWorkflowContinuationGroup = "pool-workflow"
+
 // AgentResolver resolves an agent name to a config.Agent.
 type AgentResolver interface {
 	ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool)
@@ -196,6 +201,11 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 	}
 	step.Metadata[beadmeta.RoutedToMetadataKey] = binding.QualifiedName
 	if binding.MetadataOnly {
+		// Pool-routed step: stamp continuation group so preassignHookContinuationGroup
+		// pre-assigns all molecule steps to the claiming slot, preventing scatter
+		// across pool slots (fixes #2978).
+		step.Metadata[beadmeta.ContinuationGroupMetadataKey] = poolWorkflowContinuationGroup
+		step.Metadata[beadmeta.SessionAffinityMetadataKey] = "require"
 		step.Assignee = ""
 		return
 	}

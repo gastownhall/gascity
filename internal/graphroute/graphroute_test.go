@@ -1005,3 +1005,67 @@ func TestApplyGraphControlRouteBinding_ClearsStaleFallbackMetadata(t *testing.T)
 		t.Fatalf("gc.control_dispatcher_fallback = %q, want cleared on re-decoration", got)
 	}
 }
+
+func TestApplyGraphRouteBinding_PoolRouted_StampsContinuationGroup(t *testing.T) {
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{},
+	}
+	binding := GraphRouteBinding{
+		QualifiedName: "gascity/polecat",
+		MetadataOnly:  true,
+	}
+	ApplyGraphRouteBinding(step, binding)
+
+	if got := step.Metadata["gc.continuation_group"]; got != "pool-workflow" {
+		t.Errorf("gc.continuation_group = %q, want pool-workflow", got)
+	}
+	if got := step.Metadata["gc.session_affinity"]; got != "require" {
+		t.Errorf("gc.session_affinity = %q, want require", got)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "gascity/polecat" {
+		t.Errorf("gc.routed_to = %q, want gascity/polecat", got)
+	}
+	if step.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty (pool slots claim at runtime)", step.Assignee)
+	}
+}
+
+func TestApplyGraphRouteBinding_SingleSession_NoAffinityKeys(t *testing.T) {
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{},
+	}
+	binding := GraphRouteBinding{
+		QualifiedName: "gascity/architect",
+		SessionName:   "gascity--architect",
+		MetadataOnly:  false,
+	}
+	ApplyGraphRouteBinding(step, binding)
+
+	if got := step.Metadata["gc.continuation_group"]; got != "" {
+		t.Errorf("gc.continuation_group = %q, want empty for single-session step", got)
+	}
+	if got := step.Metadata["gc.session_affinity"]; got != "" {
+		t.Errorf("gc.session_affinity = %q, want empty for single-session step", got)
+	}
+}
+
+func TestApplyGraphRouteBinding_PoolRouted_DoesNotSetSessionName(t *testing.T) {
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.session_name": "stale-session",
+			"gc.session_id":   "stale-id",
+		},
+	}
+	binding := GraphRouteBinding{
+		QualifiedName: "gascity/polecat",
+		MetadataOnly:  true,
+	}
+	ApplyGraphRouteBinding(step, binding)
+
+	if got := step.Metadata["gc.session_name"]; got != "" {
+		t.Errorf("gc.session_name = %q, want cleared for pool step", got)
+	}
+	if got := step.Metadata["gc.session_id"]; got != "" {
+		t.Errorf("gc.session_id = %q, want cleared for pool step", got)
+	}
+}
