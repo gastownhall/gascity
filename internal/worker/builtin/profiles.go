@@ -489,8 +489,12 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// MiMo Code (Xiaomi's `mimo` CLI) is an OpenCode fork. Permission
 		// defaults are already permissive for bash/edit; only the
 		// question/plan interaction gates block headless runs, so
-		// --never-ask-questions is the only default arg needed. No
-		// mimocode.json is staged — staging one would clobber user config.
+		// --never-ask-questions is the only default arg needed. The flag is
+		// not taken by the `mimo acp` subcommand, so sessions default to the
+		// CLI transport (config.ProviderSessionCreateTransport) and ACP stays
+		// explicit opt-in until `mimo acp` has equivalent non-interactive
+		// conformance coverage. No mimocode.json is staged — staging one
+		// would clobber user config.
 		DisplayName:      "MiMo Code",
 		Command:          "mimo",
 		Args:             []string{"--never-ask-questions"},

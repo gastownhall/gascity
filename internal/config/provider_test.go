@@ -788,6 +788,56 @@ func TestProviderSessionCreateTransportBuiltinKiroStaysOnCLIByDefault(t *testing
 	}
 }
 
+func TestProviderSessionCreateTransportBuiltinMimoCodeStaysOnCLIByDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		rp   ResolvedProvider
+	}{
+		{
+			name: "direct builtin name",
+			rp: ResolvedProvider{
+				Name:        "mimocode",
+				Command:     "mimo",
+				Args:        []string{"--never-ask-questions"},
+				SupportsACP: true,
+				ACPArgs:     []string{"acp"},
+			},
+		},
+		{
+			name: "builtin ancestor",
+			rp: ResolvedProvider{
+				Name:            "custom-mimocode",
+				BuiltinAncestor: "mimocode",
+				Command:         "mimo",
+				Args:            []string{"--never-ask-questions"},
+				SupportsACP:     true,
+				ACPArgs:         []string{"acp"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rp := tt.rp
+			if got := rp.ProviderSessionCreateTransport(); got != "" {
+				t.Fatalf("ProviderSessionCreateTransport() = %q, want empty default transport", got)
+			}
+			if got := ResolveSessionCreateTransport("", &rp); got != "" {
+				t.Fatalf("ResolveSessionCreateTransport(empty) = %q, want empty default transport", got)
+			}
+			if got := ResolveSessionCreateTransport("acp", &rp); got != "acp" {
+				t.Fatalf("ResolveSessionCreateTransport(acp) = %q, want acp", got)
+			}
+			if got := rp.CommandString(); got != "mimo --never-ask-questions" {
+				t.Fatalf("CommandString() = %q, want headless MiMo CLI command", got)
+			}
+			if got := rp.ACPCommandString(); got != "mimo acp" {
+				t.Fatalf("ACPCommandString() = %q, want explicit MiMo ACP command", got)
+			}
+		})
+	}
+}
+
 func TestProviderSessionCreateTransportSupportsACPAloneStaysDefault(t *testing.T) {
 	rp := &ResolvedProvider{
 		Name:        "custom-acp",

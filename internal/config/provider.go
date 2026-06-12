@@ -305,6 +305,14 @@ func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
 		// the non-interactive tool trust contract required by coding agents.
 		return ""
 	}
+	if family == "mimocode" {
+		// MiMo Code supports explicit ACP sessions, but --never-ask-questions
+		// — the flag that suppresses the question/plan gates headless runs
+		// require — is not taken by the `mimo acp` subcommand, and ACPArgs
+		// replaces Args, so an ACP default would compose a launch without it.
+		// Live conformance coverage exists only on the CLI transport.
+		return ""
+	}
 	if strings.TrimSpace(rp.ACPCommand) != "" || rp.ACPArgs != nil {
 		return SessionTransportACP
 	}

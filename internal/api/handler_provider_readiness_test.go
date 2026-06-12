@@ -109,6 +109,7 @@ func TestProbeMimoCodeNeedsAuthWithoutKeyOrCredentials(t *testing.T) {
 	pinProbeSearchPath(t, homeDir)
 	stageMimoProbeBinary(t, homeDir)
 	t.Setenv("XIAOMI_API_KEY", "")
+	t.Setenv("XDG_DATA_HOME", "")
 
 	result := probeMimoCode(homeDir)
 	if result.status != probeStatusNeedsAuth {
@@ -121,6 +122,7 @@ func TestProbeMimoCodeAuthFileConfigured(t *testing.T) {
 	pinProbeSearchPath(t, homeDir)
 	stageMimoProbeBinary(t, homeDir)
 	t.Setenv("XIAOMI_API_KEY", "")
+	t.Setenv("XDG_DATA_HOME", "")
 
 	authDir := filepath.Join(homeDir, ".local", "share", "mimocode")
 	if err := os.MkdirAll(authDir, 0o755); err != nil {
@@ -141,6 +143,7 @@ func TestProbeMimoCodeEmptyAuthFileNeedsAuth(t *testing.T) {
 	pinProbeSearchPath(t, homeDir)
 	stageMimoProbeBinary(t, homeDir)
 	t.Setenv("XIAOMI_API_KEY", "")
+	t.Setenv("XDG_DATA_HOME", "")
 
 	authDir := filepath.Join(homeDir, ".local", "share", "mimocode")
 	if err := os.MkdirAll(authDir, 0o755); err != nil {
@@ -153,6 +156,72 @@ func TestProbeMimoCodeEmptyAuthFileNeedsAuth(t *testing.T) {
 	result := probeMimoCode(homeDir)
 	if result.status != probeStatusNeedsAuth {
 		t.Fatalf("probeMimoCode status = %q, want %q (%s)", result.status, probeStatusNeedsAuth, result.detail)
+	}
+}
+
+func TestProbeMimoCodeAuthFileConfiguredUnderXDGDataHome(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+	stageMimoProbeBinary(t, homeDir)
+	t.Setenv("XIAOMI_API_KEY", "")
+	xdgDataHome := filepath.Join(homeDir, "xdg-data")
+	t.Setenv("XDG_DATA_HOME", xdgDataHome)
+
+	authDir := filepath.Join(xdgDataHome, "mimocode")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "auth.json"), []byte(`{"xiaomi":{"type":"api","key":"test"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := probeMimoCode(homeDir)
+	if result.status != probeStatusConfigured {
+		t.Fatalf("probeMimoCode status = %q, want %q (%s)", result.status, probeStatusConfigured, result.detail)
+	}
+}
+
+func TestProbeMimoCodeAbsoluteXDGDataHomeShadowsHomeAuthFile(t *testing.T) {
+	// mimo resolves its credential store under $XDG_DATA_HOME when set, so a
+	// stale ~/.local/share copy must not report configured.
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+	stageMimoProbeBinary(t, homeDir)
+	t.Setenv("XIAOMI_API_KEY", "")
+	t.Setenv("XDG_DATA_HOME", filepath.Join(homeDir, "xdg-data"))
+
+	authDir := filepath.Join(homeDir, ".local", "share", "mimocode")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "auth.json"), []byte(`{"xiaomi":{"type":"api","key":"test"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := probeMimoCode(homeDir)
+	if result.status != probeStatusNeedsAuth {
+		t.Fatalf("probeMimoCode status = %q, want %q (%s)", result.status, probeStatusNeedsAuth, result.detail)
+	}
+}
+
+func TestProbeMimoCodeRelativeXDGDataHomeFallsBackToHome(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+	stageMimoProbeBinary(t, homeDir)
+	t.Setenv("XIAOMI_API_KEY", "")
+	t.Setenv("XDG_DATA_HOME", "relative/xdg-data")
+
+	authDir := filepath.Join(homeDir, ".local", "share", "mimocode")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "auth.json"), []byte(`{"xiaomi":{"type":"api","key":"test"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := probeMimoCode(homeDir)
+	if result.status != probeStatusConfigured {
+		t.Fatalf("probeMimoCode status = %q, want %q (%s)", result.status, probeStatusConfigured, result.detail)
 	}
 }
 

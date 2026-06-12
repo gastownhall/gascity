@@ -506,22 +506,34 @@ func probeMimoCode(homeDir string) providerProbeResult {
 		return providerProbeResult{status: probeStatusConfigured}
 	}
 
-	authPath := filepath.Join(homeDir, ".local", "share", "mimocode", "auth.json")
+	authPath := mimoCodeAuthPath(homeDir)
 	data, err := os.ReadFile(authPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return providerProbeResult{status: probeStatusNeedsAuth, detail: "set XIAOMI_API_KEY or run `mimo providers login` (missing ~/.local/share/mimocode/auth.json)"}
+			return providerProbeResult{status: probeStatusNeedsAuth, detail: fmt.Sprintf("set XIAOMI_API_KEY or run `mimo providers login` (missing %s)", authPath)}
 		}
-		return providerProbeResult{status: probeStatusProbeError, detail: "failed to read ~/.local/share/mimocode/auth.json"}
+		return providerProbeResult{status: probeStatusProbeError, detail: fmt.Sprintf("failed to read %s", authPath)}
 	}
 	var credentials map[string]json.RawMessage
 	if err := json.Unmarshal(data, &credentials); err != nil {
-		return providerProbeResult{status: probeStatusProbeError, detail: "invalid JSON in ~/.local/share/mimocode/auth.json"}
+		return providerProbeResult{status: probeStatusProbeError, detail: fmt.Sprintf("invalid JSON in %s", authPath)}
 	}
 	if len(credentials) == 0 {
-		return providerProbeResult{status: probeStatusNeedsAuth, detail: "no credentials in ~/.local/share/mimocode/auth.json; set XIAOMI_API_KEY or run `mimo providers login`"}
+		return providerProbeResult{status: probeStatusNeedsAuth, detail: fmt.Sprintf("no credentials in %s; set XIAOMI_API_KEY or run `mimo providers login`", authPath)}
 	}
 	return providerProbeResult{status: probeStatusConfigured}
+}
+
+// mimoCodeAuthPath resolves the credential store written by
+// `mimo providers login`. mimo (an OpenCode fork) places it under the XDG
+// data root: $XDG_DATA_HOME when set to an absolute path, otherwise
+// ~/.local/share.
+func mimoCodeAuthPath(homeDir string) string {
+	dataRoot := filepath.Join(homeDir, ".local", "share")
+	if xdg := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdg != "" && filepath.IsAbs(xdg) {
+		dataRoot = xdg
+	}
+	return filepath.Join(dataRoot, "mimocode", "auth.json")
 }
 
 func probeGitHubCLI(ctx context.Context, homeDir string) providerProbeResult {
