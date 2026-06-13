@@ -209,53 +209,7 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 			if err != nil {
 				return err
 			}
-			if s.transcript == nil {
-				return nil
-			}
-			_, err = s.transcript.EnsureMembership(ctx, EnsureMembershipInput{
-				Caller:         groupTranscriptCaller(),
-				Conversation:   group.RootConversation,
-				SessionID:      sessionID,
-				BackfillPolicy: MembershipBackfillAll,
-				Owner:          MembershipOwnerGroup,
-				Now:            timeNow(),
-			})
-			if err != nil {
-				return wrapTranscriptSyncError("ensure transcript membership after participant upsert", err)
-			}
-			if len(pendingCleanup) == 0 {
-				return nil
-			}
-			activeSessions, err := s.activeParticipantSessionCounts(ctx, groupID)
-			if err != nil {
-				return err
-			}
-			remainingCleanup := make([]string, 0, len(pendingCleanup))
-			var cleanupErr error
-			for _, cleanupSessionID := range pendingCleanup {
-				if activeSessions[cleanupSessionID] > 0 {
-					continue
-				}
-				err = s.transcript.RemoveMembership(ctx, RemoveMembershipInput{
-					Caller:       groupTranscriptCaller(),
-					Conversation: group.RootConversation,
-					SessionID:    cleanupSessionID,
-					Owner:        MembershipOwnerGroup,
-					Now:          timeNow(),
-				})
-				if err == nil || errors.Is(err, ErrMembershipNotFound) {
-					continue
-				}
-				cleanupErr = err
-				remainingCleanup = append(remainingCleanup, cleanupSessionID)
-			}
-			if err := s.setParticipantPendingCleanup(item.ID, remainingCleanup); err != nil {
-				return err
-			}
-			if len(remainingCleanup) > 0 {
-				return wrapTranscriptSyncError("remove transcript membership after participant reassignment", cleanupErr)
-			}
-			return nil
+			return s.migrateParticipantGroupMembership(ctx, group, item.ID, sessionID, pendingCleanup)
 		}
 		createLabels := []string{"gc:extmsg-participant", labelGroupParticipantBase, groupParticipantLabel(groupID), groupParticipantSessionLabel(sessionID)}
 		if sessionName != "" {
@@ -274,21 +228,7 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 		if err != nil {
 			return err
 		}
-		if s.transcript == nil {
-			return nil
-		}
-		_, err = s.transcript.EnsureMembership(ctx, EnsureMembershipInput{
-			Caller:         groupTranscriptCaller(),
-			Conversation:   group.RootConversation,
-			SessionID:      sessionID,
-			BackfillPolicy: MembershipBackfillAll,
-			Owner:          MembershipOwnerGroup,
-			Now:            timeNow(),
-		})
-		if err != nil {
-			return wrapTranscriptSyncError("ensure transcript membership after participant upsert", err)
-		}
-		return nil
+		return s.migrateParticipantGroupMembership(ctx, group, created.ID, sessionID, nil)
 	})
 	if err != nil {
 		return ConversationGroupParticipant{}, err
@@ -635,6 +575,78 @@ func (s *groupService) setParticipantPendingCleanup(participantID string, sessio
 	return nil
 }
 
+// migrateParticipantGroupMembership ensures newSessionID owns the group's
+// transcript membership on the root conversation, then retires the group-owned
+// membership for any session in retiredSessionIDs that no active participant in
+// the group still references. A retired session whose membership cannot be
+// removed yet — a live participant still uses it, or the remove failed — is
+// written back onto the participant bead's previous_session_id_pending_cleanup
+// metadata so a later mutation retries it.
+//
+// Both UpsertParticipant (when a handle's session changes) and
+// ReassignSessionParticipants (canonical respawn handover) move a group
+// participant to a new session, so both must carry the session-ID-keyed
+// membership with it; sharing this helper keeps those paths from drifting.
+// Callers must hold groupParticipantsMutationLock for the group and should have
+// already persisted retiredSessionIDs to that metadata so an ensure failure
+// still leaves a durable cleanup record.
+//
+// The ensure/remove writes timestamp with the package timeNow() clock rather
+// than a caller-threaded now (as the sibling ReassignSessionBindings uses):
+// this helper is shared with UpsertParticipant, which has no caller-supplied
+// now, and timeNow is the package-wide clock seam (frozen in tests), so a single
+// clock source keeps both callers consistent without plumbing a now through the
+// participant upsert API. The timestamp is a touched-at marker, so the
+// sub-operation instant difference is immaterial.
+func (s *groupService) migrateParticipantGroupMembership(ctx context.Context, group ConversationGroupRecord, participantID, newSessionID string, retiredSessionIDs []string) error {
+	if s.transcript == nil {
+		return nil
+	}
+	if _, err := s.transcript.EnsureMembership(ctx, EnsureMembershipInput{
+		Caller:         groupTranscriptCaller(),
+		Conversation:   group.RootConversation,
+		SessionID:      newSessionID,
+		BackfillPolicy: MembershipBackfillAll,
+		Owner:          MembershipOwnerGroup,
+		Now:            timeNow(),
+	}); err != nil {
+		return wrapTranscriptSyncError("ensure transcript membership after participant session migration", err)
+	}
+	if len(retiredSessionIDs) == 0 {
+		return nil
+	}
+	activeSessions, err := s.activeParticipantSessionCounts(ctx, group.ID)
+	if err != nil {
+		return err
+	}
+	remainingCleanup := make([]string, 0, len(retiredSessionIDs))
+	var cleanupErr error
+	for _, cleanupSessionID := range retiredSessionIDs {
+		if activeSessions[cleanupSessionID] > 0 {
+			continue
+		}
+		err = s.transcript.RemoveMembership(ctx, RemoveMembershipInput{
+			Caller:       groupTranscriptCaller(),
+			Conversation: group.RootConversation,
+			SessionID:    cleanupSessionID,
+			Owner:        MembershipOwnerGroup,
+			Now:          timeNow(),
+		})
+		if err == nil || errors.Is(err, ErrMembershipNotFound) {
+			continue
+		}
+		cleanupErr = err
+		remainingCleanup = append(remainingCleanup, cleanupSessionID)
+	}
+	if err := s.setParticipantPendingCleanup(participantID, remainingCleanup); err != nil {
+		return err
+	}
+	if len(remainingCleanup) > 0 {
+		return wrapTranscriptSyncError("remove transcript membership after participant session migration", cleanupErr)
+	}
+	return nil
+}
+
 func groupParticipantsMutationLock(groupID string) string {
 	return groupParticipantLabel(groupID) + ":mutation"
 }
@@ -708,6 +720,25 @@ func removeSessionID(sessionIDs []string, target string) []string {
 		out = append(out, sessionID)
 	}
 	return pendingCleanupSessionIDsFromMetadata(map[string]string{"previous_session_id_pending_cleanup": encodePendingCleanupSessionIDs(out)})
+}
+
+// participantReassignmentPending reports whether a group-participant bead still
+// needs its session reassigned from oldSessionID to newSessionID. It is true
+// when the bead still points at the retired session, or when a prior attempt
+// already swapped session_id to the replacement but left the retired session in
+// previous_session_id_pending_cleanup — meaning transcript membership migration
+// had not completed yet, so a retry must finish the handover. The retired-session
+// lookup label is retained until that point precisely so such a partially
+// migrated participant remains discoverable by ReassignSessionParticipants.
+func participantReassignmentPending(metadata map[string]string, oldSessionID, newSessionID string) bool {
+	switch strings.TrimSpace(metadata["session_id"]) {
+	case oldSessionID:
+		return true
+	case newSessionID:
+		return slices.Contains(pendingCleanupSessionIDsFromMetadata(metadata), oldSessionID)
+	default:
+		return false
+	}
 }
 
 func decodeGroupBead(b beads.Bead) (ConversationGroupRecord, error) {

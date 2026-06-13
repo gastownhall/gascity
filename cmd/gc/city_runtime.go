@@ -1170,6 +1170,13 @@ func (cr *CityRuntime) tick(
 	phaseStart = time.Now()
 	reapStaleExtmsgBindings(ctx, cr.cityBeadStore(), time.Now(), cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_bindings", phaseStart, nil)
+	// Re-point group participants at respawned sessions and carry their
+	// group-owned transcript membership; the participant side has no read-time
+	// membership overlay, so this backstop is what converges binding-less
+	// participants the binding reaper never sees.
+	phaseStart = time.Now()
+	reapStaleExtmsgParticipants(ctx, cr.cityBeadStore(), cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_participants", phaseStart, nil)
 	phaseStart = time.Now()
 	result = refreshDesiredStateWithSessionBeads(
 		result,

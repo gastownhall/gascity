@@ -318,3 +318,60 @@ func TestBindBackfillsSessionNameOnLegacyBinding(t *testing.T) {
 		t.Fatalf("backfilled binding labels %v missing session-name label %q", bead.Labels, bindingSessionNameLabel("gc-pl"))
 	}
 }
+
+// TestGroupRoutingFollowsRetiredButOpenSession proves the live-session overlay
+// re-resolves a stable session name even when the stored bead is archived
+// in place rather than closed. Duplicate-named-session repair archives the loser
+// with session.RetireNamedSessionPatch — clearing its identifiers but leaving it
+// open — so a "not closed" fast path would keep routing the group participant at
+// the retired bead instead of its live replacement.
+func TestGroupRoutingFollowsRetiredButOpenSession(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	sessAID := makeSessionBead(t, store, "pl-alpha")
+
+	svc := NewGroupService(store)
+	ref := testConversationRef()
+	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if _, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessAID,
+	}); err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+
+	// Retire session A the way duplicate-named-session repair does: release its
+	// identifiers and archive it WITHOUT closing the bead. It stays open, so the
+	// overlay must not treat it as the live owner of "pl-alpha".
+	retire := session.RetireNamedSessionPatch(testNow(), "duplicate-repair", "")
+	if err := store.SetMetadataBatch(sessAID, map[string]string(retire)); err != nil {
+		t.Fatalf("retire session A in place: %v", err)
+	}
+	a, err := store.Get(sessAID)
+	if err != nil {
+		t.Fatalf("get retired session A: %v", err)
+	}
+	if a.Status == "closed" {
+		t.Fatalf("retired session A is closed; this test must exercise the open-but-retired path")
+	}
+	// The replacement bead now owns "pl-alpha"; the real resolver must find it
+	// (session A's name was cleared, so it no longer matches).
+	sessBID := makeSessionBead(t, store, "pl-alpha")
+
+	decision, err := svc.ResolveInbound(context.Background(), ExternalInboundMessage{Conversation: ref})
+	if err != nil {
+		t.Fatalf("ResolveInbound: %v", err)
+	}
+	if decision.TargetSessionID != sessBID {
+		t.Errorf("TargetSessionID = %q, want %q (live replacement); open-but-retired bead %q must not short-circuit the overlay",
+			decision.TargetSessionID, sessBID, sessAID)
+	}
+}

@@ -38,3 +38,30 @@ func reapStaleExtmsgBindings(ctx context.Context, store beads.Store, now time.Ti
 			stats.Reassigned, stats.Cleared, stats.Scanned)
 	}
 }
+
+// reapStaleExtmsgParticipants reconciles external-message group participants
+// against live session identity on each reconciler tick — the participant-side
+// companion to reapStaleExtmsgBindings. Group-participant routing self-heals at
+// read time, but the group-owned transcript membership (keyed by session ID)
+// does not, and a binding-less group participant whose session respawns is
+// reached by no other backstop, so without this sweep its membership would stay
+// stranded on the retired session bead. It runs on the same tick and after
+// session beads have been synced. Errors are logged and swallowed so a
+// participant-store hiccup never stalls the reconciler loop.
+func reapStaleExtmsgParticipants(ctx context.Context, store beads.Store, stderr io.Writer) {
+	if store == nil {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	stats, err := extmsg.ReapStaleParticipants(ctx, store)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: reaping stale extmsg participants: %v\n", err) //nolint:errcheck
+		return
+	}
+	if stats.Reassigned > 0 {
+		fmt.Fprintf(stderr, "session reconciler: extmsg participants reaped (reassigned=%d scanned=%d)\n", //nolint:errcheck
+			stats.Reassigned, stats.Scanned)
+	}
+}

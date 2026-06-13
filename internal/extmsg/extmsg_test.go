@@ -2211,6 +2211,16 @@ func overrideResolveLiveSessionID(t *testing.T, fn func(beads.Store, string) (st
 	t.Cleanup(func() { resolveLiveSessionID = prev })
 }
 
+// overrideReassignmentTranscript substitutes the transcript syncer used by
+// ReassignSessionParticipants so tests can inject a flaky transcript and drive
+// the retry-idempotence paths after a membership-migration failure.
+func overrideReassignmentTranscript(t *testing.T, transcript groupTranscriptSync) {
+	t.Helper()
+	prev := newReassignmentTranscript
+	newReassignmentTranscript = func(beads.Store, *bindingLockPool) groupTranscriptSync { return transcript }
+	t.Cleanup(func() { newReassignmentTranscript = prev })
+}
+
 func TestGroupServiceUpsertParticipantStoresSessionName(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
@@ -2353,7 +2363,9 @@ func TestReassignSessionParticipants(t *testing.T) {
 	store := beads.NewMemStore()
 	sessAID := makeSessionBead(t, store, "pl-alpha")
 
-	svc := NewGroupService(store)
+	fabric := NewServices(store)
+	svc := fabric.Groups
+	transcript := fabric.Transcript
 	ref := testConversationRef()
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
 		RootConversation: ref,
@@ -2370,6 +2382,10 @@ func TestReassignSessionParticipants(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("UpsertParticipant: %v", err)
+	}
+	// The participant upsert seeds a group-owned membership for session A.
+	if got := membershipSessionIDs(t, transcript, ref); !sameMembers(got, []string{sessAID}) {
+		t.Fatalf("memberships(after upsert) = %#v, want [%s]", got, sessAID)
 	}
 
 	sessBID := makeSessionBead(t, store, "pl-alpha-v2")
@@ -2399,6 +2415,383 @@ func TestReassignSessionParticipants(t *testing.T) {
 	// session_name label must be preserved (stable across respawn).
 	if !hasLabel(bead, groupParticipantSessionNameLabel("pl-alpha")) {
 		t.Errorf("participant missing session-name label %q; labels: %v", groupParticipantSessionNameLabel("pl-alpha"), bead.Labels)
+	}
+	// The group-owned transcript membership must follow the participant to the
+	// respawned session: session B gains it, retired session A loses it. Without
+	// this, transcript discovery (keyed by session ID) misses binding-less group
+	// participants and the retired session's membership leaks.
+	if got := membershipSessionIDs(t, transcript, ref); !sameMembers(got, []string{sessBID}) {
+		t.Fatalf("memberships(after reassign) = %#v, want [%s]", got, sessBID)
+	}
+	membership := membershipRecordBySession(t, transcript, ref, sessBID)
+	if !sameMembershipOwners(membership.Owners, []MembershipOwner{MembershipOwnerGroup}) {
+		t.Errorf("membership owners = %#v, want [group]", membership.Owners)
+	}
+}
+
+// TestReassignSessionParticipantsLeavesOtherSessionMembershipsIntact proves the
+// reassign only migrates the membership for the retired session and never
+// disturbs a co-resident participant bound to a different live session.
+func TestReassignSessionParticipantsLeavesOtherSessionMembershipsIntact(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	sessAID := makeSessionBead(t, store, "pl-alpha")
+	sessZID := makeSessionBead(t, store, "pl-zeta")
+
+	fabric := NewServices(store)
+	svc := fabric.Groups
+	transcript := fabric.Transcript
+	ref := testConversationRef()
+	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if _, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessAID,
+	}); err != nil {
+		t.Fatalf("UpsertParticipant(alpha): %v", err)
+	}
+	if _, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "zeta",
+		SessionID: sessZID,
+	}); err != nil {
+		t.Fatalf("UpsertParticipant(zeta): %v", err)
+	}
+	if got := membershipSessionIDs(t, transcript, ref); !sameMembers(got, []string{sessAID, sessZID}) {
+		t.Fatalf("memberships(after upserts) = %#v, want [%s %s]", got, sessAID, sessZID)
+	}
+
+	sessBID := makeSessionBead(t, store, "pl-alpha-v2")
+	if err := store.Close(sessAID); err != nil {
+		t.Fatalf("close retired session A bead: %v", err)
+	}
+	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err != nil {
+		t.Fatalf("ReassignSessionParticipants: %v", err)
+	}
+
+	// alpha's membership moved A->B; zeta's session-Z membership is untouched.
+	if got := membershipSessionIDs(t, transcript, ref); !sameMembers(got, []string{sessBID, sessZID}) {
+		t.Fatalf("memberships(after reassign) = %#v, want [%s %s]", got, sessBID, sessZID)
+	}
+}
+
+// TestReassignSessionParticipantsRetriesAfterEnsureFailure proves the handover
+// survives a transcript ensure failure: the retired-session lookup label must be
+// retained until membership migration commits, so a retry can rediscover the
+// partially migrated participant and finish the move instead of stranding it.
+func TestReassignSessionParticipantsRetriesAfterEnsureFailure(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	sessAID := makeSessionBead(t, store, "pl-alpha")
+
+	svc := NewServices(store).Groups
+	ref := testConversationRef()
+	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	participant, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessAID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+
+	sessBID := makeSessionBead(t, store, "pl-alpha-v2")
+	if err := store.Close(sessAID); err != nil {
+		t.Fatalf("close retired session A bead: %v", err)
+	}
+
+	// First handover attempt: the replacement-session membership ensure fails.
+	flaky := &flakyTranscriptService{failEnsureCount: 1, err: errors.New("boom")}
+	overrideReassignmentTranscript(t, flaky)
+	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err == nil || !errors.Is(err, ErrTranscriptSyncFailed) {
+		t.Fatalf("ReassignSessionParticipants(first) error = %v, want ErrTranscriptSyncFailed", err)
+	}
+
+	// Regression: the partially migrated participant must still be discoverable by
+	// the retired-session label so a retry can finish the handover. Dropping that
+	// label before membership migration committed is the bug this guards.
+	stale, err := store.ListByLabel(groupParticipantSessionLabel(sessAID), 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(retired session): %v", err)
+	}
+	if len(stale) != 1 || stale[0].ID != participant.ID {
+		t.Fatalf("retired-session label dropped before migration committed: %#v", stale)
+	}
+	if got := stale[0].Metadata["session_id"]; got != sessBID {
+		t.Errorf("session_id after failed handover = %q, want %q (already swapped to replacement)", got, sessBID)
+	}
+	if got := stale[0].Metadata["previous_session_id_pending_cleanup"]; got != sessAID {
+		t.Errorf("pending cleanup after failed handover = %q, want %q", got, sessAID)
+	}
+
+	// Retry: ensure now succeeds and the handover completes.
+	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err != nil {
+		t.Fatalf("ReassignSessionParticipants(retry): %v", err)
+	}
+	if flaky.ensureCalls != 2 {
+		t.Fatalf("EnsureMembership calls = %d, want 2 (initial failure + successful retry)", flaky.ensureCalls)
+	}
+	bead, err := store.Get(participant.ID)
+	if err != nil {
+		t.Fatalf("Get(participant): %v", err)
+	}
+	if hasLabel(bead, groupParticipantSessionLabel(sessAID)) {
+		t.Errorf("retired-session label %q not cleared after successful retry", groupParticipantSessionLabel(sessAID))
+	}
+	if !hasLabel(bead, groupParticipantSessionLabel(sessBID)) {
+		t.Errorf("replacement-session label %q missing; labels: %v", groupParticipantSessionLabel(sessBID), bead.Labels)
+	}
+	if got := bead.Metadata["previous_session_id_pending_cleanup"]; got != "" {
+		t.Errorf("pending cleanup after retry = %q, want empty", got)
+	}
+}
+
+// TestReassignSessionParticipantsRetriesAfterRemoveFailure proves the same
+// retry idempotence when the retired session's membership removal fails after a
+// successful ensure on the replacement.
+func TestReassignSessionParticipantsRetriesAfterRemoveFailure(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	sessAID := makeSessionBead(t, store, "pl-alpha")
+
+	svc := NewServices(store).Groups
+	ref := testConversationRef()
+	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	participant, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessAID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+
+	sessBID := makeSessionBead(t, store, "pl-alpha-v2")
+	if err := store.Close(sessAID); err != nil {
+		t.Fatalf("close retired session A bead: %v", err)
+	}
+
+	// First attempt: ensure(replacement) succeeds, remove(retired) fails.
+	flaky := &flakyTranscriptService{failRemoveCount: 1, err: errors.New("boom")}
+	overrideReassignmentTranscript(t, flaky)
+	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err == nil || !errors.Is(err, ErrTranscriptSyncFailed) {
+		t.Fatalf("ReassignSessionParticipants(first) error = %v, want ErrTranscriptSyncFailed", err)
+	}
+	stale, err := store.ListByLabel(groupParticipantSessionLabel(sessAID), 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(retired session): %v", err)
+	}
+	if len(stale) != 1 || stale[0].ID != participant.ID {
+		t.Fatalf("retired-session label dropped before cleanup committed: %#v", stale)
+	}
+	if got := stale[0].Metadata["previous_session_id_pending_cleanup"]; got != sessAID {
+		t.Errorf("pending cleanup after failed remove = %q, want %q", got, sessAID)
+	}
+
+	// Retry: removal now succeeds and the handover completes.
+	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err != nil {
+		t.Fatalf("ReassignSessionParticipants(retry): %v", err)
+	}
+	if flaky.removeCalls != 2 {
+		t.Fatalf("RemoveMembership calls = %d, want 2 (initial failure + successful retry)", flaky.removeCalls)
+	}
+	bead, err := store.Get(participant.ID)
+	if err != nil {
+		t.Fatalf("Get(participant): %v", err)
+	}
+	if hasLabel(bead, groupParticipantSessionLabel(sessAID)) {
+		t.Errorf("retired-session label %q not cleared after successful retry", groupParticipantSessionLabel(sessAID))
+	}
+	if got := bead.Metadata["previous_session_id_pending_cleanup"]; got != "" {
+		t.Errorf("pending cleanup after retry = %q, want empty", got)
+	}
+}
+
+// TestReapStaleParticipants proves the background participant reaper heals a
+// binding-less group participant whose session respawned: it follows the live
+// bead and carries the group-owned transcript membership, on the same NDI
+// cadence as the binding reaper, and is a no-op once converged.
+func TestReapStaleParticipants(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	sessAID := makeSessionBead(t, store, "pl-alpha")
+
+	fabric := NewServices(store)
+	svc := fabric.Groups
+	transcript := fabric.Transcript
+	ref := testConversationRef()
+	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	participant, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessAID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+	if got := membershipSessionIDs(t, transcript, ref); !sameMembers(got, []string{sessAID}) {
+		t.Fatalf("memberships(after upsert) = %#v, want [%s]", got, sessAID)
+	}
+
+	// Respawn: retire A and mint a fresh bead under the same name. No binding
+	// exists, so only the participant reaper can converge this session.
+	sessBID := respawn(t, store, sessAID, "pl-alpha")
+
+	stats, err := ReapStaleParticipants(context.Background(), store)
+	if err != nil {
+		t.Fatalf("ReapStaleParticipants: %v", err)
+	}
+	if stats.Reassigned != 1 || stats.Scanned != 1 {
+		t.Fatalf("stats = %+v, want Reassigned=1 Scanned=1", stats)
+	}
+	bead, err := store.Get(participant.ID)
+	if err != nil {
+		t.Fatalf("Get(participant): %v", err)
+	}
+	if bead.Metadata["session_id"] != sessBID {
+		t.Errorf("participant session_id = %q, want %q (respawned bead)", bead.Metadata["session_id"], sessBID)
+	}
+	if got := membershipSessionIDs(t, transcript, ref); !sameMembers(got, []string{sessBID}) {
+		t.Fatalf("memberships(after reap) = %#v, want [%s]; group-owned membership must follow the respawn", got, sessBID)
+	}
+
+	// Idempotent: a second sweep finds nothing stale now that the participant
+	// already points at the live bead.
+	stats, err = ReapStaleParticipants(context.Background(), store)
+	if err != nil {
+		t.Fatalf("ReapStaleParticipants(second): %v", err)
+	}
+	if stats.Reassigned != 0 {
+		t.Fatalf("second sweep Reassigned = %d, want 0 (already converged)", stats.Reassigned)
+	}
+}
+
+// TestReapStaleParticipantsFinishesPendingCleanupAfterPartialHandover proves the
+// participant reaper completes a handover that committed the session_id swap and
+// then failed mid-migration. Such a participant already names the live bead
+// (session_id == liveID), so the reaper's "live target already matches" fast
+// path would otherwise skip it forever while its retired-session transcript
+// membership stays stranded in previous_session_id_pending_cleanup. The reaper
+// must instead re-drive the pending handover to the live bead.
+func TestReapStaleParticipantsFinishesPendingCleanupAfterPartialHandover(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	sessAID := makeSessionBead(t, store, "pl-alpha")
+
+	svc := NewServices(store).Groups
+	ref := testConversationRef()
+	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	participant, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessAID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+
+	// Respawn A -> B. No binding exists, so only the participant reaper can
+	// converge this session.
+	sessBID := respawn(t, store, sessAID, "pl-alpha")
+
+	// First handover attempt fails mid-migration: the replacement-session
+	// membership ensure fails after session_id was already swapped to B. This
+	// leaves session_id == B (the live bead) with A still pending cleanup and the
+	// retired-session label retained for retry discovery.
+	failing := &flakyTranscriptService{failEnsureCount: 1, err: errors.New("boom")}
+	overrideReassignmentTranscript(t, failing)
+	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err == nil || !errors.Is(err, ErrTranscriptSyncFailed) {
+		t.Fatalf("ReassignSessionParticipants(partial) error = %v, want ErrTranscriptSyncFailed", err)
+	}
+	stale, err := store.Get(participant.ID)
+	if err != nil {
+		t.Fatalf("Get(participant after partial handover): %v", err)
+	}
+	if got := stale.Metadata["session_id"]; got != sessBID {
+		t.Fatalf("session_id after partial handover = %q, want %q (already swapped to live bead)", got, sessBID)
+	}
+	if got := stale.Metadata["previous_session_id_pending_cleanup"]; got != sessAID {
+		t.Fatalf("pending cleanup after partial handover = %q, want %q", got, sessAID)
+	}
+	if !hasLabel(stale, groupParticipantSessionLabel(sessAID)) {
+		t.Fatalf("retired-session label %q dropped before migration committed", groupParticipantSessionLabel(sessAID))
+	}
+
+	// The reaper now sees session_id == liveID == B, so the old "live target
+	// already matches" skip would strand the pending cleanup forever. A healthy
+	// transcript lets the reaper finish the handover.
+	healthy := &flakyTranscriptService{}
+	overrideReassignmentTranscript(t, healthy)
+	stats, err := ReapStaleParticipants(context.Background(), store)
+	if err != nil {
+		t.Fatalf("ReapStaleParticipants: %v", err)
+	}
+	if stats.Reassigned != 1 || stats.Scanned != 1 {
+		t.Fatalf("stats = %+v, want Reassigned=1 Scanned=1 (reaper must finish the pending handover)", stats)
+	}
+	if healthy.ensureCalls == 0 || healthy.removeCalls == 0 {
+		t.Fatalf("reaper did not drive membership migration: ensureCalls=%d removeCalls=%d", healthy.ensureCalls, healthy.removeCalls)
+	}
+	bead, err := store.Get(participant.ID)
+	if err != nil {
+		t.Fatalf("Get(participant after reap): %v", err)
+	}
+	if got := bead.Metadata["session_id"]; got != sessBID {
+		t.Errorf("session_id after reap = %q, want %q", got, sessBID)
+	}
+	if got := bead.Metadata["previous_session_id_pending_cleanup"]; got != "" {
+		t.Errorf("pending cleanup after reap = %q, want empty (handover finished)", got)
+	}
+	if hasLabel(bead, groupParticipantSessionLabel(sessAID)) {
+		t.Errorf("retired-session label %q not dropped after reaper finished the handover", groupParticipantSessionLabel(sessAID))
+	}
+	if !hasLabel(bead, groupParticipantSessionLabel(sessBID)) {
+		t.Errorf("replacement-session label %q missing; labels: %v", groupParticipantSessionLabel(sessBID), bead.Labels)
+	}
+
+	// Idempotent: a second sweep finds nothing pending now.
+	stats, err = ReapStaleParticipants(context.Background(), store)
+	if err != nil {
+		t.Fatalf("ReapStaleParticipants(second): %v", err)
+	}
+	if stats.Reassigned != 0 {
+		t.Fatalf("second sweep Reassigned = %d, want 0 (already converged)", stats.Reassigned)
 	}
 }
 
