@@ -20,7 +20,7 @@ contributors. Before making changes, read:
 
 `make setup` installs a pre-commit hook at `.githooks/pre-commit` that
 auto-formats staged Go files and, when any Go file is staged,
-regenerates `internal/api/openapi.json` and `docs/schema/openapi.json`
+regenerates `internal/api/openapi.json` and `docs/reference/schema/openapi.json`
 from the live supervisor. The hook stages both spec copies so the
 committed spec never drifts from what the server actually serves. It also
 runs the fast CI-equivalent gates for local changes: `make lint`,

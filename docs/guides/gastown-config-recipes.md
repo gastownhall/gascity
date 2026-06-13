@@ -135,6 +135,70 @@ For prompt or overlay replacement, patch the imported agent from your root city 
 
 If that change turns out to be broadly useful across cities, that is when it should move into the pack.
 
+### Default a formula var for one rig
+
+Rig-scoped `formula_vars` fill formula `[vars]` values when a formula runs in
+that rig and the caller passed no explicit `--var`. They beat formula-level
+defaults and lose to `--var` flags; `gc formula show` renders them as
+`(rig default="...")`.
+
+```toml
+# city.toml
+[[rigs]]
+name = "myproject"
+
+[rigs.formula_vars]
+branch = "develop"
+```
+
+To layer the same change from a patch, use `[[patches.rigs]]` — the
+`formula_vars` merge is additive, so unrelated keys are preserved:
+
+```toml
+[[patches.rigs]]
+name = "myproject"
+
+[patches.rigs.formula_vars]
+branch = "develop"
+```
+
+### Change an agent's default sling formula
+
+`default_sling_formula` names the formula sling applies automatically for an
+agent. Override it per rig:
+
+```toml
+# city.toml
+[[rigs]]
+name = "myproject"
+
+[[rigs.patches]]
+agent = "gastown.polecat"
+default_sling_formula = "mol-scoped-work"
+```
+
+### Disable or retime a pack order
+
+The Gastown pack ships the `digest-generate` order (cooldown trigger, every
+24h). Skip it everywhere it is discovered:
+
+```toml
+# city.toml
+[orders]
+skip = ["digest-generate"]
+```
+
+Or retime it with an override. An override with no `rig` matches only the
+city-level instance; `rig = "*"` matches every instance; a rig name matches
+that rig's instance:
+
+```toml
+[[orders.overrides]]
+name = "digest-generate"
+rig = "*"
+interval = "12h"
+```
+
 ## A Complete Gastown Example
 
 The overrides above are fragments — single edits you splice into an existing
@@ -197,8 +261,10 @@ patrol_interval = "30s"
 max_restarts = 5
 restart_window = "1h"
 shutdown_timeout = "5s"
-# Enable compiler-v2 formulas from imported packs. Legacy molecule formulas keep
-# molecule_id attachment semantics unless they declare a compiler-v2 requirement.
+# Formulas v2 is the default; this line only makes the choice
+# explicit. Set formula_v2 = false only for cities pinned to formula compiler
+# v1. v1 molecule formulas keep molecule_id attachment semantics unless
+# they declare the v2 requirement.
 formula_v2 = true
 
 # Register a rig to activate per-rig agents (witness, refinery, polecat):

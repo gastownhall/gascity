@@ -604,6 +604,22 @@ func tutorialReviewerProvider() string {
 	return "codex"
 }
 
+// registerTutorialReviewerProvider mirrors the tutorial-02 page step that
+// registers the reviewer's provider in city.toml's explicit provider catalog
+// ([providers.<name>] base = "builtin:<name>"). Without it, any agent
+// referencing an unregistered provider fails config load with "provider
+// catalog is missing referenced providers". Skipped when the reviewer rides
+// the init-registered claude provider, which is already in the catalog.
+func registerTutorialReviewerProvider(t *testing.T, cityPath string) {
+	t.Helper()
+	provider := tutorialReviewerProvider()
+	if provider == "claude" {
+		return
+	}
+	appendFile(t, filepath.Join(cityPath, "city.toml"),
+		"\n[providers."+provider+"]\nbase = \"builtin:"+provider+"\"\n")
+}
+
 func claudeStatusOutputLoggedIn(out []byte) bool {
 	var status struct {
 		LoggedIn bool `json:"loggedIn"`

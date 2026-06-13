@@ -3,8 +3,6 @@ title: Runbook — Managed-city Dolt endpoints
 description: Mental model, forbidden edits, sanctioned escape hatches, and recovery recipe for the city-level Dolt endpoint architecture.
 ---
 
-# Runbook: Managed-city Dolt endpoints
-
 This runbook is for mayors and operators. It covers the endpoint
 architecture introduced in the
 [beads-and-Dolt contract redesign](https://github.com/gastownhall/gascity/blob/main/engdocs/design/beads-dolt-contract-redesign.md)

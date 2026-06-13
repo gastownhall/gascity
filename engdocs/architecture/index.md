@@ -55,7 +55,7 @@ Each is provably composable from the primitives.
     reconciliation tick, order dispatch
 14. **[Orders](./orders.md)** — trigger-conditioned formula/exec
     dispatch, rig-scoped labels
-15. **[Gas City Pack Specification (2.0)](../../docs/specs/pack-spec.md)** —
+15. **[Gas City Pack Specification (2.0)](../../docs/reference/specs/pack-spec.md)** —
     authoritative pack data model, file format, and loader semantics
 
 ### End-to-End Traces

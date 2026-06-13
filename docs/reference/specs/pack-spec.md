@@ -3,8 +3,6 @@ title: Gas City 1.0 Pack System (PackV2)
 description: Authoritative specification for Gas City pack format and loading semantics.
 ---
 
-# Gas City 1.0 Pack System (PackV2)
-
 | Field | Value |
 |---|---|
 | Status | Authoritative specification |
@@ -105,9 +103,11 @@ Pack definitions are visible to consumers according to loader scope rules. Files
 under `assets/` are private support files unless a public definition references
 them.
 
-The current loader does not give import bindings a runtime namespace for agents.
-If a city-level imported pack defines an agent named `reviewer`, the effective
-city-level agent name is `reviewer`, not `<binding>/reviewer`.
+The current loader gives import bindings a runtime namespace for agents. If a
+city-level pack imported under binding `review` defines an agent named
+`reviewer`, the effective city-level agent name is `review.reviewer`. The
+binding separator is a dot; the slash separator is reserved for the rig
+identity prefix (section 2.4).
 
 ## 1. File System Structure
 
@@ -124,6 +124,7 @@ pack-root/
   orders/
   skills/
   mcp/
+  template-fragments/
   overlay/
 ```
 
@@ -147,6 +148,7 @@ The following top-level paths are reserved by the pack format:
 | `orders/` | directory | Well-known order definition directory. |
 | `skills/` | directory | Well-known skill catalog directory. |
 | `mcp/` | directory | Well-known MCP configuration directory. |
+| `template-fragments/` | directory | Well-known directory for shared prompt template fragments loaded during prompt rendering. |
 | `overlay/` | directory | Pack-level overlay directory collected automatically from imported packs. |
 
 Pack authors must not invent additional top-level machine-readable directories.
@@ -241,8 +243,9 @@ version = "^1"
 ```
 
 The binding name is local to the importing file. Current loader behavior uses
-binding names for deterministic ordering of imports. It does not add binding
-names to runtime agent identities.
+binding names for deterministic ordering of imports and stamps the binding on
+every agent the import contributes, qualifying runtime agent identities
+(section 2.5).
 
 A `source` string is a pack resolver coordinate. For GitHub-hosted packs, a
 browser-dereferenceable `tree/<ref>/<path>` URL is the preferred authored form.
@@ -337,7 +340,7 @@ The `scope` field controls where a pack-defined agent is instantiated:
 
 The following table is a curated pack authoring reference for
 `agent.toml`. It is not an exhaustive decoder inventory: the generated schema
-at `docs/schema/pack-schema.json` is the generated runtime schema inventory.
+at `docs/reference/schema/pack-schema.json` is the generated runtime schema inventory.
 The normative authoring rules are specified here.
 
 | Field | Type | Rule |
@@ -612,6 +615,7 @@ New packs should use these authoring constructs:
 | `orders/` | Pack orders. |
 | `skills/` | Pack skills. |
 | `mcp/` | Pack MCP configuration. |
+| `template-fragments/` | Shared prompt template fragments. |
 | `assets/` | Private support files. |
 | `overlay/` | Pack-level overlay files. |
 | `[[named_session]]` | Pack named sessions. |
@@ -657,10 +661,25 @@ Authors should put new private scripts, prompt fragments, overlays, and other
 implementation files under `assets/` unless an established loader convention
 requires a well-known directory.
 
+Formula steps reference prompt assets with
+`description_file = "../assets/<relative-path>"`; section 1.3.2 specifies how
+those references resolve across formula layers.
+
 ### 1.3.2. `formulas/`
 
 `formulas/` is the only pack formula directory. If it exists, the loader
 collects it as a formula layer.
+
+A formula step may reference a pack prompt asset with
+`description_file = "../assets/<relative-path>"`. The loader resolves that
+form through the formula layer order of section 2.9: each layer's sibling
+`assets/<relative-path>` is a candidate, and the highest-priority existing
+file wins. A higher layer can therefore shadow a pack's prompt asset while the
+formula itself remains inherited from the lower-priority pack. Other relative
+`description_file` paths resolve against the directory of the formula file
+that declares them. See the
+[Formula Specification](/reference/specs/formula-spec-v2#11-file-naming-and-layers) for
+formula file naming and layer resolution.
 
 ### 1.3.3. `overlay/`
 
@@ -686,9 +705,9 @@ should live under `assets/`.
 
 ### 1.3.5. Conventional Directories
 
-`orders/`, `skills/`, and `mcp/` are scanned by their owning subsystems.
-`assets/` is not scanned directly. Files under `assets/` become effective only
-when a pack definition references them.
+`orders/`, `skills/`, `mcp/`, and `template-fragments/` are scanned by their
+owning subsystems. `assets/` is not scanned directly. Files under `assets/`
+become effective only when a pack definition references them.
 
 ## 2. Loader
 
@@ -812,34 +831,48 @@ When loading a pack for a rig-level surface:
 3. For kept agents and named sessions whose `dir` is empty, the loader sets
    `dir` to the consuming rig's `name`.
 
+Agents contributed by an `[imports.<binding>]` table are stamped with that
+binding at both the city level and the rig level. The consuming surface's own
+binding wins: all agents from an import are stamped with that import's
+binding, overriding any nested binding from transitive imports. Agents
+defined by the city pack itself and agents from unbound legacy includes carry
+no binding.
+
 The runtime qualified name of an agent is:
 
 ```text
 qualifiedName(agent):
+    local = agent.name
+    if agent.binding != "":
+        local = agent.binding + "." + agent.name
     if agent.dir == "":
-        return agent.name
-    return agent.dir + "/" + agent.name
+        return local
+    return agent.dir + "/" + local
 ```
 
 The `dir` field is an identity prefix, not a filesystem path.
 
 ### 2.5. Naming And Collisions
 
-Agent names are local names. Import bindings do not qualify runtime agent
-names.
+Agent names are local names inside the defining pack. Import bindings qualify
+runtime agent names: an agent named `mayor` imported under binding `gastown`
+has the runtime name `gastown.mayor`, and `hello-world/gastown.mayor` when
+stamped for rig `hello-world`. Imported agents must be addressed by their
+binding-qualified name, not their bare local name.
 
 There is no fallback-agent mechanism. If two or more agents from different
-source directories share a local name on the same surface, loading fails;
-packs must own their agents under unambiguous names.
+source directories share a qualified name on the same surface, loading fails;
+packs must own their agents under unambiguous names. Agents with the same
+local name under different bindings do not collide: `gastown.mayor` and
+`review.mayor` coexist on the city-level surface.
 
 The "same surface" means the city-level surface or one rig-level surface. Two
 different rigs may each have an agent with the same local name because their
 qualified names differ by rig `dir`.
 
-Identifier qualification across import bindings, runtime names, registry
-selectors, and AgentScript is not yet settled. Until that work lands, this
-specification deliberately avoids defining a binding-qualified runtime agent
-syntax.
+Agents without a binding — agents defined by the city pack itself and agents
+from unbound legacy includes — keep their bare local names, and duplicate
+local names among them fail loading.
 
 ### 2.6. Patches
 
@@ -943,6 +976,13 @@ Rig formula layers are ordered from lower priority to higher priority:
 2. Formula directories from packs imported by that rig.
 3. The rig-local formula directory, when configured.
 
+When more than one layer contains a formula with the same name, the
+highest-priority layer wins (last wins); within a single layer, canonical
+`<name>.toml` beats deprecated `<name>.formula.toml`. Per-name winners are staged
+as symlinks into the scope's `.beads/formulas/` directory. See the
+[Formula Specification](/reference/specs/formula-spec-v2#11-file-naming-and-layers) for
+the resolution and staging contract.
+
 Overlay directories follow the same city-base then rig-specific collection
 model. Agent-specific `overlay_dir` is applied separately by the runtime.
 
@@ -979,8 +1019,8 @@ The loader must fail when:
 9. A pack-level or city-level patch targets a missing agent.
 10. A rig-level pack declares a service.
 11. A pack service sets `publish_mode = "direct"`.
-12. Two or more agents from different source directories share a local name on
-    the same surface.
+12. Two or more agents from different source directories share a qualified
+    name on the same surface.
 13. A declared pack requirement is not satisfied.
 14. A schema-2 `city.toml` or included fragment uses a removed PackV1 surface such as `rigs.includes`, `[packs.*]`, `workspace.includes`, `workspace.default_rig_includes`, or inline agent definitions. Exception: canonical builtin system-pack includes (`.gc/system/packs/<name>` entries written by `gc init`) remain supported in `workspace.includes`.
 

@@ -70,6 +70,38 @@
       "destination": "/guides/shareable-packs"
     },
     {
+      "source": "/reference/formula",
+      "destination": "/reference/specs/formula-spec-v2"
+    },
+    {
+      "source": "/specs/pack-spec",
+      "destination": "/reference/specs/pack-spec"
+    },
+    {
+      "source": "/specs/formula-spec-v1",
+      "destination": "/reference/specs/formula-spec-v1"
+    },
+    {
+      "source": "/specs/formula-spec-v2",
+      "destination": "/reference/specs/formula-spec-v2"
+    },
+    {
+      "source": "/internals/beads-topology",
+      "destination": "/reference/internal/beads-topology"
+    },
+    {
+      "source": "/internals",
+      "destination": "/reference/index"
+    },
+    {
+      "source": "/schema/index",
+      "destination": "/reference/schema/index"
+    },
+    {
+      "source": "/schema",
+      "destination": "/reference/schema/index"
+    },
+    {
       "source": "/tutorials/01-cities-and-rigs.md",
       "destination": "/tutorials/01-cities-and-rigs"
     },
@@ -137,6 +169,7 @@
           "guides/index",
           "guides/capabilities-for-coding-agent-users",
           "guides/understanding-packs",
+          "guides/understanding-formulas",
           "guides/shareable-packs",
           "guides/gastown-config-recipes",
           "guides/using-json-from-gc",
@@ -155,32 +188,39 @@
       {
         "group": "Reference",
         "pages": [
-          "reference/index",
-          "reference/cli",
-          "reference/gastown-command-map",
-          "reference/config",
-          "reference/formula",
-          "reference/trust-boundaries",
-          "reference/api",
-          "reference/events",
-          "schema/index",
-          "reference/system-packs",
-          "reference/exec-session-provider",
-          "reference/exec-beads-provider",
-          "reference/tmux-agent-slice"
-        ]
-      },
-      {
-        "group": "Internals",
-        "pages": [
-          "internals/index",
-          "internals/beads-topology"
-        ]
-      },
-      {
-        "group": "Specifications",
-        "pages": [
-          "specs/pack-spec"
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/index",
+              "reference/cli",
+              "reference/gastown-command-map",
+              "reference/config",
+              "reference/trust-boundaries",
+              "reference/api",
+              "reference/events",
+              "reference/schema/index",
+              "reference/system-packs",
+              "reference/exec-session-provider",
+              "reference/exec-beads-provider",
+              "reference/tmux-agent-slice"
+            ]
+          },
+          {
+            "group": "Specifications",
+            "pages": [
+              "reference/specs/index",
+              "reference/specs/pack-spec",
+              "reference/specs/formula-spec-v1",
+              "reference/specs/formula-spec-v2"
+            ]
+          },
+          {
+            "group": "Internal",
+            "pages": [
+              "reference/internal/index",
+              "reference/internal/beads-topology"
+            ]
+          }
         ]
       }
     ]

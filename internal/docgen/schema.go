@@ -102,7 +102,7 @@ func GenerateCitySchema() (*jsonschema.Schema, error) {
 		"Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. " +
 		"Use [imports.*] for PackV2 composition; legacy includes and [[agent]] fields remain visible for migration compatibility. " +
 		"Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n" +
-		"> **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
+		"> **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/reference/specs/pack-spec)."
 	removeRequiredField(s, "DaemonConfig", "formula_v2")
 	return s, nil
 }

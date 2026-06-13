@@ -169,7 +169,7 @@ Read **`engdocs/architecture/api-control-plane.md`** and
 - `internal/events/` (event bus, registry)
 - `internal/extmsg/` (external-messaging emitters)
 - Anything that affects `internal/api/openapi.json`,
-  `docs/schema/openapi.json`, or the generated TS types under
+  `docs/reference/schema/openapi.json`, or the generated TS types under
   `cmd/gc/dashboard/web/src/generated/`
 
 Load-bearing invariants enforced by CI (violating any fails the
@@ -333,7 +333,7 @@ Before considering any task complete:
 - `.githooks/pre-commit` is active locally (`git config core.hooksPath`
   prints `.githooks`) and has run for the staged change
 - `make dashboard-check` passes for any change touching `internal/api/`,
-  `internal/api/openapi.json`, `docs/schema/openapi.*`,
+  `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
   `cmd/gc/dashboard/`, or generated dashboard types
 - The dashboard starts locally and serves the app for dashboard/API-schema
   changes; use `npm run preview -- --host 127.0.0.1 --port <port>` from

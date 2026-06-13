@@ -308,5 +308,5 @@ command's normal human behavior is intentionally changed.
 
 Use the generated [CLI Reference](/reference/cli) for exact command flags.
 Use [Events](/reference/events) for the `gc events` JSONL event contract.
-Use [Schemas](/schema) for published non-CLI schema artifacts such as OpenAPI,
+Use [Schemas](/reference/schema) for published non-CLI schema artifacts such as OpenAPI,
 events, and city config.

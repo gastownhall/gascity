@@ -185,10 +185,10 @@ func (a *convergenceStoreAdapter) pourWisp(parentID, formula, idempotencyKey str
 	}
 	isGraphV2, _, err := graphv2.IsGraphV2Formula(formula, a.formulaSearchPaths)
 	if err != nil {
-		return "", fmt.Errorf("checking graph.v2 contract for convergence wisp %q: %w", formula, err)
+		return "", fmt.Errorf("checking formulas v2 contract for convergence wisp %q: %w", formula, err)
 	}
 	if isGraphV2 {
-		return "", fmt.Errorf("convergence wisps do not support graph.v2 formula %q; use a non-graph formula until convergence has an explicit input convoy target", formula)
+		return "", fmt.Errorf("convergence wisps do not support v2 formula %q; use a v1 formula until convergence has an explicit input convoy target", formula)
 	}
 	result, err := molecule.Cook(context.Background(), a.store, formula, a.formulaSearchPaths, molecule.Options{
 		Vars:           cookVars,

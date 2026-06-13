@@ -205,11 +205,14 @@ type City struct {
 	Events EventsConfig `toml:"events,omitempty"`
 	// Dolt configures optional dolt server connection overrides.
 	Dolt DoltConfig `toml:"dolt,omitempty"`
-	// Formulas configures formula directory settings.
+	// Formulas is the legacy [formulas] table; authored [formulas].dir is
+	// rejected at config load. Formulas live in the well-known formulas/
+	// directory.
 	Formulas FormulasConfig `toml:"formulas,omitempty"`
 	// Daemon configures controller daemon settings.
 	Daemon DaemonConfig `toml:"daemon,omitempty"`
-	// Orders configures order settings (skip list).
+	// Orders configures order settings: skip list, max_timeout cap, and
+	// per-order overrides.
 	Orders OrdersConfig `toml:"orders,omitempty"`
 	// API configures the optional HTTP API server.
 	API APIConfig `toml:"api,omitempty"`
@@ -523,8 +526,10 @@ type Rig struct {
 	// suspended. Once the user has explicitly suspended or resumed the
 	// rig via `gc rig suspend/resume`, the runtime state wins.
 	SuspendedOnStart bool `toml:"suspended_on_start,omitempty"`
-	// FormulasDir is a rig-local formula directory (Layer 4). Overrides
-	// pack formulas for this rig by filename.
+	// FormulasDir is a rig-local formula directory — the highest-priority
+	// formula layer, above city pack formulas, the city formulas/
+	// directory, and rig pack formulas. Overrides pack formulas for this
+	// rig by filename.
 	// Relative paths resolve against the city directory.
 	FormulasDir string `toml:"formulas_dir,omitempty"`
 	// Includes lists pack directories or URLs for this rig (V1 mechanism).
@@ -1809,15 +1814,20 @@ func (d *DoltConfig) DoltLockReleaseTimeoutDuration() time.Duration {
 	return dur
 }
 
-// FormulasConfig holds legacy formula directory settings.
+// FormulasConfig is the legacy [formulas] table with no supported fields:
+// authored [formulas].dir is rejected at config load (use the well-known
+// formulas/ directory instead), and gc doctor flags any declaration as a
+// fixable v2-formulas-dir error.
 type FormulasConfig struct {
-	// Dir is the legacy path to the formulas directory. PackV2 cities and
-	// packs use the well-known formulas/ directory; authored [formulas].dir
-	// is rejected for schema 2 configs.
+	// Dir is the legacy path to the formulas directory. Authored
+	// [formulas].dir is rejected at config load; PackV2 cities and packs
+	// use the well-known formulas/ directory.
 	Dir string `toml:"dir,omitempty" jsonschema:"-"`
 }
 
-// OrdersConfig holds order settings.
+// OrdersConfig holds order settings for orders discovered from flat TOML
+// files (one file per order) in the orders/ directory beside each formula
+// layer (packs, the city directory, and rig-local layers).
 type OrdersConfig struct {
 	// Skip lists order names to exclude from scanning.
 	Skip []string `toml:"skip,omitempty"`

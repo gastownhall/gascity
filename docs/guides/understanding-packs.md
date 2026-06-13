@@ -3,11 +3,10 @@ title: "Understanding Packs"
 description: Learn what packs are, how imports work, and how Gas City turns reusable pack files into city behavior.
 ---
 
-# Understanding Packs
-
 Every reusable capability in Gas City comes from a pack. A pack tells Gas City
-what can be loaded: agents, named sessions, formulas, skills, commands, MCP
-configuration, defaults, and the files those definitions need while running.
+what can be loaded: agents, named sessions, formulas, orders, skills, commands,
+MCP configuration, defaults, and the files those definitions need while
+running.
 
 This guide has two parts:
 
@@ -16,13 +15,13 @@ This guide has two parts:
 - The registry workflow: how to find a pack with `gc`, inspect it, write the
   import, and validate the result.
 
-The [pack specification](/specs/pack-spec) is the public source of truth for
+The [pack specification](/reference/specs/pack-spec) is the public source of truth for
 the exact format. This guide explains the same model in a more practical style.
 
 ## The Pack Model
 
 A pack is a directory with a `pack.toml` file. Only `pack.toml` is required,
-but most useful packs also include agents, prompt templates, formulas,
+but most useful packs also include agents, prompt templates, formulas, orders,
 commands, doctor checks, skills, MCP configuration, or support files.
 
 Here is a small pack:
@@ -139,11 +138,11 @@ source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^0.1"
 ```
 
-If that pack defines a city-scoped agent named `planner`, the runtime agent is
-named:
+If that pack defines a city-scoped agent named `planner`, the loader stamps it
+with the import binding, and the runtime agent is named:
 
 ```text
-planner
+gascity.planner
 ```
 
 A rig-level import appears under the `[[rigs]]` table that needs it:
@@ -159,10 +158,10 @@ version = "^0.1"
 ```
 
 If that same pack defines a rig-scoped agent named `planner`, the runtime agent
-is stamped with the rig name:
+is stamped with the rig name as well as the binding:
 
 ```text
-checkout-service/planner
+checkout-service/gascity.planner
 ```
 
 The rig `name` becomes the identity prefix. The rig `path` is the filesystem
@@ -192,8 +191,8 @@ pack.
 
 ## Names
 
-Agent names are local names. Import bindings do not become part of runtime
-agent names.
+Agent names are local names inside the pack that defines them. When a pack is
+imported, the import binding becomes part of the runtime agent name.
 
 If a city imports this dependency:
 
@@ -205,16 +204,19 @@ source = "../packs/review"
 and the imported pack defines `agents/reviewer/agent.toml`, the runtime name is:
 
 ```text
-reviewer
+review_tools.reviewer
 ```
 
-Gas City uses the binding to find and order dependencies while loading config.
-It does not use the binding as a runtime namespace.
+Gas City uses the binding to find and order dependencies while loading config,
+and stamps it on every imported agent as a runtime namespace. Imported agents
+are addressed by their qualified name — `review_tools.reviewer`, not bare
+`reviewer` — in patches, targets, and commands.
 
-If two packs define city-level agents with the same name, config load fails.
-The same rule applies inside a single rig.
-Give one of the agents a different public name, or avoid importing both
-definitions onto the same surface.
+Because the binding qualifies the name, two imports that define agents with the
+same local name do not collide: `gastown.polecat` and `review.polecat` coexist.
+Config load fails only when two source directories produce the same qualified
+name on the same surface — for example, two unbound legacy includes that both
+define a city-level `reviewer`.
 
 ## Defaults And Patches
 
@@ -234,10 +236,11 @@ blank. If a pack explicitly sets the field on an agent, the explicit value
 wins.
 
 A patch changes an agent that already exists. It does not create a new agent.
+Imported agents are targeted by their binding-qualified name:
 
 ```toml
 [[patches.agent]]
-name = "reviewer"
+name = "review_tools.reviewer"
 provider = "codex"
 session_setup_append = ["tmux set status-left '[review]'"]
 ```
@@ -247,7 +250,7 @@ For a rig-scoped agent, use `dir` to select the rig identity prefix:
 ```toml
 [[patches.agent]]
 dir = "checkout-service"
-name = "reviewer"
+name = "review_tools.reviewer"
 provider = "codex"
 ```
 

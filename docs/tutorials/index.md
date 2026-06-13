@@ -8,7 +8,7 @@ City](https://github.com/gastownhall/gascity)! These hands-on guides take you
 through the core concepts, from creating a city to orchestrating multi-agent
 workflows.
 
-## Tutorials (ready for review)
+## Tutorials
 
 | Tutorial                     | Description                         |
 | ---------------------------- | ----------------------------------- |

@@ -695,12 +695,12 @@ func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName,
 		return binding, nil
 	}
 	if cfg == nil {
-		return graphRouteBinding{}, fmt.Errorf("graph.v2 routing for %s requires config", source.ID)
+		return graphRouteBinding{}, fmt.Errorf("formulas v2 routing for %s requires config", source.ID)
 	}
 
 	agentCfg, ok := resolveAgentIdentity(cfg, routedTo, rigContext)
 	if !ok {
-		return graphRouteBinding{}, fmt.Errorf("unknown graph.v2 fallback target %q on %s", routedTo, source.ID)
+		return graphRouteBinding{}, fmt.Errorf("unknown formulas v2 fallback target %q on %s", routedTo, source.ID)
 	}
 
 	binding := graphRouteBinding{QualifiedName: agentCfg.QualifiedName()}

@@ -1,4 +1,7 @@
-# CLI Reference
+---
+title: "CLI Reference"
+description: "Every gc command, flag, and example, generated from the CLI definitions."
+---
 
 > **Auto-generated** — do not edit. Run `go run ./cmd/genschema` to regenerate.
 
@@ -113,8 +116,8 @@ gc agent add --name <name> [flags]
 
 ```
 gc agent add --name mayor
-  gc agent add --name polecat
-  gc agent add --name worker --prompt-template ./worker.md --suspended
+gc agent add --name polecat
+gc agent add --name worker --prompt-template ./worker.md --suspended
 ```
 
 | Flag | Type | Default | Description |
@@ -271,11 +274,11 @@ gc bd [bd-args...]
 
 ```
 gc bd --rig my-project list
-  gc bd --rig my-project create "New task"
-  gc bd show my-project-abc          # auto-detects rig from bead prefix
-  gc bd list --rig my-project -s open
-  gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
-  gc bd release-if-current my-project-abc worker-1
+gc bd --rig my-project create "New task"
+gc bd show my-project-abc          # auto-detects rig from bead prefix
+gc bd list --rig my-project -s open
+gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+gc bd release-if-current my-project-abc worker-1
 ```
 
 ## gc beads
@@ -359,8 +362,8 @@ gc beads health [flags]
 
 ```
 gc beads health
-  gc beads health --quiet
-  gc beads health --json
+gc beads health --quiet
+gc beads health --json
 ```
 
 | Flag | Type | Default | Description |
@@ -386,9 +389,9 @@ gc beads list
 
 ```
 gc beads list
-  gc beads list --label ready-to-build
-  gc beads list --status open --json
-  gc beads list --format=toon
+gc beads list --label ready-to-build
+gc beads list --status open --json
+gc beads list --format=toon
 ```
 
 ## gc beads show
@@ -408,7 +411,7 @@ gc beads show <bead-id>
 
 ```
 gc beads show ga-abc
-  gc beads show ga-abc --json
+gc beads show ga-abc --json
 ```
 
 ## gc build-image
@@ -431,16 +434,16 @@ gc build-image [city-path] [flags]
 
 ```
 # Build context only (no docker build)
-  gc build-image ~/bright-lights --context-only
+gc build-image ~/bright-lights --context-only
 
-  # Build and tag image
-  gc build-image ~/bright-lights --tag my-city:latest
+# Build and tag image
+gc build-image ~/bright-lights --tag my-city:latest
 
-  # Build with rig content baked in
-  gc build-image ~/bright-lights --tag my-city:latest --rig-path demo:/path/to/demo
+# Build with rig content baked in
+gc build-image ~/bright-lights --tag my-city:latest --rig-path demo:/path/to/demo
 
-  # Build and push to registry
-  gc build-image ~/bright-lights --tag registry.io/my-city:latest --push
+# Build and push to registry
+gc build-image ~/bright-lights --tag registry.io/my-city:latest --push
 ```
 
 | Flag | Type | Default | Description |
@@ -641,11 +644,11 @@ gc config explain [flags]
 
 ```
 gc config explain
-  gc config explain --agent mayor
-  gc config explain --rig my-project
-  gc config explain --provider codex-max
-  gc config explain --provider codex-max --json
-  gc config explain -f overlay.toml --agent polecat
+gc config explain --agent mayor
+gc config explain --rig my-project
+gc config explain --provider codex-max
+gc config explain --provider codex-max --json
+gc config explain -f overlay.toml --agent polecat
 ```
 
 | Flag | Type | Default | Description |
@@ -673,10 +676,10 @@ gc config show [flags]
 
 ```
 gc config show
-  gc config show --validate
-  gc config show --provenance
-  gc config show --json
-  gc config show -f overlay.toml
+gc config show --validate
+gc config show --provenance
+gc config show --json
+gc config show -f overlay.toml
 ```
 
 | Flag | Type | Default | Description |
@@ -841,9 +844,13 @@ Manage convoys — graphs of related work beads.
 A convoy is a named graph of beads with dependencies. Convoys
 group related issues via tracks dependencies.
 
-Convoys are distinct from workflows (compiler-v2 formula-compiled
-DAGs managed by the dispatch subsystem) — gc convoy commands do
-not operate on workflow roots.
+Convoys are distinct from workflows — the DAGs compiled from
+v2 formulas and managed by the dispatch
+subsystem. The convoy lifecycle subcommands (create, list, status,
+target, add, close, check, stranded, land) do not operate on
+workflow roots; the dispatch subcommands (control, delete,
+delete-source, reopen-source) manage workflow trees and their
+control beads.
 
 ```
 gc convoy
@@ -940,9 +947,9 @@ gc convoy create <name> [issue-ids...] [flags]
 
 ```
 gc convoy create sprint-42
-  gc convoy create sprint-42 issue-1 issue-2 issue-3
-  gc convoy create deploy --owner mayor --notify mayor --merge mr
-  gc convoy create auth-rewrite --owned --target integration/auth-rewrite
+gc convoy create sprint-42 issue-1 issue-2 issue-3
+gc convoy create deploy --owner mayor --notify mayor --merge mr
+gc convoy create auth-rewrite --owned --target integration/auth-rewrite
 ```
 
 | Flag | Type | Default | Description |
@@ -1006,8 +1013,8 @@ gc convoy land <convoy-id> [flags]
 
 ```
 gc convoy land gc-42
-  gc convoy land gc-42 --force
-  gc convoy land gc-42 --dry-run
+gc convoy land gc-42 --force
+gc convoy land gc-42 --dry-run
 ```
 
 | Flag | Type | Default | Description |
@@ -1133,10 +1140,13 @@ Run diagnostic health checks on the city workspace.
 
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
-bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix for the canonical remediation path, including any
-safe mechanical PackV1-to-PackV2 rewrites that are available on this
-branch.
+bead stores, Dolt server health, event log integrity, formula compiler
+requirements (deprecated contract = "graph.v2" opt-ins, missing
+[requires] formula_compiler = "&gt;=2.0.0" declarations, and requirements
+the host's [daemon] formula_v2 setting cannot satisfy), v2 config
+deprecations such as legacy [formulas].dir, and per-rig health. Use
+--fix for the canonical remediation path, including any safe mechanical
+PackV1-to-PackV2 rewrites that are available on this branch.
 
 ```
 gc doctor [flags]
@@ -1146,10 +1156,10 @@ gc doctor [flags]
 
 ```
 gc doctor
-  gc doctor --fix
-  gc doctor --verbose
-  gc doctor --json
-  gc doctor --explain-postgres-auth
+gc doctor --fix
+gc doctor --verbose
+gc doctor --json
+gc doctor --explain-postgres-auth
 ```
 
 | Flag | Type | Default | Description |
@@ -1270,11 +1280,11 @@ gc events [flags]
 
 ```
 gc events
-  gc events --type bead.created --since 1h
-  gc events --watch --type convoy.closed --timeout 5m
-  gc events --follow
-  gc events --seq
-  gc events --follow --after-cursor city-a:12,city-b:9
+gc events --type bead.created --since 1h
+gc events --watch --type convoy.closed --timeout 5m
+gc events --follow
+gc events --seq
+gc events --follow --after-cursor city-a:12,city-b:9
 ```
 
 | Flag | Type | Default | Description |
@@ -1308,8 +1318,8 @@ gc events rotate [flags]
 
 ```
 gc events rotate
-  gc events rotate --wait
-  gc --city /path/to/city events rotate --api http://127.0.0.1:8080
+gc events rotate --wait
+gc --city /path/to/city events rotate --api http://127.0.0.1:8080
 ```
 
 | Flag | Type | Default | Description |
@@ -1319,7 +1329,11 @@ gc events rotate
 
 ## gc formula
 
-Manage and inspect formulas
+Manage and inspect formulas.
+
+Formulas are TOML workflow definitions. See docs/reference/specs/formula-spec-v2.md for
+the file format, the formulas v2 contract, and the [requires]
+formula_compiler opt-in.
 
 ```
 gc formula
@@ -1345,6 +1359,12 @@ close until the sub-DAG completes. This is the core primitive for late-bound
 DAG expansion — any agent, script, or workflow step can call it to expand a
 bead into a sub-workflow at runtime.
 
+With --attach on a v2 formula — one declaring
+[requires] formula_compiler = "&gt;=2.0.0" — the invocation runs under a
+per-source workflow lock and is idempotent: a repeat cook for the same
+source bead reuses the live workflow instead of duplicating it, and a
+conflicting live workflow from the same source is an error.
+
 ```
 gc formula cook <formula-name> [flags]
 ```
@@ -1361,8 +1381,10 @@ gc formula cook <formula-name> [flags]
 
 List all formulas available in the city's formula search paths.
 
-Formulas are discovered from city-level and rig-level formula directories
-configured via packs and formulas_dir settings.
+Formulas are discovered from the well-known formulas/ directories of
+city and rig pack layers, the city's own formulas/ directory, and the
+rig-local formulas_dir directory. Later layers win for same-named
+formulas.
 
 ```
 gc formula list [flags]
@@ -1481,9 +1503,9 @@ gc graph <bead-ids|convoy-id...> [flags]
 
 ```
 gc graph gc-42               # expand convoy children
-  gc graph gc-1 gc-2 gc-3     # arbitrary beads
-  gc graph gc-42 --tree        # dependency tree
-  gc graph gc-42 --mermaid     # Mermaid.js diagram
+gc graph gc-1 gc-2 gc-3     # arbitrary beads
+gc graph gc-42 --tree        # dependency tree
+gc graph gc-42 --mermaid     # Mermaid.js diagram
 ```
 
 | Flag | Type | Default | Description |
@@ -1770,15 +1792,15 @@ gc init [path] [flags]
 
 ```
 gc init
-  gc init ~/my-city
-  gc init --default-provider codex ~/my-city
-  gc init --template gastown --default-provider codex ~/my-city
-  gc init --providers claude,codex --default-provider codex ~/my-city
-  gc init --default-provider codex --bootstrap-profile k8s-cell /city
-  gc init --name my-city
-  gc init --from ~/elan --name elan /city
-  gc init --file ./my-city.toml ~/bright-lights
-  gc init --file city.toml --preserve-existing .
+gc init ~/my-city
+gc init --default-provider codex ~/my-city
+gc init --template gastown --default-provider codex ~/my-city
+gc init --providers claude,codex --default-provider codex ~/my-city
+gc init --default-provider codex --bootstrap-profile k8s-cell /city
+gc init --name my-city
+gc init --from ~/elan --name elan /city
+gc init --file ./my-city.toml ~/bright-lights
+gc init --file city.toml --preserve-existing .
 ```
 
 | Flag | Type | Default | Description |
@@ -1885,8 +1907,8 @@ gc mail check [session] [flags]
 
 ```
 gc mail check
-  gc mail check --inject
-  gc mail check mayor
+gc mail check --inject
+gc mail check mayor
 ```
 
 | Flag | Type | Default | Description |
@@ -2028,12 +2050,12 @@ gc mail send [<to>] [<body>] [flags]
 
 ```
 gc mail send mayor "Build is green"
-  gc mail send mayor -s "Build is green"
-  gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
-  gc mail send --to mayor "Build is green"
-  gc mail send human "Review needed for PR #42"
-  gc mail send polecat "Priority task" --notify
-  gc mail send --all "Status update: tests passing"
+gc mail send mayor -s "Build is green"
+gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
+gc mail send --to mayor "Build is green"
+gc mail send human "Review needed for PR #42"
+gc mail send polecat "Priority task" --notify
+gc mail send --all "Status update: tests passing"
 ```
 
 | Flag | Type | Default | Description |
@@ -2231,9 +2253,11 @@ gc order list [flags]
 
 Execute an order manually, bypassing its trigger conditions.
 
-Instantiates a wisp from the order's formula and routes it to the
-configured target (if any). Useful for testing orders or triggering
-them outside their normal schedule.
+Formula orders instantiate a wisp from the order's formula and route it
+to the configured target (if any). Exec orders run their script directly
+— no wisp is created, and --json is rejected because the exec body may
+write arbitrary stdout. Useful for testing orders or triggering them
+outside their normal schedule.
 Use --rig to disambiguate same-name orders in different rigs.
 
 ```
@@ -2242,7 +2266,7 @@ gc order run <name> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--json` | bool |  | JSON output |
+| `--json` | bool |  | JSON output (formula orders only; rejected for exec orders) |
 | `--rig` | string |  | rig name to disambiguate same-name orders |
 
 ## gc order show
@@ -2796,13 +2820,13 @@ gc rig add <path> [flags]
 
 ```
 gc rig add /path/to/project
-  gc rig add /path/to/project --name myrig
-  gc rig add /path/to/project --prefix r1
-  gc rig add /path/to/master-repo --default-branch master
-  gc rig add ./my-project --include gastown
-  gc rig add ./my-project --include packs/planner --include packs/architect
-  gc rig add ./my-project --include gastown --start-suspended
-  gc rig add /path/to/existing --adopt
+gc rig add /path/to/project --name myrig
+gc rig add /path/to/project --prefix r1
+gc rig add /path/to/master-repo --default-branch master
+gc rig add ./my-project --include gastown
+gc rig add ./my-project --include packs/planner --include packs/architect
+gc rig add ./my-project --include gastown --start-suspended
+gc rig add /path/to/existing --adopt
 ```
 
 | Flag | Type | Default | Description |
@@ -2900,10 +2924,10 @@ gc rig set-endpoint <rig> [flags]
 
 ```
 gc rig set-endpoint frontend --inherit
-  gc rig set-endpoint frontend --external --host db.example.com --port 3307
-  gc rig set-endpoint frontend --external --host db.example.com --port 3307 --user agent --adopt-unverified
-  gc rig set-endpoint frontend --self --port 28232 --force
-  gc rig set-endpoint frontend --inherit --dry-run
+gc rig set-endpoint frontend --external --host db.example.com --port 3307
+gc rig set-endpoint frontend --external --host db.example.com --port 3307 --user agent --adopt-unverified
+gc rig set-endpoint frontend --self --port 28232 --force
+gc rig set-endpoint frontend --inherit --dry-run
 ```
 
 | Flag | Type | Default | Description |
@@ -3237,10 +3261,10 @@ gc session logs <session> [flags]
 
 ```
 gc session logs mayor
-  gc session logs mayor --tail 2
-  gc session logs gc-123 --tail 20
-  gc session logs gc-123 --tail 0
-  gc session logs s-gc-123 -f
+gc session logs mayor --tail 2
+gc session logs gc-123 --tail 20
+gc session logs gc-123 --tail 0
+gc session logs s-gc-123 -f
 ```
 
 | Flag | Type | Default | Description |
@@ -3270,10 +3294,10 @@ gc session new <template> [flags]
 
 ```
 gc session new helper
-  gc session new helper --alias sky
-  gc session new helper --title "debugging auth"
-  gc session new helper --title-hint "fix the login redirect loop"
-  gc session new helper --no-attach
+gc session new helper --alias sky
+gc session new helper --title "debugging auth"
+gc session new helper --title-hint "fix the login redirect loop"
+gc session new helper --no-attach
 ```
 
 | Flag | Type | Default | Description |
@@ -3347,8 +3371,8 @@ gc session prune [flags]
 
 ```
 gc session prune --before 7d
-  gc session prune --before 24h
-  gc session prune --state asleep,suspended,drained --before 1h
+gc session prune --before 24h
+gc session prune --state asleep,suspended,drained --before 1h
 ```
 
 | Flag | Type | Default | Description |
@@ -3404,8 +3428,8 @@ gc session submit <id-or-alias> <message...> [flags]
 
 ```
 gc session submit mayor "status update"
-  gc session submit mayor "after this run, handle docs" --intent follow_up
-  gc session submit mayor "stop and do this instead" --intent interrupt_now
+gc session submit mayor "after this run, handle docs" --intent follow_up
+gc session submit mayor "stop and do this instead" --intent interrupt_now
 ```
 
 | Flag | Type | Default | Description |
@@ -3476,7 +3500,7 @@ gc session wake <session-id-or-alias> [flags]
 
 ```
 gc session wake gc-42
-  gc session wake mayor
+gc session wake mayor
 ```
 
 | Flag | Type | Default | Description |
@@ -3583,13 +3607,21 @@ When target is omitted, the bead's rig prefix is used to look up the rig's
 default_sling_target from config. Requires --formula to have an explicit target.
 Inline text also requires an explicit target.
 
-With --formula, a wisp (ephemeral molecule) is instantiated from the formula
-and its root bead is routed to the target.
+With --formula, the formula is instantiated and its root bead is routed to
+the target. v2 formulas — those declaring [requires]
+formula_compiler = "&gt;=2.0.0" — start a workflow; v1 formulas
+instantiate a wisp (ephemeral molecule). A v2 formula that references
+&#123;&#123;convoy_id&#125;&#125; or contains a drain step requires a target convoy: route it
+with gc sling &lt;target&gt; &lt;bead&gt; --on &lt;formula&gt;, or attach it with gc formula
+cook --attach. Formula slings to a pool (multi-session) target are rejected
+unless the compiled root is Ready-visible — a v2 workflow root or a
+root-only wisp. See docs/reference/specs/formula-spec-v2.md for the formula
+format and contract details.
 
 Examples:
   gc sling my-rig/claude BL-42              # route existing bead
   gc sling my-rig/claude "write a README"   # create bead from text, then route
-  gc sling mayor code-review --formula      # instantiate formula, route wisp
+  gc sling mayor code-review --formula      # instantiate formula, route its root
   echo "fix login" | gc sling mayor --stdin # read bead text from stdin
 
 ```
@@ -3599,7 +3631,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-n`, `--dry-run` | bool |  | show what would be done without executing |
-| `--force` | bool |  | suppress warnings, allow cross-rig routing, allow graph workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store |
+| `--force` | bool |  | suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store |
 | `-f`, `--formula` | bool |  | treat argument as formula name |
 | `--json` | bool |  | Output dispatch result in JSON format |
 | `--merge` | string |  | merge strategy: direct, mr, or local |
@@ -3609,8 +3641,8 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `--on` | string |  | attach wisp from formula to bead before routing |
 | `--owned` | bool |  | mark auto-convoy as owned (skip auto-close) |
 | `--reassign` | bool |  | clear any existing human assignee before routing (for human→pool handoff) |
-| `--scope-kind` | string |  | logical workflow scope kind for compiler-v2 launches |
-| `--scope-ref` | string |  | logical workflow scope ref for compiler-v2 launches |
+| `--scope-kind` | string |  | logical workflow scope kind for formulas v2 launches |
+| `--scope-ref` | string |  | logical workflow scope ref for formulas v2 launches |
 | `--stdin` | bool |  | read bead text from stdin (first line = title, rest = description) |
 | `-t`, `--title` | string |  | wisp root bead title (with --formula or --on) |
 | `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |
@@ -3632,9 +3664,9 @@ gc start [path] [flags]
 
 ```
 gc start
-  gc start ~/my-city
-  gc start --dry-run
-  gc supervisor run
+gc start ~/my-city
+gc start --dry-run
+gc supervisor run
 ```
 
 | Flag | Type | Default | Description |

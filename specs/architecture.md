@@ -147,7 +147,7 @@ client stub.
 
 ### 3.2 Spec is generated, never hand-written
 
-`internal/api/openapi.json` and `docs/schema/openapi.json` are
+`internal/api/openapi.json` and `docs/reference/schema/openapi.json` are
 outputs of `cmd/genspec`, which reads the live Huma registration
 from a `SupervisorMux`. The pre-commit hook regenerates both on
 every Go-file commit. `TestOpenAPISpecInSync` fails CI if the
@@ -423,7 +423,7 @@ else.
    the `cityGet` / `cityPost` / `cityPatch` / etc. helpers in
    `internal/api/city_scope.go` for per-city scoped operations).
 3. Commit. Pre-commit regenerates `internal/api/openapi.json`,
-   `docs/schema/openapi.json`, `internal/api/genclient/`, and the
+   `docs/reference/schema/openapi.json`, `internal/api/genclient/`, and the
    TS types under `cmd/gc/dashboard/web/src/generated/`. Mintlify
    publishes the spec on the next docs build.
 

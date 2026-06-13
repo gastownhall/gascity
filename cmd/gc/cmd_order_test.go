@@ -2218,8 +2218,8 @@ description = "Inspect convoy {{convoy_id}}"
 	if code != 1 {
 		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "requires a targeted graph.v2 invocation") {
-		t.Fatalf("stderr = %q, want targeted graph.v2 invocation error", stderr.String())
+	if !strings.Contains(stderr.String(), "requires a targeted formulas v2 invocation") {
+		t.Fatalf("stderr = %q, want targeted formulas v2 invocation error", stderr.String())
 	}
 	results, err := store.ListByLabel("order-run:convoy-patrol", 0, beads.IncludeClosed)
 	if err != nil {

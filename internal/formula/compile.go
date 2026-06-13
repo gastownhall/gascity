@@ -48,7 +48,7 @@ func CompileWithoutRuntimeVarValidation(_ context.Context, name string, searchPa
 	return compileFormula(name, searchPaths, vars, false)
 }
 
-const explicitGraphRequirementError = `requires: formulas that use graph-only constructs must declare [requires] formula_compiler = ">=2.0.0" or legacy contract = "graph.v2" explicitly`
+const explicitGraphRequirementError = `requires: formulas that use graph-only constructs must declare [requires] formula_compiler = ">=2.0.0" or the deprecated contract = "graph.v2" explicitly`
 
 func compileFormula(name string, searchPaths []string, vars map[string]string, validateRuntimeVars bool) (*Recipe, error) {
 	parser := NewParser(searchPaths...).SetSource(SourceFromEnv())
@@ -435,7 +435,7 @@ func orderGraphRecipeSteps(rootID string, steps []RecipeStep, deps []RecipeDep) 
 	}
 
 	if len(result) != len(steps) {
-		return nil, fmt.Errorf("graph.v2 formula %q contains a dependency cycle", rootID)
+		return nil, fmt.Errorf("v2 formula %q contains a dependency cycle", rootID)
 	}
 	return result, nil
 }

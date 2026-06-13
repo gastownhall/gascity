@@ -1288,7 +1288,7 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 				rollbackErr = errors.Join(rollbackErr, cleanupErr)
 			}
 			if restoreErr := sourceworkflow.RestoreWorkflowBeads(deps.Store, replacedSnapshots); restoreErr != nil {
-				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore replaced graph.v2 root %s: %w", replacedRootID, restoreErr))
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore replaced formulas v2 root %s: %w", replacedRootID, restoreErr))
 			}
 			if rollbackErr != nil {
 				return nil, errors.Join(err, rollbackErr)
@@ -1311,27 +1311,27 @@ func lockGraphV2Root(key string) func() {
 func closeReplacedGraphV2Root(store beads.Store, rootID string) ([]sourceworkflow.WorkflowBeadSnapshot, error) {
 	root, err := store.Get(rootID)
 	if err != nil {
-		return nil, fmt.Errorf("loading replaced graph.v2 root %s: %w", rootID, err)
+		return nil, fmt.Errorf("loading replaced formulas v2 root %s: %w", rootID, err)
 	}
 	if root.Status == "closed" {
 		return nil, nil
 	}
 	snapshots, err := sourceworkflow.SnapshotOpenWorkflowBeads(store, rootID)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot replaced graph.v2 root %s: %w", rootID, err)
+		return nil, fmt.Errorf("snapshot replaced formulas v2 root %s: %w", rootID, err)
 	}
 	if _, err := sourceworkflow.CloseWorkflowSubtree(store, rootID); err != nil {
 		restoreErr := sourceworkflow.RestoreWorkflowBeads(store, snapshots)
 		return nil, errors.Join(
-			fmt.Errorf("closing replaced graph.v2 subtree %s: %w", rootID, err),
+			fmt.Errorf("closing replaced formulas v2 subtree %s: %w", rootID, err),
 			restoreErr,
 		)
 	}
 	if err := store.SetMetadata(rootID, beadmeta.FailureReasonMetadataKey, "graphv2_force_replaced"); err != nil {
 		if restoreErr := sourceworkflow.RestoreWorkflowBeads(store, snapshots); restoreErr != nil {
-			return nil, errors.Join(fmt.Errorf("marking replaced graph.v2 root %s: %w", rootID, err), restoreErr)
+			return nil, errors.Join(fmt.Errorf("marking replaced formulas v2 root %s: %w", rootID, err), restoreErr)
 		}
-		return nil, fmt.Errorf("marking replaced graph.v2 root %s: %w", rootID, err)
+		return nil, fmt.Errorf("marking replaced formulas v2 root %s: %w", rootID, err)
 	}
 	return snapshots, nil
 }
@@ -1358,17 +1358,17 @@ func snapshotGraphV2ReplacementRoot(store beads.Store, formulaName string, vars 
 	}
 	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 2, beads.WithBothTiers)
 	if err != nil {
-		return graphV2ReplacementSnapshot{}, fmt.Errorf("looking up graph.v2 root key %s: %w", key, err)
+		return graphV2ReplacementSnapshot{}, fmt.Errorf("looking up formulas v2 root key %s: %w", key, err)
 	}
 	if len(matches) == 0 {
 		return graphV2ReplacementSnapshot{}, nil
 	}
 	if len(matches) > 1 {
-		return graphV2ReplacementSnapshot{}, fmt.Errorf("graph.v2 root key %s has multiple live roots: %s, %s", key, matches[0].ID, matches[1].ID)
+		return graphV2ReplacementSnapshot{}, fmt.Errorf("formulas v2 root key %s has multiple live roots: %s, %s", key, matches[0].ID, matches[1].ID)
 	}
 	snapshots, err := sourceworkflow.SnapshotOpenWorkflowBeads(store, matches[0].ID)
 	if err != nil {
-		return graphV2ReplacementSnapshot{}, fmt.Errorf("snapshot replaced graph.v2 root %s: %w", matches[0].ID, err)
+		return graphV2ReplacementSnapshot{}, fmt.Errorf("snapshot replaced formulas v2 root %s: %w", matches[0].ID, err)
 	}
 	if len(snapshots) == 0 {
 		return graphV2ReplacementSnapshot{}, nil
@@ -1387,11 +1387,11 @@ func rollbackGraphV2ReplacementLaunch(store beads.Store, replacementRootID strin
 	replacementRootID = strings.TrimSpace(replacementRootID)
 	if replacementRootID != "" && replacementRootID != snapshot.rootID {
 		if _, err := sourceworkflow.CloseWorkflowSubtree(store, replacementRootID); err != nil {
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("close replacement graph.v2 root %s: %w", replacementRootID, err))
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("close replacement formulas v2 root %s: %w", replacementRootID, err))
 		}
 	}
 	if err := sourceworkflow.RestoreWorkflowBeads(store, snapshot.snapshots); err != nil {
-		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore replaced graph.v2 root %s: %w", snapshot.rootID, err))
+		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore replaced formulas v2 root %s: %w", snapshot.rootID, err))
 	}
 	return rollbackErr
 }
@@ -1410,14 +1410,14 @@ func closeFailedGraphV2Roots(store beads.Store, recipe *formula.Recipe) error {
 func closeFailedGraphV2RootsByKey(store beads.Store, key string) error {
 	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 0, beads.WithBothTiers)
 	if err != nil {
-		return fmt.Errorf("looking up failed graph.v2 roots for key %s: %w", key, err)
+		return fmt.Errorf("looking up failed formulas v2 roots for key %s: %w", key, err)
 	}
 	for _, root := range matches {
 		if root.Status == "closed" || root.Metadata["molecule_failed"] != "true" {
 			continue
 		}
 		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {
-			return fmt.Errorf("closing failed graph.v2 root %s: %w", root.ID, err)
+			return fmt.Errorf("closing failed formulas v2 root %s: %w", root.ID, err)
 		}
 	}
 	return nil
@@ -1463,13 +1463,13 @@ func existingGraphV2Root(store beads.Store, recipe *formula.Recipe) (*molecule.R
 	}
 	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 2, beads.WithBothTiers)
 	if err != nil {
-		return nil, fmt.Errorf("looking up graph.v2 root key %s: %w", key, err)
+		return nil, fmt.Errorf("looking up formulas v2 root key %s: %w", key, err)
 	}
 	if len(matches) == 0 {
 		return nil, nil
 	}
 	if len(matches) > 1 {
-		return nil, fmt.Errorf("graph.v2 root key %s has multiple live roots: %s, %s", key, matches[0].ID, matches[1].ID)
+		return nil, fmt.Errorf("formulas v2 root key %s has multiple live roots: %s, %s", key, matches[0].ID, matches[1].ID)
 	}
 	return &molecule.Result{
 		RootID:        matches[0].ID,

@@ -17,7 +17,7 @@
       "description": "A JSONL line from `gc events --watch` or `gc events --follow` when no city is in scope."
     }
   },
-  "$id": "https://docs.gascityhall.com/schema/events.json",
+  "$id": "https://docs.gascityhall.com/reference/schema/events.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "anyOf": [
     {

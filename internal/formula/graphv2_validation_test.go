@@ -229,7 +229,7 @@ func TestGraphV2TargetlessRejectsConvoyReferencesAndDrain(t *testing.T) {
 	if err == nil {
 		t.Fatal("ValidateGraphV2ReservedSymbols succeeded, want targetless error")
 	}
-	if !strings.Contains(err.Error(), "convoy_id requires a targeted graph.v2 invocation") {
+	if !strings.Contains(err.Error(), "convoy_id requires a targeted formulas v2 invocation") {
 		t.Fatalf("error = %q, want convoy target message", err)
 	}
 	if !GraphV2FormulaReferencesInputConvoy(f) {
@@ -693,7 +693,7 @@ prompt = "do work"
 "gc.output_json_required" = "true"
 `,
 			wantCount: 1,
-			wantMsg:   "gc.output_json is legacy; use drain in graph.v2 formulas",
+			wantMsg:   "gc.output_json is deprecated; use drain in v2 formulas",
 		},
 		{
 			name: "graph.v1 step with output_json_required does not warn",

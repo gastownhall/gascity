@@ -191,6 +191,8 @@ printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
     GOTMPDIR="${TEST_LOCAL_GOTMPDIR}" \
     GOROOT="${TEST_LOCAL_GOROOT}" \
     GOENV="${GOENV-}" \
+    CGO_CPPFLAGS="${CGO_CPPFLAGS-}" \
+    CGO_LDFLAGS="${CGO_LDFLAGS-}" \
     GOFLAGS="${GOFLAGS-}" \
     GO111MODULE="${GO111MODULE-}" \
     GOEXPERIMENT="${GOEXPERIMENT-}" \

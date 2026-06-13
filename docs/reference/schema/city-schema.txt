@@ -1097,7 +1097,7 @@
         },
         "formulas": {
           "$ref": "#/$defs/FormulasConfig",
-          "description": "Formulas configures formula directory settings."
+          "description": "Formulas is the legacy [formulas] table; authored [formulas].dir is\nrejected at config load. Formulas live in the well-known formulas/\ndirectory."
         },
         "daemon": {
           "$ref": "#/$defs/DaemonConfig",
@@ -1105,7 +1105,7 @@
         },
         "orders": {
           "$ref": "#/$defs/OrdersConfig",
-          "description": "Orders configures order settings (skip list)."
+          "description": "Orders configures order settings: skip list, max_timeout cap, and\nper-order overrides."
         },
         "api": {
           "$ref": "#/$defs/APIConfig",
@@ -1451,7 +1451,7 @@
       "properties": {},
       "additionalProperties": false,
       "type": "object",
-      "description": "FormulasConfig holds legacy formula directory settings."
+      "description": "FormulasConfig is the legacy [formulas] table with no supported fields: authored [formulas].dir is rejected at config load (use the well-known formulas/ directory instead), and gc doctor flags any declaration as a fixable v2-formulas-dir error."
     },
     "GitHubConfig": {
       "properties": {
@@ -1958,7 +1958,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "OrdersConfig holds order settings."
+      "description": "OrdersConfig holds order settings for orders discovered from flat TOML files (one file per order) in the orders/ directory beside each formula layer (packs, the city directory, and rig-local layers)."
     },
     "PackDefaults": {
       "properties": {
@@ -2375,7 +2375,7 @@
         },
         "formulas_dir": {
           "type": "string",
-          "description": "FormulasDir is a rig-local formula directory (Layer 4). Overrides\npack formulas for this rig by filename.\nRelative paths resolve against the city directory."
+          "description": "FormulasDir is a rig-local formula directory — the highest-priority\nformula layer, above city pack formulas, the city formulas/\ndirectory, and rig pack formulas. Overrides pack formulas for this\nrig by filename.\nRelative paths resolve against the city directory."
         },
         "includes": {
           "items": {
@@ -2766,5 +2766,5 @@
     }
   },
   "title": "Gas City Configuration",
-  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n\u003e **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
+  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n\u003e **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/reference/specs/pack-spec)."
 }

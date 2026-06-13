@@ -74,7 +74,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 	}
 	parentVars, err := graphv2.ParseRuntimeVarsMetadata(root.Metadata[graphv2.RuntimeVarsMetadataKey])
 	if err != nil {
-		return ControlResult{}, fmt.Errorf("%s: parsing graph.v2 runtime vars on root %s: %w", bead.ID, rootID, err)
+		return ControlResult{}, fmt.Errorf("%s: parsing formulas v2 runtime vars on root %s: %w", bead.ID, rootID, err)
 	}
 	itemFormula := strings.TrimSpace(bead.Metadata[beadmeta.DrainFormulaMetadataKey])
 	if itemFormula == "" {
@@ -304,7 +304,7 @@ func completeDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		}
 		parentVars, err := graphv2.ParseRuntimeVarsMetadata(root.Metadata[graphv2.RuntimeVarsMetadataKey])
 		if err != nil {
-			return ControlResult{}, fmt.Errorf("%s: parsing graph.v2 runtime vars on root %s: %w", bead.ID, rootID, err)
+			return ControlResult{}, fmt.Errorf("%s: parsing formulas v2 runtime vars on root %s: %w", bead.ID, rootID, err)
 		}
 		members, err := loadDrainManifestMembers(store, bead.ID, manifest)
 		if err != nil {
@@ -925,7 +925,7 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 		return "", false, fmt.Errorf("%w: %s: compiling drain item formula %q: %w", errDrainInvalidItemFormula, control.ID, itemFormula, err)
 	}
 	if !isGraphV2WorkflowRecipe(recipe) {
-		return "", false, fmt.Errorf("%w: %s: drain item formula %q must declare contract = \"graph.v2\"", errDrainInvalidItemFormula, control.ID, itemFormula)
+		return "", false, fmt.Errorf("%w: %s: drain item formula %q must declare the formulas v2 contract ([requires] formula_compiler = \">=2.0.0\")", errDrainInvalidItemFormula, control.ID, itemFormula)
 	}
 	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
 		return "", false, fmt.Errorf("%w: %s: validating drain item formula %q: %w", errDrainInvalidItemFormula, control.ID, itemFormula, err)

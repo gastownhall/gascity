@@ -64,7 +64,7 @@ Each rig gets its own beads namespace and routing context, so work slung inside
 one rig stays logically isolated from the others. That isolation is by
 `issue_prefix`, not by a separate database: the city and all its rigs share one
 underlying store, and `bd` filters every read and write to the current scope's
-prefix. See [Beads Storage Topology](/internals/beads-topology) for the details.
+prefix. See [Beads Storage Topology](/reference/internal/beads-topology) for the details.
 
 ### Agent
 
@@ -117,7 +117,7 @@ that single server, and their data is kept logically separate by `issue_prefix`.
 
 Because all domain state flows through one interface, the system converges to correct
 outcomes even as sessions churn. See
-[Beads Storage Topology](/internals/beads-topology) for where the files live and
+[Beads Storage Topology](/reference/internal/beads-topology) for where the files live and
 how the prefix scoping works.
 
 ### Event bus
@@ -219,7 +219,7 @@ A lone bead _is not_ the only way work enters the system. It is just the
 clearest place to start: the same infrastructure carries the richer shapes.
 For instance you can also:
 
-- sling a *formula* that expands into a multi-step **molecule** (a root bead plus child step beads)
+- sling a *formula* that expands into a multi-step **molecule** (a root bead plus one bead per step)
 - group related work into a **convoy**.
 
 ## Agent spawning, lifecycle, and communication
@@ -301,6 +301,6 @@ bd show <bead-id> --watch
   guided, end-to-end walkthrough that teaches the full user model.
 - [Tutorial 06: Beads](/tutorials/06-beads) — go deeper on the work store that
   underpins everything here.
-- [Beads Storage Topology](/internals/beads-topology) — how a city and its rigs
+- [Beads Storage Topology](/reference/internal/beads-topology) — how a city and its rigs
   share one store under the hood.
 - [Reference](/reference/index) — command, config, formula, and provider lookup.
