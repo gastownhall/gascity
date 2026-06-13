@@ -321,6 +321,30 @@ Lesson test — it becomes LESS useful as models improve.
   `make test-cmd-gc-process-parallel`, `make test-integration-shards-parallel`,
   `make test-local-full-parallel`) over raw `go test`.
 
+## Build Cache Conventions
+
+**Hard ban: never run `go clean -cache`** in any script, hook, or agent session.
+
+Running `go clean -cache` against a shared `GOCACHE` (the default when
+`$GOCACHE` is not overridden) corrupts the fleet-wide build cache for every
+concurrent executor. Each executor that hits a missing cache entry then runs a
+full rebuild, and any that calls `go clean -cache` mid-flight invalidates all
+the others' in-progress caches. The incident (vp-g96b, 2026-06-13) produced
+~10 cascading cache-miss errors across the executor pool.
+
+**Safe alternative for cold builds:**
+
+```bash
+GOCACHE=$(mktemp -d) go build ./cmd/gc/
+```
+
+This isolates the cache to a throwaway directory without touching the shared
+pool. Clean up with `rm -rf` after if disk space matters.
+
+**Exception:** `go clean -testcache` is explicitly allowed. It clears only the
+test-result cache, not the compiled-object cache, and does not corrupt
+concurrent builds.
+
 ## Code quality gates
 
 Before considering any task complete:
