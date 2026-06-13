@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -30,15 +31,59 @@ func cliGraphrouteDeps(cityPath string) graphroute.Deps {
 		CityPath:              cityPath,
 		Resolver:              cliAgentResolver{},
 		DirectSessionResolver: cliDirectSessionResolver,
+		ControlDispatcherRuntimeMissing: func(qualifiedName string) bool {
+			return controlDispatcherSessionRuntimeMissing(cityPath, qualifiedName)
+		},
 	}
 }
 
-// controlDispatcherBinding resolves the control-dispatcher route binding
-// with CLI dependencies. Only Resolver is supplied —
-// graphroute.ControlDispatcherBinding reads no other Deps fields, matching
-// the projection the retired sling alias layer forwarded.
-func controlDispatcherBinding(store beads.Store, cityName string, cfg *config.City, rigContext string) (graphroute.GraphRouteBinding, error) {
-	return graphroute.ControlDispatcherBinding(store, cityName, cfg, rigContext, graphroute.Deps{Resolver: cliAgentResolver{}})
+// controlDispatcherSessionRuntimeMissing reports whether the control-dispatcher
+// agent's session is asleep with reason runtime-missing. Session beads are
+// city-scoped, so it reads the city store directly (the rig-scoped routing
+// store cannot see them). It powers the rig→city control-dispatcher fallback
+// (#3454); any lookup failure returns false so routing falls back to the normal
+// rig-local binding rather than mis-routing on a transient store error.
+func controlDispatcherSessionRuntimeMissing(cityPath, qualifiedName string) bool {
+	if cityPath == "" || strings.TrimSpace(qualifiedName) == "" {
+		return false
+	}
+	// Only consult the city store for a real, initialized city. Mirrors the
+	// pool-nudge guard in doSling: a bare working dir (no city.toml) has no
+	// session beads to read, and opening a store there would needlessly
+	// spin up a managed Dolt backend on the routing hot path.
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		return false
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil || store == nil {
+		return false
+	}
+	return sessionRuntimeMissingInStore(store, qualifiedName)
+}
+
+// sessionRuntimeMissingInStore reports whether any open session bead for the
+// agent (selected by its agent:<qualified> label) projects the runtime-missing
+// lifecycle reason in the given store.
+func sessionRuntimeMissingInStore(store beads.Store, qualifiedName string) bool {
+	qualifiedName = strings.TrimSpace(qualifiedName)
+	if store == nil || qualifiedName == "" {
+		return false
+	}
+	sessions, err := store.List(beads.ListQuery{
+		Type:   sessionpkg.BeadType,
+		Label:  "agent:" + qualifiedName,
+		Status: "open",
+	})
+	if err != nil {
+		return false
+	}
+	now := time.Now().UTC()
+	for _, b := range sessions {
+		if sessionpkg.LifecycleDisplayReason(b.Status, b.Metadata, now) == sessionpkg.LifecycleReasonRuntimeMissing {
+			return true
+		}
+	}
+	return false
 }
 
 // applyGraphRouting delegates to graphroute.ApplyGraphRouting with CLI

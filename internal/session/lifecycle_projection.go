@@ -219,6 +219,11 @@ const (
 	LifecycleReasonResetPending = "reset-pending"
 	// LifecycleReasonCircuitOpen is the shared display reason for an open session circuit breaker.
 	LifecycleReasonCircuitOpen = "circuit-open"
+	// LifecycleReasonRuntimeMissing is the display reason for a session the
+	// reconciler put asleep because its runtime/process vanished. It is the
+	// durable sleep_reason written by session reconciliation and the signal the
+	// control-dispatcher rig→city fallback keys on (#3454).
+	LifecycleReasonRuntimeMissing = "runtime-missing"
 	// SessionCircuitStateMetadataKey is the durable metadata key for session circuit breaker state.
 	SessionCircuitStateMetadataKey = "session_circuit_state"
 	// SessionCircuitStateOpen is the durable metadata value for an open session circuit breaker.
