@@ -354,8 +354,11 @@ func WriteCityAndRigSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City) 
 // (.gc/site.toml) is kept consistent. If the site binding write fails after
 // city.toml is changed, both files are restored before the error is returned.
 func AppendRigAndWriteSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City, newRig Rig) error {
+	// cityRoot intentionally stays the symlink's directory even when city.toml
+	// links elsewhere: that is where the city's .gc/ state lives, so the site
+	// binding (.gc/site.toml) is kept next to the live city, not the target.
 	cityRoot := filepath.Dir(tomlPath)
-	writePath, err := ResolveCityRewritePath(fs, tomlPath)
+	writePath, err := ResolveCityAppendPath(fs, tomlPath)
 	if err != nil {
 		return err
 	}
@@ -456,6 +459,25 @@ func ResolveCityRewritePath(fs fsys.FS, tomlPath string) (string, error) {
 	return writePath, nil
 }
 
+// ResolveCityAppendPath returns the path a byte-preserving append to city.toml
+// must write to. Like ResolveCityRewritePath it follows symlinks so the append
+// targets the real file instead of replacing the link, and it refuses content
+// that no longer parses as City TOML (the caller loaded the config from this
+// same path, so unparsable content means it changed underneath us). Unlike the
+// full-rewrite path it does NOT refuse unknown keys: an append preserves the
+// existing bytes verbatim and cannot drop forward-compatible keys, so the
+// version-skew case (an older gc editing a newer gc's city.toml) stays lossless.
+func ResolveCityAppendPath(fs fsys.FS, tomlPath string) (string, error) {
+	writePath, err := fsys.ResolveSymlinks(fs, tomlPath)
+	if err != nil {
+		return "", fmt.Errorf("resolving %s for append: %w", tomlPath, err)
+	}
+	if err := guardCityAppendCorruption(fs, writePath); err != nil {
+		return "", err
+	}
+	return writePath, nil
+}
+
 // guardCityRewriteKeyLoss refuses to rewrite a city.toml whose current
 // on-disk content contains keys this gc binary does not recognize: the
 // struct round-trip would silently drop them (ga-lurp5d dropped
@@ -465,17 +487,9 @@ func ResolveCityRewritePath(fs fsys.FS, tomlPath string) (string, error) {
 // mutating it, so unparsable content here means the file changed underneath
 // us and a rewrite would destroy whatever is there now.
 func guardCityRewriteKeyLoss(fs fsys.FS, path string) error {
-	data, err := fs.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("reading %s before rewrite: %w", path, err)
-	}
-	var cfg City
-	md, err := toml.Decode(string(data), &cfg)
-	if err != nil {
-		return fmt.Errorf("refusing to rewrite %s: current content does not parse, rewriting would destroy it: %w", path, err)
+	md, ok, err := decodeCityForGuard(fs, path)
+	if err != nil || !ok {
+		return err
 	}
 	undecoded := md.Undecoded()
 	if len(undecoded) == 0 {
@@ -487,6 +501,40 @@ func guardCityRewriteKeyLoss(fs fsys.FS, path string) error {
 	}
 	sort.Strings(keys)
 	return fmt.Errorf("refusing to rewrite %s: it contains keys this gc binary does not recognize and the rewrite would silently drop them: %s (upgrade gc or remove the keys, then retry)", path, strings.Join(keys, ", "))
+}
+
+// guardCityAppendCorruption refuses to append to a city.toml whose current
+// on-disk content no longer parses as City TOML. A missing file is fine — the
+// caller handles fresh writes. An unparsable file is refused for the same
+// reason as the rewrite guard: callers load the config from this same path
+// before mutating it, so unparsable content means the file changed underneath
+// us and appending would compound the corruption. Unlike guardCityRewriteKeyLoss
+// it does not refuse unknown keys: a byte-level append preserves the existing
+// content verbatim and cannot drop them.
+func guardCityAppendCorruption(fs fsys.FS, path string) error {
+	_, _, err := decodeCityForGuard(fs, path)
+	return err
+}
+
+// decodeCityForGuard reads and TOML-decodes the current on-disk city.toml for
+// the rewrite/append guards. ok is false when the file is missing (nothing to
+// lose). It returns an error when the file exists but no longer parses as City
+// TOML, because the caller loaded the config from this same path before
+// mutating it and any edit would destroy content that changed underneath us.
+func decodeCityForGuard(fs fsys.FS, path string) (md toml.MetaData, ok bool, err error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return toml.MetaData{}, false, nil
+		}
+		return toml.MetaData{}, false, fmt.Errorf("reading %s before edit: %w", path, err)
+	}
+	var cfg City
+	md, err = toml.Decode(string(data), &cfg)
+	if err != nil {
+		return toml.MetaData{}, false, fmt.Errorf("refusing to edit %s: current content does not parse, the edit would destroy it: %w", path, err)
+	}
+	return md, true, nil
 }
 
 func rigNameSet(names []string) map[string]struct{} {

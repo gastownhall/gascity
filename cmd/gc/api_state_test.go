@@ -1061,6 +1061,74 @@ func TestControllerStateMutationRestoresFullAgentScaffoldWhenRefreshFails(t *tes
 	}
 }
 
+// TestControllerStateMutationRestoresSymlinkedCityTomlWhenRefreshFails proves
+// the controller config-mutation rollback is symlink-aware, matching the CLI
+// rollback snapshots. When a forward mutation writes through a city.toml
+// symlink and the post-mutation config reload fails, restore must rewrite the
+// real target file and leave the live city.toml symlink intact. Before the fix,
+// captureConfigMutationSnapshot/restore operated on the unresolved link path,
+// so rollback replaced the symlink with a regular file and left the
+// forward-modified target un-reverted.
+func TestControllerStateMutationRestoresSymlinkedCityTomlWhenRefreshFails(t *testing.T) {
+	dir := t.TempDir()
+	repoDir := filepath.Join(dir, "repo")
+	cityDir := filepath.Join(dir, "city")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	repoCityPath := filepath.Join(repoDir, "city.toml")
+	liveCityPath := filepath.Join(cityDir, "city.toml")
+	original := []byte("[workspace]\nname = \"city1\"\n")
+	if err := os.WriteFile(repoCityPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "repo", "city.toml"), liveCityPath); err != nil {
+		t.Fatal(err)
+	}
+
+	cs := &controllerState{
+		cityPath: cityDir,
+		cfg:      &config.City{Workspace: config.Workspace{Name: "city1"}},
+	}
+
+	mutErr := cs.mutateAndPoke(func() error {
+		// Forward mutation writes through the resolved symlink target, exactly
+		// like the config editor's ResolveCityRewritePath path. The broken TOML
+		// then makes refreshConfigSnapshot fail and triggers rollback -- the
+		// same post-mutation refresh failure the production path hits.
+		resolved, err := fsys.ResolveSymlinks(fsys.OSFS{}, liveCityPath)
+		if err != nil {
+			return err
+		}
+		return fsys.WriteFileAtomic(fsys.OSFS{}, resolved, []byte("["), 0o644)
+	})
+	if mutErr == nil {
+		t.Fatal("mutateAndPoke should fail when refreshing the post-mutation config fails")
+	}
+	if !strings.Contains(mutErr.Error(), "refreshing updated city config") {
+		t.Fatalf("mutateAndPoke error = %v, want refresh failure after mutation", mutErr)
+	}
+
+	info, err := os.Lstat(liveCityPath)
+	if err != nil {
+		t.Fatalf("Lstat(live city.toml): %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("rollback replaced the city.toml symlink with a regular file")
+	}
+	restored, readErr := os.ReadFile(repoCityPath)
+	if readErr != nil {
+		t.Fatalf("read repo city.toml: %v", readErr)
+	}
+	if string(restored) != string(original) {
+		t.Fatalf("repo city.toml = %q, want restored original %q", restored, original)
+	}
+}
+
 func TestControllerStateMutationAllowsSymlinkedAgentAssets(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 

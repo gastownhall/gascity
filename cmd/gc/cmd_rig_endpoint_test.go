@@ -1729,3 +1729,65 @@ func readRigEndpointConfigState(t *testing.T, dir string) contract.ConfigState {
 	}
 	return state
 }
+
+// Regression for PR #3428 review: the gc rig set-endpoint outer rollback
+// snapshots city.toml at its symlink-resolved path, so restoring after a later
+// step fails rewrites the real target and leaves the live symlink intact
+// instead of replacing it with a regular file.
+func TestSnapshotRigEndpointFilesRestoresSymlinkedCityToml(t *testing.T) {
+	dir := t.TempDir()
+	repoDir := filepath.Join(dir, "repo")
+	cityDir := filepath.Join(dir, "city")
+	scopeRoot := filepath.Join(dir, "rig")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(scopeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	repoCityPath := filepath.Join(repoDir, "city.toml")
+	liveCityPath := filepath.Join(cityDir, "city.toml")
+	original := []byte("[workspace]\nname = \"test-city\"\n")
+	if err := os.WriteFile(repoCityPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "repo", "city.toml"), liveCityPath); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := fsys.OSFS{}
+	snapshots, err := snapshotRigEndpointFiles(fs, cityDir, scopeRoot)
+	if err != nil {
+		t.Fatalf("snapshotRigEndpointFiles: %v", err)
+	}
+
+	// Simulate the endpoint config rewrite mutating the resolved target before
+	// a later step fails and triggers rollback.
+	mutated := []byte("[workspace]\nname = \"mutated\"\n")
+	if err := os.WriteFile(repoCityPath, mutated, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := restoreSnapshots(fs, snapshots); err != nil {
+		t.Fatalf("restoreSnapshots: %v", err)
+	}
+
+	info, err := os.Lstat(liveCityPath)
+	if err != nil {
+		t.Fatalf("Lstat(live city.toml): %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("rollback replaced the live city.toml symlink with a regular file")
+	}
+	restored, err := os.ReadFile(repoCityPath)
+	if err != nil {
+		t.Fatalf("read repo city.toml: %v", err)
+	}
+	if !bytes.Equal(restored, original) {
+		t.Fatalf("repo city.toml = %q, want restored original %q", restored, original)
+	}
+}

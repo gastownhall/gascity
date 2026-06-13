@@ -3306,3 +3306,62 @@ func TestRouteRigList_StaleBannerOver30s(t *testing.T) {
 		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
 	}
 }
+
+// Regression for PR #3428 review: the gc rig add outer rollback snapshots
+// city.toml at its symlink-resolved path, so restoring after a later step
+// fails rewrites the real target and leaves the live symlink intact instead of
+// replacing it with a regular file (and leaving the appended rig stranded in
+// the target).
+func TestSnapshotRigAddTopologyFilesRestoresSymlinkedCityToml(t *testing.T) {
+	dir := t.TempDir()
+	repoDir := filepath.Join(dir, "repo")
+	cityDir := filepath.Join(dir, "city")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	repoCityPath := filepath.Join(repoDir, "city.toml")
+	liveCityPath := filepath.Join(cityDir, "city.toml")
+	original := []byte("[workspace]\nname = \"test-city\"\n")
+	if err := os.WriteFile(repoCityPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "repo", "city.toml"), liveCityPath); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := fsys.OSFS{}
+	snapshots, err := snapshotRigAddTopologyFiles(fs, cityDir, &config.City{Workspace: config.Workspace{Name: "test-city"}})
+	if err != nil {
+		t.Fatalf("snapshotRigAddTopologyFiles: %v", err)
+	}
+
+	// Simulate the surgical append mutating the resolved target before a later
+	// rig-add step fails and triggers rollback.
+	mutated := []byte("[workspace]\nname = \"test-city\"\n\n[[rigs]]\nname = \"frontend\"\n")
+	if err := os.WriteFile(repoCityPath, mutated, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := restoreSnapshots(fs, snapshots); err != nil {
+		t.Fatalf("restoreSnapshots: %v", err)
+	}
+
+	info, err := os.Lstat(liveCityPath)
+	if err != nil {
+		t.Fatalf("Lstat(live city.toml): %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("rollback replaced the live city.toml symlink with a regular file")
+	}
+	restored, err := os.ReadFile(repoCityPath)
+	if err != nil {
+		t.Fatalf("read repo city.toml: %v", err)
+	}
+	if !bytes.Equal(restored, original) {
+		t.Fatalf("repo city.toml = %q, want restored original %q", restored, original)
+	}
+}

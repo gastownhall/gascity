@@ -789,7 +789,7 @@ func boundImportsMap(imports []config.BoundImport) map[string]config.Import {
 
 func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) ([]fileSnapshot, error) {
 	snapshots := make([]fileSnapshot, 0, len(cfg.Rigs)*3+5)
-	cityToml, err := snapshotOptionalFile(fs, filepath.Join(cityPath, "city.toml"))
+	cityToml, err := snapshotCityTomlForRollback(fs, cityPath)
 	if err != nil {
 		return nil, err
 	}

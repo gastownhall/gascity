@@ -1347,8 +1347,13 @@ func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, er
 		return nil
 	}
 
+	cityToml, err := cityTomlRollbackPath(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving city.toml for rollback snapshot: %w", err)
+	}
+
 	for _, path := range []string{
-		filepath.Join(cityPath, "city.toml"),
+		cityToml,
 		filepath.Join(cityPath, ".gc", "site.toml"),
 	} {
 		if err := capture(path); err != nil {

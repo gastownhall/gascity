@@ -684,13 +684,17 @@ func syncRigEndpointCompatConfig(fs fsys.FS, cityPath string, cfg *config.City, 
 }
 
 func snapshotRigEndpointFiles(fs fsys.FS, cityPath, scopeRoot string) ([]fileSnapshot, error) {
+	cityToml, err := snapshotCityTomlForRollback(fs, cityPath)
+	if err != nil {
+		return nil, err
+	}
 	paths := []string{
-		filepath.Join(cityPath, "city.toml"),
 		config.SiteBindingPath(cityPath),
 		filepath.Join(scopeRoot, ".beads", "metadata.json"),
 		filepath.Join(scopeRoot, ".beads", "config.yaml"),
 	}
-	snapshots := make([]fileSnapshot, 0, len(paths))
+	snapshots := make([]fileSnapshot, 0, len(paths)+1)
+	snapshots = append(snapshots, cityToml)
 	for _, path := range paths {
 		snap, err := snapshotOptionalFile(fs, path)
 		if err != nil {
@@ -711,6 +715,31 @@ func snapshotOptionalFile(fs fsys.FS, path string) (fileSnapshot, error) {
 	}
 	cp := append([]byte(nil), data...)
 	return fileSnapshot{path: path, data: cp, exists: true}, nil
+}
+
+// cityTomlRollbackPath returns the symlink-resolved city.toml path that a
+// rollback snapshot must read and later restore. Resolving first means an
+// atomic restore rewrites the real target file and leaves a live city.toml
+// symlink intact, instead of replacing the link with a regular file (the
+// failure ResolveCityRewritePath/ResolveCityAppendPath exist to prevent). When
+// city.toml is a plain file (or not yet created), resolution is a no-op and the
+// path is unchanged. Both the CLI rollback snapshots
+// (snapshotCityTomlForRollback) and the controller config-mutation snapshot
+// (captureConfigMutationSnapshot) route through this so the two rollback
+// surfaces stay symlink-aware together instead of drifting apart.
+func cityTomlRollbackPath(fs fsys.FS, cityPath string) (string, error) {
+	return fsys.ResolveSymlinks(fs, filepath.Join(cityPath, "city.toml"))
+}
+
+// snapshotCityTomlForRollback snapshots city.toml at its symlink-resolved path
+// (see cityTomlRollbackPath) so a later rollback restores the real target file
+// and leaves a live city.toml symlink intact.
+func snapshotCityTomlForRollback(fs fsys.FS, cityPath string) (fileSnapshot, error) {
+	resolved, err := cityTomlRollbackPath(fs, cityPath)
+	if err != nil {
+		return fileSnapshot{}, err
+	}
+	return snapshotOptionalFile(fs, resolved)
 }
 
 func writeRigEndpointRollbackError(fs fsys.FS, stderr io.Writer, snapshots []fileSnapshot, action string, cause error) {

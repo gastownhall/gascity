@@ -355,7 +355,7 @@ func validateCityExternalEndpointChange(cityPath string, targetState contract.Co
 
 func snapshotCityTopologyFiles(fs fsys.FS, cityPath string, plans []cityRigEndpointPlan) ([]fileSnapshot, error) {
 	snapshots := make([]fileSnapshot, 0, len(plans)+3)
-	cityToml, err := snapshotOptionalFile(fs, filepath.Join(cityPath, "city.toml"))
+	cityToml, err := snapshotCityTomlForRollback(fs, cityPath)
 	if err != nil {
 		return nil, err
 	}

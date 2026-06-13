@@ -119,6 +119,70 @@ func TestWriteCityAndRigSiteBindingsForEditRefusesToDropUnknownKeys(t *testing.T
 	}
 }
 
+// Regression for PR #3428 review: the byte-preserving append path must NOT
+// inherit the full-rewrite unknown-key refusal. Appending a [[rigs]] block
+// leaves the existing bytes untouched, so a city.toml carrying keys this gc
+// binary does not recognize (e.g. an older gc editing a newer gc's city) is
+// preserved verbatim instead of being rejected.
+func TestAppendRigAndWriteSiteBindingsForEditPreservesUnknownKeys(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	original := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nfuture_unknown_knob = \"keep-me\"\n")
+	if err := os.WriteFile(cityPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	newRig := Rig{Name: "frontend", Path: "/srv/frontend"}
+	cfg := &City{
+		Workspace: Workspace{Name: "test-city"},
+		Rigs:      []Rig{newRig},
+	}
+	if err := AppendRigAndWriteSiteBindingsForEdit(fsys.OSFS{}, cityPath, cfg, newRig); err != nil {
+		t.Fatalf("AppendRigAndWriteSiteBindingsForEdit: %v", err)
+	}
+
+	rewritten, err := os.ReadFile(cityPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(rewritten), `future_unknown_knob = "keep-me"`) {
+		t.Fatalf("append dropped the unknown key:\n%s", rewritten)
+	}
+	if !strings.Contains(string(rewritten), `name = "frontend"`) {
+		t.Fatalf("append did not add the rig block:\n%s", rewritten)
+	}
+}
+
+// The append path keeps the protective half of the rewrite guard: if the
+// on-disk city.toml no longer parses as TOML, appending would compound the
+// corruption, so it is refused and the file is left untouched. (The caller
+// loaded config from this same path before mutating it.)
+func TestAppendRigAndWriteSiteBindingsForEditRefusesUnparsableCity(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	original := []byte("this is = = not valid toml [[[\n")
+	if err := os.WriteFile(cityPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	newRig := Rig{Name: "frontend", Path: "/srv/frontend"}
+	cfg := &City{Rigs: []Rig{newRig}}
+	err := AppendRigAndWriteSiteBindingsForEdit(fsys.OSFS{}, cityPath, cfg, newRig)
+	if err == nil {
+		t.Fatal("AppendRigAndWriteSiteBindingsForEdit succeeded, want refusal for unparsable city.toml")
+	}
+	if !strings.Contains(err.Error(), "does not parse") {
+		t.Fatalf("error = %v, want parse-refusal guidance", err)
+	}
+	current, readErr := os.ReadFile(cityPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile: %v", readErr)
+	}
+	if !bytes.Equal(current, original) {
+		t.Fatalf("city.toml was modified despite refusal:\n%s", current)
+	}
+}
+
 // A brand-new city.toml (no existing file) must still be writable: the
 // unknown-key guard only applies when there is existing content to lose.
 func TestWriteCityAndRigSiteBindingsForEditAllowsFreshWrite(t *testing.T) {
