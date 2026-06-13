@@ -16,7 +16,7 @@ func newImportMigrateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Deprecated: `use "gc doctor" and "gc doctor --fix"`,
 		Long: `Deprecated compatibility shim.
 
-Use "gc doctor" to inspect legacy PackV1 surfaces and
+Use "gc doctor" to inspect legacy pack surfaces and
 "gc doctor --fix" for the safe mechanical cases that currently have
 automatic rewrites.`,
 		Args: cobra.NoArgs,
@@ -34,9 +34,9 @@ automatic rewrites.`,
 func doImportMigrate(dryRun bool, _ io.Writer, stderr io.Writer) int {
 	_ = dryRun
 	fmt.Fprintln(stderr, "gc import migrate has been deprecated.")                                                                              //nolint:errcheck // best-effort stderr
-	fmt.Fprintln(stderr, `Use "gc doctor" to inspect legacy PackV1 surfaces.`)                                                                  //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, `Use "gc doctor" to inspect legacy pack surfaces.`)                                                                    //nolint:errcheck // best-effort stderr
 	fmt.Fprintln(stderr, `Use "gc doctor --fix" for the safe mechanical cases that currently have automatic rewrites, then rerun "gc doctor".`) //nolint:errcheck // best-effort stderr
-	fmt.Fprintln(stderr, `This shim no longer performs in-place PackV1-to-PackV2 rewrites.`)                                                    //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, `This shim no longer performs in-place legacy-to-current pack rewrites.`)                                              //nolint:errcheck // best-effort stderr
 	fmt.Fprintln(stderr, `See docs/guides/shareable-packs.md for current pack layout guidance; use gc doctor for migration checks.`)            //nolint:errcheck // best-effort stderr
 	return 1
 }

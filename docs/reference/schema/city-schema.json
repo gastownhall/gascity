@@ -1044,7 +1044,7 @@
             "$ref": "#/$defs/Import"
           },
           "type": "object",
-          "description": "Imports defines named pack imports (V2 mechanism). Each key is a local\nbinding name; the authored public contract stores a durable source plus\noptional version. Processed during ExpandCityPacks."
+          "description": "Imports defines named pack imports. Each key is a local\nbinding name; the authored public contract stores a durable source plus\noptional version. Processed during ExpandCityPacks."
         },
         "defaults": {
           "$ref": "#/$defs/PackDefaults",
@@ -1055,7 +1055,7 @@
             "$ref": "#/$defs/Agent"
           },
           "type": "array",
-          "description": "Agents lists all configured agents in this city. Optional: PackV2\ncities compose agents through [imports.*] and ship without any\n[[agent]] block."
+          "description": "Agents lists all configured agents in this city. Pack-composed cities can\ncompose agents through [imports.*] and ship without any\n[[agent]] block."
         },
         "named_session": {
           "items": {
@@ -1766,7 +1766,7 @@
         },
         "template": {
           "type": "string",
-          "description": "Template is the referenced agent template name. Root declarations may\ntarget imported PackV2 agents via \"binding.agent\"."
+          "description": "Template is the referenced agent template name. Root declarations may\ntarget imported agents via \"binding.agent\"."
         },
         "scope": {
           "type": "string",
@@ -2755,5 +2755,5 @@
     }
   },
   "title": "Gas City Configuration",
-  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n\u003e **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/reference/specs/pack-spec)."
+  "description": "Schema for city.toml — the deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for pack composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n\u003e **Pack format source of truth:** Public pack format and loader semantics are specified in [Gas City Pack Specification](/reference/specs/pack-spec)."
 }

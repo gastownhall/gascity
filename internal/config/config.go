@@ -27,7 +27,7 @@ import (
 var validAgentName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // validNamedSessionTemplate matches either a bare agent name ("mayor") or a
-// PackV2 import-qualified template ("gastown.mayor"). Rig qualification is
+// import-qualified template ("gastown.mayor"). Rig qualification is
 // carried separately in NamedSession.Dir, so slashes remain invalid here.
 var validNamedSessionTemplate = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*(\.[a-zA-Z0-9][a-zA-Z0-9_-]*)?$`)
 
@@ -173,19 +173,19 @@ type City struct {
 	// Packs defines named remote pack sources fetched via git (V1 mechanism).
 	//
 	// Legacy pack source map, accepted for migration and fetch/list
-	// compatibility only. PackV2 authored config uses [imports.*] with source
+	// compatibility only. Authored schema-2 config uses [imports.*] with source
 	// plus optional version, so this legacy surface is intentionally omitted
 	// from generated public schemas and reference docs.
 	Packs map[string]PackSource `toml:"packs,omitempty" jsonschema:"-"`
-	// Imports defines named pack imports (V2 mechanism). Each key is a local
+	// Imports defines named pack imports. Each key is a local
 	// binding name; the authored public contract stores a durable source plus
 	// optional version. Processed during ExpandCityPacks.
 	Imports map[string]Import `toml:"imports,omitempty"`
 	// Defaults holds city-level defaults that seed generated config. The
 	// canonical default-rig import table is [defaults.rig.imports].
 	Defaults PackDefaults `toml:"defaults,omitempty"`
-	// Agents lists all configured agents in this city. Optional: PackV2
-	// cities compose agents through [imports.*] and ship without any
+	// Agents lists all configured agents in this city. Pack-composed cities can
+	// compose agents through [imports.*] and ship without any
 	// [[agent]] block.
 	Agents []Agent `toml:"agent,omitempty"`
 	// NamedSessions lists canonical alias-backed sessions built from
@@ -375,7 +375,7 @@ type NamedSession struct {
 	// remains the compatibility identity.
 	Name string `toml:"name,omitempty"`
 	// Template is the referenced agent template name. Root declarations may
-	// target imported PackV2 agents via "binding.agent".
+	// target imported agents via "binding.agent".
 	Template string `toml:"template" jsonschema:"required"`
 	// Scope defines where this named session is instantiated in pack
 	// expansion: "city" (one per city) or "rig" (one per rig).
@@ -712,7 +712,7 @@ type AgentOverride struct {
 // Referenced by name in V1 pack fields and fetched into the cache.
 //
 // PackSource is retained for legacy migration and fetch/list compatibility.
-// PackV2 authored imports use Import.Source and Import.Version instead.
+// Authored schema-2 imports use Import.Source and Import.Version instead.
 type PackSource struct {
 	// Source is the git repository URL.
 	Source string `toml:"source" jsonschema:"required"`
@@ -735,14 +735,14 @@ type Import struct {
 	// Version is an optional semver constraint for git-backed imports (e.g.,
 	// "^1.2"). Empty for local paths. "sha:<hex>" pins a specific commit.
 	Version string `toml:"version,omitempty"`
-	// Export is a compatibility-only PackV2 loader knob retained for older
+	// Export is a compatibility-only loader knob retained for older
 	// configs. It is intentionally omitted from generated public schemas.
 	Export bool `toml:"export,omitempty" jsonschema:"-"`
-	// Transitive is a compatibility-only PackV2 loader knob retained for older
+	// Transitive is a compatibility-only loader knob retained for older
 	// configs. Authored public imports are a DAG through source plus version.
 	// It is intentionally omitted from generated public schemas.
 	Transitive *bool `toml:"transitive,omitempty" jsonschema:"-"`
-	// Shadow is a compatibility-only PackV2 loader knob retained for older
+	// Shadow is a compatibility-only loader knob retained for older
 	// configs. It is intentionally omitted from generated public schemas.
 	Shadow string `toml:"shadow,omitempty" jsonschema:"-"`
 }
@@ -1841,7 +1841,7 @@ func (d *DoltConfig) DoltLockReleaseTimeoutDuration() time.Duration {
 // fixable v2-formulas-dir error.
 type FormulasConfig struct {
 	// Dir is the legacy path to the formulas directory. Authored
-	// [formulas].dir is rejected at config load; PackV2 cities and packs
+	// [formulas].dir is rejected at config load; schema-2 cities and packs
 	// use the well-known formulas/ directory.
 	Dir string `toml:"dir,omitempty" jsonschema:"-"`
 }

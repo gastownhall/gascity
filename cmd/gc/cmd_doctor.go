@@ -42,7 +42,7 @@ requirements (deprecated contract = "graph.v2" opt-ins, missing
 the host's [daemon] formula_v2 setting cannot satisfy), v2 config
 deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
-PackV1-to-PackV2 rewrites that are available on this branch.`,
+legacy-to-current pack rewrites that are available on this branch.`,
 		Example: `  gc doctor
   gc doctor --fix
   gc doctor --verbose

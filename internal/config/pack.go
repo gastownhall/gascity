@@ -34,7 +34,7 @@ type deferredRigPatches struct {
 	overrides          []AgentOverride
 }
 
-// PackConfig is the TOML structure of a pack.toml file. PackV2 agent
+// PackConfig is the TOML structure of a pack.toml file. Agent
 // definitions are discovered from agents/<name>/agent.toml; the inline agent
 // list remains schema-visible for migration compatibility with legacy packs.
 type PackConfig struct {
@@ -44,7 +44,7 @@ type PackConfig struct {
 	AgentsDefaults AgentDefaults     `toml:"agents,omitempty" jsonschema:"-"`
 	Defaults       PackDefaults      `toml:"defaults,omitempty" jsonschema:"-"`
 	// Agents holds legacy inline agent templates accepted by the current
-	// loader. New PackV2 packs should define agents under
+	// loader. New packs should define agents under
 	// agents/<name>/agent.toml instead.
 	Agents        []Agent                 `toml:"agent,omitempty"`
 	NamedSessions []NamedSession          `toml:"named_session,omitempty"`
@@ -118,7 +118,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		if len(topoRefs) == 0 && len(rig.Imports) == 0 {
 			// When a rig has only a path (no explicit includes/imports), treat
 			// the path directory itself as an implicit include if it contains a
-			// pack.toml. This supports the packV2 convention where a rig root
+			// pack.toml. This supports the schema-2 convention where a rig root
 			// can carry a pack.toml with agents/ directories.
 			if p := strings.TrimSpace(rig.Path); p != "" {
 				packPath := p

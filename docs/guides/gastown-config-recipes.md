@@ -212,7 +212,7 @@ them). The **root pack** wires the Gastown import and the default rig binding
 behind it. The **nested pack** holds the reusable defaults — the roles, named
 sessions, and dog pool every Gastown city inherits.
 
-All three are PackV2 (`schema = 2`, `agents/<name>/`).
+All three use the current pack layout (`schema = 2`, `agents/<name>/`).
 
 ### `city.toml` — the deployment
 

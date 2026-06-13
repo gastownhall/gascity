@@ -98,18 +98,18 @@ func GenerateCitySchema() (*jsonschema.Schema, error) {
 	}
 	s := r.Reflect(&config.City{})
 	s.Title = "Gas City Configuration"
-	s.Description = "Schema for city.toml — the PackV2 deployment file for a Gas City instance. " +
+	s.Description = "Schema for city.toml — the deployment file for a Gas City instance. " +
 		"Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. " +
-		"Use [imports.*] for PackV2 composition; legacy includes and [[agent]] fields remain visible for migration compatibility. " +
+		"Use [imports.*] for pack composition; legacy includes and [[agent]] fields remain visible for migration compatibility. " +
 		"Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n" +
-		"> **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/reference/specs/pack-spec)."
+		"> **Pack format source of truth:** Public pack format and loader semantics are specified in [Gas City Pack Specification](/reference/specs/pack-spec)."
 	removeRequiredField(s, "DaemonConfig", "formula_v2")
 	return s, nil
 }
 
-// GeneratePackSchema produces a JSON Schema for the pack.toml manifest
-// format (PackV2). It reflects the config.PackConfig struct using TOML
-// field names and extracts doc comments as descriptions.
+// GeneratePackSchema produces a JSON Schema for the pack.toml manifest format.
+// It reflects the config.PackConfig struct using TOML field names and extracts
+// doc comments as descriptions.
 func GeneratePackSchema() (*jsonschema.Schema, error) {
 	r, err := newReflector()
 	if err != nil {
@@ -117,9 +117,9 @@ func GeneratePackSchema() (*jsonschema.Schema, error) {
 	}
 	s := r.Reflect(&config.PackConfig{})
 	s.Title = "Gas City Pack Manifest"
-	s.Description = "Schema for pack.toml — the PackV2 manifest that declares " +
+	s.Description = "Schema for pack.toml — the manifest that declares " +
 		"a pack's metadata, providers, services, commands, and import surface. " +
-		"PackV2 agent authoring uses agents/<name>/agent.toml; inline [[agent]] " +
+		"Current agent authoring uses agents/<name>/agent.toml; inline [[agent]] " +
 		"tables remain schema-visible for migration compatibility. Cities and rigs " +
 		"compose packs via [imports.*]."
 	return s, nil

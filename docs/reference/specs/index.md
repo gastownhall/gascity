@@ -13,7 +13,7 @@ code wins and the spec has a bug.
 
 | Specification | Covers |
 |---|---|
-| [Gas City 1.0 Pack System (PackV2)](/reference/specs/pack-spec) | Pack format and loading semantics: directory layout, `pack.toml`, imports, patches, layers |
+| [Gas City Pack Specification](/reference/specs/pack-spec) | Pack format and loading semantics: directory layout, `pack.toml`, imports, patches, layers |
 | [Formula Specification — v1](/reference/specs/formula-spec-v1) | The formulas v1 contract: file format, molecule compilation, container semantics — the default when a formula declares nothing |
 | [Formula Specification — v2](/reference/specs/formula-spec-v2) | The formulas v2 contract: file format, graph compilation, and the controller-executed runtime constructs |
 
