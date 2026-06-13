@@ -170,9 +170,6 @@ func supersededBundledPinDetails(imports map[string]config.Import) []string {
 	return details
 }
 
-// rewriteSupersededBundledPinsFS bumps superseded canonical pins to the
-// current canonical version across pack.toml imports, pack.toml default
-// rig imports, and city.toml rig / default-rig imports.
 func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) (bool, error) {
 	bump := func(imports map[string]config.Import) bool {
 		changed := false
@@ -186,6 +183,25 @@ func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) (bool, error) {
 		return changed
 	}
 
+	packTomlPath := filepath.Join(cityPath, "pack.toml")
+	cityTomlPath := filepath.Join(cityPath, "city.toml")
+	packSnap, err := snapshotOptionalFile(fs, packTomlPath)
+	if err != nil {
+		return false, fmt.Errorf("snapshotting pack.toml: %w", err)
+	}
+	citySnap, err := snapshotOptionalFile(fs, cityTomlPath)
+	if err != nil {
+		return false, fmt.Errorf("snapshotting city.toml: %w", err)
+	}
+	snapshots := []fileSnapshot{packSnap, citySnap}
+
+	rollback := func(action string, cause error) error {
+		if restoreErr := restoreSnapshots(fs, snapshots); restoreErr != nil {
+			return fmt.Errorf("%s: %v (rollback failed: %v)", action, cause, restoreErr)
+		}
+		return fmt.Errorf("%s: %w", action, cause)
+	}
+
 	changed := false
 	manifest, err := loadCityPackManifestFS(fs, cityPath)
 	if err != nil {
@@ -195,12 +211,12 @@ func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) (bool, error) {
 	defaultRigChanged := bump(manifest.Defaults.Rig.Imports)
 	if packChanged || defaultRigChanged {
 		if err := writeCityPackManifest(fs, cityPath, manifest); err != nil {
-			return false, err
+			return false, rollback("writing pack.toml", err)
 		}
 		changed = true
 	}
 
-	if _, err := fs.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+	if _, err := fs.Stat(cityTomlPath); err != nil {
 		if os.IsNotExist(err) {
 			return changed, nil
 		}
@@ -221,7 +237,7 @@ func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) (bool, error) {
 	}
 	if cityChanged {
 		if err := writeCityImportManifestFS(fs, cityPath, cfg); err != nil {
-			return false, err
+			return false, rollback("writing city.toml", err)
 		}
 		changed = true
 	}
@@ -346,6 +362,26 @@ func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[s
 			return false, fmt.Errorf("wave 1 public pack migration target for %q is missing source", packName)
 		}
 	}
+
+	packTomlPath := filepath.Join(cityPath, "pack.toml")
+	cityTomlPath := filepath.Join(cityPath, "city.toml")
+	packSnap, err := snapshotOptionalFile(fs, packTomlPath)
+	if err != nil {
+		return false, fmt.Errorf("snapshotting pack.toml: %w", err)
+	}
+	citySnap, err := snapshotOptionalFile(fs, cityTomlPath)
+	if err != nil {
+		return false, fmt.Errorf("snapshotting city.toml: %w", err)
+	}
+	snapshots := []fileSnapshot{packSnap, citySnap}
+
+	rollback := func(action string, cause error) error {
+		if restoreErr := restoreSnapshots(fs, snapshots); restoreErr != nil {
+			return fmt.Errorf("%s: %v (rollback failed: %v)", action, cause, restoreErr)
+		}
+		return fmt.Errorf("%s: %w", action, cause)
+	}
+
 	changed := false
 
 	manifest, err := loadCityPackManifestFS(fs, cityPath)
@@ -363,14 +399,14 @@ func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[s
 
 	var cfg *config.City
 	cityChanged := false
-	if _, err := fs.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+	if _, err := fs.Stat(cityTomlPath); err != nil {
 		if os.IsNotExist(err) {
 			if packChanged || defaultRigChanged {
 				if defaultRigChanged {
 					manifest.DefaultRigImportOrder = replaceImportOrderWithTargets(manifest.DefaultRigImportOrder, defaultRigRewrites)
 				}
 				if err := writeCityPackManifest(fs, cityPath, manifest); err != nil {
-					return false, err
+					return false, rollback("writing pack.toml", err)
 				}
 				changed = true
 			}
@@ -399,13 +435,13 @@ func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[s
 			manifest.DefaultRigImportOrder = replaceImportOrderWithTargets(manifest.DefaultRigImportOrder, defaultRigRewrites)
 		}
 		if err := writeCityPackManifest(fs, cityPath, manifest); err != nil {
-			return false, err
+			return false, rollback("writing pack.toml", err)
 		}
 		changed = true
 	}
 	if cityChanged {
 		if err := writeCityImportManifestFS(fs, cityPath, cfg); err != nil {
-			return false, err
+			return false, rollback("writing city.toml", err)
 		}
 		changed = true
 	}

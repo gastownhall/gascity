@@ -31,6 +31,18 @@ const (
 	BundledPackImportVersion = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
 )
 
+// SupersededBundledPackImportVersions lists previous canonical pins for the
+// gascity.git core/bd/dolt bundled packs, oldest first. Older gc releases
+// wrote these as the canonical pin; the packv2-import-state doctor fix
+// rewrites them to the current BundledPackImportVersion so a pin bump never
+// strands a city on a network-only resolution path for content it only ever
+// wanted as "the builtin". Deliberate user pins at other commits are
+// untouched. When bumping BundledPackImportVersion, append the old value
+// here.
+var SupersededBundledPackImportVersions = []string{
+	// Currently empty, ready for future pin bumps.
+}
+
 // SupersededPublicGastownPackVersions lists previous canonical pins for the
 // public gastown pack, oldest first. Older gc releases and docs wrote these
 // as "the canonical pin"; the packv2-import-state doctor fix rewrites them

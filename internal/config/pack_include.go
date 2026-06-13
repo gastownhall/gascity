@@ -201,21 +201,34 @@ func BundledSourcePinnedVersion(source string) string {
 
 // SupersededBundledPinTarget reports the current canonical version for a
 // bundled source whose declared version is a SUPERSEDED canonical pin —
-// one an older gc release wrote as canonical. Only public registry pins
-// are ever bumped; deliberate user pins at other commits never match.
+// one an older gc release wrote as canonical. Older gc releases and docs
+// wrote these as the canonical pin; the packv2-import-state doctor fix
+// rewrites them to the current canonical version so a pin bump never
+// strands a city on a network-only resolution path.
 func SupersededBundledPinTarget(source, version string) (string, bool) {
 	name, repository, ok := builtinpacks.SourceLayout(source)
-	if !ok || repository != builtinpacks.PublicRepository {
+	if !ok {
 		return "", false
 	}
 	var superseded []string
 	var current string
-	switch name {
-	case "gastown":
-		superseded, current = SupersededPublicGastownPackVersions, PublicGastownPackVersion
-	case "gascity":
-		superseded, current = SupersededPublicGascityPackVersions, PublicGascityPackVersion
-	default:
+	if repository == builtinpacks.PublicRepository {
+		switch name {
+		case "gastown":
+			superseded, current = SupersededPublicGastownPackVersions, PublicGastownPackVersion
+		case "gascity":
+			superseded, current = SupersededPublicGascityPackVersions, PublicGascityPackVersion
+		default:
+			return "", false
+		}
+	} else if repository == builtinpacks.Repository {
+		switch name {
+		case "core", "bd", "dolt":
+			superseded, current = SupersededBundledPackImportVersions, BundledPackImportVersion
+		default:
+			return "", false
+		}
+	} else {
 		return "", false
 	}
 	v := strings.TrimSpace(version)
@@ -270,22 +283,22 @@ func IsBundledSourceAtCanonicalPin(source, commit string) bool {
 // be installed for real, exactly like any other remote import. This
 // fallback keeps cities composable before the first "gc import install"
 // writes the lock.
-func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, bool) {
+func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, error, bool) {
 	if !builtinpacks.IsSource(source) {
-		return "", false
+		return "", nil, false
 	}
 	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
 	if declared := strings.TrimSpace(declaredVersion); declared != "" &&
 		strings.TrimPrefix(declared, "sha:") != commit {
-		return "", false
+		return "", nil, false
 	}
 	cacheRoot, err := GlobalRepoCacheRoot()
 	if err != nil {
-		return "", false
+		return "", fmt.Errorf("resolving global repo cache root: %w", err), true
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
 	if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
-		return cacheDir, true
+		return cacheDir, nil, true
 	}
 	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
 		if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
@@ -293,9 +306,9 @@ func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, bo
 		}
 		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, commit)
 	}); err != nil {
-		return "", false
+		return "", fmt.Errorf("hydrating synthetic repo cache: %w", err), true
 	}
-	return cacheDir, true
+	return cacheDir, nil, true
 }
 
 func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (string, error) {
@@ -303,7 +316,10 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (str
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if cacheDir, ok := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
+			if cacheDir, err, ok := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
+				if err != nil {
+					return "", fmt.Errorf("resolving remote import %s without lock: %w", source, err)
+				}
 				return cacheDir, nil
 			}
 			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); %s", source, notCachedRemediation(source, declaredVersion))
@@ -317,7 +333,10 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (str
 	}
 	entry, ok := lock.Packs[source]
 	if !ok || entry.Commit == "" {
-		if cacheDir, ok := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
+		if cacheDir, err, ok := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
+			if err != nil {
+				return "", fmt.Errorf("resolving remote import %s without lock entry: %w", source, err)
+			}
 			return cacheDir, nil
 		}
 		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); %s", source, notCachedRemediation(source, declaredVersion))

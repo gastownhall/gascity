@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -791,3 +792,114 @@ version = "`+superseded[0]+`"
 		t.Fatalf("status after fix = %v, want OK; result=%#v", result.Status, result)
 	}
 }
+
+// TestImportStateDoctorCheckMigratesSupersededCoreBundledPin verifies that
+// superseded pins for the core gascity.git repo are also correctly detected
+// and re-pinned to the current canonical BundledPackImportVersion.
+func TestImportStateDoctorCheckMigratesSupersededCoreBundledPin(t *testing.T) {
+	clearGCEnv(t)
+	dummyOldPin := "sha:1234567890abcdef1234567890abcdef12345678"
+	prevSuperseded := config.SupersededBundledPackImportVersions
+	config.SupersededBundledPackImportVersions = append(config.SupersededBundledPackImportVersions, dummyOldPin)
+	t.Cleanup(func() {
+		config.SupersededBundledPackImportVersions = prevSuperseded
+	})
+
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 2
+
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "`+dummyOldPin+`"
+`)
+
+	check := newImportStateDoctorCheck(cityDir)
+	result := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error for superseded core pin; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
+		t.Fatalf("details = %v, want superseded-canonical-pin entry", result.Details)
+	}
+
+	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+
+	packData, err := os.ReadFile(filepath.Join(cityDir, "pack.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(packData), dummyOldPin) {
+		t.Fatalf("pack.toml still pins superseded version:\n%s", packData)
+	}
+	if !strings.Contains(string(packData), config.BundledPackImportVersion) {
+		t.Fatalf("pack.toml missing current canonical pin:\n%s", packData)
+	}
+}
+
+type errorInjectingFS struct {
+	fsys.OSFS
+	failWritePath string
+}
+
+func (f errorInjectingFS) WriteFile(name string, data []byte, perm os.FileMode) error {
+	if strings.HasPrefix(filepath.Base(name), f.failWritePath) {
+		return fmt.Errorf("injected write failure")
+	}
+	return f.OSFS.WriteFile(name, data, perm)
+}
+
+// TestImportStateDoctorCheckRollbackOnFailure verifies that if writing city.toml
+// fails during rewriteSupersededBundledPinsFS or rewriteLegacyPublicPackImportsFS,
+// the pack.toml file is successfully rolled back to its original state.
+func TestImportStateDoctorCheckRollbackOnFailure(t *testing.T) {
+	clearGCEnv(t)
+	dummyOldPin := "sha:1234567890abcdef1234567890abcdef12345678"
+	prevSuperseded := config.SupersededBundledPackImportVersions
+	config.SupersededBundledPackImportVersions = append(config.SupersededBundledPackImportVersions, dummyOldPin)
+	t.Cleanup(func() {
+		config.SupersededBundledPackImportVersions = prevSuperseded
+	})
+
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "demo-rig"
+[rigs.imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "`+dummyOldPin+`"
+`)
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 2
+
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "`+dummyOldPin+`"
+`)
+
+	fs := errorInjectingFS{failWritePath: "city.toml"}
+
+	_, err := rewriteSupersededBundledPinsFS(fs, cityDir)
+	if err == nil || !strings.Contains(err.Error(), "injected write failure") {
+		t.Fatalf("expected injected write failure error, got: %v", err)
+	}
+
+	// Verify that pack.toml has been rolled back and still contains dummyOldPin
+	packData, err := os.ReadFile(filepath.Join(cityDir, "pack.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(packData), dummyOldPin) {
+		t.Fatalf("pack.toml was NOT rolled back, missing old pin:\n%s", packData)
+	}
+}
+
