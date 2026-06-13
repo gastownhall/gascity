@@ -8,7 +8,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
-	sessioncloudflare "github.com/gastownhall/gascity/internal/runtime/cloudflare"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	"github.com/gastownhall/gascity/internal/runtime/registry"
@@ -65,9 +64,11 @@ func buildRuntimeRegistry() *registry.Registry {
 	must(r.Register("t3bridge", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
 		return sessiont3bridge.NewProvider(), nil
 	}))
-	must(r.Register("cloudflare", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-		return sessioncloudflare.NewProvider()
-	}))
+	// "cloudflare" is no longer a builtin: it ships as the runtime-cloudflare
+	// pack ([runtimes.cloudflare] → gc-runtime-cloudflare, RPP v0) and
+	// resolves per city via runtimeRegistryForCity. A city without that pack
+	// that selects session = "cloudflare" falls through to the tmux fallback
+	// (RUNTIME-SEL-006) — the delivery-independence boundary (RUNTIME-PLAN-004).
 	must(r.Register("k8s", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
 		return sessionk8s.NewProvider()
 	}))

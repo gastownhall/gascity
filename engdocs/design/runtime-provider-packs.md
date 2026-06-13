@@ -233,21 +233,29 @@ Four PRs, each independently green:
 | 1 | `ga-fse3es` | gascity | Registry: `internal/runtime/registry/` (Register/RegisterPrefix/fallback; collisions are errors), builtin registrations in `cmd/gc/runtime_registry.go`, switch in `cmd/gc/providers.go` becomes lookup. Stdlib-only boundary test on the contract package. Behavior-preserving. **Landed on this branch.** | Low |
 | 2 | `ga-ghbts9` | gascity | RPP v0: protocol spec doc (`engdocs/architecture/` or `docs/`), `protocol` handshake op + capability mapping in the exec/proxy provider, `gc runtime check` conformance command (wraps `runtimetest` against an arbitrary executable). Reference executable: fake-backed test script. **Landed on this branch.** | Medium |
 | 3 | `ga-h504e5` | gascity | Pack surface: `[runtimes.<name>]` in pack.toml, composition registers pack runtimes (per-city clone of the builtin registry), collision rules, `pack-runtimes` doctor handshake check, `gc runtime check <name>` resolution. **Landed on this branch.** | Medium |
-| 4 | `ga-6qwfkb` | gascity-packs + gascity | `runtime-cloudflare` pack: nested Go module (no gascity deps) emitting `gc-runtime-cloudflare` speaking RPP v0, installed by the pack, `gc runtime check` green in packs CI. gascity deletes `internal/runtime/cloudflare`; `session = "cloudflare"` resolves via the pack. | Low |
+| 4 | `ga-6qwfkb` | gascity-packs + gascity | `runtime-cloudflare` pack: nested Go module (no gascity deps) emitting `gc-runtime-cloudflare` speaking RPP v0, installed by the pack, `gc runtime check` green in packs CI. gascity deletes `internal/runtime/cloudflare`; `session = "cloudflare"` resolves via the pack. **gascity side landed on this branch (RUNTIME-SEL-012); pack lives in `gascity-packs/runtime-cloudflare/`.** | Low |
 
 PoC exit criteria:
 
 - A city with the runtime-cloudflare pack and `session = "cloudflare"`
-  behaves as today (existing selection tests adapted).
+  behaves as today (existing selection tests adapted). ✅ `cloudflare`
+  resolves via the pack; `TestCloudflareIsNoLongerABuiltin` pins the
+  without-the-pack tmux fallback.
 - **Delivery-independence demo**: bump the runtime-cloudflare pack
   version in a city, observe the new provider behavior with the same
-  `gc` binary.
+  `gc` binary. ✅ documented in
+  `gascity-packs/runtime-cloudflare/README.md` (Delivery-independence
+  demo).
 - `gc runtime check` runs green in gascity-packs CI against the
-  installed executable, with no Go imports from gascity.
+  installed executable, with no Go imports from gascity. ✅
+  `runtime-cloudflare/conformance.sh` runs the full RPP round-trip
+  against an in-module fake Worker (13 pass / 1 skip / 0 fail); the pack
+  module has zero gascity imports.
 - `go vet ./...`, fast unit baseline, and the sharded suites pass at
   each PR boundary.
 - A written t3bridge extraction checklist: which ops it needs, ledger
   access via bd CLI / gc API, and whether T3 Code hosts the executable.
+  ✅ `gascity-packs/runtime-cloudflare/docs/t3bridge-extraction-checklist.md`.
 
 ## Alternatives considered
 

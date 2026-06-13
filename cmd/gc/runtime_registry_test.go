@@ -17,7 +17,7 @@ import (
 // internal/runtime/REQUIREMENTS.md (RUNTIME-SEL-002). Removing a name is
 // a breaking change to city configs; update the ledger row with this list.
 var builtinRuntimeNames = []string{
-	"fake", "fail", "subprocess", "acp", "t3bridge", "cloudflare", "k8s", "hybrid", "tmux",
+	"fake", "fail", "subprocess", "acp", "t3bridge", "k8s", "hybrid", "tmux",
 }
 
 func TestRuntimeRegistryRegistersAllBuiltinNames(t *testing.T) {
@@ -26,6 +26,23 @@ func TestRuntimeRegistryRegistersAllBuiltinNames(t *testing.T) {
 		if !r.Has(name) {
 			t.Errorf("builtin runtime %q not registered", name)
 		}
+	}
+}
+
+func TestCloudflareIsNoLongerABuiltin(t *testing.T) {
+	// cloudflare moved to the runtime-cloudflare pack (RUNTIME-PLAN-004
+	// delivery independence). Without the pack, the name is unregistered and
+	// falls through to the tmux fallback (RUNTIME-SEL-006) — it must not
+	// resolve to a builtin cloudflare provider.
+	if runtimeRegistry.Has("cloudflare") {
+		t.Fatal("cloudflare must not be a builtin runtime; it ships as the runtime-cloudflare pack")
+	}
+	sp, err := newSessionProviderForCityByName(nil, "cloudflare", config.SessionConfig{}, "city", t.TempDir())
+	if err != nil {
+		t.Fatalf("newSessionProviderForCityByName(cloudflare): %v", err)
+	}
+	if _, ok := sp.(*sessiontmux.Provider); !ok {
+		t.Fatalf("provider type = %T, want *tmux.Provider (fallback without the pack)", sp)
 	}
 }
 
