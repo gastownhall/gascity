@@ -60,9 +60,10 @@ func defaultPricingRegistry() *pricing.Registry {
 // process (the API server constructs a fresh handle per request) — can each
 // read the same stale cursor and double-record the pending batch.
 // invTelemetryMu only serializes ops that share a single handle instance.
-// Accepted as best-effort. RuntimeHandle prompt ops are not covered:
-// runtime-only sessions have no transcript adapter, no session bead for the
-// cursor, and no agent identity.
+// Accepted as best-effort. RuntimeHandle prompt ops are permanently out of
+// scope (decided in ga-tkvb31, not a pending gap): runtime-only sessions
+// have no transcript adapter, no session bead for the cursor, and no agent
+// identity, and will not gain bead-backed identity just for telemetry.
 func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if operationEventsSuppressed(ctx) {
 		return

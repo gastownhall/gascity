@@ -204,6 +204,9 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 }
 
 // Message submits a runtime nudge as a synchronous worker message.
+// Runtime-only sessions are permanently excluded from invocation
+// telemetry (gc.agent.tokens.*, gc.agent.invocation.cost_usd); see
+// SessionHandle.recordInvocationTelemetry. Do not add a telemetry hook here.
 func (h *RuntimeHandle) Message(ctx context.Context, req MessageRequest) (result MessageResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationMessage)
 	defer func() {
@@ -236,6 +239,8 @@ func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 }
 
 // Nudge submits a best-effort reminder to the live runtime session.
+// Like Message, it is permanently excluded from invocation telemetry;
+// see SessionHandle.recordInvocationTelemetry.
 func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
