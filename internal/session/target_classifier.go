@@ -1,5 +1,7 @@
 package session
 
+import "fmt"
+
 // Session target classification, extracted from the API resolver's
 // precedence ladder (SESSION-ID-003/004 plus the API-level steps around
 // them). Pure decision ladder over caller-gathered lookup facts: the caller
@@ -65,6 +67,29 @@ const (
 	TargetStepClosedNamedSpec
 	TargetStepClosed
 )
+
+// String names the precedence step so diagnostics and test failures read as
+// ladder steps rather than bare ints.
+func (s TargetStep) String() string {
+	switch s {
+	case TargetStepNone:
+		return "none"
+	case TargetStepExactID:
+		return "exact-id"
+	case TargetStepConfiguredName:
+		return "configured-name"
+	case TargetStepLive:
+		return "live"
+	case TargetStepPathAlias:
+		return "path-alias"
+	case TargetStepClosedNamedSpec:
+		return "closed-named-spec"
+	case TargetStepClosed:
+		return "closed"
+	default:
+		return fmt.Sprintf("TargetStep(%d)", int(s))
+	}
+}
 
 // TargetAction is what the caller must do next.
 type TargetAction int

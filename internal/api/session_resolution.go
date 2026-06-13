@@ -460,7 +460,12 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 	}
 	selected := map[session.TargetStep]string{}
 	failed := map[session.TargetStep]error{}
-	for {
+	// The classifier gathers each of the ladder's six facts at most once, so
+	// classification terminates within seven decisions. The bound (matching
+	// gatherSequence in the classifier tests) turns a classifier regression
+	// that re-requests a gathered fact into an internal error instead of a
+	// spinning request goroutine.
+	for range 16 {
 		dec := session.DecideSessionTarget(facts)
 		if dec.Action == session.TargetDone {
 			switch dec.Result {
@@ -529,6 +534,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 			return "", fmt.Errorf("session target classifier requested unknown step %v", dec.Gather)
 		}
 	}
+	return "", fmt.Errorf("session target classifier did not terminate for %q", identifier)
 }
 
 // lookupFact maps a Resolve* error to the classifier's tri-state lookup

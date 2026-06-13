@@ -216,3 +216,96 @@ func TestDecideSessionTargetClosedLadderGatedOnAllowClosed(t *testing.T) {
 		t.Fatalf("live-only ladder miss: got %+v, want done/not-found", dec)
 	}
 }
+
+// targetStepFactUnknown reports whether the fact a gather step would fill is
+// still ungathered.
+func targetStepFactUnknown(f TargetFacts, step TargetStep) bool {
+	switch step {
+	case TargetStepExactID:
+		return f.ExactID == LookupUnknown
+	case TargetStepConfiguredName:
+		return f.ConfiguredName == NamedLookupUnknown
+	case TargetStepLive:
+		return f.Live == LookupUnknown
+	case TargetStepPathAlias:
+		return f.PathAlias == LookupUnknown
+	case TargetStepClosedNamedSpec:
+		return f.ClosedNamedSpec == LookupUnknown
+	case TargetStepClosed:
+		return f.Closed == LookupUnknown
+	default:
+		return false
+	}
+}
+
+// Exhaustively enumerates the full fact space and asserts every gather
+// decision requests a still-unknown fact. Supplying any non-Unknown value
+// for a gathered fact therefore strictly shrinks the unknown set, so a
+// gather/decide loop terminates within the ladder depth — the invariant the
+// API adapter's bounded decision loop relies on.
+func TestDecideSessionTargetGatherAlwaysMakesProgress(t *testing.T) {
+	lookupFacts := []TargetLookupFact{LookupUnknown, LookupMatch, LookupNoMatch, LookupError}
+	namedFacts := []TargetNamedFact{NamedLookupUnknown, NamedLookupMatch, NamedLookupTerminalError, NamedLookupNoMatch}
+	bools := []bool{false, true}
+	checked := 0
+	for _, templateForm := range bools {
+		for _, allowClosed := range bools {
+			for _, exactID := range lookupFacts {
+				for _, configuredName := range namedFacts {
+					for _, live := range lookupFacts {
+						for _, liveOrphan := range bools {
+							for _, pathAlias := range lookupFacts {
+								for _, closedNamedSpec := range lookupFacts {
+									for _, closed := range lookupFacts {
+										f := TargetFacts{
+											TemplateForm:     templateForm,
+											AllowClosed:      allowClosed,
+											ExactID:          exactID,
+											ConfiguredName:   configuredName,
+											Live:             live,
+											LiveConfigOrphan: liveOrphan,
+											PathAlias:        pathAlias,
+											ClosedNamedSpec:  closedNamedSpec,
+											Closed:           closed,
+										}
+										checked++
+										dec := DecideSessionTarget(f)
+										if dec.Action == TargetDone {
+											continue
+										}
+										if !targetStepFactUnknown(f, dec.Gather) {
+											t.Fatalf("facts %+v: gather re-requests already-gathered step %v", f, dec.Gather)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if want := 2 * 2 * 4 * 4 * 4 * 2 * 4 * 4 * 4; checked != want {
+		t.Fatalf("enumerated %d fact combinations, want %d", checked, want)
+	}
+}
+
+func TestTargetStepStringNamesEveryStep(t *testing.T) {
+	want := map[TargetStep]string{
+		TargetStepNone:            "none",
+		TargetStepExactID:         "exact-id",
+		TargetStepConfiguredName:  "configured-name",
+		TargetStepLive:            "live",
+		TargetStepPathAlias:       "path-alias",
+		TargetStepClosedNamedSpec: "closed-named-spec",
+		TargetStepClosed:          "closed",
+	}
+	for step, name := range want {
+		if got := step.String(); got != name {
+			t.Fatalf("TargetStep(%d).String() = %q, want %q", int(step), got, name)
+		}
+	}
+	if got := TargetStep(99).String(); got != "TargetStep(99)" {
+		t.Fatalf("out-of-range step String() = %q, want %q", got, "TargetStep(99)")
+	}
+}
