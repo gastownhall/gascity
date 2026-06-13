@@ -340,7 +340,12 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 		} else {
 			restartErr = restartSupervisor(spec, restartHelpersHook())
 		}
-		if restartErr != nil {
+		// A bounded delegated try-restart timeout is not terminal: the
+		// restart job can still complete inside systemd after the CLI stops
+		// waiting, so fall through to PollReady and the post-restart drift
+		// verification below, which confirm whether the supervisor was
+		// actually replaced. Ordinary restart failures stay terminal.
+		if restartErr != nil && !isDelegatedSystemctlTimeout(restartErr) {
 			fmt.Fprintln(stdout)                                                      //nolint:errcheck // best-effort stdout
 			fmt.Fprintf(stderr, "error: supervisor restart failed: %v\n", restartErr) //nolint:errcheck // best-effort stderr
 			return 1, false

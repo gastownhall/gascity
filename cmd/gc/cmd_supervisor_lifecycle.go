@@ -561,7 +561,10 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 		if supervisorAliveHook() != 0 {
 			return 0
 		}
-		if err := runDelegatedSystemctlTimeout(delegation, "start", delegatedSystemctlJobTimeout); err != nil {
+		// A bounded systemctl-start timeout is not terminal: fall through to
+		// the same socket-then-fallback liveness check that confirms a late
+		// start. Only an ordinary systemctl failure is terminal.
+		if err := runDelegatedSystemctlTimeout(delegation, "start", delegatedSystemctlJobTimeout); err != nil && !isDelegatedSystemctlTimeout(err) {
 			fmt.Fprintf(stderr, "gc: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

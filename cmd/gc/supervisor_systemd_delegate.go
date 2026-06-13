@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -61,8 +62,11 @@ var delegatedStopVerifyTimeout = 5 * time.Second
 // The budget sits above systemd's default 90s job timeout so a
 // default-configured unit surfaces systemd's own diagnostic first.
 // Killing systemctl at the bound does not cancel the job: it keeps
-// running inside systemd, and the readiness/verification polls that
-// follow pick up a late start on their own. Package var so tests can
+// running inside systemd. runDelegatedSystemctlTimeout reports that bound
+// as a delegatedSystemctlTimeoutError so the start, ensure, and drift
+// try-restart callers fall through into their own readiness or drift
+// verification — which observe a late start — instead of treating the
+// bounded wait as a terminal systemctl failure. Package var so tests can
 // shrink the wait.
 var delegatedSystemctlJobTimeout = 2 * time.Minute
 
@@ -187,13 +191,45 @@ func delegatedUnitActive(d systemdDelegation) bool {
 	return exec.Command(delegatedSystemctlPath(), d.systemctlIsActiveArgs()...).Run() == nil
 }
 
+// delegatedSystemctlTimeoutError reports that a delegated systemctl
+// invocation hit its CLI-side bound (delegatedSystemctlJobTimeout) before
+// systemctl returned. systemctl's unit job keeps running inside systemd
+// after the CLI stops waiting, so this is a bounded-wait outcome —
+// distinct from an ordinary systemctl failure — that callers with their
+// own readiness or drift verification should fall through into rather
+// than treat as terminal. Non-timeout systemctl errors stay terminal.
+type delegatedSystemctlTimeoutError struct {
+	args    string
+	timeout time.Duration
+}
+
+// Error implements error.
+func (e *delegatedSystemctlTimeoutError) Error() string {
+	return fmt.Sprintf("systemctl %s: timed out after %s", e.args, e.timeout)
+}
+
+// isDelegatedSystemctlTimeout reports whether err is a bounded-wait
+// timeout from runDelegatedSystemctlTimeout, as opposed to an ordinary
+// systemctl failure. Callers with their own post-start readiness or drift
+// verification use it to continue into that verification on timeout
+// instead of returning failure before a late systemd success can be
+// observed.
+func isDelegatedSystemctlTimeout(err error) bool {
+	var timeoutErr *delegatedSystemctlTimeoutError
+	return errors.As(err, &timeoutErr)
+}
+
 // runDelegatedSystemctlTimeout invokes systemctl (resolved via PATH) for
 // verb against the delegated unit, bounded by timeout (unbounded when
 // timeout <= 0), folding any output into the returned error so operators
 // see systemd's own diagnostic. systemctl runs unit jobs synchronously,
 // so the bound keeps a wedged unit from holding the CLI past its
 // advertised budget; the unit's own job keeps running inside systemd
-// after the CLI gives up waiting.
+// after the CLI gives up waiting. A timeout returns a
+// *delegatedSystemctlTimeoutError (see isDelegatedSystemctlTimeout) so
+// callers with their own readiness or drift verification can distinguish
+// the bounded wait from an ordinary systemctl failure; every other
+// failure is returned as an ordinary error.
 func runDelegatedSystemctlTimeout(d systemdDelegation, verb string, timeout time.Duration) error {
 	args := d.systemctlArgs(verb)
 	ctx := context.Background()
@@ -209,7 +245,7 @@ func runDelegatedSystemctlTimeout(d systemdDelegation, verb string, timeout time
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("systemctl %s: timed out after %s", strings.Join(args, " "), timeout)
+			return &delegatedSystemctlTimeoutError{args: strings.Join(args, " "), timeout: timeout}
 		}
 		if msg := strings.TrimSpace(string(out)); msg != "" {
 			return fmt.Errorf("systemctl %s: %w: %s", strings.Join(args, " "), err, msg)
@@ -266,7 +302,11 @@ func delegatedSupervisorStart(d systemdDelegation, stdout, stderr io.Writer, jso
 		fmt.Fprintf(stderr, "gc supervisor start: supervisor already running (PID %d)\n", pid) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := runDelegatedSystemctlTimeout(d, "start", delegatedSystemctlJobTimeout); err != nil {
+	// A bounded systemctl-start timeout is not terminal: the start job can
+	// still complete inside systemd after the CLI stops waiting, so fall
+	// through to the same readiness poll and is-active/API fallback that
+	// confirm a late start. Only an ordinary systemctl failure is terminal.
+	if err := runDelegatedSystemctlTimeout(d, "start", delegatedSystemctlJobTimeout); err != nil && !isDelegatedSystemctlTimeout(err) {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

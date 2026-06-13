@@ -53,16 +53,27 @@ func installFakeDelegatedSystemctlWithUnitState(t *testing.T, exitCode int, stde
 // installFakeDelegatedSystemctlHangingVerb installs a shim whose
 // invocation of verb hangs (exec sleep) so tests can prove the CLI
 // bounds the systemctl wait. is-active probes report active; other
-// verbs succeed.
-func installFakeDelegatedSystemctlHangingVerb(t *testing.T, verb string) {
+// verbs succeed. Returns the path the shim records its argv into.
+func installFakeDelegatedSystemctlHangingVerb(t *testing.T, verb string) string {
+	t.Helper()
+	return installFakeDelegatedSystemctlHangingVerbWithUnitState(t, verb, 0)
+}
+
+// installFakeDelegatedSystemctlHangingVerbWithUnitState is
+// installFakeDelegatedSystemctlHangingVerb with an explicit exit code for
+// `is-active` probes (0 = active, non-zero = inactive), so timeout tests
+// can model whether the post-timeout liveness fallback observes a late
+// start.
+func installFakeDelegatedSystemctlHangingVerbWithUnitState(t *testing.T, verb string, isActiveExit int) string {
 	t.Helper()
 	dir := t.TempDir()
 	argsFile := filepath.Join(dir, "systemctl-args")
-	script := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %q\ncase \" $* \" in *\" is-active \"*) exit 0 ;; *\" %s \"*) exec sleep 5 ;; esac\nexit 0\n", argsFile, verb)
+	script := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %q\ncase \" $* \" in *\" is-active \"*) exit %d ;; *\" %s \"*) exec sleep 5 ;; esac\nexit 0\n", argsFile, isActiveExit, verb)
 	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake systemctl: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argsFile
 }
 
 // setDelegationEnvForTest configures the systemd delegation env for the
@@ -469,14 +480,61 @@ func TestSupervisorStartDelegatedNotReadyWithoutLivenessEvidenceFails(t *testing
 	}
 }
 
-// TestSupervisorStartDelegatedBoundsSystemctl pins the CLI-side budget
-// on delegated `systemctl start`: a wedged manager or a unit with
+// TestRunDelegatedSystemctlTimeoutClassifiesTimeout pins the contract the
+// start/ensure/try-restart fall-through depends on: a bounded systemctl
+// invocation that exceeds its budget returns a delegatedSystemctlTimeoutError
+// (recognized by isDelegatedSystemctlTimeout), while an ordinary systemctl
+// failure does not — so only a true timeout is treated as a bounded wait.
+func TestRunDelegatedSystemctlTimeoutClassifiesTimeout(t *testing.T) {
+	setDelegationEnvForTest(t, "gascity-prod.service", "")
+	d := systemdDelegation{Unit: "gascity-prod.service", Scope: "system"}
+
+	t.Run("timeout is classified and bounded", func(t *testing.T) {
+		installFakeDelegatedSystemctlHangingVerb(t, "start")
+		start := time.Now()
+		err := runDelegatedSystemctlTimeout(d, "start", 200*time.Millisecond)
+		elapsed := time.Since(start)
+		if err == nil {
+			t.Fatal("runDelegatedSystemctlTimeout err = nil, want timeout")
+		}
+		if !isDelegatedSystemctlTimeout(err) {
+			t.Errorf("isDelegatedSystemctlTimeout(%v) = false, want true", err)
+		}
+		if !strings.Contains(err.Error(), "timed out after") {
+			t.Errorf("err = %q, want 'timed out after'", err.Error())
+		}
+		if elapsed > 3*time.Second {
+			t.Fatalf("runDelegatedSystemctlTimeout took %s; the bound did not apply", elapsed)
+		}
+	})
+
+	t.Run("ordinary failure is not a timeout", func(t *testing.T) {
+		installFakeDelegatedSystemctl(t, 5, "Unit gascity-prod.service not found.")
+		err := runDelegatedSystemctlTimeout(d, "start", 2*time.Second)
+		if err == nil {
+			t.Fatal("runDelegatedSystemctlTimeout err = nil, want failure")
+		}
+		if isDelegatedSystemctlTimeout(err) {
+			t.Errorf("isDelegatedSystemctlTimeout(%v) = true, want false for an ordinary systemctl failure", err)
+		}
+		if !strings.Contains(err.Error(), "not found") {
+			t.Errorf("err = %q, want systemctl diagnostic folded in", err.Error())
+		}
+	})
+}
+
+// TestSupervisorStartDelegatedBoundsSystemctl pins the CLI-side budget on
+// delegated `systemctl start`: a wedged manager or a unit with
 // TimeoutStartSec=infinity must not hold `gc supervisor start` past the
-// job timeout, matching the bounded delegated stop.
+// job timeout, matching the bounded delegated stop. The bounded timeout is
+// not terminal — it falls through to the same readiness/is-active/API
+// fallback a normal start uses — so with the unit still inactive and the
+// API unreachable the command reports the standard "did not become ready"
+// failure instead of hanging or falsely succeeding.
 func TestSupervisorStartDelegatedBoundsSystemctl(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	setDelegationEnvForTest(t, "gascity-prod.service", "")
-	installFakeDelegatedSystemctlHangingVerb(t, "start")
+	installFakeDelegatedSystemctlHangingVerbWithUnitState(t, "start", 3)
 	oldJob := delegatedSystemctlJobTimeout
 	delegatedSystemctlJobTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { delegatedSystemctlJobTimeout = oldJob })
@@ -484,6 +542,12 @@ func TestSupervisorStartDelegatedBoundsSystemctl(t *testing.T) {
 	old := supervisorAliveHook
 	t.Cleanup(func() { supervisorAliveHook = old })
 	supervisorAliveHook = func() int { return 0 }
+	oldTimeout := supervisorReadyTimeout
+	supervisorReadyTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { supervisorReadyTimeout = oldTimeout })
+	oldAPI := supervisorAPIReachable
+	supervisorAPIReachable = func() bool { return false }
+	t.Cleanup(func() { supervisorAPIReachable = oldAPI })
 
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
@@ -495,17 +559,20 @@ func TestSupervisorStartDelegatedBoundsSystemctl(t *testing.T) {
 	if elapsed > 3*time.Second {
 		t.Fatalf("delegated start took %s; the job timeout did not bound the systemctl invocation", elapsed)
 	}
-	if !strings.Contains(stderr.String(), "timed out after") {
-		t.Errorf("stderr = %q, want systemctl timeout named", stderr.String())
+	if !strings.Contains(stderr.String(), "did not become ready") {
+		t.Errorf("stderr = %q, want 'did not become ready' after the bounded timeout fell through to liveness verification", stderr.String())
 	}
 }
 
-// TestEnsureSupervisorRunningDelegatedBoundsSystemctl is the gc-start
-// ensure twin of TestSupervisorStartDelegatedBoundsSystemctl.
-func TestEnsureSupervisorRunningDelegatedBoundsSystemctl(t *testing.T) {
+// TestSupervisorStartDelegatedTimeoutThenLateStartSucceeds pins the
+// bounded-wait fix: a delegated `systemctl start` that exceeds the CLI
+// budget but whose unit still comes up inside systemd must report success
+// via the is-active fallback, not a false failure. The hanging shim leaves
+// the unit is-active, modeling a start that completes late.
+func TestSupervisorStartDelegatedTimeoutThenLateStartSucceeds(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	setDelegationEnvForTest(t, "gascity-prod.service", "")
-	installFakeDelegatedSystemctlHangingVerb(t, "start")
+	installFakeDelegatedSystemctlHangingVerbWithUnitState(t, "start", 0)
 	oldJob := delegatedSystemctlJobTimeout
 	delegatedSystemctlJobTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { delegatedSystemctlJobTimeout = oldJob })
@@ -513,6 +580,50 @@ func TestEnsureSupervisorRunningDelegatedBoundsSystemctl(t *testing.T) {
 	old := supervisorAliveHook
 	t.Cleanup(func() { supervisorAliveHook = old })
 	supervisorAliveHook = func() int { return 0 }
+	oldTimeout := supervisorReadyTimeout
+	supervisorReadyTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { supervisorReadyTimeout = oldTimeout })
+	oldAPI := supervisorAPIReachable
+	supervisorAPIReachable = func() bool { return false }
+	t.Cleanup(func() { supervisorAPIReachable = oldAPI })
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := doSupervisorStart(&stdout, &stderr)
+	elapsed := time.Since(start)
+	if code != 0 {
+		t.Fatalf("doSupervisorStart code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("delegated start took %s; the job timeout did not bound the systemctl invocation", elapsed)
+	}
+	if !strings.Contains(stdout.String(), "liveness confirmed via service_manager") {
+		t.Errorf("stdout = %q, want service-manager liveness after a late start", stdout.String())
+	}
+}
+
+// TestEnsureSupervisorRunningDelegatedBoundsSystemctl is the gc-start
+// ensure twin of TestSupervisorStartDelegatedBoundsSystemctl: the bounded
+// timeout falls through to the socket-then-fallback liveness check and,
+// with the unit still inactive and the API unreachable, reports "did not
+// become ready" instead of hanging or falsely succeeding.
+func TestEnsureSupervisorRunningDelegatedBoundsSystemctl(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	setDelegationEnvForTest(t, "gascity-prod.service", "")
+	installFakeDelegatedSystemctlHangingVerbWithUnitState(t, "start", 3)
+	oldJob := delegatedSystemctlJobTimeout
+	delegatedSystemctlJobTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { delegatedSystemctlJobTimeout = oldJob })
+
+	old := supervisorAliveHook
+	t.Cleanup(func() { supervisorAliveHook = old })
+	supervisorAliveHook = func() int { return 0 }
+	oldTimeout := supervisorReadyTimeout
+	supervisorReadyTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { supervisorReadyTimeout = oldTimeout })
+	oldAPI := supervisorAPIReachable
+	supervisorAPIReachable = func() bool { return false }
+	t.Cleanup(func() { supervisorAPIReachable = oldAPI })
 
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
@@ -524,8 +635,46 @@ func TestEnsureSupervisorRunningDelegatedBoundsSystemctl(t *testing.T) {
 	if elapsed > 3*time.Second {
 		t.Fatalf("delegated ensure-start took %s; the job timeout did not bound the systemctl invocation", elapsed)
 	}
-	if !strings.Contains(stderr.String(), "timed out after") {
-		t.Errorf("stderr = %q, want systemctl timeout named", stderr.String())
+	if !strings.Contains(stderr.String(), "did not become ready") {
+		t.Errorf("stderr = %q, want 'did not become ready' after the bounded timeout fell through to liveness verification", stderr.String())
+	}
+}
+
+// TestEnsureSupervisorRunningDelegatedTimeoutThenLateStartSucceeds is the
+// gc-start ensure twin of
+// TestSupervisorStartDelegatedTimeoutThenLateStartSucceeds: a bounded
+// systemctl-start timeout whose unit still comes up late must succeed via
+// the is-active fallback rather than fail the whole `gc start`.
+func TestEnsureSupervisorRunningDelegatedTimeoutThenLateStartSucceeds(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	setDelegationEnvForTest(t, "gascity-prod.service", "")
+	installFakeDelegatedSystemctlHangingVerbWithUnitState(t, "start", 0)
+	oldJob := delegatedSystemctlJobTimeout
+	delegatedSystemctlJobTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { delegatedSystemctlJobTimeout = oldJob })
+
+	old := supervisorAliveHook
+	t.Cleanup(func() { supervisorAliveHook = old })
+	supervisorAliveHook = func() int { return 0 }
+	oldTimeout := supervisorReadyTimeout
+	supervisorReadyTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { supervisorReadyTimeout = oldTimeout })
+	oldAPI := supervisorAPIReachable
+	supervisorAPIReachable = func() bool { return false }
+	t.Cleanup(func() { supervisorAPIReachable = oldAPI })
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := ensureSupervisorRunning(&stdout, &stderr)
+	elapsed := time.Since(start)
+	if code != 0 {
+		t.Fatalf("ensureSupervisorRunning code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("delegated ensure-start took %s; the job timeout did not bound the systemctl invocation", elapsed)
+	}
+	if strings.Contains(stderr.String(), "did not become ready") {
+		t.Errorf("stderr = %q, want no readiness failure after a late start", stderr.String())
 	}
 }
 
@@ -1430,9 +1579,13 @@ func TestSupervisorGuidanceUsesServiceNameHelper(t *testing.T) {
 }
 
 // TestRunStartDriftCheck_DelegatedTryRestartBoundsSystemctl pins the
-// CLI-side budget on delegated `systemctl try-restart`: a wedged unit
-// must not hold drift remediation (and with it `gc start`) past the job
-// timeout, matching the bounded delegated stop and start.
+// CLI-side budget on delegated `systemctl try-restart`: a wedged unit must
+// not hold drift remediation (and with it `gc start`) past the job
+// timeout, matching the bounded delegated stop and start. The bounded
+// timeout is not terminal — it falls through to PollReady and the
+// post-restart drift verification — so a try-restart that never replaced
+// the supervisor still fails with the "was not replaced" diagnostic
+// instead of hanging.
 func TestRunStartDriftCheck_DelegatedTryRestartBoundsSystemctl(t *testing.T) {
 	cityPath, setCommit := driftCheckEnv(t, "old-build-id")
 	setCommit("new-build-id")
@@ -1457,10 +1610,62 @@ func TestRunStartDriftCheck_DelegatedTryRestartBoundsSystemctl(t *testing.T) {
 	if elapsed > 3*time.Second {
 		t.Fatalf("delegated try-restart took %s; the job timeout did not bound the systemctl invocation", elapsed)
 	}
-	for _, want := range []string{"supervisor restart failed", "timed out after"} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	if !strings.Contains(stderr.String(), "was not replaced") {
+		t.Errorf("stderr = %q, want 'was not replaced' after the bounded timeout fell through to drift verification", stderr.String())
+	}
+}
+
+// TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds
+// pins the bounded-wait fix for drift remediation: a delegated
+// `systemctl try-restart` that exceeds the CLI budget but whose unit still
+// replaces the supervisor inside systemd must fall through to PollReady and
+// drift verification, observe the late replacement, and report ready —
+// instead of failing before the verification can run.
+func TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds(t *testing.T) {
+	cityPath, setCommit := driftCheckEnv(t, "old-build-id")
+	setCommit("new-build-id")
+
+	oldDry, oldNoAR := dryRunMode, noAutoRestartMode
+	dryRunMode, noAutoRestartMode = false, false
+	t.Cleanup(func() { dryRunMode, noAutoRestartMode = oldDry, oldNoAR })
+
+	setDelegationEnvForTest(t, "gascity-prod.service", "")
+	argsFile := installFakeDelegatedSystemctlHangingVerb(t, "try-restart")
+	oldJob := delegatedSystemctlJobTimeout
+	delegatedSystemctlJobTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { delegatedSystemctlJobTimeout = oldJob })
+
+	// Serve the old build until the fake systemctl has recorded its argv
+	// (argsFile exists), then the new build — modeling a unit that replaces
+	// the supervisor binary only after the CLI's bounded wait has elapsed.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		build := "old-build-id"
+		if _, err := os.Stat(argsFile); err == nil {
+			build = "new-build-id"
 		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"ok","version":"v0","build_id":%q,"uptime_sec":1,"cities_total":0,"cities_running":0}`, build)
+	}))
+	t.Cleanup(srv.Close)
+	oldURL := supervisorAPIBaseURLHook
+	supervisorAPIBaseURLHook = func() (string, error) { return srv.URL, nil }
+	t.Cleanup(func() { supervisorAPIBaseURLHook = oldURL })
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
+	elapsed := time.Since(start)
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0; stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	if !cont {
+		t.Fatalf("cont = false after a verified late replacement; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("delegated try-restart took %s; the job timeout did not bound the systemctl invocation", elapsed)
+	}
+	if !strings.Contains(stdout.String(), " ready (") {
+		t.Errorf("stdout = %q, want ready line after verified late replacement", stdout.String())
 	}
 }
 
