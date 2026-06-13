@@ -526,12 +526,18 @@ func RecordBDSlow(ctx context.Context, args []string, dir, agentID string) {
 // result size crossed the caller's warn threshold. The reconcile scan is
 // O(active beads) by design and is otherwise silent, so this event makes
 // store growth visible before it degrades every reconcile cycle. rig is the
-// cache's bead ID prefix; beadCount is the number of beads the scan
+// cache's bead ID prefix; an empty prefix is recorded as "(no-prefix)" to
+// match the reconciler's success-log label, so prefix-less stores group
+// cleanly in telemetry backends. beadCount is the number of beads the scan
 // returned; threshold is the warn threshold that fired; elapsed is the
 // wall-clock duration of the backing list call.
 func RecordCacheScanLarge(ctx context.Context, rig string, beadCount, threshold int, elapsed time.Duration) {
+	rig = strings.TrimSpace(rig)
+	if rig == "" {
+		rig = "(no-prefix)"
+	}
 	emit(ctx, "beads.cache.scan_large", otellog.SeverityWarn,
-		otellog.String("rig", strings.TrimSpace(rig)),
+		otellog.String("rig", rig),
 		otellog.Int64("bead_count", int64(beadCount)),
 		otellog.Int64("threshold", int64(threshold)),
 		otellog.Int64("elapsed_ms", elapsed.Milliseconds()),

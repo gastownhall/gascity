@@ -290,6 +290,22 @@ func TestRecordCacheScanLargeEmitsWarnEvent(t *testing.T) {
 	}
 }
 
+func TestRecordCacheScanLargeNormalizesEmptyRig(t *testing.T) {
+	resetInstruments(t)
+	exp := installRecordingLogExporter(t)
+
+	RecordCacheScanLarge(context.Background(), "  ", 2600, 2500, 150*time.Millisecond)
+
+	rec := exp.recordByBody("beads.cache.scan_large")
+	if rec == nil {
+		t.Fatal("RecordCacheScanLarge did not emit beads.cache.scan_large")
+	}
+	attrs := recordAttrs(*rec)
+	if got := attrs["rig"].AsString(); got != "(no-prefix)" {
+		t.Fatalf("beads.cache.scan_large rig = %q, want (no-prefix)", got)
+	}
+}
+
 func TestRecordBeadStoreHealth(t *testing.T) {
 	resetInstruments(t)
 	ctx := context.Background()

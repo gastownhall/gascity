@@ -40,7 +40,9 @@ const cacheLatencyHighWaterMark = cacheReconcileIntervalSmall / 4
 const cacheReconcileScanWarnThreshold = 2500
 
 // recordCacheScanLarge emits the over-threshold scan-size telemetry; a var so
-// internal tests can intercept emission.
+// internal tests can intercept emission. Swaps are unsynchronized: tests that
+// replace it must stay sequential (no t.Parallel) and must not leave a
+// reconcile loop running across the swap.
 var recordCacheScanLarge = telemetry.RecordCacheScanLarge
 
 // cacheFullScanQuery is the single query shape Prime and the reconciler use
