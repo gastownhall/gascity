@@ -2202,6 +2202,281 @@ func TestGroupServiceRemoveParticipantRetriesTranscriptCleanup(t *testing.T) {
 	}
 }
 
+// overrideResolveLiveSessionID substitutes resolveLiveSessionID for the
+// duration of the test, restoring the original in t.Cleanup (Theme 18).
+func overrideResolveLiveSessionID(t *testing.T, fn func(beads.Store, string) (string, error)) {
+	t.Helper()
+	prev := resolveLiveSessionID
+	resolveLiveSessionID = fn
+	t.Cleanup(func() { resolveLiveSessionID = prev })
+}
+
+func TestGroupServiceUpsertParticipantStoresSessionName(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	sessID := makeSessionBead(t, store, "pl-alpha")
+
+	svc := NewGroupService(store)
+	ref := testConversationRef()
+	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+
+	participant, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+	if participant.SessionName != "pl-alpha" {
+		t.Errorf("SessionName = %q, want %q", participant.SessionName, "pl-alpha")
+	}
+
+	bead, err := store.Get(participant.ID)
+	if err != nil {
+		t.Fatalf("get participant bead: %v", err)
+	}
+	wantLabel := groupParticipantSessionNameLabel("pl-alpha")
+	if !hasLabel(bead, wantLabel) {
+		t.Errorf("participant bead missing label %q; labels: %v", wantLabel, bead.Labels)
+	}
+}
+
+func TestGroupServiceResolveInboundFollowsRespawnedSession(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	// Session A is the original (now dead) bead; session B is the live respawn.
+	sessAID := makeSessionBead(t, store, "pl-alpha")
+	sessBID := makeSessionBead(t, store, "pl-alpha-v2") // different name, same slot
+
+	svc := NewGroupService(store)
+	ref := testConversationRef()
+	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if _, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessAID,
+	}); err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+
+	// Simulate respawn: close the old session bead (as happens in production on
+	// handover), then override the resolver to point "pl-alpha" at session B.
+	if err := store.Close(sessAID); err != nil {
+		t.Fatalf("close session A bead: %v", err)
+	}
+	overrideResolveLiveSessionID(t, func(_ beads.Store, name string) (string, error) {
+		if name == "pl-alpha" {
+			return sessBID, nil
+		}
+		return "", errors.New("not found")
+	})
+
+	decision, err := svc.ResolveInbound(context.Background(), ExternalInboundMessage{Conversation: ref})
+	if err != nil {
+		t.Fatalf("ResolveInbound: %v", err)
+	}
+	if decision.TargetSessionID != sessBID {
+		t.Errorf("TargetSessionID = %q, want %q (live session B)", decision.TargetSessionID, sessBID)
+	}
+}
+
+func TestGroupServiceResolveOutboundFollowsRespawnedSession(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	sessAID := makeSessionBead(t, store, "pl-alpha")
+	sessBID := makeSessionBead(t, store, "pl-alpha-v2")
+
+	svc := NewGroupService(store)
+	ref := testConversationRef()
+	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if _, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessAID,
+	}); err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+
+	if err := store.Close(sessAID); err != nil {
+		t.Fatalf("close session A bead: %v", err)
+	}
+	overrideResolveLiveSessionID(t, func(_ beads.Store, name string) (string, error) {
+		if name == "pl-alpha" {
+			return sessBID, nil
+		}
+		return "", errors.New("not found")
+	})
+
+	// Session B should now be authorized to publish (participant overlay matched it).
+	decision, err := svc.ResolveOutbound(context.Background(), ref, sessBID)
+	if err != nil {
+		t.Fatalf("ResolveOutbound: %v", err)
+	}
+	if decision.Match != GroupRouteParticipantMatch {
+		t.Errorf("ResolveOutbound(sessB).Match = %q, want %q", decision.Match, GroupRouteParticipantMatch)
+	}
+
+	// Original dead session A should not be authorized after respawn.
+	deadDecision, err := svc.ResolveOutbound(context.Background(), ref, sessAID)
+	if err != nil {
+		t.Fatalf("ResolveOutbound(dead): %v", err)
+	}
+	if deadDecision.Match != GroupRouteNoMatch {
+		t.Errorf("ResolveOutbound(sessA).Match = %q, want GroupRouteNoMatch", deadDecision.Match)
+	}
+}
+
+func TestReassignSessionParticipants(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	sessAID := makeSessionBead(t, store, "pl-alpha")
+
+	svc := NewGroupService(store)
+	ref := testConversationRef()
+	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	participant, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessAID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+
+	sessBID := makeSessionBead(t, store, "pl-alpha-v2")
+	// Reassignment runs on a retired (closed) old session in production
+	// (session_beads.go and session_resolution.go both call it after the old
+	// bead is superseded); close sessAID so the test reflects that invariant.
+	if err := store.Close(sessAID); err != nil {
+		t.Fatalf("close retired session A bead: %v", err)
+	}
+	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err != nil {
+		t.Fatalf("ReassignSessionParticipants: %v", err)
+	}
+
+	bead, err := store.Get(participant.ID)
+	if err != nil {
+		t.Fatalf("get participant bead: %v", err)
+	}
+	if bead.Metadata["session_id"] != sessBID {
+		t.Errorf("session_id = %q, want %q", bead.Metadata["session_id"], sessBID)
+	}
+	if hasLabel(bead, groupParticipantSessionLabel(sessAID)) {
+		t.Errorf("participant still has old session label %q", groupParticipantSessionLabel(sessAID))
+	}
+	if !hasLabel(bead, groupParticipantSessionLabel(sessBID)) {
+		t.Errorf("participant missing new session label %q; labels: %v", groupParticipantSessionLabel(sessBID), bead.Labels)
+	}
+	// session_name label must be preserved (stable across respawn).
+	if !hasLabel(bead, groupParticipantSessionNameLabel("pl-alpha")) {
+		t.Errorf("participant missing session-name label %q; labels: %v", groupParticipantSessionNameLabel("pl-alpha"), bead.Labels)
+	}
+}
+
+func TestGroupServiceUpsertParticipantSessionNameLegacyFallback(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	// "legacy-sess" is a raw ID with no backing session bead — sessionNameForSelector returns "".
+	svc := NewGroupService(store)
+	ref := testConversationRef()
+	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+
+	participant, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: "legacy-sess",
+	})
+	if err != nil {
+		t.Fatalf("UpsertParticipant with legacy session: %v", err)
+	}
+	if participant.SessionName != "" {
+		t.Errorf("SessionName = %q, want empty for legacy session", participant.SessionName)
+	}
+
+	// ResolveInbound should still route to legacy-sess without panic.
+	decision, err := svc.ResolveInbound(context.Background(), ExternalInboundMessage{Conversation: ref})
+	if err != nil {
+		t.Fatalf("ResolveInbound: %v", err)
+	}
+	if decision.TargetSessionID != "legacy-sess" {
+		t.Errorf("TargetSessionID = %q, want legacy-sess", decision.TargetSessionID)
+	}
+}
+
+func TestGroupServiceResolveInboundDeadSessionNameReturnsStaleID(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	sessAID := makeSessionBead(t, store, "pl-alpha")
+
+	svc := NewGroupService(store)
+	ref := testConversationRef()
+	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if _, err := svc.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessAID,
+	}); err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+
+	// Simulate session gone: resolver returns error for any name.
+	overrideResolveLiveSessionID(t, func(_ beads.Store, _ string) (string, error) {
+		return "", errors.New("session not found")
+	})
+
+	// Overlay returns "" → routing falls back to stored (stale) session ID; no panic.
+	decision, err := svc.ResolveInbound(context.Background(), ExternalInboundMessage{Conversation: ref})
+	if err != nil {
+		t.Fatalf("ResolveInbound: %v", err)
+	}
+	if decision.TargetSessionID != sessAID {
+		t.Errorf("TargetSessionID = %q, want stale %q as fallback", decision.TargetSessionID, sessAID)
+	}
+}
+
 func testConversationRef() ConversationRef {
 	return ConversationRef{
 		ScopeID:        "city-1",

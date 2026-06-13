@@ -227,14 +227,7 @@ func (s *bindingService) ResolveByConversation(ctx context.Context, ref Conversa
 // labelBindingSessionPrefix label (indexed on the volatile ID) and keep
 // label-based lookups correct across ticks.
 func overlayLiveSession(store beads.Store, record *SessionBindingRecord) {
-	if record.SessionName == "" {
-		return
-	}
-	liveID, err := resolveLiveSessionID(store, record.SessionName)
-	if err != nil || liveID == "" {
-		return
-	}
-	record.SessionID = liveID
+	overlayLiveSessionID(store, record.SessionName, record.SessionID, &record.SessionID)
 }
 
 func (s *bindingService) ListBySession(ctx context.Context, sessionID string) ([]SessionBindingRecord, error) {
@@ -546,6 +539,73 @@ func ReassignSessionBindings(ctx context.Context, store beads.Store, oldSessionI
 			}
 			if err := delivery.ClearForConversation(ctx, oldSessionID, record.Conversation); err != nil {
 				return err
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReassignSessionParticipants moves active group participants from one session
+// bead ID to another during canonical session repair. It mirrors
+// ReassignSessionBindings: the volatile session_id metadata and the
+// groupParticipantSessionLabel are updated; the stable session_name and
+// groupParticipantSessionNameLabel are left untouched because the name is the
+// same before and after a respawn.
+func ReassignSessionParticipants(ctx context.Context, store beads.Store, oldSessionID, newSessionID string) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	if store == nil {
+		return nil
+	}
+	oldSessionID = strings.TrimSpace(oldSessionID)
+	newSessionID = strings.TrimSpace(newSessionID)
+	if oldSessionID == "" || newSessionID == "" || oldSessionID == newSessionID {
+		return nil
+	}
+	items, err := store.List(beads.ListQuery{Label: groupParticipantSessionLabel(oldSessionID)})
+	if err != nil {
+		return fmt.Errorf("list participants by retired session label: %w", err)
+	}
+	locks := sharedBindingLockPool(store)
+	for _, item := range items {
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
+		if !hasLabel(item, "gc:extmsg-participant") || item.Status == "closed" {
+			continue
+		}
+		if strings.TrimSpace(item.Metadata["session_id"]) != oldSessionID {
+			continue
+		}
+		seedGroupID := strings.TrimSpace(item.Metadata["group_id"])
+		if err := withLockKey(locks, groupParticipantsMutationLock(seedGroupID), func() error {
+			latest, err := store.Get(item.ID)
+			if err != nil {
+				return fmt.Errorf("get participant %s: %w", item.ID, err)
+			}
+			if !hasLabel(latest, "gc:extmsg-participant") || latest.Status == "closed" {
+				return nil
+			}
+			record, err := decodeParticipantBead(latest)
+			if err != nil {
+				return fmt.Errorf("decode participant %s: %w", latest.ID, err)
+			}
+			if record.SessionID != oldSessionID {
+				return nil
+			}
+			labelsToAdd, labelsToRemove := recordLabels(latest.Labels,
+				[]string{groupParticipantSessionLabel(oldSessionID)},
+				[]string{groupParticipantSessionLabel(newSessionID)})
+			if err := store.Update(record.ID, beads.UpdateOpts{
+				Labels:       labelsToAdd,
+				RemoveLabels: labelsToRemove,
+				Metadata:     map[string]string{"session_id": newSessionID},
+			}); err != nil {
+				return fmt.Errorf("reassign participant %s from session %s to %s: %w", record.ID, oldSessionID, newSessionID, err)
 			}
 			return nil
 		}); err != nil {

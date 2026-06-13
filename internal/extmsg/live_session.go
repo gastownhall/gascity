@@ -13,6 +13,24 @@ import (
 // resolver without standing up real session beads (mirrors timeNow).
 var resolveLiveSessionID = session.ResolveSessionID
 
+// overlayLiveSessionID re-points *target at the current live bead for the
+// given stable session name. It is a no-op when the stored bead is still
+// active (fast path avoiding name-resolution round-trips) or when name
+// resolution fails. It mutates *target in place.
+func overlayLiveSessionID(store beads.Store, name, currentID string, target *string) {
+	if name == "" {
+		return
+	}
+	if b, err := store.Get(currentID); err == nil && b.Status != "closed" {
+		return
+	}
+	liveID, err := resolveLiveSessionID(store, name)
+	if err != nil || liveID == "" {
+		return
+	}
+	*target = liveID
+}
+
 // sessionNameForSelector resolves a bind selector (a session bead ID, alias,
 // or session name) to the stable session name recorded on the target bead.
 // Bindings store this name so they can follow the session across respawn.

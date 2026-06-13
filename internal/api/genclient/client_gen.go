@@ -880,12 +880,13 @@ type ConfigValidateOutputBody struct {
 
 // ConversationGroupParticipant defines model for ConversationGroupParticipant.
 type ConversationGroupParticipant struct {
-	GroupID   string            `json:"GroupID"`
-	Handle    string            `json:"Handle"`
-	ID        string            `json:"ID"`
-	Metadata  map[string]string `json:"Metadata"`
-	Public    bool              `json:"Public"`
-	SessionID string            `json:"SessionID"`
+	GroupID     string            `json:"GroupID"`
+	Handle      string            `json:"Handle"`
+	ID          string            `json:"ID"`
+	Metadata    map[string]string `json:"Metadata"`
+	Public      bool              `json:"Public"`
+	SessionID   string            `json:"SessionID"`
+	SessionName string            `json:"SessionName"`
 }
 
 // ConversationGroupRecord defines model for ConversationGroupRecord.

@@ -1646,6 +1646,9 @@
           },
           "SessionID": {
             "type": "string"
+          },
+          "SessionName": {
+            "type": "string"
           }
         },
         "required": [
@@ -1653,6 +1656,7 @@
           "GroupID",
           "Handle",
           "SessionID",
+          "SessionName",
           "Public",
           "Metadata"
         ],

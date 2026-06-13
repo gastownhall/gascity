@@ -14,8 +14,10 @@ const (
 	labelGroupBase            = "gc:extmsg-group"
 	labelGroupParticipantBase = "gc:extmsg-group-participant"
 	labelTranscriptBase       = "gc:extmsg-transcript"
-	labelMembershipBase       = "gc:extmsg-membership"
-	labelTranscriptStateBase  = "gc:extmsg-transcript-state"
+
+	labelGroupParticipantSessionNamePrefix = "extmsg:group:participant:session-name:v1:"
+	labelMembershipBase                    = "gc:extmsg-membership"
+	labelTranscriptStateBase               = "gc:extmsg-transcript-state"
 
 	labelBindingConversationPrefix = "extmsg:binding:conv:v1:"
 	labelBindingSessionPrefix      = "extmsg:binding:session:v1:"
@@ -93,6 +95,15 @@ func groupParticipantLabel(groupID string) string {
 
 func groupParticipantSessionLabel(sessionID string) string {
 	return labelGroupParticipantSession + strings.TrimSpace(sessionID)
+}
+
+// groupParticipantSessionNameLabel labels a participant by the stable session
+// name its target session was created under. Unlike groupParticipantSessionLabel
+// (which keys on the volatile bead ID), this label survives respawn, so
+// ReassignSessionParticipants can find participants owned by a name even after
+// the original session bead closes.
+func groupParticipantSessionNameLabel(name string) string {
+	return labelGroupParticipantSessionNamePrefix + strings.TrimSpace(name)
 }
 
 func transcriptConversationLabel(ref ConversationRef) string {

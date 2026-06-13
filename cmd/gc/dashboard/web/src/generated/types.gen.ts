@@ -590,6 +590,7 @@ export type ConversationGroupParticipant = {
     };
     Public: boolean;
     SessionID: string;
+    SessionName: string;
 };
 
 export type ConversationGroupRecord = {

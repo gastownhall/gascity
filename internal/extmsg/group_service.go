@@ -146,12 +146,16 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 	if err := authorizeMutation(caller, group.RootConversation); err != nil {
 		return ConversationGroupParticipant{}, err
 	}
+	// Capture the stable session name so the participant survives respawn.
+	// Best-effort: empty when the selector resolves to no session bead.
+	sessionName := sessionNameForSelector(s.store, sessionID)
 	title := groupID + "/" + handle
 	fields := encodeMetadataFields(input.Metadata, map[string]string{
 		"schema_version": strconv.Itoa(schemaVersion),
 		"group_id":       groupID,
 		"handle":         handle,
 		"session_id":     sessionID,
+		"session_name":   sessionName,
 		"public":         strconv.FormatBool(input.Public),
 	})
 	var out ConversationGroupParticipant
@@ -184,7 +188,9 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 			pendingCleanup = removeSessionID(pendingCleanup, sessionID)
 			updateFields := mapsClone(fields)
 			updateFields["previous_session_id_pending_cleanup"] = encodePendingCleanupSessionIDs(pendingCleanup)
-			labelsToAdd, labelsToRemove := recordLabels(item.Labels, []string{groupParticipantSessionLabel(record.SessionID)}, []string{groupParticipantSessionLabel(sessionID)})
+			labelsToAdd, labelsToRemove := recordLabels(item.Labels,
+				participantSessionLabels(record.SessionID, record.SessionName),
+				participantSessionLabels(sessionID, sessionName))
 			if err := s.store.Update(item.ID, beads.UpdateOpts{
 				Title:        &title,
 				Labels:       labelsToAdd,
@@ -251,10 +257,14 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 			}
 			return nil
 		}
+		createLabels := []string{"gc:extmsg-participant", labelGroupParticipantBase, groupParticipantLabel(groupID), groupParticipantSessionLabel(sessionID)}
+		if sessionName != "" {
+			createLabels = append(createLabels, groupParticipantSessionNameLabel(sessionName))
+		}
 		created, err := s.store.Create(beads.Bead{
 			Title:    title,
 			Type:     "task",
-			Labels:   []string{"gc:extmsg-participant", labelGroupParticipantBase, groupParticipantLabel(groupID), groupParticipantSessionLabel(sessionID)},
+			Labels:   createLabels,
 			Metadata: fields,
 		})
 		if err != nil {
@@ -406,6 +416,7 @@ func (s *groupService) ResolveInbound(ctx context.Context, event ExternalInbound
 	}
 	byHandle := make(map[string]ConversationGroupParticipant, len(participants))
 	for _, participant := range participants {
+		overlayLiveParticipantSessionID(s.store, &participant)
 		byHandle[participant.Handle] = participant
 	}
 	if explicit := normalizeHandle(event.ExplicitTarget); explicit != "" {
@@ -468,6 +479,7 @@ func (s *groupService) ResolveOutbound(ctx context.Context, ref ConversationRef,
 		return nil, err
 	}
 	for _, participant := range participants {
+		overlayLiveParticipantSessionID(s.store, &participant)
 		if participant.SessionID == sessionID {
 			return &GroupOutboundDecision{
 				Match:       GroupRouteParticipantMatch,
@@ -723,11 +735,31 @@ func decodeGroupBead(b beads.Bead) (ConversationGroupRecord, error) {
 //nolint:unparam // error return reserved for future decoding failures
 func decodeParticipantBead(b beads.Bead) (ConversationGroupParticipant, error) {
 	return ConversationGroupParticipant{
-		ID:        b.ID,
-		GroupID:   strings.TrimSpace(b.Metadata["group_id"]),
-		Handle:    normalizeHandle(b.Metadata["handle"]),
-		SessionID: strings.TrimSpace(b.Metadata["session_id"]),
-		Public:    parseBool(b.Metadata, "public"),
-		Metadata:  decodePrefixedMetadata(b.Metadata),
+		ID:          b.ID,
+		GroupID:     strings.TrimSpace(b.Metadata["group_id"]),
+		Handle:      normalizeHandle(b.Metadata["handle"]),
+		SessionID:   strings.TrimSpace(b.Metadata["session_id"]),
+		SessionName: strings.TrimSpace(b.Metadata["session_name"]),
+		Public:      parseBool(b.Metadata, "public"),
+		Metadata:    decodePrefixedMetadata(b.Metadata),
 	}, nil
+}
+
+// overlayLiveParticipantSessionID re-points a participant at its session's
+// current live bead when the stored session_id has gone stale across a
+// respawn. It mutates only the in-memory copy — persistent healing is
+// ReassignSessionParticipants' job (runs on session handover).
+func overlayLiveParticipantSessionID(store beads.Store, participant *ConversationGroupParticipant) {
+	overlayLiveSessionID(store, participant.SessionName, participant.SessionID, &participant.SessionID)
+}
+
+// participantSessionLabels returns the label set for a participant given its
+// session ID (volatile) and optional session name (stable). The session-name
+// label is omitted when name is empty (legacy participants without one).
+func participantSessionLabels(sessionID, sessionName string) []string {
+	labels := []string{groupParticipantSessionLabel(sessionID)}
+	if sessionName != "" {
+		labels = append(labels, groupParticipantSessionNameLabel(sessionName))
+	}
+	return labels
 }

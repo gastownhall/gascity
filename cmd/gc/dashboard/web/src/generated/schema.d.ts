@@ -2478,6 +2478,7 @@ export interface components {
             };
             Public: boolean;
             SessionID: string;
+            SessionName: string;
         };
         ConversationGroupRecord: {
             DefaultHandle: string;
