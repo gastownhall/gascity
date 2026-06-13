@@ -28,22 +28,6 @@ const (
 
 var registryPublishHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
-func newRegistryCmd(stdout, stderr io.Writer) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "registry",
-		Short: "Publish packs to Gas City Registry",
-		Long:  "Publish packs to the hosted Gas City Registry.",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmd.Help()
-		},
-	}
-	cmd.AddCommand(newRegistryLoginCmd(stdout, stderr))
-	cmd.AddCommand(newRegistryPublishCmd(stdout, stderr))
-	cmd.AddCommand(newRegistryWhoamiCmd(stdout, stderr))
-	return cmd
-}
-
 type registryPublishOptions struct {
 	RegistryURL   string
 	Name          string
@@ -104,7 +88,7 @@ func doRegistryPublish(ctx context.Context, packRoot string, opts registryPublis
 
 	baseURL, err := resolveRegistryPublishBaseURL(opts.RegistryURL)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc registry publish: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
@@ -125,7 +109,7 @@ func doRegistryPublish(ctx context.Context, packRoot string, opts registryPublis
 	if !auth.hasCredentials() && !opts.DevAuth {
 		configuredToken, err := readRegistryConfiguredToken(baseURL)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc registry publish: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
 			return 1
 		}
 		auth.Token = strings.TrimSpace(configuredToken)
@@ -134,7 +118,7 @@ func doRegistryPublish(ctx context.Context, packRoot string, opts registryPublis
 
 	request, err := buildRegistryPublishRequest(ctx, packRoot, opts, useGitHubActionsOIDC)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc registry publish: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
@@ -149,37 +133,37 @@ func doRegistryPublish(ctx context.Context, packRoot string, opts registryPublis
 		var err error
 		auth, err = registryPublishDevAuth(ctx, registryPublishHTTPClient, baseURL, opts.DevAuthHandle)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc registry publish: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
 			return 1
 		}
 	}
 	if useGitHubActionsOIDC {
 		oidcToken, err := registryRequestGitHubActionsOIDCToken(ctx, registryPublishHTTPClient, registryGitHubActionsAudience)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc registry publish: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
 			return 1
 		}
 		publishToken, err := registryMintGitHubActionsPublishToken(ctx, registryPublishHTTPClient, baseURL, request, oidcToken)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc registry publish: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
 			return 1
 		}
 		auth.Token = publishToken
 	}
 	if !auth.hasCredentials() {
-		fmt.Fprintln(stderr, "gc registry publish: authentication required; run `gc registry login`, set GC_REGISTRY_TOKEN, pass --token, set GC_REGISTRY_SESSION and GC_REGISTRY_CSRF_TOKEN, or use --dev-auth against a local registry") //nolint:errcheck
+		fmt.Fprintln(stderr, "gc pack registry publish: authentication required; run `gc pack registry login`, set GC_REGISTRY_TOKEN, pass --token, set GC_REGISTRY_SESSION and GC_REGISTRY_CSRF_TOKEN, or use --dev-auth against a local registry") //nolint:errcheck
 		return 1
 	}
 
 	submitted, err := submitRegistryPublishRequest(ctx, registryPublishHTTPClient, baseURL, request, auth, opts.Validate)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc registry publish: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	writeRegistryPublishSubmitted(stdout, baseURL, submitted)
 	if opts.Validate {
 		if failure := registryPublishValidationFailure(submitted); failure != "" {
-			fmt.Fprintf(stderr, "gc registry publish: validation failed: %s\n", failure) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc pack registry publish: validation failed: %s\n", failure) //nolint:errcheck
 			return 1
 		}
 	}
@@ -780,7 +764,7 @@ func writeRegistryPublishSubmitted(stdout io.Writer, baseURL string, result regi
 }
 
 // registryPublishValidationRejectedStatuses lists publish-request statuses that
-// represent a terminal validation rejection. A `gc registry publish --validate`
+// represent a terminal validation rejection. A `gc pack registry publish --validate`
 // run that lands in one of these states failed validation; statuses outside
 // this set (for example queued or pending-review states) are not treated as
 // failures, so a successfully queued request still exits zero.
@@ -795,7 +779,7 @@ var registryPublishValidationRejectedStatuses = map[string]bool{
 // registryPublishValidationFailure reports a human-readable reason when a
 // validated publish request did not pass registry validation, or "" when it
 // did. A populated ValidationError is always a failure; otherwise a terminal
-// rejected/invalid status is treated as a failure so `gc registry publish
+// rejected/invalid status is treated as a failure so `gc pack registry publish
 // --validate` exits non-zero instead of masking a pack the registry rejected
 // inside a 2xx response as a successful publish.
 func registryPublishValidationFailure(result registryPublishSubmitted) string {

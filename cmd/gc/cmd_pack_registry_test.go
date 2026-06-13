@@ -522,14 +522,27 @@ func TestPackRegistrySearchWarnsOnStaleCache(t *testing.T) {
 func TestPackCommandTreeKeepsRegistryAndLegacySurfacesSeparate(t *testing.T) {
 	cmd := newPackCmd(&bytes.Buffer{}, &bytes.Buffer{})
 	for _, args := range [][]string{{"registry", "list"}, {"fetch"}, {"list"}} {
-		if found, _, err := cmd.Find(args); err != nil || found == cmd {
+		found, remaining, err := cmd.Find(args)
+		if err != nil || found == cmd || len(remaining) != 0 || found.Name() != args[len(args)-1] {
 			t.Fatalf("gc pack %s not found: found=%v err=%v", strings.Join(args, " "), found, err)
 		}
 	}
 	for _, name := range []string{"add", "remove", "refresh", "search", "show"} {
-		if found, _, err := cmd.Find([]string{"registry", name}); err != nil || found == cmd {
+		found, remaining, err := cmd.Find([]string{"registry", name})
+		if err != nil || found == cmd || len(remaining) != 0 || found.Name() != name {
 			t.Fatalf("gc pack registry %s not found: found=%v err=%v", name, found, err)
 		}
+	}
+	for _, name := range []string{"login", "publish", "whoami"} {
+		found, remaining, err := cmd.Find([]string{"registry", name})
+		if err != nil || found == cmd || len(remaining) != 0 || found.Name() != name {
+			t.Fatalf("gc pack registry %s not found: found=%v err=%v", name, found, err)
+		}
+	}
+
+	root := newRootCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	if found, _, err := root.Find([]string{"registry"}); err == nil && found != root {
+		t.Fatalf("gc registry should not be a root command; found=%s", found.CommandPath())
 	}
 }
 

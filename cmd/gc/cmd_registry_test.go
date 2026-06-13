@@ -119,7 +119,7 @@ schema = 2
 
 // TestBuildRegistryPublishRequestIgnoresPoisonedGitEnv proves the publish
 // request is derived from the pack repository even when git-locating
-// environment variables point elsewhere. Running `gc registry publish` inside a
+// environment variables point elsewhere. Running `gc pack registry publish` inside a
 // pre-commit hook or nested worktree tooling exports GIT_DIR/GIT_WORK_TREE/
 // GIT_INDEX_FILE for an unrelated repository; the publish git subprocesses must
 // strip those so status, HEAD, upstream, and remote URL are read from the pack
@@ -928,15 +928,15 @@ func TestRegistryHelpDoesNotLeakEnvironmentSecrets(t *testing.T) {
 
 	for _, sub := range []string{"publish", "login", "whoami"} {
 		var help bytes.Buffer
-		cmd := newRegistryCmd(io.Discard, io.Discard)
+		cmd := newPackRegistryCmd(io.Discard, io.Discard)
 		cmd.SetOut(&help)
 		cmd.SetErr(&help)
 		cmd.SetArgs([]string{sub, "--help"})
 		if err := cmd.Execute(); err != nil {
-			t.Fatalf("registry %s --help: %v", sub, err)
+			t.Fatalf("pack registry %s --help: %v", sub, err)
 		}
 		if strings.Contains(help.String(), "s3cr3t") {
-			t.Fatalf("registry %s --help leaks environment secrets:\n%s", sub, help.String())
+			t.Fatalf("pack registry %s --help leaks environment secrets:\n%s", sub, help.String())
 		}
 	}
 }
@@ -1386,7 +1386,7 @@ func TestRegistryPollDeviceToken(t *testing.T) {
 // TestRegistryDeviceLoginCompletesAfterPending drives the device-code login
 // orchestration end to end: it requests a device code, prints the verification
 // instructions, polls through an authorization_pending response, and returns the
-// access token once the registry approves. This covers gc registry login
+// access token once the registry approves. This covers gc pack registry login
 // --device above the registryPollDeviceToken helper unit test.
 func TestRegistryDeviceLoginCompletesAfterPending(t *testing.T) {
 	var mu sync.Mutex

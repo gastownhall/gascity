@@ -32,6 +32,9 @@ func newPackRegistryCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newPackRegistryRefreshCmd(stdout, stderr))
 	cmd.AddCommand(newPackRegistrySearchCmd(stdout, stderr))
 	cmd.AddCommand(newPackRegistryShowCmd(stdout, stderr))
+	cmd.AddCommand(newRegistryLoginCmd(stdout, stderr))
+	cmd.AddCommand(newRegistryPublishCmd(stdout, stderr))
+	cmd.AddCommand(newRegistryWhoamiCmd(stdout, stderr))
 	return cmd
 }
 
