@@ -1860,6 +1860,7 @@ func TestFindSupervisorWorkspaceServiceProcessesFiltersOwnershipAndRequiredEnv(t
 		"GC_CITY_PATH":              cityPath,
 		"GC_SERVICE_NAME":           "bridge",
 		"GC_SERVICE_STATE_ROOT":     serviceRoot,
+		"GC_SERVICE_SECRETS_DIR":    filepath.Join(serviceRoot, "secrets"),
 		"GC_SERVICE_SOCKET":         filepath.Join(t.TempDir(), "bridge.sock"),
 		"GC_CITY_RUNTIME_DIR":       filepath.Join(cityPath, ".gc", "runtime"),
 		"GC_SERVICE_RUN_ROOT":       filepath.Join(serviceRoot, "run"),
