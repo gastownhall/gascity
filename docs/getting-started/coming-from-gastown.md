@@ -108,7 +108,7 @@ Gas City gives you a small set of building blocks. There are **five primitives**
 …and **four derived mechanisms** composed from them:
 
 - **Messaging** — mail and nudges.
-- **Formulas & Molecules** — workflow templates and their runtime instances.
+- **Formulas & Molecules** — a formula is the reusable method for how work is done; a molecule is the work it produces at runtime.
 - **Dispatch** (`gc sling`) — find or spawn an agent and route work to it.
 - **Health Patrol** — stall detection and restart-with-backoff.
 

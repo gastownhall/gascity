@@ -281,6 +281,6 @@ From here:
 
 - **[Agent-to-Agent Communication](/tutorials/04-communication)** — how agents
   coordinate through mail, slung work, and hooks
-- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
-  dependencies and variables
+- **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
+  done: steps, dependencies, and variables
 - **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all

@@ -173,6 +173,6 @@ Without hooks, you'd have to manually tell each agent to run `gc mail check` and
 You've seen the two coordination mechanisms — mail for messages and slung beads
 for work — and the hook infrastructure that wires it all together. From here:
 
-- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
-  dependencies and variables
+- **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
+  done: steps, dependencies, and variables
 - **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all

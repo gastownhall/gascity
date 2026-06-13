@@ -16,6 +16,6 @@ workflows.
 | [Agents](/tutorials/02-agents)          | Configuring agent templates         |
 | [Sessions](/tutorials/03-sessions)      | Running and interacting with agents |
 | [Communication](/tutorials/04-communication) | Agent-to-agent coordination    |
-| [Formulas](/tutorials/05-formulas)      | Declarative workflow templates      |
+| [Formulas](/tutorials/05-formulas)      | How multi-step work should be done  |
 | [Beads](/tutorials/06-beads)            | The universal work primitive        |
 | [Orders](/tutorials/07-orders)          | Scheduled and event-driven dispatch |

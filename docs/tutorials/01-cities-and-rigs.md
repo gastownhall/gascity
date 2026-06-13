@@ -348,5 +348,5 @@ that rig. From here:
   prompts, sessions, scope, working directories
 - **[Sessions](/tutorials/03-sessions)** — interactive conversations with
   agents, polecats and crew
-- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
-  dependencies and variables
+- **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
+  done: steps, dependencies, and variables

@@ -1,7 +1,7 @@
 ---
 title: Tutorial 05 - Formulas
 sidebarTitle: 05 - Formulas
-description: Write declarative workflow templates with steps, dependencies, variables, and control flow, then dispatch them to agents.
+description: Capture how multi-step work should be done — steps, dependencies, variables, and control flow — in a reusable formula, then dispatch it to agents.
 ---
 
 So far you've been giving agents work one piece at a time — `gc sling my-agent
@@ -19,9 +19,11 @@ A formula describes the steps that need to take place, but it's not _quite_ step
 by step instructions. As with many things in life, some things need to happen
 one after another, but a lot of things can happen in parallel.
 
-A formula is a TOML file that describes a collection of steps with dependencies,
-variables, and optional control flow. To run a formula, you `gc sling` it to an
-agent just as you would any other work.
+A formula is a TOML file that captures _how_ a piece of work should be done — a
+collection of steps with dependencies, variables, and optional control flow.
+It isn't the work itself (that's a bead); it's the reusable method, and running
+it produces the work. To run a formula, you `gc sling` it to an agent just as
+you would any other work.
 
 ## A simple formula
 

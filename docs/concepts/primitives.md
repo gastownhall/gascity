@@ -225,9 +225,9 @@ gc session nudge mayor "Check mail and hook status, then act accordingly"
 
 ### Formulas & Molecules
 
-A **formula** is a reusable, multi-step workflow written as TOML.
+A **formula** is a reusable, parameterized *method* — how a piece of multi-step work should be done — written as TOML. It is not the work itself: a bead is the unit of work, and a convoy is a graph of related work. Applying a formula is what produces that work.
 
-A **molecule** is a formula *instantiated at runtime*: a root bead plus one bead per step in the Beads Store, with progress tracked by closing those beads.
+A **molecule** is a formula *instantiated at runtime* — the work a formula produces: a root bead plus one bead per step in the Beads Store, with progress tracked by closing those beads.
 
 A **wisp** is an ephemeral molecule that auto-closes and is garbage-collected after a configurable time-to-live (TTL).
 

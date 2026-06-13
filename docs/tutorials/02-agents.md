@@ -188,6 +188,6 @@ provider, and slung work to it directly. From here:
 
 - **[Sessions](/tutorials/03-sessions)** — session lifecycle, sleep/wake,
   suspension, named sessions
-- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
-  dependencies and variables
+- **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
+  done: steps, dependencies, and variables
 - **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all

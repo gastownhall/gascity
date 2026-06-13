@@ -3,25 +3,30 @@ title: "Understanding Formulas"
 description: How to think about formulas, choose a contract, and apply the major patterns.
 ---
 
-A formula is a declarative definition of work. Instead of prompting an agent
-with "do this thing," you write a TOML file that describes the work itself —
-the steps, the dependencies between them, the variables that parameterize
-them, and the control flow around them — and Gas City turns that description
-into durable work items.
+A formula is *how* work should be done. A [bead](/tutorials/06-beads) is the
+work itself — a single unit of it — and a [convoy](/tutorials/06-beads) is a
+graph of related work; a formula is neither. It is the reusable method you
+apply to produce and organize that work. Instead of prompting an agent "do
+this thing" and steering every step yourself, you write the method down once
+in a TOML file — the steps, the dependencies between them, the variables that
+parameterize them, and the control flow around them — and apply it whenever
+that kind of work comes up.
 
-The pipeline has three stages. The formula is the file on disk, resolved
-across pack layers so a city can override what a pack ships. Compiling it
-produces a recipe: an in-memory plan with namespaced step IDs and dependency
-edges. Instantiating the recipe creates beads in the store — and from that
-moment the work is independent of both the file and any agent session.
-Sessions crash, restart, and get recycled; the beads persist, and whoever
-picks the work up next finds the same state. That property — work survives
-sessions — is what every pattern in this guide builds on.
+Applying a formula is what turns the method into running work, in three
+stages. The formula is the file on disk, resolved across pack layers so a city
+can override what a pack ships. Compiling it produces a recipe: an in-memory
+plan with namespaced step IDs and dependency edges. Instantiating the recipe
+creates the beads — and from that moment the work is independent of both the
+file and any agent session. Sessions crash, restart, and get recycled; the
+beads persist, and whoever picks the work up next finds the same state. That
+property — work survives sessions — is what every pattern in this guide builds
+on.
 
-Because the unit is data, you get leverage you would never get from a prompt:
-preview a formula before creating anything (`gc formula show`), parameterize
-one definition across many runs (`--var`), and detect when a running instance
-has drifted from the file it came from (`gc formula version-check`).
+Because the method is written down rather than improvised in a prompt, you get
+leverage: preview what a formula will produce before creating anything (`gc
+formula show`), apply one method across many runs with different inputs
+(`--var`), and detect when running work has drifted from the formula it came
+from (`gc formula version-check`).
 
 This guide is about judgment: which compiler contract to declare, which
 instantiation verb to use, and how the major patterns fit together. The

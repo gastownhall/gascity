@@ -27,7 +27,8 @@ func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Manage and inspect formulas",
 		Long: `Manage and inspect formulas.
 
-Formulas are TOML workflow definitions. See docs/reference/specs/formula-spec-v2.md for
+A formula is a reusable TOML method for how multi-step work should be done
+(a bead is the work itself). See docs/reference/specs/formula-spec-v2.md for
 the file format, the formulas v2 contract, and the [requires]
 formula_compiler opt-in.`,
 	}
