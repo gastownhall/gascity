@@ -85,6 +85,23 @@ func (a SessionLogAdapter) TailUsage(path string) ([]sessionlog.TailUsage, error
 	return sessionlog.ExtractTailUsageFromSearchPaths(a.SearchPaths, path)
 }
 
+// CodexTailUsage reads per-invocation token usage from the tail of a codex
+// rollout transcript. Validation merges the codex default roots
+// (~/.codex/sessions) on top of the configured search paths, because
+// a.SearchPaths alone holds claude-style roots that would reject real codex
+// rollout locations.
+func (a SessionLogAdapter) CodexTailUsage(path string) ([]sessionlog.TailUsage, error) {
+	return sessionlog.ExtractCodexTailUsageFromSearchPaths(a.SearchPaths, path)
+}
+
+// GeminiUsage reads per-invocation token usage from a gemini chat recording
+// (legacy single-JSON or gemini-cli >=0.45 JSONL). Validation merges the
+// gemini default roots (~/.gemini/tmp) on top of the configured search
+// paths, mirroring CodexTailUsage.
+func (a SessionLogAdapter) GeminiUsage(path string) ([]sessionlog.TailUsage, error) {
+	return sessionlog.ExtractGeminiUsageFromSearchPaths(a.SearchPaths, path)
+}
+
 // TailActivity reads the transcript tail activity without loading full history.
 func (a SessionLogAdapter) TailActivity(path string) (TailActivity, error) {
 	meta, err := a.TailMeta(path)
