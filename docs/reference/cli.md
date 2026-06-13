@@ -2730,7 +2730,7 @@ gc registry login [flags]
 | `--device` | bool |  | use device-code login instead of browser callback login |
 | `--label` | string | `GC CLI login` | label for the registry API token |
 | `--no-browser` | bool |  | print the browser login URL instead of opening it |
-| `--registry-url` | string | `https://registry.gascity.com` | registry app base URL |
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
 | `--timeout` | duration | `15m0s` | maximum time to wait for interactive login |
 | `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN |
 
@@ -2748,17 +2748,17 @@ gc registry publish <path-to-pack-root> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--csrf-token` | string |  | registry CSRF token |
+| `--csrf-token` | string |  | registry CSRF token; defaults to GC_REGISTRY_CSRF_TOKEN |
 | `--description` | string |  | release description; defaults to [pack].description |
 | `--dev-auth` | bool |  | create a local dev-auth session before submitting; localhost only |
 | `--dev-auth-handle` | string | `local-cli` | dev-auth handle when --dev-auth is used |
 | `--dry-run` | bool |  | print the publish request without submitting |
 | `--name` | string |  | registry pack name; defaults to [pack].name |
 | `--ref` | string |  | release ref label; defaults to the upstream branch name |
-| `--registry-url` | string | `https://registry.gascity.com` | registry app base URL |
-| `--session-cookie` | string |  | registry_session cookie value or Cookie header |
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
+| `--session-cookie` | string |  | registry_session cookie value or Cookie header; defaults to GC_REGISTRY_SESSION |
 | `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN |
-| `--validate` | bool | `true` | ask the registry to validate the request immediately |
+| `--validate` | bool | `true` | ask the registry to validate the request immediately; a rejected validation exits non-zero |
 | `--version` | string |  | release version; defaults to [pack].version |
 
 ## gc registry whoami
@@ -2771,7 +2771,7 @@ gc registry whoami [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--registry-url` | string | `https://registry.gascity.com` | registry app base URL |
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
 | `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN or stored login |
 
 ## gc reload

@@ -3110,3 +3110,75 @@ func gitOutputImportE(t *testing.T, dir string, args ...string) (string, error) 
 	}
 	return strings.TrimSpace(string(out)), nil
 }
+
+// TestLocalGitRepoRootIgnoresPoisonedGitEnv proves localGitRepoRoot resolves
+// the toplevel of the requested targetDir even when git-locating environment
+// variables point at an unrelated repository. Running gc inside a pre-commit
+// hook or nested worktree tooling exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE
+// for the parent repo; the import probe must strip those so the local import
+// target is resolved from its own working directory.
+func TestLocalGitRepoRootIgnoresPoisonedGitEnv(t *testing.T) {
+	repo := t.TempDir()
+	mustGitImport(t, repo, "init")
+	// Capture git's own resolved toplevel before poisoning so symlink
+	// normalization matches localGitRepoRoot's later result.
+	wantRoot := gitOutputImport(t, repo, "rev-parse", "--show-toplevel")
+
+	poison := t.TempDir()
+	mustGitImport(t, poison, "init")
+	t.Setenv("GIT_DIR", filepath.Join(poison, ".git"))
+	t.Setenv("GIT_WORK_TREE", poison)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(poison, ".git", "index"))
+
+	got, ok, err := localGitRepoRoot(repo)
+	if err != nil {
+		t.Fatalf("localGitRepoRoot with poisoned git env: %v", err)
+	}
+	if !ok {
+		t.Fatalf("localGitRepoRoot ok = false, want true for an initialized repo")
+	}
+	if got != wantRoot {
+		t.Fatalf("localGitRepoRoot = %q, want %q (must ignore poisoned GIT_DIR)", got, wantRoot)
+	}
+}
+
+// TestDefaultImportHeadCommitIgnoresPoisonedGitEnv proves defaultImportHeadCommit
+// resolves the HEAD of the requested source under a poisoned git environment.
+// `git ls-remote <url>` lists refs from the explicit URL, so the sanitized
+// environment is defense-in-depth (against config injection or a future change
+// that relies on local repo discovery); the resolved HEAD must still be the
+// requested source's, never the leaked parent's.
+func TestDefaultImportHeadCommitIgnoresPoisonedGitEnv(t *testing.T) {
+	repo := t.TempDir()
+	mustGitImport(t, repo, "init")
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	mustGitImport(t, repo, "add", ".")
+	mustGitImport(t, repo, "commit", "-m", "initial")
+	wantHead := gitOutputImport(t, repo, "rev-parse", "HEAD")
+
+	// A second repo whose HEAD differs from the source.
+	poison := t.TempDir()
+	mustGitImport(t, poison, "init")
+	if err := os.WriteFile(filepath.Join(poison, "p.txt"), []byte("poison\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(poison): %v", err)
+	}
+	mustGitImport(t, poison, "add", ".")
+	mustGitImport(t, poison, "commit", "-m", "poison")
+	poisonHead := gitOutputImport(t, poison, "rev-parse", "HEAD")
+	if poisonHead == wantHead {
+		t.Fatalf("poison HEAD unexpectedly equals source HEAD %s", wantHead)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(poison, ".git"))
+	t.Setenv("GIT_WORK_TREE", poison)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(poison, ".git", "index"))
+
+	got, err := defaultImportHeadCommit(repo)
+	if err != nil {
+		t.Fatalf("defaultImportHeadCommit with poisoned git env: %v", err)
+	}
+	if got != wantHead {
+		t.Fatalf("defaultImportHeadCommit = %q, want %q (must resolve the requested source)", got, wantHead)
+	}
+}

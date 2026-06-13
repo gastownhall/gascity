@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/spf13/cobra"
@@ -1582,6 +1583,10 @@ func canonicalizeLocalGitImportSource(targetDir string) (string, bool, error) {
 
 func localGitRepoRoot(targetDir string) (string, bool, error) {
 	cmd := exec.Command("git", "-C", targetDir, "rev-parse", "--show-toplevel")
+	// Strip git-locating env vars (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, ...)
+	// so the toplevel resolves from targetDir, not a parent repo leaked through
+	// a pre-commit hook or nested worktree tooling.
+	cmd.Env = git.SanitizedEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		text := string(out)
@@ -1600,6 +1605,10 @@ func localGitRepoRoot(targetDir string) (string, bool, error) {
 func defaultImportHeadCommit(source string) (string, error) {
 	cloneURL := config.NormalizeRemoteSource(source)
 	cmd := exec.Command("git", "ls-remote", cloneURL, "HEAD")
+	// Strip git-locating env vars so a leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE
+	// (or config injection) from a parent pre-commit hook or worktree tooling
+	// cannot perturb how this remote HEAD probe runs.
+	cmd.Env = git.SanitizedEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("resolving HEAD for %q: %w", source, err)

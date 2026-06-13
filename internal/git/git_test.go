@@ -40,6 +40,84 @@ func runGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
+func TestSanitizeGitEnvStripsGitLocatingVariables(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin",
+		"GIT_DIR=/poison/.git",
+		"GIT_WORK_TREE=/poison",
+		"GIT_INDEX_FILE=/poison/.git/index",
+		"GIT_OBJECT_DIRECTORY=/poison/.git/objects",
+		"HOME=/home/user",
+		"GIT_AUTHOR_NAME=keep-me",
+	}
+	got := sanitizeGitEnv(in)
+	for _, e := range got {
+		if k, _, _ := strings.Cut(e, "="); gitEnvBlacklist[k] {
+			t.Errorf("sanitizeGitEnv kept blacklisted var %q", k)
+		}
+	}
+	want := map[string]bool{"PATH": true, "HOME": true, "GIT_AUTHOR_NAME": true}
+	if len(got) != len(want) {
+		t.Fatalf("sanitizeGitEnv returned %d vars %v, want %d", len(got), got, len(want))
+	}
+	for _, e := range got {
+		k, _, _ := strings.Cut(e, "=")
+		if !want[k] {
+			t.Errorf("sanitizeGitEnv dropped expected var %q", k)
+		}
+	}
+}
+
+func TestSanitizedEnvStripsPoisonedProcessEnv(t *testing.T) {
+	t.Setenv("GIT_DIR", "/poison/.git")
+	t.Setenv("GIT_WORK_TREE", "/poison")
+	t.Setenv("GIT_INDEX_FILE", "/poison/.git/index")
+	for _, e := range SanitizedEnv() {
+		switch k, _, _ := strings.Cut(e, "="); k {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE":
+			t.Errorf("SanitizedEnv leaked git-locating var %q", k)
+		}
+	}
+}
+
+func TestHermeticEnvStripsDiscoveryAndConfigVarsAndPinsHermeticConfig(t *testing.T) {
+	// SanitizedEnv-covered locating vars plus HermeticEnv-only discovery and
+	// config-location vars must all be removed; the hermetic config pins must be
+	// appended.
+	t.Setenv("GIT_DIR", "/poison/.git")
+	t.Setenv("GIT_CEILING_DIRECTORIES", "/poison")
+	t.Setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+	t.Setenv("GIT_NAMESPACE", "poison")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/poison/system")
+	t.Setenv("GIT_EXEC_PATH", "/poison/exec")
+	t.Setenv("GIT_PAGER", "poison-pager")
+	t.Setenv("PATH", "/usr/bin")
+
+	got := HermeticEnv()
+	stripped := map[string]bool{
+		"GIT_DIR": true, "GIT_CEILING_DIRECTORIES": true,
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM": true, "GIT_NAMESPACE": true,
+		"GIT_CONFIG_SYSTEM": true, "GIT_EXEC_PATH": true, "GIT_PAGER": true,
+	}
+	seen := map[string]string{}
+	for _, e := range got {
+		k, v, _ := strings.Cut(e, "=")
+		if stripped[k] {
+			t.Errorf("HermeticEnv leaked %q", k)
+		}
+		seen[k] = v
+	}
+	if seen["GIT_CONFIG_NOSYSTEM"] != "1" {
+		t.Errorf("HermeticEnv GIT_CONFIG_NOSYSTEM = %q, want 1", seen["GIT_CONFIG_NOSYSTEM"])
+	}
+	if seen["GIT_CONFIG_GLOBAL"] != "/dev/null" {
+		t.Errorf("HermeticEnv GIT_CONFIG_GLOBAL = %q, want /dev/null", seen["GIT_CONFIG_GLOBAL"])
+	}
+	if _, ok := seen["PATH"]; !ok {
+		t.Error("HermeticEnv dropped non-git var PATH")
+	}
+}
+
 func TestIsRepo(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)

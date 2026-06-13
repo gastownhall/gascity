@@ -108,6 +108,38 @@ func TestJsonlArchiveDoctorCheck_LocalOnlyWarning(t *testing.T) {
 	}
 }
 
+// TestJsonlArchiveDoctorCheck_ArchiveHasOriginIgnoresPoisonedGitEnv proves the
+// archive remote query resolves from the archive repo passed via -C even when
+// git-locating environment variables point at an unrelated repository. Running
+// gc doctor inside a pre-commit hook or nested worktree exports
+// GIT_DIR/GIT_WORK_TREE for the parent repo; without git.SanitizedEnv() the
+// leaked GIT_DIR redirects `git -C <archive> remote -v` to the poisoned repo, so
+// the check would report push-mode health for the wrong repository.
+func TestJsonlArchiveDoctorCheck_ArchiveHasOriginIgnoresPoisonedGitEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	archiveDir := filepath.Join(cityDir, "archive")
+	// Archive repo has an origin remote → push mode.
+	initBareArchiveRepo(t, archiveDir, true)
+
+	// Unrelated repo with no origin whose git-locating env vars would make
+	// archiveHasOrigin read its (empty) remote list if inherited.
+	poison := t.TempDir()
+	initBareArchiveRepo(t, poison, false)
+	t.Setenv("GIT_DIR", filepath.Join(poison, ".git"))
+	t.Setenv("GIT_WORK_TREE", poison)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(poison, ".git", "index"))
+
+	// Real git path (no runGit stub) exercises cmd.Env = git.SanitizedEnv().
+	check := newJsonlArchiveDoctorCheck(cityDir)
+	hasOrigin, err := check.archiveHasOrigin(archiveDir)
+	if err != nil {
+		t.Fatalf("archiveHasOrigin with poisoned git env: %v", err)
+	}
+	if !hasOrigin {
+		t.Fatalf("archiveHasOrigin = false, want true (must query archive repo via -C, not poisoned GIT_DIR)")
+	}
+}
+
 func TestJsonlArchiveDoctorCheck_PushModeHealthyWithTimestamp(t *testing.T) {
 	cityDir := t.TempDir()
 	stateDir := t.TempDir()

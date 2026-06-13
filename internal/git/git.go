@@ -300,6 +300,71 @@ var gitEnvBlacklist = map[string]bool{
 	"GIT_SHALLOW_FILE":                 true,
 }
 
+// hermeticGitEnvExtra lists git environment variables stripped by HermeticEnv
+// in addition to gitEnvBlacklist. These are repository-discovery,
+// config-location, and pager/exec-path variables that a hermetic cache clone
+// must not inherit from the parent process. They are kept separate from
+// gitEnvBlacklist because SanitizedEnv deliberately preserves some of them: for
+// example GIT_CEILING_DIRECTORIES is required by ordinary repo-discovery checks
+// such as IsRepo, which would climb out of a non-repo directory if it were
+// stripped. Cache clones, by contrast, want maximum isolation.
+var hermeticGitEnvExtra = map[string]bool{
+	"GIT_CEILING_DIRECTORIES":         true,
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM": true,
+	"GIT_NAMESPACE":                   true,
+	"GIT_CONFIG_SYSTEM":               true,
+	"GIT_CONFIG_GLOBAL":               true,
+	"GIT_CONFIG_NOSYSTEM":             true,
+	"GIT_EXEC_PATH":                   true,
+	"GIT_PAGER":                       true,
+}
+
+// SanitizedEnv returns a copy of the current process environment with
+// git-specific variables removed. Subprocess git invocations should run with
+// this environment so they operate on their own working directory instead of a
+// parent repository leaked through GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, and
+// related variables (for example when gc runs inside a pre-commit hook or
+// nested worktree tooling). Callers outside this package that shell out to git
+// directly should assign this to cmd.Env.
+func SanitizedEnv() []string {
+	return sanitizeGitEnv(os.Environ())
+}
+
+// HermeticEnv returns a process environment for git subprocesses that must run
+// hermetically against a cached clone, isolated from ambient system, global,
+// and parent-repository git state. It strips everything SanitizedEnv removes
+// plus the repository-discovery, config-location, and pager/exec-path variables
+// in hermeticGitEnvExtra, then pins GIT_CONFIG_NOSYSTEM=1 and
+// GIT_CONFIG_GLOBAL=/dev/null so the clone reads no system or user git config.
+// Cache and fetch runners that previously maintained their own duplicate
+// blacklists should assign this to cmd.Env instead.
+func HermeticEnv() []string {
+	environ := os.Environ()
+	cleaned := make([]string, 0, len(environ)+2)
+	for _, e := range environ {
+		if k, _, ok := strings.Cut(e, "="); ok && (gitEnvBlacklist[k] || hermeticGitEnvExtra[k]) {
+			continue
+		}
+		cleaned = append(cleaned, e)
+	}
+	cleaned = append(cleaned, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	return cleaned
+}
+
+// sanitizeGitEnv returns environ with git-specific variables removed. It is the
+// single filtering implementation shared by SanitizedEnv and runCtx so the
+// blacklist has exactly one enforcement path.
+func sanitizeGitEnv(environ []string) []string {
+	cleaned := make([]string, 0, len(environ))
+	for _, e := range environ {
+		if k, _, ok := strings.Cut(e, "="); ok && gitEnvBlacklist[k] {
+			continue
+		}
+		cleaned = append(cleaned, e)
+	}
+	return cleaned
+}
+
 // run executes a git command in the working directory. Git environment
 // variables from the parent process are stripped to prevent interference
 // (e.g., when called from a pre-commit hook context).
@@ -312,12 +377,7 @@ func (g *Git) runCtx(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.workDir
 	// Build clean env: inherit everything except git-specific vars.
-	for _, e := range os.Environ() {
-		if k, _, ok := strings.Cut(e, "="); ok && gitEnvBlacklist[k] {
-			continue
-		}
-		cmd.Env = append(cmd.Env, e)
-	}
+	cmd.Env = sanitizeGitEnv(os.Environ())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)

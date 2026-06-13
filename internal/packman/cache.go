@@ -263,35 +263,10 @@ func defaultRunGit(dir string, args ...string) (string, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	for _, e := range os.Environ() {
-		if k, _, ok := strings.Cut(e, "="); ok && fetchGitEnvBlacklist[k] {
-			continue
-		}
-		cmd.Env = append(cmd.Env, e)
-	}
-	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	cmd.Env = gitutil.HermeticEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-var fetchGitEnvBlacklist = map[string]bool{
-	"GIT_DIR":                          true,
-	"GIT_WORK_TREE":                    true,
-	"GIT_INDEX_FILE":                   true,
-	"GIT_OBJECT_DIRECTORY":             true,
-	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
-	"GIT_COMMON_DIR":                   true,
-	"GIT_CEILING_DIRECTORIES":          true,
-	"GIT_DISCOVERY_ACROSS_FILESYSTEM":  true,
-	"GIT_NAMESPACE":                    true,
-	"GIT_CONFIG":                       true,
-	"GIT_CONFIG_GLOBAL":                true,
-	"GIT_CONFIG_SYSTEM":                true,
-	"GIT_CONFIG_NOSYSTEM":              true,
-	"GIT_CONFIG_COUNT":                 true,
-	"GIT_EXEC_PATH":                    true,
-	"GIT_PAGER":                        true,
 }

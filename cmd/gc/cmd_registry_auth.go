@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/spf13/cobra"
 )
 
@@ -51,10 +52,8 @@ type registryLoginOptions struct {
 
 func newRegistryLoginCmd(stdout, stderr io.Writer) *cobra.Command {
 	opts := registryLoginOptions{
-		RegistryURL: registryFirstNonEmpty(os.Getenv("GC_REGISTRY_URL"), defaultRegistryPublishURL),
-		Token:       os.Getenv("GC_REGISTRY_TOKEN"),
-		Label:       "GC CLI login",
-		Timeout:     15 * time.Minute,
+		Label:   "GC CLI login",
+		Timeout: 15 * time.Minute,
 	}
 	cmd := &cobra.Command{
 		Use:   "login",
@@ -64,15 +63,15 @@ func newRegistryLoginCmd(stdout, stderr io.Writer) *cobra.Command {
 By default this opens a browser for GitHub or Google Workspace sign-in. Use
 --device for headless shells, or --token to store an existing registry token.`,
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if doRegistryLogin(opts, stdout, stderr) != 0 {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if doRegistryLogin(cmd.Context(), opts, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&opts.RegistryURL, "registry-url", opts.RegistryURL, "registry app base URL")
-	cmd.Flags().StringVar(&opts.Token, "token", opts.Token, "registry API token; defaults to GC_REGISTRY_TOKEN")
+	cmd.Flags().StringVar(&opts.RegistryURL, "registry-url", "", "registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then "+defaultRegistryPublishURL)
+	cmd.Flags().StringVar(&opts.Token, "token", "", "registry API token; defaults to GC_REGISTRY_TOKEN")
 	cmd.Flags().StringVar(&opts.Label, "label", opts.Label, "label for the registry API token")
 	cmd.Flags().BoolVar(&opts.Device, "device", false, "use device-code login instead of browser callback login")
 	cmd.Flags().BoolVar(&opts.NoBrowser, "no-browser", false, "print the browser login URL instead of opening it")
@@ -82,36 +81,36 @@ By default this opens a browser for GitHub or Google Workspace sign-in. Use
 
 func newRegistryWhoamiCmd(stdout, stderr io.Writer) *cobra.Command {
 	opts := registryLoginOptions{
-		RegistryURL: registryFirstNonEmpty(os.Getenv("GC_REGISTRY_URL"), defaultRegistryPublishURL),
-		Token:       os.Getenv("GC_REGISTRY_TOKEN"),
-		Timeout:     30 * time.Second,
+		Timeout: 30 * time.Second,
 	}
 	cmd := &cobra.Command{
 		Use:   "whoami",
 		Short: "Show the authenticated registry account",
 		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if doRegistryWhoami(opts, stdout, stderr) != 0 {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if doRegistryWhoami(cmd.Context(), opts, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&opts.RegistryURL, "registry-url", opts.RegistryURL, "registry app base URL")
-	cmd.Flags().StringVar(&opts.Token, "token", opts.Token, "registry API token; defaults to GC_REGISTRY_TOKEN or stored login")
+	cmd.Flags().StringVar(&opts.RegistryURL, "registry-url", "", "registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then "+defaultRegistryPublishURL)
+	cmd.Flags().StringVar(&opts.Token, "token", "", "registry API token; defaults to GC_REGISTRY_TOKEN or stored login")
 	return cmd
 }
 
-func doRegistryLogin(opts registryLoginOptions, stdout, stderr io.Writer) int {
-	baseURL, err := normalizeRegistryPublishBaseURL(opts.RegistryURL)
+func doRegistryLogin(ctx context.Context, opts registryLoginOptions, stdout, stderr io.Writer) int {
+	baseURL, err := resolveRegistryPublishBaseURL(opts.RegistryURL)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc registry login: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
-	token := strings.TrimSpace(opts.Token)
+	// Secrets resolve at execution time, never as flag defaults, so help
+	// output cannot render credential values from the environment.
+	token := strings.TrimSpace(registryFirstNonEmpty(opts.Token, os.Getenv("GC_REGISTRY_TOKEN")))
 	if token == "" {
 		if opts.Device {
 			token, err = registryDeviceLogin(ctx, registryPublishHTTPClient, baseURL, opts.Label, stdout)
@@ -137,13 +136,15 @@ func doRegistryLogin(opts registryLoginOptions, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func doRegistryWhoami(opts registryLoginOptions, stdout, stderr io.Writer) int {
-	baseURL, err := normalizeRegistryPublishBaseURL(opts.RegistryURL)
+func doRegistryWhoami(ctx context.Context, opts registryLoginOptions, stdout, stderr io.Writer) int {
+	baseURL, err := resolveRegistryPublishBaseURL(opts.RegistryURL)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc registry whoami: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	token := strings.TrimSpace(opts.Token)
+	// Secrets resolve at execution time, never as flag defaults, so help
+	// output cannot render credential values from the environment.
+	token := strings.TrimSpace(registryFirstNonEmpty(opts.Token, os.Getenv("GC_REGISTRY_TOKEN")))
 	if token == "" {
 		token, err = readRegistryConfiguredToken(baseURL)
 		if err != nil {
@@ -155,7 +156,7 @@ func doRegistryWhoami(opts registryLoginOptions, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "gc registry whoami: not logged in; run `gc registry login`") //nolint:errcheck
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 	user, err := registryFetchCurrentUser(ctx, registryPublishHTTPClient, baseURL, token)
 	if err != nil {
@@ -166,15 +167,14 @@ func doRegistryWhoami(opts registryLoginOptions, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func registryCLIConfigPath() (string, error) {
+// registryCLIConfigPath resolves the hosted-registry auth config file path.
+// GC_REGISTRY_CONFIG_PATH wins; otherwise the file lives under the canonical
+// Gas City state root so isolated runs and tests stay sandboxed.
+func registryCLIConfigPath() string {
 	if override := strings.TrimSpace(os.Getenv(registryCLIConfigEnv)); override != "" {
-		return override, nil
+		return override
 	}
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("resolving user config directory: %w", err)
-	}
-	return filepath.Join(dir, "gascity", "registry.json"), nil
+	return filepath.Join(gchome.Default(), "registry.json")
 }
 
 func loadRegistryCLIConfig(path string) (registryCLIConfig, error) {
@@ -204,21 +204,34 @@ func saveRegistryCLIConfig(path string, cfg registryCLIConfig) error {
 		return err
 	}
 	data = append(data, '\n')
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating registry config directory: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	// A fresh 0600 temp file renamed over the target keeps the write atomic
+	// and sheds any looser permissions from a pre-existing config file.
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("writing registry config: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("writing registry config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("writing registry config: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("writing registry config: %w", err)
 	}
 	return nil
 }
 
 func readRegistryConfiguredToken(baseURL string) (string, error) {
-	path, err := registryCLIConfigPath()
-	if err != nil {
-		return "", err
-	}
-	cfg, err := loadRegistryCLIConfig(path)
+	cfg, err := loadRegistryCLIConfig(registryCLIConfigPath())
 	if err != nil {
 		return "", err
 	}
@@ -230,10 +243,7 @@ func readRegistryConfiguredToken(baseURL string) (string, error) {
 }
 
 func writeRegistryConfiguredToken(baseURL, token string) error {
-	path, err := registryCLIConfigPath()
-	if err != nil {
-		return err
-	}
+	path := registryCLIConfigPath()
 	cfg, err := loadRegistryCLIConfig(path)
 	if err != nil {
 		return err
@@ -268,8 +278,8 @@ func registryFetchCurrentUser(ctx context.Context, client *http.Client, baseURL,
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return registryCurrentUser{}, fmt.Errorf("decoding registry login: %w", err)
+	if err := registryDecodeJSONResponse(resp, &payload); err != nil {
+		return registryCurrentUser{}, fmt.Errorf("checking registry login: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if payload.Error.Message != "" {
@@ -295,11 +305,48 @@ func registryBrowserLogin(ctx context.Context, baseURL, label string, stdout io.
 		return "", err
 	}
 	resultCh := make(chan browserLoginResult, 1)
-	mux := http.NewServeMux()
 	server := &http.Server{
-		Handler:           mux,
+		Handler:           registryBrowserLoginHandler(state, resultCh),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	// Bound shutdown so a lingering keep-alive connection cannot hang the CLI.
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			_ = server.Close()
+		}
+	}()
+
+	callbackURL := "http://" + listener.Addr().String() + "/callback"
+	authURL := baseURL + "/cli/auth?" + url.Values{
+		"redirect_uri": {callbackURL},
+		"state":        {state},
+		"label":        {label},
+	}.Encode()
+	if openBrowser {
+		if err := openRegistryURL(authURL); err != nil {
+			fmt.Fprintf(stdout, "Open this URL to finish registry login:\n%s\n", authURL) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stdout, "Opened browser for registry login.\n%s\n", authURL) //nolint:errcheck
+		}
+	} else {
+		fmt.Fprintf(stdout, "Open this URL to finish registry login:\n%s\n", authURL) //nolint:errcheck
+	}
+
+	return resolveRegistryBrowserLoginResult(ctx, baseURL, resultCh)
+}
+
+// registryBrowserLoginHandler builds the local callback server used by browser
+// login. The /callback route serves the page that forwards the URL-fragment
+// credentials; the /token route rejects non-POST requests, malformed bodies, a
+// CSRF state mismatch, and a missing token before delivering the captured
+// result to resultCh with a non-blocking send.
+func registryBrowserLoginHandler(state string, resultCh chan<- browserLoginResult) http.Handler {
+	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, registryBrowserCallbackHTML())
@@ -329,27 +376,14 @@ func registryBrowserLogin(ctx context.Context, baseURL, label string, stdout io.
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	})
-	go func() {
-		_ = server.Serve(listener)
-	}()
-	defer server.Shutdown(context.Background()) //nolint:errcheck
+	return mux
+}
 
-	callbackURL := "http://" + listener.Addr().String() + "/callback"
-	authURL := baseURL + "/cli/auth?" + url.Values{
-		"redirect_uri": {callbackURL},
-		"state":        {state},
-		"label":        {label},
-	}.Encode()
-	if openBrowser {
-		if err := openRegistryURL(authURL); err != nil {
-			fmt.Fprintf(stdout, "Open this URL to finish registry login:\n%s\n", authURL) //nolint:errcheck
-		} else {
-			fmt.Fprintf(stdout, "Opened browser for registry login.\n%s\n", authURL) //nolint:errcheck
-		}
-	} else {
-		fmt.Fprintf(stdout, "Open this URL to finish registry login:\n%s\n", authURL) //nolint:errcheck
-	}
-
+// resolveRegistryBrowserLoginResult blocks until the callback delivers a result
+// or ctx is done. It rejects a result whose registry does not match the login
+// target so a stray callback cannot redirect the stored token to another
+// registry.
+func resolveRegistryBrowserLoginResult(ctx context.Context, baseURL string, resultCh <-chan browserLoginResult) (string, error) {
 	select {
 	case result := <-resultCh:
 		if result.Registry != "" && result.Registry != baseURL {
@@ -425,8 +459,8 @@ func registryDeviceLogin(ctx context.Context, client *http.Client, baseURL, labe
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&code); err != nil {
-		return "", fmt.Errorf("decoding device login: %w", err)
+	if err := registryDecodeJSONResponse(resp, &code); err != nil {
+		return "", fmt.Errorf("requesting device login: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if code.Error.Message != "" {
@@ -493,8 +527,8 @@ func registryPollDeviceToken(ctx context.Context, client *http.Client, baseURL, 
 		Error       string `json:"error"`
 		Interval    int    `json:"interval"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", 0, false, fmt.Errorf("decoding device login poll: %w", err)
+	if err := registryDecodeJSONResponse(resp, &payload); err != nil {
+		return "", 0, false, fmt.Errorf("polling device login: %w", err)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 && payload.AccessToken != "" {
 		return payload.AccessToken, 0, false, nil
@@ -548,8 +582,8 @@ func registryRequestGitHubActionsOIDCToken(ctx context.Context, client *http.Cli
 	var payload struct {
 		Value string `json:"value"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("decoding GitHub Actions OIDC token: %w", err)
+	if err := registryDecodeJSONResponse(resp, &payload); err != nil {
+		return "", fmt.Errorf("requesting GitHub Actions OIDC token: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("GitHub Actions OIDC request failed: HTTP %d", resp.StatusCode)
@@ -589,8 +623,8 @@ func registryMintGitHubActionsPublishToken(ctx context.Context, client *http.Cli
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("decoding GitHub Actions publish token: %w", err)
+	if err := registryDecodeJSONResponse(resp, &payload); err != nil {
+		return "", fmt.Errorf("minting GitHub Actions publish token: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if payload.Error.Message != "" {
