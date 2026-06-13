@@ -236,11 +236,14 @@ func TestClassifyDoltProcess_RigPortBeatsConfigPath(t *testing.T) {
 }
 
 func TestClassifyDoltProcess_DeletedScopeSignals(t *testing.T) {
-	// New reap signals for deleted-scope dolt servers (ga-10wmzh): a process
-	// whose cwd readlink ends in " (deleted)" is an unambiguous zombie even
-	// without --config, and a --config path that no longer exists on disk
-	// means the owning scope (worktree, PR clone) was removed. Both must be
-	// detected before the no-config / not-on-allowlist protect branches.
+	// Deleted-scope reap signals for dolt servers (ga-10wmzh): a process whose
+	// cwd readlink ends in " (deleted)" is an unambiguous zombie even without
+	// --config, and that deleted-cwd signal is what authorizes reaping. A
+	// --config path that has vanished is NOT a standalone reap signal — on its
+	// own (live or unknown cwd) it protects, because a lone missing-config
+	// observation is not proof the scope was removed; it only reaps when the
+	// deleted-cwd signal corroborates it. Both deleted-cwd and active-test-root
+	// protection are evaluated before the no-config / not-on-allowlist branches.
 	// Unknown state must always protect.
 	cases := []struct {
 		name           string
@@ -273,16 +276,49 @@ func TestClassifyDoltProcess_DeletedScopeSignals(t *testing.T) {
 			wantReasonSub:  "deleted",
 		},
 		{
-			name: "missing config path on non-allowlist scope reaps",
+			name: "missing config with live cwd protects (needs deleted-cwd corroboration)",
 			proc: DoltProcInfo{
 				PID:             6003,
 				Argv:            []string{"dolt", "sql-server", "--config", "/data/worktrees/gone/.gc/runtime/packs/dolt/dolt-config.yaml"},
 				CWDState:        procPathStateLive,
 				ConfigPathState: procPathStateDeleted,
 			},
+			wantAction:    "protect",
+			wantReasonSub: "missing",
+		},
+		{
+			name: "missing config with unknown cwd protects and does not claim cwd live",
+			proc: DoltProcInfo{
+				PID:             6012,
+				Argv:            []string{"dolt", "sql-server", "--config", "/data/worktrees/gone/.gc/runtime/packs/dolt/dolt-config.yaml"},
+				CWDState:        procPathStateUnknown,
+				ConfigPathState: procPathStateDeleted,
+			},
+			wantAction:    "protect",
+			wantReasonSub: "could not be determined",
+		},
+		{
+			name: "missing config with deleted cwd reaps (corroborated) and echoes config",
+			proc: DoltProcInfo{
+				PID:             6010,
+				Argv:            []string{"dolt", "sql-server", "--config", "/data/worktrees/gone/.gc/runtime/packs/dolt/dolt-config.yaml"},
+				CWDState:        procPathStateDeleted,
+				ConfigPathState: procPathStateDeleted,
+			},
 			wantAction:     "reap",
 			wantConfigPath: "/data/worktrees/gone/.gc/runtime/packs/dolt/dolt-config.yaml",
-			wantReasonSub:  "no longer exists",
+			wantReasonSub:  "deleted",
+		},
+		{
+			name: "missing config on allowlist test path still reaps (ownership signal)",
+			proc: DoltProcInfo{
+				PID:             6011,
+				Argv:            []string{"dolt", "sql-server", "--config", "/tmp/TestLeaked123/001/.gc/runtime/packs/dolt/dolt-config.yaml"},
+				CWDState:        procPathStateLive,
+				ConfigPathState: procPathStateDeleted,
+			},
+			wantAction:     "reap",
+			wantConfigPath: "/tmp/TestLeaked123/001/.gc/runtime/packs/dolt/dolt-config.yaml",
 		},
 		{
 			name: "live cwd with existing non-allowlist config protects",

@@ -109,16 +109,78 @@ func discoverDoltProcessesFromPS() ([]DoltProcInfo, error) {
 	return out, nil
 }
 
-// cwdStateFromLink classifies a /proc/<pid>/cwd readlink target. The kernel
-// appends " (deleted)" when the working directory inode has been unlinked;
-// that suffix can never revert (a rename shows the new path instead), so it
-// is an unambiguous deleted-scope signal. The suffix must terminate the
-// link — a directory literally named "x (deleted) suffix" stays live.
-func cwdStateFromLink(link string) string {
-	if strings.HasSuffix(link, " (deleted)") {
-		return procPathStateDeleted
+// cwdStateFromLink classifies a /proc/<pid>/cwd readlink target, given the
+// procfs cwd link path (cwdLink) so the one ambiguous case can be resolved by
+// inode identity. The kernel appends " (deleted)" when the working directory
+// inode has been unlinked; that marker normally proves the scope is gone. It
+// is ambiguous only when a *live* directory's real name ends in " (deleted)",
+// which yields an identical readlink target. To tell them apart, treat the
+// readlink text as a literal path and compare its inode with the procfs cwd
+// link: when they are the same file the directory is live. A path that merely
+// contains "(deleted)" mid-string (e.g. "x (deleted) suffix") never matches
+// the suffix and stays live without any stat.
+//
+// Disambiguation fails closed. deleted is returned only on definitive evidence
+// that the cwd inode is unlinked: either the literal path does not exist
+// (a clean not-exist error) or it exists as a different inode than the process
+// cwd. Any non-definitive stat error or timeout — permission denied, an I/O
+// error, or a hung NFS/FUSE mount — returns unknown so that ambiguous
+// filesystem evidence can never authorize a destructive force-mode reap. The
+// stat calls are bounded by procEnumerationTimeout, matching statConfigPathState.
+func cwdStateFromLink(link, cwdLink string) string {
+	if !strings.HasSuffix(link, " (deleted)") {
+		return procPathStateLive
 	}
-	return procPathStateLive
+	linkInfo, err := statWithTimeout(link)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// The literal path does not exist, so the suffix is the kernel's
+			// unlinked marker rather than part of a real directory name: the
+			// cwd inode is definitively gone.
+			return procPathStateDeleted
+		}
+		// Permission, I/O, or timeout: not definitive proof of an unlinked cwd,
+		// so fail closed to protect rather than reap on a transient error.
+		return procPathStateUnknown
+	}
+	cwdInfo, err := statWithTimeout(cwdLink)
+	if err != nil {
+		// The literal path exists but the process cwd could not be resolved to
+		// compare inodes; without that proof, fail closed to protect.
+		return procPathStateUnknown
+	}
+	if os.SameFile(linkInfo, cwdInfo) {
+		return procPathStateLive
+	}
+	// The literal path resolves to a different inode than the process cwd, so
+	// the cwd's " (deleted)" suffix is the genuine kernel unlinked marker.
+	return procPathStateDeleted
+}
+
+// statWithTimeout stats path under procEnumerationTimeout so a config or cwd on
+// a hung NFS/FUSE mount cannot stall the discovery walk. A timeout surfaces as
+// context.DeadlineExceeded (not a not-exist error), which callers treat as a
+// non-definitive failure and fail closed to protect. The abandoned goroutine
+// cannot leak a send (the channel is buffered), matching readWithTimeout's
+// fail-closed posture for /proc reads.
+func statWithTimeout(path string) (os.FileInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
+	defer cancel()
+	type result struct {
+		info os.FileInfo
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		info, err := os.Stat(path)
+		ch <- result{info, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.info, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // doltProcCWDState resolves /proc/<pid>/cwd and classifies the target.
@@ -128,24 +190,34 @@ func doltProcCWDState(pid int) string {
 	if pid <= 0 {
 		return procPathStateUnknown
 	}
-	link, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
+	cwdLink := filepath.Join("/proc", strconv.Itoa(pid), "cwd")
+	link, err := os.Readlink(cwdLink)
 	if err != nil {
 		return procPathStateUnknown
 	}
-	return cwdStateFromLink(link)
+	return cwdStateFromLink(link, cwdLink)
 }
 
 // doltConfigPathState classifies the --config path from a dolt sql-server
 // argv: deleted when an absolute config path no longer exists on disk, live
 // when it does, unknown for absent or relative configs and for stat errors
 // other than not-exist (e.g. permission) so classification degrades toward
-// protection.
+// protection. The path is extracted from an arbitrary process's argv and may
+// live on a slow or hung NFS/FUSE mount, so the existence probe is bounded by
+// the same deadline used for /proc reads and fails closed to unknown.
 func doltConfigPathState(argv []string) string {
 	cfg := extractConfigPath(argv)
 	if cfg == "" || !filepath.IsAbs(cfg) {
 		return procPathStateUnknown
 	}
-	if _, err := os.Stat(cfg); err != nil {
+	return statConfigPathState(cfg)
+}
+
+// statConfigPathState stats cfg under procEnumerationTimeout. A definitive
+// not-exist yields the deleted signal; any other error or a timeout degrades
+// to unknown so a blocking mount can never hang cleanup or drive a reap.
+func statConfigPathState(cfg string) string {
+	if _, err := statWithTimeout(cfg); err != nil {
 		if os.IsNotExist(err) {
 			return procPathStateDeleted
 		}

@@ -27,14 +27,19 @@ const (
 // detect PID reuse before sending a signal. StartIdentity is a portable
 // fallback populated by ps-based discovery on hosts without /proc.
 //
-// CWDState is procPathStateDeleted when /proc/<pid>/cwd resolves to a target
-// ending in " (deleted)" — the kernel's marker for an unlinked working
-// directory, which can never revert (renames show the new path instead) —
-// procPathStateLive when it resolves cleanly, and procPathStateUnknown when
-// the host has no /proc or the readlink failed. ConfigPathState records the
-// same tri-state for the absolute --config path from Argv: deleted when the
-// file no longer exists on disk, live when it does, unknown for absent or
-// relative configs and for stat errors.
+// CWDState is procPathStateDeleted only on definitive evidence that
+// /proc/<pid>/cwd is an unlinked inode — the kernel marks such a target with a
+// trailing " (deleted)", which can never revert (renames show the new path
+// instead) and is confirmed against the literal path by inode identity.
+// procPathStateLive means the cwd resolves cleanly; procPathStateUnknown
+// covers a host with no /proc, a failed readlink, or a non-definitive stat
+// error or timeout during disambiguation, so ambiguous evidence always
+// degrades toward protection. ConfigPathState records the same tri-state for
+// the absolute --config path from Argv: deleted when the file no longer exists
+// on disk, live when it does, unknown for absent or relative configs and for
+// stat errors. ConfigPathState is not a standalone reap trigger: a deleted
+// config protects (with a confirm-manually reason) unless the deleted-cwd
+// signal corroborates that the scope is truly gone.
 type DoltProcInfo struct {
 	PID             int
 	Argv            []string
@@ -187,14 +192,23 @@ func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool
 //  2. Else protect if the --config sits under an active test root, even when
 //     the config file itself is momentarily gone (mid-teardown of a test
 //     that is still running).
-//  3. Else reap on deleted-scope signals (ga-10wmzh): a cwd readlink ending
-//     in " (deleted)" — which covers bare servers started without --config —
-//     or an absolute --config path that no longer exists on disk. Unknown
-//     state is never a reap signal.
-//  4. Else extract --config path; matches /tmp/Test*, os.TempDir()/Test*,
-//     known Gas City temp prefixes → reap.
-//  5. Else protect with a reason that echoes the actual config path so
+//  3. Else reap when the working directory is an unlinked inode (ga-10wmzh):
+//     a cwd readlink ending in " (deleted)" can never revert, so it proves the
+//     scope is gone — this also covers bare servers started without --config.
+//  4. Else protect bare servers (no --config): an unidentified dolt server is
+//     never killed.
+//  5. Else reap when --config is on the test-config-path allowlist (/tmp/Test*,
+//     os.TempDir()/Test*, known Gas City temp prefixes). The allowlist match
+//     is an ownership signal, so an owned test scope is reaped even if its
+//     --config file was already removed.
+//  6. Else, if a non-allowlist --config has vanished while the cwd is still
+//     live or its state is unknown, protect with a confirm-and-kill-manually
+//     reason: a lone missing-config observation is not proof of scope deletion,
+//     so it reaps only with cross-signal corroboration (a confirmed deleted
+//     cwd, checked in step 3) or an ownership signal (the allowlist in step 5).
+//     Otherwise protect with a reason that echoes the actual config path so
 //     operators can decide whether to kill it manually (architect Open Q 0).
+//     Unknown state is never a reap signal.
 func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, tempDir string, activeTestRoots []string) reapClassification {
 	for _, port := range p.Ports {
 		if name, ok := rigPortByPort[port]; ok {
@@ -220,13 +234,6 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			ConfigPath: cfgPath,
 		}
 	}
-	if cfgPath != "" && p.ConfigPathState == procPathStateDeleted {
-		return reapClassification{
-			Action:     "reap",
-			Reason:     fmt.Sprintf("config %q no longer exists on disk (scope removed)", cfgPath),
-			ConfigPath: cfgPath,
-		}
-	}
 	if cfgPath == "" {
 		return reapClassification{
 			Action: "protect",
@@ -234,7 +241,36 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 		}
 	}
 	if isTestConfigPath(cfgPath, homeDir, tempDir) {
+		// A test-config-path match is itself an ownership signal, so an owned
+		// test scope is reaped even when its --config file was already removed.
 		return reapClassification{Action: "reap", ConfigPath: cfgPath}
+	}
+	if p.ConfigPathState == procPathStateDeleted {
+		// A non-allowlist --config has vanished while the working directory
+		// checked above is not a confirmed unlinked inode (it is live, or its
+		// state could not be determined). A lone missing-config observation is
+		// not proof the owning scope was removed: a config can be momentarily
+		// absent during a crash-adoption window or a transient rename. This
+		// reaper therefore never acts on the missing-config signal by itself —
+		// it requires cross-signal corroboration (a confirmed deleted cwd,
+		// checked above) or an ownership signal (the test-config-path
+		// allowlist). That is a different mechanism from the scope-death
+		// watchdog (dolt_scope_watchdog.go), which instead waits for repeated
+		// temporal confirmation of the same anchor before terminating a
+		// supervised server. Without corroboration, protect and report rather
+		// than risk killing a healthy or non-owned server.
+		cwdDesc := "is still live"
+		if p.CWDState != procPathStateLive {
+			// CWDState is unknown here (deleted was reaped above): the ps
+			// fallback or a readlink/stat failure left it undetermined, so the
+			// reason must not claim the cwd was confirmed live.
+			cwdDesc = "could not be determined"
+		}
+		return reapClassification{
+			Action:     "protect",
+			Reason:     fmt.Sprintf("config %q is missing but the working directory %s; not reaping on the missing-config signal alone — confirm the scope is gone and kill manually if unwanted", cfgPath, cwdDesc),
+			ConfigPath: cfgPath,
+		}
 	}
 	return reapClassification{
 		Action: "protect",

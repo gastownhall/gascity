@@ -201,20 +201,70 @@ func TestSameReapProcessIdentity_UsesPSStartIdentityFallback(t *testing.T) {
 }
 
 func TestCWDStateFromLink(t *testing.T) {
+	// The non-suffix cases never stat, so an arbitrary cwdLink is fine.
 	cases := []struct {
+		name string
 		link string
 		want string
 	}{
-		{"/data/worktrees/live", procPathStateLive},
-		{"/data/worktrees/gone (deleted)", procPathStateDeleted},
-		{"/data/worktrees/dir with spaces", procPathStateLive},
-		// "(deleted)" must be a readlink suffix, not an arbitrary substring.
-		{"/data/worktrees/x (deleted) suffix", procPathStateLive},
+		{"plain live path", "/data/worktrees/live", procPathStateLive},
+		{"path with spaces", "/data/worktrees/dir with spaces", procPathStateLive},
+		// "(deleted)" must terminate the readlink, not appear mid-string.
+		{"deleted mid-string stays live", "/data/worktrees/x (deleted) suffix", procPathStateLive},
+		// A genuinely unlinked cwd: the literal "<path> (deleted)" does not
+		// exist on disk, so the inode comparison fails closed to deleted.
+		{"unlinked inode is deleted", "/data/worktrees/gone (deleted)", procPathStateDeleted},
 	}
 	for _, tc := range cases {
-		if got := cwdStateFromLink(tc.link); got != tc.want {
-			t.Errorf("cwdStateFromLink(%q) = %q, want %q", tc.link, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cwdStateFromLink(tc.link, "/proc/self/cwd"); got != tc.want {
+				t.Errorf("cwdStateFromLink(%q) = %q, want %q", tc.link, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCWDStateFromLink_LiveDirNamedDeletedStaysLive(t *testing.T) {
+	// Pathological but real: a live directory whose name literally ends in
+	// " (deleted)". The readlink target is identical to the kernel's unlinked
+	// marker, so only an inode comparison can tell them apart. When the literal
+	// path resolves to the same inode as the procfs cwd link, it must classify
+	// live and never be reaped.
+	dir := filepath.Join(t.TempDir(), "scope (deleted)")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// cwdLink == the literal path here: both stat the same live inode, the way
+	// /proc/<pid>/cwd would resolve for a process whose cwd is this directory.
+	if got := cwdStateFromLink(dir, dir); got != procPathStateLive {
+		t.Errorf("cwdStateFromLink(%q) = %q, want live (real dir named '... (deleted)')", dir, got)
+	}
+}
+
+func TestCWDStateFromLink_NonDefinitiveStatErrorIsUnknown(t *testing.T) {
+	// A stat failure that is NOT a definitive not-exist (here EACCES from an
+	// unsearchable parent, standing in for permission, I/O, or hung-mount
+	// errors) must fail closed to unknown/protect, never deleted/reap. The old
+	// sameFile collapsed every stat error to "not the same file" and reaped;
+	// destructive force-mode cleanup must not act on ambiguous evidence.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses directory permission checks")
+	}
+	parent := filepath.Join(t.TempDir(), "locked")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Restore search permission before t.TempDir's RemoveAll cleanup runs
+	// (Cleanup is LIFO, so this registers after — and runs before — it).
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// Stat of "<parent>/scope (deleted)" fails with EACCES because searching the
+	// 0o000 parent is denied; EACCES is not os.IsNotExist, so it must be unknown.
+	link := filepath.Join(parent, "scope (deleted)")
+	if got := cwdStateFromLink(link, link); got != procPathStateUnknown {
+		t.Errorf("cwdStateFromLink(%q) under EACCES = %q, want unknown (fail closed, not deleted)", link, got)
 	}
 }
 
