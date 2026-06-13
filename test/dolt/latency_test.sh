@@ -33,7 +33,7 @@ else
   bad "now_ms resolution: got ${d}ms, want 5..800 (whole-second clock yields 0 or 1000)"
 fi
 
-# A fast probe does NOT warn at the default 1000ms threshold.
+# A fast probe does NOT warn at a 1000ms threshold.
 if latency_should_warn 50 1000; then bad "50ms probe warned at 1000ms threshold (false positive)"; else pass "50ms probe -> no warn"; fi
 
 # A genuinely slow probe warns.
@@ -41,6 +41,25 @@ if latency_should_warn 1500 1000; then pass "1500ms probe -> warn"; else bad "15
 
 # Boundary equality warns (>= semantics preserved).
 if latency_should_warn 1000 1000; then pass "1000ms == threshold -> warn"; else bad "boundary 1000ms did not warn"; fi
+
+# --- latency_warn_threshold_ms: default + override precedence --------------
+# The doctor resolves its warn threshold from the environment so operators can
+# retune it per city via [[orders.overrides]].env without editing scripts.
+command -v latency_warn_threshold_ms >/dev/null 2>&1 \
+  || { echo "FAIL: latency_warn_threshold_ms not defined"; exit 1; }
+
+# Default (no env) is 3000ms (3s) — above the 1-2s a loaded shared box grazes
+# routinely, so the MEDIUM advisory stops false-tripping on healthy latency.
+t=$(unset GC_DOCTOR_LATENCY_WARN_MS GC_DOCTOR_LATENCY_WARN_S; latency_warn_threshold_ms)
+if [ "$t" = "3000" ]; then pass "default threshold = 3000ms (3s)"; else bad "default threshold = ${t}ms, want 3000"; fi
+
+# Legacy whole-second knob scales x1000 (backward compatibility).
+t=$(unset GC_DOCTOR_LATENCY_WARN_MS; GC_DOCTOR_LATENCY_WARN_S=5; latency_warn_threshold_ms)
+if [ "$t" = "5000" ]; then pass "GC_DOCTOR_LATENCY_WARN_S=5 -> 5000ms"; else bad "seconds knob -> ${t}ms, want 5000"; fi
+
+# Millisecond knob wins over the legacy seconds knob.
+t=$(GC_DOCTOR_LATENCY_WARN_MS=4500; GC_DOCTOR_LATENCY_WARN_S=9; latency_warn_threshold_ms)
+if [ "$t" = "4500" ]; then pass "GC_DOCTOR_LATENCY_WARN_MS wins over _S"; else bad "WARN_MS precedence -> ${t}ms, want 4500"; fi
 
 # Regression of the original bug — 30 fast probes must NEVER false-warn.
 i=0; warned=0

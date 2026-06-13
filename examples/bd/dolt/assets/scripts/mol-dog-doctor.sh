@@ -25,10 +25,10 @@ PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." 
 PORT="$GC_DOLT_PORT"
 HOST="${GC_DOLT_HOST:-127.0.0.1}"
 USER="${GC_DOLT_USER:-root}"
-# Latency warn threshold in milliseconds. GC_DOCTOR_LATENCY_WARN_MS takes
-# precedence; otherwise derive from the legacy seconds knob (default 1s ->
-# 1000ms) for backward compatibility.
-LATENCY_WARN_MS="${GC_DOCTOR_LATENCY_WARN_MS:-$(( ${GC_DOCTOR_LATENCY_WARN_S:-1} * 1000 ))}"
+# Latency warn threshold in milliseconds; latency_warn_threshold_ms (sourced
+# from latency.sh) resolves the GC_DOCTOR_LATENCY_WARN_MS / _S env knobs and
+# the 3s default. Retune per city via the order's [[orders.overrides]].env.
+LATENCY_WARN_MS="$(latency_warn_threshold_ms)"
 CONN_WARN_PCT="${GC_DOCTOR_CONN_WARN_PCT:-80}"
 BACKUP_STALE_S="${GC_DOCTOR_BACKUP_STALE_S:-43200}"  # 2x 6h backup interval
 BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"

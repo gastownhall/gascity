@@ -322,6 +322,26 @@ override targeting a nonexistent order is an error, not a silent no-op — `gc
 order` commands fail; `gc start` logs the error and continues with the unmatched
 override skipped.
 
+### Tuning an exec order's environment
+
+For `exec` orders, `[orders.overrides.env]` injects environment variables into
+the order's child process. This is the supported way to retune a pack script's
+thresholds without editing (and losing on re-embed) its source. For example,
+the built-in `mol-dog-doctor` order emits a `Dolt health advisory [MEDIUM]`
+mail when Dolt probe latency reaches its warn threshold (3s by default). On a
+heavily loaded box where healthy latency grazes higher, raise it to 5s:
+
+```toml
+[[orders.overrides]]
+name = "mol-dog-doctor"
+
+[orders.overrides.env]
+GC_DOCTOR_LATENCY_WARN_MS = "5000"
+```
+
+Env overrides apply only to `exec` orders; controller-owned routing and
+identity keys are rejected before dispatch.
+
 <Accordion title="Disambiguating overrides when an order exists both city-wide and per-rig">
 Many orders expand at scan time into one instance per rig (anything in a rig's
 `orders/` directory or a pack imported into a rig). When the same order appears
