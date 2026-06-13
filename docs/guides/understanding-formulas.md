@@ -22,6 +22,11 @@ beads persist, and whoever picks the work up next finds the same state. That
 property — work survives sessions — is what every pattern in this guide builds
 on.
 
+![Applying a formula in three stages: the formula.toml on disk is compiled
+into an in-memory recipe (flattened steps plus dependency edges), then
+instantiated into beads in the store — the actual work, which then outlives
+the file and any agent session.](/diagrams/excalidraw-rendered/formula-apply-pipeline.svg)
+
 Because the method is written down rather than improvised in a prompt, you get
 leverage: preview what a formula will produce before creating anything (`gc
 formula show`), apply one method across many runs with different inputs
@@ -344,6 +349,12 @@ you want one workflow instance per item, running in parallel. `drain` is the
 canonical v2 fan-out for this, and it is the pack's single load-bearing
 parallelism pattern: every build entrypoint drains an implementation convoy
 into per-member units.
+
+![drain fanning out a convoy: each member of the input convoy is scattered
+into its own one-member unit convoy, and the item formula runs for each unit
+in parallel. context=separate gives every item its own root; member_access=
+exclusive reserves the member while its item
+runs.](/diagrams/excalidraw-rendered/formula-drain-fanout.svg)
 
 The real shape, adapted from
 [`build-from-convoy-base`](https://github.com/gastownhall/gascity-packs/tree/main/gascity/formulas/build-from-convoy-base.formula.toml),

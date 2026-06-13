@@ -325,6 +325,11 @@ dependency edges from the convoy to each bead — that's the "tracking 3
 issue(s)" in the output. Tracking doesn't change a bead's parent or block
 anything; it's pure grouping.
 
+![Convoy membership shown as tracks edges: a convoy bead ("Sprint 42") with
+dashed tracks edges to three independent work beads (fix login bug, refactor
+auth, update API docs). The members keep their own identity and status and
+are not children of the convoy.](/diagrams/excalidraw-rendered/convoy-tracks-membership.svg)
+
 ```shell
 ~/my-city
 $ gc convoy status mc-d4g
