@@ -77,6 +77,10 @@ const (
 	// molecule creation. Speculative actionable work is created as a ready-
 	// excluded type and restored on activation.
 	DeferredTypeMetadataKey = beadmeta.DeferredTypeMetadataKey
+
+	// InstantiatingMetadataKey marks graph workflows that are visible in the
+	// store while sequential fallback is still wiring their dependency graph.
+	InstantiatingMetadataKey = beadmeta.InstantiatingMetadataKey
 )
 
 // FragmentOptions configures instantiation of a rootless recipe fragment into
@@ -509,6 +513,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	embeddedDeps := make(map[string]bool)
 	pendingAssignees := make(map[string]string)
 	graphWorkflow := preservesGraphActionTypes(recipe)
+	fenceGraphWorkflow := graphWorkflow && !opts.DeferAssignees
 	externalDepsByStep, err := groupExternalDeps(opts.ExternalDeps)
 	if err != nil {
 		return nil, err
@@ -636,6 +641,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				b.Assignee = ""
 			}
 		}
+		if fenceGraphWorkflow {
+			fenceGraphWorkflowBead(&b)
+		}
 
 		// Catch unresolved {{...}} in the bead title — the field agents see
 		// first. Unresolved placeholders here cause agent churn (#618).
@@ -721,6 +729,19 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if err := store.Update(beadID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
 				markFailed(store, createdIDs)
 				return nil, fmt.Errorf("assigning graph step %q: %w", stepID, err)
+			}
+		}
+	}
+
+	if fenceGraphWorkflow {
+		for _, step := range recipe.Steps {
+			beadID := idMapping[step.ID]
+			if beadID == "" {
+				continue
+			}
+			if err := activateFencedGraphWorkflowBead(store, beadID); err != nil {
+				markFailed(store, createdIDs)
+				return nil, fmt.Errorf("activating graph step %q: %w", step.ID, err)
 			}
 		}
 	}
@@ -1070,6 +1091,60 @@ func deferBeadRouting(b *beads.Bead) {
 	deferBeadMetadataValue(b, beadmeta.ExecutionRoutedToMetadataKey, DeferredExecutionRoutedToMetadataKey)
 }
 
+func fenceGraphWorkflowBead(b *beads.Bead) {
+	ensureBeadMetadata(b)
+	b.Metadata[InstantiatingMetadataKey] = "true"
+	deferBeadRouting(b)
+}
+
+func activateFencedGraphWorkflowBead(store beads.Store, id string) error {
+	b, err := store.Get(id)
+	if err != nil {
+		return err
+	}
+	update := deferredRoutingActivationUpdate(b)
+	if update.Assignee == nil && update.Type == nil && len(update.Metadata) == 0 {
+		return nil
+	}
+	return store.Update(id, update)
+}
+
+func deferredRoutingActivationUpdate(b beads.Bead) beads.UpdateOpts {
+	update := beads.UpdateOpts{}
+	metadata := map[string]string{}
+	if assignee := b.Metadata[DeferredAssigneeMetadataKey]; assignee != "" {
+		if b.Assignee != assignee {
+			update.Assignee = &assignee
+		}
+		metadata[DeferredAssigneeMetadataKey] = ""
+	}
+	if routedTo := b.Metadata[DeferredRoutedToMetadataKey]; routedTo != "" {
+		if b.Metadata[beadmeta.RoutedToMetadataKey] != routedTo {
+			metadata[beadmeta.RoutedToMetadataKey] = routedTo
+		}
+		metadata[DeferredRoutedToMetadataKey] = ""
+	}
+	if executionRoutedTo := b.Metadata[DeferredExecutionRoutedToMetadataKey]; executionRoutedTo != "" {
+		if b.Metadata[beadmeta.ExecutionRoutedToMetadataKey] != executionRoutedTo {
+			metadata[beadmeta.ExecutionRoutedToMetadataKey] = executionRoutedTo
+		}
+		metadata[DeferredExecutionRoutedToMetadataKey] = ""
+	}
+	if typ := b.Metadata[DeferredTypeMetadataKey]; typ != "" {
+		if b.Type != typ {
+			update.Type = &typ
+		}
+		metadata[DeferredTypeMetadataKey] = ""
+	}
+	if b.Metadata[InstantiatingMetadataKey] != "" {
+		metadata[InstantiatingMetadataKey] = ""
+	}
+	if len(metadata) > 0 {
+		update.Metadata = metadata
+	}
+	return update
+}
+
 func deferBeadMetadataValue(b *beads.Bead, sourceKey, deferredKey string) {
 	if b.Metadata == nil {
 		return
@@ -1218,7 +1293,10 @@ func unresolvedTitleValidationErrorsWithVars(recipe *formula.Recipe, opts Option
 // error path.
 func markFailed(store beads.Store, ids []string) {
 	for _, id := range ids {
-		_ = store.SetMetadata(id, "molecule_failed", "true")
+		_ = store.SetMetadataBatch(id, map[string]string{
+			"molecule_failed":        "true",
+			InstantiatingMetadataKey: "",
+		})
 	}
 }
 

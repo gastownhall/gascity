@@ -827,6 +827,198 @@ func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
 	}
 }
 
+func TestInstantiateSequentialGraphWorkflowDefersRoutingUntilGraphWired(t *testing.T) {
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(false)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+	base := beads.NewMemStore()
+	store := &observingCreateStore{MemStore: base}
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{
+				ID:       "wf",
+				Title:    "Workflow",
+				Type:     "task",
+				IsRoot:   true,
+				Assignee: "controller",
+				Metadata: map[string]string{
+					"gc.kind":      "workflow",
+					"gc.routed_to": "gascity/control-dispatcher",
+				},
+			},
+			{
+				ID:       "wf.body",
+				Title:    "Body",
+				Type:     "task",
+				Assignee: "worker",
+				Metadata: map[string]string{
+					"gc.kind":      "scope",
+					"gc.routed_to": "gascity/worker",
+				},
+			},
+			{
+				ID:    "wf.workflow-finalize",
+				Title: "Finalize",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":                  "workflow-finalize",
+					"gc.execution_routed_to":   "gascity/control-dispatcher",
+					"gc.step_timeout":          "5m",
+					"gc.control_dispatch_kind": "finalize",
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.body", DependsOnID: "wf", Type: "parent-child"},
+			{StepID: "wf.workflow-finalize", DependsOnID: "wf", Type: "parent-child"},
+			{StepID: "wf.workflow-finalize", DependsOnID: "wf.body", Type: "blocks"},
+			{StepID: "wf", DependsOnID: "wf.workflow-finalize", Type: "blocks"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if len(store.created) != 3 {
+		t.Fatalf("created %d beads, want 3", len(store.created))
+	}
+	for _, created := range store.created {
+		if got := created.Metadata[InstantiatingMetadataKey]; got != "true" {
+			t.Fatalf("created bead %s instantiating metadata = %q, want true", created.ID, got)
+		}
+		if created.Assignee != "" {
+			t.Fatalf("created bead %s assignee = %q, want deferred", created.ID, created.Assignee)
+		}
+		if created.Type != "gate" {
+			t.Fatalf("created bead %s type = %q, want gate", created.ID, created.Type)
+		}
+		if created.Metadata["gc.routed_to"] != "" || created.Metadata["gc.execution_routed_to"] != "" {
+			t.Fatalf("created bead %s exposed routing metadata during instantiation: %#v", created.ID, created.Metadata)
+		}
+	}
+
+	root, err := base.Get(result.IDMapping["wf"])
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if root.Metadata[InstantiatingMetadataKey] != "" {
+		t.Fatalf("root instantiating metadata after instantiate = %q, want cleared", root.Metadata[InstantiatingMetadataKey])
+	}
+	if root.Assignee != "controller" || root.Type != "task" || root.Metadata["gc.routed_to"] != "gascity/control-dispatcher" {
+		t.Fatalf("root routing not restored: type=%q assignee=%q metadata=%#v", root.Type, root.Assignee, root.Metadata)
+	}
+
+	body, err := base.Get(result.IDMapping["wf.body"])
+	if err != nil {
+		t.Fatalf("Get(body): %v", err)
+	}
+	if body.Metadata[InstantiatingMetadataKey] != "" {
+		t.Fatalf("body instantiating metadata after instantiate = %q, want cleared", body.Metadata[InstantiatingMetadataKey])
+	}
+	if body.Assignee != "worker" || body.Type != "task" || body.Metadata["gc.routed_to"] != "gascity/worker" {
+		t.Fatalf("body routing not restored: type=%q assignee=%q metadata=%#v", body.Type, body.Assignee, body.Metadata)
+	}
+
+	finalize, err := base.Get(result.IDMapping["wf.workflow-finalize"])
+	if err != nil {
+		t.Fatalf("Get(finalize): %v", err)
+	}
+	if finalize.Metadata[InstantiatingMetadataKey] != "" {
+		t.Fatalf("finalize instantiating metadata after instantiate = %q, want cleared", finalize.Metadata[InstantiatingMetadataKey])
+	}
+	if finalize.Type != "task" || finalize.Metadata["gc.execution_routed_to"] != "gascity/control-dispatcher" {
+		t.Fatalf("finalize routing not restored: type=%q metadata=%#v", finalize.Type, finalize.Metadata)
+	}
+}
+
+func TestInstantiateGraphWorkflowFailureClearsInstantiationFence(t *testing.T) {
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(false)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+	base := beads.NewMemStore()
+	store := &errDepStore{Store: base}
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{
+				ID:       "wf",
+				Title:    "Workflow",
+				Type:     "task",
+				IsRoot:   true,
+				Assignee: "controller",
+				Metadata: map[string]string{
+					"gc.kind":      "workflow",
+					"gc.routed_to": "gascity/control-dispatcher",
+				},
+			},
+			{
+				ID:       "wf.body",
+				Title:    "Body",
+				Type:     "task",
+				Assignee: "worker",
+				Metadata: map[string]string{
+					"gc.kind":      "scope",
+					"gc.routed_to": "gascity/worker",
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.body", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	_, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err == nil {
+		t.Fatal("expected error on dep failure")
+	}
+
+	all, err := base.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("open beads = %d, want 2", len(all))
+	}
+	for _, b := range all {
+		full, err := base.Get(b.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", b.ID, err)
+		}
+		if full.Metadata["molecule_failed"] != "true" {
+			t.Errorf("bead %s molecule_failed = %q, want true", full.ID, full.Metadata["molecule_failed"])
+		}
+		if full.Metadata[InstantiatingMetadataKey] != "" {
+			t.Errorf("bead %s instantiating metadata = %q, want cleared", full.ID, full.Metadata[InstantiatingMetadataKey])
+		}
+		if full.Type != "gate" {
+			t.Errorf("bead %s type = %q, want gate", full.ID, full.Type)
+		}
+		if full.Assignee != "" {
+			t.Errorf("bead %s assignee = %q, want deferred", full.ID, full.Assignee)
+		}
+		if full.Metadata["gc.routed_to"] != "" {
+			t.Errorf("bead %s restored routing metadata after failed instantiation: %#v", full.ID, full.Metadata)
+		}
+	}
+}
+
+type observingCreateStore struct {
+	*beads.MemStore
+	created []beads.Bead
+}
+
+func (s *observingCreateStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.MemStore.Create(b)
+	if err == nil {
+		s.created = append(s.created, created)
+	}
+	return created, err
+}
+
 func TestInstantiateGraphApplyPreservesStepMetadata(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 	prev := IsGraphApplyEnabled()
@@ -1253,7 +1445,7 @@ func (r *recordingStore) Update(id string, opts beads.UpdateOpts) error {
 	return r.Store.Update(id, opts)
 }
 
-func TestInstantiateGraphWorkflowDefersAssignmentsOnlyForFutureBlockers(t *testing.T) {
+func TestInstantiateGraphWorkflowDefersAssignmentsUntilGraphWired(t *testing.T) {
 	base := beads.NewMemStore()
 	store := &recordingStore{Store: base}
 
@@ -1295,11 +1487,17 @@ func TestInstantiateGraphWorkflowDefersAssignmentsOnlyForFutureBlockers(t *testi
 	for _, created := range store.created {
 		createdByRef[created.Ref] = created
 	}
-	if got := createdByRef["graph-assign.setup"].Assignee; got != "worker" {
-		t.Fatalf("setup created assignee = %q, want worker", got)
+	if got := createdByRef["graph-assign.setup"].Assignee; got != "" {
+		t.Fatalf("setup created assignee = %q, want empty until graph wiring completes", got)
 	}
 	if got := createdByRef["graph-assign.run"].Assignee; got != "" {
-		t.Fatalf("run created assignee = %q, want empty until blocker wiring completes", got)
+		t.Fatalf("run created assignee = %q, want empty until graph wiring completes", got)
+	}
+	if got := createdByRef["graph-assign.setup"].Type; got != "gate" {
+		t.Fatalf("setup created type = %q, want gate until graph wiring completes", got)
+	}
+	if got := createdByRef["graph-assign.run"].Type; got != "gate" {
+		t.Fatalf("run created type = %q, want gate until graph wiring completes", got)
 	}
 
 	setup, err := base.Get(result.IDMapping["graph-assign.setup"])
