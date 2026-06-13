@@ -332,11 +332,11 @@ session = "acp"
 	}
 	oldBuild := buildSessionProviderByName
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
-	buildSessionProviderByName = func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		if name == "acp" {
 			return nil, errors.New("provider unavailable")
 		}
-		return oldBuild(name, sc, cityName, cityPath)
+		return oldBuild(cfg, name, sc, cityName, cityPath)
 	}
 
 	got := loadSessionsForCompletion()

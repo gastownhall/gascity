@@ -177,8 +177,9 @@ protocol = 0
 City composition registers pack-declared runtimes into the runtime
 registry; `session = "cloudflare"` resolves through the registry to a
 proxy provider bound to that executable. Name collisions with builtin
-providers are errors (no silent shadowing). A pack `doctor/` check
-verifies the executable is installed and `protocol`-handshakes.
+providers are errors (no silent shadowing). The built-in `pack-runtimes`
+doctor check verifies every declared executable is installed and
+`protocol`-handshakes — no pack-shipped `doctor/` entry required.
 
 ### Distribution
 
@@ -230,8 +231,8 @@ Four PRs, each independently green:
 | PR | Issue | Repo | Content | Risk |
 |---|---|---|---|---|
 | 1 | `ga-fse3es` | gascity | Registry: `internal/runtime/registry/` (Register/RegisterPrefix/fallback; collisions are errors), builtin registrations in `cmd/gc/runtime_registry.go`, switch in `cmd/gc/providers.go` becomes lookup. Stdlib-only boundary test on the contract package. Behavior-preserving. **Landed on this branch.** | Low |
-| 2 | `ga-ghbts9` | gascity | RPP v0: protocol spec doc (`engdocs/architecture/` or `docs/`), `protocol` handshake op + capability mapping in the exec/proxy provider, `gc runtime check` conformance command (wraps `runtimetest` against an arbitrary executable). Reference executable: fake-backed test script. | Medium |
-| 3 | `ga-h504e5` | gascity | Pack surface: `[runtimes.<name>]` in pack.toml, composition registers pack runtimes, collision rules, doctor handshake check. | Medium |
+| 2 | `ga-ghbts9` | gascity | RPP v0: protocol spec doc (`engdocs/architecture/` or `docs/`), `protocol` handshake op + capability mapping in the exec/proxy provider, `gc runtime check` conformance command (wraps `runtimetest` against an arbitrary executable). Reference executable: fake-backed test script. **Landed on this branch.** | Medium |
+| 3 | `ga-h504e5` | gascity | Pack surface: `[runtimes.<name>]` in pack.toml, composition registers pack runtimes (per-city clone of the builtin registry), collision rules, `pack-runtimes` doctor handshake check, `gc runtime check <name>` resolution. **Landed on this branch.** | Medium |
 | 4 | `ga-6qwfkb` | gascity-packs + gascity | `runtime-cloudflare` pack: nested Go module (no gascity deps) emitting `gc-runtime-cloudflare` speaking RPP v0, installed by the pack, `gc runtime check` green in packs CI. gascity deletes `internal/runtime/cloudflare`; `session = "cloudflare"` resolves via the pack. | Low |
 
 PoC exit criteria:

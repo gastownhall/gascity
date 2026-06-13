@@ -73,7 +73,7 @@ func sessionProviderContextForCity(cfg *config.City, cityPath, providerOverride 
 
 var (
 	openSessionProviderStore   = openCityStoreAt
-	buildSessionProviderByName = newSessionProviderByName
+	buildSessionProviderByName = newSessionProviderForCityByName
 )
 
 // tmuxConfigFromSession converts a config.SessionConfig into a
@@ -109,13 +109,16 @@ func providerStateDir(providerName, cityPath string) string {
 	return filepath.Join(supervisor.RuntimeDir(), providerName, hex.EncodeToString(sum[:4]))
 }
 
-// newSessionProviderByName constructs a runtime.Provider from a provider name
-// by resolving it through runtimeRegistry (see cmd/gc/runtime_registry.go for
-// the builtin registrations and internal/runtime/REQUIREMENTS.md for the
-// selection contract).
-// cityName is used to auto-default the tmux socket when none is configured.
-// cityPath is used to isolate socket-based providers per city.
-// Returns error instead of os.Exit, making it safe for the hot-reload path.
+// newSessionProviderForCityByName resolves a selection name through the
+// city's runtime registry: the builtins plus any pack-declared runtimes
+// from cfg (RUNTIME-SEL-011). cfg may be nil (no city context), in which
+// case only builtin names resolve. A pack runtime colliding with a builtin
+// name surfaces here as a construction error.
+// See cmd/gc/runtime_registry.go for the builtin registrations and
+// internal/runtime/REQUIREMENTS.md for the selection contract:
+// cityName auto-defaults the tmux socket when none is configured,
+// cityPath isolates socket-based providers per city, and errors return
+// instead of os.Exit, making this safe for the hot-reload path.
 //
 //   - "fake" → in-memory fake (all ops succeed)
 //   - "fail" → broken fake (all ops return errors)
@@ -123,9 +126,14 @@ func providerStateDir(providerName, cityPath string) string {
 //   - "acp" → ACP (Agent Client Protocol) JSON-RPC over stdio
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - "k8s" → native Kubernetes provider (client-go)
+//   - "<pack runtime>" → exec proxy bound to the pack's declared command
 //   - default → real tmux provider
-func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-	return runtimeRegistry.New(name, sc, cityName, cityPath)
+func newSessionProviderForCityByName(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	reg, err := runtimeRegistryForCity(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return reg.New(name, sc, cityName, cityPath)
 }
 
 func isLegacyT3BridgeExecScript(script string) bool {
@@ -193,7 +201,7 @@ func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *ses
 }
 
 func newSessionProviderFromContextWithError(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	sp, err := buildSessionProviderByName(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
+	sp, err := buildSessionProviderByName(ctx.cfg, ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +211,7 @@ func newSessionProviderFromContextWithError(ctx sessionProviderContext, sessionB
 	// so the Session field from overrides is already resolved here.
 	requireACPWrapper := requiresACPProviderWrapper(sessionBeads, ctx.cityName, ctx.cfg)
 	if ctx.providerName != "acp" && needsACPProviderWrapper(sessionBeads, ctx.cityName, ctx.cfg) {
-		acpSP, acpErr := buildSessionProviderByName("acp", ctx.sc, ctx.cityName, ctx.cityPath)
+		acpSP, acpErr := buildSessionProviderByName(ctx.cfg, "acp", ctx.sc, ctx.cityName, ctx.cityPath)
 		if acpErr != nil {
 			if requireACPWrapper {
 				return nil, fmt.Errorf("acp provider: %w", acpErr)

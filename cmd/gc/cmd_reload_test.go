@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -913,5 +914,90 @@ func TestSupervisorCityInfoMatchesNormalizedPath(t *testing.T) {
 	}
 	if info.Path != linkDir {
 		t.Fatalf("info.Path = %q, want %q", info.Path, linkDir)
+	}
+}
+
+func TestReloadConfigTracedRebuildsProviderWhenPackRuntimeCommandChanges(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_SESSION", "")
+
+	dir := shortSocketTempDir(t, "gc-reload-rt-decl-")
+	disableManagedDoltRecoveryForTest(t)
+	cleanupManagedDoltTestCity(t, dir)
+
+	packDir := filepath.Join(dir, "packs", "rtpack")
+	scriptsDir := filepath.Join(packDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opsA := filepath.Join(t.TempDir(), "a.log")
+	opsB := filepath.Join(t.TempDir(), "b.log")
+	writeProbeScript := func(name, marker string) {
+		t.Helper()
+		script := fmt.Sprintf("#!/bin/sh\necho \"$1\" >> %q\ncase \"$1\" in is-running) echo false ;; *) exit 2 ;; esac\n", marker)
+		if err := os.WriteFile(filepath.Join(scriptsDir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeProbeScript("a.sh", opsA)
+	writeProbeScript("b.sh", opsB)
+
+	writePackTOML := func(command string) {
+		t.Helper()
+		packToml := fmt.Sprintf("[pack]\nname = \"rtpack\"\nschema = 1\n\n[runtimes.rtprov]\ncommand = %q\n", command)
+		if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(packToml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writePackTOML("scripts/a.sh")
+
+	tomlPath := filepath.Join(dir, "city.toml")
+	cityToml := "[workspace]\nname = \"test\"\n\n[imports.rtpack]\nsource = \"packs/rtpack\"\n\n[session]\nprovider = \"rtprov\"\n"
+	if err := os.WriteFile(tomlPath, []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := tryReloadConfig(tomlPath, "test", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := result.Cfg
+	applyFeatureFlags(cfg)
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cityPath:   dir,
+		cityName:   "test",
+		configName: "test",
+		tomlPath:   tomlPath,
+		configRev:  result.Revision,
+		cfg:        cfg,
+		sp:         runtime.NewFake(),
+		dops:       newDrainOps(runtime.NewFake()),
+		rec:        events.Discard,
+		stdout:     &stdout,
+		stderr:     &stderr,
+		logPrefix:  "gc test",
+	}
+	lastProviderName := cfg.Session.Provider
+
+	// Same selection name, different declared command. The exec proxy
+	// binds the command at construction time, so the reload must rebuild
+	// the provider — otherwise every session op keeps forking the old
+	// executable until a controller restart.
+	writePackTOML("scripts/b.sh")
+
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q, want %q; message=%q error=%q stderr=%q",
+			reply.Outcome, reloadOutcomeApplied, reply.Message, reply.Error, stderr.String())
+	}
+	cr.sp.IsRunning("probe")
+	if _, err := os.Stat(opsB); err != nil {
+		t.Fatalf("provider still bound to the old executable after reload: %v\nstdout:\n%s", err, stdout.String())
+	}
+	if _, err := os.Stat(opsA); err == nil {
+		data, _ := os.ReadFile(opsA)
+		t.Fatalf("old executable still invoked after reload: ops=%q", data)
 	}
 }

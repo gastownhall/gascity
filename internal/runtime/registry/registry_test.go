@@ -192,3 +192,48 @@ func TestHasAndNames(t *testing.T) {
 		}
 	}
 }
+
+func TestCloneIsIndependentOfOriginal(t *testing.T) {
+	r := New()
+	exact, _ := fakeFactory(t)
+	prefix, _ := fakeFactory(t)
+	fallback, fallbackCalls := fakeFactory(t)
+	if err := r.Register("builtin", exact); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := r.RegisterPrefix("exec:", prefix); err != nil {
+		t.Fatalf("RegisterPrefix: %v", err)
+	}
+	r.SetFallback(fallback)
+
+	c := r.Clone()
+
+	// The clone carries the original's registrations.
+	if !c.Has("builtin") {
+		t.Error("clone should carry exact registrations")
+	}
+	if _, err := c.New("exec:/x", config.SessionConfig{}, "city", t.TempDir()); err != nil {
+		t.Errorf("clone prefix resolution: %v", err)
+	}
+	if _, err := c.New("unknown", config.SessionConfig{}, "city", t.TempDir()); err != nil {
+		t.Errorf("clone fallback resolution: %v", err)
+	}
+	if *fallbackCalls != 1 {
+		t.Errorf("fallback calls = %d, want 1 (clone shares the fallback factory)", *fallbackCalls)
+	}
+
+	// Registrations on the clone never leak back into the original —
+	// pack runtimes from one city must not be visible to another.
+	packRT, _ := fakeFactory(t)
+	if err := c.Register("pack-runtime", packRT); err != nil {
+		t.Fatalf("Register on clone: %v", err)
+	}
+	if r.Has("pack-runtime") {
+		t.Error("registering on a clone must not mutate the original")
+	}
+
+	// Duplicate detection still applies on the clone.
+	if err := c.Register("builtin", packRT); err == nil {
+		t.Error("clone must reject names already registered in the original")
+	}
+}

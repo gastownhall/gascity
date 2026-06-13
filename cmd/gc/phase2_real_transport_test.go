@@ -155,7 +155,7 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 		}
 	}
 
-	sp, err := newSessionProviderByName("", config.SessionConfig{
+	sp, err := newSessionProviderForCityByName(nil, "", config.SessionConfig{
 		Socket:             guard.SocketName(),
 		SetupTimeout:       "3s",
 		NudgeReadyTimeout:  "2s",

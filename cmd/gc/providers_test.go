@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -630,20 +631,20 @@ func TestEventsProviderNameFallsBackOnMalformedCityTOML(t *testing.T) {
 	}
 }
 
-func TestNewSessionProviderByName_UsesFirstClassT3Bridge(t *testing.T) {
-	sp, err := newSessionProviderByName("t3bridge", config.SessionConfig{}, "city", t.TempDir())
+func TestNewSessionProviderForCityByName_UsesFirstClassT3Bridge(t *testing.T) {
+	sp, err := newSessionProviderForCityByName(nil, "t3bridge", config.SessionConfig{}, "city", t.TempDir())
 	if err != nil {
-		t.Fatalf("newSessionProviderByName(t3bridge): %v", err)
+		t.Fatalf("newSessionProviderForCityByName(t3bridge): %v", err)
 	}
 	if _, ok := sp.(*sessiont3bridge.Provider); !ok {
 		t.Fatalf("provider type = %T, want *t3bridge.Provider", sp)
 	}
 }
 
-func TestNewSessionProviderByName_LegacyExecT3BridgeStillMapsNative(t *testing.T) {
-	sp, err := newSessionProviderByName("exec:/tmp/gc-session-t3", config.SessionConfig{}, "city", t.TempDir())
+func TestNewSessionProviderForCityByName_LegacyExecT3BridgeStillMapsNative(t *testing.T) {
+	sp, err := newSessionProviderForCityByName(nil, "exec:/tmp/gc-session-t3", config.SessionConfig{}, "city", t.TempDir())
 	if err != nil {
-		t.Fatalf("newSessionProviderByName(exec gc-session-t3): %v", err)
+		t.Fatalf("newSessionProviderForCityByName(exec gc-session-t3): %v", err)
 	}
 	if _, ok := sp.(*sessiont3bridge.Provider); !ok {
 		t.Fatalf("provider type = %T, want *t3bridge.Provider", sp)
@@ -729,11 +730,11 @@ func TestNewSessionProviderWrapsCustomACPProvidersWithExplicitACPConfig(t *testi
 func TestNewSessionProviderIgnoresACPInitFailureForUnusedACPProviders(t *testing.T) {
 	oldBuild := buildSessionProviderByName
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
-	buildSessionProviderByName = func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		if name == "acp" {
 			return nil, errors.New("acp unavailable")
 		}
-		return oldBuild(name, sc, cityName, cityPath)
+		return oldBuild(cfg, name, sc, cityName, cityPath)
 	}
 
 	ctx := sessionProviderContextForCity(&config.City{
@@ -764,11 +765,11 @@ func TestNewSessionProviderIgnoresACPInitFailureForUnusedACPProviders(t *testing
 func TestNewSessionProviderRequiresACPInitForACPAgents(t *testing.T) {
 	oldBuild := buildSessionProviderByName
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
-	buildSessionProviderByName = func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		if name == "acp" {
 			return nil, errors.New("acp unavailable")
 		}
-		return oldBuild(name, sc, cityName, cityPath)
+		return oldBuild(cfg, name, sc, cityName, cityPath)
 	}
 
 	ctx := sessionProviderContextForCity(&config.City{
@@ -797,11 +798,11 @@ func TestNewSessionProviderRequiresACPInitForACPAgents(t *testing.T) {
 func TestNewSessionProviderRequiresACPInitForImplicitACPTemplates(t *testing.T) {
 	oldBuild := buildSessionProviderByName
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
-	buildSessionProviderByName = func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		if name == "acp" {
 			return nil, errors.New("acp unavailable")
 		}
-		return oldBuild(name, sc, cityName, cityPath)
+		return oldBuild(cfg, name, sc, cityName, cityPath)
 	}
 
 	ctx := sessionProviderContextForCity(&config.City{
@@ -942,7 +943,7 @@ func TestStatusSessionProviderUsesProvidedSnapshotToWrapObservedACPSessions(t *t
 
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	buildSessionProviderByName = func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(_ *config.City, name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
 		if name == "acp" {
 			return acpSP, nil
 		}
@@ -1130,5 +1131,30 @@ acp_args = ["acp"]
 `)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+}
+
+func TestNewSessionProviderFromContext_PackRuntimeSelected(t *testing.T) {
+	script := writeRPPScript(t, "exit 2\n")
+	cfg := &config.City{Runtimes: map[string]config.DiscoveredRuntime{
+		"packrt": {Name: "packrt", Command: script, PackName: "p", PackDir: filepath.Dir(script)},
+	}}
+	ctx := sessionProviderContextForCity(cfg, t.TempDir(), "packrt")
+	sp, err := newSessionProviderFromContextWithError(ctx, nil)
+	if err != nil {
+		t.Fatalf("newSessionProviderFromContextWithError: %v", err)
+	}
+	if _, ok := sp.(*sessionexec.Provider); !ok {
+		t.Fatalf("provider type = %T, want *exec.Provider (pack runtime proxy)", sp)
+	}
+}
+
+func TestNewSessionProviderFromContext_PackRuntimeCollisionSurfaces(t *testing.T) {
+	cfg := &config.City{Runtimes: map[string]config.DiscoveredRuntime{
+		"tmux": {Name: "tmux", Command: "/bin/true", PackName: "badpack"},
+	}}
+	ctx := sessionProviderContextForCity(cfg, t.TempDir(), "")
+	if _, err := newSessionProviderFromContextWithError(ctx, nil); err == nil {
+		t.Fatal("builtin-shadowing pack runtime must fail provider construction, not fall back silently")
 	}
 }

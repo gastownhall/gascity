@@ -818,6 +818,12 @@
           },
           "type": "object"
         },
+        "runtimes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PackRuntimeEntry"
+          },
+          "type": "object"
+        },
         "patches": {
           "$ref": "#/$defs/PackPatches"
         },
@@ -975,6 +981,24 @@
         "agent"
       ],
       "description": "PackRequirement declares an agent that must exist in the expanded config for this pack's formulas/orders to function."
+    },
+    "PackRuntimeEntry": {
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Command is the runtime executable: a path relative to the pack\ndirectory (anything containing a path separator) or a bare name\nresolved on PATH at session start."
+        },
+        "protocol": {
+          "type": "integer",
+          "description": "Protocol is the RPP version the executable speaks. Version 0 is\nthe only version today; the declaration exists so future protocol\nbumps fail at composition instead of at session start."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "command"
+      ],
+      "description": "PackRuntimeEntry declares a pack-shipped runtime provider executable under [runtimes.\u003cname\u003e] in pack.toml."
     },
     "PoolOverride": {
       "properties": {

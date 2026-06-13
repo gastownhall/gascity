@@ -128,6 +128,25 @@ func (r *Registry) lookup(name string) Factory {
 	return r.fallback
 }
 
+// Clone returns a registry with the receiver's registrations that shares
+// no mutable state with it. City composition clones the builtin registry
+// and registers pack-declared runtimes on the copy, so concurrent cities
+// in one process never observe each other's registrations and the builtin
+// registry itself is never mutated after construction.
+func (r *Registry) Clone() *Registry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	c := New()
+	for name, f := range r.exact {
+		c.exact[name] = f
+	}
+	for prefix, f := range r.prefixes {
+		c.prefixes[prefix] = f
+	}
+	c.fallback = r.fallback
+	return c
+}
+
 // Has reports whether an exact selection name is registered.
 func (r *Registry) Has(name string) bool {
 	r.mu.RLock()

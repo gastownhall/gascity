@@ -46,6 +46,9 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 	}
 	emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
 	warnMissingRequiredBuiltinImports(fs, cfg, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...))
+	if err := validatePackRuntimeRegistrations(cfg); err != nil {
+		return nil, err
+	}
 	applyFeatureFlags(cfg)
 	return cfg, nil
 }
@@ -61,6 +64,9 @@ func loadCityConfigWithoutBuiltinPackRefreshFS(fs fsys.FS, tomlPath string, warn
 		return nil, err
 	}
 	emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
+	if err := validatePackRuntimeRegistrations(cfg); err != nil {
+		return nil, err
+	}
 	applyFeatureFlags(cfg)
 	return cfg, nil
 }

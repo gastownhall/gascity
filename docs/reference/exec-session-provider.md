@@ -18,6 +18,42 @@ export GC_SESSION=exec:/path/to/gc-session-screen
 export GC_SESSION=exec:gc-session-screen
 ```
 
+## Pack-Declared Runtimes
+
+A pack can ship (or install) a runtime executable and bind it to a
+selection name in `pack.toml`:
+
+```toml
+[runtimes.cloudflare]
+command = "scripts/gc-runtime-cloudflare"   # pack-relative, or PATH name
+protocol = 0
+```
+
+City composition registers the name into the runtime selection
+registry, so `city.toml` selects it like a builtin:
+
+```toml
+[session]
+provider = "cloudflare"
+```
+
+Rules:
+
+- A `command` containing a path separator resolves relative to the pack
+  directory; a bare name resolves on PATH at session start.
+- `protocol` declares the RPP version the executable speaks (version 0
+  is the only version today); any other value fails composition.
+- Name collisions with builtin runtimes or other packs are composition
+  errors — no silent shadowing. Identical re-declarations of the same
+  pack reached through a diamond import graph dedupe.
+- The `pack-runtimes` doctor check verifies each declared executable is
+  installed and answers the `protocol` handshake.
+- Config reload enforces the same registration rules, and rebuilds the
+  session provider when the declaration behind the selected name changes
+  (the executable binding is fixed at provider construction).
+- `gc runtime check <name>` resolves the declared name and runs the
+  full conformance suite against the pack's executable.
+
 ## Calling Convention
 
 The script receives the operation name as its first argument:
