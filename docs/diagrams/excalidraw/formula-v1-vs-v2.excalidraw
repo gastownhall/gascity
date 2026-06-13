@@ -507,9 +507,9 @@
       "type": "arrow",
       "id": "divider",
       "x": 600,
-      "y": 30,
+      "y": 40,
       "width": 0,
-      "height": 790,
+      "height": 610,
       "points": [
         [
           0,
@@ -517,7 +517,7 @@
         ],
         [
           0,
-          790
+          610
         ]
       ],
       "endArrowhead": null,
