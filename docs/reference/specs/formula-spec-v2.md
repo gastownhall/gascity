@@ -30,7 +30,7 @@ The key words "must", "must not", "required", "shall", "shall not",
 "should", "should not", and "may" are to be interpreted as normative
 requirements unless the paragraph is explicitly marked as non-normative.
 
-## 0. Data And Information Model
+## 0. Concept And Data Model
 
 A formula is a TOML file specifying *how* work should be carried out — its
 steps, their ordering and dependencies, and the control flow around them. A
