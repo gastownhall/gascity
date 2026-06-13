@@ -19,6 +19,15 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
+func setHookRunExecutableForTest(t *testing.T, path string) func() {
+	t.Helper()
+	previous := hookRunExecutable
+	hookRunExecutable = func() (string, error) { return path, nil }
+	restore := func() { hookRunExecutable = previous }
+	t.Cleanup(restore)
+	return restore
+}
+
 func TestNewHookCmdUsesRoutedWorkHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd := newHookCmd(&stdout, &stderr)
@@ -589,6 +598,53 @@ func TestHookInjectDoesNotRunWorkQuery(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestHookRunTimesOutAndFailsOpenWhenConfigured(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	restore := setHookRunExecutableForTest(t, "sh")
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := cmdHookRun([]string{"-c", "sleep 10"}, hookRunOptions{
+		Timeout:         50 * time.Millisecond,
+		TimeoutExitCode: 0,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookRun timeout code = %d, want fail-open 0; stderr=%s", code, stderr.String())
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("cmdHookRun timeout took %s, want bounded below provider hook timeout", elapsed)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "timed out after 50ms") {
+		t.Fatalf("stderr = %q, want timeout diagnostic", stderr.String())
+	}
+}
+
+func TestHookRunPreservesChildExitCodeAndOutput(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	restore := setHookRunExecutableForTest(t, "sh")
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookRun([]string{"-c", "printf ok; exit 7"}, hookRunOptions{
+		Timeout:         time.Second,
+		TimeoutExitCode: 124,
+	}, &stdout, &stderr)
+	if code != 7 {
+		t.Fatalf("cmdHookRun code = %d, want child exit 7; stderr=%s", code, stderr.String())
+	}
+	if stdout.String() != "ok" {
+		t.Fatalf("stdout = %q, want ok", stdout.String())
 	}
 }
 

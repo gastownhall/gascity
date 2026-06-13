@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -56,7 +57,83 @@ With --claim: runs the standard startup claim protocol for one work item.
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
 	}
+	cmd.AddCommand(newHookRunCmd(stdout, stderr))
 	return cmd
+}
+
+func newHookRunCmd(stdout, stderr io.Writer) *cobra.Command {
+	opts := hookRunOptions{
+		Timeout:         defaultHookRunTimeout,
+		TimeoutExitCode: 124,
+	}
+	cmd := &cobra.Command{
+		Use:   "run -- <gc args...>",
+		Short: "Run a managed hook command with a hard timeout",
+		Long: `Runs a managed gc hook command in a child process with a hard timeout.
+
+This protects provider hook callbacks from wedged data-plane commands. The
+child process is the current gc executable, and <gc args...> are passed to it
+verbatim.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				fmt.Fprintln(stderr, "gc hook run: missing gc command arguments after --") //nolint:errcheck
+				return errExit
+			}
+			return exitForCode(cmdHookRun(args, opts, stdout, stderr))
+		},
+	}
+	cmd.Flags().DurationVar(&opts.Timeout, "timeout", defaultHookRunTimeout, "hard timeout for the managed hook command")
+	cmd.Flags().IntVar(&opts.TimeoutExitCode, "timeout-exit-code", 124, "exit code to return when the managed hook command times out")
+	return cmd
+}
+
+const defaultHookRunTimeout = 15 * time.Second
+
+type hookRunOptions struct {
+	Timeout         time.Duration
+	TimeoutExitCode int
+}
+
+var hookRunExecutable = os.Executable
+
+func cmdHookRun(args []string, opts hookRunOptions, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "gc hook run: missing gc command arguments") //nolint:errcheck
+		return 1
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = defaultHookRunTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	exe, err := hookRunExecutable()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook run: resolving gc executable: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.WaitDelay = 2 * time.Second
+	prepareProviderOpCommand(cmd)
+
+	err = cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		fmt.Fprintf(stderr, "gc hook run: command timed out after %s\n", timeout) //nolint:errcheck
+		return opts.TimeoutExitCode
+	}
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	fmt.Fprintf(stderr, "gc hook run: %v\n", err) //nolint:errcheck
+	return 1
 }
 
 type hookCommandOptions struct {

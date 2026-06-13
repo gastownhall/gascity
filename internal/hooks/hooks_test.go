@@ -143,8 +143,11 @@ func TestInstallClaude(t *testing.T) {
 	if !strings.Contains(claudeHookCommand(t, runtimeData, "PreCompact"), `gc handoff --auto "context cycle"`) {
 		t.Error("claude PreCompact hook should use gc handoff --auto (not gc prime or restart handoff) on compaction")
 	}
-	if !strings.Contains(s, "gc nudge drain --inject") {
-		t.Error("claude settings should contain gc nudge drain --inject")
+	if !strings.Contains(s, "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject") {
+		t.Error("claude settings should run nudge drain through gc hook run")
+	}
+	if !strings.Contains(s, "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject") {
+		t.Error("claude settings should run mail check through gc hook run")
 	}
 	if strings.Contains(s, "gc hook --inject") {
 		t.Error("fresh claude settings should not install no-op gc hook --inject")
@@ -400,6 +403,9 @@ func TestInstallCodexUpgradesManagedFileMissingPreCompact(t *testing.T) {
 	}
 	if !strings.Contains(got, `gc handoff --auto --hook-format codex \"context cycle\"`) {
 		t.Errorf("upgraded codex PreCompact missing auto handoff command:\n%s", got)
+	}
+	if !strings.Contains(got, `gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`) {
+		t.Errorf("upgraded codex UserPromptSubmit missing bounded mail check command:\n%s", got)
 	}
 }
 
@@ -1478,6 +1484,44 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	if !strings.Contains(codexHooksText, `gc handoff --auto --hook-format codex \"context cycle\"`) {
 		t.Error("codex PreCompact should use auto handoff with Codex hook output format")
 	}
+	for _, want := range []string{
+		`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex`,
+		`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`,
+	} {
+		if !strings.Contains(codexHooksText, want) {
+			t.Errorf("codex prompt hooks missing bounded command %q:\n%s", want, codexHooksText)
+		}
+	}
+	geminiHooks := string(fs.Files["/work/.gemini/settings.json"])
+	for _, want := range []string{
+		`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini`,
+		`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini`,
+	} {
+		if !strings.Contains(geminiHooks, want) {
+			t.Errorf("gemini prompt hooks missing bounded command %q:\n%s", want, geminiHooks)
+		}
+	}
+	for path, wants := range map[string][]string{
+		"/work/.github/hooks/gascity.json": {
+			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+		},
+		"/work/.cursor/hooks.json": {
+			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+		},
+		"/work/.kiro/agents/gascity.json": {
+			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+		},
+	} {
+		data := string(fs.Files[path])
+		for _, want := range wants {
+			if !strings.Contains(data, want) {
+				t.Errorf("%s prompt hooks missing bounded command %q:\n%s", path, want, data)
+			}
+		}
+	}
 	// Copilot CLI documents preCompact (camelCase). The hook fires before
 	// context compaction starts so handoff can capture state; without it,
 	// long Copilot sessions silently lose context at compact boundaries.
@@ -1492,8 +1536,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	antigravityHooks := string(fs.Files["/work/.agents/hooks.json"])
 	for hookName, wantCommand := range map[string]string{
 		"gascity-prime":       `GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity`,
-		"gascity-nudge-drain": "gc nudge drain --inject --hook-format antigravity",
-		"gascity-mail-check":  "gc mail check --inject --hook-format antigravity",
+		"gascity-nudge-drain": "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity",
+		"gascity-mail-check":  "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity",
 	} {
 		if !strings.Contains(antigravityHooks, `"`+hookName+`"`) {
 			t.Errorf("Antigravity hooks missing hook %q:\n%s", hookName, antigravityHooks)
@@ -1663,6 +1707,8 @@ func TestInstallAntigravityMergesExistingHooks(t *testing.T) {
 		`"command": "echo custom"`,
 		`"gascity-prime"`,
 		`gc prime --hook --hook-format antigravity`,
+		`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity`,
+		`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity`,
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("merged Antigravity hooks missing %q:\n%s", want, data)

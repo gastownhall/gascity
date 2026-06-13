@@ -1,8 +1,9 @@
 # Hook Event Vocabulary
 
 Gas City wires per-provider hook configs into a small set of coordination
-commands (`gc prime --hook`, `gc handoff --auto`, `gc nudge drain --inject`,
-`gc mail check --inject`). Each provider names its hook events differently;
+commands (`gc prime --hook`, `gc handoff --auto`, and prompt-submit
+`gc hook run --timeout 15s --timeout-exit-code 0 -- ...` wrappers around
+`gc nudge drain --inject` / `gc mail check --inject`). Each provider names its hook events differently;
 this document maps Gas City's canonical events to the provider's native
 name for each, plus where the wiring lives on disk.
 
@@ -41,9 +42,10 @@ For each provider where a row above is ✓, the wired command is one of:
 - **session start** → `gc prime --hook` (loads context, drains hooks).
 - **pre-compaction** → `gc handoff --auto "context cycle"` (capture state
   before the provider compacts the conversation).
-- **user prompt submit** / **before agent run** → `gc nudge drain --inject`
-  and/or `gc mail check --inject` (inject pending agent-to-agent messages
-  into the upcoming prompt).
+- **user prompt submit** / **before agent run** → bounded `gc hook run`
+  wrappers around `gc nudge drain --inject` and/or `gc mail check --inject`
+  (inject pending agent-to-agent messages into the upcoming prompt without
+  letting a wedged data-plane command block the provider hook).
 
 Some providers fold both injection commands into a single hook entry;
 others split them. The exact wiring lives in the per-provider config —

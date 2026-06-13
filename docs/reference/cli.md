@@ -1566,6 +1566,27 @@ gc hook [agent] [flags]
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 | `--json` | bool |  | with --claim, emit a JSON protocol result |
 
+| Subcommand | Description |
+|------------|-------------|
+| [gc hook run](#gc-hook-run) | Run a managed hook command with a hard timeout |
+
+## gc hook run
+
+Runs a managed gc hook command in a child process with a hard timeout.
+
+This protects provider hook callbacks from wedged data-plane commands. The
+child process is the current gc executable, and &lt;gc args...&gt; are passed to it
+verbatim.
+
+```
+gc hook run -- <gc args...> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--timeout` | duration | `15s` | hard timeout for the managed hook command |
+| `--timeout-exit-code` | int | `124` | exit code to return when the managed hook command times out |
+
 ## gc import
 
 Manage pack imports

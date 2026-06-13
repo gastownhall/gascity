@@ -770,12 +770,36 @@ func upgradeCodexHookCommand(command string) (string, bool) {
 		prefix := strings.TrimSuffix(command, body)
 		return prefix + sessionStartCurrentFormBody, true
 	}
+	if upgraded, ok := upgradeManagedPromptHookCommand(command, "codex"); ok {
+		return upgraded, true
+	}
 	if strings.Contains(command, `--hook-format codex`) {
 		return "", false
 	}
 	for _, needle := range codexManagedHookCommandNeedles {
 		if strings.Contains(command, needle) {
 			return strings.Replace(command, needle, needle+` --hook-format codex`, 1), true
+		}
+	}
+	return "", false
+}
+
+const managedPromptHookRunPrefix = `gc hook run --timeout 15s --timeout-exit-code 0 -- `
+
+func upgradeManagedPromptHookCommand(command, hookFormat string) (string, bool) {
+	body := commandBodyAfterCanonicalPrefix(command)
+	for _, base := range []string{
+		`gc nudge drain --inject`,
+		`gc mail check --inject`,
+	} {
+		if equalsLegacyCommandBody(body, base) ||
+			(hookFormat != "" && equalsLegacyCommandBody(body, base+` --hook-format `+hookFormat)) {
+			target := strings.TrimPrefix(base, `gc `)
+			if hookFormat != "" {
+				target += ` --hook-format ` + hookFormat
+			}
+			prefix := strings.TrimSuffix(command, body)
+			return prefix + managedPromptHookRunPrefix + target, true
 		}
 	}
 	return "", false
@@ -1047,6 +1071,10 @@ func isLegacyGCManagedCommand(event, command string) bool {
 			equalsLegacyCommandBody(body, "gc prime --hook --hook-format codex") ||
 			equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) ||
 			equalsLegacyCommandBody(body, sessionStartCurrentFormBody)
+	case "UserPromptSubmit":
+		return equalsLegacyCommandBody(body, `gc nudge drain --inject`) ||
+			equalsLegacyCommandBody(body, `gc mail check --inject`) ||
+			strings.HasPrefix(body, managedPromptHookRunPrefix)
 	}
 	return false
 }
@@ -1117,6 +1145,8 @@ func upgradeClaudeHookCommand(event, command string) (string, bool) {
 			prefix := strings.TrimSuffix(command, body)
 			return prefix + sessionStartCurrentFormBody, true
 		}
+	case "UserPromptSubmit":
+		return upgradeManagedPromptHookCommand(command, "")
 	}
 	return "", false
 }
