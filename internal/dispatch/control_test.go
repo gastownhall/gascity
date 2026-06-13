@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -2054,6 +2055,105 @@ func TestReconcileClosedScopeMemberRalphPass(t *testing.T) {
 // buildAttemptRecipe tests
 // ---------------------------------------------------------------------------
 
+// TestAttemptRecipeStepNeedsScopeCheckTracksBeadmetaExemptKinds keeps the
+// attempt-path predicate in lockstep with beadmeta.ScopeCheckExemptKinds and
+// therefore with the compile-path predicate in formula/graph.go. Before
+// ga-e154xo this list lagged the compile list by {tally, drain}, so
+// hand-written drain/tally control children inside retry/ralph attempt
+// recipes were given scope-checks only on the attempt path.
+func TestAttemptRecipeStepNeedsScopeCheckTracksBeadmetaExemptKinds(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range beadmeta.ScopeCheckExemptKinds {
+		step := formula.RecipeStep{
+			ID: "mol-test.subject",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     kind,
+				beadmeta.ScopeRefMetadataKey: "mol-test.body",
+			},
+		}
+		if attemptRecipeStepNeedsScopeCheck(step) {
+			t.Errorf("attemptRecipeStepNeedsScopeCheck(kind=%q) = true, want false (exempt kind)", kind)
+		}
+	}
+
+	for _, kind := range []string{"", beadmeta.KindTask, beadmeta.KindRetry, beadmeta.KindRalph, beadmeta.KindCleanup} {
+		step := formula.RecipeStep{
+			ID: "mol-test.subject",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     kind,
+				beadmeta.ScopeRefMetadataKey: "mol-test.body",
+			},
+		}
+		if !attemptRecipeStepNeedsScopeCheck(step) {
+			t.Errorf("attemptRecipeStepNeedsScopeCheck(kind=%q) = false, want true (non-exempt kind)", kind)
+		}
+	}
+}
+
+// TestApplyAttemptRecipeScopeChecksSkipsDrainAndTally pins the attempt-recipe
+// scope-check pass to the shared exemption set end to end: drain/tally steps
+// carrying a scope_ref get no synthesized scope-check and keep their original
+// downstream dependencies.
+func TestApplyAttemptRecipeScopeChecksSkipsDrain(t *testing.T) {
+	t.Parallel()
+
+	recipe := &formula.Recipe{
+		Name: "mol-test.converge.iteration.1",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "mol-test.converge.iteration.1",
+				IsRoot: true,
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey: beadmeta.KindScope,
+				},
+			},
+			{
+				ID: "mol-test.converge.iteration.1.work",
+				Metadata: map[string]string{
+					beadmeta.ScopeRefMetadataKey:  "mol-test.converge.iteration.1",
+					beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
+				},
+			},
+			{
+				ID: "mol-test.converge.iteration.1.drain",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:      beadmeta.KindDrain,
+					beadmeta.ScopeRefMetadataKey:  "mol-test.converge.iteration.1",
+					beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-test.converge.iteration.1.drain", DependsOnID: "mol-test.converge.iteration.1.work", Type: "blocks"},
+		},
+	}
+
+	applyAttemptRecipeScopeChecks(recipe)
+
+	stepByID := make(map[string]formula.RecipeStep, len(recipe.Steps))
+	for _, step := range recipe.Steps {
+		stepByID[step.ID] = step
+	}
+	if _, ok := stepByID["mol-test.converge.iteration.1.drain-scope-check"]; ok {
+		t.Error("drain step received a synthesized scope-check; drain is scope-check exempt")
+	}
+	if _, ok := stepByID["mol-test.converge.iteration.1.work-scope-check"]; !ok {
+		t.Error("plain member step lost its synthesized scope-check")
+	}
+	// The drain's upstream dependency is still rewritten to wait on the work
+	// step's scope-check — only the drain step itself is exempt.
+	var drainWaitsOnWorkScopeCheck bool
+	for _, dep := range recipe.Deps {
+		if dep.StepID == "mol-test.converge.iteration.1.drain" && dep.DependsOnID == "mol-test.converge.iteration.1.work-scope-check" {
+			drainWaitsOnWorkScopeCheck = true
+		}
+	}
+	if !drainWaitsOnWorkScopeCheck {
+		t.Error("drain dependency on work was not rewritten to the work scope-check")
+	}
+}
+
 func TestBuildAttemptRecipeSimpleRetry(t *testing.T) {
 	t.Parallel()
 
@@ -2962,8 +3062,8 @@ func TestBuildAttemptRecipeRalphChildOnCompleteCreatesScopedFanout(t *testing.T)
 	if got := fanout.Metadata["gc.scope_ref"]; got != "mol-review.review-loop.iteration.2" {
 		t.Fatalf("fanout gc.scope_ref = %q, want mol-review.review-loop.iteration.2", got)
 	}
-	if got := fanout.Metadata["gc.scope_role"]; got != "member" {
-		t.Fatalf("fanout gc.scope_role = %q, want member", got)
+	if got := fanout.Metadata["gc.scope_role"]; got != beadmeta.ScopeRoleControl {
+		t.Fatalf("fanout gc.scope_role = %q, want control (control infrastructure must not inherit the member role)", got)
 	}
 	if got := fanout.Metadata["gc.attempt"]; got != "2" {
 		t.Fatalf("fanout gc.attempt = %q, want 2", got)
@@ -2991,6 +3091,101 @@ func TestBuildAttemptRecipeRalphChildOnCompleteCreatesScopedFanout(t *testing.T)
 	if !foundFanoutDep {
 		t.Fatalf("missing fanout blocks dependency on source; deps = %+v", recipe.Deps)
 	}
+}
+
+func TestBuildAttemptRecipeRalphChildDrainKeepsDrainControl(t *testing.T) {
+	t.Parallel()
+
+	// A drain child inside a ralph body must keep its gc.kind=drain control
+	// contract on re-spawned iterations, mirroring the compile-time
+	// metadata from flattenSteps (gc.drain_* keys with compiler defaults).
+	maxUnits := 5
+	step := &formula.Step{
+		ID:    "process-loop",
+		Title: "Process loop",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{
+				ID:    "drain-items",
+				Title: "Drain convoy items",
+				Drain: &formula.DrainSpec{
+					Context:  "separate",
+					Formula:  "item-formula",
+					MaxUnits: &maxUnits,
+				},
+			},
+		},
+	}
+	control := beads.Bead{
+		ID: "ctrl-drain",
+		Metadata: map[string]string{
+			"gc.step_id":  "process-loop",
+			"gc.step_ref": "mol-batch.process-loop",
+		},
+	}
+
+	recipe := buildAttemptRecipe(step, control, 2)
+	scopeID := "mol-batch.process-loop.iteration.2"
+	drainID := scopeID + ".drain-items"
+
+	drain := recipe.StepByID(drainID)
+	if drain == nil {
+		t.Fatalf("missing drain child step; steps = %+v", stepIDsOf(recipe))
+	}
+	if got := drain.Metadata["gc.kind"]; got != "drain" {
+		t.Errorf("drain gc.kind = %q, want drain", got)
+	}
+	if got := drain.Metadata["gc.drain_formula"]; got != "item-formula" {
+		t.Errorf("gc.drain_formula = %q, want item-formula", got)
+	}
+	if got := drain.Metadata["gc.drain_context"]; got != "separate" {
+		t.Errorf("gc.drain_context = %q, want separate", got)
+	}
+	if got := drain.Metadata["gc.drain_member_access"]; got != "read" {
+		t.Errorf("gc.drain_member_access = %q, want read (compiler default)", got)
+	}
+	if got := drain.Metadata["gc.drain_max_units"]; got != "5" {
+		t.Errorf("gc.drain_max_units = %q, want 5", got)
+	}
+	if got := drain.Metadata["gc.drain_on_item_failure"]; got != "continue" {
+		t.Errorf("gc.drain_on_item_failure = %q, want continue (separate-context default)", got)
+	}
+	// Scope membership metadata is preserved alongside the drain contract.
+	if got := drain.Metadata["gc.scope_ref"]; got != scopeID {
+		t.Errorf("drain gc.scope_ref = %q, want %s", got, scopeID)
+	}
+	if got := drain.Metadata["gc.scope_role"]; got != "member" {
+		t.Errorf("drain gc.scope_role = %q, want member", got)
+	}
+
+	// Compile-time needsScopeCheck excludes kind=drain: no scope-check is
+	// minted for the drain control and the iteration scope blocks on the
+	// drain bead directly.
+	if recipe.StepByID(drainID+"-scope-check") != nil {
+		t.Errorf("unexpected scope-check minted for drain control")
+	}
+	if !hasBlocksDep(recipe, scopeID, drainID) {
+		t.Errorf("missing scope blocks dep on drain control; deps = %+v", recipe.Deps)
+	}
+}
+
+// stepIDsOf lists recipe step IDs for failure messages.
+func stepIDsOf(recipe *formula.Recipe) []string {
+	ids := make([]string, 0, len(recipe.Steps))
+	for _, s := range recipe.Steps {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
+// hasBlocksDep reports whether the recipe wires stepID -> dependsOnID blocks.
+func hasBlocksDep(recipe *formula.Recipe, stepID, dependsOnID string) bool {
+	for _, dep := range recipe.Deps {
+		if dep.StepID == stepID && dep.DependsOnID == dependsOnID && dep.Type == "blocks" {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBuildAttemptRecipeScopeMetadataAndStepRef(t *testing.T) {

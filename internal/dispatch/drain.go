@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -83,10 +84,25 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 	manifest, members, err := loadOrBuildDrainManifest(store, bead, parentConvoyID, itemFormula)
 	if err != nil {
 		if errors.Is(err, errDrainLimitExceeded) {
-			return ControlResult{Processed: true, Action: "drain-limit-exceeded"}, nil
+			scopeResult, scopeErr := reconcileClosedDrainScope(store, bead.ID, opts)
+			if scopeErr != nil {
+				return ControlResult{}, scopeErr
+			}
+			return ControlResult{Processed: true, Action: "drain-limit-exceeded", Skipped: scopeResult.Skipped}, nil
 		}
 		if errors.Is(err, errDrainUnresolvedMember) {
-			return ControlResult{Processed: true, Action: "drain-unresolved-member"}, nil
+			scopeResult, scopeErr := reconcileClosedDrainScope(store, bead.ID, opts)
+			if scopeErr != nil {
+				return ControlResult{}, scopeErr
+			}
+			return ControlResult{Processed: true, Action: "drain-unresolved-member", Skipped: scopeResult.Skipped}, nil
+		}
+		// Validation failures above may have closed the control before
+		// erroring; reconcile the scope best-effort so a closed scoped drain
+		// does not strand its scope (mirrors markControllerSpawnError's tolerant
+		// reconcile).
+		if closed, getErr := store.Get(bead.ID); getErr == nil && closed.Status == "closed" {
+			_, _ = reconcileTerminalScopedMemberWithOptions(store, closed, opts)
 		}
 		return ControlResult{}, err
 	}
@@ -97,7 +113,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		return advanceSharedDrain(store, bead, manifest, members, itemFormula, parentVars, opts)
 	}
 	if err := reserveDrainMembers(store, bead, members); err != nil {
-		return closeDrainReservationFailure(store, bead, manifest, err)
+		return closeDrainReservationFailure(store, bead, manifest, err, opts)
 	}
 
 	totalCreated := 0
@@ -133,7 +149,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 			rootID, created, err := ensureDrainItemRoot(store, bead, unit, member, len(members), row, itemFormula, parentVars, blockerIDs, opts)
 			if err != nil {
 				if errors.Is(err, errDrainInvalidItemFormula) {
-					return closeDrainItemFormulaFailure(store, bead, manifest, err)
+					return closeDrainItemFormulaFailure(store, bead, manifest, err, opts)
 				}
 				return ControlResult{}, err
 			}
@@ -385,12 +401,16 @@ func completeDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 	if err := updateMetadataAndClose(store, bead.ID, metadata); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing drain: %w", bead.ID, err)
 	}
-	return ControlResult{Processed: true, Action: action}, nil
+	scopeResult, err := reconcileClosedDrainScope(store, bead.ID, opts)
+	if err != nil {
+		return ControlResult{}, err
+	}
+	return ControlResult{Processed: true, Action: action, Skipped: scopeResult.Skipped}, nil
 }
 
 func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManifest, members []beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (ControlResult, error) {
 	if len(manifest.Rows) == 0 {
-		return closeDrainWithManifest(store, bead.ID, manifest, "succeeded", beadmeta.OutcomePass, "drain-succeeded")
+		return closeDrainWithManifest(store, bead.ID, manifest, "succeeded", beadmeta.OutcomePass, "drain-succeeded", opts)
 	}
 	// Repair materialized rows before waiting on them: a row wired to a
 	// source member by an earlier build never closes (drains do not close
@@ -419,7 +439,7 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 			if !recordDrainRowOutcome(row, root) {
 				if onItemFailure == beadmeta.DrainOnItemFailureSkipRemaining {
 					markRemainingSharedRowsSkipped(&manifest, i+1)
-					return closeDrainWithManifest(store, bead.ID, manifest, "failed", beadmeta.OutcomeFail, "drain-failed")
+					return closeDrainWithManifest(store, bead.ID, manifest, "failed", beadmeta.OutcomeFail, "drain-failed", opts)
 				}
 			}
 			continue
@@ -429,12 +449,12 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 		}
 		member := members[i]
 		if err := reserveDrainMember(store, bead, member); err != nil {
-			return closeDrainReservationFailure(store, bead, manifest, err)
+			return closeDrainReservationFailure(store, bead, manifest, err, opts)
 		}
 		created, err := materializeDrainRow(store, bead, manifest, members, row, member, itemFormula, parentVars, opts)
 		if err != nil {
 			if errors.Is(err, errDrainInvalidItemFormula) {
-				return closeDrainItemFormulaFailure(store, bead, manifest, err)
+				return closeDrainItemFormulaFailure(store, bead, manifest, err, opts)
 			}
 			return ControlResult{}, err
 		}
@@ -454,9 +474,9 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 		return ControlResult{Processed: true, Action: "drain-shared-advanced", Created: created}, nil
 	}
 	if drainManifestHasFailedRows(manifest) {
-		return closeDrainWithManifest(store, bead.ID, manifest, "failed", beadmeta.OutcomeFail, "drain-failed")
+		return closeDrainWithManifest(store, bead.ID, manifest, "failed", beadmeta.OutcomeFail, "drain-failed", opts)
 	}
-	return closeDrainWithManifest(store, bead.ID, manifest, "succeeded", beadmeta.OutcomePass, "drain-succeeded")
+	return closeDrainWithManifest(store, bead.ID, manifest, "succeeded", beadmeta.OutcomePass, "drain-succeeded", opts)
 }
 
 func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainManifest, members []beads.Bead, row *drainManifestRow, member beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (int, error) {
@@ -714,7 +734,17 @@ func markRemainingSharedRowsSkipped(manifest *drainManifest, start int) {
 	}
 }
 
-func closeDrainWithManifest(store beads.Store, beadID string, manifest drainManifest, closeState, outcome, action string) (ControlResult, error) {
+// reconcileClosedDrainScope mirrors the fanout/retry/ralph terminal-close
+// behavior for drain controls: after a drain control closes, reconcile its
+// enclosing scope so a drain that was the scope's last open member finalizes
+// the scope (or aborts it on fail) instead of relying on another control's
+// close-time backstop. Returns the scope reconciliation result for Skipped
+// propagation; no-op for scope-less drains.
+func reconcileClosedDrainScope(store beads.Store, beadID string, opts ProcessOptions) (ControlResult, error) {
+	return reconcileClosedScopeMemberWithOptions(store, beadID, opts)
+}
+
+func closeDrainWithManifest(store beads.Store, beadID string, manifest drainManifest, closeState, outcome, action string, opts ProcessOptions) (ControlResult, error) {
 	metadata := map[string]string{
 		beadmeta.DrainStateMetadataKey: closeState,
 		beadmeta.OutcomeMetadataKey:    outcome,
@@ -730,7 +760,11 @@ func closeDrainWithManifest(store beads.Store, beadID string, manifest drainMani
 	if err := updateMetadataAndClose(store, beadID, metadata); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing drain: %w", beadID, err)
 	}
-	return ControlResult{Processed: true, Action: action}, nil
+	scopeResult, err := reconcileClosedDrainScope(store, beadID, opts)
+	if err != nil {
+		return ControlResult{}, err
+	}
+	return ControlResult{Processed: true, Action: action, Skipped: scopeResult.Skipped}, nil
 }
 
 func buildDrainManifest(bead beads.Bead, parentConvoyID, itemFormula string, members []beads.Bead) drainManifest {
@@ -1066,6 +1100,13 @@ func stampDrainItemRecipe(recipe *formula.Recipe, control, unit, member beads.Be
 	}
 }
 
+// isSharedDrainExecutableStep reports whether a drain item recipe step is
+// worker-executable work that should carry shared-drain continuation
+// metadata (gc.continuation_group, gc.session_affinity). Control-dispatcher
+// steps (beadmeta.ControlKinds) and workflow-topology anchors
+// (beadmeta.WorkflowTopologyKinds) are infrastructure the control dispatcher
+// or graph routing owns, never session-affine worker work, so they are
+// excluded.
 func isSharedDrainExecutableStep(step *formula.RecipeStep) bool {
 	if step == nil {
 		return false
@@ -1074,12 +1115,7 @@ func isSharedDrainExecutableStep(step *formula.RecipeStep) bool {
 	if step.Metadata != nil {
 		kind = strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey])
 	}
-	switch kind {
-	case "workflow", "workflow-finalize", "scope", "spec", "drain", "check", "fanout", "retry-eval", "scope-check", "retry", "ralph":
-		return false
-	default:
-		return true
-	}
+	return !beadmeta.IsControlKind(kind) && !slices.Contains(beadmeta.WorkflowTopologyKinds, kind)
 }
 
 func sharedDrainContinuationGroup(control beads.Bead) string {
@@ -1159,7 +1195,7 @@ func releaseDrainReservations(store beads.Store, controlID string, manifest drai
 	return nil
 }
 
-func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error) (ControlResult, error) {
+func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error, opts ProcessOptions) (ControlResult, error) {
 	var reservationErr drainReservationError
 	failureReason := "exclusive_reservation_failed"
 	metadata := map[string]string{
@@ -1188,10 +1224,14 @@ func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest d
 	if closeErr := updateMetadataAndClose(store, bead.ID, metadata); closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing reservation-failed drain after %w: %w", bead.ID, err, closeErr)
 	}
-	return ControlResult{Processed: true, Action: "drain-reservation-failed"}, nil
+	scopeResult, scopeErr := reconcileClosedDrainScope(store, bead.ID, opts)
+	if scopeErr != nil {
+		return ControlResult{}, scopeErr
+	}
+	return ControlResult{Processed: true, Action: "drain-reservation-failed", Skipped: scopeResult.Skipped}, nil
 }
 
-func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error) (ControlResult, error) {
+func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error, opts ProcessOptions) (ControlResult, error) {
 	const failureReason = "invalid_drain_item_formula"
 	if closeErr := closeOpenDrainItemRoots(store, &manifest, failureReason); closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing partial drain item roots after %w: %w", bead.ID, err, closeErr)
@@ -1217,7 +1257,11 @@ func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest d
 	if closeErr := updateMetadataAndClose(store, bead.ID, metadata); closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing invalid-item-formula drain after %w: %w", bead.ID, err, closeErr)
 	}
-	return ControlResult{Processed: true, Action: "drain-failed"}, nil
+	scopeResult, scopeErr := reconcileClosedDrainScope(store, bead.ID, opts)
+	if scopeErr != nil {
+		return ControlResult{}, scopeErr
+	}
+	return ControlResult{Processed: true, Action: "drain-failed", Skipped: scopeResult.Skipped}, nil
 }
 
 func markIncompleteDrainRowsFailed(manifest *drainManifest, failureReason string) {

@@ -11,8 +11,7 @@ package beadmeta
 // Values of KindMetadataKey ("gc.kind"). Several predicates over this
 // vocabulary coexist with different membership; the named subsets, their
 // relationships, and the authoritative set are declared in kindsets.go
-// (ControlKinds is authoritative; see that file's doc for the known drift in
-// one routing predicate).
+// (ControlKinds is authoritative; every routing predicate derives from it).
 const (
 	// Control-bead kinds processed by the control dispatcher.
 	KindRetry            = "retry"

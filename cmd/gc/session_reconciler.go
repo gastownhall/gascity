@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -3554,12 +3555,11 @@ func applyTemplateOverridesToConfig(agentCfg *runtime.Config, session beads.Bead
 	if agentCfg == nil {
 		return
 	}
-	rawOvr := session.Metadata["template_overrides"]
-	if rawOvr == "" || tp.ResolvedProvider == nil || len(tp.ResolvedProvider.OptionsSchema) == 0 {
+	if tp.ResolvedProvider == nil || len(tp.ResolvedProvider.OptionsSchema) == 0 {
 		return
 	}
-	var ovr map[string]string
-	if err := json.Unmarshal([]byte(rawOvr), &ovr); err != nil || len(ovr) == 0 {
+	ovr, err := sessionpkg.ParseTemplateOverrides(session.Metadata)
+	if err != nil || len(ovr) == 0 {
 		return
 	}
 	fullOptions := make(map[string]string)
@@ -3864,10 +3864,10 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 	return ""
 }
 
-const dispatchOptionMetadataPrefix = "opt_"
-
+// dispatchOptionMetadataKey returns the bead-metadata key carrying a
+// per-dispatch provider option choice for the given OptionsSchema key.
 func dispatchOptionMetadataKey(key string) string {
-	return dispatchOptionMetadataPrefix + key
+	return beadmeta.OptionMetadataPrefix + key
 }
 
 // resolveTaskOptionOverrides returns provider option choices requested by the

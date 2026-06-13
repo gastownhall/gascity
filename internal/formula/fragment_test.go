@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 func TestCompileExpansionFragmentRunsInlineExpansionAndConditionFiltering(t *testing.T) {
@@ -504,5 +506,109 @@ func TestRecipeStepNeedsScopeCheckExcludesSpec(t *testing.T) {
 	}
 	if recipeStepNeedsScopeCheck(step) {
 		t.Fatal("spec step should not need scope check")
+	}
+}
+
+// TestRecipeStepNeedsScopeCheckTracksBeadmetaExemptKinds keeps the
+// fragment-path predicate in lockstep with beadmeta.ScopeCheckExemptKinds and
+// therefore with the compile-path predicate in graph.go. Before ga-e154xo this
+// list lagged the compile list by {tally, drain}, so drain/tally steps with a
+// propagated scope_ref were given scope-checks only on the fragment path.
+func TestRecipeStepNeedsScopeCheckTracksBeadmetaExemptKinds(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range beadmeta.ScopeCheckExemptKinds {
+		step := RecipeStep{
+			ID: "test.subject",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     kind,
+				beadmeta.ScopeRefMetadataKey: "body",
+			},
+		}
+		if recipeStepNeedsScopeCheck(step) {
+			t.Errorf("recipeStepNeedsScopeCheck(kind=%q) = true, want false (exempt kind)", kind)
+		}
+	}
+
+	for _, kind := range []string{"", beadmeta.KindTask, beadmeta.KindRetry, beadmeta.KindRalph, beadmeta.KindCleanup} {
+		step := RecipeStep{
+			ID: "test.subject",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     kind,
+				beadmeta.ScopeRefMetadataKey: "body",
+			},
+		}
+		if !recipeStepNeedsScopeCheck(step) {
+			t.Errorf("recipeStepNeedsScopeCheck(kind=%q) = false, want true (non-exempt kind)", kind)
+		}
+	}
+}
+
+// TestApplyFragmentRecipeGraphControlsSkipsDrainAndTally pins the fragment
+// decoration path to the compile-path exclusion set: drain and tally control
+// steps that inherit a scope_ref (e.g. via dynamic-fragment scope propagation)
+// must NOT receive synthesized scope-checks, and their downstream dependencies
+// must NOT be rewritten.
+func TestApplyFragmentRecipeGraphControlsSkipsDrainAndTally(t *testing.T) {
+	t.Parallel()
+
+	fragment := &FragmentRecipe{
+		Name: "expansion-controls",
+		Steps: []RecipeStep{
+			{
+				ID:    "expansion-controls.work",
+				Title: "Work",
+				Metadata: map[string]string{
+					beadmeta.ScopeRefMetadataKey:  "body",
+					beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
+				},
+			},
+			{
+				ID:    "expansion-controls.drain",
+				Title: "Drain",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:      beadmeta.KindDrain,
+					beadmeta.ScopeRefMetadataKey:  "body",
+					beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
+				},
+			},
+			{
+				ID:    "expansion-controls.after",
+				Title: "After",
+				Metadata: map[string]string{
+					beadmeta.ScopeRefMetadataKey:  "body",
+					beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
+				},
+			},
+		},
+		Deps: []RecipeDep{
+			{StepID: "expansion-controls.drain", DependsOnID: "expansion-controls.work", Type: "blocks"},
+			{StepID: "expansion-controls.after", DependsOnID: "expansion-controls.drain", Type: "blocks"},
+		},
+	}
+
+	ApplyFragmentRecipeGraphControls(fragment)
+
+	stepByID := make(map[string]RecipeStep, len(fragment.Steps))
+	for _, step := range fragment.Steps {
+		stepByID[step.ID] = step
+	}
+	if _, ok := stepByID["expansion-controls.drain-scope-check"]; ok {
+		t.Error("drain step received a synthesized scope-check; drain is scope-check exempt")
+	}
+	if _, ok := stepByID["expansion-controls.work-scope-check"]; !ok {
+		t.Error("plain member step lost its synthesized scope-check")
+	}
+
+	for _, dep := range fragment.Deps {
+		if dep.StepID != "expansion-controls.after" {
+			continue
+		}
+		switch dep.DependsOnID {
+		case "expansion-controls.drain":
+			// Unrewritten — expected.
+		case "expansion-controls.drain-scope-check":
+			t.Errorf("dependency on %s was rewritten to a scope-check that must not exist", dep.DependsOnID)
+		}
 	}
 }

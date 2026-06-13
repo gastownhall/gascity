@@ -744,6 +744,12 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 				nestedSeedSteps = append(nestedSeedSteps, seedSteps...)
 				nestedSeedDeps = append(nestedSeedDeps, seedDeps...)
 			}
+			// Drain children are themselves control beads: re-apply the
+			// compiler's drain contract (gc.kind=drain + gc.drain_* keys) so
+			// re-spawned iterations keep the shape minted by flattenSteps.
+			// Validation forbids combining drain with retry/ralph, so this
+			// never overwrites the nested-control kinds above.
+			formula.ApplyDrainControlMetadata(childMeta, child.Drain)
 			childStep := formula.RecipeStep{
 				ID:          childID,
 				Title:       child.Title,
@@ -854,10 +860,16 @@ func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *form
 			meta[beadmeta.BondVarsMetadataKey] = string(data)
 		}
 	}
-	for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.ScopeRoleMetadataKey, beadmeta.OnFailMetadataKey, beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey} {
+	for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.OnFailMetadataKey, beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey} {
 		if value := source.Metadata[key]; value != "" {
 			meta[key] = value
 		}
+	}
+	// Control infrastructure is never a scope member: stamp the control role
+	// explicitly (mirroring minted scope-checks) instead of inheriting the
+	// host step's role (see the identical stamp in formula's applyGraphControls).
+	if meta[beadmeta.ScopeRefMetadataKey] != "" {
+		meta[beadmeta.ScopeRoleMetadataKey] = beadmeta.ScopeRoleControl
 	}
 	control := formula.RecipeStep{
 		ID:       source.ID + "-fanout",
@@ -873,6 +885,11 @@ func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *form
 	return control, dep, true
 }
 
+// applyAttemptRecipeScopeChecks re-mints paired scope-check controls for the
+// scoped steps of a re-spawned attempt recipe, mirroring the compile-time
+// shape injected by formula.ApplyGraphControls: each scope-check blocks on
+// its subject step, and deps that waited on the subject are rewritten to
+// wait on the scope-check instead.
 func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 	if recipe == nil || len(recipe.Steps) == 0 {
 		return
@@ -940,12 +957,7 @@ func attemptRecipeStepNeedsScopeCheck(step formula.RecipeStep) bool {
 	if step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 		return false
 	}
-	switch step.Metadata[beadmeta.KindMetadataKey] {
-	case "scope", "scope-check", "workflow-finalize", "fanout", "check", "spec":
-		return false
-	default:
-		return true
-	}
+	return !beadmeta.IsScopeCheckExemptKind(step.Metadata[beadmeta.KindMetadataKey])
 }
 
 func loadAttemptRouteConfig(cityPath string) *config.City {
@@ -1054,17 +1066,20 @@ func controlDispatcherTargetForExecutionTarget(executionTarget, rigContext strin
 }
 
 // isAttemptControlKind reports whether an Attach-path recipe step should be
-// routed to the control dispatcher rather than a worker.
-//
-// KNOWN DRIFT: this is beadmeta.ControlKinds minus KindDrain — a frozen
-// 2026-04-14 snapshot of the then-complete control vocabulary; drain
-// (PR #2784) was added to other predicates but not here. The exclusion is
-// masked on the attempt path (buildAttemptRecipe cannot mint that kind) but
-// reachable on the fanout-fragment path. Adopting the full set changes
-// routing for persisted fragments and is tracked as a dispatch routing bug
-// rather than silently flipped here.
+// routed to the control dispatcher rather than a worker: exactly the kinds
+// the dispatcher's ProcessControl switch executes (beadmeta.ControlKinds).
+// Pinned to the authoritative set by TestIsAttemptControlKindMatchesControlKinds.
 func isAttemptControlKind(kind string) bool {
-	return beadmeta.IsControlKind(kind) && kind != beadmeta.KindDrain
+	return beadmeta.IsControlKind(kind)
+}
+
+// latestAttemptCandidateIsControlInfrastructure reports whether a bead kind
+// is control infrastructure (never selectable as the latest-attempt work
+// bead): every control kind plus the workflow topology root. Scope beads are
+// deliberately NOT included — for ralph controls, scope beads ARE the
+// iterations, and the caller handles that case.
+func latestAttemptCandidateIsControlInfrastructure(kind string) bool {
+	return beadmeta.IsControlKind(kind) || kind == beadmeta.KindWorkflow
 }
 
 type attemptRouteBinding struct {
@@ -1392,13 +1407,11 @@ func latestAttemptFromCandidates(control beads.Bead, candidates []beads.Bead) be
 		// Skip beads that are control infrastructure, not actual work.
 		// For ralph controls, scope beads ARE the iterations — don't skip them.
 		kind := b.Metadata[beadmeta.KindMetadataKey]
-		switch kind {
-		case "scope-check", "workflow-finalize", "fanout", "check", "retry-eval", "retry", "ralph", "workflow":
+		if latestAttemptCandidateIsControlInfrastructure(kind) {
 			continue
-		case "scope":
-			if controlKind != "ralph" {
-				continue
-			}
+		}
+		if kind == beadmeta.KindScope && controlKind != "ralph" {
+			continue
 		}
 
 		ref := b.Metadata[beadmeta.StepRefMetadataKey]

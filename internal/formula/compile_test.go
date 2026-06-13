@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/testfixtures/reviewworkflows"
 )
 
@@ -1511,6 +1513,181 @@ metadata = { "gc.kind" = "retry" }
 	}
 }
 
+func TestValidateRejectsHandWrittenEngineMintedKindMetadata(t *testing.T) {
+	cases := []struct {
+		name    string
+		formula *Formula
+		want    []string
+	}{
+		{
+			name: "fanout top-level step",
+			formula: &Formula{
+				Formula: "hand-fanout",
+				Steps: []*Step{{
+					ID:       "work",
+					Title:    "Do the work",
+					Metadata: map[string]string{"gc.kind": "fanout"},
+				}},
+			},
+			want: []string{`steps[0] (work)`, `gc.kind="fanout" is engine-minted`, "[steps.on_complete]"},
+		},
+		{
+			name: "fanout in child step",
+			formula: &Formula{
+				Formula: "hand-fanout-child",
+				Steps: []*Step{{
+					ID:    "parent",
+					Title: "Parent",
+					Children: []*Step{{
+						ID:       "child",
+						Title:    "Child",
+						Metadata: map[string]string{"gc.kind": "fanout"},
+					}},
+				}},
+			},
+			want: []string{`steps[0] (parent).children[0] (child)`, `gc.kind="fanout" is engine-minted`},
+		},
+		{
+			name: "fanout in loop body",
+			formula: &Formula{
+				Formula: "hand-fanout-loop",
+				Steps: []*Step{{
+					ID:    "looper",
+					Title: "Looper",
+					Loop: &LoopSpec{
+						Count: 2,
+						Body: []*Step{{
+							ID:       "body",
+							Title:    "Body",
+							Metadata: map[string]string{"gc.kind": "fanout"},
+						}},
+					},
+				}},
+			},
+			want: []string{`steps[0] (looper).loop.body[0] (body)`, `gc.kind="fanout" is engine-minted`},
+		},
+		{
+			name: "fanout in template step",
+			formula: &Formula{
+				Formula: "hand-fanout-template",
+				Type:    TypeExpansion,
+				Template: []*Step{{
+					ID:       "{target}.work",
+					Title:    "Work",
+					Metadata: map[string]string{"gc.kind": "fanout"},
+				}},
+			},
+			want: []string{`template[0] ({target}.work)`, `gc.kind="fanout" is engine-minted`},
+		},
+		{
+			name: "fanout with declared graph contract still errors",
+			formula: &Formula{
+				Formula:  "hand-fanout-graph",
+				Contract: "graph.v2",
+				Type:     TypeWorkflow,
+				Steps: []*Step{{
+					ID:       "work",
+					Title:    "Do the work",
+					Metadata: map[string]string{"gc.kind": "fanout"},
+				}},
+			},
+			want: []string{`gc.kind="fanout" is engine-minted`, "[steps.on_complete]"},
+		},
+		{
+			name: "untrimmed key and value still caught",
+			formula: &Formula{
+				Formula: "hand-fanout-spaces",
+				Steps: []*Step{{
+					ID:       "work",
+					Title:    "Do the work",
+					Metadata: map[string]string{" gc.kind ": " fanout "},
+				}},
+			},
+			want: []string{`gc.kind="fanout" is engine-minted`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.formula.Validate()
+			if err == nil {
+				t.Fatal("Validate succeeded, want engine-minted kind error")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Validate error = %q, want it to contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateAcceptsHandAuthorableKindMetadata(t *testing.T) {
+	// Hand-authoring structural kinds (scope, cleanup) in a declared graph.v2
+	// formula is a supported surface (see core pack mol-scoped-work) and must
+	// stay valid.
+	f := &Formula{
+		Formula:  "hand-scope",
+		Contract: "graph.v2",
+		Type:     TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:       "body",
+				Title:    "Body",
+				Metadata: map[string]string{"gc.kind": "scope", "gc.scope_name": "worktree", "gc.scope_role": "body"},
+			},
+			{
+				ID:        "teardown",
+				Title:     "Teardown",
+				DependsOn: []string{"body"},
+				Metadata:  map[string]string{"gc.kind": "cleanup", "gc.scope_ref": "body", "gc.scope_role": "teardown"},
+			},
+		},
+	}
+	if err := f.Validate(); err != nil {
+		t.Fatalf("Validate(hand-authored scope/cleanup) = %v, want nil", err)
+	}
+}
+
+func TestEngineMintedAuthoringSurfacesCoverEngineMintedOnlyKinds(t *testing.T) {
+	for _, kind := range beadmeta.EngineMintedOnlyKinds {
+		if _, ok := engineMintedAuthoringSurfaces[kind]; !ok {
+			t.Errorf("engineMintedAuthoringSurfaces missing guidance for engine-minted-only kind %q", kind)
+		}
+	}
+	for kind := range engineMintedAuthoringSurfaces {
+		if !slices.Contains(beadmeta.EngineMintedOnlyKinds, kind) {
+			t.Errorf("engineMintedAuthoringSurfaces has guidance for %q, which is not in beadmeta.EngineMintedOnlyKinds", kind)
+		}
+	}
+}
+
+func TestCompileRejectsHandWrittenFanoutKindMetadata(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	formulaText := `
+formula = "hand-fanout"
+phase = "liquid"
+
+[[steps]]
+id = "work"
+title = "Do the work"
+metadata = { "gc.kind" = "fanout" }
+`
+	if err := os.WriteFile(filepath.Join(dir, "hand-fanout.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	_, err := Compile(context.Background(), "hand-fanout", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile succeeded, want engine-minted kind error")
+	}
+	requireErrorContains(t, err, "engine-minted")
+	requireErrorContains(t, err, "[steps.on_complete]")
+}
+
 func TestCompileOnCompleteWithoutRequirementFailsClosed(t *testing.T) {
 	prev := IsFormulaV2Enabled()
 	SetFormulaV2Enabled(true)
@@ -2379,4 +2556,72 @@ title = "Pour"
 	if !strings.Contains(err.Error(), "range") {
 		t.Errorf("error = %q, want to mention 'range'", err.Error())
 	}
+}
+
+func TestApplyDrainControlMetadata(t *testing.T) {
+	t.Parallel()
+
+	t.Run("separate context defaults", func(t *testing.T) {
+		t.Parallel()
+		maxUnits := 7
+		metadata := map[string]string{"existing": "kept"}
+		ApplyDrainControlMetadata(metadata, &DrainSpec{
+			Context:  "separate",
+			Formula:  "item-formula",
+			MaxUnits: &maxUnits,
+		})
+		want := map[string]string{
+			"existing":                 "kept",
+			"gc.kind":                  "drain",
+			"gc.drain_context":         "separate",
+			"gc.drain_formula":         "item-formula",
+			"gc.drain_member_access":   "read",
+			"gc.drain_max_units":       "7",
+			"gc.drain_on_item_failure": "continue",
+		}
+		for k, v := range want {
+			if metadata[k] != v {
+				t.Errorf("metadata[%q] = %q, want %q", k, metadata[k], v)
+			}
+		}
+		if len(metadata) != len(want) {
+			t.Errorf("metadata = %v, want exactly %v", metadata, want)
+		}
+	})
+
+	t.Run("shared context defaults", func(t *testing.T) {
+		t.Parallel()
+		metadata := map[string]string{}
+		ApplyDrainControlMetadata(metadata, &DrainSpec{
+			Context:           "shared",
+			Formula:           "item-formula",
+			MemberAccess:      "exclusive",
+			OnItemFailure:     "",
+			ContinuationGroup: "lane-a",
+			Item:              &DrainItemSpec{SingleLane: true},
+		})
+		want := map[string]string{
+			"gc.kind":                     "drain",
+			"gc.drain_context":            "shared",
+			"gc.drain_formula":            "item-formula",
+			"gc.drain_member_access":      "exclusive",
+			"gc.drain_on_item_failure":    "skip_remaining",
+			"gc.drain_continuation_group": "lane-a",
+			"gc.drain_item_single_lane":   "true",
+		}
+		for k, v := range want {
+			if metadata[k] != v {
+				t.Errorf("metadata[%q] = %q, want %q", k, metadata[k], v)
+			}
+		}
+	})
+
+	t.Run("nil spec is a no-op", func(t *testing.T) {
+		t.Parallel()
+		metadata := map[string]string{"existing": "kept"}
+		ApplyDrainControlMetadata(metadata, nil)
+		if len(metadata) != 1 || metadata["existing"] != "kept" {
+			t.Errorf("metadata = %v, want unchanged", metadata)
+		}
+	})
 }

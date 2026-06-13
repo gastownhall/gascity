@@ -1,6 +1,10 @@
 package formula
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+)
 
 func TestApplyRalph_Basic(t *testing.T) {
 	steps := []*Step{
@@ -630,5 +634,67 @@ func TestApplyRalph_PreservesNonRalphSteps(t *testing.T) {
 	}
 	if got[4].ID != "cleanup" {
 		t.Errorf("got[4].ID = %q, want cleanup", got[4].ID)
+	}
+}
+
+// TestMarkRalphBodyOutputSinksTracksBeadmetaExemptKinds keeps the ralph
+// body-sink marker in lockstep with beadmeta.ScopeCheckExemptKinds plus its
+// one deliberate extra exclusion, KindRalph (a nested ralph control's output
+// contract is owned by its own OnComplete, not by the enclosing body). Before
+// ga-e154xo this list lagged by {tally, drain}, so hand-written drain/tally
+// control steps that were body sinks were wrongly marked
+// gc.output_json_required even though control beads are never worker-executed.
+func TestMarkRalphBodyOutputSinksTracksBeadmetaExemptKinds(t *testing.T) {
+	exempt := append([]string{beadmeta.KindRalph}, beadmeta.ScopeCheckExemptKinds...)
+	for _, kind := range exempt {
+		steps := []*Step{
+			{
+				ID:       "sink",
+				Title:    "Sink",
+				Metadata: map[string]string{beadmeta.KindMetadataKey: kind},
+			},
+		}
+		markRalphBodyOutputSinks(steps)
+		if got := steps[0].Metadata[beadmeta.OutputJSONRequiredMetadataKey]; got == "true" {
+			t.Errorf("markRalphBodyOutputSinks marked kind=%q sink, want skipped", kind)
+		}
+	}
+
+	for _, kind := range []string{"", beadmeta.KindTask, beadmeta.KindRetry} {
+		steps := []*Step{
+			{
+				ID:       "sink",
+				Title:    "Sink",
+				Metadata: map[string]string{beadmeta.KindMetadataKey: kind},
+			},
+		}
+		markRalphBodyOutputSinks(steps)
+		if got := steps[0].Metadata[beadmeta.OutputJSONRequiredMetadataKey]; got != "true" {
+			t.Errorf("markRalphBodyOutputSinks did not mark kind=%q sink, want marked", kind)
+		}
+	}
+
+	// Referenced (non-sink) steps and teardown-role steps stay unmarked
+	// regardless of kind.
+	steps := []*Step{
+		{ID: "upstream", Title: "Upstream"},
+		{ID: "downstream", Title: "Downstream", Needs: []string{"upstream"}},
+		{
+			ID:    "teardown",
+			Title: "Teardown",
+			Metadata: map[string]string{
+				beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleTeardown,
+			},
+		},
+	}
+	markRalphBodyOutputSinks(steps)
+	if steps[0].Metadata[beadmeta.OutputJSONRequiredMetadataKey] == "true" {
+		t.Error("referenced upstream step was marked as an output sink")
+	}
+	if steps[1].Metadata[beadmeta.OutputJSONRequiredMetadataKey] != "true" {
+		t.Error("sink downstream step was not marked as an output sink")
+	}
+	if steps[2].Metadata[beadmeta.OutputJSONRequiredMetadataKey] == "true" {
+		t.Error("teardown-role step was marked as an output sink")
 	}
 }

@@ -50,10 +50,17 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 				controlMetadata[beadmeta.BondVarsMetadataKey] = string(data)
 			}
 		}
-		for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.ScopeRoleMetadataKey, beadmeta.OnFailMetadataKey, beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey} {
+		for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.OnFailMetadataKey, beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey} {
 			if value := step.Metadata[key]; value != "" {
 				controlMetadata[key] = value
 			}
+		}
+		// Control infrastructure is never a scope member: stamp the control
+		// role explicitly (mirroring minted scope-checks) instead of
+		// inheriting the host step's role, or the control's metadata and
+		// output_json would participate in scope finalization as work.
+		if controlMetadata[beadmeta.ScopeRefMetadataKey] != "" {
+			controlMetadata[beadmeta.ScopeRoleMetadataKey] = beadmeta.ScopeRoleControl
 		}
 		controls = append(controls, &Step{
 			ID:       step.ID + "-fanout",
@@ -125,12 +132,7 @@ func needsScopeCheck(step *Step) bool {
 	if step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 		return false
 	}
-	switch step.Metadata[beadmeta.KindMetadataKey] {
-	case "scope", "scope-check", "workflow-finalize", "fanout", "check", "drain", "spec":
-		return false
-	default:
-		return true
-	}
+	return !beadmeta.IsScopeCheckExemptKind(step.Metadata[beadmeta.KindMetadataKey])
 }
 
 func rewriteGraphRefs(in []string, replacements map[string]string) []string {
