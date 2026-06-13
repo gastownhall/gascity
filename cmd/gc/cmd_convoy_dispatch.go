@@ -187,6 +187,12 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
 	opts.Tracef = workflowTracef
 	loadCfg := false
+	// This is a per-kind capability switch (does this control kind need city
+	// config loaded to resolve store-refs/formulas/sessions?), not a
+	// control-kind membership predicate, so it intentionally lists literals
+	// rather than deriving from the beadmeta taxonomy. "scope-check" is
+	// deliberately absent because it needs no config resolution; a future
+	// control kind that needs cfg must be added here explicitly.
 	switch bead.Metadata[beadmeta.KindMetadataKey] {
 	case "check", "drain", "fanout", "retry-eval", "retry", "ralph":
 		loadCfg = true

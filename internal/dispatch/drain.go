@@ -99,7 +99,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		}
 		// Validation failures above may have closed the control before
 		// erroring; reconcile the scope best-effort so a closed scoped drain
-		// does not strand its scope (mirrors markControllerError's tolerant
+		// does not strand its scope (mirrors markControllerSpawnError's tolerant
 		// reconcile).
 		if closed, getErr := store.Get(bead.ID); getErr == nil && closed.Status == "closed" {
 			_, _ = reconcileTerminalScopedMemberWithOptions(store, closed, opts)
@@ -741,11 +741,7 @@ func markRemainingSharedRowsSkipped(manifest *drainManifest, start int) {
 // close-time backstop. Returns the scope reconciliation result for Skipped
 // propagation; no-op for scope-less drains.
 func reconcileClosedDrainScope(store beads.Store, beadID string, opts ProcessOptions) (ControlResult, error) {
-	closed, err := store.Get(beadID)
-	if err != nil {
-		return ControlResult{}, fmt.Errorf("%s: reloading closed drain: %w", beadID, err)
-	}
-	return reconcileTerminalScopedMemberWithOptions(store, closed, opts)
+	return reconcileClosedScopeMemberWithOptions(store, beadID, opts)
 }
 
 func closeDrainWithManifest(store beads.Store, beadID string, manifest drainManifest, closeState, outcome, action string, opts ProcessOptions) (ControlResult, error) {
