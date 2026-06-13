@@ -951,13 +951,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// counter means "cycles", not "cycles that ran to completion". started
 	// counts the planned wakes the tick actually executed. Stops are applied
 	// asynchronously (drain advance, drain-ack goroutines) and skips are
-	// per-session trace decisions; neither is aggregated at the tick
-	// boundary, so they are reported as 0 rather than invented (tracked for
-	// fidelity in ga-ebb62d). The ctx param may legitimately be nil here, so
-	// the metric uses context.Background().
+	// per-session trace decisions, so honest tick-boundary counts cannot
+	// exist for them and the metric deliberately omits them (settled in
+	// ga-ebb62d). The ctx param may legitimately be nil here, so the metric
+	// uses context.Background().
 	startedThisTick := 0
 	defer func() {
-		telemetry.RecordReconcileCycle(context.Background(), startedThisTick, 0, 0)
+		telemetry.RecordReconcileCycle(context.Background(), startedThisTick)
 	}()
 	if ctx != nil && ctx.Err() != nil {
 		return 0

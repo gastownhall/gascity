@@ -14,6 +14,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -433,18 +435,157 @@ func TestRecordChurn_QuarantineRecordsMetric(t *testing.T) {
 	}
 }
 
+// TestCmdSessionKill_RecordsAgentStopMetric verifies a successful
+// `gc session kill` increments gc.agent.stops.total exactly once with the
+// bounded runtime session name from the session bead, reason "stopped", and
+// status "ok" — beside its SessionStopped emission (ga-rjk4or).
+func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := shortSocketTempDir(t, "gc-kill-stop-metric-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+
+	fakeProvider := runtime.NewFake()
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fakeProvider, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	const identity = "session-a"
+	const sessionName = "s-gc-kill-stop-metric"
+	bead, err := store.Create(beads.Bead{
+		Title:  "named session",
+		Type:   sessionpkg.BeadType,
+		Labels: []string{sessionpkg.LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"alias":                      identity,
+			"template":                   "worker",
+			"session_name":               sessionName,
+			"state":                      "awake",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+	if err := fakeProvider.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("fakeProvider.Start: %v", err)
+	}
+	if err := fakeProvider.SetMeta(sessionName, "GC_SESSION_ID", bead.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	lis, err := startControllerSocket(
+		cityDir,
+		func() {},
+		nil,
+		nil,
+		make(chan reloadRequest),
+		make(chan convergenceRequest, 1),
+		make(chan struct{}, 1),
+		make(chan struct{}, 1),
+	)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	defer lis.Close()                              //nolint:errcheck
+	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+
+	reader := installManualMetricReader(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{identity}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionKill = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
+	want := map[string]string{"agent": sessionName, "reason": "stopped", "status": "ok"}
+	if !hasDataPointWithStringAttrs(points, want) {
+		t.Fatalf("gc.agent.stops.total has no datapoint with agent=%s reason=stopped status=ok: %+v", sessionName, points)
+	}
+	for _, dp := range points {
+		matched := true
+		for key, wantValue := range want {
+			val, ok := dp.Attributes.Value(attribute.Key(key))
+			if !ok || val.AsString() != wantValue {
+				matched = false
+				break
+			}
+		}
+		if matched && dp.Value != 1 {
+			t.Fatalf("gc.agent.stops.total datapoint value = %d, want exactly 1 per kill: %+v", dp.Value, dp.Attributes)
+		}
+	}
+}
+
+// TestRecordSessionKillStop_SkipOnUnknown pins the skip-on-unknown contract
+// of recordSessionKillStop: when the session bead failed to load, or carries
+// no bounded session name, nothing is recorded — an unknown identity must
+// not become a garbage metric label. The beadErr path is deterministically
+// unreachable through cmdSessionKill end-to-end (handle resolution on the
+// same store fails first), so this helper-level test is the only way to pin
+// it.
+func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
+	t.Run("bead load failure records nothing", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+
+		recordSessionKillStop(beads.Bead{}, errors.New("store unavailable"))
+
+		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
+			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none when the bead failed to load", points)
+		}
+	})
+
+	t.Run("empty session name records nothing", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+
+		recordSessionKillStop(beads.Bead{Metadata: map[string]string{"session_name": "  "}}, nil)
+
+		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
+			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none for a blank session name", points)
+		}
+	})
+
+	t.Run("loaded bead records the stop", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+
+		recordSessionKillStop(beads.Bead{Metadata: map[string]string{"session_name": "worker-9"}}, nil)
+
+		points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "worker-9", "reason": "stopped", "status": "ok"}) {
+			t.Fatalf("gc.agent.stops.total has no datapoint with agent=worker-9 reason=stopped status=ok: %+v", points)
+		}
+	})
+}
+
 // TestReconcileSessionBeads_RecordsReconcileCycleMetric verifies every
 // reconciler tick increments gc.reconcile.cycles.total at the chokepoint all
 // reconcile wrappers funnel into — including ticks aborted by context
 // cancellation, so the counter means "cycles", not "cycles that ran to
 // completion". Stops and skips are not aggregated at the tick boundary, so
-// they are honestly reported as 0.
+// the metric intentionally carries only the started attribute.
 func TestReconcileSessionBeads_RecordsReconcileCycleMetric(t *testing.T) {
 	assertCycleRecorded := func(t *testing.T, reader *sdkmetric.ManualReader) {
 		t.Helper()
 		points := collectCounterDataPoints(t, reader, "gc.reconcile.cycles.total")
-		if !hasDataPointWithIntAttrs(points, map[string]int64{"started": 0, "stopped": 0, "skipped": 0}) {
-			t.Fatalf("gc.reconcile.cycles.total has no datapoint with started=0 stopped=0 skipped=0: %+v", points)
+		if !hasDataPointWithIntAttrs(points, map[string]int64{"started": 0}) {
+			t.Fatalf("gc.reconcile.cycles.total has no datapoint with started=0: %+v", points)
+		}
+		for _, dp := range points {
+			if _, ok := dp.Attributes.Value(attribute.Key("stopped")); ok {
+				t.Fatalf("gc.reconcile.cycles.total datapoint carries dropped attribute %q: %+v", "stopped", dp.Attributes)
+			}
+			if _, ok := dp.Attributes.Value(attribute.Key("skipped")); ok {
+				t.Fatalf("gc.reconcile.cycles.total datapoint carries dropped attribute %q: %+v", "skipped", dp.Attributes)
+			}
 		}
 	}
 

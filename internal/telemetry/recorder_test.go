@@ -126,8 +126,8 @@ func TestRecordReconcileCycle(t *testing.T) {
 	resetInstruments(t)
 	ctx := context.Background()
 
-	RecordReconcileCycle(ctx, 3, 1, 2)
-	RecordReconcileCycle(ctx, 0, 0, 0)
+	RecordReconcileCycle(ctx, 3)
+	RecordReconcileCycle(ctx, 0)
 }
 
 func TestRecordNudge(t *testing.T) {
