@@ -666,12 +666,13 @@ func TestEnsureBundledPacksCurrentRepairsStaleSyntheticCache(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	source, ok := builtinpacks.Source("core")
 	if !ok {
 		t.Fatal("no bundled core source")
 	}
-	commit := "abc123def456abc123def456abc123def456abc123de"
+	commit := strings.TrimPrefix(config.BundledPackImportVersion, "sha:")
 	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
 		Schema: LockfileSchema,
 		Packs:  map[string]LockedPack{source: {Version: "1.0.0", Commit: commit}},

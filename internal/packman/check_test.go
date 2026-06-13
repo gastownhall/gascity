@@ -145,8 +145,8 @@ func TestSyncLockUsesBundledFallbackForPublicGascityWhenRemoteUnavailable(t *tes
 	if _, err := os.Stat(filepath.Join(cacheDir, "gascity", "pack.toml")); err != nil {
 		t.Fatalf("public gascity synthetic cache missing pack.toml: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(cacheDir, "gascity", "skills", "plan", "SKILL.md")); err != nil {
-		t.Fatalf("public gascity synthetic cache missing plan skill: %v", err)
+	if _, err := os.Stat(filepath.Join(cacheDir, "gascity", "skills", "mayor", "SKILL.md")); err != nil {
+		t.Fatalf("public gascity synthetic cache missing mayor skill: %v", err)
 	}
 }
 

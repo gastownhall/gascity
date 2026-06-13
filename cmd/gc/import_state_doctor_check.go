@@ -129,7 +129,7 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 		}
 	}
 	if len(supersededBundledPinDetails(imports)) > 0 {
-		if _, err := rewriteSupersededBundledPinsFS(fsys.OSFS{}, c.cityPath); err != nil {
+		if err := rewriteSupersededBundledPinsFS(fsys.OSFS{}, c.cityPath); err != nil {
 			return err
 		}
 		imports, err = collectAllImportsFS(fsys.OSFS{}, c.cityPath)
@@ -170,7 +170,7 @@ func supersededBundledPinDetails(imports map[string]config.Import) []string {
 	return details
 }
 
-func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) (bool, error) {
+func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) error {
 	bump := func(imports map[string]config.Import) bool {
 		changed := false
 		for name, imp := range imports {
@@ -185,46 +185,44 @@ func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) (bool, error) {
 
 	packTomlPath := filepath.Join(cityPath, "pack.toml")
 	cityTomlPath := filepath.Join(cityPath, "city.toml")
-	packSnap, err := snapshotOptionalFile(fs, packTomlPath)
+	packSnap, err := snapshotResolvedFile(fs, packTomlPath)
 	if err != nil {
-		return false, fmt.Errorf("snapshotting pack.toml: %w", err)
+		return fmt.Errorf("snapshotting pack.toml: %w", err)
 	}
-	citySnap, err := snapshotOptionalFile(fs, cityTomlPath)
+	citySnap, err := snapshotResolvedFile(fs, cityTomlPath)
 	if err != nil {
-		return false, fmt.Errorf("snapshotting city.toml: %w", err)
+		return fmt.Errorf("snapshotting city.toml: %w", err)
 	}
 	snapshots := []fileSnapshot{packSnap, citySnap}
 
 	rollback := func(action string, cause error) error {
 		if restoreErr := restoreSnapshots(fs, snapshots); restoreErr != nil {
-			return fmt.Errorf("%s: %v (rollback failed: %v)", action, cause, restoreErr)
+			return fmt.Errorf("%s: %w (rollback failed: %w)", action, cause, restoreErr)
 		}
 		return fmt.Errorf("%s: %w", action, cause)
 	}
 
-	changed := false
 	manifest, err := loadCityPackManifestFS(fs, cityPath)
 	if err != nil {
-		return false, err
+		return err
 	}
 	packChanged := bump(manifest.Imports)
 	defaultRigChanged := bump(manifest.Defaults.Rig.Imports)
 	if packChanged || defaultRigChanged {
 		if err := writeCityPackManifest(fs, cityPath, manifest); err != nil {
-			return false, rollback("writing pack.toml", err)
+			return rollback("writing pack.toml", err)
 		}
-		changed = true
 	}
 
 	if _, err := fs.Stat(cityTomlPath); err != nil {
 		if os.IsNotExist(err) {
-			return changed, nil
+			return nil
 		}
-		return false, err
+		return err
 	}
 	cfg, err := loadCityImportManifestFS(fs, cityPath)
 	if err != nil {
-		return false, err
+		return err
 	}
 	cityChanged := false
 	for i := range cfg.Rigs {
@@ -237,11 +235,10 @@ func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) (bool, error) {
 	}
 	if cityChanged {
 		if err := writeCityImportManifestFS(fs, cityPath, cfg); err != nil {
-			return false, rollback("writing city.toml", err)
+			return rollback("writing city.toml", err)
 		}
-		changed = true
 	}
-	return changed, nil
+	return nil
 }
 
 func defaultWave1PublicPackImports(packNames []string) (map[string]wave1PublicPackImportTarget, error) {
@@ -365,11 +362,11 @@ func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[s
 
 	packTomlPath := filepath.Join(cityPath, "pack.toml")
 	cityTomlPath := filepath.Join(cityPath, "city.toml")
-	packSnap, err := snapshotOptionalFile(fs, packTomlPath)
+	packSnap, err := snapshotResolvedFile(fs, packTomlPath)
 	if err != nil {
 		return false, fmt.Errorf("snapshotting pack.toml: %w", err)
 	}
-	citySnap, err := snapshotOptionalFile(fs, cityTomlPath)
+	citySnap, err := snapshotResolvedFile(fs, cityTomlPath)
 	if err != nil {
 		return false, fmt.Errorf("snapshotting city.toml: %w", err)
 	}
@@ -377,7 +374,7 @@ func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[s
 
 	rollback := func(action string, cause error) error {
 		if restoreErr := restoreSnapshots(fs, snapshots); restoreErr != nil {
-			return fmt.Errorf("%s: %v (rollback failed: %v)", action, cause, restoreErr)
+			return fmt.Errorf("%s: %w (rollback failed: %w)", action, cause, restoreErr)
 		}
 		return fmt.Errorf("%s: %w", action, cause)
 	}

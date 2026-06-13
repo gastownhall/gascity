@@ -888,7 +888,7 @@ version = "`+dummyOldPin+`"
 
 	fs := errorInjectingFS{failWritePath: "city.toml"}
 
-	_, err := rewriteSupersededBundledPinsFS(fs, cityDir)
+	err := rewriteSupersededBundledPinsFS(fs, cityDir)
 	if err == nil || !strings.Contains(err.Error(), "injected write failure") {
 		t.Fatalf("expected injected write failure error, got: %v", err)
 	}
@@ -902,4 +902,3 @@ version = "`+dummyOldPin+`"
 		t.Fatalf("pack.toml was NOT rolled back, missing old pin:\n%s", packData)
 	}
 }
-
