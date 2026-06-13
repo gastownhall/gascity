@@ -664,7 +664,16 @@ func unclaimWorkAssignedToRetiredSessionBead(
 						continue
 					}
 					seen[key] = struct{}{}
-					update := beads.UpdateOpts{Assignee: &empty}
+					// The session owning this work is retired, so the work is fully
+					// detached (not preserved to a new assignee). Clear the stale
+					// session-affinity metadata too, or the next claim re-pins the
+					// reopened work onto the dead session's continuation group — the
+					// same stale-affinity bug fixed on the retry, reopen, orphan-pool,
+					// and closed-session release paths.
+					update := beads.UpdateOpts{
+						Assignee: &empty,
+						Metadata: withClearedSessionAffinityMetadata(nil),
+					}
 					// Clearing assignee on an in_progress bead leaves it invisible to
 					// the work_query: Tier 1 needs an assignee match, Tiers 2/3 only
 					// match "ready" status. Reset to "open" so a fresh worker can
@@ -675,7 +684,7 @@ func unclaimWorkAssignedToRetiredSessionBead(
 					if fallbackRoute != "" &&
 						strings.TrimSpace(item.Metadata[beadmeta.RunTargetMetadataKey]) == "" &&
 						strings.TrimSpace(item.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
-						update.Metadata = map[string]string{beadmeta.RunTargetMetadataKey: fallbackRoute}
+						update.Metadata[beadmeta.RunTargetMetadataKey] = fallbackRoute
 					}
 					if err := ownerStore.Update(item.ID, update); err != nil {
 						fmt.Fprintf(stderr, "session beads: unclaiming work %s assigned to retired session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
@@ -2359,7 +2368,16 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 					continue
 				}
 				seenWork[item.ID] = struct{}{}
-				update := beads.UpdateOpts{Assignee: &empty}
+				// The session owning this work is closing, so the work is
+				// fully detached (not preserved to a new assignee). Clear the
+				// stale session-affinity metadata too, or the next claim
+				// re-pins the reopened work onto the dead session's group —
+				// the same stale-affinity bug fixed on the retry, reopen, and
+				// orphan-pool release paths.
+				update := beads.UpdateOpts{
+					Assignee: &empty,
+					Metadata: withClearedSessionAffinityMetadata(nil),
+				}
 				if item.Status == "in_progress" {
 					update.Status = &openStatus
 				}

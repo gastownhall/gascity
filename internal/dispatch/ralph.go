@@ -1035,10 +1035,10 @@ func clearSessionAffinityMetadata(meta map[string]string) {
 	if meta == nil {
 		return
 	}
-	for _, key := range []string{
-		beadmeta.SessionAffinityMetadataKey,
-		beadmeta.ContinuationGroupMetadataKey,
-	} {
+	// Delete (rather than empty-string clear, as cmd/gc does) because this map
+	// is handed to store.Create on the cloned attempt, where an absent key is
+	// the natural representation of "no affinity".
+	for _, key := range beadmeta.SessionAffinityMetadataKeys {
 		delete(meta, key)
 	}
 }

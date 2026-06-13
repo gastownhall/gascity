@@ -331,3 +331,23 @@ var KnownMetadataKeys = []string{
 var KnownMetadataPrefixes = []string{
 	FormulaVarPrefix,
 }
+
+// SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a
+// particular live session through continuation-group routing. They must be
+// cleared together whenever work is rerouted off its original session without a
+// preserved assignee (retry-to-pool, reopen-source, orphan/closed/retired-session
+// release); otherwise a later claim re-vacuums the bead onto an unrelated
+// session via the stale group. Both cmd/gc and internal/dispatch consume this
+// single list so a new affinity key cannot silently fix one clear path while
+// leaving another stale.
+//
+// Of these keys, ContinuationGroupMetadataKey is the active routing vector: the
+// hook claim path reads it to vacuum open, unassigned sibling work onto the
+// claiming session. SessionAffinityMetadataKey is currently an advisory marker —
+// it is written (e.g. internal/dispatch/drain.go) but no Go routing path reads
+// it yet, so it is cleared alongside the group for hygiene and future-proofing
+// rather than because it gates routing today.
+var SessionAffinityMetadataKeys = []string{
+	SessionAffinityMetadataKey,
+	ContinuationGroupMetadataKey,
+}
