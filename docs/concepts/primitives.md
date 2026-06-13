@@ -9,6 +9,8 @@ Gas City is built from **nine concepts** — *five* irreducible *primitives* and
 
 Everything `gc` does, from slinging a single task to running a fleet of pooled agents, is some combination of these nine. Read this page after the overview, or jump straight to the concept you need.
 
+![The nine concepts in two tiers: five irreducible primitives along the bottom — Session, Beads Store (the universal persistence substrate), Event Bus (the universal observation substrate), Config (the universal activation mechanism), and Prompt Templates — and four derived mechanisms composed from them along the top — Messaging, Formulas & Molecules, Dispatch (Sling), and Health Patrol. The derived mechanisms add no new storage or observation; they compose the five primitives.](../diagrams/excalidraw-rendered/nine-concepts.svg)
+
 <Note>
 This is reference material, not a tutorial. Each section explains what a concept is, what it does for you, and shows one snippet you can copy-paste. For the guided, end-to-end path, start with the [Tutorials](/tutorials/index).
 </Note>
