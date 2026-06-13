@@ -8,18 +8,20 @@ The loop runs **inside the supervisor process** when opted in via
 
 ## Current wiring status
 
-**Observe-only mode (as of this release).** The SQL connection to Dolt
-(`OpenDoltOps`) and the backup runner (`OpenDoltBackup`) are not yet
-wired in the production controller. When `[maintenance.dolt]
-enabled=true`, the loop runs on schedule, emits events, and records
-history — but steps 2 (snapshot) and 3 (compaction) below are no-ops.
-The supervisor logs `store-maintenance: enabled in observe-only mode
-(snapshot and DOLT_GC not yet wired)` at startup.
+**Compaction is wired (active mode).** The SQL connection to Dolt
+(`OpenDoltOps`) is wired in the production controller, so step 3 below
+runs `CALL DOLT_GC()` against the live store. On a Dolt-backed city the
+supervisor logs `store-maintenance: loop started interval=<I> mode=active`
+at startup; on a non-Dolt (Postgres) backend it logs `mode=observe-only
+(CALL DOLT_GC not wired — non-Dolt backend)` and the GC step no-ops.
 
-Production wiring of the snapshot and GC factories will land in a
-follow-up. Until then, `gc maintenance status` and the events are
-meaningful for scheduling/alert testing, but a `gc.store.maintenance.done`
-event does **not** imply compaction occurred.
+**The pre-gc snapshot is not yet wired.** The backup runner
+(`OpenDoltBackup`) is still nil, so step 2 (snapshot) is a no-op and the
+*Emergency rollback* section below has no snapshot to restore from until
+that lands in a follow-up. This matches the prior interim behavior (a
+launchd `dolt-gc.sh` that GC'd without snapshotting); the supervisor now
+owns the GC on the same risk profile, gated on store size and verified by
+the per-database smoke test.
 
 ## What this runs
 
@@ -30,10 +32,20 @@ For each scheduled cycle the supervisor:
 2. **Snapshot** — `dolt backup sync` to
    `<city>/.beads/dolt-backups/current/`, then atomically rotates
    `current/` to `success/<timestamp>/` (see *Snapshot layout* below).
-3. **Compaction** — `CALL DOLT_GC()` against the managed Dolt server,
-   bounded by `gc_timeout` (default `10m`).
-4. **Smoke test** — `SELECT COUNT(*) FROM issues` (5 s timeout) to
-   confirm the store is readable.
+   *(Not yet wired — see Current wiring status.)*
+3. **Compaction** — a per-database sweep. Each Dolt database is a
+   separate repository with its own chunk store, so the loop runs
+   `SHOW DATABASES`, drops the system schemas, and runs `CALL DOLT_GC()`
+   against every remaining database (`hq` + each rig), each bounded by
+   `gc_timeout` (default `10m`). The whole sweep is skipped when the
+   on-disk store is below `min_store_mb` (default `1024` MiB ≈ 1 GiB),
+   because GC on a small store reclaims little; a skipped cycle still
+   records a `done` event with `before_bytes == after_bytes`.
+4. **Smoke test** — after GC'ing a database, `SELECT COUNT(*) FROM issues`
+   against it (5 s timeout) confirms the store is still queryable. A SQL
+   error fails the cycle (`stage=smoke-test`); a zero count is healthy —
+   an empty rig is a valid post-gc state. Per-database failures are
+   aggregated, and the failing database names appear in the error.
 5. **Prune** — keep the 3 newest successful snapshots and the most
    recent failed snapshot; older entries are removed. Prune errors
    are logged but do not regress a successful run.
@@ -56,9 +68,10 @@ until they explicitly opt in.
    [maintenance.dolt]
    enabled = true
    # All other keys are optional; defaults shown:
-   # interval   = "168h"   # weekly
-   # gc_timeout = "10m"
-   # alert_to   = ""       # no alert until set; see "Alerting" below
+   # interval     = "168h"  # weekly
+   # gc_timeout   = "10m"
+   # min_store_mb = 1024     # skip GC below ~1 GiB; 0 disables the gate
+   # alert_to     = ""       # no alert until set; see "Alerting" below
    ```
 
 2. Restart the controller so the loop picks up the new config:
@@ -255,8 +268,9 @@ events remain visible via `gc events`.
 ## References
 
 - Implementation:
-  - `internal/supervisor/maintenance.go` (loop + lease)
+  - `internal/supervisor/maintenance.go` (loop + lease + per-database GC sweep)
   - `internal/supervisor/maintenance_snapshot.go` (backup + retention)
+  - `cmd/gc/maintenance_dolt_ops.go` (production GC connection + size probe wiring)
   - `cmd/gc/cmd_maintenance.go` (CLI)
   - `cmd/gc/store_health.go` (status block)
 - Dolt: `dolt gc`, `dolt backup`, `dolt clone`

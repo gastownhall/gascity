@@ -521,8 +521,13 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 		DiskFreeBytes:     doltContainerFreeBytesFunc,
 		DiskMinFreeBytes:  doltDiskMinFreeBytes(),
 		DiskWarnFreeBytes: doltDiskWarnFreeBytes(),
+		OpenDoltOps:       maintenanceDoltOpsFactory(cityPath),
+		StoreSizeBytes:    maintenanceStoreSizeFunc(cityPath),
 	}
-	active := deps.OpenDoltOps != nil && deps.OpenDoltBackup != nil
+	// "active" tracks whether CALL DOLT_GC is wired (the primary maintenance
+	// action). The backup snapshot is a separate, optional stage that no-ops
+	// when OpenDoltBackup is nil, so it does not gate the active banner.
+	active := deps.OpenDoltOps != nil
 	// Always log the loop's startup so operators can confirm initialization
 	// (and its mode) from the supervisor log, not just the observe-only case.
 	fmt.Fprintln(os.Stderr, maintenanceStartupLine(cfg.Maintenance.Dolt.IntervalOrDefault(), active)) //nolint:errcheck // best-effort stderr
@@ -543,7 +548,7 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 func maintenanceStartupLine(interval time.Duration, active bool) string {
 	mode := "active"
 	if !active {
-		mode = "observe-only (snapshot and DOLT_GC not yet wired)"
+		mode = "observe-only (CALL DOLT_GC not wired — non-Dolt backend)"
 	}
 	return fmt.Sprintf("store-maintenance: loop started interval=%s mode=%s", interval, mode)
 }

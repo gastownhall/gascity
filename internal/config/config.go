@@ -2422,6 +2422,14 @@ type DoltMaintenance struct {
 	// GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.
 	// Defaults to 10m.
 	GCTimeout string `toml:"gc_timeout,omitempty" jsonschema:"default=10m"`
+	// MinStoreMB gates CALL DOLT_GC() on the on-disk store size: the GC
+	// stage is skipped when the store is smaller than this many mebibytes,
+	// because dolt_gc on a small store reclaims little and is not worth the
+	// maintenance lease. Nil (unset) defaults to 1024 (≈1 GiB), the size at
+	// which observed store bloat begins to degrade query latency. Set to 0
+	// to disable the gate and run GC on every scheduled cycle regardless of
+	// size. Negative values are treated as 0 (disabled).
+	MinStoreMB *int `toml:"min_store_mb,omitempty" jsonschema:"default=1024"`
 }
 
 // IntervalOrDefault returns the parsed Interval, falling back to 168h
@@ -2435,6 +2443,26 @@ func (d DoltMaintenance) IntervalOrDefault() time.Duration {
 // when unset or unparseable.
 func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
 	return durationOr(d.GCTimeout, 10*time.Minute)
+}
+
+// defaultMinStoreMB is the store-size floor (in mebibytes) applied when
+// MinStoreMB is unset. 1024 MiB (≈1 GiB) matches the interim launchd
+// dolt-gc threshold and the point at which store bloat begins to slow
+// queries.
+const defaultMinStoreMB = 1024
+
+// MinStoreBytesOrDefault returns the on-disk store-size floor in bytes
+// below which the GC stage is skipped. A nil MinStoreMB defaults to
+// 1024 MiB (≈1 GiB); an explicit 0 or negative value disables the gate
+// (returns 0, meaning "always GC").
+func (d DoltMaintenance) MinStoreBytesOrDefault() int64 {
+	if d.MinStoreMB == nil {
+		return int64(defaultMinStoreMB) << 20
+	}
+	if *d.MinStoreMB <= 0 {
+		return 0
+	}
+	return int64(*d.MinStoreMB) << 20
 }
 
 // DaemonConfig holds controller daemon settings.

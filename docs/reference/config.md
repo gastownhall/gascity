@@ -375,6 +375,7 @@ DoltMaintenance configures the periodic Dolt store maintenance loop.
 | `interval` | string |  | `168h` | Interval is the cadence between maintenance runs as a duration string (e.g., "168h"). Defaults to 168h (weekly). |
 | `alert_to` | string |  |  | AlertTo is the agent identity to mail on failure (e.g., "gascity/mayor"). Empty disables alert mail. |
 | `gc_timeout` | string |  | `10m` | GCTimeout is the ceiling for CALL DOLT_GC() as a duration string. Defaults to 10m. |
+| `min_store_mb` | integer |  | `1024` | MinStoreMB gates CALL DOLT_GC() on the on-disk store size: the GC stage is skipped when the store is smaller than this many mebibytes, because dolt_gc on a small store reclaims little and is not worth the maintenance lease. Nil (unset) defaults to 1024 (≈1 GiB), the size at which observed store bloat begins to degrade query latency. Set to 0 to disable the gate and run GC on every scheduled cycle regardless of size. Negative values are treated as 0 (disabled). |
 
 ## EventsConfig
 

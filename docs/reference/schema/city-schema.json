@@ -1490,6 +1490,11 @@
           "type": "string",
           "description": "GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.\nDefaults to 10m.",
           "default": "10m"
+        },
+        "min_store_mb": {
+          "type": "integer",
+          "description": "MinStoreMB gates CALL DOLT_GC() on the on-disk store size: the GC\nstage is skipped when the store is smaller than this many mebibytes,\nbecause dolt_gc on a small store reclaims little and is not worth the\nmaintenance lease. Nil (unset) defaults to 1024 (≈1 GiB), the size at\nwhich observed store bloat begins to degrade query latency. Set to 0\nto disable the gate and run GC on every scheduled cycle regardless of\nsize. Negative values are treated as 0 (disabled).",
+          "default": 1024
         }
       },
       "additionalProperties": false,
