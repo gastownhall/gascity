@@ -303,6 +303,42 @@ func TestProviderLifecycleProcessEnvPropagatesArchiveLevel(t *testing.T) {
 	}
 }
 
+func TestProviderLifecycleProcessEnvPropagatesAutoGCEnabled(t *testing.T) {
+	cityPath := t.TempDir()
+	normPath := normalizePathForCompare(cityPath)
+
+	autoGC := false
+	cityDoltConfigs.Store(normPath, config.DoltConfig{AutoGCEnabled: &autoGC})
+	t.Cleanup(func() { cityDoltConfigs.Delete(normPath) })
+
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	if got := env["GC_DOLT_AUTO_GC_ENABLED"]; got != "false" {
+		t.Fatalf("GC_DOLT_AUTO_GC_ENABLED = %q, want %q", got, "false")
+	}
+}
+
+func TestProviderLifecycleProcessEnvOmitsAutoGCEnabledWhenNil(t *testing.T) {
+	cityPath := t.TempDir()
+	normPath := normalizePathForCompare(cityPath)
+
+	cityDoltConfigs.Store(normPath, config.DoltConfig{})
+	t.Cleanup(func() { cityDoltConfigs.Delete(normPath) })
+
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	for _, entry := range envEntries {
+		if strings.HasPrefix(entry, "GC_DOLT_AUTO_GC_ENABLED=") {
+			t.Fatalf("GC_DOLT_AUTO_GC_ENABLED should not be set when AutoGCEnabled is nil, got %q", entry)
+		}
+	}
+}
+
 func TestProviderLifecycleProcessEnvPropagatesManagedDoltListenerOverrides(t *testing.T) {
 	cityPath := t.TempDir()
 	normPath := normalizePathForCompare(cityPath)
@@ -374,6 +410,25 @@ func TestCityDoltConfigHasLifecycleFieldsRecognizesDoltLockReleaseTimeout(t *tes
 	// entry and the value never reaches providerLifecycleProcessEnv.
 	if !cityDoltConfigHasLifecycleFields(config.DoltConfig{DoltLockReleaseTimeout: "90s"}) {
 		t.Fatal("cityDoltConfigHasLifecycleFields must recognize DoltLockReleaseTimeout")
+	}
+	if cityDoltConfigHasLifecycleFields(config.DoltConfig{}) {
+		t.Fatal("cityDoltConfigHasLifecycleFields must stay false for an empty config")
+	}
+}
+
+func TestCityDoltConfigHasLifecycleFieldsRecognizesAutoGCEnabled(t *testing.T) {
+	// A city that sets only [dolt].auto_gc_enabled must register its dolt
+	// config — otherwise startBeadsLifecycle clears the registry entry and
+	// the documented auto_gc_enabled=false rollback never reaches
+	// providerLifecycleProcessEnv, so the shell fallback silently re-enables
+	// auto-GC. Both an explicit false and an explicit true must register.
+	autoGCOff := false
+	if !cityDoltConfigHasLifecycleFields(config.DoltConfig{AutoGCEnabled: &autoGCOff}) {
+		t.Fatal("cityDoltConfigHasLifecycleFields must recognize AutoGCEnabled=false")
+	}
+	autoGCOn := true
+	if !cityDoltConfigHasLifecycleFields(config.DoltConfig{AutoGCEnabled: &autoGCOn}) {
+		t.Fatal("cityDoltConfigHasLifecycleFields must recognize AutoGCEnabled=true")
 	}
 	if cityDoltConfigHasLifecycleFields(config.DoltConfig{}) {
 		t.Fatal("cityDoltConfigHasLifecycleFields must stay false for an empty config")
@@ -10451,6 +10506,47 @@ func TestStartBeadsLifecycleRegistersArchiveLevelOnlyDoltConfig(t *testing.T) {
 	}
 	if got := env["GC_DOLT_ARCHIVE_LEVEL"]; got != "1" {
 		t.Fatalf("GC_DOLT_ARCHIVE_LEVEL = %q, want 1", got)
+	}
+}
+
+func TestStartBeadsLifecycleRegistersAutoGCOnlyDoltConfig(t *testing.T) {
+	// A city.toml whose [dolt] table sets only auto_gc_enabled = false (the
+	// documented opt-out and the documented rollback for the auto-GC default
+	// flip) must register its dolt config so the override reaches the managed
+	// dolt server. Without AutoGCEnabled in cityDoltConfigHasLifecycleFields,
+	// startBeadsLifecycle clears the registry entry and
+	// providerLifecycleProcessEnvFromBase never projects
+	// GC_DOLT_AUTO_GC_ENABLED, so the shell fallback re-enables auto-GC.
+	realCity := t.TempDir()
+	aliasRoot := t.TempDir()
+	aliasCity := filepath.Join(aliasRoot, "city-link")
+	if err := os.Symlink(realCity, aliasCity); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", aliasCity)
+	t.Setenv("GC_DOLT", "skip")
+
+	autoGCOff := false
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Dolt:      config.DoltConfig{AutoGCEnabled: &autoGCOff},
+	}
+	if err := startBeadsLifecycle(aliasCity, "test-city", cfg, io.Discard); err != nil {
+		t.Fatalf("startBeadsLifecycle: %v", err)
+	}
+	t.Cleanup(func() { cityDoltConfigs.Delete(normalizePathForCompare(realCity)) })
+
+	envEntries := mustProviderLifecycleProcessEnv(t, realCity, "exec:"+gcBeadsBdScriptPath(realCity))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	if got := env["GC_DOLT_AUTO_GC_ENABLED"]; got != "false" {
+		t.Fatalf("GC_DOLT_AUTO_GC_ENABLED = %q, want false", got)
 	}
 }
 

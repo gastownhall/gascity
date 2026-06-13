@@ -99,6 +99,7 @@ func cityDoltConfigHasLifecycleFields(cfg config.DoltConfig) bool {
 	return cfg.Host != "" ||
 		cfg.Port != 0 ||
 		cfg.ArchiveLevel != nil ||
+		cfg.AutoGCEnabled != nil ||
 		cfg.MaxConnections != 0 ||
 		cfg.ReadTimeoutMillis != 0 ||
 		cfg.WriteTimeoutMillis != 0 ||
