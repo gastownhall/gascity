@@ -1,4 +1,7 @@
-# Gas City Architecture
+---
+title: Architecture Invariants
+description: The normative architectural invariants Gas City has converged on — object model at the center, typed wire end-to-end, CLI and API as projections.
+---
 
 This spec captures the architectural invariants Gas City has
 converged on. It is a normative document: future contributions that

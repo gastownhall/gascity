@@ -4,12 +4,14 @@ description: How docs/ is structured, named, registered, generated, and gated �
 ---
 
 `docs/` is the source tree for the published Mintlify site
-(docs.gascityhall.com). `engdocs/` is GitHub-only contributor material and
-is never published; repo-root `specs/` (e.g. `specs/architecture.md`) is the
-internal engineering spec tree and is unrelated to `docs/reference/specs/`.
-This page covers `docs/`: which section a page belongs in, how to name it,
-how to register it, which pages are generated, and which gates must stay
-green.
+(docs.gascityhall.com). `engdocs/` is GitHub-only contributor material —
+architecture, design, and contributor guides — and is never published.
+Normative **user-facing** specifications (pack and formula specs) live under
+`docs/reference/specs/` and ship to readers; **internal** architecture
+invariants and subsystem docs live under `engdocs/architecture/`. There is no
+repo-root `specs/` tree. This page covers `docs/`: which section a page
+belongs in, how to name it, how to register it, which pages are generated,
+and which gates must stay green.
 
 ## Section Taxonomy
 
@@ -112,11 +114,60 @@ Notes:
   `TestSchemaDownloadLinksUseGitHubRaw` checks the URL form and that each
   linked artifact is committed.
 
+## Media: Prose, Code, and Images
+
+A page teaches with three media, and the best pages use all three
+deliberately: **prose** for the why and the judgment, **code/CLI** for the
+exact, copy-pasteable truth (validated against the binary — see Gates), and
+**images** for structure and flow that words describe poorly. Treat them as
+complementary, not interchangeable. If a concept is a shape — a graph, a
+tree, a fan-out, a lifecycle, a layering — prose is the wrong primary medium
+for it, and a wall of prose or ASCII art is a signal that a diagram is owed.
+
+**When a diagram earns its place.** Add one when at least one is true:
+
+- The thing is inherently spatial or topological: bead graphs, the v1
+  molecule tree vs the v2 flat workflow, drain fan-out into unit convoys,
+  convoy `tracks` membership, the city/controller/store structure.
+- A reader must hold several moving parts at once to follow the prose
+  (a multi-actor flow, a multi-stage pipeline, a state lifecycle).
+- The page is already carrying the picture as ASCII art or a long
+  "first… then… which then…" paragraph. That is a diagram in disguise;
+  replace it (or pair it) with a real one.
+
+**When NOT to.** Skip the diagram when prose or a code block already conveys
+it cleanly: a two-step sequence, a field table, a single command and its
+output. A decorative diagram that restates a sentence adds maintenance cost
+(it can drift from the code) without adding understanding. Reference pages
+that are exhaustive field tables generally do not need diagrams; concept,
+architecture, and "how the pieces fit" pages usually do.
+
+**Why this matters here specifically.** Gas City's load-bearing concepts are
+graph-shaped — formulas compile to bead graphs; convoys *are* graphs of
+related work. Those are exactly the concepts that prose serves worst, so the
+concept/architecture pages and the formula specs are where diagrams pay off
+most. A diagram that drifts from the code is worse than none, so keep each
+one anchored to a real, current shape (the same standard as a code example).
+
+**How — the toolchain (do not improvise a medium).** Excalidraw is the
+adopted standard; the decision and the rationale are in
+[Adopt Excalidraw](../design/excalidraw-diagrams.md), and the end-to-end
+mechanics (MCP authoring, the shared pastel palette, `make
+diagrams-excalidraw`, committing source + rendered SVG) are in
+[Excalidraw Setup](excalidraw-setup.md). Use the shared palette so recurring
+roles (entry, compute, persistence, success, error) read consistently across
+the corpus. Mermaid inline remains an acceptable fallback only for simple or
+sequence diagrams where the no-build-step advantage outweighs the aesthetic.
+Both the `.excalidraw` source and the rendered `.svg` are committed; pages
+reference the SVG (`/diagrams/excalidraw-rendered/<name>.svg`) with
+descriptive alt text. Screenshots are for UI/terminal output that genuinely
+needs to be shown; keep them current.
+
 ## Gates
 
 | Gate | When it runs | What it checks |
 |---|---|---|
-| `make check-docs` (`go test ./test/docsync`) | per-PR CI; pre-commit on staged docs | Tutorial command/txtar sync (today: tutorial 01 vs `cmd/gc/testdata/01-hello-gas-city.txtar`); schema download-link integrity; generated-page freshness; nav↔file correspondence; file-level link resolution across all doc trees (docs, engdocs, contrib, release-gates, specs); bans on known-stale references |
+| `make check-docs` (`go test ./test/docsync`) | per-PR CI; pre-commit on staged docs | Tutorial command/txtar sync (today: tutorial 01 vs `cmd/gc/testdata/01-hello-gas-city.txtar`); schema download-link integrity; generated-page freshness; nav↔file correspondence; file-level link resolution across all doc trees (docs, engdocs, contrib, release-gates); bans on known-stale references |
 | Tutorial goldens (`make test-tutorial-goldens`; `//go:build acceptance_c`; `test/acceptance/tutorial_goldens/`) | RC-gate CI (sharded); before each release | Executes the tutorial pages end-to-end with real inference. `manifests_test.go` pins the exact command sequence of every tutorial page; the per-tutorial tests assert outcomes. Tutorial edits and golden assertions move in lockstep — change a tutorial command and you must update the manifest and the matching `tutorialNN_test.go` |
 | Anchor hygiene | manual / review | docsync resolves links at file level only (fragments are stripped) — when citing a spec section anchor (`#3-runtime`), verify the heading exists |
 | Local preview | manual | `./mint.sh dev` from the repo root. Mintlify requires Node ≤ 24; the wrapper falls back to Homebrew `node@22` when the ambient Node is too new |

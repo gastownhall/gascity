@@ -59,6 +59,13 @@ finalize — while agents only ever run plain work beads. Per-step routing
 (`gc.run_target`) is resolved at dispatch, so one workflow can spread its
 steps across agents and pools.
 
+![Side-by-side comparison of the two contracts. Left, v1: a molecule root
+that contains its step beads as parent-child children, so a step that needs
+the root waits for all of them. Right, v2: a workflow root plus independent
+step beads linked only by blocking-dependency edges, ending in a
+workflow-finalize step that the root blocks on — the root goes ready only
+when the whole graph completes.](/diagrams/excalidraw-rendered/formula-v1-vs-v2.svg)
+
 In reader terms: under v1, the agent you sling to is the engine. Under v2,
 the controller is the engine and agents are interchangeable workers that the
 engine feeds.
