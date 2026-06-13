@@ -42,7 +42,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers. Template variables same as session_setup."
+          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers. Template variables same as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
         },
         "prompt_template": {
           "type": "string",
@@ -212,18 +212,18 @@
             "type": "string"
           },
           "type": "array",
-          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.\nCommands run in gc's process (not inside the agent session) via sh -c."
+          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.\nCommands run in gc's process (not inside the agent session) via sh -c.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
         },
         "session_setup_script": {
           "type": "string",
-          "description": "SessionSetupScript is the path to a script run after session_setup commands.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root.\nThe script receives context via environment variables (GC_SESSION plus\nexisting GC_* vars)."
+          "description": "SessionSetupScript is the path to a script run after session_setup commands.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root.\nThe script receives context via environment variables (GC_SESSION plus\nexisting GC_* vars). On failure, the last 4 KiB of the script's\nstdout/stderr is included in the error and may appear in controller\nand reconciler logs; avoid set -x or echoing secrets in setup scripts."
         },
         "session_live": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "SessionLive is a list of shell commands that are safe to re-apply\nwithout restarting the agent. Run at startup (after session_setup)\nand re-applied on config change without triggering a restart.\nMust be idempotent. Typical use: tmux theming, keybindings, status bars.\nSame template placeholders as session_setup."
+          "description": "SessionLive is a list of shell commands that are safe to re-apply\nwithout restarting the agent. Run at startup (after session_setup)\nand re-applied on config change without triggering a restart.\nMust be idempotent. Typical use: tmux theming, keybindings, status bars.\nSame template placeholders as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
         },
         "overlay_dir": {
           "type": "string",

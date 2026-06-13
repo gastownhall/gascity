@@ -754,6 +754,7 @@ const (
 	readyProbeSlack          = 5 * time.Second
 	startupPaneCaptureLines  = 80
 	setupCommandOutputLimit  = 4096
+	setupCommandWaitDelay    = 2 * time.Second
 )
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
@@ -839,7 +840,17 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	stderr := newCommandOutputTail(setupCommandOutputLimit)
 	c.Stdout = stdout
 	c.Stderr = stderr
+	// WaitDelay ensures Go forcibly closes the capture pipes after the
+	// command exits or the timeout fires, even if background descendants
+	// spawned by the command still hold them open.
+	c.WaitDelay = setupCommandWaitDelay
 	if err := c.Run(); err != nil {
+		// ErrWaitDelay means the command itself exited successfully and
+		// only the force-closed pipes ended the wait: a setup command that
+		// daemonizes a child holding inherited stdio and exits 0 succeeded.
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return nil
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
@@ -887,13 +898,18 @@ func (b *commandOutputTail) Detail(label string) string {
 }
 
 func setupCommandFailure(err error, stdout, stderr *commandOutputTail) error {
-	if detail := stderr.Detail("stderr"); detail != "" {
-		return fmt.Errorf("%w; %s", err, detail)
+	stderrDetail := stderr.Detail("stderr")
+	stdoutDetail := stdout.Detail("stdout")
+	switch {
+	case stderrDetail != "" && stdoutDetail != "":
+		return fmt.Errorf("%w; %s; %s", err, stderrDetail, stdoutDetail)
+	case stderrDetail != "":
+		return fmt.Errorf("%w; %s", err, stderrDetail)
+	case stdoutDetail != "":
+		return fmt.Errorf("%w; %s", err, stdoutDetail)
+	default:
+		return err
 	}
-	if detail := stdout.Detail("stdout"); detail != "" {
-		return fmt.Errorf("%w; %s", err, detail)
-	}
-	return err
 }
 
 func startupReadyProbeTimeout(cfg runtime.Config) time.Duration {

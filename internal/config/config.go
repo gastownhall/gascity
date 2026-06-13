@@ -2847,6 +2847,9 @@ type Agent struct {
 	// PreStart is a list of shell commands run before session creation.
 	// Commands run on the target filesystem: locally for tmux, inside the
 	// pod/container for exec providers. Template variables same as session_setup.
+	// On failure, the last 4 KiB of the command's stdout/stderr is included
+	// in the error and may appear in controller and reconciler logs; avoid
+	// set -x or echoing secrets in setup commands.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate is the path to this agent's prompt template file.
 	// Relative paths resolve against the city directory.
@@ -3006,18 +3009,26 @@ type Agent struct {
 	// {{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},
 	// {{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.
 	// Commands run in gc's process (not inside the agent session) via sh -c.
+	// On failure, the last 4 KiB of the command's stdout/stderr is included
+	// in the error and may appear in controller and reconciler logs; avoid
+	// set -x or echoing secrets in setup commands.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript is the path to a script run after session_setup commands.
 	// Relative paths resolve against the declaring config file's directory
 	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	// The script receives context via environment variables (GC_SESSION plus
-	// existing GC_* vars).
+	// existing GC_* vars). On failure, the last 4 KiB of the script's
+	// stdout/stderr is included in the error and may appear in controller
+	// and reconciler logs; avoid set -x or echoing secrets in setup scripts.
 	SessionSetupScript string `toml:"session_setup_script,omitempty"`
 	// SessionLive is a list of shell commands that are safe to re-apply
 	// without restarting the agent. Run at startup (after session_setup)
 	// and re-applied on config change without triggering a restart.
 	// Must be idempotent. Typical use: tmux theming, keybindings, status bars.
 	// Same template placeholders as session_setup.
+	// On failure, the last 4 KiB of the command's stdout/stderr is included
+	// in the error and may appear in controller and reconciler logs; avoid
+	// set -x or echoing secrets in setup commands.
 	SessionLive []string `toml:"session_live,omitempty"`
 	// OverlayDir is a directory whose contents are recursively copied (additive)
 	// into the agent's working directory at startup. Existing files are not

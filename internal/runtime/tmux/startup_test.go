@@ -1587,6 +1587,151 @@ func TestRunSetupCommandIncludesStderrOnFailure(t *testing.T) {
 	}
 }
 
+func TestRunSetupCommandFallsBackToStdoutDetail(t *testing.T) {
+	ops := &tmuxStartOps{tm: &Tmux{}}
+
+	err := ops.runSetupCommand(
+		context.Background(),
+		"printf 'wrote state to /tmp/x'; exit 4",
+		map[string]string{},
+		time.Second,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "exit status 4") {
+		t.Fatalf("error = %q, want exit status", err)
+	}
+	if !strings.Contains(err.Error(), "stdout: wrote state to /tmp/x") {
+		t.Fatalf("error = %q, want stdout detail", err)
+	}
+}
+
+func TestRunSetupCommandIncludesBothStreamDetails(t *testing.T) {
+	ops := &tmuxStartOps{tm: &Tmux{}}
+
+	err := ops.runSetupCommand(
+		context.Background(),
+		"printf 'actionable stdout'; printf 'noisy stderr' >&2; exit 5",
+		map[string]string{},
+		time.Second,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "stderr: noisy stderr") {
+		t.Fatalf("error = %q, want stderr detail", err)
+	}
+	if !strings.Contains(err.Error(), "stdout: actionable stdout") {
+		t.Fatalf("error = %q, want stdout detail", err)
+	}
+}
+
+func TestRunSetupCommandTimeoutMatchesDeadlineExceeded(t *testing.T) {
+	ops := &tmuxStartOps{tm: &Tmux{}}
+
+	err := ops.runSetupCommand(
+		context.Background(),
+		"echo started; sleep 30",
+		map[string]string{},
+		500*time.Millisecond,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %q, want errors.Is DeadlineExceeded", err)
+	}
+	if !strings.Contains(err.Error(), "stdout: started") {
+		t.Fatalf("error = %q, want partial output captured before timeout", err)
+	}
+}
+
+// TestRunSetupCommandBackgroundChildSucceedsBounded is the regression for
+// setup commands that daemonize a child inheriting stdio: without
+// Cmd.WaitDelay the capture pipes never reach EOF and Run blocks until the
+// descendant exits, far past setup_timeout. The command itself exits 0, so
+// it must be reported as success once the pipes are force-closed.
+func TestRunSetupCommandBackgroundChildSucceedsBounded(t *testing.T) {
+	ops := &tmuxStartOps{tm: &Tmux{}}
+
+	start := time.Now()
+	err := ops.runSetupCommand(
+		context.Background(),
+		"sleep 30 & exit 0",
+		map[string]string{},
+		5*time.Second,
+	)
+	elapsed := time.Since(start)
+	if elapsed >= 10*time.Second {
+		t.Fatalf("runSetupCommand blocked %v on a background child holding stdio", elapsed)
+	}
+	if err != nil {
+		t.Fatalf("daemonizing setup command exiting 0 should succeed, got %v", err)
+	}
+}
+
+func TestRunSetupCommandBackgroundChildFailureBounded(t *testing.T) {
+	ops := &tmuxStartOps{tm: &Tmux{}}
+
+	start := time.Now()
+	err := ops.runSetupCommand(
+		context.Background(),
+		"printf 'daemon prestart broke' >&2; sleep 30 & exit 7",
+		map[string]string{},
+		5*time.Second,
+	)
+	elapsed := time.Since(start)
+	if elapsed >= 10*time.Second {
+		t.Fatalf("runSetupCommand blocked %v on a background child holding stdio", elapsed)
+	}
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "exit status 7") {
+		t.Fatalf("error = %q, want exit status", err)
+	}
+	if !strings.Contains(err.Error(), "stderr: daemon prestart broke") {
+		t.Fatalf("error = %q, want stderr detail", err)
+	}
+}
+
+func TestCommandOutputTail(t *testing.T) {
+	cases := []struct {
+		name   string
+		limit  int
+		writes []string
+		label  string
+		want   string
+	}{
+		{name: "no output", limit: 8, writes: nil, label: "stderr", want: ""},
+		{name: "whitespace only", limit: 8, writes: []string{" \n\t "}, label: "stderr", want: ""},
+		{name: "under limit", limit: 8, writes: []string{"abc"}, label: "stderr", want: "stderr: abc"},
+		{name: "exact limit has no marker", limit: 4, writes: []string{"abcd"}, label: "stderr", want: "stderr: abcd"},
+		{name: "oversized single write keeps tail", limit: 4, writes: []string{"abcdefgh"}, label: "stderr", want: "stderr: ... efgh"},
+		{name: "rollover across writes", limit: 4, writes: []string{"abc", "def"}, label: "stderr", want: "stderr: ... cdef"},
+		{name: "many small writes", limit: 3, writes: []string{"a", "b", "c", "d", "e"}, label: "stdout", want: "stdout: ... cde"},
+		{name: "zero limit drops content", limit: 0, writes: []string{"abc"}, label: "stderr", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tail := newCommandOutputTail(tc.limit)
+			for _, w := range tc.writes {
+				n, err := tail.Write([]byte(w))
+				if err != nil {
+					t.Fatalf("Write(%q) error: %v", w, err)
+				}
+				if n != len(w) {
+					t.Fatalf("Write(%q) = %d, want %d", w, n, len(w))
+				}
+			}
+			if got := tail.Detail(tc.label); got != tc.want {
+				t.Fatalf("Detail(%q) = %q, want %q", tc.label, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDoStartSession_SetupEnvPassthrough(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult: true,
