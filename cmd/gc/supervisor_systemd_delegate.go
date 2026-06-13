@@ -176,19 +176,45 @@ func (d systemdDelegation) commandHint(verb string) string {
 	return "systemctl " + strings.Join(d.systemctlArgs(verb), " ")
 }
 
+// delegatedIsActiveTimeout bounds the delegated `systemctl is-active`
+// probe. is-active is a quick unit-state query, but the same wedged
+// manager or D-Bus connection that makes a delegated `systemctl
+// start`/`try-restart` block past delegatedSystemctlJobTimeout also blocks
+// is-active. The is-active fallback runs precisely after such a bounded
+// start/restart timeout — inside delegatedLivenessWithoutSocket and the
+// delegated `gc supervisor status` service-manager probe — so without a
+// CLI-side bound it would hang `gc supervisor start`, `gc start`, and `gc
+// supervisor status` forever, defeating the bound the mutating call just
+// enforced and starving the supervisor-API fallback that follows it.
+// Package var so tests can shrink the wait.
+var delegatedIsActiveTimeout = 10 * time.Second
+
 // delegatedUnitActive reports whether the delegated unit is currently
 // active, via `systemctl [--user] is-active --quiet <unit>` resolved on
-// PATH. A missing systemctl binary or unreachable manager reads as
-// inactive.
+// PATH and bounded by delegatedIsActiveTimeout. A missing systemctl
+// binary, an unreachable manager, or a probe that exceeds the bound reads
+// as inactive, so callers fall through to the next liveness signal (the
+// supervisor API) instead of blocking on a wedged manager.
 //
 // Decision: delegated paths exec PATH-resolved systemctl directly instead
 // of routing through the supervisorSystemctlRun hook, and the PATH-shim
 // fake systemctl (argv-recording) is the canonical test seam for them.
-// The bounded stop needs CommandContext+WaitDelay semantics the hook
-// cannot express, and the shim exercises the real exec path end to end.
-// delegatedSystemctlPath backstops the seam in test binaries.
+// The bounded stop and this bounded probe need CommandContext+WaitDelay
+// semantics the hook cannot express, and the shim exercises the real exec
+// path end to end. delegatedSystemctlPath backstops the seam in test
+// binaries.
 func delegatedUnitActive(d systemdDelegation) bool {
-	return exec.Command(delegatedSystemctlPath(), d.systemctlIsActiveArgs()...).Run() == nil
+	ctx := context.Background()
+	if delegatedIsActiveTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, delegatedIsActiveTimeout)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, delegatedSystemctlPath(), d.systemctlIsActiveArgs()...)
+	// Don't let an inherited pipe from a systemctl child stretch the wait
+	// past the kill the context deadline triggers.
+	cmd.WaitDelay = time.Second
+	return cmd.Run() == nil
 }
 
 // delegatedSystemctlTimeoutError reports that a delegated systemctl

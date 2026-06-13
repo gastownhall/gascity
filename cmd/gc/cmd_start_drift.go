@@ -174,8 +174,13 @@ func printDriftReport(w io.Writer, r driftReport) {
 
 // driftReadyTimeout caps how long PollReady waits after a restart for
 // the new supervisor to come up. Five seconds matches NFR-2 in the
-// architect's brief.
+// architect's brief. It also caps pollDelegatedRestartVerified's wait for
+// a delegated restart to land its replacement.
 var driftReadyTimeout = 5 * time.Second
+
+// driftVerifyProbeTimeout bounds each supervisor Status probe inside
+// pollDelegatedRestartVerified's post-restart verification poll.
+var driftVerifyProbeTimeout = 2 * time.Second
 
 // restartHelpersHook lets tests substitute a fake set of helpers for
 // the production kill+spawn (or systemctl) side effects.
@@ -350,38 +355,25 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			fmt.Fprintf(stderr, "error: supervisor restart failed: %v\n", restartErr) //nolint:errcheck // best-effort stderr
 			return 1, false
 		}
-		// Wait for the new supervisor to come up.
-		if err := PollReady(newHTTPSupervisorClient(baseURL), driftReadyTimeout); err != nil {
-			fmt.Fprintln(stdout)                                                                                                                                                  //nolint:errcheck // best-effort stdout
-			fmt.Fprintf(stderr, "error: supervisor restart timed out after %s; check '%s' for details. Last known pid=%d.\n", driftReadyTimeout, supervisorStatusGuidance(), pid) //nolint:errcheck // best-effort stderr
-			return 1, false
-		}
 		if delegated {
-			// `try-restart` no-ops successfully when the unit is inactive,
-			// and PollReady answers from whatever process serves /health —
-			// the OLD supervisor when the unit never managed it. A unit can
-			// also genuinely replace the process while its ExecStart still
-			// launches the drifted binary. Require evidence that the drift
-			// actually cleared — not merely that the process changed — and
-			// treat an unverifiable post-restart probe as failure, instead
-			// of reporting "ready" while a stale supervisor keeps serving.
-			vctx, vcancel := context.WithTimeout(context.Background(), 2*time.Second)
-			verifyStatus, verifyErr := newHTTPSupervisorClient(baseURL).Status(vctx)
-			vcancel()
-			if verifyErr != nil {
-				fmt.Fprintln(stdout)                                                                                                                                              //nolint:errcheck // best-effort stdout
-				fmt.Fprintf(stderr, "error: cannot verify supervisor after '%s': %v; check '%s'\n", delegation.commandHint("try-restart"), verifyErr, supervisorStatusGuidance()) //nolint:errcheck // best-effort stderr
+			// A delegated try-restart can fall through a bounded CLI timeout
+			// (or restart the unit asynchronously) with systemd's restart job
+			// still in flight, so the OLD supervisor may keep answering
+			// /health for a moment. A single early probe — or PollReady, which
+			// answers from whatever serves /health — would then misreport "was
+			// not replaced" before the late replacement lands. Poll for genuine
+			// replacement *and* drift-clearance evidence until it is observed
+			// or driftReadyTimeout expires, then surface the last obstacle.
+			if msg := pollDelegatedRestartVerified(baseURL, pid, status.BuildID, commit, delegation, driftReadyTimeout); msg != "" {
+				fmt.Fprintln(stdout)             //nolint:errcheck // best-effort stdout
+				fmt.Fprintf(stderr, "%s\n", msg) //nolint:errcheck // best-effort stderr
 				return 1, false
 			}
-			verifyPID := supervisorAliveHook()
-			if verifyPID == pid && verifyStatus.BuildID == status.BuildID {
-				fmt.Fprintln(stdout)                                                                                                                                                                                                                                                                                                                    //nolint:errcheck // best-effort stdout
-				fmt.Fprintf(stderr, "error: supervisor was not replaced by '%s': PID %d still serving build %s; it is not managed by delegated unit %s — stop it with 'gc supervisor stop' (%s unset), or fix the delegation env\n", delegation.commandHint("try-restart"), verifyPID, verifyStatus.BuildID, delegation.Unit, supervisorSystemdUnitEnv) //nolint:errcheck // best-effort stderr
-				return 1, false
-			}
-			if DetectBinaryDrift(commit, verifyStatus) {
-				fmt.Fprintln(stdout)                                                                                                                                                                                                                                                                                                           //nolint:errcheck // best-effort stdout
-				fmt.Fprintf(stderr, "error: supervisor restarted by '%s' but still serves drifted build %s (local build %s); unit %s's ExecStart does not launch the updated gc binary — point the unit at the new binary, or fix the delegation env\n", delegation.commandHint("try-restart"), verifyStatus.BuildID, commit, delegation.Unit) //nolint:errcheck // best-effort stderr
+		} else {
+			// Wait for the new supervisor to come up.
+			if err := PollReady(newHTTPSupervisorClient(baseURL), driftReadyTimeout); err != nil {
+				fmt.Fprintln(stdout)                                                                                                                                                  //nolint:errcheck // best-effort stdout
+				fmt.Fprintf(stderr, "error: supervisor restart timed out after %s; check '%s' for details. Last known pid=%d.\n", driftReadyTimeout, supervisorStatusGuidance(), pid) //nolint:errcheck // best-effort stderr
 				return 1, false
 			}
 		}
@@ -418,6 +410,51 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 	}
 	// Unreachable; decideDriftAction always sets exactly one disposition.
 	return 0, true
+}
+
+// pollDelegatedRestartVerified polls the supervisor API after a delegated
+// `systemctl try-restart` until it observes that the supervisor was both
+// replaced (a new PID, or a new served build identity) and is no longer
+// drifted (the served build matches localBuildID), or readyTimeout
+// expires. It returns "" on success; otherwise it returns the
+// operator-facing diagnostic for the last obstacle observed.
+//
+// Polling — rather than a single probe — is load-bearing for the
+// bounded-timeout fall-through: a `systemctl try-restart` that exceeds
+// delegatedSystemctlJobTimeout leaves systemd's restart job running while
+// the OLD supervisor still answers /health, so verifying once would
+// misreport "was not replaced" before the late replacement lands. The
+// failure arms it can report — an unverifiable probe, a supervisor that was
+// never replaced, and a replacement whose ExecStart still serves the
+// drifted build — mirror the single-probe checks they replace.
+func pollDelegatedRestartVerified(baseURL string, oldPID int, oldBuildID, localBuildID string, d systemdDelegation, readyTimeout time.Duration) string {
+	client := newHTTPSupervisorClient(baseURL)
+	deadline := time.Now().Add(readyTimeout)
+	var lastMsg string
+	for {
+		vctx, vcancel := context.WithTimeout(context.Background(), driftVerifyProbeTimeout)
+		verifyStatus, verifyErr := client.Status(vctx)
+		vcancel()
+		switch {
+		case verifyErr != nil:
+			lastMsg = fmt.Sprintf("error: cannot verify supervisor after '%s': %v; check '%s'", d.commandHint("try-restart"), verifyErr, supervisorStatusGuidance())
+		default:
+			verifyPID := supervisorAliveHook()
+			switch {
+			case verifyPID == oldPID && verifyStatus.BuildID == oldBuildID:
+				lastMsg = fmt.Sprintf("error: supervisor was not replaced by '%s': PID %d still serving build %s; it is not managed by delegated unit %s — stop it with 'gc supervisor stop' (%s unset), or fix the delegation env", d.commandHint("try-restart"), verifyPID, verifyStatus.BuildID, d.Unit, supervisorSystemdUnitEnv)
+			case DetectBinaryDrift(localBuildID, verifyStatus):
+				lastMsg = fmt.Sprintf("error: supervisor restarted by '%s' but still serves drifted build %s (local build %s); unit %s's ExecStart does not launch the updated gc binary — point the unit at the new binary, or fix the delegation env", d.commandHint("try-restart"), verifyStatus.BuildID, localBuildID, d.Unit)
+			default:
+				// Replaced and drift cleared.
+				return ""
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return lastMsg
+		}
+		time.Sleep(supervisorReadyPollInterval)
+	}
 }
 
 func printUnreadableSupervisorRestartError(stderr io.Writer, pid int, exeErr error) {
