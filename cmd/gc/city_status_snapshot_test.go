@@ -202,7 +202,7 @@ func TestCityStatusNamedSessionSurfacesLookupErrorWhenSnapshotDegraded(t *testin
 	}
 
 	store := beads.NewMemStore()
-	degraded := newSessionBeadSnapshotWithError(nil, errors.New("loading session snapshot timed out after 20ms"))
+	degraded := newSessionBeadSnapshotWithError(errors.New("loading session snapshot timed out after 20ms"))
 
 	status := namedSessionStatusForCity(
 		"/home/user/city", cfg, store, degraded,

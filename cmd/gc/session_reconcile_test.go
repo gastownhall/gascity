@@ -2421,6 +2421,44 @@ func TestFindAgentByTemplate(t *testing.T) {
 	}
 }
 
+// TestAgentTemplateIdentitiesEquivalent pins the load-bearing asymmetry of
+// the identity-equivalence helper: a legacy bound identity is equivalent to
+// the unbound agent only after the bound agent is gone. While both a bound
+// "rig/gc.worker" and an unbound "rig/worker" exist, each identity normalizes
+// to itself and the two must stay distinct — otherwise wake demand and
+// session accounting for two different roles would merge.
+func TestAgentTemplateIdentitiesEquivalent(t *testing.T) {
+	unboundOnly := &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "rig"}},
+	}
+	if !agentTemplateIdentitiesEquivalent(unboundOnly, "rig/gc.worker", "rig/worker") {
+		t.Error("legacy bound identity should be equivalent to the remaining unbound agent")
+	}
+	if !agentTemplateIdentitiesEquivalent(unboundOnly, "rig/worker", "rig/gc.worker") {
+		t.Error("equivalence should be symmetric")
+	}
+
+	bothPresent := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "rig"},
+			{Name: "worker", Dir: "rig", BindingName: "gc"},
+		},
+	}
+	if agentTemplateIdentitiesEquivalent(bothPresent, "rig/gc.worker", "rig/worker") {
+		t.Error("bound and unbound identities must stay distinct while both agents exist")
+	}
+
+	if agentTemplateIdentitiesEquivalent(unboundOnly, "otherrig/gc.worker", "rig/worker") {
+		t.Error("legacy fallback must not cross rig/dir boundaries")
+	}
+	if agentTemplateIdentitiesEquivalent(unboundOnly, "", "rig/worker") {
+		t.Error("empty identity is never equivalent")
+	}
+	if !agentTemplateIdentitiesEquivalent(nil, "rig/worker", "rig/worker") {
+		t.Error("identical strings are equivalent even without config")
+	}
+}
+
 // --- isKnownState tests (Phase 0b: forward compatibility) ---
 
 func TestIsKnownState_KnownStates(t *testing.T) {

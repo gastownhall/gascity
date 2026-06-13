@@ -51,12 +51,12 @@ func (s *sessionBeadSnapshot) LoadError() error {
 	return s.loadErr
 }
 
-// newSessionBeadSnapshotWithError builds a snapshot from beadsIn and tags it
-// with a non-fatal load error. Callers that fail-soft on load (returning an
-// empty snapshot instead of nil) use this so downstream consumers can still
-// see the underlying failure via LoadError.
-func newSessionBeadSnapshotWithError(beadsIn []beads.Bead, err error) *sessionBeadSnapshot {
-	s := newSessionBeadSnapshot(beadsIn)
+// newSessionBeadSnapshotWithError builds an empty snapshot and tags it with a
+// non-fatal load error. Callers that fail-soft on load (returning an empty
+// snapshot instead of nil) use this so downstream consumers can still see the
+// underlying failure via LoadError.
+func newSessionBeadSnapshotWithError(err error) *sessionBeadSnapshot {
+	s := newSessionBeadSnapshot(nil)
 	// loadErr is set during construction, before s is published to any other
 	// goroutine, so no s.mu lock is needed here even though LoadError() reads
 	// it under RLock.

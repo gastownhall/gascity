@@ -288,6 +288,36 @@ func TestComputePoolDesiredStates_ResumeResolvesPersistedBoundTemplate(t *testin
 	}
 }
 
+// TestComputePoolDesiredStates_WakeKnownIdentityResolvesPersistedBoundAssignee
+// covers the wake-known-identity tier one migration class over from the
+// resume tier: in-progress work assigned to the pool identity itself under
+// the legacy bound form, with no open session bead. The assignee/template
+// comparison must use identity equivalence so the work still produces a wake
+// request for the current canonical template instead of being treated as
+// orphaned.
+func TestComputePoolDesiredStates_WakeKnownIdentityResolvesPersistedBoundAssignee(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("implementation-worker", "gascity-packs", intPtr(8), 0)},
+	}
+	legacyIdentity := "gascity-packs/gc.implementation-worker"
+	work := []beads.Bead{
+		workBead("gp-qx1o", legacyIdentity, legacyIdentity, "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, nil, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if result[0].Template != "gascity-packs/implementation-worker" {
+		t.Fatalf("result template = %q, want current canonical template", result[0].Template)
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 || reqs[0].Tier != "wake-known-identity" || reqs[0].WorkBeadID != "gp-qx1o" {
+		t.Fatalf("requests = %+v, want one wake-known-identity for gp-qx1o", reqs)
+	}
+}
+
 func TestComputePoolDesiredStates_MaxCapsTotal(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(2), 0)},

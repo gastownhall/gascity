@@ -178,9 +178,13 @@ func computePoolDesiredStates(
 				})
 				continue
 			}
-			if assignee != template || !isKnownPoolTemplate(assignee, cfg) {
+			if !agentTemplateIdentitiesEquivalent(cfg, assignee, template) || !isKnownPoolTemplate(assignee, cfg) {
 				// Assignee set but session closed/unknown and not a configured
-				// pool template — orphaned work, not our job to respawn.
+				// pool template — orphaned work, not our job to respawn. The
+				// identity-equivalence compare keeps work assigned under a
+				// legacy bound form of this template eligible for the
+				// wake-known-identity tier; the emitted request carries the
+				// canonical template.
 				continue
 			}
 			if _, ok := wakeRequestedTemplates[template]; ok {
@@ -573,7 +577,7 @@ func isKnownPoolTemplate(assignee string, cfg *config.City) bool {
 		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
 			continue
 		}
-		if assignee == agent.QualifiedName() {
+		if agentTemplateIdentitiesEquivalent(cfg, assignee, agent.QualifiedName()) {
 			return true
 		}
 	}

@@ -119,6 +119,9 @@ func resolvedTemplateForIdentity(identity string, cfg *config.City) string {
 func resolvedSessionTemplate(bead beads.Bead, cfg *config.City) string {
 	template := normalizedSessionTemplate(bead, cfg)
 	if template != "" && (cfg == nil || findAgentByTemplate(cfg, template) != nil) {
+		// normalizedSessionTemplate already returns the canonical qualified name
+		// when an agent resolves, so this re-normalization is a defensive no-op
+		// on that value (and still canonicalizes a non-canonical input).
 		return normalizeAgentTemplateIdentity(cfg, template)
 	}
 	storedTemplate := sessionBeadStoredTemplate(bead)

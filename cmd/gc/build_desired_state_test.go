@@ -3392,6 +3392,68 @@ func TestRealizePoolDesiredSessionsDefersAliasWhenNormalizationCollides(t *testi
 	}
 }
 
+// TestRealizePoolDesiredSessionsResumePreservesLegacyBoundSessionName traces
+// the bound→unbound adoption through realize: a resume request for the
+// current canonical template that carries a session bead persisted under the
+// removed binding must keep that bead's persisted session_name, so the live
+// runtime session is reused instead of being renamed or recreated (which
+// would orphan the running agent holding in-progress work).
+func TestRealizePoolDesiredSessionsResumePreservesLegacyBoundSessionName(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	adopted, err := store.Create(beads.Bead{
+		Title:  "gascity-packs/gc.implementation-worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity-packs/gc.implementation-worker"},
+		Metadata: map[string]string{
+			"template":             "gascity-packs/gc.implementation-worker",
+			"agent_name":           "gascity-packs/gc.implementation-worker",
+			"session_name":         "gc__implementation-worker-mc-1",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "implementation-worker",
+			Dir:               "gascity-packs",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(8),
+		}},
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(adopted)
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = snapshot
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "gascity-packs/implementation-worker",
+		Requests: []SessionRequest{{
+			Template:      "gascity-packs/implementation-worker",
+			Tier:          "resume",
+			SessionBeadID: adopted.ID,
+		}},
+	}, desired, &stderr)
+
+	tp, ok := desired["gc__implementation-worker-mc-1"]
+	if !ok {
+		t.Fatalf("desired state missing adopted resume session under persisted session_name; keys=%v stderr=%q",
+			mapKeys(desired), stderr.String())
+	}
+	if tp.SessionName != "gc__implementation-worker-mc-1" {
+		t.Fatalf("TemplateParams.SessionName = %q, want persisted session_name preserved", tp.SessionName)
+	}
+	if got := len(desired); got != 1 {
+		t.Fatalf("desired sessions = %d, want 1 (no duplicate spawn for adopted bead)", got)
+	}
+}
+
 func TestRealizePoolDesiredSessionsLimitsFreshCreatesToWakeBudget(t *testing.T) {
 	maxWakes := 2
 	store := beads.NewMemStore()
@@ -6960,6 +7022,7 @@ func TestBuildDesiredState_ScaleCheckErrorPreservesDormantAffectedPoolSessionWit
 	}
 
 	poolDesired := retainScaleCheckPartialPoolDesired(
+		cfg,
 		PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
 		snapshot,
 		result.PoolScaleCheckPartialTemplates,

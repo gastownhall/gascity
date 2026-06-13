@@ -514,13 +514,17 @@ func buildDesiredStateWithSessionBeads(
 		runningSessions := 0
 		for _, sb := range allOpenSessionBeads {
 			if isPoolManagedSessionBead(sb) {
-				// Match the qualified template only. allOpenSessionBeads is
-				// aggregated across the city + every rig store, and pool session
-				// beads store the qualified name (agent.QualifiedName(), see
-				// session_sleep.go). Also matching the unqualified base name would
-				// let a same-base-name pool in another rig (e.g. rigB/planner)
-				// inflate this rig's count and wrongly suppress its cold-wake probe.
-				if sb.Metadata["template"] == template {
+				// Match the qualified template by identity equivalence.
+				// allOpenSessionBeads is aggregated across the city + every rig
+				// store, and pool session beads store the qualified name
+				// (agent.QualifiedName(), see session_sleep.go); adopted beads may
+				// still carry a legacy bound form of the same identity, which must
+				// count here or the cold-wake probe over-wakes a pool that already
+				// has a live session. Equivalence preserves the cross-rig guarantee:
+				// an unqualified base name never normalizes to a dir-scoped agent,
+				// and a same-base-name pool in another rig (e.g. rigB/planner)
+				// normalizes to itself, so neither inflates this rig's count.
+				if agentTemplateIdentitiesEquivalent(cfg, sb.Metadata["template"], template) {
 					runningSessions++
 				}
 			}
@@ -660,6 +664,20 @@ func buildDesiredStateWithSessionBeads(
 		// correct, and any bead missed by a partial query simply gets stamped
 		// on a later tick.
 		stampRunSessionIdentity(assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		// Re-home work pre-assigned to a legacy bound form of a now-unbound pool
+		// agent onto the canonical identity, so the canonical session the
+		// awake/scale accounting wakes for it can actually surface and claim it
+		// (the agent-side work_query/claim path matches identities by raw string).
+		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		// Re-home open, unassigned work still routed to a legacy bound form of a
+		// now-unbound pool agent. This is the demand/claim half of the migration:
+		// empty-assignee open work never enters the assigned-work collection above,
+		// and the canonical pool-demand probe below (defaultScaleCheckCounts) plus
+		// the worker work_query/claim path match gc.routed_to canonically by raw
+		// string, so the route must be canonicalized before demand is counted or
+		// the cold pool never wakes for it.
+		unassignedRoutedBeads, unassignedRoutedStores := collectOpenUnassignedRoutedWork(cfg, store, rigStores, suspendedRigPaths, stderr)
+		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
 		if len(defaultScaleTargets) > 0 {
 			defaultCounts, partialTemplates, errs := defaultScaleCheckCounts(defaultScaleTargets)
@@ -1480,13 +1498,17 @@ func sortedBoolMapKeys(values map[string]bool) []string {
 	return out
 }
 
-func retainScaleCheckPartialPoolDesired(counts map[string]int, sessionBeads *sessionBeadSnapshot, partialTemplates map[string]bool) map[string]int {
+func retainScaleCheckPartialPoolDesired(cfg *config.City, counts map[string]int, sessionBeads *sessionBeadSnapshot, partialTemplates map[string]bool) map[string]int {
 	if len(partialTemplates) == 0 || sessionBeads == nil {
 		return counts
 	}
 	retained := make(map[string]int)
 	for _, b := range sessionBeads.Open() {
-		template := strings.TrimSpace(b.Metadata["template"])
+		// Adopted session beads can persist a legacy bound template identity;
+		// normalize to the current canonical name before the membership check,
+		// because partialTemplates is keyed canonically. Without this a transient
+		// scale_check partial failure would drop legacy-bound pool sessions.
+		template := normalizeAgentTemplateIdentity(cfg, strings.TrimSpace(b.Metadata["template"]))
 		if !partialTemplates[template] || !isPoolManagedSessionBead(b) || !scaleCheckPartialSessionRetainable(b) {
 			continue
 		}
@@ -3302,6 +3324,206 @@ func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workD
 	if err := store.SetMetadataBatch(rootID, patch); err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "stampRunSessionIdentity root %s: %v\n", rootID, err) //nolint:errcheck
 	}
+}
+
+// canonicalizeLegacyBoundAssignedWork re-homes the Assignee and gc.routed_to of
+// actionable pool work that is pre-assigned to a legacy bound form of a
+// configured unbound pool agent (e.g. "dir/binding.name") to that agent's
+// current canonical identity ("dir/name").
+//
+// Why: after a bound→unbound agent migration, the awake/scale accounting wakes
+// a canonical pool session for work persisted under the legacy bound identity
+// (it normalizes template identities), but the woken session's work_query and
+// `gc hook --claim` path match assignees and routes by raw string. A canonical
+// session can derive neither the old binding name nor the legacy assignee, so
+// the triggering bead would surface to no one and stay unclaimed. Re-homing the
+// persisted identity to canonical makes the bead behave exactly like ordinary
+// canonical pool work, which the existing surface/claim machinery already
+// resumes — closing the agent-side half of the migration recovery loop.
+//
+// The live-session guard preserves the resume tier: work a still-running
+// session already owns under the legacy identity is left untouched so its own
+// work_query keeps resolving it; only orphaned work with no live owner (the
+// wake-known-identity case) is re-homed.
+//
+// Because a re-home moves an assignee away from its owner, it runs only on a
+// complete session snapshot. Unlike the benign stampRunSessionIdentity pass, a
+// nil or load-errored snapshot can omit a live legacy owner, and the
+// live-session guard would then misread that absence as "orphaned" and re-home
+// in-flight work out from under the running session. On a degraded snapshot the
+// whole pass is skipped and a later complete tick converges it (NDI), mirroring
+// releaseOrphanedPoolAssignmentsWhenSnapshotsComplete.
+//
+// Idempotent by design: it writes only when the canonical identity differs from
+// what is already on the bead, so steady-state reconciles perform no writes. A
+// write failure is logged and skipped — recovery is best-effort and must never
+// block reconciliation.
+func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) {
+	if cfg == nil || len(workBeads) != len(workStores) {
+		return
+	}
+	// A nil or load-errored snapshot is incomplete: the live-session guard below
+	// cannot prove a legacy owner is gone, so re-homing could strand a live
+	// session's in-flight work. Skip and let a later complete tick converge it.
+	if sessionBeads == nil || sessionBeads.LoadError() != nil {
+		return
+	}
+	sessionByAssignee := buildSessionAssigneeIndex(sessionBeads)
+	for i, wb := range workBeads {
+		if wb.Status != "in_progress" && wb.Status != "open" {
+			continue
+		}
+		store := workStores[i]
+		if store == nil {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		// Only template-assigned pool work qualifies: real per-session
+		// assignments (session names) and named-session work are not equivalent
+		// to a pool template's qualified name and are left untouched.
+		if assignee == "" || !isKnownPoolTemplate(assignee, cfg) {
+			continue
+		}
+		canonicalAssignee := normalizeAgentTemplateIdentity(cfg, assignee)
+		routedTo := strings.TrimSpace(wb.Metadata[beadmeta.RoutedToMetadataKey])
+		canonicalRouted := normalizeAgentTemplateIdentity(cfg, routedTo)
+		assigneeChanged := canonicalAssignee != "" && canonicalAssignee != assignee
+		routedChanged := routedTo != "" && canonicalRouted != routedTo
+		if !assigneeChanged && !routedChanged {
+			continue
+		}
+		// A live session still owns this assignment under the legacy identity —
+		// the resume tier handles it; re-homing would strand its work_query.
+		if _, served := sessionByAssignee[assignee]; served {
+			continue
+		}
+		opts := beads.UpdateOpts{}
+		if assigneeChanged {
+			opts.Assignee = &canonicalAssignee
+		}
+		if routedChanged {
+			opts.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: canonicalRouted}
+		}
+		if err := store.Update(wb.ID, opts); err != nil && stderr != nil {
+			fmt.Fprintf(stderr, "canonicalizeLegacyBoundAssignedWork: %s: %v\n", wb.ID, err) //nolint:errcheck
+		}
+	}
+}
+
+// canonicalizeLegacyBoundUnassignedRoutedWork rewrites the gc.routed_to of open,
+// unassigned pool work that is still routed to the legacy bound form of a
+// now-unbound pool agent ("dir/binding.name") onto the agent's current canonical
+// identity ("dir/name").
+//
+// This closes the demand/claim half of the bound→unbound migration that the
+// assignee-keyed canonicalizeLegacyBoundAssignedWork cannot reach: open work with
+// an empty assignee never enters the assigned-work collection, and the canonical
+// pool-demand probe (EffectivePoolDemandQuery), the worker work_query
+// (EffectiveWorkQuery Tier 3), and the claim predicate (hookClaimMatchesRoute)
+// all match gc.routed_to against the canonical target by raw string. A bead still
+// routed to "dir/binding.name" is therefore invisible to the canonical "dir/name"
+// pool — it neither contributes scale demand nor can be claimed — so migration-era
+// ready work stays stuck until its route is canonicalized. Rewriting the route in
+// place lets every existing canonical-only path surface it, keeping the legacy
+// awareness confined to this migration pass instead of spread across the demand,
+// work_query, and claim predicates.
+//
+// Unlike the assignee re-home, this needs no session-snapshot guard: open
+// unassigned work has no live owner to strand, so rewriting its route can only
+// make it discoverable. Idempotent by design: it writes only when the canonical
+// identity differs from the persisted route, so steady-state reconciles perform
+// no writes, and a route that is already canonical, resolves to no configured
+// agent, or still matches a configured bound agent is left untouched. A write
+// failure is logged and skipped — recovery is best-effort and must never block
+// reconciliation.
+func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, stderr io.Writer) {
+	if cfg == nil || len(workBeads) != len(workStores) {
+		return
+	}
+	for i, wb := range workBeads {
+		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
+			continue
+		}
+		store := workStores[i]
+		if store == nil {
+			continue
+		}
+		routedTo := strings.TrimSpace(wb.Metadata[beadmeta.RoutedToMetadataKey])
+		if routedTo == "" {
+			continue
+		}
+		// Cheap pre-filter: a legacy bound form is "dir/binding.name", so only a
+		// route whose local segment carries the binding-separator dot can be one.
+		// Canonical unbound routes ("dir/name") skip the per-bead agent scan in
+		// normalizeAgentTemplateIdentity, keeping the steady-state cost off the
+		// full open-routed backlog.
+		if _, local := config.ParseQualifiedName(routedTo); !strings.Contains(local, ".") {
+			continue
+		}
+		canonicalRouted := normalizeAgentTemplateIdentity(cfg, routedTo)
+		if canonicalRouted == "" || canonicalRouted == routedTo {
+			continue
+		}
+		opts := beads.UpdateOpts{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: canonicalRouted}}
+		if err := store.Update(wb.ID, opts); err != nil && stderr != nil {
+			fmt.Fprintf(stderr, "canonicalizeLegacyBoundUnassignedRoutedWork: %s: %v\n", wb.ID, err) //nolint:errcheck
+		}
+	}
+}
+
+// collectOpenUnassignedRoutedWork gathers open, unassigned, pool-routed work from
+// the city store and every non-suspended rig store, index-aligned with the store
+// that owns each bead. It is the input collection for
+// canonicalizeLegacyBoundUnassignedRoutedWork: empty-assignee open work is dropped
+// by the assignee-keyed collectAssignedWorkBeadsWithStores passes, so the
+// migration re-home needs its own scan. Active-only List queries are served from
+// the CachingStore in steady state, so this adds no backing-store round trip.
+func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store) {
+	if cfg == nil {
+		return nil, nil
+	}
+	type workStore struct {
+		store beads.Store
+		ref   string
+	}
+	stores := []workStore{{store: store, ref: "city"}}
+	for _, rig := range cfg.Rigs {
+		if suspendedRigPaths[filepath.Clean(rig.Path)] {
+			continue
+		}
+		if s, ok := rigStores[rig.Name]; ok {
+			stores = append(stores, workStore{store: s, ref: rig.Name})
+		}
+	}
+
+	var workBeads []beads.Bead
+	var workStores []beads.Store
+	seen := make(map[string]struct{})
+	for _, source := range stores {
+		if source.store == nil {
+			continue
+		}
+		open, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"})
+		if err != nil && !beads.IsPartialResult(err) {
+			fmt.Fprintf(stderr, "collectOpenUnassignedRoutedWork: %s: List(open): %v\n", source.ref, err) //nolint:errcheck
+			continue
+		}
+		for _, b := range open {
+			if b.Type == sessionBeadType || strings.TrimSpace(b.Assignee) != "" {
+				continue
+			}
+			if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
+				continue
+			}
+			if _, ok := seen[b.ID]; ok {
+				continue
+			}
+			seen[b.ID] = struct{}{}
+			workBeads = append(workBeads, b)
+			workStores = append(workStores, source.store)
+		}
+	}
+	return workBeads, workStores
 }
 
 func selectOrCreateDependencyPoolSessionBead(

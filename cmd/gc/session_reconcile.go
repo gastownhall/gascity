@@ -486,7 +486,13 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 	return work
 }
 
-// findAgentByTemplate looks up a config agent by template name.
+// findAgentByTemplate looks up a config agent by template name. Exact
+// identity matches (canonical qualified name or V1 dir+name form, via
+// config.AgentMatchesIdentity) win over all fallbacks; when nothing matches
+// exactly, a legacy bound form ("dir/binding.name") resolves to the unbound
+// agent "dir/name" so sessions and work persisted before a bound→unbound
+// migration stay attributed. Callers that need strict exact-match lookup
+// (e.g. uniqueness validation) must not use this resolver.
 // Returns nil if not found.
 func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 	template = strings.TrimSpace(template)
@@ -521,6 +527,11 @@ func legacyBoundTemplateMatchesUnboundAgent(agent *config.Agent, template string
 	return strings.TrimSpace(unbound) == strings.TrimSpace(agent.Name)
 }
 
+// normalizeAgentTemplateIdentity maps a persisted template identity to the
+// matching agent's current canonical qualified name. It resolves through
+// findAgentByTemplate, so a legacy bound form ("dir/binding.name") left by a
+// bound→unbound migration normalizes to the unbound agent's canonical name.
+// Identities that resolve to no configured agent pass through unchanged.
 func normalizeAgentTemplateIdentity(cfg *config.City, template string) string {
 	template = strings.TrimSpace(template)
 	if template == "" {
@@ -532,6 +543,10 @@ func normalizeAgentTemplateIdentity(cfg *config.City, template string) string {
 	return template
 }
 
+// agentTemplateIdentitiesEquivalent reports whether two template identities
+// name the same configured agent after normalization. Distinct configured
+// agents stay distinct: each exact identity normalizes to itself, so a bound
+// agent and a same-named unbound agent never merge while both exist.
 func agentTemplateIdentitiesEquivalent(cfg *config.City, a, b string) bool {
 	a = strings.TrimSpace(a)
 	b = strings.TrimSpace(b)

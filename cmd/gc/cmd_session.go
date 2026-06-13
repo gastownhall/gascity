@@ -225,7 +225,8 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	}
 
 	// Store the canonical qualified name so the reconciler can match it
-	// via findAgentByTemplate (which compares against QualifiedName()).
+	// via findAgentByTemplate (which resolves canonical, V1 dir+name, and
+	// legacy bound identities).
 	canonicalTemplate := found.QualifiedName()
 	configuredOwner := sessionNewAliasOwner(cfg, &found)
 	reservationIDs := []string{alias, explicitName}

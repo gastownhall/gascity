@@ -43,6 +43,97 @@ func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilitySta
 	}
 }
 
+// TestBuildAwakeInputFromReconcilerCanonicalizesLegacyBoundTemplate pins the
+// bridge-side identity normalization for adopted legacy-bound session beads.
+// A bead persisted under a removed binding ("gascity-packs/gc.implementation-worker")
+// must enter the awake engine keyed by the current unbound agent's canonical
+// template, so explicit wake, suspension gates, and scale/min-active
+// accounting all see the adopted session. Without normalization the raw
+// stored template misses every agentsByName lookup and the explicit wake
+// request lingers unhonored.
+func TestBuildAwakeInputFromReconcilerCanonicalizesLegacyBoundTemplate(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "implementation-worker", Dir: "gascity-packs"}},
+	}
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"", // cityPath: empty exercises zero suspension state
+		[]beads.Bead{{
+			ID:     "mc-session-1",
+			Status: "open",
+			Type:   "session",
+			Metadata: map[string]string{
+				"state":        "stopped",
+				"session_name": "gc__implementation-worker-mc-1",
+				"template":     "gascity-packs/gc.implementation-worker",
+				"wake_request": "explicit",
+			},
+		}},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		now,
+	)
+
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	if got := input.SessionBeads[0].Template; got != "gascity-packs/implementation-worker" {
+		t.Fatalf("Template = %q, want canonical current template", got)
+	}
+	if !input.SessionBeads[0].ExplicitWake {
+		t.Fatal("ExplicitWake = false, want true for wake_request=explicit")
+	}
+
+	decisions := ComputeAwakeSet(input)
+	got := decisions["gc__implementation-worker-mc-1"]
+	if !got.ShouldWake || got.Reason != "explicit-wake" {
+		t.Fatalf("decision = %+v, want explicit-wake for adopted legacy-bound bead", got)
+	}
+}
+
+// TestBuildAwakeInputFromReconcilerKeepsUnresolvableTemplateRaw guards the
+// conservative half of the bridge normalization: a stored template that does
+// not resolve to any configured agent must pass through unchanged rather
+// than being rewritten or dropped.
+func TestBuildAwakeInputFromReconcilerKeepsUnresolvableTemplateRaw(t *testing.T) {
+	now := time.Now().UTC()
+	input := buildAwakeInputFromReconciler(
+		&config.City{Agents: []config.Agent{{Name: "other", Dir: "rig"}}},
+		"", // cityPath: empty exercises zero suspension state
+		[]beads.Bead{{
+			ID:     "mc-session-1",
+			Status: "open",
+			Type:   "session",
+			Metadata: map[string]string{
+				"state":        "stopped",
+				"session_name": "s-orphan",
+				"template":     "removed-rig/gone-worker",
+			},
+		}},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		now,
+	)
+
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	if got := input.SessionBeads[0].Template; got != "removed-rig/gone-worker" {
+		t.Fatalf("Template = %q, want raw stored template preserved", got)
+	}
+}
+
 func TestBuildAwakeInputFromReconcilerCarriesResetPendingMetadata(t *testing.T) {
 	now := time.Now().UTC()
 	input := buildAwakeInputFromReconciler(
