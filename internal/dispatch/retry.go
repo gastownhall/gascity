@@ -542,6 +542,10 @@ func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval b
 func retryAttemptBead(prev beads.Bead, logicalID, stepRef string, attempt int, cityPath string) beads.Bead {
 	meta := cloneMetadata(prev.Metadata)
 	clearRetryEphemera(meta)
+	assignee := retryPreservedAssignee(prev, cityPath)
+	if assignee == "" {
+		clearSessionAffinityMetadata(meta)
+	}
 	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attempt)
 	meta[beadmeta.RetryFromMetadataKey] = prev.ID
 	meta[beadmeta.StepRefMetadataKey] = stepRef
@@ -550,7 +554,7 @@ func retryAttemptBead(prev beads.Bead, logicalID, stepRef string, attempt int, c
 		Title:       prev.Title,
 		Description: prev.Description,
 		Type:        prev.Type,
-		Assignee:    retryPreservedAssignee(prev, cityPath),
+		Assignee:    assignee,
 		From:        prev.From,
 		ParentID:    prev.ParentID,
 		Ref:         stepRef,
@@ -562,6 +566,7 @@ func retryAttemptBead(prev beads.Bead, logicalID, stepRef string, attempt int, c
 func retryEvalBead(prev beads.Bead, logicalID, stepRef string, attempt int) beads.Bead {
 	meta := cloneMetadata(prev.Metadata)
 	clearRetryEphemera(meta)
+	clearSessionAffinityMetadata(meta)
 	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attempt)
 	meta[beadmeta.RetryFromMetadataKey] = prev.ID
 	meta[beadmeta.StepRefMetadataKey] = stepRef

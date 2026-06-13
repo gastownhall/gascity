@@ -620,16 +620,19 @@ func TestProcessRetryEvalTransientAppendErrorStaysOpenForRetry(t *testing.T) {
 		Type:   "task",
 		Status: "closed",
 		Metadata: map[string]string{
-			"gc.kind":            "retry-run",
-			"gc.root_bead_id":    root.ID,
-			"gc.step_ref":        "demo.review.run.1",
-			"gc.logical_bead_id": logical.ID,
-			"gc.attempt":         "1",
-			"gc.max_attempts":    "3",
-			"gc.on_exhausted":    "hard_fail",
-			"gc.outcome":         "fail",
-			"gc.failure_class":   "transient",
-			"gc.failure_reason":  "rate_limited",
+			"gc.kind":               "retry-run",
+			"gc.root_bead_id":       root.ID,
+			"gc.step_ref":           "demo.review.run.1",
+			"gc.logical_bead_id":    logical.ID,
+			"gc.attempt":            "1",
+			"gc.max_attempts":       "3",
+			"gc.on_exhausted":       "hard_fail",
+			"gc.outcome":            "fail",
+			"gc.failure_class":      "transient",
+			"gc.failure_reason":     "rate_limited",
+			"gc.routed_to":          "polecat",
+			"gc.session_affinity":   "require",
+			"gc.continuation_group": "main",
 		},
 	})
 	eval1 := mustCreateWorkflowBead(t, base, beads.Bead{
@@ -1000,6 +1003,12 @@ func TestProcessRetryEvalTransientRetriesAndRecyclesPoolSession(t *testing.T) {
 	}
 	if run2.Assignee != "" {
 		t.Fatalf("run2 assignee = %q, want empty for pooled retry", run2.Assignee)
+	}
+	if run2.Metadata["gc.session_affinity"] != "" {
+		t.Fatalf("run2 gc.session_affinity = %q, want cleared with pooled retry assignee", run2.Metadata["gc.session_affinity"])
+	}
+	if run2.Metadata["gc.continuation_group"] != "" {
+		t.Fatalf("run2 gc.continuation_group = %q, want cleared with pooled retry assignee", run2.Metadata["gc.continuation_group"])
 	}
 	if got := run2.Metadata["gc.retry_from"]; got != run1.ID {
 		t.Fatalf("run2 gc.retry_from = %q, want %s", got, run1.ID)

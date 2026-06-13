@@ -334,9 +334,10 @@ func releaseOrphanedPoolAssignment(store beads.Store, id string, clearDetached b
 	opts := beads.UpdateOpts{
 		Assignee: stringPtr(""),
 		Status:   stringPtr("open"),
+		Metadata: withClearedSessionAffinityMetadata(nil),
 	}
 	if clearDetached {
-		opts.Metadata = map[string]string{detachedProbeMetadataKey: ""}
+		opts.Metadata[detachedProbeMetadataKey] = ""
 	}
 	if err := store.Update(id, opts); err != nil {
 		log.Printf("releaseOrphanedPoolAssignments: releasing orphaned pool assignment %s: %v", id, err)

@@ -423,6 +423,10 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 	if controlFor := strings.TrimSpace(subjectMeta[beadmeta.ControlForMetadataKey]); controlFor != "" {
 		subjectMeta[beadmeta.ControlForMetadataKey] = rewriteRetryControlFor(subjectMeta, controlFor, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
 	}
+	subjectAssignee := retryPreservedAssigneeWithConfig(prevSubject, cfg)
+	if subjectAssignee == "" {
+		clearSessionAffinityMetadata(subjectMeta)
+	}
 	newSubject, err := store.Create(beads.Bead{
 		Title:       prevSubject.Title,
 		Description: prevSubject.Description,
@@ -437,8 +441,8 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 		return nil, err
 	}
 	mapping[prevSubject.ID] = newSubject.ID
-	if preservedAssignee := retryPreservedAssigneeWithConfig(prevSubject, cfg); preservedAssignee != "" {
-		pendingAssignees[prevSubject.ID] = preservedAssignee
+	if subjectAssignee != "" {
+		pendingAssignees[prevSubject.ID] = subjectAssignee
 	}
 
 	for _, old := range ordered {
@@ -456,6 +460,10 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 		if controlFor := strings.TrimSpace(meta[beadmeta.ControlForMetadataKey]); controlFor != "" {
 			meta[beadmeta.ControlForMetadataKey] = rewriteRetryControlFor(meta, controlFor, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
 		}
+		preservedAssignee := retryPreservedAssigneeWithConfig(old, cfg)
+		if preservedAssignee == "" {
+			clearSessionAffinityMetadata(meta)
+		}
 		created, err := store.Create(beads.Bead{
 			Title:       old.Title,
 			Description: old.Description,
@@ -470,7 +478,7 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 			return nil, err
 		}
 		mapping[old.ID] = created.ID
-		if preservedAssignee := retryPreservedAssigneeWithConfig(old, cfg); preservedAssignee != "" {
+		if preservedAssignee != "" {
 			pendingAssignees[old.ID] = preservedAssignee
 		}
 	}
@@ -484,6 +492,10 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 	checkMeta[beadmeta.StepRefMetadataKey] = rewriteRetryStepRef(checkMeta, prevCheck.Ref, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
 	if controlFor := strings.TrimSpace(checkMeta[beadmeta.ControlForMetadataKey]); controlFor != "" {
 		checkMeta[beadmeta.ControlForMetadataKey] = rewriteRetryControlFor(checkMeta, controlFor, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
+	}
+	checkAssignee := retryPreservedAssigneeWithConfig(prevCheck, cfg)
+	if checkAssignee == "" {
+		clearSessionAffinityMetadata(checkMeta)
 	}
 	newCheck, err := store.Create(beads.Bead{
 		Title:       prevCheck.Title,
@@ -499,8 +511,8 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 		return nil, err
 	}
 	mapping[prevCheck.ID] = newCheck.ID
-	if preservedAssignee := retryPreservedAssigneeWithConfig(prevCheck, cfg); preservedAssignee != "" {
-		pendingAssignees[prevCheck.ID] = preservedAssignee
+	if checkAssignee != "" {
+		pendingAssignees[prevCheck.ID] = checkAssignee
 	}
 
 	for _, old := range ordered {
@@ -640,6 +652,9 @@ func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRe
 		parentID = ""
 	}
 	assignee := retryPreservedAssigneeWithConfig(old, cfg)
+	if assignee == "" {
+		clearSessionAffinityMetadata(meta)
+	}
 	return beads.GraphApplyNode{
 		Key:               old.ID,
 		Title:             old.Title,
@@ -1011,6 +1026,18 @@ func clearRetryEphemera(meta map[string]string) {
 		"review.verdict",
 		"design_review.verdict",
 		"code_review.verdict",
+	} {
+		delete(meta, key)
+	}
+}
+
+func clearSessionAffinityMetadata(meta map[string]string) {
+	if meta == nil {
+		return
+	}
+	for _, key := range []string{
+		"gc.session_affinity",
+		"gc.continuation_group",
 	} {
 		delete(meta, key)
 	}

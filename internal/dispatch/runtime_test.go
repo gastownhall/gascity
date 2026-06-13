@@ -3967,7 +3967,11 @@ max = -1
 	poolSlot := "polecat-2"
 	if err := store.Update(run1.ID, beads.UpdateOpts{
 		Assignee: &poolSlot,
-		Metadata: map[string]string{"gc.routed_to": "polecat"},
+		Metadata: map[string]string{
+			"gc.continuation_group": "main",
+			"gc.routed_to":          "polecat",
+			"gc.session_affinity":   "require",
+		},
 	}); err != nil {
 		t.Fatalf("assign pooled run1: %v", err)
 	}
@@ -3982,6 +3986,12 @@ max = -1
 	run2 := mustGetBead(t, store, mapping[run1.ID])
 	if run2.Assignee != "" {
 		t.Fatalf("run2 assignee = %q, want empty for pooled retry task", run2.Assignee)
+	}
+	if run2.Metadata["gc.session_affinity"] != "" {
+		t.Fatalf("run2 gc.session_affinity = %q, want cleared with pooled retry assignee", run2.Metadata["gc.session_affinity"])
+	}
+	if run2.Metadata["gc.continuation_group"] != "" {
+		t.Fatalf("run2 gc.continuation_group = %q, want cleared with pooled retry assignee", run2.Metadata["gc.continuation_group"])
 	}
 }
 

@@ -1121,6 +1121,12 @@ func TestCmdWorkflowReopenSourceClearsRoutedToForResling(t *testing.T) {
 	if err := store.SetMetadata(source.ID, "gc.routed_to", "mayor"); err != nil {
 		t.Fatalf("SetMetadata(gc.routed_to): %v", err)
 	}
+	if err := store.SetMetadata(source.ID, "gc.session_affinity", "require"); err != nil {
+		t.Fatalf("SetMetadata(gc.session_affinity): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "gc.continuation_group", "main"); err != nil {
+		t.Fatalf("SetMetadata(gc.continuation_group): %v", err)
+	}
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 0 {
@@ -1143,6 +1149,12 @@ func TestCmdWorkflowReopenSourceClearsRoutedToForResling(t *testing.T) {
 	}
 	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "" {
 		t.Fatalf("gc.routed_to = %q, want cleared (no gc.run_target → legacy blank)", got)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.session_affinity"]); got != "" {
+		t.Fatalf("gc.session_affinity = %q, want cleared with unassigned reopen", got)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.continuation_group"]); got != "" {
+		t.Fatalf("gc.continuation_group = %q, want cleared with unassigned reopen", got)
 	}
 	if updated.Status != "open" {
 		t.Fatalf("status = %q, want open", updated.Status)

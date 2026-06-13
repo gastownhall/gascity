@@ -1468,6 +1468,62 @@ func TestReleaseOrphanedPoolAssignments_ReopensCrossStoreIDCollisions(t *testing
 	}
 }
 
+func TestReleaseOrphanedPoolAssignments_ClearsSessionAffinityOnRelease(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "orphaned pool work",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{
+			"gc.continuation_group": "main",
+			"gc.routed_to":          "worker",
+			"gc.session_affinity":   "require",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		&config.City{
+			Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+		},
+		"",
+		nil,
+		[]beads.Bead{work},
+		[]beads.Store{store},
+		nil,
+		nil,
+	)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("work = status %q assignee %q, want open/unassigned", got.Status, got.Assignee)
+	}
+	if got.Metadata["gc.session_affinity"] != "" {
+		t.Fatalf("gc.session_affinity still present after release: %#v", got.Metadata)
+	}
+	if got.Metadata["gc.continuation_group"] != "" {
+		t.Fatalf("gc.continuation_group still present after release: %#v", got.Metadata)
+	}
+	if got.Metadata["gc.routed_to"] != "worker" {
+		t.Fatalf("gc.routed_to = %q, want worker", got.Metadata["gc.routed_to"])
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_SkipsStoreAwareEntryWithoutOwnerStore(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()

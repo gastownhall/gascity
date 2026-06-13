@@ -1329,6 +1329,9 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		if err := target.storeView.store.SetMetadata(currentSource.ID, beadmeta.RoutedToMetadataKey, nextRoute); err != nil {
 			return err
 		}
+		if err := clearSessionAffinityMetadataOnBead(target.storeView.store, currentSource.ID); err != nil {
+			return err
+		}
 		if err := target.storeView.store.Update(currentSource.ID, beads.UpdateOpts{
 			Status:   &open,
 			Assignee: &unassigned,
