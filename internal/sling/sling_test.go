@@ -3304,6 +3304,80 @@ func TestDoSling_Reassign_DryRunSkipsClear(t *testing.T) {
 	}
 }
 
+// TestClearHumanAssignee_RigStore: clearHumanAssignee clears the assignee on
+// a rig-prefixed bead whose record lives in a source-workflow (rig) store
+// rather than the city primary store. Direct unit test of the multi-store
+// fallback added for gastownhall/gascity#3408.
+func TestClearHumanAssignee_RigStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "human"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	deps := SlingDeps{
+		Store: cityStore,
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+		},
+	}
+	if err := clearHumanAssignee(bead.ID, deps); err != nil {
+		t.Fatalf("clearHumanAssignee: %v", err)
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty after clear in rig store", got.Assignee)
+	}
+}
+
+// TestDoSling_Reassign_ClearsHumanAssignee_RigStore: --reassign clears a human
+// assignee on a rig-prefixed bead whose record lives in the rig store, not the
+// city primary store. Regression for gastownhall/gascity#3408 — the clear
+// previously no-op'd because clearHumanAssignee only consulted deps.Store, so
+// the bead stayed routed+human-assigned and invisible to the pool scaler.
+func TestDoSling_Reassign_ClearsHumanAssignee_RigStore(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/myrig", Prefix: "gc"},
+		},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "human"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	deps.SourceWorkflowStores = func() ([]SourceWorkflowStore, error) {
+		return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+	}
+	// Force routing: the bead lives only in the rig store, so the city-store
+	// existence validation must be bypassed to reach the reassign clear.
+	opts := SlingOpts{
+		Target:        a,
+		BeadOrFormula: bead.ID,
+		NoFormula:     true,
+		NoConvoy:      true,
+		Reassign:      true,
+		Force:         true,
+	}
+	if _, err := DoSling(opts, deps, nil); err != nil {
+		t.Fatalf("DoSling --reassign on rig-store bead: %v", err)
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty after --reassign", got.Assignee)
+	}
+}
+
 // TestSlingFormulaSearchPaths_RigNameKey: agent.Dir = rig name should
 // resolve to the rig-specific FormulaLayers entry. This is the legacy
 // shape and was already working pre-#1801.
