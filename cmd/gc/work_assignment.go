@@ -47,9 +47,9 @@ func (w workAssignment) unwrapped() beads.Store {
 // assigned to the given identity for the given tier mode, excluding session
 // beads. It is the typed form of the raw
 // List{Assignee,Status,Live,TierMode} probe the reconciler ran directly.
-// status selects the bead status ("open" / "in_progress"); live mirrors the
-// raw ListQuery.Live flag. Session beads (and repairable session beads) are
-// filtered out, matching the raw probes.
+// status selects the bead status ("open" / "in_progress" / "deferred"); live
+// mirrors the raw ListQuery.Live flag. Session beads (and repairable session
+// beads) are filtered out, matching the raw probes.
 func (w workAssignment) OpenAssignedTo(assignee, status string, tierMode beads.TierMode, live bool) ([]beads.Bead, error) {
 	store := w.unwrapped()
 	if store == nil {
@@ -123,14 +123,15 @@ func (w workAssignment) OpenAssignedToBasic(assignee, status string) ([]beads.Be
 
 // ReleaseWorkBead detaches one WORK bead from its (closed/retired) session: it
 // clears the assignee (empty-string clear), clears stale session-affinity
-// metadata, and resets an in_progress bead to open so a fresh worker can
-// re-claim it via the routed queue. When runTargetFallback is non-empty AND the
-// bead carries neither run_target nor routed_to, the fallback route is stamped so
-// the reopened work stays reachable by the controller demand query. It emits the
-// exact beads.UpdateOpts the raw release ops in releaseWorkFromClosedSessionBead
-// and unclaimWorkAssignedToRetiredSessionBead emitted (proven byte-identical by
-// the recording-fake write tests). Pass runTargetFallback="" for the close-
-// release path, which never stamps a fallback.
+// metadata, clears defer_until for deferred beads, and resets in_progress or
+// deferred beads to open so a fresh worker can re-claim them via the routed
+// queue. When runTargetFallback is non-empty AND the bead carries neither
+// run_target nor routed_to, the fallback route is stamped so the reopened work
+// stays reachable by the controller demand query. It emits the exact
+// beads.UpdateOpts the raw release ops in releaseWorkFromClosedSessionBead and
+// unclaimWorkAssignedToRetiredSessionBead emitted (proven byte-identical by the
+// recording-fake write tests). Pass runTargetFallback="" for the close-release
+// path, which never stamps a fallback.
 func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback string) error {
 	store := w.unwrapped()
 	if store == nil {
@@ -141,9 +142,12 @@ func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback strin
 		Assignee: &empty,
 		Metadata: withClearedSessionAffinityMetadata(nil),
 	}
-	if item.Status == "in_progress" {
+	if item.Status == "in_progress" || item.Status == "deferred" {
 		open := "open"
 		update.Status = &open
+	}
+	if item.Status == "deferred" {
+		update.ClearDefer = true
 	}
 	if runTargetFallback != "" &&
 		strings.TrimSpace(item.Metadata[beadmeta.RunTargetMetadataKey]) == "" &&

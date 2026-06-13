@@ -159,6 +159,12 @@ func (m *MemStore) Update(id string, opts UpdateOpts) error {
 				}
 				m.beads[i].Labels = filtered
 			}
+			if opts.ClearDefer {
+				m.beads[i].DeferUntil = nil
+				if opts.Status == nil {
+					m.beads[i].Status = "open"
+				}
+			}
 			m.beads[i].UpdatedAt = time.Now()
 			return nil
 		}

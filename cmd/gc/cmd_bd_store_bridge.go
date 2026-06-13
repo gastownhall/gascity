@@ -39,6 +39,7 @@ type bdStoreBridgeUpdateRequest struct {
 	Labels       []string          `json:"labels,omitempty"`
 	RemoveLabels []string          `json:"remove_labels,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
+	ClearDefer   bool              `json:"clear_defer,omitempty"`
 }
 
 type bdStoreBridgeBead struct {
@@ -191,6 +192,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 			Labels:       req.Labels,
 			RemoveLabels: req.RemoveLabels,
 			Metadata:     req.Metadata,
+			ClearDefer:   req.ClearDefer,
 		})
 	case "close":
 		if len(args) < 1 {

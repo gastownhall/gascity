@@ -1075,6 +1075,10 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	for _, l := range opts.RemoveLabels {
 		args = append(args, "--remove-label", l)
 	}
+	if opts.ClearDefer {
+		// --defer="" clears defer_until and resets status to open (bd GH#3233).
+		args = append(args, "--defer", "")
+	}
 	// No fields to update — no-op (bd errors on empty update).
 	if len(args) == 3 {
 		return nil

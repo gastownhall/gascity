@@ -104,6 +104,10 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+	// ClearDefer clears defer_until and resets status to open. Used to
+	// recover pool-routed work beads that were deferred by an agent while
+	// they should remain in the ready pool for pickup.
+	ClearDefer bool
 }
 
 // ConditionalAssignmentReleaser is implemented by stores that can release an

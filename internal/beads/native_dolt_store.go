@@ -1149,6 +1149,13 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 		}
 		updates["metadata"] = raw
 	}
+	if opts.ClearDefer {
+		updates["defer_until"] = nil
+		// Only reset to open if no explicit status override was requested.
+		if opts.Status == nil {
+			updates["status"] = string(beadslib.StatusOpen)
+		}
+	}
 	return updates, nil
 }
 

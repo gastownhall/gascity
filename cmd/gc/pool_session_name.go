@@ -136,7 +136,8 @@ func releaseOrphanedPoolAssignments(
 
 	var released []releasedPoolAssignment
 	for i, wb := range assignedWorkBeads {
-		if wb.Status != "open" && wb.Status != "in_progress" {
+		isDeferred := wb.Status == "deferred"
+		if wb.Status != "open" && wb.Status != "in_progress" && !isDeferred {
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
@@ -152,8 +153,12 @@ func releaseOrphanedPoolAssignments(
 			continue
 		}
 		if assignee == "" {
-			if wb.Status != "in_progress" {
-				continue
+			// Deferred pool-routed beads with no assignee should always be
+			// undeferred — no session owns them, so there is nothing to check.
+			if !isDeferred {
+				if wb.Status != "in_progress" {
+					continue
+				}
 			}
 		} else {
 			workStoreRef := ""
@@ -184,14 +189,16 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 		}
-		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
-			continue
+		if !isDeferred {
+			if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
+				continue
+			}
 		}
 		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
 		if !allowsRelease {
 			continue
 		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb.ID, clearDetached) {
+		if !releaseOrphanedPoolAssignmentFull(ownerStore, wb.ID, clearDetached, isDeferred) {
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
@@ -350,13 +357,18 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 }
 
 func releaseOrphanedPoolAssignment(store beads.Store, id string, clearDetached bool) bool {
+	return releaseOrphanedPoolAssignmentFull(store, id, clearDetached, false)
+}
+
+func releaseOrphanedPoolAssignmentFull(store beads.Store, id string, clearDetached, clearDefer bool) bool {
 	if store == nil || id == "" {
 		return false
 	}
 	opts := beads.UpdateOpts{
-		Assignee: stringPtr(""),
-		Status:   stringPtr("open"),
-		Metadata: withClearedSessionAffinityMetadata(nil),
+		Assignee:   stringPtr(""),
+		Status:     stringPtr("open"),
+		ClearDefer: clearDefer,
+		Metadata:   withClearedSessionAffinityMetadata(nil),
 	}
 	if clearDetached {
 		opts.Metadata[detachedProbeMetadataKey] = ""
