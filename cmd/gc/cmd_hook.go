@@ -75,12 +75,12 @@ This protects provider hook callbacks from wedged data-plane commands. The
 child process is the current gc executable, and <gc args...> are passed to it
 verbatim.`,
 		Args: cobra.ArbitraryArgs,
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				fmt.Fprintln(stderr, "gc hook run: missing gc command arguments after --") //nolint:errcheck
 				return errExit
 			}
-			return exitForCode(cmdHookRun(args, opts, stdout, stderr))
+			return exitForCode(cmdHookRun(args, opts, c.InOrStdin(), stdout, stderr))
 		},
 	}
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", defaultHookRunTimeout, "hard timeout for the managed hook command")
@@ -97,7 +97,7 @@ type hookRunOptions struct {
 
 var hookRunExecutable = os.Executable
 
-func cmdHookRun(args []string, opts hookRunOptions, stdout, stderr io.Writer) int {
+func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "gc hook run: missing gc command arguments") //nolint:errcheck
 		return 1
@@ -115,19 +115,38 @@ func cmdHookRun(args []string, opts hookRunOptions, stdout, stderr io.Writer) in
 		return 1
 	}
 	cmd := exec.CommandContext(ctx, exe, args...)
-	cmd.Stdout = stdout
+	// Forward the provider hook stdin so wrapped commands like
+	// `nudge drain --inject` still receive the UserPromptSubmit JSON
+	// (carrying transcript_path) they need for context-pressure injection.
+	// readHookStdin already bounds the read with an io.LimitReader and the
+	// hard timeout below bounds any block, so forwarding is safe.
+	cmd.Stdin = stdin
+	// Buffer child stdout instead of streaming it straight to the provider so
+	// a wedged command cannot leak partial injectable output before the
+	// fail-open timeout path runs. The buffer is flushed only on a clean or
+	// self-determined exit, and discarded on timeout.
+	var childOut bytes.Buffer
+	cmd.Stdout = &childOut
 	cmd.Stderr = stderr
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 
 	err = cmd.Run()
+	// A clean exit wins even if the deadline fired in the same instant: the
+	// child finished and produced complete output, so report success and flush.
+	if err == nil {
+		_, _ = stdout.Write(childOut.Bytes()) //nolint:errcheck
+		return 0
+	}
 	if ctx.Err() == context.DeadlineExceeded {
+		// Timed out: the child was killed mid-flight, so any buffered output is
+		// partial. Discard it and return the configured fail-open code.
 		fmt.Fprintf(stderr, "gc hook run: command timed out after %s\n", timeout) //nolint:errcheck
 		return opts.TimeoutExitCode
 	}
-	if err == nil {
-		return 0
-	}
+	// The child exited on its own with a non-zero status: its output is
+	// complete, so preserve it and propagate the exit code.
+	_, _ = stdout.Write(childOut.Bytes()) //nolint:errcheck
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		return exitErr.ExitCode()

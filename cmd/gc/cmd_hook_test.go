@@ -19,10 +19,13 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
-func setHookRunExecutableForTest(t *testing.T, path string) func() {
+// setHookRunExecutableForTest stubs the re-exec target of `gc hook run` to the
+// shell so tests can drive the wrapper with `sh -c` scripts instead of the real
+// gc binary. The stub is restored on cleanup.
+func setHookRunExecutableForTest(t *testing.T) func() {
 	t.Helper()
 	previous := hookRunExecutable
-	hookRunExecutable = func() (string, error) { return path, nil }
+	hookRunExecutable = func() (string, error) { return "sh", nil }
 	restore := func() { hookRunExecutable = previous }
 	t.Cleanup(restore)
 	return restore
@@ -605,7 +608,7 @@ func TestHookRunTimesOutAndFailsOpenWhenConfigured(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
-	restore := setHookRunExecutableForTest(t, "sh")
+	restore := setHookRunExecutableForTest(t)
 	defer restore()
 
 	var stdout, stderr bytes.Buffer
@@ -613,7 +616,7 @@ func TestHookRunTimesOutAndFailsOpenWhenConfigured(t *testing.T) {
 	code := cmdHookRun([]string{"-c", "sleep 10"}, hookRunOptions{
 		Timeout:         50 * time.Millisecond,
 		TimeoutExitCode: 0,
-	}, &stdout, &stderr)
+	}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHookRun timeout code = %d, want fail-open 0; stderr=%s", code, stderr.String())
 	}
@@ -632,19 +635,98 @@ func TestHookRunPreservesChildExitCodeAndOutput(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
-	restore := setHookRunExecutableForTest(t, "sh")
+	restore := setHookRunExecutableForTest(t)
 	defer restore()
 
 	var stdout, stderr bytes.Buffer
 	code := cmdHookRun([]string{"-c", "printf ok; exit 7"}, hookRunOptions{
 		Timeout:         time.Second,
 		TimeoutExitCode: 124,
-	}, &stdout, &stderr)
+	}, nil, &stdout, &stderr)
 	if code != 7 {
 		t.Fatalf("cmdHookRun code = %d, want child exit 7; stderr=%s", code, stderr.String())
 	}
 	if stdout.String() != "ok" {
 		t.Fatalf("stdout = %q, want ok", stdout.String())
+	}
+}
+
+// TestHookRunForwardsStdinToChild guards the regression where `gc hook run`
+// left cmd.Stdin nil, so wrapped commands such as `nudge drain --inject` saw
+// /dev/null instead of the provider UserPromptSubmit JSON and silently dropped
+// context-pressure injection. The child here echoes its stdin; the wrapper must
+// forward the piped input through to it.
+func TestHookRunForwardsStdinToChild(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	restore := setHookRunExecutableForTest(t)
+	defer restore()
+
+	const payload = `{"transcript_path":"/tmp/transcript.jsonl"}`
+	var stdout, stderr bytes.Buffer
+	code := cmdHookRun([]string{"-c", "cat"}, hookRunOptions{
+		Timeout:         time.Second,
+		TimeoutExitCode: 124,
+	}, strings.NewReader(payload), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookRun code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stdout.String() != payload {
+		t.Fatalf("child stdin not forwarded: stdout = %q, want %q", stdout.String(), payload)
+	}
+}
+
+// TestHookRunDiscardsPartialStdoutOnTimeout guards the fail-open contract: a
+// child that prints partial injectable output and then wedges past the timeout
+// must not leak that partial output to the provider. The wrapper buffers child
+// stdout and discards it when the deadline fires.
+func TestHookRunDiscardsPartialStdoutOnTimeout(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	restore := setHookRunExecutableForTest(t)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookRun([]string{"-c", "printf partial; sleep 10"}, hookRunOptions{
+		Timeout:         50 * time.Millisecond,
+		TimeoutExitCode: 0,
+	}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookRun timeout code = %d, want fail-open 0; stderr=%s", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("partial stdout leaked on timeout: stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "timed out after 50ms") {
+		t.Fatalf("stderr = %q, want timeout diagnostic", stderr.String())
+	}
+}
+
+// TestHookRunCommandForwardsStdinAndArgsAfterDoubleDash exercises the full
+// production wiring through the real Cobra command: flags before `--` are
+// parsed by `gc hook run`, the args after `--` reach the wrapped child
+// verbatim, and the command's stdin (defaulting to os.Stdin in production,
+// injected here via SetIn) is forwarded to the child. The child echoes its
+// stdin, so a passthrough failure shows up as empty stdout.
+func TestHookRunCommandForwardsStdinAndArgsAfterDoubleDash(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	restore := setHookRunExecutableForTest(t)
+	defer restore()
+
+	const payload = `{"transcript_path":"/tmp/transcript.jsonl"}`
+	var stdout, stderr bytes.Buffer
+	cmd := newHookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"run", "--timeout", "5s", "--timeout-exit-code", "0", "--", "-c", "cat"})
+	cmd.SetIn(strings.NewReader(payload))
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc hook run failed: %v; stderr=%s", err, stderr.String())
+	}
+	if stdout.String() != payload {
+		t.Fatalf("cobra hook run did not forward stdin through `--`: stdout = %q, want %q", stdout.String(), payload)
 	}
 }
 
