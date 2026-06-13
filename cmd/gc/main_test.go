@@ -2811,6 +2811,9 @@ version = "` + config.BundledPackImportVersion + `"
 [imports.core]
 source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
 version = "` + config.BundledPackImportVersion + `"
+[imports.gascity]
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+version = "` + config.PublicGascityPackVersion + `"
 
 [[named_session]]
 template = "mayor"
@@ -3179,8 +3182,8 @@ func TestRunWizardDefaults(t *testing.T) {
 	if !wiz.interactive {
 		t.Error("expected interactive = true")
 	}
-	if wiz.configName != "minimal" {
-		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
+	if wiz.configName != "gascity" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "gascity")
 	}
 	if wiz.defaultProvider != "claude" {
 		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "claude")
@@ -3208,8 +3211,8 @@ func TestRunWizardNilStdin(t *testing.T) {
 	if wiz.interactive {
 		t.Error("expected interactive = false for nil stdin")
 	}
-	if wiz.configName != "minimal" {
-		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
+	if wiz.configName != "gascity" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "gascity")
 	}
 	if wiz.provider != "" {
 		t.Errorf("provider = %q, want empty", wiz.provider)
@@ -3272,7 +3275,7 @@ func TestRunWizardCustomTemplate(t *testing.T) {
 func TestRunWizardGastownTemplate(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude")
 	// Select gastown template + default agent.
-	stdin := strings.NewReader("2\n")
+	stdin := strings.NewReader("3\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
@@ -3352,8 +3355,8 @@ func TestRunWizardEOFStdin(t *testing.T) {
 	wiz := runWizard(stdin, &stdout)
 
 	// EOF means default for both questions.
-	if wiz.configName != "minimal" {
-		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
+	if wiz.configName != "gascity" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "gascity")
 	}
 	if wiz.defaultProvider != "claude" {
 		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "claude")

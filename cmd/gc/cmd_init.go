@@ -72,6 +72,8 @@ type initPackConfig struct {
 
 var initConventionDirs = cityinit.InitConventionDirs()
 
+const defaultInitTemplate = "gascity"
+
 // wizardConfig carries the results of the interactive init wizard (or defaults
 // for non-interactive paths). doInit uses it to decide which config to write.
 type wizardConfig struct {
@@ -86,14 +88,14 @@ type wizardConfig struct {
 }
 
 // defaultWizardConfig returns a non-interactive wizardConfig that produces
-// a single mayor agent with no provider.
+// the default init template with no provider.
 func defaultWizardConfig() wizardConfig {
-	return wizardConfig{configName: "minimal"}
+	return wizardConfig{configName: defaultInitTemplate}
 }
 
 func canBootstrapExistingCity(wiz wizardConfig) bool {
 	return !wiz.interactive &&
-		wiz.configName == "minimal" &&
+		(wiz.configName == "minimal" || wiz.configName == defaultInitTemplate) &&
 		wizardDefaultProvider(wiz) == "" &&
 		len(wiz.providers) == 0 &&
 		wiz.startCommand == "" &&
@@ -137,29 +139,29 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 
 	br := bufio.NewReader(stdin)
 
-	fmt.Fprintln(stdout, "Welcome to Gas City SDK!")                                //nolint:errcheck // best-effort stdout
-	fmt.Fprintln(stdout, "")                                                        //nolint:errcheck // best-effort stdout
-	fmt.Fprintln(stdout, "Choose a config template:")                               //nolint:errcheck // best-effort stdout
-	fmt.Fprintln(stdout, "  1. minimal   — default coding agent (default)")         //nolint:errcheck // best-effort stdout
-	fmt.Fprintln(stdout, "  2. gastown   — multi-agent orchestration pack")         //nolint:errcheck // best-effort stdout
-	fmt.Fprintln(stdout, "  3. gascity   — planning & implementation skills pack")  //nolint:errcheck // best-effort stdout
-	fmt.Fprintln(stdout, "  4. custom    — empty workspace, configure it yourself") //nolint:errcheck // best-effort stdout
-	fmt.Fprintf(stdout, "Template [1]: ")                                           //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "Welcome to Gas City SDK!")                                         //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "")                                                                 //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "Choose a config template:")                                        //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "  1. gascity   — planning & implementation skills pack (default)") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "  2. minimal   — default coding agent")                            //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "  3. gastown   — multi-agent orchestration pack")                  //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "  4. custom    — empty workspace, configure it yourself")          //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "Template [1]: ")                                                    //nolint:errcheck // best-effort stdout
 
 	configChoice := readLine(br)
-	configName := "minimal"
+	configName := defaultInitTemplate
 
 	switch configChoice {
-	case "", "1", "minimal", "tutorial":
-		configName = "minimal"
-	case "2", "gastown":
-		configName = "gastown"
-	case "3", "gascity":
+	case "", "1", "gascity":
 		configName = "gascity"
+	case "2", "minimal", "tutorial":
+		configName = "minimal"
+	case "3", "gastown":
+		configName = "gastown"
 	case "4", "custom":
 		configName = "custom"
 	default:
-		fmt.Fprintf(stdout, "Unknown template %q, using minimal.\n", configChoice) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "Unknown template %q, using gascity.\n", configChoice) //nolint:errcheck // best-effort stdout
 	}
 
 	// Custom config → skip agent question, return minimal config.
@@ -551,7 +553,7 @@ func initWizardConfig(providerFlag, bootstrapProfileFlag string) (wizardConfig, 
 		providers = []string{defaultProvider}
 	}
 	return wizardConfig{
-		configName:       "minimal",
+		configName:       defaultInitTemplate,
 		defaultProvider:  defaultProvider,
 		providers:        providers,
 		provider:         defaultProvider,
@@ -667,7 +669,7 @@ func normalizeInitProviders(values []string) ([]string, error) {
 func normalizeInitTemplate(template string, supplied bool) (string, error) {
 	template = strings.TrimSpace(template)
 	if template == "" {
-		return "minimal", nil
+		return defaultInitTemplate, nil
 	}
 	switch template {
 	case "minimal", "gastown", "gascity", "custom":
@@ -676,7 +678,7 @@ func normalizeInitTemplate(template string, supplied bool) (string, error) {
 		if supplied {
 			return "", fmt.Errorf("unknown template %q (expected one of: minimal, gastown, gascity, custom)", template)
 		}
-		return "minimal", nil
+		return defaultInitTemplate, nil
 	}
 }
 

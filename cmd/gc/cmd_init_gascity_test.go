@@ -11,6 +11,92 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+func TestDefaultWizardConfigUsesGascityTemplate(t *testing.T) {
+	wiz := defaultWizardConfig()
+	if wiz.configName != "gascity" {
+		t.Fatalf("defaultWizardConfig().configName = %q, want gascity", wiz.configName)
+	}
+}
+
+func TestNormalizeInitTemplateDefaultUsesGascity(t *testing.T) {
+	got, err := normalizeInitTemplate("", false)
+	if err != nil {
+		t.Fatalf("normalizeInitTemplate(empty, false): %v", err)
+	}
+	if got != "gascity" {
+		t.Fatalf("normalizeInitTemplate(empty, false) = %q, want gascity", got)
+	}
+}
+
+func TestInitWizardConfigProviderFlagDefaultsToGascity(t *testing.T) {
+	wiz, err := initWizardConfig("codex", "")
+	if err != nil {
+		t.Fatalf("initWizardConfig: %v", err)
+	}
+	if wiz.configName != "gascity" {
+		t.Fatalf("initWizardConfig provider default configName = %q, want gascity", wiz.configName)
+	}
+	if wiz.defaultProvider != "codex" {
+		t.Fatalf("initWizardConfig defaultProvider = %q, want codex", wiz.defaultProvider)
+	}
+}
+
+func TestRunWizardBlankTemplateChoiceUsesGascity(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude")
+	stdin := strings.NewReader("\n")
+	var stdout bytes.Buffer
+	wiz := runWizard(stdin, &stdout)
+
+	if wiz.configName != "gascity" {
+		t.Fatalf("runWizard(blank template).configName = %q, want gascity", wiz.configName)
+	}
+	if wiz.defaultProvider != "claude" {
+		t.Fatalf("runWizard(blank template).defaultProvider = %q, want claude", wiz.defaultProvider)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "gascity") || !strings.Contains(out, "(default)") {
+		t.Fatalf("wizard output should advertise gascity as default:\n%s", out)
+	}
+}
+
+func TestDoInitDefaultTemplateImportsGascityPack(t *testing.T) {
+	f := fsys.NewFake()
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packData := f.Files[filepath.Join("/bright-lights", "pack.toml")]
+	packCfg, err := config.Parse(packData)
+	if err != nil {
+		t.Fatalf("parsing pack.toml: %v", err)
+	}
+	if _, ok := packCfg.Imports["gascity"]; !ok {
+		t.Fatalf("default pack.toml imports = %v, want gascity entry:\n%s", packCfg.Imports, packData)
+	}
+}
+
+func TestDoInitExplicitMinimalTemplateDoesNotImportGascityPack(t *testing.T) {
+	f := fsys.NewFake()
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/bright-lights", wizardConfig{configName: "minimal"}, "", &stdout, &stderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packData := f.Files[filepath.Join("/bright-lights", "pack.toml")]
+	packCfg, err := config.Parse(packData)
+	if err != nil {
+		t.Fatalf("parsing pack.toml: %v", err)
+	}
+	if _, ok := packCfg.Imports["gascity"]; ok {
+		t.Fatalf("explicit minimal pack.toml imports gascity unexpectedly:\n%s", packData)
+	}
+}
+
 // TestDoInitWithGascityTemplate pins the gascity wizard template: a minimal
 // mayor city whose pack.toml imports the public gascity skills pack pinned
 // to the registry release, written alongside the explicit builtin includes.
