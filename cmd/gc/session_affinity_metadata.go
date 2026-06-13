@@ -1,10 +1,13 @@
 package main
 
-import "github.com/gastownhall/gascity/internal/beads"
+import (
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+)
 
 var routedWorkSessionAffinityMetadataKeys = []string{
-	"gc.session_affinity",
-	"gc.continuation_group",
+	beadmeta.SessionAffinityMetadataKey,
+	beadmeta.ContinuationGroupMetadataKey,
 }
 
 func withClearedSessionAffinityMetadata(metadata map[string]string) map[string]string {

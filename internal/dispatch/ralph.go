@@ -1036,8 +1036,8 @@ func clearSessionAffinityMetadata(meta map[string]string) {
 		return
 	}
 	for _, key := range []string{
-		"gc.session_affinity",
-		"gc.continuation_group",
+		beadmeta.SessionAffinityMetadataKey,
+		beadmeta.ContinuationGroupMetadataKey,
 	} {
 		delete(meta, key)
 	}
