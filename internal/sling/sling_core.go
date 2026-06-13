@@ -1486,20 +1486,27 @@ func selectedStoreContainer(opts SlingOpts, deps SlingDeps) (beads.Bead, bool) {
 // city primary store (deps.Store) first; if the bead is not there it sweeps
 // the source-workflow stores (deps.SourceWorkflowStores) so rig-prefixed beads
 // — whose record lives in a rig store, not deps.Store — still get cleared.
-// No-op when the assignee is already empty, the store is unavailable, or the
-// bead is absent from every store. Errors on a real store-Update failure or a
-// SourceWorkflowStores listing/read failure. See SlingOpts.Reassign, #1007,
-// and #3408.
+// No-op when the assignee is already empty, no store is available, or the bead
+// is absent from every store. Errors on a real primary-store read failure, a
+// store-Update failure, or a SourceWorkflowStores listing/read failure. See
+// SlingOpts.Reassign, #1007, and #3408.
 func clearHumanAssignee(beadID string, deps SlingDeps) error {
-	if deps.Store == nil {
-		return nil
+	if deps.Store != nil {
+		b, err := deps.Store.Get(beadID)
+		if err == nil {
+			return clearAssigneeInStore(deps.Store, beadID, b)
+		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			return fmt.Errorf("reading %s from primary store to clear assignee: %w", beadID, err)
+		}
+		// ErrNotFound: the record is not in the city primary store. For
+		// rig-prefixed beads it lives in a rig store, so fall through to the
+		// source-workflow sweep below.
 	}
-	if b, err := deps.Store.Get(beadID); err == nil {
-		return clearAssigneeInStore(deps.Store, beadID, b)
-	}
-	// Not in the city primary store. For rig-prefixed beads the record lives
-	// in a rig store, so sweep the source-workflow stores and clear it where
-	// found. Mirrors the multi-store pattern in sourceWorkflowRootByID.
+	// Sweep the source-workflow stores and clear the bead in whichever one
+	// holds it. Mirrors the multi-store pattern in sourceWorkflowRootByID,
+	// which likewise consults the workflow stores when deps.Store lacks (or
+	// omits) the bead.
 	if deps.SourceWorkflowStores == nil {
 		return nil
 	}
