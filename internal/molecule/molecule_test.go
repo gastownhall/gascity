@@ -695,6 +695,43 @@ func TestInstantiateFallsBackWhenGraphApplyDoltConnectionTimesOut(t *testing.T) 
 	}
 }
 
+func TestInstantiateFallsBackWhenNativeGraphApplyCycleCheckTimesOut(t *testing.T) {
+	store := &graphApplySpyStore{
+		MemStore: beads.NewMemStore(),
+		err:      fmt.Errorf("adding edge ga-wisp-f5tz43->ga-wisp-oog3my: failed to check for dependency cycle: context deadline exceeded"),
+	}
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.step", Title: "Work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if store.calls != 2 {
+		t.Fatalf("ApplyGraphPlan calls = %d, want 2", store.calls)
+	}
+	if result.Created != 2 {
+		t.Fatalf("Created = %d, want 2", result.Created)
+	}
+	if result.RootID == "" || result.RootID == "bd-1" {
+		t.Fatalf("RootID = %q, want sequential store ID", result.RootID)
+	}
+	if _, err := store.Get(result.RootID); err != nil {
+		t.Fatalf("fallback root missing from store: %v", err)
+	}
+}
+
 func TestInstantiateDoesNotFallbackForNonTransientGraphApplyError(t *testing.T) {
 	store := &graphApplySpyStore{
 		MemStore: beads.NewMemStore(),

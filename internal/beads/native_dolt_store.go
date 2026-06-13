@@ -406,7 +406,7 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 
 		return nil
 	}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
 
 	result := &GraphApplyResult{IDs: keyToID}
