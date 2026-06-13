@@ -238,7 +238,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// Verify via BdStore.Get — which already enforces an exact-ID match —
 	// before forwarding any mutation to the bd subprocess.
 	//
-	// Fail-closed: if the arg scanner reports ambiguity (unrecognised
+	// Fail-closed: if the arg scanner reports ambiguity (unrecognized
 	// value-consuming flag), the command is rejected rather than forwarded
 	// unguarded.
 	//
@@ -254,7 +254,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// substring-resolves. That is intentional — reads are non-destructive.
 	if writeIDs, writeOK, ambiguous := bdMutationWriteIDs(bdArgs); writeOK {
 		if ambiguous {
-			fmt.Fprintf(stderr, "gc bd: cannot safely verify bead IDs (unrecognised flag in args %v); aborting to prevent substring-resolution mutation of the wrong bead\n", bdArgs) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc bd: cannot safely verify bead IDs (unrecognized flag in args %v); aborting to prevent substring-resolution mutation of the wrong bead\n", bdArgs) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if len(writeIDs) > 0 {
@@ -366,7 +366,7 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 // Returns:
 //   - ids: all positional (non-flag) tokens after the subcommand; may be empty.
 //   - ok: false if args is empty or the subcommand is not a write-mutation.
-//   - ambiguous: true if the scanner encountered an unrecognised flag that
+//   - ambiguous: true if the scanner encountered an unrecognized flag that
 //     might consume the next argument as its value. In that case the caller
 //     must fail-closed — forwarding the command unguarded risks the original
 //     substring-resolution bug (gcy-g4o).
@@ -441,7 +441,6 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		}
 		// Unknown flag. It might consume a value argument that looks like a
 		// bead ID. Fail-closed: report ambiguity so the caller can reject.
-		ambiguous = true
 		return nil, true, true
 	}
 	return ids, true, false
@@ -456,55 +455,55 @@ func bdSubcmdValueFlags(sub string) map[string]bool {
 		"--actor": true, "--db": true, "--directory": true, "-C": true,
 		"--dolt-auto-commit": true,
 	}
-	var sub_ map[string]bool
+	var subFlags map[string]bool
 	switch sub {
 	case "update":
-		sub_ = map[string]bool{
+		subFlags = map[string]bool{
 			"--acceptance": true,
 			"--add-label":  true, "--append-notes": true,
 			"-a": true, "--assignee": true,
-			"--await-id":    true,
-			"--body-file":   true,
-			"--defer":       true,
-			"-d": true, "--description": true,
+			"--await-id":  true,
+			"--body-file": true,
+			"--defer":     true,
+			"-d":          true, "--description": true,
 			"--design": true, "--design-file": true,
-			"--due":          true,
-			"-e": true, "--estimate": true,
+			"--due": true,
+			"-e":    true, "--estimate": true,
 			"--external-ref": true,
 			"--metadata":     true,
 			"--notes":        true,
 			"--parent":       true,
-			"-p": true, "--priority": true,
-			"--remove-label":   true,
-			"--session":        true,
-			"--set-labels":     true,
-			"--set-metadata":   true,
-			"-s": true, "--status": true,
+			"-p":             true, "--priority": true,
+			"--remove-label": true,
+			"--session":      true,
+			"--set-labels":   true,
+			"--set-metadata": true,
+			"-s":             true, "--status": true,
 			"-t": true, "--type": true,
 			"--title":          true,
 			"--spec-id":        true,
 			"--unset-metadata": true,
 		}
 	case "close":
-		sub_ = map[string]bool{
+		subFlags = map[string]bool{
 			"-r": true, "--reason": true,
 			"--reason-file": true,
 			"--session":     true,
 		}
 	case "reopen":
-		sub_ = map[string]bool{
+		subFlags = map[string]bool{
 			"-r": true, "--reason": true,
 		}
 	case "delete":
-		sub_ = map[string]bool{
+		subFlags = map[string]bool{
 			"--from-file": true,
 		}
 	}
-	merged := make(map[string]bool, len(global)+len(sub_))
+	merged := make(map[string]bool, len(global)+len(subFlags))
 	for k := range global {
 		merged[k] = true
 	}
-	for k := range sub_ {
+	for k := range subFlags {
 		merged[k] = true
 	}
 	return merged
@@ -523,34 +522,34 @@ func bdSubcmdBoolFlags(sub string) map[string]bool {
 		"-v": true, "--verbose": true,
 		"-h": true, "--help": true,
 	}
-	var sub_ map[string]bool
+	var subFlags map[string]bool
 	switch sub {
 	case "update":
-		sub_ = map[string]bool{
+		subFlags = map[string]bool{
 			"--allow-empty-description": true,
-			"--claim": true, "--ephemeral": true,
+			"--claim":                   true, "--ephemeral": true,
 			"--history": true, "--no-history": true,
 			"--persistent": true, "--stdin": true,
 		}
 	case "close":
-		sub_ = map[string]bool{
+		subFlags = map[string]bool{
 			"--claim-next": true, "--continue": true,
 			"-f": true, "--force": true,
 			"--no-auto": true, "--suggest-next": true,
 		}
 	case "reopen":
-		sub_ = map[string]bool{}
+		subFlags = map[string]bool{}
 	case "delete":
-		sub_ = map[string]bool{
+		subFlags = map[string]bool{
 			"--cascade": true, "--dry-run": true,
 			"-f": true, "--force": true,
 		}
 	}
-	merged := make(map[string]bool, len(global)+len(sub_))
+	merged := make(map[string]bool, len(global)+len(subFlags))
 	for k := range global {
 		merged[k] = true
 	}
-	for k := range sub_ {
+	for k := range subFlags {
 		merged[k] = true
 	}
 	return merged

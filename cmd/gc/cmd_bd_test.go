@@ -2294,7 +2294,7 @@ func TestBdMutationWriteID(t *testing.T) {
 			}
 		}
 	})
-	t.Run("returns false for read or unrecognised subcommands", func(t *testing.T) {
+	t.Run("returns false for read or unrecognized subcommands", func(t *testing.T) {
 		for _, args := range [][]string{
 			{"show", "gcy-dv7"},
 			{"list", "-s", "open"},
