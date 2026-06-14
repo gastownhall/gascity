@@ -137,7 +137,7 @@ shape. The registry commands available in this release cover discovery, cache
 management, authentication, and publish submission:
 
 ```text
-gc pack registry add main https://github.com/gastownhall/gascity-packs.git
+gc pack registry add example https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml
 gc pack registry refresh main
 gc pack registry search gastown
 gc pack registry show main:gastown
@@ -145,17 +145,17 @@ gc pack registry login
 gc pack registry publish .
 gc pack registry whoami
 gc pack registry list
-gc pack registry remove main
+gc pack registry remove example
 ```
 
 When a registry entry is used to add or migrate a pack, the durable
 `pack.toml` entry stores the entry's resolved `source` and optional `version`,
 not the registry handle.
 
-The first public registry is the `gascity-packs` catalog:
+The first public registry is the `gascity-packs` catalog, configured by default
+as the built-in `main` registry, so there is nothing to add:
 
 ```text
-gc pack registry add main https://github.com/gastownhall/gascity-packs.git
 gc pack registry refresh main
 gc pack registry search gascity
 gc pack registry show main:gascity

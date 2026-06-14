@@ -10,10 +10,10 @@ Gas City publishes first-party reusable packs through the public
 `pack.toml` files still record durable GitHub tree URLs plus an optional
 version constraint or pin.
 
-Add the public registry locally:
+The public `main` registry is configured by default, so there is nothing to
+add. Refresh its catalog before browsing:
 
 ```bash
-gc pack registry add main https://github.com/gastownhall/gascity-packs.git
 gc pack registry refresh main
 ```
 
