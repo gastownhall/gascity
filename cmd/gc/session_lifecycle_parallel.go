@@ -1132,19 +1132,24 @@ func runPreparedStartCandidate(
 	// recordWakeFailure clears the key for the next attempt.
 	if startedFresh && err == nil && item.candidate.session != nil && item.candidate.session.Metadata["session_key"] != "" {
 		postStartBegin := time.Now()
-		time.Sleep(staleKeyDetectDelay)
-		running := false
-		alive := false
-		if store == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
-			running, alive = observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
-		} else {
-			var obs worker.LiveObservation
-			obs, err = workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
-			running = obs.Running
-			alive = obs.Alive
-		}
-		if err != nil || !running || !alive {
-			err = fmt.Errorf("session %q died during startup", item.candidate.name())
+		staleTimer := time.NewTimer(staleKeyDetectDelay)
+		select {
+		case <-staleTimer.C:
+			running := false
+			alive := false
+			if store == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
+				running, alive = observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
+			} else {
+				var obs worker.LiveObservation
+				obs, err = workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
+				running = obs.Running
+				alive = obs.Alive
+			}
+			if err != nil || !running || !alive {
+				err = fmt.Errorf("session %q died during startup", item.candidate.name())
+			}
+		case <-startCtx.Done():
+			staleTimer.Stop()
 		}
 		phases.PostStartObserve = time.Since(postStartBegin)
 	}

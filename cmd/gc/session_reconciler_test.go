@@ -5462,6 +5462,91 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 	}
 }
 
+func TestFreshRestartSessionKey(t *testing.T) {
+	cases := []struct {
+		name        string
+		tp          TemplateParams
+		meta        map[string]string
+		wantUUID    bool
+		wantCapable bool
+	}{
+		{
+			name:        "SessionIDFlag via ResolvedProvider generates fresh UUID key",
+			tp:          TemplateParams{ResolvedProvider: &config.ResolvedProvider{SessionIDFlag: "--session-id"}},
+			wantUUID:    true,
+			wantCapable: true,
+		},
+		{
+			name:        "ResumeFlag via ResolvedProvider clears key",
+			tp:          TemplateParams{ResolvedProvider: &config.ResolvedProvider{ResumeFlag: "--resume"}},
+			wantUUID:    false,
+			wantCapable: true,
+		},
+		{
+			name:        "ResumeCommand via ResolvedProvider clears key",
+			tp:          TemplateParams{ResolvedProvider: &config.ResolvedProvider{ResumeCommand: "resume"}},
+			wantUUID:    false,
+			wantCapable: true,
+		},
+		{
+			name:        "ResumeStyle via ResolvedProvider clears key",
+			tp:          TemplateParams{ResolvedProvider: &config.ResolvedProvider{ResumeStyle: "key"}},
+			wantUUID:    false,
+			wantCapable: true,
+		},
+		{
+			name:        "session_id_flag via meta generates fresh UUID key",
+			meta:        map[string]string{"session_id_flag": "--session-id"},
+			wantUUID:    true,
+			wantCapable: true,
+		},
+		{
+			name:        "resume_flag via meta clears key",
+			meta:        map[string]string{"resume_flag": "--resume"},
+			wantUUID:    false,
+			wantCapable: true,
+		},
+		{
+			name:        "resume_command via meta clears key",
+			meta:        map[string]string{"resume_command": "resume"},
+			wantUUID:    false,
+			wantCapable: true,
+		},
+		{
+			name:        "resume_style via meta clears key",
+			meta:        map[string]string{"resume_style": "key"},
+			wantUUID:    false,
+			wantCapable: true,
+		},
+		{
+			name:        "no resume capability clears key",
+			tp:          TemplateParams{},
+			wantUUID:    false,
+			wantCapable: true,
+		},
+		{
+			name:        "ResolvedProvider with no resume flags clears key",
+			tp:          TemplateParams{ResolvedProvider: &config.ResolvedProvider{Name: "fake"}},
+			wantUUID:    false,
+			wantCapable: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key, capable := freshRestartSessionKey(tc.tp, tc.meta)
+			if capable != tc.wantCapable {
+				t.Fatalf("capable = %v, want %v", capable, tc.wantCapable)
+			}
+			if tc.wantUUID && key == "" {
+				t.Fatal("want non-empty UUID key, got empty")
+			}
+			if !tc.wantUUID && key != "" {
+				t.Fatalf("key = %q, want empty (key should be cleared for this provider)", key)
+			}
+		})
+	}
+}
+
 func TestReconcileSessionBeads_PreservedRunningNamedSessionHonorsRestartRequest(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -5506,8 +5591,10 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionHonorsRestartRequest(
 	if got.Metadata["continuation_reset_pending"] != "true" {
 		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
 	}
-	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
-		t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
+	// Provider has no SessionIDFlag/ResumeFlag/ResumeCommand/ResumeStyle, so the
+	// restart path clears the session_key rather than rotating it.
+	if got.Metadata["session_key"] != "" {
+		t.Fatalf("session_key = %q, want cleared (provider has no session ID capability)", got.Metadata["session_key"])
 	}
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared after durable restart request", got.Metadata["pending_create_claim"])
@@ -8304,8 +8391,10 @@ func TestReconcileSessionBeads_BeadMetadataRestartRequestedWhenSessionDead(t *te
 	if got.Metadata["continuation_reset_pending"] != "true" {
 		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
 	}
-	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
-		t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
+	// Provider has no SessionIDFlag/ResumeFlag/ResumeCommand/ResumeStyle, so the
+	// restart path clears the session_key rather than rotating it.
+	if got.Metadata["session_key"] != "" {
+		t.Fatalf("session_key = %q, want cleared (provider has no session ID capability)", got.Metadata["session_key"])
 	}
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared after durable dead-session restart request", got.Metadata["pending_create_claim"])
