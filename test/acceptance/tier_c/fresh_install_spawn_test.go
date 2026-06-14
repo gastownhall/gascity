@@ -240,7 +240,6 @@ func configureFreshInitClaudePool(t *testing.T, c *helpers.City) {
 	t.Helper()
 	c.WriteV2AgentDir("claude",
 		`provider = "claude"`,
-		`prompt_template = ".gc/system/packs/core/assets/prompts/pool-worker.md"`,
 		`default_sling_formula = "mol-do-work"`,
 		`min_active_sessions = 0`,
 		`max_active_sessions = 1`,

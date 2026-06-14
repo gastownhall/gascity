@@ -187,6 +187,7 @@ func TestShellInstall(t *testing.T) {
 	// Override HOME so we don't touch real RC files.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	// Create a .zshrc to install into.
 	rc := filepath.Join(home, ".zshrc")
@@ -230,6 +231,7 @@ func TestShellInstall(t *testing.T) {
 func TestShellRemove(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	// Set up installed state.
 	compDir := filepath.Join(home, ".gc", "completions")
@@ -264,6 +266,7 @@ func TestShellRemove(t *testing.T) {
 func TestShellInstallFishCreatesConfigDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	root := newRootCmd(os.Stdout, os.Stderr)
 	var stdout, stderr bytes.Buffer
@@ -285,6 +288,7 @@ func TestShellInstallFishCreatesConfigDir(t *testing.T) {
 func TestShellStatusTracksBashProfileInstall(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	root := newRootCmd(os.Stdout, os.Stderr)
 	var installOut, installErr bytes.Buffer
@@ -320,6 +324,7 @@ func TestShellStatusTracksBashProfileInstall(t *testing.T) {
 func TestShellRemoveRemovesBashProfileHookAfterBashrcAppears(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	root := newRootCmd(os.Stdout, os.Stderr)
 	var installOut, installErr bytes.Buffer
@@ -352,6 +357,7 @@ func TestShellRemoveRemovesBashProfileHookAfterBashrcAppears(t *testing.T) {
 func TestShellReinstallUpdatesExistingBashProfileHookAfterBashrcAppears(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	root := newRootCmd(os.Stdout, os.Stderr)
 	var stdout, stderr bytes.Buffer
@@ -391,6 +397,7 @@ func TestShellReinstallUpdatesExistingBashProfileHookAfterBashrcAppears(t *testi
 func TestShellReinstallPreservesRCFileMode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	rc := filepath.Join(home, ".zshrc")
 	shellTestWriteFile(t, rc, "# zshrc\n")
@@ -424,6 +431,7 @@ func TestShellReinstallPreservesRCFileMode(t *testing.T) {
 func TestShellRemovePreservesRCFileMode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	rc := filepath.Join(home, ".zshrc")
 	shellTestWriteFile(t, rc, "# zshrc\n")
@@ -457,6 +465,7 @@ func TestShellRemovePreservesRCFileMode(t *testing.T) {
 func TestShellStatus_NotInstalled(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	// Create RC files so shellRCFile doesn't fall through.
 	shellTestWriteFile(t, filepath.Join(home, ".bashrc"), "")
 	shellTestWriteFile(t, filepath.Join(home, ".zshrc"), "")
@@ -473,6 +482,7 @@ func TestShellStatus_NotInstalled(t *testing.T) {
 func TestShellStatus_Installed(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	// Create installed state for zsh.
 	compDir := filepath.Join(home, ".gc", "completions")
@@ -492,6 +502,7 @@ func TestShellStatus_Installed(t *testing.T) {
 func TestShellStatusJSON(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	shellTestWriteFile(t, filepath.Join(home, ".bashrc"), "")
 	shellTestWriteFile(t, filepath.Join(home, ".zshrc"), "")
 	shellTestMkdirAll(t, filepath.Join(home, ".config", "fish"))
@@ -527,6 +538,7 @@ func TestShellStatusJSON(t *testing.T) {
 func TestShellCmd_ViaCLI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	shellTestWriteFile(t, filepath.Join(home, ".zshrc"), "")
 
 	var stdout, stderr bytes.Buffer

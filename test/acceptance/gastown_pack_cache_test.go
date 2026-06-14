@@ -3,7 +3,8 @@
 // Helpers for locating the gastown pack content that gc materializes into
 // the user-global repo cache. The gastown example city composes the pack via
 // a pinned public import (committed packs.lock); the gc binary self-heals
-// the cache for bundled locked sources from its embedded copy, so the cache
+// the cache for bundled sources locked at their canonical pin from its
+// embedded copy, so the cache
 // — not a city-local packs/ directory — is where materialized pack
 // artifacts live.
 package acceptance_test
@@ -34,11 +35,11 @@ type packsLockPack struct {
 	Commit  string `toml:"commit"`
 }
 
-// gastownCachePackDir resolves the gastown pack content directory inside the
+// cachePackDirByName resolves a builtin pack's content directory inside the
 // user-global repo cache from the city's packs.lock pin. It fails the test
-// when the city has no gastown pin or when gc has not materialized the
-// pinned source into the cache.
-func gastownCachePackDir(t *testing.T, c *helpers.City) string {
+// when the city has no pin for that pack or when gc has not materialized
+// the pinned source into the cache.
+func cachePackDirByName(t *testing.T, c *helpers.City, name string) string {
 	t.Helper()
 	lockData := c.ReadFile("packs.lock")
 	var lock packsLockFile
@@ -46,7 +47,7 @@ func gastownCachePackDir(t *testing.T, c *helpers.City) string {
 		t.Fatalf("parsing packs.lock: %v", err)
 	}
 	for source, pin := range lock.Packs {
-		if name, ok := builtinpacks.NameForSource(source); !ok || name != "gastown" {
+		if got, ok := builtinpacks.NameForSource(source); !ok || got != name {
 			continue
 		}
 		commit := pin.Commit
@@ -59,10 +60,17 @@ func gastownCachePackDir(t *testing.T, c *helpers.City) string {
 		}
 		packDir := filepath.Join(cachePath, filepath.FromSlash(remotesource.Parse(source).Subpath))
 		if _, err := os.Stat(filepath.Join(packDir, "pack.toml")); err != nil {
-			t.Fatalf("gastown pack not materialized in repo cache at %s: %v", packDir, err)
+			t.Fatalf("%s pack not materialized in repo cache at %s: %v", name, packDir, err)
 		}
 		return packDir
 	}
-	t.Fatalf("packs.lock has no gastown entry:\n%s", lockData)
+	t.Fatalf("packs.lock has no %s entry:\n%s", name, lockData)
 	return "" // unreachable
+}
+
+// gastownCachePackDir resolves the gastown pack content directory inside
+// the user-global repo cache from the city's packs.lock pin.
+func gastownCachePackDir(t *testing.T, c *helpers.City) string {
+	t.Helper()
+	return cachePackDirByName(t, c, "gastown")
 }

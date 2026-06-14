@@ -15,10 +15,11 @@ import (
 func TestEnsureBundledLockedRemoteImportsCachedHydratesBundledLockEntry(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityPath := t.TempDir()
 	source := config.PublicGastownPackSource
 	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
-	writePreflightImportLock(t, cityPath, source, commit)
+	writePreflightImportLock(t, cityPath, commit)
 
 	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
 		t.Fatalf("ensureBundledLockedRemoteImportsCached returned error: %v", err)
@@ -36,10 +37,10 @@ func TestEnsureBundledLockedRemoteImportsCachedHydratesBundledLockEntry(t *testi
 func TestEnsureBundledLockedRemoteImportsCachedValidatesWarmCacheWithoutWriteLock(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityPath := t.TempDir()
-	source := config.PublicGastownPackSource
 	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
-	writePreflightImportLock(t, cityPath, source, commit)
+	writePreflightImportLock(t, cityPath, commit)
 
 	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
 		t.Fatalf("cold hydration returned error: %v", err)
@@ -84,7 +85,7 @@ func TestEnsureBundledLockedRemoteImportsCachedRejectsBundledLockEntryWithoutCom
 	t.Setenv("HOME", t.TempDir())
 	cityPath := t.TempDir()
 	source := config.PublicGastownPackSource
-	writePreflightImportLock(t, cityPath, source, "")
+	writePreflightImportLock(t, cityPath, "")
 
 	err := ensureBundledLockedRemoteImportsCached(cityPath)
 	if err == nil {
@@ -98,6 +99,7 @@ func TestEnsureBundledLockedRemoteImportsCachedRejectsBundledLockEntryWithoutCom
 func TestEnsureBundledLockedRemoteImportsCachedSkipsNonBundledLockEntries(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityPath := t.TempDir()
 	lockToml := `schema = 1
 
@@ -118,7 +120,10 @@ fetched = "2026-01-01T00:00:00Z"
 	}
 }
 
-func writePreflightImportLock(t *testing.T, cityPath, source, commit string) {
+// writePreflightImportLock pins the public gastown source at commit in a
+// fresh packs.lock (every preflight scenario uses that bundled source).
+func writePreflightImportLock(t *testing.T, cityPath, commit string) {
+	source := config.PublicGastownPackSource
 	t.Helper()
 	lockToml := fmt.Sprintf(`schema = 1
 
@@ -129,5 +134,25 @@ fetched = "2026-01-01T00:00:00Z"
 `, source, commit)
 	if err := os.WriteFile(filepath.Join(cityPath, packman.LockfileName), []byte(lockToml), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestEnsureBundledLockedRemoteImportsCachedSkipsNonCanonicalBundledPin
+// pins the canonical-pin gate at the preflight: a bundled source locked at
+// a non-canonical commit is an ordinary remote import — the preflight must
+// neither materialize embedded content for it nor error (gc import install
+// owns fetching it).
+func TestEnsureBundledLockedRemoteImportsCachedSkipsNonCanonicalBundledPin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	cityPath := t.TempDir()
+	writePreflightImportLock(t, cityPath, "0123456789abcdef0123456789abcdef01234567")
+
+	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
+		t.Fatalf("ensureBundledLockedRemoteImportsCached returned error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gc", "cache", "repos")); !os.IsNotExist(err) {
+		t.Fatalf("non-canonical bundled lock entry should not create shared repo cache, stat err = %v", err)
 	}
 }

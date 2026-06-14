@@ -405,7 +405,7 @@ An exact SHA pin says which revision must be used:
 ```toml
 [imports.gascity]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:af1640917a24f88126c37a1e3697a619b731cc0f"
 ```
 
 The authored import expresses the source and optional constraint. The lockfile

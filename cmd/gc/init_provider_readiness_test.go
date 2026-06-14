@@ -455,7 +455,7 @@ schema = 1
 
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "`+config.PublicGastownPackVersion+`"
 `)
 
 	prevSync := syncImports
@@ -799,6 +799,37 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Skipping provider readiness checks") {
 		t.Fatalf("stdout = %q, want skip readiness progress", stdout.String())
+	}
+}
+
+func TestCmdInitNoStartSkipsSupervisorRegistration(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	calledRegister := false
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		calledRegister = true
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init", "--provider", "claude", "--skip-provider-readiness", "--no-start", cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc init --no-start = %d, want 0; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if calledRegister {
+		t.Fatal("registerCityWithSupervisor should not run when --no-start is set")
+	}
+	if !strings.Contains(stdout.String(), "Skipping supervisor startup") {
+		t.Fatalf("stdout = %q, want no-start progress", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Next: cd ") {
+		t.Fatalf("stdout = %q, want next start command", stdout.String())
 	}
 }
 

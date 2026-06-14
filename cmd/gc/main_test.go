@@ -2777,12 +2777,11 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	// city.toml keeps the runtime-local [workspace] with the explicit
-	// builtin pack includes (core + bd for the default bd provider).
-	// workspace.name lives in .gc/site.toml.
+	// city.toml keeps only the runtime-local [workspace]; builtin packs
+	// compose via pinned [imports] in pack.toml. workspace.name lives in
+	// .gc/site.toml.
 	got := string(f.Files[filepath.Join("/bright-lights", "city.toml")])
 	want := `[workspace]
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [daemon]
 formula_v2 = true
@@ -2797,12 +2796,24 @@ formula_v2 = true
 		t.Errorf("city.toml content:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 
-	// pack.toml keeps the portable pack metadata and named session; the
-	// fresh mayor scaffold now comes from agents/<name>/ discovery.
+	// pack.toml keeps the portable pack metadata, the pinned builtin pack
+	// imports (core + bd for the default bd provider), and the named
+	// session; the fresh mayor scaffold comes from agents/<name>/ discovery.
 	packGot := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
 	packWant := `[pack]
 name = "bright-lights"
 schema = 2
+
+[imports]
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "` + config.BundledPackImportVersion + `"
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "` + config.BundledPackImportVersion + `"
+[imports.gascity]
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+version = "` + config.PublicGascityPackVersion + `"
 
 [[named_session]]
 template = "mayor"
@@ -3171,8 +3182,8 @@ func TestRunWizardDefaults(t *testing.T) {
 	if !wiz.interactive {
 		t.Error("expected interactive = true")
 	}
-	if wiz.configName != "minimal" {
-		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
+	if wiz.configName != "gascity" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "gascity")
 	}
 	if wiz.defaultProvider != "claude" {
 		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "claude")
@@ -3200,8 +3211,8 @@ func TestRunWizardNilStdin(t *testing.T) {
 	if wiz.interactive {
 		t.Error("expected interactive = false for nil stdin")
 	}
-	if wiz.configName != "minimal" {
-		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
+	if wiz.configName != "gascity" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "gascity")
 	}
 	if wiz.provider != "" {
 		t.Errorf("provider = %q, want empty", wiz.provider)
@@ -3241,7 +3252,7 @@ func TestRunWizardSelectCodex(t *testing.T) {
 
 func TestRunWizardCustomTemplate(t *testing.T) {
 	// Select custom template → skips agent question, returns minimal config.
-	stdin := strings.NewReader("3\n")
+	stdin := strings.NewReader("4\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
@@ -3264,7 +3275,7 @@ func TestRunWizardCustomTemplate(t *testing.T) {
 func TestRunWizardGastownTemplate(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude")
 	// Select gastown template + default agent.
-	stdin := strings.NewReader("2\n")
+	stdin := strings.NewReader("3\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
@@ -3344,8 +3355,8 @@ func TestRunWizardEOFStdin(t *testing.T) {
 	wiz := runWizard(stdin, &stdout)
 
 	// EOF means default for both questions.
-	if wiz.configName != "minimal" {
-		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
+	if wiz.configName != "gascity" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "gascity")
 	}
 	if wiz.defaultProvider != "claude" {
 		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "claude")
@@ -3486,10 +3497,8 @@ func TestDoInitWithGastownTemplate(t *testing.T) {
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
 	}
-	wantIncludes := []string{".gc/system/packs/core", ".gc/system/packs/bd"}
-	if got := cfg.Workspace.LegacyIncludes(); len(got) != len(wantIncludes) ||
-		got[0] != wantIncludes[0] || got[1] != wantIncludes[1] {
-		t.Errorf("Workspace.Includes = %v, want %v (explicit builtin pack includes)", got, wantIncludes)
+	if got := cfg.Workspace.LegacyIncludes(); len(got) != 0 {
+		t.Errorf("Workspace.Includes = %v, want none (builtin packs compose via pack.toml imports)", got)
 	}
 	if len(cfg.Workspace.LegacyDefaultRigIncludes()) != 0 {
 		t.Errorf("Workspace.DefaultRigIncludes = %v, want empty", cfg.Workspace.LegacyDefaultRigIncludes())
@@ -6872,9 +6881,10 @@ start_command = "echo"
 min = 0
 max = -1
 `
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tomlContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tomlContent+builtinImportsTOML("core")), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeBuiltinImportsLock(t, dir, "core")
 
 	orig, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(orig) })
@@ -6926,9 +6936,10 @@ start_command = "echo"
 min = 0
 max = -1
 `
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tomlContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tomlContent+builtinImportsTOML("core")), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeBuiltinImportsLock(t, dir, "core")
 
 	orig, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(orig) })
@@ -6957,7 +6968,7 @@ max = -1
 }
 
 func materializeBuiltinPrompts(cityPath string) error {
-	return MaterializeBuiltinPacks(cityPath)
+	return EnsureBuiltinRuntimeAssets(cityPath, io.Discard)
 }
 
 func TestDoPrimeHookDoesNotCreateRuntimeSessionSidecar(t *testing.T) {

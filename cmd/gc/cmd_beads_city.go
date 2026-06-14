@@ -180,7 +180,7 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 			managedStopScript = strings.TrimPrefix(provider, "exec:")
 			configuredProvider := configuredBeadsProviderValue(cityPath)
 			if (configuredProvider == "" || configuredProvider == "bd") && execProviderBase(provider) == "gc-beads-bd" {
-				if err := MaterializeBuiltinPacks(cityPath); err != nil {
+				if err := EnsureBuiltinRuntimeAssets(cityPath, os.Stderr); err != nil {
 					fmt.Fprintf(stderr, "%s: materialize managed provider: %v\n", name, err) //nolint:errcheck
 					return 1
 				}

@@ -2872,7 +2872,7 @@ func qualifyPoolInDir(pool, dir, scope string, cfg *config.City, cleanHint strin
 	// Exact SourceDir matches (and their binding closure) take priority over
 	// tail matches: distinct packs can share the same trailing two path
 	// components (a city-local fork at packs/<name> vs the builtin pack
-	// materialized at .gc/system/packs/<name>), and a hint that names one of
+	// served from the user-global cache), and a hint that names one of
 	// them exactly must not go ambiguous because the other tail-matches.
 	switch {
 	case len(exactQualified) == 1:

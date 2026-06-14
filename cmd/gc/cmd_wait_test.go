@@ -713,8 +713,8 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("write template scaffold: %w", err)
 			return
 		}
-		if err := MaterializeBuiltinPacks(cityPath); err != nil {
-			managedBdWaitTemplateErr = fmt.Errorf("MaterializeBuiltinPacks(template): %w", err)
+		if err := EnsureBuiltinRuntimeAssets(cityPath, io.Discard); err != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("EnsureBuiltinRuntimeAssets(template): %w", err)
 			return
 		}
 		script := gcBeadsBdScriptPath(cityPath)
@@ -2627,9 +2627,7 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
 	}
 	t.Setenv("GC_CITY", cityPath)
 	t.Setenv("GC_CITY_PATH", cityPath)
-	if err := MaterializeBuiltinPacks(cityPath); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks: %v", err)
-	}
+	materializeBuiltinPacksForTest(t, cityPath)
 	if err := ensureBeadsProvider(cityPath); err != nil {
 		t.Fatalf("ensureBeadsProvider: %v", err)
 	}
@@ -2697,9 +2695,7 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Setenv("GC_CITY", cityPath)
 	t.Setenv("GC_CITY_PATH", cityPath)
 
-	if err := MaterializeBuiltinPacks(cityPath); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks: %v", err)
-	}
+	materializeBuiltinPacksForTest(t, cityPath)
 	script := gcBeadsBdScriptPath(cityPath)
 	poisonRuntimeDir := filepath.Join(t.TempDir(), "poison-runtime")
 	poisonPackStateDir := filepath.Join(poisonRuntimeDir, "packs", "dolt")

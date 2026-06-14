@@ -75,8 +75,14 @@ def main() -> int:
         if actual_hash != release["hash"]:
             raise SystemExit(f"{PACK_NAME}: registry hash mismatch: got {actual_hash}, want {release['hash']}")
 
+        # The gascity pack is embedded from the SAME module pin, so its
+        # canonical pin must stay in lockstep: the module tree at the
+        # gastown pin must match the latest gascity registry release.
+        gascity_release = latest_registry_release(registry_path, "gascity")
+
     if args.check:
         errors = check_local_state(repo_root, public_packs, release)
+        errors += check_gascity_lockstep(repo_root, public_packs, gascity_release)
         if errors:
             for error in errors:
                 print(error, file=sys.stderr)
@@ -93,11 +99,73 @@ def main() -> int:
         raise SystemExit(
             f"{PACK_NAME}: pinned module content hash = {module_hash}, want registry {release['hash']}"
         )
+    gascity_module_hash = module_pack_hash(repo_root, "gascity")
+    if gascity_module_hash != gascity_release["hash"]:
+        raise SystemExit(
+            "gascity: pinned module content hash = "
+            f"{gascity_module_hash}, want registry {gascity_release['hash']} "
+            f"(release {gascity_release['version']}); the gascity pack changed "
+            "since its last registry release — cut a gascity release in "
+            "gascity-packs first so its canonical pin stays honest"
+        )
     write_public_pack_constants(public_packs, release)
+    write_gascity_pin(public_packs, gascity_release)
     update_example_pins(repo_root, release)
     update_doc_pins(repo_root, release)
     print(f"pinned gastown to registry release {release['version']} ({release['commit'][:12]})")
+    print(f"gascity pin verified against registry release {gascity_release['version']} ({gascity_release['commit'][:12]})")
     return 0
+
+
+def write_gascity_pin(path: Path, release: dict[str, str]) -> None:
+    text = path.read_text(encoding="utf-8")
+    new_version = "sha:" + release["commit"]
+    current = re.search(r'\bPublicGascityPackVersion\s*=\s*"([^"]*)"', text)
+    if current and current.group(1) == new_version:
+        return
+    if current and current.group(1):
+        old_pin = current.group(1)
+        list_pattern = re.compile(
+            r"(var SupersededPublicGascityPackVersions \[\]string)\b"
+        )
+        # The gascity superseded list starts as a nil-slice declaration;
+        # convert it to a literal carrying the old pin.
+        text, count = list_pattern.subn(
+            rf'\g<1> = []string{{\n\t"{old_pin}",\n}}', text, count=1
+        )
+        if count != 1:
+            # Already a literal list: append into it instead.
+            literal = re.compile(
+                r"(var SupersededPublicGascityPackVersions = \[\]string\{\n)"
+            )
+            text, count = literal.subn(rf'\g<1>\t"{old_pin}",\n', text, count=1)
+            if count != 1:
+                raise SystemExit(
+                    "could not record superseded PublicGascityPackVersion"
+                )
+    text = replace_go_string_const(text, "PublicGascityPackVersion", new_version)
+    path.write_text(text, encoding="utf-8")
+
+
+def check_gascity_lockstep(repo_root: Path, public_packs: Path, release: dict[str, str]) -> list[str]:
+    errors: list[str] = []
+    text = public_packs.read_text(encoding="utf-8")
+    match = re.search(r'\bPublicGascityPackVersion\s*=\s*"([^"]*)"', text)
+    want = "sha:" + release["commit"]
+    if not match or match.group(1) != want:
+        errors.append(
+            f"PublicGascityPackVersion = {match.group(1) if match else None!r}, want {want!r}"
+        )
+    try:
+        module_hash = module_pack_hash(repo_root, "gascity")
+    except (OSError, SystemExit) as exc:
+        errors.append(f"hashing pinned module gascity content: {exc}")
+    else:
+        if module_hash != release["hash"]:
+            errors.append(
+                f"pinned module gascity hash = {module_hash}, want registry {release['hash']}"
+            )
+    return errors
 
 
 def require_within(root: Path, path: Path) -> None:
@@ -128,12 +196,12 @@ class maybe_clone_repo:
             self.tempdir.cleanup()
 
 
-def latest_registry_release(registry_path: Path) -> dict[str, str]:
+def latest_registry_release(registry_path: Path, pack_name: str = PACK_NAME) -> dict[str, str]:
     with registry_path.open("rb") as handle:
         catalog = tomllib.load(handle)
-    matches = [pack for pack in catalog.get("pack", []) if pack.get("name") == PACK_NAME]
+    matches = [pack for pack in catalog.get("pack", []) if pack.get("name") == pack_name]
     if len(matches) != 1:
-        raise SystemExit(f"registry must contain exactly one {PACK_NAME!r} pack entry, got {len(matches)}")
+        raise SystemExit(f"registry must contain exactly one {pack_name!r} pack entry, got {len(matches)}")
     pack = matches[0]
     releases = [
         release
@@ -141,7 +209,7 @@ def latest_registry_release(registry_path: Path) -> dict[str, str]:
         if not release.get("withdrawn", False)
     ]
     if not releases:
-        raise SystemExit(f"{PACK_NAME}: registry has no non-withdrawn releases")
+        raise SystemExit(f"{pack_name}: registry has no non-withdrawn releases")
     release = max(releases, key=lambda item: semver_key(item.get("version", "")))
     return {
         "source": pack["source"],
@@ -251,7 +319,11 @@ def module_dir(repo_root: Path) -> Path:
 
 
 def module_gastown_hash(repo_root: Path) -> str:
-    target = module_dir(repo_root) / PACK_NAME
+    return module_pack_hash(repo_root, PACK_NAME)
+
+
+def module_pack_hash(repo_root: Path, pack_name: str) -> str:
+    target = module_dir(repo_root) / pack_name
     entries: list[str] = []
     for path in sorted(target.rglob("*")):
         if path.is_dir():
@@ -281,9 +353,27 @@ def module_gastown_hash(repo_root: Path) -> str:
 
 def write_public_pack_constants(path: Path, release: dict[str, str]) -> None:
     text = path.read_text(encoding="utf-8")
+    new_version = "sha:" + release["commit"]
+
+    # A bumped canonical pin strands cities locked at the previous pin on
+    # the real-fetch path; appending the old pin to the superseded list
+    # lets the packv2-import-state doctor fix re-pin them offline.
+    current = re.search(r'\bPublicGastownPackVersion\s*=\s*"([^"]*)"', text)
+    if current and current.group(1) and current.group(1) != new_version:
+        old_pin = current.group(1)
+        if old_pin not in text.split("SupersededPublicGastownPackVersions", 1)[-1]:
+            list_pattern = re.compile(
+                r"(var SupersededPublicGastownPackVersions = \[\]string\{\n)"
+            )
+            text, count = list_pattern.subn(rf'\g<1>\t"{old_pin}",\n', text)
+            if count != 1:
+                raise SystemExit(
+                    "expected exactly one SupersededPublicGastownPackVersions list"
+                )
+
     replacements = {
         "PublicGastownPackSource": release["source"],
-        "PublicGastownPackVersion": "sha:" + release["commit"],
+        "PublicGastownPackVersion": new_version,
     }
     for name, value in replacements.items():
         text = replace_go_string_const(text, name, value)
@@ -322,14 +412,22 @@ def update_example_pins(repo_root: Path, release: dict[str, str]) -> None:
     for rel in ("pack.toml", "city.toml"):
         update_pinned_import_versions(repo_root / EXAMPLE_DIR / rel, release)
 
+    # Rewrite ONLY the gastown lock entry in place: the example's packs.lock
+    # also pins the bundled core/bd imports, which must survive a pin bump.
     lock_path = repo_root / EXAMPLE_DIR / "packs.lock"
-    lock_path.write_text(
-        "schema = 1\n\n[packs]\n"
-        f'[packs."{release["source"]}"]\n'
-        f'version = "{version}"\n'
-        f'commit = "{release["commit"]}"\n',
-        encoding="utf-8",
+    lock_text = lock_path.read_text(encoding="utf-8")
+    lock_pattern = re.compile(
+        rf'(\[packs\."{re.escape(release["source"])}"\]\n'
+        rf'version = ")sha:[0-9a-f]+("\ncommit = ")[0-9a-f]+(")'
     )
+    lock_updated, lock_count = lock_pattern.subn(
+        rf"\g<1>{version}\g<2>{release['commit']}\g<3>", lock_text
+    )
+    if lock_count != 1:
+        raise SystemExit(
+            f"{lock_path}: expected exactly one gastown lock entry, found {lock_count}"
+        )
+    lock_path.write_text(lock_updated, encoding="utf-8")
 
 
 def update_doc_pins(repo_root: Path, release: dict[str, str]) -> None:

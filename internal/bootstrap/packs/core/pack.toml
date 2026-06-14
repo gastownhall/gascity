@@ -1,8 +1,8 @@
-# Bundled with the gc binary and materialized into each city at
-# .gc/system/packs/core.
+# Bundled with the gc binary and served from the user-global pack cache
+# via the pinned bundled import.
 #
 # This is the single builtin pack every city needs. `gc init` writes an
-# explicit include for it into city.toml and `gc doctor --fix` repairs a
+# explicit pinned import for it into pack.toml and `gc doctor --fix` repairs a
 # missing include. It contributes the gc-* skills that teach agents how to
 # use Gas City, default worker prompts, core formulas such as mol-do-work
 # and mol-scoped-work, mechanical housekeeping orders (gate/orphan/wisp

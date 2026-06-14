@@ -284,12 +284,21 @@ func (c *BuiltinPackFamilyCheck) Fix(_ *CheckContext) error { return nil }
 
 func (c *BuiltinPackFamilyCheck) userBuiltinPackOverrides() map[string]bool {
 	systemRoot := filepath.Clean(filepath.Join(c.cityPath, citylayout.SystemPacksRoot))
+	// Builtin packs compose from the user-global repo cache; dirs under it
+	// are the bundled packs themselves, not user-authored overrides.
+	cacheRoot := ""
+	if root, err := config.GlobalRepoCacheRoot(); err == nil {
+		cacheRoot = filepath.Clean(root)
+	}
 	seenDirs := make(map[string]bool)
 	overrides := make(map[string]bool)
 
 	for _, dir := range packDirsForCheck(c.cfg) {
 		dir = filepath.Clean(dir)
 		if seenDirs[dir] || isSubpath(systemRoot, dir) {
+			continue
+		}
+		if cacheRoot != "" && isSubpath(cacheRoot, dir) {
 			continue
 		}
 		seenDirs[dir] = true

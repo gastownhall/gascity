@@ -128,7 +128,6 @@ template and Claude Code, `city.toml` keeps the shared runtime settings:
 $ cat city.toml
 [workspace]
 provider = "claude"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [providers]
 [providers.claude]
@@ -150,24 +149,33 @@ $ cat pack.toml
 name = "my-city"
 schema = 2
 
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "sha:<pinned commit>"
+
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "sha:<pinned commit>"
+
 [[named_session]]
 template = "mayor"
 mode = "always"
 ```
 
 The `[workspace]` section in `city.toml` sets shared runtime defaults such as
-the provider. The `includes` entries are written by `gc init` and point at the
-builtin packs bundled with the `gc` binary, which Gas City materializes under
-`.gc/system/packs/`: `core` (housekeeping orders, doctor checks, default
-prompts, and core formulas) and — for cities on the default `bd` beads
-provider — `bd`, which brings in its `dolt` helper pack. If these includes go
-missing, `gc doctor --fix` restores them. The `[providers.claude]` table
-registers your chosen provider against the builtin `claude` preset, and
-`[daemon]`'s `formula_v2 = true` turns on the v2 formula compiler — the
-default for new cities (you'll meet formulas in
-[Tutorial 05](/tutorials/05-formulas)). The machine-local workspace identity
-lives in `.gc/site.toml` instead, which is how `gc cities`, `gc status`, and
-other commands still know this city is named `my-city`.
+the provider. The `[providers.claude]` table registers your chosen provider
+against the builtin `claude` preset, and `[daemon]`'s `formula_v2 = true`
+turns on the v2 formula compiler — the default for new cities (you'll meet
+formulas in [Tutorial 05](/tutorials/05-formulas)). The `[imports]` entries
+in `pack.toml` pin the builtin packs bundled with the `gc` binary: `core`
+(housekeeping orders, doctor checks, default prompts, and core formulas) and
+— for cities on the default `bd` beads provider — `bd`, which brings in its
+`dolt` helper pack. They resolve offline from the user-global pack cache,
+which the binary keeps hydrated with its own embedded content. If these
+imports go missing, `gc doctor --fix` restores them. The machine-local
+workspace identity lives in `.gc/site.toml` instead, which is how `gc
+cities`, `gc status`, and other commands still know this city is named
+`my-city`.
 
 The built-in `mayor` comes from the scaffolded `agents/mayor/` content, and
 `[[named_session]]` keeps a `mayor` session running so you can talk to it at
@@ -247,7 +255,6 @@ up work tracking in it. The shared rig declaration lives in `city.toml`:
 $ cat city.toml
 [workspace]
 provider = "claude"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 ... # content elided
 

@@ -120,9 +120,10 @@ So when you move from Gas Town to Gas City, the default mental model becomes:
 
 - reusable behavior lives in `pack.toml` plus pack directories
 - deployment choices live in `city.toml`
-- even the builtin packs are explicit: `gc init` writes their includes into
-  `city.toml` (`[workspace] includes = [".gc/system/packs/core", ...]`) —
-  nothing is spliced into config composition implicitly
+- even the builtin packs are explicit: `gc init` writes pinned
+  `[imports.core]`/`[imports.bd]` entries into `pack.toml` (resolved from
+  the user-global pack cache) — nothing is spliced into config composition
+  implicitly
 - machine-local bindings and runtime state live in `.gc/`
 - every durable work item is a bead
 - agents are generic; roles come from prompts, formulas, orders, and config

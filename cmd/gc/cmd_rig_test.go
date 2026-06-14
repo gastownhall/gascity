@@ -1286,6 +1286,14 @@ func TestDoRigListShowsSuspended(t *testing.T) {
 func TestDoRigAdd_WithPack(t *testing.T) {
 	cityPath := t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	// A real local pack at packs/gastown: the include token must stay a
+	// local import instead of canonicalizing to the bundled source.
+	if err := os.MkdirAll(filepath.Join(cityPath, "packs", "gastown"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "packs", "gastown", "pack.toml"), []byte("[pack]\nname = \"gastown\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	rigPath := filepath.Join(t.TempDir(), "my-project")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {

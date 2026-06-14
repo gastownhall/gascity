@@ -1720,6 +1720,7 @@ func TestSubmitInterruptNowFindsPiDefaultSessionPath(t *testing.T) {
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	info, err := mgr.Create(context.Background(), "helper", "", "pi --session abc123", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
 	if err != nil {

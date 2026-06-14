@@ -778,6 +778,24 @@ func (imp *Import) ImportIsTransitive() bool {
 	return *imp.Transitive
 }
 
+// HasDefaultOptionSemantics reports whether the import carries the
+// default option semantics: not exported, transitive resolution enabled,
+// and shadow handling empty or "warn". This is the option half of the
+// reuse policy composition applies when deciding whether an existing
+// same-source binding can stand in for a converted legacy include
+// (existingDefaultImportBindingForSource); the doctor migration's
+// same-source dedup shares it so the two policies cannot drift.
+func (imp *Import) HasDefaultOptionSemantics() bool {
+	if imp.Export {
+		return false
+	}
+	if imp.Transitive != nil && !*imp.Transitive {
+		return false
+	}
+	shadow := strings.TrimSpace(imp.Shadow)
+	return shadow == "" || shadow == "warn"
+}
+
 // BoundImport preserves the user-visible binding name associated with an
 // import when edit paths need ordered root-pack defaults.
 type BoundImport struct {
@@ -798,7 +816,7 @@ func AddLegacyImports(target map[string]Import, includes []string, packs map[str
 		if _, exists := existingDefaultImportBindingForSource(target, source); exists {
 			continue
 		}
-		binding := uniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
+		binding := UniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
 		target[binding] = Import{Source: source}
 		changed = true
 	}
@@ -812,7 +830,7 @@ func AddOrderedLegacyImports(target map[string]Import, order []string, includes 
 		source := legacyImportSourceFor(include, packs)
 		binding, exists := existingDefaultImportBindingForSource(target, source)
 		if !exists {
-			binding = uniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
+			binding = UniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
 			target[binding] = Import{Source: source}
 			changed = true
 		}
@@ -878,21 +896,21 @@ func existingDefaultImportBindingForSource(target map[string]Import, source stri
 		if imp.Source != source {
 			continue
 		}
-		if strings.TrimSpace(imp.Version) != "" || imp.Export {
+		if strings.TrimSpace(imp.Version) != "" {
 			continue
 		}
-		if imp.Transitive != nil && !*imp.Transitive {
-			continue
-		}
-		shadow := strings.TrimSpace(imp.Shadow)
-		if shadow == "" || shadow == "warn" {
+		if imp.HasDefaultOptionSemantics() {
 			return binding, true
 		}
 	}
 	return "", false
 }
 
-func uniqueLegacyImportBinding(target map[string]Import, base string) string {
+// UniqueLegacyImportBinding returns base when no import occupies it in
+// target, or the first free "base-N" (N ≥ 2) suffix — the binding
+// allocation policy for converting legacy includes into imports when the
+// natural binding collides with an existing import.
+func UniqueLegacyImportBinding(target map[string]Import, base string) string {
 	if base == "" {
 		base = "import"
 	}
@@ -4029,7 +4047,14 @@ func InjectImplicitAgents(cfg *City) {
 	// then any custom providers in sorted order.
 	providers := configuredProviderOrder(configured)
 
-	promptTemplate := citylayout.SystemPacksRoot + "/core/assets/prompts/pool-worker.md"
+	// Implicit agents default to the core pack's pool-worker prompt when
+	// the core pack is composed (it resolves from the user-global cache,
+	// so the path is absolute). Without core the template stays empty and
+	// prompt rendering falls back to the embedded baseline.
+	promptTemplate := ""
+	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
+		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.md")
+	}
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
 	if slingFormula == "" {
@@ -4778,6 +4803,22 @@ func GastownCity(name, provider, startCommand string) City {
 		return gastownCityWithWorkspace(name, ws, nil)
 	}
 	return GastownCityWithProviders(name, provider, []string{provider})
+}
+
+// GascityCityWithProviders returns a minimal managed city that imports the
+// public gascity planning/implementation skills pack: a single mayor agent
+// plus [imports.gascity] pinned to the registry release. The pack ships
+// skills and formulas only (no agents), so the city shape matches the
+// minimal template with the pack layered on top.
+func GascityCityWithProviders(name, defaultProvider string, providers []string) City {
+	city := WizardCityWithProviders(name, defaultProvider, providers)
+	city.Imports = map[string]Import{
+		"gascity": {
+			Source:  PublicGascityPackSource,
+			Version: PublicGascityPackVersion,
+		},
+	}
+	return city
 }
 
 // GastownCityWithProviders returns a Gas Town city whose default provider is

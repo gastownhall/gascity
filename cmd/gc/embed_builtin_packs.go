@@ -1,121 +1,332 @@
 package main
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/packman"
 )
 
-const (
-	legacyOrderConfigFile = "order.toml"
-	packHashManifestFile  = ".gc-pack-hashes.json"
-)
+// Builtin packs are never materialized into the city: they compose through
+// explicit [imports.<name>] entries (written by gc init, repaired by the
+// builtin-pack-imports doctor check) whose bundled sources resolve from the
+// user-global repo cache. The running binary pre-seeds that cache with its
+// embedded content at each pack's canonical pin; a bundled source pinned at
+// any other commit is an ordinary remote import and is fetched for real.
+// The retired .gc/system/packs tree is pruned on sight.
 
-// builtinPacks lists all packs embedded in the gc binary. These are
-// materialized to .gc/system/packs/ on every gc start and gc init.
-var builtinPacks = builtinpacks.All()
+var builtinRuntimeReadyCache sync.Map
 
-// retiredBuiltinPackNames lists packs that earlier gc binaries materialized
-// under .gc/system/packs but that no longer ship with the binary. Their
-// system-pack directories are binary-owned, so materialization removes any
-// stale copy left behind by an upgrade. The maintenance pack was folded into
-// the bundled core pack.
-var retiredBuiltinPackNames = []string{"maintenance"}
-
-var builtinPackRefreshCache sync.Map
-
-type builtinPackRefreshState struct {
+type builtinRuntimeState struct {
 	mu          sync.Mutex
 	ready       bool
 	lastWarning string
 }
 
-type builtinPackRefreshResult struct {
-	ready   bool
-	warning error
-	fatal   error
-}
-
-type builtinPackFile struct {
-	data []byte
-	perm os.FileMode
-}
-
-// MaterializeBuiltinPacks writes all embedded pack files to
-// .gc/system/packs/{name}/ in the city directory. Files whose content and mode
-// already match are left in place; changed content or mode is repaired with an
-// atomic rename so readers never observe a truncated file. Executable scripts
-// get 0755; everything else 0644.
-//
-// Operator edits are preserved only for non-required packs: a regular,
-// correct-mode file in a non-required pack is left untouched even when its
-// content differs from the embedded bytes (see gastownhall/gascity#2429).
-// Required packs (core and the provider-dependent bd/dolt) are always
-// refreshed and validated, so a stale or corrupt required pack on disk
-// is repaired rather than silently accepted.
-// Idempotent: safe to call on every gc start and gc init.
-func MaterializeBuiltinPacks(cityPath string) error {
-	required := requiredBuiltinPackSet(cityPath)
-	for _, bp := range builtinPacks {
-		dst := filepath.Join(cityPath, citylayout.SystemPacksRoot, bp.Name)
-		_, isRequired := required[bp.Name]
-		desired, err := materializeFS(bp.FS, dst, !isRequired, os.Stderr)
-		if err != nil {
-			return fmt.Errorf("materializing %s pack: %w", bp.Name, err)
-		}
-		if err := pruneStaleGeneratedPackFiles(dst, desired); err != nil {
-			return fmt.Errorf("pruning stale %s pack files: %w", bp.Name, err)
-		}
-		if err := pruneLegacyEmbeddedOrders(bp.FS, dst); err != nil {
-			return fmt.Errorf("pruning legacy %s order paths: %w", bp.Name, err)
-		}
-	}
-	for _, name := range retiredBuiltinPackNames {
-		if err := os.RemoveAll(filepath.Join(cityPath, citylayout.SystemPacksRoot, name)); err != nil {
-			return fmt.Errorf("removing retired %s pack: %w", name, err)
-		}
-	}
-	if err := repairLegacyGcBeadsBdScript(cityPath); err != nil {
-		return fmt.Errorf("repairing legacy gc-beads-bd script: %w", err)
-	}
-	return nil
-}
-
 // ensureBuiltinPacksForConfigLoad is the shared config-load boundary for
-// builtin pack readiness: it hydrates the shared repo cache for bundled
-// imports pinned in packs.lock and materializes the builtin system packs.
-// Every production loader — loadCityConfig, loadCityConfigFS, and
-// loadCityConfigWithBuiltinPacks — routes through it so any gc command
-// self-heals a cold repo cache instead of failing with "run \"gc import
-// install\"" after a binary upgrade or cache eviction.
-//
-// It deliberately injects nothing into config composition: builtin packs
-// compose only through the explicit city.toml includes that gc init writes
-// and gc doctor --fix repairs.
+// builtin pack readiness. It hydrates the user-global repo cache for the
+// bundled sources pinned in packs.lock plus the always-required builtin
+// sources (core, and bd for bd-provider cities), regenerates the stable
+// gc-beads-bd shim, and prunes the retired .gc/system/packs tree. Every
+// production loader routes through it so any gc command self-heals a cold
+// cache after a binary upgrade or cache eviction. It injects nothing into
+// config composition.
 func ensureBuiltinPacksForConfigLoad(fs fsys.FS, tomlPath string, warningWriter io.Writer) error {
 	if !usesOSFS(fs) {
 		return nil
 	}
-	cityPath := filepath.Dir(tomlPath)
+	return EnsureBuiltinRuntimeAssets(filepath.Dir(tomlPath), warningWriter)
+}
+
+// EnsureBuiltinRuntimeAssets performs the per-city builtin readiness work
+// outside config loading (init finalization, supervisor startup and city
+// registration, beads bootstrap). Failures degrade to a once-per-city
+// warning when the required caches are already usable.
+func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error {
+	key := normalizePathForCompare(cityPath)
+	stateAny, _ := builtinRuntimeReadyCache.LoadOrStore(key, &builtinRuntimeState{})
+	state := stateAny.(*builtinRuntimeState)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if _, err := config.GlobalRepoCacheRoot(); err != nil {
+		// No user-global cache root (hermetic test environment without
+		// GC_HOME). There is nothing to heal: bundled-source resolution
+		// surfaces its own error if config references a bundled import.
+		pruneRetiredSystemPacks(cityPath, warningWriter)
+		return nil
+	}
+	if state.ready && requiredBuiltinSourcesUsable(cityPath) && lockedBundledImportsUsable(cityPath) {
+		return nil
+	}
+	state.ready = false
+
+	var problems []error
 	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
+		problems = append(problems, err)
+	}
+	if err := ensureRequiredBuiltinSourcesCached(cityPath); err != nil {
+		problems = append(problems, err)
+	}
+	if err := ensureGcBeadsBdShim(cityPath); err != nil {
+		problems = append(problems, fmt.Errorf("writing gc-beads-bd shim: %w", err))
+	}
+	pruneRetiredSystemPacks(cityPath, warningWriter)
+
+	if len(problems) > 0 {
+		if !requiredBuiltinSourcesUsable(cityPath) {
+			state.lastWarning = ""
+			return fmt.Errorf("preparing builtin pack caches: %w", problems[0])
+		}
+		const warningKey = "builtin-cache-refresh-incomplete"
+		if state.lastWarning != warningKey {
+			emitBuiltinRuntimeWarning(warningWriter, fmt.Errorf("builtin pack cache refresh incomplete; using existing caches: %w", problems[0]))
+			state.lastWarning = warningKey
+		}
+		return nil
+	}
+	state.ready = true
+	state.lastWarning = ""
+	return nil
+}
+
+// requiredBuiltinSources returns the bundled sources every city with this
+// configuration needs, keyed by pack name.
+//
+// Core is always required: it ships the role prompts referenced by
+// implicit agents, the gc-* skills, mechanical housekeeping orders, and
+// the per-provider hook overlays. When the beads provider is "bd" (the
+// default), bd is required and its own pack imports pull in dolt
+// transitively. Gastown and gascity are never required — they need an
+// explicit import.
+func requiredBuiltinSources(cityPath string) map[string]string {
+	sources := make(map[string]string)
+	for _, name := range requiredBuiltinPackNames(cityPath) {
+		source, ok := builtinpacks.Source(name)
+		if !ok {
+			continue
+		}
+		sources[name] = source
+	}
+	return sources
+}
+
+func requiredBuiltinPackNames(cityPath string) []string {
+	required := []string{"core"}
+
+	if cityUsesBdStoreContract(cityPath) {
+		required = append(required, "bd")
+	}
+	provider := strings.TrimSpace(configuredBeadsProviderValue(cityPath))
+	usesDirectExecLifecycle := strings.HasPrefix(provider, "exec:") &&
+		execProviderBase(provider) == "gc-beads-bd" &&
+		normalizeRawBeadsProvider(cityPath, provider) != "bd"
+	if usesDirectExecLifecycle {
+		required = append(required, "dolt")
+	}
+	return required
+}
+
+// bundledPackImportCommit is the commit tag bundled-source caches and lock
+// entries pin (config.BundledPackImportVersion without the "sha:" prefix).
+func bundledPackImportCommit() string {
+	return strings.TrimPrefix(config.BundledPackImportVersion, "sha:")
+}
+
+// bundledSourcePinnedVersion returns the canonical pinned version for a
+// bundled source (public registry pins for gastown/gascity so they never
+// conflict with the pins gc init templates write).
+func bundledSourcePinnedVersion(source string) string {
+	return config.BundledSourcePinnedVersion(source)
+}
+
+// requiredBuiltinImports returns the [imports.<name>] entries gc init
+// writes (and the builtin-pack-imports doctor check repairs) for this
+// city's providers, plus the deterministic name order.
+func requiredBuiltinImports(cityPath string) (map[string]config.Import, []string) {
+	return builtinImportsForNames(requiredBuiltinPackNames(cityPath))
+}
+
+// builtinImportsForInit resolves the beads provider the same way
+// command-time store selection does — GC_BEADS env first, then the
+// about-to-be-written city.toml provider — so init writes exactly the
+// imports the builtin-pack-imports doctor check will later enforce.
+func builtinImportsForInit(cityProvider string) (map[string]config.Import, []string) {
+	provider := strings.TrimSpace(os.Getenv("GC_BEADS"))
+	if provider == "" {
+		provider = strings.TrimSpace(cityProvider)
+	}
+	if provider == "" {
+		provider = "bd" // matches the rawBeadsProvider default
+	}
+	names := []string{"core"}
+	if providerUsesBdStoreContract(provider) {
+		names = append(names, "bd")
+	}
+	return builtinImportsForNames(names)
+}
+
+func builtinImportsForNames(names []string) (map[string]config.Import, []string) {
+	imports := make(map[string]config.Import, len(names))
+	ordered := make([]string, 0, len(names))
+	for _, name := range names {
+		source, ok := builtinpacks.Source(name)
+		if !ok {
+			continue
+		}
+		imports[name] = config.Import{
+			Source:  source,
+			Version: config.BundledSourcePinnedVersion(source),
+		}
+		ordered = append(ordered, name)
+	}
+	return imports, ordered
+}
+
+// ensureRequiredBuiltinSourcesCached hydrates the user-global cache for the
+// required bundled sources at the canonical pin, independent of packs.lock,
+// so the stable shim target and pre-migration cities always have the
+// current binary's content available.
+func ensureRequiredBuiltinSourcesCached(cityPath string) error {
+	commit := bundledPackImportCommit()
+	for name, source := range requiredBuiltinSources(cityPath) {
+		cachePath, err := packman.RepoCachePath(source, commit)
+		if err != nil {
+			return fmt.Errorf("resolving cache path for bundled %s pack: %w", name, err)
+		}
+		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) == nil {
+			continue
+		}
+		if _, err := packman.EnsureRepoInCache(source, commit); err != nil {
+			return fmt.Errorf("caching bundled %s pack: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func requiredBuiltinSourcesUsable(cityPath string) bool {
+	commit := bundledPackImportCommit()
+	for _, source := range requiredBuiltinSources(cityPath) {
+		cachePath, err := packman.RepoCachePath(source, commit)
+		if err != nil {
+			return false
+		}
+		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// bundledGcBeadsBdScriptTarget returns the cache-resolved bd lifecycle
+// script the stable shim execs.
+func bundledGcBeadsBdScriptTarget() (string, error) {
+	source, ok := builtinpacks.Source("bd")
+	if !ok {
+		return "", fmt.Errorf("bundled bd pack is not registered")
+	}
+	cachePath, err := packman.RepoCachePath(source, bundledPackImportCommit())
+	if err != nil {
+		return "", err
+	}
+	pack, _ := builtinpacks.ByName("bd")
+	return filepath.Join(cachePath, filepath.FromSlash(pack.Subpath), "assets", "scripts", "gc-beads-bd.sh"), nil
+}
+
+// ensureGcBeadsBdShim writes the stable per-city gc-beads-bd entrypoint
+// (.gc/scripts/gc-beads-bd.sh) execing the cache-resolved bundled script.
+// The shim path is what sessions and provider pins reference; this
+// boundary rewrites its target whenever the binary (and therefore the
+// cache location) changes. Cities on non-bd providers skip it.
+func ensureGcBeadsBdShim(cityPath string) error {
+	if !cityUsesBdStoreContract(cityPath) {
+		return nil
+	}
+	target, err := bundledGcBeadsBdScriptTarget()
+	if err != nil {
 		return err
 	}
-	return ensureBuiltinPacksReadyForConfigLoad(cityPath, warningWriter)
+	shim := fmt.Sprintf(`#!/bin/sh
+# Generated by gc — do not edit. Stable entrypoint for the bundled bd
+# lifecycle script; the target tracks the running binary's pack cache.
+exec %q "$@"
+`, target)
+	path := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, path, []byte(shim), 0o755)
+}
+
+// pruneRetiredSystemPacks removes the retired .gc/system/packs tree.
+// Builtin packs are no longer materialized per city; everything resolves
+// from the user-global cache. Removal failures only warn — a leftover
+// tree is inert.
+//
+// The prune is gated on the legacy reference migration: while the city's
+// manifests still compose through the retired tree on ANY route —
+// workspace includes, default-rig includes, rig includes, or city / rig /
+// default-rig import sources, whether declared in city.toml, pack.toml,
+// or a local config fragment — deleting the tree would either silently
+// strip those packs from composition (dangling V1 workspace includes skip
+// with only a log line) or hard-fail config load citywide (rig includes
+// and local-path import sources do not skip). Until the migration has
+// happened the tree is preserved and a once-per-city warning points at
+// the doctor repair. The gate fails closed: an unreadable or unparseable
+// city.toml, and any referenced fragment that cannot be inspected
+// (unreadable, unparseable, or remote), preserve the inert tree rather
+// than risk deleting composition state the gate cannot see.
+func pruneRetiredSystemPacks(cityPath string, warningWriter io.Writer) {
+	root := filepath.Join(cityPath, citylayout.SystemPacksRoot)
+	if _, err := os.Lstat(root); err != nil {
+		return
+	}
+	scan, ok := collectLegacySystemPacksRefs(cityPath)
+	if !ok || len(scan.Uninspectable) > 0 {
+		return
+	}
+	if len(scan.Refs) > 0 {
+		warnLegacySystemPacksPreserved(cityPath, warningWriter)
+		return
+	}
+	if err := os.RemoveAll(root); err != nil {
+		emitBuiltinRuntimeWarning(warningWriter, fmt.Errorf("pruning retired %s: %w", citylayout.SystemPacksRoot, err))
+	}
+}
+
+// legacyIncludePruneWarningCache dedups the preserved-legacy-tree warning
+// to once per city per process.
+var legacyIncludePruneWarningCache sync.Map
+
+// warnLegacySystemPacksPreserved emits the once-per-city migration pointer
+// for a legacy tree preserved by the prune gate. Silent loaders
+// (io.Discard) must not consume the once-per-city slot: commands often
+// pre-load config quietly before the user-visible load, and the warning
+// has to reach the visible one.
+func warnLegacySystemPacksPreserved(cityPath string, w io.Writer) {
+	if w == nil || w == io.Discard {
+		return
+	}
+	key := normalizePathForCompare(cityPath)
+	if _, alreadyWarned := legacyIncludePruneWarningCache.LoadOrStore(key, struct{}{}); alreadyWarned {
+		return
+	}
+	fmt.Fprintf(w, "warning: city config still composes builtin packs through legacy %s references; run \"gc doctor --fix\" to migrate to [imports] (the retired tree is preserved until then)\n", citylayout.SystemPacksRoot) //nolint:errcheck // best-effort warning emission
+}
+
+func emitBuiltinRuntimeWarning(w io.Writer, err error) {
+	if w == nil || err == nil {
+		return
+	}
+	fmt.Fprintf(w, "warning: %v\n", err) //nolint:errcheck // best-effort warning emission
 }
 
 func usesOSFS(fs fsys.FS) bool {
@@ -125,213 +336,6 @@ func usesOSFS(fs fsys.FS) bool {
 	default:
 		return false
 	}
-}
-
-func ensureBuiltinPacksReadyForConfigLoad(cityPath string, warningWriter io.Writer) error {
-	key := normalizePathForCompare(cityPath)
-	stateAny, _ := builtinPackRefreshCache.LoadOrStore(key, &builtinPackRefreshState{})
-	state := stateAny.(*builtinPackRefreshState)
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.ready {
-		if len(unusableRequiredBuiltinPackNames(cityPath)) == 0 {
-			return nil
-		}
-		state.ready = false
-	}
-	result := materializeBuiltinPacksForConfigLoad(cityPath)
-	if result.fatal != nil {
-		state.lastWarning = ""
-		return result.fatal
-	}
-	if result.warning != nil {
-		const warningKey = "builtin-pack-refresh-incomplete"
-		if state.lastWarning != warningKey {
-			emitBuiltinPackRefreshWarning(warningWriter, result.warning)
-			state.lastWarning = warningKey
-		}
-		return nil
-	}
-	if result.ready {
-		state.ready = true
-		state.lastWarning = ""
-	}
-	return nil
-}
-
-func materializeBuiltinPacksForConfigLoad(cityPath string) builtinPackRefreshResult {
-	if err := MaterializeBuiltinPacks(cityPath); err != nil {
-		if missing := unusableRequiredBuiltinPackNames(cityPath); len(missing) > 0 {
-			return builtinPackRefreshResult{
-				fatal: fmt.Errorf("materializing builtin packs: required builtin packs remain unusable (%s): %w", strings.Join(missing, ", "), err),
-			}
-		}
-		return builtinPackRefreshResult{
-			warning: fmt.Errorf("builtin pack refresh incomplete; using existing materialized packs: %w", err),
-		}
-	}
-	return builtinPackRefreshResult{ready: true}
-}
-
-func unusableRequiredBuiltinPackNames(cityPath string) []string {
-	systemRoot := filepath.Join(cityPath, citylayout.SystemPacksRoot)
-	var missing []string
-	for _, name := range requiredBuiltinPackNames(cityPath) {
-		bp, ok := builtinPackByName(name)
-		if !ok || !packContainsEmbeddedState(bp.FS, filepath.Join(systemRoot, name)) {
-			missing = append(missing, name)
-		}
-	}
-	return missing
-}
-
-func builtinPackByName(name string) (builtinpacks.Pack, bool) {
-	for _, bp := range builtinPacks {
-		if bp.Name == name {
-			return bp, true
-		}
-	}
-	return builtinpacks.Pack{}, false
-}
-
-func packContainsEmbeddedState(embedded fs.FS, dstDir string) bool {
-	manifest, err := embeddedPackManifest(embedded)
-	if err != nil {
-		return false
-	}
-	return packContainsEmbeddedManifest(manifest, dstDir)
-}
-
-func packContainsEmbeddedManifest(manifest map[string]builtinPackFile, dstDir string) bool {
-	fi, err := os.Stat(dstDir)
-	if err != nil || !fi.IsDir() {
-		return false
-	}
-	for rel, want := range manifest {
-		dstPath := filepath.Join(dstDir, filepath.FromSlash(rel))
-		info, err := os.Lstat(dstPath)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != want.perm {
-			return false
-		}
-		got, err := os.ReadFile(dstPath)
-		if err != nil || !bytes.Equal(got, want.data) {
-			return false
-		}
-	}
-	return true
-}
-
-func embeddedPackManifest(embedded fs.FS) (map[string]builtinPackFile, error) {
-	manifest := make(map[string]builtinPackFile)
-	err := fs.WalkDir(embedded, ".", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		data, err := fs.ReadFile(embedded, path)
-		if err != nil {
-			return fmt.Errorf("reading embedded %s: %w", path, err)
-		}
-		manifest[filepath.ToSlash(path)] = builtinPackFile{
-			data: data,
-			perm: builtinpacks.MaterializedFileMode(path),
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return manifest, nil
-}
-
-// requiredBuiltinPackSet returns the set of builtin pack names that must stay
-// in lockstep with the embedded bytes for the city at cityPath. Required packs
-// are refreshed and validated on every materialize; operator edits to them are
-// not preserved. Derived from requiredBuiltinPackNames so the set tracks the
-// provider-dependent membership (bd/dolt) exactly.
-func requiredBuiltinPackSet(cityPath string) map[string]struct{} {
-	names := requiredBuiltinPackNames(cityPath)
-	set := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		set[name] = struct{}{}
-	}
-	return set
-}
-
-func requiredBuiltinPackNames(cityPath string) []string {
-	required := []string{"core"}
-
-	provider := strings.TrimSpace(configuredBeadsProviderValue(cityPath))
-	normalizedProvider := normalizeRawBeadsProvider(cityPath, provider)
-	if providerUsesBdStoreContract(normalizedProvider) {
-		required = append(required, "bd")
-	}
-	usesDirectExecLifecycle := strings.HasPrefix(provider, "exec:") &&
-		execProviderBase(provider) == "gc-beads-bd" &&
-		normalizedProvider != "bd"
-	if usesDirectExecLifecycle {
-		required = append(required, "dolt")
-	}
-	return required
-}
-
-func emitBuiltinPackRefreshWarning(w io.Writer, err error) {
-	if w == nil || err == nil {
-		return
-	}
-	fmt.Fprintf(w, "warning: %v\n", err) //nolint:errcheck // best-effort warning emission
-}
-
-// requiredBuiltinIncludePaths returns the canonical city-relative include
-// paths for the builtin packs this city requires (e.g. ".gc/system/packs/core").
-// gc init writes them into city.toml [workspace] includes; the
-// builtin-pack-includes doctor check repairs them when missing. Nothing on
-// the config-load path injects them — builtin packs compose only through
-// these explicit includes.
-//
-// Core is always required: it ships the role prompts referenced by implicit
-// agents, the gc-* skills, mechanical housekeeping orders, and the
-// overlay/per-provider hook files. When the beads provider is "bd" (the
-// default), bd is required and its own pack imports pull in dolt
-// transitively. Gastown is never required — it needs an explicit import.
-func requiredBuiltinIncludePaths(cityPath string) []string {
-	names := requiredBuiltinPackNames(cityPath)
-	paths := make([]string, 0, len(names))
-	for _, name := range names {
-		paths = append(paths, builtinIncludePathForPack(name))
-	}
-	return paths
-}
-
-// builtinIncludePathForPack returns the canonical city-relative include path
-// for a builtin pack name.
-func builtinIncludePathForPack(name string) string {
-	return citylayout.SystemPacksRoot + "/" + name
-}
-
-// builtinIncludesForProvider mirrors requiredBuiltinIncludePaths for a city
-// whose city.toml has not been written yet: gc init computes the canonical
-// builtin include list straight from the provider value in play.
-func builtinIncludesForProvider(provider string) []string {
-	includes := []string{builtinIncludePathForPack("core")}
-	if providerUsesBdStoreContract(strings.TrimSpace(provider)) {
-		includes = append(includes, builtinIncludePathForPack("bd"))
-	}
-	return includes
-}
-
-// builtinIncludesForInit resolves the beads provider the same way
-// command-time store selection does — GC_BEADS env first, then the
-// about-to-be-written city.toml provider — so init writes exactly the
-// includes the builtin-pack-includes doctor check will later enforce.
-func builtinIncludesForInit(cityProvider string) []string {
-	provider := strings.TrimSpace(os.Getenv("GC_BEADS"))
-	if provider == "" {
-		provider = cityProvider
-	}
-	return builtinIncludesForProvider(provider)
 }
 
 // packExists checks if a pack.toml exists in the given directory.
@@ -401,295 +405,4 @@ func peekEventsProvider(tomlPath string) string {
 		return ""
 	}
 	return peek.Events.Provider
-}
-
-// materializeFS walks an embed.FS, writes all files to dstDir, and returns the
-// relative file paths that belong in the generated directory.
-//
-// When preserveOperatorEdits is true, a per-pack hash manifest
-// (.gc-pack-hashes.json) distinguishes stale embedded content from operator
-// edits. A file whose on-disk hash matches the last binary-written hash is
-// stale and refreshed silently. A file whose on-disk hash differs from the
-// manifest entry has been operator-edited and is preserved with a warning. A
-// file with no manifest entry is conservatively preserved without a warning
-// (migration path for cities without a prior manifest).
-//
-// When preserveOperatorEdits is false (required packs), every file is refreshed
-// and validated against the embedded bytes regardless of the manifest.
-//
-// The manifest is written after a successful walk even when the merged map is
-// empty; write failures are non-fatal and surface through w. The manifest file
-// itself is not included in the returned desired set.
-//
-// The remaining repair semantics are independent of the flag: missing files are
-// written (initial scaffolding), wrong-mode files are rewritten (e.g., script
-// that lost its +x bit), and non-regular files (symlinks, etc.) are replaced
-// with the embedded content.
-func materializeFS(embedded fs.FS, dstDir string, preserveOperatorEdits bool, w io.Writer) (map[string]struct{}, error) {
-	existingManifest := readPackHashManifest(dstDir)
-	pendingManifest := make(map[string]string)
-	desired := make(map[string]struct{})
-
-	walkErr := fs.WalkDir(embedded, ".", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		dst := filepath.Join(dstDir, path)
-
-		if d.IsDir() {
-			return os.MkdirAll(dst, 0o755)
-		}
-
-		rel := filepath.ToSlash(path)
-		desired[rel] = struct{}{}
-
-		perm := builtinpacks.MaterializedFileMode(path)
-
-		// For non-required packs, use the hash manifest to distinguish stale
-		// embedded content from operator edits. Mode comparison uses
-		// fsys.ComparableMode (perm + setuid/setgid/sticky) so it agrees with
-		// the WriteFileIfContentOrModeChangedAtomic repair path below.
-		if preserveOperatorEdits {
-			if info, statErr := os.Lstat(dst); statErr == nil {
-				if info.Mode().IsRegular() && fsys.ComparableMode(info.Mode()) == fsys.ComparableMode(perm) {
-					if knownHash, ok := existingManifest[rel]; ok {
-						onDiskData, readErr := os.ReadFile(dst)
-						if readErr != nil {
-							return fmt.Errorf("reading %s for hash comparison: %w", dst, readErr)
-						}
-						if sha256Hex(onDiskData) != knownHash {
-							// On-disk content differs from last binary-written hash: operator edit.
-							emitBuiltinPackRefreshWarning(w, fmt.Errorf("file %s has local edits; newer version available in the binary", rel))
-							pendingManifest[rel] = knownHash
-							return nil
-						}
-						// On-disk hash matches manifest: stale embed, fall through to refresh.
-					} else {
-						// No manifest entry: conservatively preserve without warning.
-						return nil
-					}
-				}
-				// Wrong mode or non-regular: fall through to repair.
-			} else if !os.IsNotExist(statErr) {
-				return fmt.Errorf("stat %s: %w", dst, statErr)
-			}
-		}
-
-		data, err := fs.ReadFile(embedded, path)
-		if err != nil {
-			return fmt.Errorf("reading embedded %s: %w", path, err)
-		}
-
-		pendingManifest[rel] = sha256Hex(data)
-
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-
-		return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, dst, data, perm)
-	})
-
-	if walkErr != nil {
-		return nil, walkErr
-	}
-
-	if writeErr := writePackHashManifest(dstDir, pendingManifest); writeErr != nil {
-		emitBuiltinPackRefreshWarning(w, fmt.Errorf("could not write pack hash manifest: %w", writeErr))
-	}
-
-	return desired, nil
-}
-
-// sha256Hex returns the hex-encoded SHA-256 digest of data.
-func sha256Hex(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-// readPackHashManifest reads the pack hash manifest from dstDir. Returns an
-// empty map when the manifest is absent or contains invalid JSON.
-func readPackHashManifest(dstDir string) map[string]string {
-	data, err := os.ReadFile(filepath.Join(dstDir, packHashManifestFile))
-	if err != nil {
-		return map[string]string{}
-	}
-	var manifest map[string]string
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return map[string]string{}
-	}
-	if manifest == nil {
-		return map[string]string{}
-	}
-	return manifest
-}
-
-// writePackHashManifest writes manifest to dstDir/.gc-pack-hashes.json
-// atomically. The caller is responsible for treating write errors as non-fatal.
-func writePackHashManifest(dstDir string, manifest map[string]string) error {
-	data, err := json.Marshal(manifest)
-	if err != nil {
-		return fmt.Errorf("marshaling pack hash manifest: %w", err)
-	}
-	dst := filepath.Join(dstDir, packHashManifestFile)
-	return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, dst, data, 0o644)
-}
-
-func repairLegacyGcBeadsBdScript(cityPath string) error {
-	path := legacyGcBeadsBdScriptPath(cityPath)
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		return nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	if !looksLikeGeneratedGcBeadsBdScript(data) {
-		return nil
-	}
-	return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, path, legacyGcBeadsBdShim(), 0o755)
-}
-
-func looksLikeGeneratedGcBeadsBdScript(data []byte) bool {
-	text := string(data)
-	return strings.Contains(text, "gc-beads-bd") && strings.Contains(text, "exec: beads provider")
-}
-
-func legacyGcBeadsBdShim() []byte {
-	return []byte(`#!/bin/sh
-set -eu
-
-script_dir=$(dirname "$0")
-city_root=$(cd "$script_dir/../.." && pwd)
-
-exec "$city_root/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh" "$@"
-`)
-}
-
-// pruneLegacyEmbeddedOrders removes deprecated order directory layouts when the
-// embedded pack already provides the flat orders/<name>.toml form.
-func pruneLegacyEmbeddedOrders(embedded fs.FS, dstDir string) error {
-	entries, err := fs.ReadDir(embedded, "orders")
-	if err != nil {
-		return nil
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		orderName, ok := orders.TrimFlatOrderFilename(name)
-		if !ok {
-			continue
-		}
-		for _, legacyPath := range []string{
-			filepath.Join(dstDir, "orders", orderName, legacyOrderConfigFile),
-			filepath.Join(dstDir, "formulas", "orders", orderName, legacyOrderConfigFile),
-		} {
-			if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			pruneEmptyDirs(filepath.Dir(legacyPath), dstDir)
-		}
-	}
-	return nil
-}
-
-// pruneStaleGeneratedPackFiles treats the current binary's embedded pack tree
-// as the source of truth for generated files. Concurrent older/newer binaries
-// can briefly prune each other's obsolete generated-only files, but the next
-// successful materialization self-heals the directory to the active binary.
-func pruneStaleGeneratedPackFiles(dstDir string, desired map[string]struct{}) error {
-	if _, err := os.Stat(dstDir); os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-
-	dirsToPrune := make(map[string]struct{})
-	if err := filepath.WalkDir(dstDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(dstDir, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if _, ok := desired[rel]; ok {
-			return nil
-		}
-		// Ignore in-flight atomic temp files so concurrent refreshes do not
-		// delete each other's rename targets mid-write.
-		if isGeneratedPackAtomicTempRel(rel, func(path string) bool {
-			_, ok := desired[path]
-			return ok
-		}) {
-			return nil
-		}
-		// Preserve the pack hash manifest and its atomic temp siblings — they
-		// are runtime metadata produced by materializeFS, not embedded content.
-		if rel == packHashManifestFile || strings.HasPrefix(rel, packHashManifestFile+".tmp.") {
-			return nil
-		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		dirsToPrune[filepath.Dir(path)] = struct{}{}
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	pruneDirs := make([]string, 0, len(dirsToPrune))
-	for dir := range dirsToPrune {
-		pruneDirs = append(pruneDirs, dir)
-	}
-	sort.Slice(pruneDirs, func(i, j int) bool {
-		left := filepath.Clean(pruneDirs[i])
-		right := filepath.Clean(pruneDirs[j])
-		leftDepth := strings.Count(left, string(filepath.Separator))
-		rightDepth := strings.Count(right, string(filepath.Separator))
-		if leftDepth != rightDepth {
-			return leftDepth > rightDepth
-		}
-		return left > right
-	})
-	for _, dir := range pruneDirs {
-		pruneEmptyDirs(dir, dstDir)
-	}
-	return nil
-}
-
-func isGeneratedPackAtomicTempRel(rel string, hasDesired func(string) bool) bool {
-	idx := strings.LastIndex(rel, ".tmp.")
-	return idx > 0 && hasDesired(rel[:idx])
-}
-
-func pruneEmptyDirs(dir, stop string) {
-	stop = filepath.Clean(stop)
-	for {
-		cleanDir := filepath.Clean(dir)
-		if cleanDir == stop || cleanDir == "." || cleanDir == string(filepath.Separator) {
-			return
-		}
-		entries, err := os.ReadDir(cleanDir)
-		if err != nil || len(entries) > 0 {
-			return
-		}
-		if err := os.Remove(cleanDir); err != nil {
-			return
-		}
-		dir = filepath.Dir(cleanDir)
-	}
 }

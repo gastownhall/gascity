@@ -24,6 +24,7 @@ func TestAllAndSourceAreDeterministic(t *testing.T) {
 		"bd=examples/bd",
 		"dolt=examples/bd/dolt",
 		"gastown=examples/gastown/packs/gastown",
+		"gascity=",
 	}
 	if strings.Join(first, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("All = %v, want %v", first, want)
@@ -34,8 +35,13 @@ func TestAllAndSourceAreDeterministic(t *testing.T) {
 		if !ok {
 			t.Fatalf("Source(%q) ok = false, want true", pack.Name)
 		}
-		if source != Repository+"//"+pack.Subpath {
-			t.Fatalf("Source(%q) = %q, want canonical source", pack.Name, source)
+		wantSource := Repository + "//" + pack.Subpath
+		if pack.Subpath == "" {
+			// Public-registry-only packs are addressed by the public source.
+			wantSource = PublicRepository + "//" + pack.Name
+		}
+		if source != wantSource {
+			t.Fatalf("Source(%q) = %q, want %q", pack.Name, source, wantSource)
 		}
 	}
 }
@@ -127,10 +133,15 @@ func TestMaterializeSyntheticRepoRejectsUnsafeDestination(t *testing.T) {
 	}
 }
 
-func TestMaterializeSyntheticRepoProductionCallersStayInPackman(t *testing.T) {
+func TestMaterializeSyntheticRepoProductionCallersStayAllowlisted(t *testing.T) {
 	repoRoot := testRepoRoot(t)
 	allowed := map[string]bool{
+		// packman owns locked cache hydration for pack installs.
 		"internal/packman/cache.go": true,
+		// config's composition self-heal re-materializes the canonical
+		// bundled pin under the repo-cache write lock when packs.lock has
+		// no entry yet; config cannot route through packman (import cycle).
+		"internal/config/pack_include.go": true,
 	}
 	var offenders []string
 	if err := filepath.WalkDir(repoRoot, func(path string, entry fs.DirEntry, err error) error {
@@ -171,7 +182,7 @@ func TestMaterializeSyntheticRepoProductionCallersStayInPackman(t *testing.T) {
 		t.Fatalf("WalkDir(%q): %v", repoRoot, err)
 	}
 	if len(offenders) > 0 {
-		t.Fatalf("MaterializeSyntheticRepo production callers = %v, want only internal/packman/cache.go", offenders)
+		t.Fatalf("MaterializeSyntheticRepo production callers = %v, want only the allowlisted callers (packman cache hydration, config bundled self-heal)", offenders)
 	}
 }
 

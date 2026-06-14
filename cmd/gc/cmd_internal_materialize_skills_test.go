@@ -25,7 +25,6 @@ func TestInternalMaterializeSkillsMaterializesClaude(t *testing.T) {
 	}
 	cityToml := `[workspace]
 name = "test-city"
-includes = [".gc/system/packs/core"]
 
 [beads]
 provider = "file"
@@ -35,6 +34,7 @@ provider = "file"
 	// Pack.toml enables PackSkillsDir discovery. Without it, the
 	// materializer sees no shared city catalog and the sink stays empty.
 	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
+	writeBuiltinImportsFixture(t, cityDir, "core")
 	writeSkillSource(t, filepath.Join(cityDir, "skills", "plan"))
 
 	workdir := t.TempDir()

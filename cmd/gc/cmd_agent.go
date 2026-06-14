@@ -45,7 +45,7 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 		return nil, err
 	}
 	emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
-	warnMissingRequiredBuiltinIncludes(fs, cfg, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...))
+	warnMissingRequiredBuiltinImports(fs, cfg, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...))
 	applyFeatureFlags(cfg)
 	return cfg, nil
 }

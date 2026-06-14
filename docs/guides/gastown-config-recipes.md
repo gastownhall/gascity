@@ -24,7 +24,7 @@ schema = 2
 
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
 ```
 
 ```toml
@@ -34,7 +34,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
 ```
 
 ```bash
@@ -52,7 +52,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -70,7 +70,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -124,7 +124,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
 
 [[rigs.patches]]
 agent = "gastown.refinery"
@@ -245,16 +245,15 @@ All three use the current pack layout (`schema = 2`, `agents/<name>/`).
 name = "gastown"
 provider = "claude"
 global_fragments = ["command-glossary", "operational-awareness"]
-# Builtin packs compose only through explicit includes (gc init writes
-# these; gc doctor --fix repairs them).
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
+# Builtin packs (core, bd) compose through explicit pinned imports in
+# pack.toml (gc init writes these; gc doctor --fix repairs them).
 
 [providers.claude]
 base = "builtin:claude"
 
 [defaults.rig.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
 
 [daemon]
 patrol_interval = "30s"
@@ -321,7 +320,7 @@ schema = 2
 # bundled copy. The gastown pack is no longer a local directory.
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
 ```
 
 ### The gastown pack — the reusable defaults

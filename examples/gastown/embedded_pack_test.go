@@ -74,13 +74,25 @@ func primeBundledGastownCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
-	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
-	cachePath, err := packman.RepoCachePath(config.PublicGastownPackSource, commit)
-	if err != nil {
-		t.Fatalf("RepoCachePath: %v", err)
+	coreSource, ok := builtinpacks.Source("core")
+	if !ok {
+		t.Fatal("bundled core pack not registered")
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, commit); err != nil {
-		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	// One pin per repository the example's packs.lock references: the
+	// public gastown release (gascity-packs) plus the bundled core/bd pin
+	// (gascity.git — core and bd share the repo-shaped synthetic cache).
+	for _, pin := range []struct{ source, version string }{
+		{config.PublicGastownPackSource, config.PublicGastownPackVersion},
+		{coreSource, config.BundledPackImportVersion},
+	} {
+		commit := strings.TrimPrefix(pin.version, "sha:")
+		cachePath, err := packman.RepoCachePath(pin.source, commit)
+		if err != nil {
+			t.Fatalf("RepoCachePath(%s): %v", pin.source, err)
+		}
+		if err := builtinpacks.MaterializeSyntheticRepo(cachePath, commit); err != nil {
+			t.Fatalf("MaterializeSyntheticRepo(%s): %v", pin.source, err)
+		}
 	}
 }
 

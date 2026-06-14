@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Version pins on builtin packs are honored: the binary only pre-seeds
+  its embedded content at each pack's canonical pin.** Previously the
+  bundled synthetic cache served the running binary's embedded bytes for
+  ANY commit pinned on a bundled source — editing the pin changed nothing.
+  Now only the canonical pin (the one `gc init` writes) resolves from the
+  embedded copy; a bundled source pinned at any other commit behaves
+  exactly like a regular remote import: `gc import install` fetches that
+  exact commit from git, validation uses the git checkout, and the cache
+  slot uses the plain remote key. Cities on canonical pins keep working
+  fully offline, including across binary upgrades that keep the pin
+  constants; releases that bump a canonical pin migrate existing cities
+  via `gc doctor --fix` (superseded canonical pins are rewritten to the
+  current one).
+
+- **Builtin packs are no longer materialized into cities; they compose via
+  pinned imports resolved from the user-global pack cache.** The per-city
+  `.gc/system/packs` tree is retired (and pruned on sight): `gc init` now
+  writes pinned `[imports.core]`/`[imports.bd]` entries into pack.toml plus
+  a matching packs.lock, and the gc binary self-heals the GC_HOME cache
+  (`$GC_HOME/cache/repos`) with its own embedded content so the pins resolve
+  offline. The `builtin-pack-includes` doctor check became
+  `builtin-pack-imports`: it migrates legacy `workspace.includes =
+  [".gc/system/packs/..."]` cities by stripping the includes, upserting the
+  pinned imports (creating a minimal pack.toml for legacy cities), and
+  refreshing packs.lock and the cache. The bd lifecycle script moved behind
+  a stable per-city shim at `.gc/scripts/gc-beads-bd.sh` that execs the
+  cache-resolved bundled script; provider normalization still recognizes
+  the legacy materialized path. All repo-cache roots (packman install,
+  config resolution, doctor) now uniformly resolve via GC_HOME instead of
+  mixing `$HOME/.gc` and GC_HOME. `gc rig add --include <builtin>`
+  canonicalizes to the bundled remote source and locks it. **Migration:**
+  run `gc doctor --fix` once per existing city.
+
+- **The registry `gascity` planning pack is bundled and offered by the init
+  wizard.** `gc init` now offers `gascity` as a config template alongside
+  minimal/gastown (also via `--template gascity`), wiring the pinned public
+  import from gascity-packs the same way the gastown template does. The
+  pack is embedded from the `github.com/gastownhall/gascity-packs` module
+  root, so the pin resolves offline from the bundled synthetic cache.
+
 - **The bundled gastown pack is now a Go module dependency, not a checked-in
   copy.** `examples/gastown/packs/gastown` is gone; the gc binary embeds the
   pack from `github.com/gastownhall/gascity-packs` (pinned in go.mod to the
@@ -53,6 +93,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   work to a pool they ship themselves).
 
 ### Added
+
+- **Formulas v2 and `drain` are the supported path for new graph
+  workflows.** The v2 compiler emits flat workflow graphs with
+  controller-owned control/finalize beads, and `drain` is now the canonical
+  fan-out primitive for scattering convoy members into per-item formula runs.
+  The bundled `gascity` planning pack ships graph.v2 build and implementation
+  formulas, including the mayor skill's documented `gc sling ... --on
+  <formula>` launch flow and drain-based `implement` workflow, so new Gas City
+  methodology workflows no longer need the legacy `gc.output_json`/tally fan-out
+  pattern.
 
 - Proxy-process workspace services now receive `GC_SERVICE_SECRETS_DIR`
   (`<GC_SERVICE_STATE_ROOT>/secrets`) in their environment, alongside the

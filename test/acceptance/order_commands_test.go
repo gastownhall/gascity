@@ -18,7 +18,7 @@ import (
 
 func TestOrderGastownCity(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	t.Run("List_ShowsOrders", func(t *testing.T) {
 		out, err := c.GC("order", "list")
@@ -71,7 +71,7 @@ func TestOrderGastownCity(t *testing.T) {
 
 func TestOrderRunGastownCity(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	t.Run("Run_Nonexistent_ReturnsError", func(t *testing.T) {
 		_, err := c.GC("order", "run", "nonexistent-order-xyz")
@@ -122,7 +122,7 @@ func TestOrderRunGastownCity(t *testing.T) {
 
 func TestOrderTutorialCity(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("List_Succeeds", func(t *testing.T) {
 		out, err := c.GC("order", "list")

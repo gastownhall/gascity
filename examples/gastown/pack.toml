@@ -11,6 +11,18 @@
 name = "gastown"
 schema = 2
 
+# Builtin packs compose through explicit imports; the gc binary pre-seeds
+# these pinned versions offline from its embedded content. Pinning a
+# different commit fetches that commit from git like any remote import.
+# The builtin-pack-imports doctor check repairs missing entries.
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+
 # The gastown pack comes from the public gascity-packs registry, pinned to
 # a release commit. The gc binary bundles the same content (via the
 # gascity-packs Go module), so init and start resolve this import offline
@@ -18,4 +30,4 @@ schema = 2
 # pin in lockstep with the registry release and the module dependency.
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"

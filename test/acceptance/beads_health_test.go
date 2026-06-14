@@ -14,7 +14,7 @@ import (
 
 func TestBeadsHealthCommands(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("HealthSucceeds", func(t *testing.T) {
 		out, err := c.GC("beads", "health")

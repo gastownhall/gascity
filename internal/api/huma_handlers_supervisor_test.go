@@ -122,6 +122,7 @@ func TestSupervisorCityCreateConflictsWhenTargetAlreadyInitialized(t *testing.T)
 func TestSupervisorCityCreateScaffoldsViaInitializer(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityPath := filepath.Join(home, "mc-city")
 	init := &fakeInitializer{
 		scaffoldResult: &cityinit.InitResult{
@@ -164,6 +165,7 @@ func TestSupervisorCityCreateScaffoldsViaInitializer(t *testing.T) {
 func TestSupervisorCityCreateScaffoldsWithStartCommand(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityPath := filepath.Join(home, "mc-city")
 	init := &fakeInitializer{
 		scaffoldResult: &cityinit.InitResult{
@@ -201,6 +203,7 @@ func TestSupervisorCityCreateScaffoldsWithStartCommand(t *testing.T) {
 func TestSupervisorCityCreateReturnsRequestID(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityPath := filepath.Join(home, "mc-city")
 	init := &fakeInitializer{
 		scaffoldResult: &cityinit.InitResult{
@@ -234,6 +237,7 @@ func TestSupervisorCityCreateReturnsRequestID(t *testing.T) {
 func TestSupervisorCityCreateReturnsCurrentEventCursor(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityPath := filepath.Join(home, "mc-city")
 	recorder := events.NewFake()
 	recorder.Record(events.Event{Type: events.SessionWoke, Actor: "seed"})
@@ -269,6 +273,7 @@ func TestSupervisorCityCreateReturnsCurrentEventCursor(t *testing.T) {
 func TestSupervisorCityCreateStoresPendingRequestForReconciler(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityPath := filepath.Join(home, "mc-city")
 	resolver := &fakeCityResolver{
 		cities:             map[string]*fakeState{},

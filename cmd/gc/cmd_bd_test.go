@@ -670,12 +670,10 @@ func TestGcBdSuppressesBdAutoExportInChildEnv(t *testing.T) {
 	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
 	// `.beads/redirect` in the ambient working tree doesn't surface here.
 	setCwd(t, cityDir)
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-name = "demo"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
-`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeBuiltinImportsFixture(t, cityDir, "core", "bd")
 
 	binDir := t.TempDir()
 	script := filepath.Join(binDir, "bd")

@@ -58,7 +58,7 @@ func agentCount(cfg *config.City, name string) int {
 // single gc init call.
 func TestRegression_GastownConfig(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(c.Dir, "city.toml"))
 	if err != nil {
@@ -100,8 +100,9 @@ func TestRegression_GastownConfig(t *testing.T) {
 	})
 
 	// Each pack owns its dog outright: gastown ships the themed utility
-	// dog and the dolt pack ships its own Dolt-maintenance dog. The
-	// maintenance fallback dog and the fallback-resolution mechanism were
+	// dog and the dolt pack ships its own Dolt-maintenance dog, re-exported
+	// through the bd pack's [imports.dolt] binding so it surfaces as bd.dog.
+	// The maintenance fallback dog and the fallback-resolution mechanism were
 	// removed, so the two coexist under distinct binding-qualified names.
 	t.Run("PacksOwnTheirDogs", func(t *testing.T) {
 		dogsByBinding := make(map[string]config.Agent)
@@ -111,10 +112,10 @@ func TestRegression_GastownConfig(t *testing.T) {
 			}
 		}
 		if len(dogsByBinding) != 2 {
-			t.Errorf("dogs by binding = %v, want gastown + dolt", dogsByBinding)
+			t.Errorf("dogs by binding = %v, want gastown + bd", dogsByBinding)
 		}
-		if _, ok := dogsByBinding["dolt"]; !ok {
-			t.Error("dolt pack dog missing")
+		if _, ok := dogsByBinding["bd"]; !ok {
+			t.Error("dolt maintenance dog (binding bd) missing")
 		}
 		dog, ok := dogsByBinding["gastown"]
 		if !ok {
@@ -170,21 +171,14 @@ func TestRegression_GastownConfig(t *testing.T) {
 			t.Error("PackDirs is empty after config load; pack expansion did not run")
 		}
 
-		hasCoreInclude := false
-		for _, inc := range cfg.Workspace.LegacyIncludes() {
-			if strings.HasSuffix(filepath.ToSlash(inc), ".gc/system/packs/core") {
-				hasCoreInclude = true
-				break
-			}
-		}
-		if !hasCoreInclude {
-			t.Errorf("workspace includes %v missing explicit .gc/system/packs/core entry", cfg.Workspace.LegacyIncludes())
+		if cfg.PackDirByName("core") == "" {
+			t.Error("core pack not reachable from composed config (missing pinned [imports.core])")
 		}
 
 		cityFormulas := cfg.FormulaLayers.City
 		hasCoreFormulas := false
 		for _, dir := range cityFormulas {
-			if strings.Contains(dir, filepath.Join("system", "packs", "core")) {
+			if strings.Contains(filepath.ToSlash(dir), "/packs/core") {
 				hasCoreFormulas = true
 				break
 			}
@@ -202,7 +196,7 @@ func TestRegression_GastownConfig(t *testing.T) {
 // packs/ directory. They share a single gc init call.
 func TestRegression_GastownPackArtifacts(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 	packDir := gastownCachePackDir(t, c)
 
 	// PR #3044: invalid TOML escape in a formula file broke 5 CI tests.
@@ -344,7 +338,7 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 // single gc init call and rig setup.
 func TestRegression_GastownWithRigs(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	rig1 := t.TempDir()
 	rig2 := t.TempDir()

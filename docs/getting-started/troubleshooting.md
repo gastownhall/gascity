@@ -51,26 +51,31 @@ Local checks reuse the same script protocol as pack doctor checks:
 The first stdout line becomes the check message. Additional stdout lines are
 shown by `gc doctor --verbose`.
 
-## "city.toml does not include required builtin pack(s)" Warning
+## "does not import required builtin pack(s)" Warning
 
-Builtin packs compose only through explicit `[workspace]` includes in
-`city.toml` — nothing splices them into config composition implicitly.
-`gc init` writes the includes for new cities:
+Builtin packs compose only through explicit pinned `[imports]` in
+`pack.toml` — nothing splices them into config composition implicitly.
+`gc init` writes the imports (plus a matching `packs.lock`) for new cities:
 
 ```toml
-[workspace]
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "sha:<pinned commit>"
+
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "sha:<pinned commit>"
 ```
 
 (The `bd` entry is written only for bd-provider cities, the default;
 non-bd providers get only `core`.)
 
-If a required include is missing — typically in a city created before the
-includes became explicit — config load still refreshes the materialized
-pack content under `.gc/system/packs/` and prints a once-per-city warning:
+If a required import is missing — typically in a city created before the
+imports became explicit — config load still self-heals the user-global pack
+cache and prints a once-per-city warning:
 
 ```
-warning: city.toml does not include required builtin pack(s) core; run "gc doctor --fix" to add the missing include(s)
+warning: this city does not import required builtin pack(s) core; run "gc doctor --fix" to add the missing import(s)
 ```
 
 Run the suggested fix:
@@ -79,12 +84,11 @@ Run the suggested fix:
 gc doctor --fix
 ```
 
-The `builtin-pack-includes` doctor check adds the missing include(s) and
-removes stale includes that point at the retired
-`.gc/system/packs/maintenance` pack, whose exec orders and scripts now
-ship in the bundled core pack at `.gc/system/packs/core`. Stale
-`.gc/system/packs/maintenance` directories on disk are pruned
-automatically by materialization.
+The `builtin-pack-imports` doctor check migrates the city to the imports
+model: it strips legacy `workspace.includes` entries pointing at the retired
+per-city `.gc/system/packs` tree, adds the missing pinned import(s) to
+`pack.toml`, and refreshes `packs.lock` and the cache. Leftover
+`.gc/system/packs` directories on disk are pruned automatically.
 
 ## "command not found" After Install
 

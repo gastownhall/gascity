@@ -169,12 +169,10 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 		return "", false, nil
 	}
 
-	home, err := os.UserHomeDir()
+	cacheRoot, err := GlobalRepoCacheRoot()
 	if err != nil {
-		return "", false, fmt.Errorf("resolving home dir: %w", err)
+		return "", false, err
 	}
-
-	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit); err != nil {
 		return "", false, err
@@ -182,12 +180,150 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 	return cacheDir, true, nil
 }
 
-func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
+// BundledSourcePinnedVersion returns the canonical pinned version for a
+// bundled builtin source: packs addressed through the public gascity-packs
+// repository keep their public registry pin; gascity.git sources use the
+// bundled gascity.git pin. The canonical pin is the only commit the
+// running binary pre-seeds from its embedded content — any other commit
+// on a bundled source is an ordinary remote import.
+func BundledSourcePinnedVersion(source string) string {
+	name, repository, ok := builtinpacks.SourceLayout(source)
+	if ok && repository == builtinpacks.PublicRepository {
+		switch name {
+		case "gastown":
+			return PublicGastownPackVersion
+		case "gascity":
+			return PublicGascityPackVersion
+		}
+	}
+	return BundledPackImportVersion
+}
+
+// SupersededBundledPinTarget reports the current canonical version for a
+// bundled source whose declared version is a SUPERSEDED canonical pin —
+// one an older gc release wrote as canonical. Older gc releases and docs
+// wrote these as the canonical pin; the packv2-import-state doctor fix
+// rewrites them to the current canonical version so a pin bump never
+// strands a city on a network-only resolution path.
+func SupersededBundledPinTarget(source, version string) (string, bool) {
+	name, repository, ok := builtinpacks.SourceLayout(source)
+	if !ok {
+		return "", false
+	}
+	var superseded []string
+	var current string
+	switch repository {
+	case builtinpacks.PublicRepository:
+		switch name {
+		case "gastown":
+			superseded, current = SupersededPublicGastownPackVersions, PublicGastownPackVersion
+		case "gascity":
+			superseded, current = SupersededPublicGascityPackVersions, PublicGascityPackVersion
+		default:
+			return "", false
+		}
+	case builtinpacks.Repository:
+		switch name {
+		case "core", "bd", "dolt":
+			superseded, current = SupersededBundledPackImportVersions, BundledPackImportVersion
+		default:
+			return "", false
+		}
+	default:
+		return "", false
+	}
+	v := strings.TrimSpace(version)
+	for _, old := range superseded {
+		if v == old {
+			return current, true
+		}
+	}
+	return "", false
+}
+
+// notCachedRemediation returns the remediation clause for an import whose
+// pinned content is not in the repo cache. The default is the plain install
+// command. When the pin is a superseded canonical pin — one an older gc
+// release wrote as canonical — the clause leads with "gc doctor --fix",
+// which re-pins to the current canonical version offline and serves
+// embedded content; "gc import install" stays the fallback because it
+// fetches the exact superseded commit over the network. Without the doctor
+// pointer every public-pin bump would strand such cities on a network-only
+// resolution path, the outcome the superseded-pin machinery exists to
+// prevent.
+func notCachedRemediation(source, version string) string {
+	current, ok := SupersededBundledPinTarget(source, version)
+	if !ok {
+		return `run "gc import install"`
+	}
+	return fmt.Sprintf("pinned at superseded canonical %s; run \"gc doctor --fix\" to re-pin to the current canonical %s (offline), or \"gc import install\" to fetch this exact commit", version, current)
+}
+
+// IsBundledSourceAtCanonicalPin reports whether commit is the canonical
+// pinned commit the running binary pre-seeds for a bundled source. Only
+// the canonical pin is served from embedded content; pinning a bundled
+// source at any other commit makes it behave exactly like a regular
+// remote import — fetched for real by gc import install.
+//
+// The comparison is deliberately exact (full lowercase sha): this
+// predicate determines cache-key derivation, which must be stable. An
+// abbreviated or differently-cased pin classifies as non-canonical and
+// takes the real-fetch path consistently at every gate.
+func IsBundledSourceAtCanonicalPin(source, commit string) bool {
+	commit = strings.TrimSpace(commit)
+	if commit == "" || !builtinpacks.IsSource(source) {
+		return false
+	}
+	return strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:") == commit
+}
+
+// resolveBundledSourceWithoutLock resolves a bundled builtin source that has
+// no packs.lock entry to the binary's canonical pin, hydrating the synthetic
+// cache when needed. The lock stays the source of truth when an entry
+// exists, and a declared non-canonical pin never falls back here — it must
+// be installed for real, exactly like any other remote import. This
+// fallback keeps cities composable before the first "gc import install"
+// writes the lock.
+func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, bool, error) {
+	if !builtinpacks.IsSource(source) {
+		return "", false, nil
+	}
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
+	if declared := strings.TrimSpace(declaredVersion); declared != "" &&
+		strings.TrimPrefix(declared, "sha:") != commit {
+		return "", false, nil
+	}
+	cacheRoot, err := GlobalRepoCacheRoot()
+	if err != nil {
+		return "", true, fmt.Errorf("resolving global repo cache root: %w", err)
+	}
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
+	if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
+		return cacheDir, true, nil
+	}
+	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
+		if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
+			return cacheDir, nil
+		}
+		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, commit)
+	}); err != nil {
+		return "", true, fmt.Errorf("hydrating synthetic repo cache: %w", err)
+	}
+	return cacheDir, true, nil
+}
+
+func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (string, error) {
 	lockPath := filepath.Join(cityRoot, "packs.lock")
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); run \"gc import install\"", source)
+			if cacheDir, ok, err := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
+				if err != nil {
+					return "", fmt.Errorf("resolving remote import %s without lock: %w", source, err)
+				}
+				return cacheDir, nil
+			}
+			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); %s", source, notCachedRemediation(source, declaredVersion))
 		}
 		return "", fmt.Errorf("reading packs.lock: %w", err)
 	}
@@ -198,15 +334,19 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	}
 	entry, ok := lock.Packs[source]
 	if !ok || entry.Commit == "" {
-		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run \"gc import install\"", source)
+		if cacheDir, ok, err := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
+			if err != nil {
+				return "", fmt.Errorf("resolving remote import %s without lock entry: %w", source, err)
+			}
+			return cacheDir, nil
+		}
+		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); %s", source, notCachedRemediation(source, declaredVersion))
 	}
 
-	home, err := os.UserHomeDir()
+	cacheRoot, err := GlobalRepoCacheRoot()
 	if err != nil {
-		return "", fmt.Errorf("resolving home dir: %w", err)
+		return "", err
 	}
-
-	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit); err != nil {
 		return "", err
@@ -276,7 +416,7 @@ func ResetRemoteCacheValidationCache() {
 func validateInstalledRemoteCache(source, cacheDir, commit string) error {
 	gitPath := filepath.Join(cacheDir, ".git")
 	gitInfo, gitStatErr := os.Stat(gitPath)
-	if builtinpacks.IsSource(source) {
+	if IsBundledSourceAtCanonicalPin(source, commit) {
 		err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit)
 		if err == nil {
 			return nil
@@ -291,7 +431,7 @@ func validateInstalledRemoteCache(source, cacheDir, commit string) error {
 		// path, so validate it with the ordinary remote-cache contract below.
 	}
 	if gitutil.MissingCheckoutMarker(gitInfo, gitStatErr) {
-		return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
+		return fmt.Errorf("remote import %s is locked but not cached at %s; %s", source, cacheDir, notCachedRemediation(source, "sha:"+commit))
 	}
 	if gitStatErr != nil {
 		return fmt.Errorf("checking cached import %s: %w", source, gitStatErr)
@@ -351,7 +491,7 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 // "bundled pack cache content hash does not match current binary" wedge).
 func RepoCacheKey(source, commit string) string {
 	identity := NormalizeRemoteSource(source) + commit
-	if builtinpacks.IsSource(source) {
+	if IsBundledSourceAtCanonicalPin(source, commit) {
 		identity = builtinpacks.SyntheticCacheNamespace + "\x00" + NormalizeRemoteSource(source) + "\x00" + commit
 		if component := builtinpacks.SyntheticCacheKeyComponent(); component != "" {
 			identity += "\x00" + component

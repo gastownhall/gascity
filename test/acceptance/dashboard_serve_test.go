@@ -102,7 +102,7 @@ func newShortDashboardCity(t *testing.T) *helpers.City {
 	t.Cleanup(func() { _ = os.RemoveAll(shortRoot) })
 
 	c := helpers.NewCityInRoot(t, testEnv, shortRoot)
-	c.Init("claude")
+	c.InitNoStart("claude")
 	return c
 }
 

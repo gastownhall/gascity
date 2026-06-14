@@ -1779,10 +1779,10 @@ Create a new Gas City workspace in the given directory (or cwd).
 
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
-the standard top-level directories, and .template.md prompt templates, then
-materializes builtin packs under .gc/system/packs. Use --template with
---default-provider to create a city non-interactively, or --file to initialize
-from an existing TOML config file.
+the standard top-level directories, and .template.md prompt templates, and
+pins the builtin pack imports (resolved from the user-global pack cache).
+Use --template with --default-provider to create a city non-interactively,
+or --file to initialize from an existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
@@ -1815,10 +1815,11 @@ gc init --file city.toml --preserve-existing .
 | `--from` | string |  | path to an example city directory to copy |
 | `--json` | bool |  | emit JSON summary |
 | `--name` | string |  | workspace name (default: target directory basename) |
+| `--no-start` | bool |  | initialize files and imports without registering or starting the city |
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
-| `--template` | string |  | non-interactive template to write: minimal, gastown, or custom |
+| `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, or custom |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
 ## gc lint
@@ -2695,7 +2696,7 @@ Baseline:
   baseline so the LLM iterates on a known-good shape rather than
   designing from scratch. Resolution priority:
     1. &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md     (user customization)
-    2. &lt;city&gt;/.gc/system/packs/*/agents/&lt;role&gt;/    (pack default)
+    2. &lt;composed pack dirs&gt;/agents/&lt;role&gt;/         (pack default)
     3. embedded prompts/&lt;role&gt;.md                  (built-in fallback)
     4. embedded prompts/mayor.md                   (structural reference,
                                                      used only when no
