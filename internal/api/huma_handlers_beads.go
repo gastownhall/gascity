@@ -281,21 +281,38 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	rigNames := sortedRigNames(stores)
 	var all []beads.Bead
 	var pa partialAggregator
-	for _, rigName := range rigNames {
+	seen := make(map[string]bool)
+	federate := func(label string, store beads.Store) {
+		if store == nil {
+			return
+		}
 		pa.attempt()
-		ready, err := beads.HandlesFor(stores[rigName]).Live.Ready()
+		ready, err := beads.HandlesFor(store).Live.Ready()
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
-				pa.record("rig "+rigName, err)
+				pa.record(label, err)
 				pa.success()
 			} else {
-				pa.record("rig "+rigName, err)
-				continue
+				pa.record(label, err)
+				return
 			}
 		} else {
 			pa.success()
 		}
-		all = append(all, ready...)
+		for _, b := range ready {
+			if seen[b.ID] {
+				continue // legacy file mode can alias the city and rig stores
+			}
+			seen[b.ID] = true
+			all = append(all, b)
+		}
+	}
+	// The city store is NOT among the per-rig BeadStores(); city-scope ready work
+	// (graph.v2 molecules in a single-HQ city, control beads) lives there, so
+	// federate it first or HTTP `bd ready` would never surface it.
+	federate("city", s.state.CityBeadStore())
+	for _, rigName := range rigNames {
+		federate("rig "+rigName, stores[rigName])
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()
