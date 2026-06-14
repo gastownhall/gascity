@@ -14,7 +14,7 @@ func TestApplyWispQueryIndexesToDB_ReturnsErrorOnUnreachableServer(t *testing.T)
 	}
 }
 
-func TestApplyWispQueryIndexesToDB_ContextCancellation(t *testing.T) {
+func TestApplyWispQueryIndexesToDB_ContextCancellation(_ *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var stderr bytes.Buffer

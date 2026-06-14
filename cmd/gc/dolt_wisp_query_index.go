@@ -12,7 +12,7 @@ import (
 //
 // Background: the beads library's SearchIssuesWithCountsInTx generates SQL
 // with full-table subquery aggregations for wisp_labels and wisp_dependencies
-// (JSON_ARRAYAGG labels, dep/rdep/comment counts), all materialised across the
+// (JSON_ARRAYAGG labels, dep/rdep/comment counts), all materialized across the
 // entire table before the outer WHERE filter is applied. Two indexes are
 // missing from the beads schema migrations that would significantly reduce the
 // cost of these scans on a busy server:
