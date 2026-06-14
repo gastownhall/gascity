@@ -94,6 +94,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Formulas v2 and `drain` are the supported path for new graph
+  workflows.** The v2 compiler emits flat workflow graphs with
+  controller-owned control/finalize beads, and `drain` is now the canonical
+  fan-out primitive for scattering convoy members into per-item formula runs.
+  The bundled `gascity` planning pack ships graph.v2 build and implementation
+  formulas, including the mayor skill's documented `gc sling ... --on
+  <formula>` launch flow and drain-based `implement` workflow, so new Gas City
+  methodology workflows no longer need the legacy `gc.output_json`/tally fan-out
+  pattern.
+
 - Proxy-process workspace services now receive `GC_SERVICE_SECRETS_DIR`
   (`<GC_SERVICE_STATE_ROOT>/secrets`) in their environment, alongside the
   existing `GC_SERVICE_*` variables. The directory is scaffolded at `0700`
