@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -21,7 +22,7 @@ type agentWorktreeGitProbe interface {
 	CurrentBranch() (string, error)
 	HasUncommittedWork() bool
 	CheckoutDetach(ref string) error
-	ProbeDefaultBranch() string
+	DefaultBranch() (string, error)
 }
 
 // newAgentWorktreeGitProbe is the factory for the git probe. Tests may
@@ -128,8 +129,8 @@ func cleanupClosedBeadAgentHomeWorktrees(
 				continue
 			}
 
-			defaultBranch := wg.ProbeDefaultBranch()
-			if defaultBranch == "" {
+			defaultBranch, err := wg.DefaultBranch()
+			if err != nil || strings.TrimSpace(defaultBranch) == "" {
 				defaultBranch = "main"
 			}
 			resetRef := "origin/" + defaultBranch

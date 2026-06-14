@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,15 +12,20 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// errFakeResolver is a sentinel error returned by the fake DefaultBranch
+// resolver to exercise the error-fallback path.
+var errFakeResolver = errors.New("fake resolver failure")
+
 // fakeAgentWorktreeGit is a configurable fake for the agentWorktreeGitProbe interface.
 type fakeAgentWorktreeGit struct {
-	isRepo             bool
-	currentBranch      string
-	currentBranchErr   error
-	hasUncommitted     bool
-	checkoutDetachErr  error
-	checkoutDetachRef  string
-	probeDefaultBranch string
+	isRepo            bool
+	currentBranch     string
+	currentBranchErr  error
+	hasUncommitted    bool
+	checkoutDetachErr error
+	checkoutDetachRef string
+	defaultBranch     string
+	defaultBranchErr  error
 }
 
 func (f *fakeAgentWorktreeGit) IsRepo() bool { return f.isRepo }
@@ -35,7 +41,9 @@ func (f *fakeAgentWorktreeGit) CheckoutDetach(ref string) error {
 	return f.checkoutDetachErr
 }
 
-func (f *fakeAgentWorktreeGit) ProbeDefaultBranch() string { return f.probeDefaultBranch }
+func (f *fakeAgentWorktreeGit) DefaultBranch() (string, error) {
+	return f.defaultBranch, f.defaultBranchErr
+}
 
 func setupAgentHomeWorktreeCleanupTest(t *testing.T) (cityPath, builderWTPath string, store beads.Store) {
 	t.Helper()
@@ -322,13 +330,15 @@ func TestCleanupClosedBeadAgentHomeWorktrees_EmptyStores(t *testing.T) {
 // uses the probed default branch for the detach reset ref.
 func TestCleanupClosedBeadAgentHomeWorktrees_DefaultBranch(t *testing.T) {
 	cases := []struct {
-		name               string
-		probeDefaultBranch string
-		wantRef            string
+		name             string
+		defaultBranch    string
+		defaultBranchErr error
+		wantRef          string
 	}{
-		{name: "non-main default branch", probeDefaultBranch: "master", wantRef: "origin/master"},
-		{name: "custom default branch", probeDefaultBranch: "develop", wantRef: "origin/develop"},
-		{name: "probe returns empty, fallback to main", probeDefaultBranch: "", wantRef: "origin/main"},
+		{name: "non-main default branch", defaultBranch: "master", wantRef: "origin/master"},
+		{name: "custom default branch", defaultBranch: "develop", wantRef: "origin/develop"},
+		{name: "resolver returns empty, fallback to main", defaultBranch: "", wantRef: "origin/main"},
+		{name: "resolver error, fallback to main", defaultBranchErr: errFakeResolver, wantRef: "origin/main"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -346,9 +356,10 @@ func TestCleanupClosedBeadAgentHomeWorktrees_DefaultBranch(t *testing.T) {
 			defer func() { newAgentWorktreeGitProbe = orig }()
 			newAgentWorktreeGitProbe = func(_ string) agentWorktreeGitProbe {
 				fake = &fakeAgentWorktreeGit{
-					isRepo:             true,
-					currentBranch:      "builder/ga-abc123",
-					probeDefaultBranch: tc.probeDefaultBranch,
+					isRepo:           true,
+					currentBranch:    "builder/ga-abc123",
+					defaultBranch:    tc.defaultBranch,
+					defaultBranchErr: tc.defaultBranchErr,
 				}
 				return fake
 			}
@@ -361,5 +372,48 @@ func TestCleanupClosedBeadAgentHomeWorktrees_DefaultBranch(t *testing.T) {
 				t.Errorf("CheckoutDetach(%q), want %q", fake.checkoutDetachRef, tc.wantRef)
 			}
 		})
+	}
+}
+
+// TestCleanupClosedBeadAgentHomeWorktrees_DetachesToMainNotCurrentBranch is a
+// regression test for the origin/HEAD-unset case. The mainline resolver
+// (DefaultBranch) must never return the current (closed bead) branch, so the
+// reset ref must be origin/main — never origin/<current branch>. This guards
+// against reintroducing the registration-time ProbeDefaultBranch resolver,
+// which falls back to the current branch when origin/HEAD is unset.
+func TestCleanupClosedBeadAgentHomeWorktrees_DetachesToMainNotCurrentBranch(t *testing.T) {
+	cityPath, builderWTPath, _ := setupAgentHomeWorktreeCleanupTest(t)
+	cfg := agentHomeConfig()
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-abc123", Status: "closed"}}, nil)
+
+	stalePath := filepath.Join(builderWTPath, worktreeStaleFileName)
+	if err := os.WriteFile(stalePath, []byte("branch=builder/ga-abc123\n"), 0o644); err != nil {
+		t.Fatalf("write stale marker: %v", err)
+	}
+
+	var fake *fakeAgentWorktreeGit
+	orig := newAgentWorktreeGitProbe
+	defer func() { newAgentWorktreeGitProbe = orig }()
+	newAgentWorktreeGitProbe = func(_ string) agentWorktreeGitProbe {
+		fake = &fakeAgentWorktreeGit{
+			isRepo:        true,
+			currentBranch: "builder/ga-abc123",
+			// DefaultBranch resolves origin/HEAD → origin/main → origin/master
+			// → "main"; it never returns the current branch. Simulate the
+			// origin/HEAD-unset case where it resolves to "main".
+			defaultBranch: "main",
+		}
+		return fake
+	}
+
+	cleaned := cleanupClosedBeadAgentHomeWorktrees(cityPath, cfg, map[string]beads.Store{"ga-rig": store}, nil)
+	if cleaned != 1 {
+		t.Errorf("cleaned = %d, want 1", cleaned)
+	}
+	if fake.checkoutDetachRef != "origin/main" {
+		t.Errorf("CheckoutDetach(%q), want %q", fake.checkoutDetachRef, "origin/main")
+	}
+	if fake.checkoutDetachRef == "origin/builder/ga-abc123" {
+		t.Error("reset detached to the closed bead branch; must reset to origin/main")
 	}
 }
