@@ -298,7 +298,7 @@ func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, bo
 		return "", true, fmt.Errorf("resolving global repo cache root: %w", err)
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
-	if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
+	if builtinpacks.ValidateSyntheticRepoFast(cacheDir, commit) == nil {
 		return cacheDir, true, nil
 	}
 	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
@@ -417,7 +417,7 @@ func validateInstalledRemoteCache(source, cacheDir, commit string) error {
 	gitPath := filepath.Join(cacheDir, ".git")
 	gitInfo, gitStatErr := os.Stat(gitPath)
 	if IsBundledSourceAtCanonicalPin(source, commit) {
-		err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit)
+		err := builtinpacks.ValidateSyntheticRepoFast(cacheDir, commit)
 		if err == nil {
 			return nil
 		}
