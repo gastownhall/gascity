@@ -963,7 +963,7 @@ func TestSessionHandleHistoryLoadsNormalizedTranscript(t *testing.T) {
 	}
 }
 
-func TestSessionHandleHistoryPersistsCodexResumeKeyForLaterRestart(t *testing.T) {
+func TestSessionHandleHistoryDoesNotPersistCodexResumeKeyFromTranscript(t *testing.T) {
 	base := t.TempDir()
 	dayDir := filepath.Join(base, "2026", "04", "14")
 	if err := os.MkdirAll(dayDir, 0o755); err != nil {
@@ -1004,19 +1004,19 @@ func TestSessionHandleHistoryPersistsCodexResumeKeyForLaterRestart(t *testing.T)
 	if err != nil {
 		t.Fatalf("History: %v", err)
 	}
-	if history.GCSessionID != resumeID {
-		t.Fatalf("History().GCSessionID = %q, want %q", history.GCSessionID, resumeID)
+	if history.GCSessionID == resumeID {
+		t.Fatalf("History().GCSessionID = %q, want Gas City session id, not transcript-derived Codex resume id", history.GCSessionID)
 	}
-	if history.LogicalConversationID != resumeID {
-		t.Fatalf("History().LogicalConversationID = %q, want %q", history.LogicalConversationID, resumeID)
+	if history.LogicalConversationID == resumeID {
+		t.Fatalf("History().LogicalConversationID = %q, want non-Codex-derived logical id", history.LogicalConversationID)
 	}
 
 	bead, err := store.Get(handle.sessionID)
 	if err != nil {
 		t.Fatalf("store.Get(%q): %v", handle.sessionID, err)
 	}
-	if bead.Metadata["session_key"] != resumeID {
-		t.Fatalf("session_key = %q, want %q", bead.Metadata["session_key"], resumeID)
+	if got := bead.Metadata["session_key"]; got != "" {
+		t.Fatalf("session_key = %q, want empty; Codex resume keys come from SessionStart hook stdin", got)
 	}
 
 	if err := handle.Stop(context.Background()); err != nil {
@@ -1031,12 +1031,12 @@ func TestSessionHandleHistoryPersistsCodexResumeKeyForLaterRestart(t *testing.T)
 		t.Fatalf("runtime calls = %#v, want second Start", sp.Calls)
 	}
 	wantResume := "codex resume " + resumeID
-	if !strings.Contains(secondStart.Config.Command, wantResume) {
-		t.Fatalf("second start command = %q, want %q", secondStart.Config.Command, wantResume)
+	if strings.Contains(secondStart.Config.Command, wantResume) {
+		t.Fatalf("second start command = %q, must not use transcript-derived Codex resume command %q", secondStart.Config.Command, wantResume)
 	}
 }
 
-func TestSessionHandleStatePersistsCodexResumeKeyWithoutPrimingHistoryCache(t *testing.T) {
+func TestSessionHandleStateDoesNotPersistCodexResumeKeyWithoutPrimingHistoryCache(t *testing.T) {
 	base := t.TempDir()
 	dayDir := filepath.Join(base, "2026", "04", "14")
 	if err := os.MkdirAll(dayDir, 0o755); err != nil {
@@ -1088,8 +1088,8 @@ func TestSessionHandleStatePersistsCodexResumeKeyWithoutPrimingHistoryCache(t *t
 	if err != nil {
 		t.Fatalf("store.Get(%q): %v", handle.sessionID, err)
 	}
-	if bead.Metadata["session_key"] != resumeID {
-		t.Fatalf("session_key = %q, want %q", bead.Metadata["session_key"], resumeID)
+	if got := bead.Metadata["session_key"]; got != "" {
+		t.Fatalf("session_key = %q, want empty; Codex resume keys come from SessionStart hook stdin", got)
 	}
 
 	if err := handle.Stop(context.Background()); err != nil {
@@ -1104,8 +1104,8 @@ func TestSessionHandleStatePersistsCodexResumeKeyWithoutPrimingHistoryCache(t *t
 		t.Fatalf("runtime calls = %#v, want second Start", sp.Calls)
 	}
 	wantResume := "codex resume " + resumeID
-	if !strings.Contains(secondStart.Config.Command, wantResume) {
-		t.Fatalf("second start command = %q, want %q", secondStart.Config.Command, wantResume)
+	if strings.Contains(secondStart.Config.Command, wantResume) {
+		t.Fatalf("second start command = %q, must not use transcript-derived Codex resume command %q", secondStart.Config.Command, wantResume)
 	}
 }
 

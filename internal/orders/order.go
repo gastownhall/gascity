@@ -16,6 +16,9 @@ import (
 type Order struct {
 	// Name is derived from the discovered filename or directory name (not from TOML).
 	Name string `toml:"-"`
+	// skipAliases lists alternate names that match [orders].skip without changing
+	// the order's canonical runtime name.
+	skipAliases []string
 	// Description explains what this order does.
 	Description string `toml:"description,omitempty"`
 	// Formula is the formula name to dispatch when the trigger fires.
@@ -98,6 +101,7 @@ type orderDecode struct {
 	Enabled     *bool             `toml:"enabled,omitempty"`
 	Idempotent  bool              `toml:"idempotent,omitempty"`
 	Env         map[string]string `toml:"env,omitempty"`
+	SkipAliases []string          `toml:"skip_aliases,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -120,6 +124,7 @@ func (d orderDecode) normalized() Order {
 		Enabled:     d.Enabled,
 		Idempotent:  d.Idempotent,
 		Env:         d.Env,
+		skipAliases: d.SkipAliases,
 	}
 }
 

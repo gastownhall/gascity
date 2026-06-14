@@ -96,7 +96,23 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(tmpDir, "tmux")); err != nil {
+	// Create the tmux socket root under /tmp rather than $TMPDIR.
+	// On macOS, $TMPDIR is ~80 chars (/private/var/folders/…/T/); nesting
+	// tmux sockets inside it pushes socket paths past macOS's 104-byte limit.
+	// /tmp is world-writable on macOS, Linux, and CI runners.
+	tmuxSocketParent, tmuxParentErr := os.MkdirTemp("/tmp", "gct-")
+	tmuxSocketRoot := filepath.Join(tmpDir, "tmux")
+	if tmuxParentErr == nil {
+		tmuxSocketRoot = filepath.Join(tmuxSocketParent, "tmux")
+		if err := os.MkdirAll(tmuxSocketRoot, 0o700); err != nil {
+			os.RemoveAll(tmuxSocketParent)
+			tmuxSocketParent = ""
+			tmuxSocketRoot = filepath.Join(tmpDir, "tmux")
+		} else {
+			defer os.RemoveAll(tmuxSocketParent)
+		}
+	}
+	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic("integration: configuring tmux test env: " + err.Error())
 	}
 
@@ -104,6 +120,9 @@ func TestMain(m *testing.M) {
 	if !subprocess {
 		if _, err := exec.LookPath("tmux"); err != nil {
 			_ = os.RemoveAll(tmpDir)
+			if tmuxSocketParent != "" {
+				_ = os.RemoveAll(tmuxSocketParent)
+			}
 			os.Exit(0)
 		}
 		// Pre-sweep: kill this run's root plus stale sibling orphans.
@@ -155,6 +174,10 @@ func TestMain(m *testing.M) {
 		realBDBinary, err = exec.LookPath("bd")
 		if err != nil {
 			// bd not available — skip all integration tests.
+			_ = os.RemoveAll(tmpDir)
+			if tmuxSocketParent != "" {
+				_ = os.RemoveAll(tmuxSocketParent)
+			}
 			os.Exit(0)
 		}
 	}
@@ -212,6 +235,9 @@ func TestMain(m *testing.M) {
 	}
 
 	_ = os.RemoveAll(tmpDir)
+	if tmuxSocketParent != "" {
+		_ = os.RemoveAll(tmuxSocketParent)
+	}
 	os.Exit(code)
 }
 

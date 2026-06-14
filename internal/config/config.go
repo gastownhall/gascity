@@ -601,6 +601,10 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Args overrides the provider's default arguments. Leave unset to keep
+	// the pack-defined args; set to an empty list to clear them; set to a
+	// populated list to replace them entirely (full replace, not append).
+	Args *[]string `toml:"args,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
 	// Lifecycle overrides the runtime lifecycle ("one_shot" or empty).
@@ -1163,7 +1167,7 @@ type Workspace struct {
 	// into agent working directories. Agent-level overrides workspace-level
 	// (replace, not additive). Supported: "claude", "codex", "gemini",
 	// "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot",
-	// "cursor", "pi", "omp".
+	// "cursor", "pi", "omp", "kimi".
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// GlobalFragments lists named template fragments injected into every
 	// agent's rendered prompt. Applied before per-agent InjectFragments.
@@ -4287,12 +4291,17 @@ func configuredProviderOrder(providers map[string]ProviderSpec) []string {
 	return order
 }
 
+// validationAgentKey identifies the canonical route template for an agent.
+type validationAgentKey struct{ dir, binding, name string }
+
 // ValidateAgents checks agent configurations for errors. It returns an error
-// if any agent is missing required fields, has duplicate identities, or has
-// invalid pool bounds. Uniqueness is keyed on (dir, name) — the same name
-// in different dirs is allowed.
+// if any agent is missing required fields, has duplicate canonical identities,
+// or has invalid pool bounds. Uniqueness is keyed on (dir, binding, name), so
+// the same bare name may exist in the same scope when imports qualify it under
+// different bindings.
 func ValidateAgents(agents []Agent) error {
-	seen := make(map[agentKey]int, len(agents))
+	seen := make(map[validationAgentKey]int, len(agents))
+	layoutSeen := make(map[agentKey][]int, len(agents))
 	for i, a := range agents {
 		if a.Name == "" {
 			return fmt.Errorf("agent[%d]: name is required", i)
@@ -4300,7 +4309,15 @@ func ValidateAgents(agents []Agent) error {
 		if !validAgentName.MatchString(a.Name) {
 			return fmt.Errorf("agent %q: name must match [a-zA-Z0-9][a-zA-Z0-9_-]* (no spaces, slashes, or dots)", a.Name)
 		}
-		key := agentKey{dir: a.Dir, name: a.Name}
+		layoutKey := agentKey{dir: a.Dir, name: a.Name}
+		for _, priorIdx := range layoutSeen[layoutKey] {
+			if _, _, ok := orderV1V2(agents[priorIdx], a); ok {
+				return formatDuplicateAgentError(agents[priorIdx], a)
+			}
+		}
+		layoutSeen[layoutKey] = append(layoutSeen[layoutKey], i)
+
+		key := validationAgentKey{dir: a.Dir, binding: a.BindingName, name: a.Name}
 		if priorIdx, dup := seen[key]; dup {
 			return formatDuplicateAgentError(agents[priorIdx], a)
 		}
@@ -4606,7 +4623,7 @@ func DefaultCity(name string) City {
 
 func defaultInstallAgentHooksForProvider(provider string) []string {
 	switch strings.TrimSpace(provider) {
-	case "kiro", "opencode", "groq":
+	case "kiro", "opencode", "groq", "kimi":
 		return []string{strings.TrimSpace(provider)}
 	default:
 		return nil

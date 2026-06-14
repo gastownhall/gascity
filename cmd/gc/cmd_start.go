@@ -1100,7 +1100,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 	}
 
 	providerSet := hookProviderSet(hookProviders)
-	// workDir-based hooks: gemini, codex, antigravity, opencode, copilot, cursor, pi, omp.
+	// workDir-based hooks: gemini, codex, antigravity, opencode, copilot, cursor, pi, omp, kimi.
 	for _, provider := range orderedWorkDirHookProviders {
 		if !providerSet[provider.name] {
 			continue
@@ -1134,9 +1134,18 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 			}
 		}
 		if !alreadyStaged {
+			// .gc/settings.json uses path-only fingerprinting (Probed: false) so
+			// that binary-upgrade rewrites of the managed settings file do not
+			// cascade stale-session drains. The legacy hooks/claude.json path is
+			// user-authored and uses content hashing. (ga-zfm)
+			probed := settingsRel != path.Join(".gc", "settings.json")
+			var contentHash string
+			if probed {
+				contentHash = runtime.HashPathContent(settingsAbs)
+			}
 			copyFiles = append(copyFiles, runtime.CopyEntry{
 				Src: settingsAbs, RelDst: settingsRel,
-				Probed: true, ContentHash: runtime.HashPathContent(settingsAbs),
+				Probed: probed, ContentHash: contentHash,
 			})
 		}
 	}
@@ -1160,6 +1169,10 @@ var orderedWorkDirHookProviders = []workDirHookProvider{
 	{name: "cursor", relPaths: []string{path.Join(".cursor", "hooks.json")}},
 	{name: "pi", relPaths: []string{path.Join(".pi", "extensions", "gc-hooks.js")}},
 	{name: "omp", relPaths: []string{path.Join(".omp", "hooks", "gc-hook.ts")}},
+	{name: "kimi", relPaths: []string{
+		path.Join(".kimi", "config.toml"),
+		path.Join(".kimi", "hooks", "gascity-session-start.py"),
+	}},
 }
 
 func hookFileProvidersForResolved(resolved *config.ResolvedProvider, installHooks []string, providers map[string]config.ProviderSpec) []string {

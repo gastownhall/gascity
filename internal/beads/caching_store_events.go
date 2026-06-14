@@ -222,6 +222,9 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		}
 		c.updateStatsLocked()
 		mutated = true
+		if c.clearDependentReadyProjectionsLocked(b.ID) {
+			mutated = true
+		}
 	case "bead.updated":
 		existing, cached := c.beads[b.ID]
 		if !cached || beadChanged(existing, b, false) {
@@ -235,6 +238,9 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			c.noteMutationLocked(b.ID)
 			mutated = true
 		}
+		if hasCacheEventField(fields, "status") && c.clearDependentReadyProjectionsLocked(b.ID) {
+			mutated = true
+		}
 	case "bead.closed":
 		c.noteMutationLocked(b.ID)
 		if _, exists := c.beads[b.ID]; !exists {
@@ -245,6 +251,9 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		delete(c.dirty, b.ID)
 		delete(c.deletedSeq, b.ID)
 		mutated = true
+		if c.clearDependentReadyProjectionsLocked(b.ID) {
+			mutated = true
+		}
 	case "bead.deleted":
 		c.noteMutationLocked(b.ID)
 		delete(c.beads, b.ID)
@@ -255,6 +264,9 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		c.deletedSeq[b.ID] = c.mutationSeq
 		c.updateStatsLocked()
 		mutated = true
+		if c.clearDependentReadyProjectionsLocked(b.ID) {
+			mutated = true
+		}
 	default:
 		return
 	}
@@ -284,6 +296,9 @@ func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields ma
 			delete(c.deps, b.ID)
 			mutated = true
 		}
+		if c.clearReadyProjectionLocked(b.ID) {
+			mutated = true
+		}
 		if c.depsComplete {
 			c.depsComplete = false
 			mutated = true
@@ -311,12 +326,14 @@ func (c *CachingStore) setEventDepsLocked(id string, deps []Dep) bool {
 			return false
 		}
 		c.deps[id] = cloneDeps(deps)
+		c.clearReadyProjectionLocked(id)
 		return true
 	}
 	if c.depsComplete && len(deps) == 0 {
-		return false
+		return c.clearReadyProjectionLocked(id)
 	}
 	c.deps[id] = cloneDeps(deps)
+	c.clearReadyProjectionLocked(id)
 	return true
 }
 
@@ -331,10 +348,64 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 	}
 	c.noteMutationLocked(beadID)
 	c.deps[beadID] = cloneDeps(deps)
+	c.clearReadyProjectionLocked(beadID)
 	delete(c.dirty, beadID)
 	delete(c.deletedSeq, beadID)
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
+}
+
+func (c *CachingStore) clearReadyProjectionLocked(id string) bool {
+	b, ok := c.beads[id]
+	if !ok || b.IsBlocked == nil {
+		return false
+	}
+	b.IsBlocked = nil
+	c.beads[id] = b
+	return true
+}
+
+func (c *CachingStore) clearAllReadyProjectionsLocked() bool {
+	cleared := make([]string, 0)
+	for id := range c.beads {
+		if c.clearReadyProjectionLocked(id) {
+			cleared = append(cleared, id)
+		}
+	}
+	if len(cleared) == 0 {
+		return false
+	}
+	c.noteMutationLocked(cleared...)
+	return true
+}
+
+func (c *CachingStore) clearDependentReadyProjectionsLocked(dependsOnID string) bool {
+	if dependsOnID == "" {
+		return false
+	}
+	if !c.depsComplete {
+		return c.clearAllReadyProjectionsLocked()
+	}
+	cleared := make([]string, 0)
+	for id, deps := range c.deps {
+		if _, ok := c.beads[id]; !ok {
+			continue
+		}
+		for _, dep := range deps {
+			if dep.DependsOnID != dependsOnID || !isReadyBlockingDependencyType(dep.Type) {
+				continue
+			}
+			if c.clearReadyProjectionLocked(id) {
+				cleared = append(cleared, id)
+			}
+			break
+		}
+	}
+	if len(cleared) == 0 {
+		return false
+	}
+	c.noteMutationLocked(cleared...)
+	return true
 }
 
 func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) Bead {
@@ -387,6 +458,9 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	if hasCacheEventField(fields, "defer_until") {
 		merged.DeferUntil = cloneTimePtr(patch.DeferUntil)
 	}
+	if hasCacheEventField(fields, "is_blocked") {
+		merged.IsBlocked = cloneBoolPtr(patch.IsBlocked)
+	}
 	return merged
 }
 
@@ -430,6 +504,9 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 		return true
 	}
 	if hasCacheEventField(fields, "defer_until") && !timePtrEqual(current.DeferUntil, patch.DeferUntil) {
+		return true
+	}
+	if hasCacheEventField(fields, "is_blocked") && !boolPtrEqual(current.IsBlocked, patch.IsBlocked) {
 		return true
 	}
 	return false
@@ -610,7 +687,8 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		old.Ref != fresh.Ref ||
 		old.Description != fresh.Description ||
 		old.Ephemeral != fresh.Ephemeral ||
-		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) {
+		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) ||
+		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {
 		return true
 	}
 	if !maps.Equal(old.Metadata, fresh.Metadata) {
@@ -630,6 +708,17 @@ func depsChanged(old, fresh []Dep) bool {
 }
 
 func intPtrEqual(left, right *int) bool {
+	switch {
+	case left == nil && right == nil:
+		return true
+	case left == nil || right == nil:
+		return false
+	default:
+		return *left == *right
+	}
+}
+
+func boolPtrEqual(left, right *bool) bool {
 	switch {
 	case left == nil && right == nil:
 		return true

@@ -159,7 +159,7 @@ jobs:
     needs: runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
-      DOLT_VERSION: "2.1.0"
+      DOLT_VERSION: "2.1.4"
       BD_VERSION: "v1.0.5"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -202,7 +202,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "2.1.0"
+      DOLT_VERSION: "2.1.4"
       BD_VERSION: "v1.0.5"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -228,7 +228,7 @@ jobs:
       - runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "2.1.0"
+      DOLT_VERSION: "2.1.4"
       BD_VERSION: "v1.0.5"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -327,7 +327,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
-      DOLT_VERSION: "2.1.0"
+      DOLT_VERSION: "2.1.4"
       BD_VERSION: "v1.0.5"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -459,7 +459,7 @@ jobs:
             timeout_minutes: 15
             command: ./scripts/test-integration-shard rest-full-16-of-16
     env:
-      DOLT_VERSION: "2.1.0"
+      DOLT_VERSION: "2.1.4"
       BD_VERSION: "v1.0.5"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -482,7 +482,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 30
     env:
-      DOLT_VERSION: "2.1.0"
+      DOLT_VERSION: "2.1.4"
       BD_VERSION: "v1.0.5"
       GC_BEADS: sqlite
       GC_ACCEPTANCE_BEADS_PROVIDER: sqlite
@@ -954,8 +954,22 @@ jobs:
         run: make install-tools
       - name: Pack compatibility tests
         run: make test-acceptance
+      - name: Live registry smoke
+        timeout-minutes: 12
+        run: |
+          for attempt in 1 2 3; do
+            if make test-pack-registry-live; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+        env:
+          GC_TEST_GASCITY_PACKS_REGISTRY: main
     env:
-      DOLT_VERSION: "2.1.0"
+      DOLT_VERSION: "2.1.4"
       BD_VERSION: "v1.0.5"
 
   # Dashboard SPA typecheck + tests + build. Runs on every push/PR

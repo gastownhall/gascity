@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -65,7 +66,7 @@ func TestBuildStatusBodyIncludesComponentVersions(t *testing.T) {
 		return componentVersions{Dolt: "2.0.7", Beads: "1.0.4"}
 	}}
 
-	body := s.buildStatusBody(false)
+	body := s.buildStatusBody(context.Background(), false)
 	if body.DoltVersion != "2.0.7" {
 		t.Errorf("DoltVersion = %q, want 2.0.7", body.DoltVersion)
 	}

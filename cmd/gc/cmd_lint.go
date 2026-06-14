@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/promptmeta"
 	"github.com/spf13/cobra"
 )
@@ -191,6 +192,7 @@ func lintPack(packDir string) lintPackReport {
 	for _, target := range targets {
 		out.Diagnostics = append(out.Diagnostics, lintPrompt(packDir, loaded.PackDirs, loaded.Providers, target)...)
 	}
+	out.Diagnostics = append(out.Diagnostics, lintClaudeOverlayHookShape(packDir)...)
 	out.OK = lintErrorCount(out.Diagnostics) == 0
 	return out
 }
@@ -518,4 +520,44 @@ func formatLintDiagnostic(diagnostic lintDiagnostic) string {
 		return fmt.Sprintf("%s: %s: %s", path, diagnostic.Severity, message)
 	}
 	return fmt.Sprintf("%s: %s", path, message)
+}
+
+// lintClaudeOverlayHookShape walks a pack for .claude/settings.json overlay
+// files and flags any top-level hook entry using the invalid bare shape.
+// Claude Code requires the wrapped {"matcher": ..., "hooks": [...]} form; a bare
+// {"type": "command", "command": ...} entry projects to a settings file that
+// fails Claude's schema (and `claude doctor`).
+func lintClaudeOverlayHookShape(packDir string) []lintDiagnostic {
+	var diagnostics []lintDiagnostic
+	_ = filepath.WalkDir(packDir, func(path string, entry iofs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if path != packDir && lintSkipDir(entry.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Name() != "settings.json" || filepath.Base(filepath.Dir(path)) != ".claude" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			diagnostics = append(diagnostics, diagnosticFromError(path, err))
+			return nil
+		}
+		bare, err := overlay.FindBareHookEntries(data)
+		if err != nil {
+			diagnostics = append(diagnostics, diagnosticFromError(path, err))
+			return nil
+		}
+		for _, b := range bare {
+			diagnostics = append(diagnostics, newLintDiagnostic(path, 0, fmt.Sprintf(
+				"hooks.%s[%d] is a bare hook entry; Claude settings require the wrapped form {\"matcher\": ..., \"hooks\": [...]}",
+				b.Category, b.Index)))
+		}
+		return nil
+	})
+	return diagnostics
 }

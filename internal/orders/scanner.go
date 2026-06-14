@@ -77,10 +77,19 @@ func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 		if !a.IsEnabled() {
 			continue
 		}
-		if skipSet[name] {
+		if skipSet[name] || hasSkippedAlias(a, skipSet) {
 			continue
 		}
 		result = append(result, a)
 	}
 	return result, nil
+}
+
+func hasSkippedAlias(a Order, skipSet map[string]bool) bool {
+	for _, alias := range a.skipAliases {
+		if skipSet[alias] {
+			return true
+		}
+	}
+	return false
 }

@@ -244,6 +244,117 @@ func TestJsonlArchiveDoctorCheck_StateInLegacyLocation(t *testing.T) {
 	}
 }
 
+func TestJsonlArchiveDoctorCheck_StateInCoreRuntimePackLocation(t *testing.T) {
+	cityDir := t.TempDir()
+	archiveDir := filepath.Join(cityDir, "archive")
+	initBareArchiveRepo(t, archiveDir, true)
+	writeArchiveState(t, filepath.Join(cityDir, ".gc", "runtime", "packs", "core"), `{"last_push_at":"2026-06-09T00:00:00Z"}`)
+
+	env := map[string]string{
+		"GC_JSONL_ARCHIVE_REPO": archiveDir,
+	}
+	result := runJsonlArchiveCheck(t, cityDir, env)
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want OK; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(result.Message, "2026-06-09T00:00:00Z") {
+		t.Fatalf("message = %q (core state path ignored?)", result.Message)
+	}
+}
+
+func TestJsonlArchiveDoctorCheck_StateInLegacyMaintenancePackLocation(t *testing.T) {
+	cityDir := t.TempDir()
+	archiveDir := filepath.Join(cityDir, "archive")
+	initBareArchiveRepo(t, archiveDir, true)
+	writeArchiveState(t, filepath.Join(cityDir, ".gc", "runtime", "packs", "maintenance"), `{"last_push_at":"2026-05-30T00:00:00Z"}`)
+
+	env := map[string]string{
+		"GC_JSONL_ARCHIVE_REPO": archiveDir,
+	}
+	result := runJsonlArchiveCheck(t, cityDir, env)
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want OK; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(result.Message, "2026-05-30T00:00:00Z") {
+		t.Fatalf("message = %q (legacy maintenance state path ignored?)", result.Message)
+	}
+}
+
+func TestJsonlArchiveDoctorCheck_StateEnvOverridesRuntimePackLocations(t *testing.T) {
+	cityDir := t.TempDir()
+	stateDir := t.TempDir()
+	archiveDir := filepath.Join(cityDir, "archive")
+	initBareArchiveRepo(t, archiveDir, true)
+	writeArchiveState(t, stateDir, `{"last_push_at":"2026-06-09T12:00:00Z"}`)
+	writeArchiveState(t, filepath.Join(cityDir, ".gc", "runtime", "packs", "core"), `{"last_push_at":"2026-06-09T00:00:00Z"}`)
+
+	env := map[string]string{
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_JSONL_ARCHIVE_REPO": archiveDir,
+	}
+	result := runJsonlArchiveCheck(t, cityDir, env)
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want OK; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(result.Message, "2026-06-09T12:00:00Z") {
+		t.Fatalf("message = %q (GC_PACK_STATE_DIR did not win?)", result.Message)
+	}
+}
+
+func TestJsonlArchiveDoctorCheck_ArchiveRepoRuntimePackPrecedence(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		coreExists        bool
+		maintenanceExists bool
+		legacyExists      bool
+		want              string
+	}{
+		{
+			name:       "core wins",
+			coreExists: true,
+			want:       "core",
+		},
+		{
+			name:              "maintenance fallback",
+			maintenanceExists: true,
+			legacyExists:      true,
+			want:              "maintenance",
+		},
+		{
+			name:         "pre-pack fallback",
+			legacyExists: true,
+			want:         "legacy",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			runtimeDir := filepath.Join(cityDir, ".gc", "runtime")
+			paths := map[string]string{
+				"core":        filepath.Join(runtimeDir, "packs", "core", "jsonl-archive"),
+				"maintenance": filepath.Join(runtimeDir, "packs", "maintenance", "jsonl-archive"),
+				"legacy":      filepath.Join(cityDir, ".gc", "jsonl-archive"),
+			}
+			if tt.coreExists {
+				initBareArchiveRepo(t, paths["core"], true)
+			}
+			if tt.maintenanceExists {
+				initBareArchiveRepo(t, paths["maintenance"], true)
+			}
+			if tt.legacyExists {
+				initBareArchiveRepo(t, paths["legacy"], true)
+			}
+
+			check := newJsonlArchiveDoctorCheck(cityDir)
+			check.getenv = stubArchiveEnv{vars: map[string]string{
+				"GC_CITY_RUNTIME_DIR": runtimeDir,
+			}}.get
+			if got := check.resolveArchiveRepo(); got != paths[tt.want] {
+				t.Fatalf("resolveArchiveRepo() = %q, want %q", got, paths[tt.want])
+			}
+		})
+	}
+}
+
 func TestDoDoctorRegistersJsonlArchiveCheck(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()

@@ -4,7 +4,6 @@ package overlay
 import (
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,7 +107,7 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 				continue
 			}
 		}
-		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel)); err != nil {
+		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel), WrapsBareHooks(entryRel)); err != nil {
 			fmt.Fprintf(stderr, "overlay: %v\n", err) //nolint:errcheck
 		}
 	}
@@ -173,7 +172,7 @@ func copyDirWithSkipRecursive(srcBase, dstBase, rel string, skip SkipFunc) error
 
 		src := filepath.Join(srcBase, entryRel)
 		dst := filepath.Join(dstBase, entryRel)
-		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel)); err != nil {
+		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel), WrapsBareHooks(entryRel)); err != nil {
 			return err
 		}
 	}
@@ -284,27 +283,35 @@ func providerPreserveExisting(providerName string) preserveExistingFunc {
 }
 
 // copyOrMergeFile copies src to dst, optionally merging JSON if merge is true
-// and dst already exists. Falls back to plain copy on any merge error.
-func copyOrMergeFile(src, dst string, merge bool) error {
+// and dst already exists. When wrapBareHooks is true (Claude settings), bare
+// hook entries in the result are normalized into wrapped form, both when
+// merging and when creating the file fresh. Falls back to plain copy on any
+// merge error.
+func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 	if !merge {
 		return copyFile(src, dst)
 	}
 	// Only merge if destination already exists.
 	dstInfo, dstErr := os.Stat(dst)
 	if dstErr != nil {
-		// Destination doesn't exist or can't be stat'd — canonicalize the
-		// mergeable source JSON before creating it.
-		return copyCanonicalJSONFile(src, dst, 0)
+		// Destination doesn't exist or can't be stat'd — canonicalize (and
+		// normalize hook shape for wrap-style files) the source before
+		// creating it.
+		return createCanonicalSettingsFile(src, dst, wrapBareHooks)
 	}
 	dstData, err := os.ReadFile(dst)
 	if err != nil {
-		return copyCanonicalJSONFile(src, dst, 0)
+		return createCanonicalSettingsFile(src, dst, wrapBareHooks)
 	}
 	srcData, err := os.ReadFile(src)
 	if err != nil {
-		return copyCanonicalJSONFile(src, dst, 0)
+		return createCanonicalSettingsFile(src, dst, wrapBareHooks)
 	}
-	merged, err := MergeSettingsJSON(dstData, srcData)
+	var opts []MergeOption
+	if wrapBareHooks {
+		opts = append(opts, WithWrapBareHooks())
+	}
+	merged, err := MergeSettingsJSON(dstData, srcData, opts...)
 	if err != nil {
 		// Merge failed — fall back to overwrite.
 		return copyFile(src, dst)
@@ -317,7 +324,34 @@ func copyOrMergeFile(src, dst string, merge bool) error {
 	return os.WriteFile(dst, merged, dstInfo.Mode().Perm())
 }
 
-func copyCanonicalJSONFile(src, dst string, mode fs.FileMode) error {
+// createCanonicalSettingsFile writes dst from src's canonicalized JSON. For
+// wrap-style files (wrapBareHooks) it also normalizes bare hook entries into
+// wrapped form by merging the source over an empty object. Falls back to a
+// plain canonical copy if the source can't be read or isn't a JSON object.
+func createCanonicalSettingsFile(src, dst string, wrapBareHooks bool) error {
+	if !wrapBareHooks {
+		return copyCanonicalJSONFile(src, dst)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return copyCanonicalJSONFile(src, dst)
+	}
+	out, err := MergeSettingsJSON([]byte("{}"), data, WithWrapBareHooks())
+	if err != nil {
+		// Source isn't a mergeable JSON object — fall back to canonical copy.
+		return copyCanonicalJSONFile(src, dst)
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		return copyCanonicalJSONFile(src, dst)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("creating parent for %q: %w", dst, err)
+	}
+	return os.WriteFile(dst, out, info.Mode().Perm())
+}
+
+func copyCanonicalJSONFile(src, dst string) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return copyFile(src, dst)
@@ -326,17 +360,14 @@ func copyCanonicalJSONFile(src, dst string, mode fs.FileMode) error {
 	if err != nil {
 		return copyFile(src, dst)
 	}
-	if mode == 0 {
-		info, err := os.Stat(src)
-		if err != nil {
-			return copyFile(src, dst)
-		}
-		mode = info.Mode()
+	info, err := os.Stat(src)
+	if err != nil {
+		return copyFile(src, dst)
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("creating parent for %q: %w", dst, err)
 	}
-	return os.WriteFile(dst, canonical, mode.Perm())
+	return os.WriteFile(dst, canonical, info.Mode().Perm())
 }
 
 // copyFile copies a single file preserving permissions.

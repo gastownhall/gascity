@@ -2,34 +2,47 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
-// modelSchemaProvider returns a ResolvedProvider that exposes a "model" option
-// with two choices, matching the shape of the builtin claude/codex schemas.
-func modelSchemaProvider() *config.ResolvedProvider {
+// optionSchemaProvider returns a ResolvedProvider with two OptionsSchema keys.
+// Work beads request per-dispatch values for these keys via opt_<key> metadata.
+func optionSchemaProvider() *config.ResolvedProvider {
 	return &config.ResolvedProvider{
 		Name:    "claude",
 		Command: "claude",
-		OptionsSchema: []config.ProviderOption{{
-			Key:   "model",
-			Label: "Model",
-			Choices: []config.OptionChoice{
-				{Value: "opus", FlagArgs: []string{"--model", "claude-opus-4-8"}},
-				{Value: "sonnet", FlagArgs: []string{"--model", "claude-sonnet-4-6"}},
+		OptionsSchema: []config.ProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Choices: []config.OptionChoice{
+					{Value: "opus", FlagArgs: []string{"--model", "claude-opus-4-8"}},
+					{Value: "sonnet", FlagArgs: []string{"--model", "claude-sonnet-4-6"}},
+				},
 			},
-		}},
+			{
+				Key:   "effort",
+				Label: "Effort",
+				Choices: []config.OptionChoice{
+					{Value: "low", FlagArgs: []string{"--effort", "low"}},
+					{Value: "high", FlagArgs: []string{"--effort", "high"}},
+				},
+			},
+		},
 	}
 }
 
-// newModelSessionCandidate builds an in-progress work bead carrying gc.model
-// assigned to a session bead, plus the matching startCandidate. The work bead's
-// assignee is the session_name so taskWorkDirAssignees resolves it.
-func newModelSessionCandidate(t *testing.T, store beads.Store, gcModel string, sessionOverrides map[string]string) startCandidate {
+// newOptionSessionCandidate builds an in-progress work bead assigned to a
+// session. workOptions are written as opt_<key> metadata, matching the existing
+// explicit option metadata convention used for session beads.
+func newOptionSessionCandidate(t *testing.T, store beads.Store, workOptions, sessionOverrides map[string]string) startCandidate {
 	t.Helper()
 	const sessionName = "worker"
 	meta := map[string]string{
@@ -55,8 +68,8 @@ func newModelSessionCandidate(t *testing.T, store beads.Store, gcModel string, s
 	}
 
 	workMeta := map[string]string{}
-	if gcModel != "" {
-		workMeta["gc.model"] = gcModel
+	for key, value := range workOptions {
+		workMeta[dispatchOptionMetadataKey(key)] = value
 	}
 	work, err := store.Create(beads.Bead{
 		Title:    "do the work",
@@ -78,12 +91,12 @@ func newModelSessionCandidate(t *testing.T, store beads.Store, gcModel string, s
 			TemplateName:     "worker",
 			SessionName:      sessionName,
 			Command:          "claude",
-			ResolvedProvider: modelSchemaProvider(),
+			ResolvedProvider: optionSchemaProvider(),
 		},
 	}
 }
 
-func sessionModelOverride(t *testing.T, store beads.Store, id string) string {
+func storedSessionOverrides(t *testing.T, store beads.Store, id string) map[string]string {
 	t.Helper()
 	b, err := store.Get(id)
 	if err != nil {
@@ -95,109 +108,56 @@ func sessionModelOverride(t *testing.T, store beads.Store, id string) string {
 			t.Fatalf("unmarshal template_overrides: %v", err)
 		}
 	}
-	return parsed["model"]
+	return parsed
 }
 
-// setAssignedWorkModel updates the gc.model metadata on the in-progress work
-// bead(s) assigned to assignee, simulating a later dispatch advising a
-// different (or, with gcModel=="", no) model on the same session.
-func setAssignedWorkModel(t *testing.T, store beads.Store, assignee, gcModel string) {
+func storedSessionMetadata(t *testing.T, store beads.Store, id string) map[string]string {
 	t.Helper()
-	assigned, err := store.List(beads.ListQuery{
-		Assignee: assignee,
-		Status:   "in_progress",
-		Live:     true,
-		TierMode: beads.TierBoth,
-	})
+	b, err := store.Get(id)
 	if err != nil {
-		t.Fatalf("List(assigned work): %v", err)
+		t.Fatalf("Get(session): %v", err)
 	}
-	if len(assigned) == 0 {
-		t.Fatalf("no in-progress work assigned to %q", assignee)
-	}
-	for _, b := range assigned {
-		if err := store.SetMetadata(b.ID, "gc.model", gcModel); err != nil {
-			t.Fatalf("SetMetadata(gc.model): %v", err)
-		}
-	}
+	return b.Metadata
 }
 
-func TestMaybeApplyPerDispatchModelOverride_SwitchesModelAcrossDispatches(t *testing.T) {
+func TestBuildPreparedStart_ExplicitOverrideWinsPerKey(t *testing.T) {
 	store := beads.NewMemStore()
-	candidate := newModelSessionCandidate(t, store, "opus", nil)
+	candidate := newOptionSessionCandidate(
+		t,
+		store,
+		map[string]string{"model": "opus", "effort": "high"},
+		map[string]string{"model": "sonnet"},
+	)
 
-	// First dispatch stamps opus.
-	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
-	if got := sessionModelOverride(t, store, candidate.session.ID); got != "opus" {
-		t.Fatalf("after first dispatch model = %q, want %q", got, "opus")
+	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	if err != nil {
+		t.Fatalf("buildPreparedStart: %v", err)
 	}
-
-	// A later dispatch on the same session advises sonnet; the auto-stamped
-	// model must flip rather than leak the prior choice forward.
-	setAssignedWorkModel(t, store, "worker", "sonnet")
-	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
-	if got := sessionModelOverride(t, store, candidate.session.ID); got != "sonnet" {
-		t.Fatalf("after second dispatch model = %q, want %q", got, "sonnet")
+	if !strings.Contains(prepared.cfg.Command, "--model claude-sonnet-4-6") {
+		t.Fatalf("prepared command = %q, want explicit --model claude-sonnet-4-6", prepared.cfg.Command)
 	}
-	if got := candidate.session.Metadata[perDispatchModelSourceKey]; got != "sonnet" {
-		t.Fatalf("provenance = %q, want %q", got, "sonnet")
+	if strings.Contains(prepared.cfg.Command, "claude-opus-4-8") {
+		t.Fatalf("prepared command = %q, work opt_model should not override explicit model", prepared.cfg.Command)
 	}
-}
-
-func TestMaybeApplyPerDispatchModelOverride_ClearsWhenNextDispatchHasNoModel(t *testing.T) {
-	store := beads.NewMemStore()
-	candidate := newModelSessionCandidate(t, store, "opus", nil)
-
-	// First dispatch stamps opus.
-	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
-	if got := sessionModelOverride(t, store, candidate.session.ID); got != "opus" {
-		t.Fatalf("after first dispatch model = %q, want %q", got, "opus")
+	if !strings.Contains(prepared.cfg.Command, "--effort high") {
+		t.Fatalf("prepared command = %q, want work opt_effort high", prepared.cfg.Command)
 	}
-
-	// A later dispatch advises no model; the auto-stamped override must be
-	// cleared so the agent falls back to its configured default.
-	setAssignedWorkModel(t, store, "worker", "")
-	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
-	if got := sessionModelOverride(t, store, candidate.session.ID); got != "" {
-		t.Fatalf("after clearing dispatch model = %q, want empty", got)
-	}
-	if got := candidate.session.Metadata[perDispatchModelSourceKey]; got != "" {
-		t.Fatalf("provenance = %q, want cleared", got)
+	wantPersisted := map[string]string{"model": "sonnet"}
+	if got := storedSessionOverrides(t, store, candidate.session.ID); !reflect.DeepEqual(got, wantPersisted) {
+		t.Fatalf("persisted overrides = %v, want unchanged %v", got, wantPersisted)
 	}
 }
 
-func TestMaybeApplyPerDispatchModelOverride_ExplicitOverrideStillWinsAfterRouting(t *testing.T) {
-	store := beads.NewMemStore()
-	// Session carries a genuine explicit override (no provenance marker) and a
-	// work bead advises a different model.
-	candidate := newModelSessionCandidate(t, store, "opus", map[string]string{"model": "sonnet"})
-
-	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
-
-	if got := sessionModelOverride(t, store, candidate.session.ID); got != "sonnet" {
-		t.Fatalf("model = %q, want explicit %q (routing must not replace it)", got, "sonnet")
-	}
-	if _, ok := candidate.session.Metadata[perDispatchModelSourceKey]; ok {
-		t.Fatalf("provenance marker set on explicit override: %q", candidate.session.Metadata[perDispatchModelSourceKey])
-	}
-}
-
-func TestWorkRoutingModel(t *testing.T) {
-	if got := WorkRoutingModel(beads.Bead{}); got != "" {
-		t.Fatalf("WorkRoutingModel(empty) = %q, want empty", got)
-	}
-	if got := WorkRoutingModel(beads.Bead{Metadata: map[string]string{"gc.model": "  opus  "}}); got != "opus" {
-		t.Fatalf("WorkRoutingModel = %q, want trimmed %q", got, "opus")
-	}
-}
-
-func TestResolveTaskModelReadsAssignedWorkBead(t *testing.T) {
+func TestResolveTaskOptionOverridesReadsAssignedWorkBead(t *testing.T) {
 	store := beads.NewMemStore()
 	work, err := store.Create(beads.Bead{
 		Title:    "active step",
 		Type:     "task",
 		Assignee: "worker-session",
-		Metadata: map[string]string{"gc.model": "sonnet"},
+		Metadata: map[string]string{
+			"opt_model":  "sonnet",
+			"opt_effort": "high",
+		},
 	})
 	if err != nil {
 		t.Fatalf("Create(work): %v", err)
@@ -207,73 +167,35 @@ func TestResolveTaskModelReadsAssignedWorkBead(t *testing.T) {
 		t.Fatalf("mark in_progress: %v", err)
 	}
 
-	if got := resolveTaskModel(store, "worker-session"); got != "sonnet" {
-		t.Fatalf("resolveTaskModel = %q, want %q", got, "sonnet")
+	want := map[string]string{"model": "sonnet", "effort": "high"}
+	if got := resolveTaskOptionOverrides(store, optionSchemaProvider(), "worker-session"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolveTaskOptionOverrides = %v, want %v", got, want)
 	}
-	// Open (not in_progress) work is ignored, matching resolveTaskWorkDir.
 	open := "open"
 	if err := store.Update(work.ID, beads.UpdateOpts{Status: &open}); err != nil {
 		t.Fatalf("reopen work: %v", err)
 	}
-	if got := resolveTaskModel(store, "worker-session"); got != "" {
-		t.Fatalf("resolveTaskModel(open work) = %q, want empty", got)
+	if got := resolveTaskOptionOverrides(store, optionSchemaProvider(), "worker-session"); len(got) != 0 {
+		t.Fatalf("resolveTaskOptionOverrides(open work) = %v, want empty", got)
 	}
 }
 
-func TestMaybeApplyPerDispatchModelOverride_StampsWorkBeadModel(t *testing.T) {
+func TestResolveTaskOptionOverrides_InvalidValueIgnoredPerKey(t *testing.T) {
 	store := beads.NewMemStore()
-	candidate := newModelSessionCandidate(t, store, "opus", nil)
+	candidate := newOptionSessionCandidate(t, store, map[string]string{"model": "definitely-not-a-choice", "effort": "high"}, nil)
 
-	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
-
-	// Persisted on the bead so config-drift hashing sees the same override.
-	if got := sessionModelOverride(t, store, candidate.session.ID); got != "opus" {
-		t.Fatalf("persisted template_overrides model = %q, want %q", got, "opus")
-	}
-	// Mirrored in memory for the in-flight start.
-	if got := candidate.session.Metadata["template_overrides"]; !strings.Contains(got, `"model":"opus"`) {
-		t.Fatalf("in-memory template_overrides = %q, want model:opus", got)
+	want := map[string]string{"effort": "high"}
+	if got := resolveTaskOptionOverrides(store, optionSchemaProvider(), taskWorkDirAssignees(candidate, &config.City{})...); !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolveTaskOptionOverrides = %v, want %v", got, want)
 	}
 }
 
-func TestMaybeApplyPerDispatchModelOverride_ExplicitOverrideWins(t *testing.T) {
+// TestBuildPreparedStartAppliesWorkBeadOptionsToCommand proves the end-to-end
+// path: work bead opt_<key> metadata becomes provider CLI flags through
+// OptionsSchema, without adding a dedicated field per option.
+func TestBuildPreparedStartAppliesWorkBeadOptionsToCommand(t *testing.T) {
 	store := beads.NewMemStore()
-	candidate := newModelSessionCandidate(t, store, "opus", map[string]string{"model": "sonnet"})
-
-	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
-
-	if got := sessionModelOverride(t, store, candidate.session.ID); got != "sonnet" {
-		t.Fatalf("model = %q, want explicit %q (routing metadata must not win)", got, "sonnet")
-	}
-}
-
-func TestMaybeApplyPerDispatchModelOverride_NoWorkModelIsNoOp(t *testing.T) {
-	store := beads.NewMemStore()
-	candidate := newModelSessionCandidate(t, store, "", nil)
-
-	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
-
-	if _, ok := candidate.session.Metadata["template_overrides"]; ok {
-		t.Fatalf("template_overrides set despite no gc.model: %q", candidate.session.Metadata["template_overrides"])
-	}
-}
-
-func TestMaybeApplyPerDispatchModelOverride_InvalidModelIgnored(t *testing.T) {
-	store := beads.NewMemStore()
-	candidate := newModelSessionCandidate(t, store, "definitely-not-a-choice", nil)
-
-	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
-
-	if got, ok := candidate.session.Metadata["template_overrides"]; ok {
-		t.Fatalf("invalid gc.model was applied: %q", got)
-	}
-}
-
-// TestBuildPreparedStartAppliesWorkBeadModelToCommand proves the end-to-end
-// seam: a work bead's gc.model becomes a --model flag on the launch command.
-func TestBuildPreparedStartAppliesWorkBeadModelToCommand(t *testing.T) {
-	store := beads.NewMemStore()
-	candidate := newModelSessionCandidate(t, store, "opus", nil)
+	candidate := newOptionSessionCandidate(t, store, map[string]string{"model": "opus", "effort": "high"}, nil)
 
 	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
 	if err != nil {
@@ -281,5 +203,40 @@ func TestBuildPreparedStartAppliesWorkBeadModelToCommand(t *testing.T) {
 	}
 	if !strings.Contains(prepared.cfg.Command, "--model claude-opus-4-8") {
 		t.Fatalf("prepared command = %q, want --model claude-opus-4-8", prepared.cfg.Command)
+	}
+	if !strings.Contains(prepared.cfg.Command, "--effort high") {
+		t.Fatalf("prepared command = %q, want --effort high", prepared.cfg.Command)
+	}
+	metadata := storedSessionMetadata(t, store, candidate.session.ID)
+	if got := strings.TrimSpace(metadata["template_overrides"]); got != "" {
+		t.Fatalf("template_overrides persisted from work options: %q", got)
+	}
+	if got := strings.TrimSpace(metadata["opt_model"]); got != "" {
+		t.Fatalf("opt_model persisted on session from work option: %q", got)
+	}
+}
+
+func TestBuildPreparedStartInitialMessageOnlyMatchesDriftHash(t *testing.T) {
+	store := beads.NewMemStore()
+	candidate := newOptionSessionCandidate(t, store, nil, map[string]string{"initial_message": "hello"})
+	resolved := claudeEffortResolvedProvider()
+	defaultArgs := resolved.ResolveDefaultArgs()
+	if len(defaultArgs) == 0 {
+		t.Fatal("claude provider default args are empty")
+	}
+	candidate.tp.ResolvedProvider = resolved
+	candidate.tp.Command = "claude " + shellquote.Join(defaultArgs) + " --settings /tmp/city/.gc/settings.json"
+
+	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	if err != nil {
+		t.Fatalf("buildPreparedStart: %v", err)
+	}
+	want := runtime.CoreFingerprint(sessionCoreConfigForHash(candidate.tp, *candidate.session))
+	if prepared.coreHash != want {
+		t.Fatalf("prepared coreHash = %s, want drift hash %s\nprepared command: %q\ndrift command:    %q",
+			prepared.coreHash,
+			want,
+			prepared.cfg.Command,
+			sessionCoreConfigForHash(candidate.tp, *candidate.session).Command)
 	}
 }

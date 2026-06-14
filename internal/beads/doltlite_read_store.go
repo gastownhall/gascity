@@ -672,6 +672,20 @@ func (s *DoltliteReadStore) DepListBatch(ids []string) (map[string][]Dep, error)
 	return result, nil
 }
 
+func (s *DoltliteReadStore) dependencySnapshotForCache(ids []string) (map[string][]Dep, bool, error) {
+	deps, err := s.DepListBatch(ids)
+	if err != nil {
+		return deps, false, err
+	}
+	return deps, true, nil
+}
+
+func (s *DoltliteReadStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
+	// Native DoltLite snapshots do not carry bd's denormalized is_blocked
+	// projection, so cached ready intentionally keeps the nil fallback.
+	return items, nil
+}
+
 func (s *DoltliteReadStore) queryDeps(where, value string) ([]Dep, error) {
 	var deps []Dep
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {

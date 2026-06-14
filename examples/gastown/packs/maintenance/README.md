@@ -19,8 +19,6 @@ requires per-city configuration.
 | `spawn-storm-detect` | cooldown | Detect beads repeatedly bouncing back to pool |
 | `prune-branches` | cooldown | Clean stale `gc/*` branches from all rigs |
 | `wisp-compact` | cooldown | TTL-based cleanup of expired ephemeral beads (wisps) |
-| `mol-dog-jsonl` | cooldown | Export Dolt databases to a JSONL git archive |
-| `mol-dog-reaper` | cooldown | Reap stale wisps and purge closed molecules |
 | **`nudge-on-route`** | **event `bead.updated`** | **Nudge the target session when a bead is routed to it** |
 | **`cascade-nudge-on-blocker-close`** | **event `bead.closed`** | **Nudge dependents' assignees when a blocker bead closes** |
 

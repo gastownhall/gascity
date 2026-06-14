@@ -36,7 +36,11 @@ type BreakdownCopyEntry struct {
 // different prefix) and silently rebaseline them instead of triggering a
 // false-positive drain. Bump this constant whenever the inputs to or the
 // algorithm of any Fingerprint helper change.
-const FingerprintVersion = "v3"
+//
+// v4: .gc/settings.json is no longer probed in CopyFiles; its fingerprint
+// contribution is path-based only. Content changes to the managed runtime
+// settings file no longer trigger stale-session cascades. (ga-zfm)
+const FingerprintVersion = "v4"
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
 // define an agent's behavioral identity. Changes to these fields indicate

@@ -59,6 +59,7 @@ export type AgentOutputResponse = {
 
 export type AgentPatch = {
     AppendFragments: Array<string> | null;
+    Args: Array<string> | null;
     Attach: boolean | null;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
@@ -262,6 +263,7 @@ export type Bead = {
     ephemeral?: boolean;
     from?: string;
     id: string;
+    is_blocked?: boolean;
     issue_type: string;
     labels?: Array<string> | null;
     metadata?: {
@@ -799,7 +801,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2754,6 +2756,25 @@ export type SessionResponse = {
     title: string;
 };
 
+export type SessionStrandedPayload = {
+    /**
+     * Canonical session bead ID for the stranded pool session (also the envelope Subject).
+     */
+    session_id: string;
+    /**
+     * Runtime session name from the session bead metadata, when set.
+     */
+    session_name?: string;
+    /**
+     * Pool template name when known at the emission site.
+     */
+    template?: string;
+    /**
+     * IDs of the open/in-progress work beads still assigned to the session. Never truncated, unlike the envelope Message. Empty when the work-collection query failed at emission time.
+     */
+    work_bead_ids?: Array<string> | null;
+};
+
 /**
  * Session stream lifecycle event
  *
@@ -4300,7 +4321,7 @@ export type TypedEventStreamEnvelopeSessionStopped = {
 export type TypedEventStreamEnvelopeSessionStranded = {
     actor: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionStrandedPayload;
     seq: number;
     subject?: string;
     ts: string;
@@ -5403,7 +5424,7 @@ export type TypedTaggedEventStreamEnvelopeSessionStranded = {
     actor: string;
     city: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionStrandedPayload;
     seq: number;
     subject?: string;
     ts: string;
@@ -11378,6 +11399,10 @@ export type GetV0CityByCityNameStatusData = {
          * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
          */
         wait?: string;
+        /**
+         * When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
+         */
+        lite?: boolean;
     };
     url: '/v0/city/{cityName}/status';
 };

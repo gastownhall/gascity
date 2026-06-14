@@ -13,5 +13,5 @@ name = "bd"
 schema = 2
 
 [imports.dolt]
-source = "../dolt"
+source = "./dolt"
 export = true

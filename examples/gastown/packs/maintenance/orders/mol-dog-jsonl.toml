@@ -1,8 +1,0 @@
-# Converted from formula+pool to exec. All JSONL export operations are
-# deterministic: dolt sql exports, jq record-count comparisons, git push.
-# No LLM judgment needed — runs inline in the controller.
-[order]
-description = "Export Dolt databases to JSONL git archive"
-exec = "$PACK_DIR/assets/scripts/jsonl-export.sh"
-trigger = "cooldown"
-interval = "15m"

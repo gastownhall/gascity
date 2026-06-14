@@ -52,10 +52,12 @@ bd-split-store
 beads-store
 v2-routed-to-namespace
 run-target-routed-to-backfill
+work-option-metadata-migration
 backlog-depth
 order-tracking-retention
 session-model
 dolt-server
+fork-rate
 dolt-noms-size
 dolt-config
 dolt-version

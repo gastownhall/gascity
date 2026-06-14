@@ -144,6 +144,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
+					{Value: "fable-5", Label: "Fable 5", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
 					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-8"}, FlagAliases: [][]string{{"-m", "claude-opus-4-8"}}},
 					{Value: "opus-4-7", Label: "Opus 4.7", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
 					{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-4-6"}, FlagAliases: [][]string{{"-m", "claude-sonnet-4-6"}}},
@@ -275,13 +276,24 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		Command:     "grok",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
-			"model":           "grok-composer-2.5",
+			"model":           "grok-composer-2.5-fast",
 		},
 		// The grok TUI accepts no positional or flag-delivered initial
 		// prompt (`-p/--single` is print-and-exit), so prompts are
-		// delivered via tmux send-keys.
+		// delivered via tmux send-keys once the TUI is ready.
+		//
+		// grok's input handler does not accept send-keys until ~5-6s after
+		// launch (TUI init: auth check + model-list load). Its prompt box
+		// renders earlier (~3s) but silently drops keystrokes until then, so
+		// ReadyPromptPrefix-based readiness detection can't be used here — the
+		// box would match and we'd send into a not-yet-listening TUI. A blind
+		// 5000ms delay raced that window: the initial nudge was lost and the
+		// worker idled forever at the welcome screen (never running `gc hook`).
+		// 12000ms clears the ready threshold with margin for spawn-time load.
+		// Empirically verified against grok 0.2.32: send-keys is dropped at 5s
+		// and lands reliably from ~6s onward.
 		PromptMode:       "none",
-		ReadyDelayMs:     5000,
+		ReadyDelayMs:     12000,
 		ProcessNames:     []string{"grok"},
 		InstructionsFile: "AGENTS.md",
 		ResumeFlag:       "--resume",
@@ -344,6 +356,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:         []string{"kimi", "python"},
 		AcceptStartupDialogs: boolPtr(false),
 		SupportsACP:          true,
+		SupportsHooks:        true,
 		InstructionsFile:     "AGENTS.md",
 		ResumeFlag:           "--session",
 		ResumeStyle:          "flag",

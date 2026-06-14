@@ -238,10 +238,28 @@ func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context,
 	}
 
 	if !opts.materialize {
-		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+		// The identifier maps to a configured named session with no
+		// canonical bead. When it names the reserved identity directly
+		// (configured identity or its runtime session name), report
+		// matched=true so non-materializing callers short-circuit to
+		// not-found instead of falling through to ordinary live-session
+		// matching, where a rogue session whose session_name, alias, or
+		// path-alias title equals the reserved name could hijack the
+		// target (ga-4of1nc). Bare-leaf convenience tokens keep falling
+		// through so ordinary sessions can still own those aliases.
+		return "", namedSessionTargetIsReservedIdentity(spec, identifier), fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	id, err := s.materializeNamedSessionWithContext(ctx, store, spec)
 	return id, true, err
+}
+
+// namedSessionTargetIsReservedIdentity reports whether identifier names a
+// configured named-session identity directly — by its configured identity or
+// by its runtime session name — as opposed to a bare-leaf convenience token
+// that merely resolves to the spec.
+func namedSessionTargetIsReservedIdentity(spec apiNamedSessionSpec, identifier string) bool {
+	target := apiNormalizeSessionTarget(identifier)
+	return target != "" && (target == spec.Identity || target == spec.SessionName)
 }
 
 func parseAPITemplateTarget(identifier string) (string, bool) {

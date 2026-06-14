@@ -188,8 +188,8 @@ func TestBuiltinProvidersKimi(t *testing.T) {
 	if !derefBool(p.SupportsACP) {
 		t.Error("SupportsACP = false, want true")
 	}
-	if derefBool(p.SupportsHooks) {
-		t.Error("SupportsHooks = true, want false until Kimi hook installer exists")
+	if !derefBool(p.SupportsHooks) {
+		t.Error("SupportsHooks = false, want true")
 	}
 	if p.ResumeFlag != "--session" {
 		t.Errorf("ResumeFlag = %q, want --session", p.ResumeFlag)
@@ -527,15 +527,18 @@ func TestBuiltinProvidersGrokPreset(t *testing.T) {
 	if p.TitleModel != "grok-composer-2.5-fast" {
 		t.Errorf("TitleModel = %q, want %q", p.TitleModel, "grok-composer-2.5-fast")
 	}
+	if p.ReadyDelayMs != 12000 {
+		t.Errorf("ReadyDelayMs = %d, want 12000", p.ReadyDelayMs)
+	}
 
 	rp := specToResolved("grok", &p)
 	if got := rp.ProviderSessionCreateTransport(); got != "" {
 		t.Fatalf("ProviderSessionCreateTransport() = %q, want \"\" (no ACP)", got)
 	}
-	if p.OptionDefaults["model"] != "grok-composer-2.5" {
-		t.Errorf("OptionDefaults[model] = %q, want grok-composer-2.5", p.OptionDefaults["model"])
+	if p.OptionDefaults["model"] != "grok-composer-2.5-fast" {
+		t.Errorf("OptionDefaults[model] = %q, want grok-composer-2.5-fast", p.OptionDefaults["model"])
 	}
-	if got, want := rp.ResolveDefaultArgs(), []string{"--permission-mode", "bypassPermissions", "--model", "grok-composer-2.5"}; !reflect.DeepEqual(got, want) {
+	if got, want := rp.ResolveDefaultArgs(), []string{"--permission-mode", "bypassPermissions", "--model", "grok-composer-2.5-fast"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("ResolveDefaultArgs() = %v, want %v", got, want)
 	}
 	if got, want := rp.TitleModelFlagArgs(), []string{"--model", "grok-composer-2.5-fast"}; !reflect.DeepEqual(got, want) {

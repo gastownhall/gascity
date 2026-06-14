@@ -294,11 +294,28 @@ gc service restart     # restarts the launchd/systemd service
 
 ## JSONL Archive Push Failures
 
-The maintenance pack runs `jsonl-export` every 15 minutes to dump each bead
+The core pack runs `jsonl-export` every 15 minutes to dump each bead
 database to a text-diffable JSONL snapshot inside a local git repository
 (the "JSONL archive"). The archive serves as a disaster-recovery backup:
 if the live Dolt server loses data, the last-known-good bead graph can be
 reconstructed from the archive's commit history.
+
+`jsonl-export` (every 15 minutes) and `reaper` (every 30 minutes) ship in
+the core pack, so they are active in every city by default — including
+cities that previously ran them only via the opt-in gastown maintenance
+pack. On cities without a Dolt target (for example `[beads]
+provider = "file"`), both orders skip with a one-line `no managed dolt
+target for this city` message instead of running. To turn them off
+entirely, skip them by name in `city.toml`:
+
+```toml
+[orders]
+skip = ["jsonl-export", "reaper"]
+```
+
+Cities that had skipped the old formula orders (`mol-dog-jsonl`,
+`mol-dog-reaper`) stay opted out; the renamed orders honor the legacy
+skip entries.
 
 ### Local-only vs push mode
 
@@ -328,7 +345,7 @@ bead content and should not be shared across cities). Then:
 gh repo create my-city-jsonl-archive --private
 
 # Point the archive at it (run from anywhere inside your city)
-ARCHIVE="$(gc status --json | jq -r '.city_path')/.gc/runtime/packs/maintenance/jsonl-archive"
+ARCHIVE="$(gc status --json | jq -r '.city_path')/.gc/runtime/packs/core/jsonl-archive"
 git -C "$ARCHIVE" remote add origin git@github.com:<you>/my-city-jsonl-archive.git
 
 # Seed the remote with the existing local history
@@ -337,6 +354,13 @@ git -C "$ARCHIVE" push -u origin main
 
 On the next 15-minute tick, `jsonl-export` detects the new `origin`,
 logs `archive running in push mode`, and resumes pushing every run.
+
+On cities migrated from the gastown maintenance pack, the archive stays
+at its legacy location — `.gc/runtime/packs/maintenance/jsonl-archive`
+(or `.gc/jsonl-archive` for pre-pack cities) — and the
+`packs/core/jsonl-archive` path above does not exist. Point `ARCHIVE` at
+the legacy path instead; `gc doctor` reports the resolved archive path
+for the city.
 
 ### Switching back to local-only
 
@@ -356,11 +380,11 @@ retaining `pending_archive_push` so deferred commits are still pushed if
 ### Reading a `JSONL push failed [HIGH]` escalation
 
 When push mode is active and `git push` fails `GC_JSONL_MAX_PUSH_FAILURES`
-times in a row (default: 3), the mayor's inbox receives an
+times in a row (default: 3), the default human escalation mailbox receives an
 `ESCALATION: JSONL push failed [HIGH]` message with a body shaped like:
 
 ```
-Order: mol-dog-jsonl
+Order: jsonl-export
 Archive: /path/to/archive
 Consecutive failures: 3 (threshold: 3)
 
@@ -385,6 +409,24 @@ failure. It continues recording `consecutive_push_failures` and
 `pending_archive_push` in state, but does not mail the same failure on
 every tick. A successful push or a switch back to local-only mode clears
 the escalation marker.
+
+### Maintenance escalation and completion routing
+
+Core maintenance scripts route alerts through a generic escalation hook
+instead of mailing a hardcoded role. Orders inherit the controller's
+environment, so set these at controller start to customize routing:
+
+- `GC_ESCALATION_RECIPIENT` — mail recipient for escalations (default:
+  `human`, the reserved human mailbox).
+- `GC_ESCALATE_SCRIPT` — absolute path to an escalation script to run
+  instead of searching packs.
+- `GC_ESCALATE_SEARCH_PACKS` — space-separated pack names searched (in
+  order) for an `assets/scripts/escalate.sh` override (default:
+  `gastown maintenance bd core`). A pack earlier in the list wins.
+- `GC_MAINTENANCE_DONE_TARGET` — session target to nudge with
+  `MAINTENANCE_DONE:`/warn summaries when a maintenance run completes
+  (default: unset, no completion nudge). Deployments that relied on the
+  old hardcoded deacon nudges should set this to restore that loop.
 
 Common root causes, in rough order of frequency:
 

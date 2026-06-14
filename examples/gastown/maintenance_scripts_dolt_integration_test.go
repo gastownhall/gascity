@@ -85,7 +85,7 @@ exit 0
 		"GC_DOLT_PASSWORD": "",
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {

@@ -503,7 +503,7 @@ when the contract exists, and avoid introducing a common wrapper around arbitrar
 pack output in the first wave.
 
 Known local examples already use JSON-capable scripts or commands, including
-`examples/dolt/commands/sync/run.sh` and `examples/dolt` health formulas/tests.
+`examples/bd/dolt/commands/sync/run.sh` and `examples/bd/dolt` health formulas/tests.
 Those should be part of the pack-command inventory before tightening enforcement
 around pack-defined `--json`.
 

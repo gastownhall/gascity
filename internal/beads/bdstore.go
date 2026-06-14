@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -30,7 +31,7 @@ type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 var (
 	bdCommandTimeout = 120 * time.Second
 	// bdReadCommandTimeout bounds bd read-only subcommands (count, list,
-	// ready, show, stats). Default matches bdCommandTimeout to preserve
+	// ready, show, sql, stats, version). Default matches bdCommandTimeout to preserve
 	// pre-bounded behavior; lowered in follow-up work after slow read
 	// paths are identified.
 	bdReadCommandTimeout = 120 * time.Second
@@ -188,7 +189,7 @@ func bdCommandTimeoutFor(name string, args []string) time.Duration {
 		return bdGraphApplyCommandTimeout
 	}
 	switch args[0] {
-	case "count", "list", "ready", "show", "stats":
+	case "count", "list", "ready", "show", "sql", "stats", "version":
 		return bdReadCommandTimeout
 	case "query":
 		return bdQueryCommandTimeout
@@ -246,6 +247,10 @@ type BdStore struct {
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
+
+	readyProjectionMu      sync.Mutex
+	readyProjectionChecked bool
+	readyProjectionEnabled bool
 }
 
 const bdTransientWriteAttempts = 3
@@ -520,6 +525,7 @@ type bdIssue struct {
 	Ephemeral    bool         `json:"ephemeral,omitempty"`
 	NoHistory    bool         `json:"no_history,omitempty"`
 	DeferUntil   *time.Time   `json:"defer_until,omitempty"`
+	IsBlocked    optionalBool `json:"is_blocked,omitempty"`
 }
 
 type bdIssueDep struct {
@@ -671,6 +677,7 @@ func (b *bdIssue) toBead() Bead {
 		Ephemeral:    b.Ephemeral,
 		NoHistory:    b.NoHistory,
 		DeferUntil:   cloneTimePtr(b.DeferUntil),
+		IsBlocked:    b.IsBlocked.ptr(),
 	}
 }
 
@@ -737,6 +744,52 @@ func mapBdStatus(s string) string {
 	default:
 		return "open"
 	}
+}
+
+type optionalBool struct {
+	set   bool
+	value bool
+}
+
+func (b *optionalBool) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		*b = optionalBool{}
+		return nil
+	}
+	var boolValue bool
+	if err := json.Unmarshal(data, &boolValue); err == nil {
+		b.set = true
+		b.value = boolValue
+		return nil
+	}
+	var intValue int
+	if err := json.Unmarshal(data, &intValue); err == nil {
+		b.set = true
+		b.value = intValue != 0
+		return nil
+	}
+	var stringValue string
+	if err := json.Unmarshal(data, &stringValue); err == nil {
+		switch strings.ToLower(strings.TrimSpace(stringValue)) {
+		case "1", "t", "true", "y", "yes":
+			b.set = true
+			b.value = true
+			return nil
+		case "0", "f", "false", "n", "no":
+			b.set = true
+			b.value = false
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid bool value %q", string(data))
+}
+
+func (b optionalBool) ptr() *bool {
+	if !b.set {
+		return nil
+	}
+	return cloneBoolPtr(&b.value)
 }
 
 // Create persists a new bead via bd create.

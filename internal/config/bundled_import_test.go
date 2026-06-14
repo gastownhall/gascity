@@ -115,6 +115,16 @@ func TestResolveImportPackRefAcceptsPublicGastownSyntheticCache(t *testing.T) {
 	}
 }
 
+func TestPublicGastownPackSourceMapsToBundledGastownPack(t *testing.T) {
+	name, ok := builtinpacks.NameForSource(PublicGastownPackSource)
+	if !ok {
+		t.Fatalf("PublicGastownPackSource %q is not recognized as a bundled pack source", PublicGastownPackSource)
+	}
+	if name != "gastown" {
+		t.Fatalf("PublicGastownPackSource maps to bundled pack %q, want gastown", name)
+	}
+}
+
 func TestResolveLockedRemoteImportSurfacesInvalidBundledMarker(t *testing.T) {
 	home, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()

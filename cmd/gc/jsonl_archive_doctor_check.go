@@ -56,23 +56,27 @@ func (c *jsonlArchiveDoctorCheck) git(dir string, args ...string) ([]byte, error
 
 // resolveStateFile mirrors the precedence rules embedded in jsonl-export.sh:
 //  1. $GC_PACK_STATE_DIR/jsonl-export-state.json
-//  2. $GC_CITY_RUNTIME_DIR/packs/maintenance/jsonl-export-state.json
-//  3. <cityPath>/.gc/runtime/packs/maintenance/jsonl-export-state.json
+//  2. $GC_CITY_RUNTIME_DIR/packs/core/jsonl-export-state.json
+//  3. <cityPath>/.gc/runtime/packs/core/jsonl-export-state.json
 //
-// When the primary path is absent, the legacy fallback
-// `<cityPath>/.gc/jsonl-export-state.json` is returned if it exists.
+// When the primary path is absent, legacy maintenance-pack and pre-pack state
+// files are returned if they exist.
 func (c *jsonlArchiveDoctorCheck) resolveStateFile() string {
 	base := c.env("GC_PACK_STATE_DIR")
+	runtime := c.env("GC_CITY_RUNTIME_DIR")
+	if runtime == "" {
+		runtime = filepath.Join(c.cityPath, ".gc", "runtime")
+	}
 	if base == "" {
-		runtime := c.env("GC_CITY_RUNTIME_DIR")
-		if runtime == "" {
-			runtime = filepath.Join(c.cityPath, ".gc", "runtime")
-		}
-		base = filepath.Join(runtime, "packs", "maintenance")
+		base = filepath.Join(runtime, "packs", "core")
 	}
 	primary := filepath.Join(base, "jsonl-export-state.json")
 	if _, err := os.Stat(primary); err == nil {
 		return primary
+	}
+	legacyPack := filepath.Join(runtime, "packs", "maintenance", "jsonl-export-state.json")
+	if _, err := os.Stat(legacyPack); err == nil {
+		return legacyPack
 	}
 	legacy := filepath.Join(c.cityPath, ".gc", "jsonl-export-state.json")
 	if _, err := os.Stat(legacy); err == nil {
@@ -83,22 +87,26 @@ func (c *jsonlArchiveDoctorCheck) resolveStateFile() string {
 
 // resolveArchiveRepo mirrors the precedence rules embedded in jsonl-export.sh
 // for locating the archive repository. The script falls back from the
-// primary location to a legacy location when the primary has no `.git`.
+// primary location to legacy locations when the primary has no `.git`.
 func (c *jsonlArchiveDoctorCheck) resolveArchiveRepo() string {
 	if v := strings.TrimSpace(c.env("GC_JSONL_ARCHIVE_REPO")); v != "" {
 		return v
 	}
 	base := c.env("GC_PACK_STATE_DIR")
+	runtime := c.env("GC_CITY_RUNTIME_DIR")
+	if runtime == "" {
+		runtime = filepath.Join(c.cityPath, ".gc", "runtime")
+	}
 	if base == "" {
-		runtime := c.env("GC_CITY_RUNTIME_DIR")
-		if runtime == "" {
-			runtime = filepath.Join(c.cityPath, ".gc", "runtime")
-		}
-		base = filepath.Join(runtime, "packs", "maintenance")
+		base = filepath.Join(runtime, "packs", "core")
 	}
 	primary := filepath.Join(base, "jsonl-archive")
 	if _, err := os.Stat(filepath.Join(primary, ".git")); err == nil {
 		return primary
+	}
+	legacyPack := filepath.Join(runtime, "packs", "maintenance", "jsonl-archive")
+	if _, err := os.Stat(filepath.Join(legacyPack, ".git")); err == nil {
+		return legacyPack
 	}
 	legacy := filepath.Join(c.cityPath, ".gc", "jsonl-archive")
 	if _, err := os.Stat(filepath.Join(legacy, ".git")); err == nil {

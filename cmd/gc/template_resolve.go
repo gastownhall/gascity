@@ -171,13 +171,16 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	default:
 		return TemplateParams{}, fmt.Errorf("agent %q: unknown session transport %q", qualifiedName, sessionTransport)
 	}
+	providerFamily := resolvedProviderLaunchFamily(resolved)
+	installHooks := config.ResolveInstallHooks(cfgAgent, p.workspace)
+	if providerFamily == "kimi" && installHooksIncludeFamily(installHooks, "kimi", p.providers) {
+		command = appendKimiHookConfigArg(command)
+	}
 	// Append schema-derived default args (e.g., --dangerously-skip-permissions
 	// from EffectiveDefaults["permission_mode"] = "unrestricted").
 	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 		command = command + " " + shellquote.Join(defaultArgs)
 	}
-	providerFamily := resolvedProviderLaunchFamily(resolved)
-	installHooks := config.ResolveInstallHooks(cfgAgent, p.workspace)
 	sa, err := ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
@@ -186,9 +189,19 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		command = command + " " + sa
 		settingsFile, relDst := claudeSettingsSource(p.cityPath)
 		if settingsFile != "" {
+			// .gc/settings.json is managed by gc (regenerated on binary upgrade).
+			// Using path-only fingerprinting prevents content changes from
+			// cascading stale-session drains to unrelated productive sessions.
+			// The legacy hooks/claude.json path is user-authored, so it uses
+			// content hashing to detect intentional changes. (ga-zfm)
+			probed := relDst != path.Join(".gc", "settings.json")
+			var contentHash string
+			if probed {
+				contentHash = runtime.HashPathContent(settingsFile)
+			}
 			copyFiles = append(copyFiles, runtime.CopyEntry{
 				Src: settingsFile, RelDst: relDst,
-				Probed: true, ContentHash: runtime.HashPathContent(settingsFile),
+				Probed: probed, ContentHash: contentHash,
 			})
 		}
 	}
@@ -599,6 +612,40 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	return params, nil
 }
 
+func installHooksIncludeFamily(installHooks []string, family string, providers map[string]config.ProviderSpec) bool {
+	family = strings.TrimSpace(family)
+	if family == "" {
+		return false
+	}
+	for _, hook := range installHooks {
+		hook = strings.TrimSpace(hook)
+		if hook == "" {
+			continue
+		}
+		if hook == family || config.BuiltinFamily(hook, providers) == family {
+			return true
+		}
+	}
+	return false
+}
+
+func appendKimiHookConfigArg(command string) string {
+	parts := shellquote.Split(command)
+	if len(parts) == 0 {
+		return command
+	}
+	configArgs := []string{"--config-file", ".kimi/config.toml"}
+	if parts[len(parts)-1] == "acp" {
+		withConfig := make([]string, 0, len(parts)+len(configArgs))
+		withConfig = append(withConfig, parts[:len(parts)-1]...)
+		withConfig = append(withConfig, configArgs...)
+		withConfig = append(withConfig, parts[len(parts)-1])
+		return shellquote.Join(withConfig)
+	}
+	parts = append(parts, configArgs...)
+	return shellquote.Join(parts)
+}
+
 func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {
 	return cfgAgent != nil &&
 		cfgAgent.Implicit &&
@@ -614,6 +661,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 		"BEADS_DOLT_AUTO_START": "0",
 	}
 	applyBdCLIRemoteSyncOptOut(env)
+	applyBdAutoBackupOptOut(env)
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)

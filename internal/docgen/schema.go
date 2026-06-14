@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/invopop/jsonschema"
@@ -30,12 +31,38 @@ func ModuleRoot() (string, error) {
 	}
 }
 
+// addGoCommentsFiltered calls r.AddGoComments for each visible (non-hidden)
+// top-level directory under root, skipping any directory whose name begins
+// with ".". CWD must already be set to root before calling.
+//
+// This avoids the TOCTOU failure where .gc/*/pr-checkout/ dirs are deleted by
+// mpr cleanup while filepath.Walk is in progress: r.AddGoComments("module",
+// ".") walks the entire tree including .gc/; if a directory disappears
+// mid-scan the walk surfaces an I/O error that propagates up and fails schema
+// generation. By enumerating only visible top-level dirs, we never enter .gc/.
+func addGoCommentsFiltered(r *jsonschema.Reflector, module, root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", root, err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if err := r.AddGoComments(module, entry.Name()); err != nil {
+			return fmt.Errorf("extracting Go comments from %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
+
 // newReflector creates a jsonschema.Reflector configured for TOML field
 // names with Go doc comments extracted from the source tree.
 //
-// AddGoComments requires the path parameter to be "." with the working
-// directory set to the module root, so that filepath.Walk produces paths
-// like "internal/config" which gopath.Join maps to the correct import path.
+// AddGoComments requires CWD to be set to the module root so that
+// filepath.Walk produces paths like "internal/config" which map to the
+// correct import paths. Hidden directories (names beginning with ".") are
+// excluded via addGoCommentsFiltered.
 func newReflector() (*jsonschema.Reflector, error) {
 	root, err := ModuleRoot()
 	if err != nil {
@@ -55,7 +82,7 @@ func newReflector() (*jsonschema.Reflector, error) {
 	r := &jsonschema.Reflector{
 		FieldNameTag: "toml",
 	}
-	if err := r.AddGoComments("github.com/gastownhall/gascity", "."); err != nil {
+	if err := addGoCommentsFiltered(r, "github.com/gastownhall/gascity", "."); err != nil {
 		return nil, fmt.Errorf("extracting Go comments: %w", err)
 	}
 	return r, nil

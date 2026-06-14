@@ -11,10 +11,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/examples/bd"
-	"github.com/gastownhall/gascity/examples/dolt"
+	"github.com/gastownhall/gascity/examples/bd/dolt"
 	"github.com/gastownhall/gascity/examples/gastown/packs/gastown"
 	"github.com/gastownhall/gascity/examples/gastown/packs/maintenance"
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
@@ -52,7 +53,7 @@ func All() []Pack {
 	return []Pack{
 		{Name: "core", Subpath: "internal/bootstrap/packs/core", FS: core.PackFS},
 		{Name: "bd", Subpath: "examples/bd", FS: bd.PackFS},
-		{Name: "dolt", Subpath: "examples/dolt", FS: dolt.PackFS},
+		{Name: "dolt", Subpath: "examples/bd/dolt", FS: dolt.PackFS},
 		{Name: "maintenance", Subpath: "examples/gastown/packs/maintenance", FS: maintenance.PackFS},
 		{Name: "gastown", Subpath: "examples/gastown/packs/gastown", FS: gastown.PackFS},
 	}
@@ -105,13 +106,20 @@ type syntheticPackLayout struct {
 
 func syntheticPackLayouts() []syntheticPackLayout {
 	packs := All()
-	layouts := make([]syntheticPackLayout, 0, len(packs)+2)
+	layouts := make([]syntheticPackLayout, 0, len(packs)+3)
 	for _, pack := range packs {
 		layouts = append(layouts, syntheticPackLayout{
 			Repository: Repository,
 			Subpath:    pack.Subpath,
 			Pack:       pack,
 		})
+		for _, legacySubpath := range legacySubpathsForPack(pack.Name) {
+			layouts = append(layouts, syntheticPackLayout{
+				Repository: Repository,
+				Subpath:    legacySubpath,
+				Pack:       pack,
+			})
+		}
 		if publicSubpath, ok := publicSubpathForPack(pack.Name); ok {
 			layouts = append(layouts, syntheticPackLayout{
 				Repository: PublicRepository,
@@ -121,6 +129,15 @@ func syntheticPackLayouts() []syntheticPackLayout {
 		}
 	}
 	return layouts
+}
+
+func legacySubpathsForPack(name string) []string {
+	switch name {
+	case "dolt":
+		return []string{"examples/dolt"}
+	default:
+		return nil
+	}
 }
 
 func publicSubpathForPack(name string) (string, bool) {
@@ -271,6 +288,34 @@ func SyntheticContentHash() (string, error) {
 	sort.Strings(entries)
 	sum := sha256.Sum256([]byte(strings.Join(entries, "\n")))
 	return fmt.Sprintf("sha256:%x", sum[:]), nil
+}
+
+// syntheticContentHashOnce memoizes SyntheticContentHash. The hash derives
+// entirely from embedded pack data, so it is identical for the life of the
+// process and is computed at most once.
+var syntheticContentHashOnce = sync.OnceValues(SyntheticContentHash)
+
+// SyntheticCacheKeyComponent returns the running binary's bundled-pack content
+// hash for inclusion in the synthetic repo cache key, binding each cache
+// directory to the binary content that materialized it. Two gc binaries with
+// different embedded pack content therefore resolve to different cache
+// directories instead of overwriting one shared marker — the citywide
+// "bundled pack cache content hash does not match current binary" wedge that
+// recurs whenever a deploy leaves two binary versions running side by side.
+//
+// It returns "" only when the embedded pack set cannot be hashed, which is a
+// build-integrity failure that MaterializeSyntheticRepo and ValidateSyntheticRepo
+// surface with full context on the next cache operation. Callers fold the
+// component into the key only when non-empty, degrading to the legacy
+// (content-independent) key rather than failing to resolve a path; this keeps
+// the pure cache-key function panic-free without hiding a genuinely broken
+// binary.
+func SyntheticCacheKeyComponent() string {
+	hash, err := syntheticContentHashOnce()
+	if err != nil {
+		return ""
+	}
+	return hash
 }
 
 type syntheticMarker struct {

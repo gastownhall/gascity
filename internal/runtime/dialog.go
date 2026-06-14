@@ -934,6 +934,12 @@ func containsPromptIndicator(content string) bool {
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.ReplaceAll(line, "\u00a0", " ")
 		trimmed = strings.TrimRight(trimmed, " \t")
+		// Strip a leading box-drawing border + whitespace so a prompt glyph a TUI
+		// renders inside a bordered input box (grok: "\u2502 \u276f \u2026") is recognized. Without
+		// this the startup-dialog handlers never early-return for grok and burn
+		// their full timeout, blowing doStartSession's start-context deadline so the
+		// initial nudge (Step 6) is never sent and the worker idles forever.
+		trimmed = stripLeadingBoxBorder(trimmed)
 		if trimmed == "" {
 			continue
 		}
@@ -950,6 +956,18 @@ func containsPromptIndicator(content string) bool {
 		}
 	}
 	return false
+}
+
+// stripLeadingBoxBorder removes a leading vertical box-drawing character (│/┃)
+// plus surrounding spaces, so a boxed prompt glyph (grok) is detected. No-op for
+// borderless lines.
+func stripLeadingBoxBorder(s string) string {
+	s = strings.TrimLeft(s, " \t")
+	r := []rune(s)
+	if len(r) > 0 && (r[0] == '│' || r[0] == '┃') {
+		return strings.TrimLeft(string(r[1:]), " \t")
+	}
+	return s
 }
 
 func isNumberedMenuRow(content string) bool {

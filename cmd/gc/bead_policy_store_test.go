@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -624,5 +625,53 @@ func assertStorageClass(t *testing.T, got beads.StorageClass, want string) {
 	}
 	if got != wantClass {
 		t.Fatalf("storage = %q, want %q", got, wantClass)
+	}
+}
+
+type countCaptureStore struct {
+	beads.Store
+	countErr    error
+	gotQuery    beads.ListQuery
+	gotExcludes []string
+}
+
+func (s *countCaptureStore) Count(_ context.Context, query beads.ListQuery, excludeTypes ...string) (int, error) {
+	s.gotQuery = query
+	s.gotExcludes = excludeTypes
+	return 4, s.countErr
+}
+
+func TestBeadPolicyStoreCountExpandsReadTier(t *testing.T) {
+	inner := &countCaptureStore{Store: beads.NewMemStore()}
+	store := wrapStoreWithBeadPolicies(inner, &config.City{})
+
+	counter, ok := store.(beads.Counter)
+	if !ok {
+		t.Fatal("policy store does not implement beads.Counter")
+	}
+	got, err := counter.Count(context.Background(), beads.ListQuery{Status: "open", AllowScan: true}, "message")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if got != 4 {
+		t.Fatalf("Count = %d, want 4", got)
+	}
+	if inner.gotQuery.TierMode != beads.TierBoth {
+		t.Fatalf("TierMode = %v, want TierBoth (policy reads span both tiers)", inner.gotQuery.TierMode)
+	}
+	if len(inner.gotExcludes) != 1 || inner.gotExcludes[0] != "message" {
+		t.Fatalf("excludeTypes = %v, want [message]", inner.gotExcludes)
+	}
+}
+
+func TestBeadPolicyStoreCountUnsupportedWithoutInnerCounter(t *testing.T) {
+	store := wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})
+
+	counter, ok := store.(beads.Counter)
+	if !ok {
+		t.Fatal("policy store does not implement beads.Counter")
+	}
+	if _, err := counter.Count(context.Background(), beads.ListQuery{AllowScan: true}); !errors.Is(err, beads.ErrCountUnsupported) {
+		t.Fatalf("Count error = %v, want ErrCountUnsupported", err)
 	}
 }

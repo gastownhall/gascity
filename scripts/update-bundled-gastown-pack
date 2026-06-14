@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+
+DEFAULT_GASCITY_PACKS_REPO = "https://github.com/gastownhall/gascity-packs.git"
+PACK_NAME = "gastown"
+TARGET_PACK_DIR = Path("examples/gastown/packs/gastown")
+PUBLIC_PACKS_GO = Path("internal/config/public_packs.go")
+EMBED_GO = """// Package gastown embeds the gastown orchestration pack for bundling into the gc binary.
+package gastown
+
+import "embed"
+
+// PackFS contains the gastown pack files.
+//
+//go:embed pack.toml commands doctor formulas orders all:agents assets template-fragments all:overlay
+var PackFS embed.FS
+"""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Sync the bundled gastown pack from the latest gascity-packs registry release."
+    )
+    parser.add_argument("--repo-root", default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--repo", default=DEFAULT_GASCITY_PACKS_REPO)
+    parser.add_argument("--registry", help="path to registry.toml; defaults to <repo>/registry.toml")
+    parser.add_argument("--check", action="store_true", help="verify without modifying the checkout")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    repo_root = Path(args.repo_root).resolve()
+    target = (repo_root / TARGET_PACK_DIR).resolve()
+    public_packs = (repo_root / PUBLIC_PACKS_GO).resolve()
+    require_within(repo_root, target)
+    require_within(repo_root, public_packs)
+
+    with maybe_clone_repo(args.repo) as packs_repo:
+        registry_path = Path(args.registry).resolve() if args.registry else packs_repo / "registry.toml"
+        release = latest_registry_release(registry_path)
+        pack_path = source_pack_path(release["source"])
+        if not pack_path:
+            raise SystemExit(f"{PACK_NAME}: registry source does not include a pack path: {release['source']}")
+
+        files = git_pack_files(packs_repo, release["commit"], pack_path)
+        actual_hash = git_pack_hash(packs_repo, files)
+        if actual_hash != release["hash"]:
+            raise SystemExit(f"{PACK_NAME}: registry hash mismatch: got {actual_hash}, want {release['hash']}")
+
+        if args.check:
+            errors = check_local_state(target, public_packs, release)
+            if errors:
+                for error in errors:
+                    print(error, file=sys.stderr)
+                return 1
+            print(
+                f"bundled {PACK_NAME} matches registry release "
+                f"{release['version']} ({release['commit'][:12]})"
+            )
+            return 0
+
+        write_pack_tree(target, packs_repo, files)
+        write_public_pack_constants(public_packs, release)
+        print(f"synced bundled {PACK_NAME} to registry release {release['version']} ({release['commit'][:12]})")
+        return 0
+
+
+def require_within(root: Path, path: Path) -> None:
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise SystemExit(f"refusing to write outside repo root: {path}") from exc
+
+
+class maybe_clone_repo:
+    def __init__(self, repo: str):
+        self.repo = repo
+        self.tempdir: tempfile.TemporaryDirectory[str] | None = None
+        self.path: Path | None = None
+
+    def __enter__(self) -> Path:
+        local = Path(self.repo).expanduser()
+        if local.exists():
+            self.path = local.resolve()
+            return self.path
+        self.tempdir = tempfile.TemporaryDirectory(prefix="gascity-packs-")
+        self.path = Path(self.tempdir.name) / "repo"
+        run(["git", "clone", "--quiet", self.repo, str(self.path)])
+        return self.path
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.tempdir is not None:
+            self.tempdir.cleanup()
+
+
+def latest_registry_release(registry_path: Path) -> dict[str, str]:
+    with registry_path.open("rb") as handle:
+        catalog = tomllib.load(handle)
+    matches = [pack for pack in catalog.get("pack", []) if pack.get("name") == PACK_NAME]
+    if len(matches) != 1:
+        raise SystemExit(f"registry must contain exactly one {PACK_NAME!r} pack entry, got {len(matches)}")
+    pack = matches[0]
+    releases = [
+        release
+        for release in pack.get("release", [])
+        if not release.get("withdrawn", False)
+    ]
+    if not releases:
+        raise SystemExit(f"{PACK_NAME}: registry has no non-withdrawn releases")
+    release = max(releases, key=lambda item: semver_key(item.get("version", "")))
+    return {
+        "source": pack["source"],
+        "version": release["version"],
+        "ref": release["ref"],
+        "commit": release["commit"],
+        "hash": release["hash"],
+    }
+
+
+def semver_key(version: str) -> tuple[int, int, int]:
+    parts = version.split(".")
+    if len(parts) not in {2, 3}:
+        raise SystemExit(f"{PACK_NAME}: unsupported release version {version!r}")
+    nums = [int(part) for part in parts]
+    while len(nums) < 3:
+        nums.append(0)
+    return tuple(nums)
+
+
+def source_pack_path(source: str) -> str:
+    git_subdir = re.search(r"\.git//([^#]+)", source)
+    if git_subdir:
+        return git_subdir.group(1).strip("/")
+    tree_path = re.search(r"/tree/[^/]+/([^#]+)", source)
+    if tree_path:
+        return tree_path.group(1).strip("/")
+    return ""
+
+
+def git_pack_files(repo: Path, commit: str, pack_path: str) -> list[dict[str, str]]:
+    out = run_bytes([
+        "git",
+        "-C",
+        str(repo),
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        commit,
+        "--",
+        pack_path,
+    ])
+    records = out.rstrip(b"\0").split(b"\0") if out else []
+    files: list[dict[str, str]] = []
+    for record in records:
+        if not record:
+            continue
+        meta, git_path = record.split(b"\t", 1)
+        mode, object_type, object_id = meta.decode().split()
+        if object_type != "blob":
+            raise SystemExit(f"{PACK_NAME}: unsupported git object type {object_type!r} for {git_path!r}")
+        rel = relative_pack_path(git_path.decode(), pack_path)
+        perm = manifest_perm(mode, rel)
+        files.append({"rel": rel, "mode": mode, "object": object_id, "perm": perm})
+    if not files:
+        raise SystemExit(f"{PACK_NAME}: pack path {pack_path!r} has no files at {commit}")
+    return files
+
+
+def relative_pack_path(git_path: str, pack_path: str) -> str:
+    prefix = pack_path.rstrip("/") + "/"
+    if not git_path.startswith(prefix):
+        raise SystemExit(f"{PACK_NAME}: git path {git_path!r} is outside pack path {pack_path!r}")
+    return git_path[len(prefix):]
+
+
+def manifest_perm(mode: str, rel: str) -> str:
+    if mode == "100644":
+        return "0644"
+    if mode == "100755":
+        return "0755"
+    raise SystemExit(f"{PACK_NAME}: unsupported git file mode {mode!r} for {rel}")
+
+
+def git_pack_hash(repo: Path, files: list[dict[str, str]]) -> str:
+    entries = []
+    for file in files:
+        data = git_blob(repo, file["object"])
+        digest = hashlib.sha256(data).hexdigest()
+        entries.append(f"{file['rel']} {file['perm']} {digest}")
+    entries.sort()
+    return "sha256:" + hashlib.sha256("\n".join(entries).encode()).hexdigest()
+
+
+def git_blob(repo: Path, object_id: str) -> bytes:
+    return run_bytes(["git", "-C", str(repo), "cat-file", "blob", object_id])
+
+
+def write_pack_tree(target: Path, repo: Path, files: list[dict[str, str]]) -> None:
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    for file in files:
+        path = target / Path(file["rel"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(git_blob(repo, file["object"]))
+        os.chmod(path, int(file["perm"], 8))
+    (target / "embed.go").write_text(EMBED_GO, encoding="utf-8")
+    os.chmod(target / "embed.go", 0o644)
+
+
+def write_public_pack_constants(path: Path, release: dict[str, str]) -> None:
+    text = path.read_text(encoding="utf-8")
+    replacements = {
+        "PublicGastownPackSource": release["source"],
+        "PublicGastownPackVersion": "sha:" + release["commit"],
+    }
+    for name, value in replacements.items():
+        text = replace_go_string_const(text, name, value)
+    path.write_text(text, encoding="utf-8")
+
+
+def replace_go_string_const(text: str, name: str, value: str) -> str:
+    pattern = re.compile(rf'(\b{name}\s*=\s*)"[^"]*"')
+    updated, count = pattern.subn(rf'\1"{value}"', text)
+    if count != 1:
+        raise SystemExit(f"expected exactly one {name} constant, replaced {count}")
+    return updated
+
+
+def check_local_state(target: Path, public_packs: Path, release: dict[str, str]) -> list[str]:
+    errors: list[str] = []
+    current = read_public_pack_constants(public_packs)
+    for key, value in {
+        "PublicGastownPackSource": release["source"],
+        "PublicGastownPackVersion": "sha:" + release["commit"],
+    }.items():
+        if current.get(key) != value:
+            errors.append(f"{key} = {current.get(key)!r}, want {value!r}")
+    try:
+        local_hash = local_pack_hash(target)
+    except OSError as exc:
+        errors.append(f"hashing local bundled pack: {exc}")
+    else:
+        if local_hash != release["hash"]:
+            errors.append(f"bundled {PACK_NAME} content hash = {local_hash}, want {release['hash']}")
+    embed_path = target / "embed.go"
+    try:
+        embed_go = embed_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(f"reading {embed_path}: {exc}")
+    else:
+        if embed_go != EMBED_GO:
+            errors.append(f"{embed_path} does not match the generated embed wrapper")
+    return errors
+
+
+def read_public_pack_constants(path: Path) -> dict[str, str]:
+    text = path.read_text(encoding="utf-8")
+    names = [
+        "PublicGastownPackSource",
+        "PublicGastownPackVersion",
+    ]
+    found: dict[str, str] = {}
+    for name in names:
+        match = re.search(rf'\b{name}\s*=\s*"([^"]*)"', text)
+        if match:
+            found[name] = match.group(1)
+    return found
+
+
+def local_pack_hash(target: Path) -> str:
+    entries: list[str] = []
+    for path in sorted(target.rglob("*")):
+        if path.is_dir():
+            continue
+        rel = path.relative_to(target).as_posix()
+        if rel == "embed.go":
+            continue
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise OSError(f"unsupported symlink {rel}")
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(f"unsupported non-regular file {rel}")
+        perm = "0755" if info.st_mode & 0o111 else "0644"
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        entries.append(f"{rel} {perm} {digest}")
+    if not entries:
+        raise OSError(f"{target} has no pack files")
+    return "sha256:" + hashlib.sha256("\n".join(entries).encode()).hexdigest()
+
+
+def run(args: list[str]) -> None:
+    subprocess.run(args, check=True)
+
+
+def run_bytes(args: list[str]) -> bytes:
+    return subprocess.run(args, check=True, stdout=subprocess.PIPE).stdout
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

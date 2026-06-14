@@ -264,7 +264,7 @@ func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 		default:
 			return nil, fmt.Errorf("reading ready deps from cache: %w", ErrCacheUnavailable)
 		}
-		if !cachedBeadReady(statusByID, deps) {
+		if !cachedBeadReady(b, statusByID, deps) {
 			continue
 		}
 		result = append(result, cloneBead(b))

@@ -19,15 +19,9 @@ import (
 func TestNoDolt3307FallbackInScripts(t *testing.T) {
 	root := repoRoot()
 	packDirs := []string{
-		filepath.Join(root, "examples", "dolt"),
+		filepath.Join(root, "examples", "bd", "dolt"),
 		filepath.Join(root, "examples", "gastown", "packs", "maintenance"),
-	}
-
-	// Formula literals are owned by slice 2 (ga-nptxjv). When slice 2 lands,
-	// this list shrinks to nil and this comment is removed.
-	allowlist := map[string]struct{}{
-		filepath.Join(root, "examples", "gastown", "packs", "maintenance", "formulas", "mol-dog-jsonl.toml"):  {},
-		filepath.Join(root, "examples", "gastown", "packs", "maintenance", "formulas", "mol-dog-reaper.toml"): {},
+		filepath.Join(root, "internal", "bootstrap", "packs", "core"),
 	}
 
 	// Matches GC_DOLT_PORT.*3307 on a single line in source files. The
@@ -48,9 +42,6 @@ func TestNoDolt3307FallbackInScripts(t *testing.T) {
 			}
 			ext := strings.ToLower(filepath.Ext(path))
 			if ext != ".sh" && ext != ".toml" && ext != ".md" {
-				return nil
-			}
-			if _, ok := allowlist[path]; ok {
 				return nil
 			}
 			data, err := os.ReadFile(path)

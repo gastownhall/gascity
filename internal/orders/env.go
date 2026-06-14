@@ -16,8 +16,10 @@ func ValidateExecEnvOverrides(a Order) error {
 func IsReservedExecEnvKey(key string) bool {
 	switch key {
 	case
+		"BD_BACKUP_ENABLED",
 		"BD_EXPORT_AUTO",
 		"BEADS_ACTOR",
+		"BEADS_BACKUP_ENABLED",
 		"BEADS_CREDENTIALS_FILE",
 		"BEADS_DIR",
 		"BEADS_DOLT_AUTO_START",

@@ -23,7 +23,6 @@ func TestAgentFieldSync(t *testing.T) {
 		// Provider-level fields: set during ResolveProvider, not typically
 		// overridden per-rig. Agent-level overrides happen in the Agent
 		// struct itself (which feeds into ResolveProvider).
-		"Args":                         "provider field, set via ResolveProvider",
 		"PromptMode":                   "provider field, set via ResolveProvider",
 		"PromptFlag":                   "provider field, set via ResolveProvider",
 		"ReadyDelayMs":                 "provider field, set via ResolveProvider",
@@ -180,6 +179,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		PromptTemplate:          strVal("prompts/test.md"),
 		Session:                 strVal("acp"),
 		Provider:                strVal("claude"),
+		Args:                    Fragments("--custom-arg"),
 		StartCommand:            strVal("claude --dangerously"),
 		Lifecycle:               strVal(AgentLifecycleOneShot),
 		Nudge:                   strVal("wake up"),
@@ -333,6 +333,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		PromptTemplate:          strVal("prompts/test.md"),
 		Session:                 strVal("acp"),
 		Provider:                strVal("claude"),
+		Args:                    Fragments("--custom-arg"),
 		StartCommand:            strVal("claude --dangerously"),
 		Lifecycle:               strVal(AgentLifecycleOneShot),
 		Nudge:                   strVal("wake up"),

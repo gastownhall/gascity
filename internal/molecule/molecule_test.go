@@ -239,13 +239,13 @@ func TestBuildRecipeApplyPlanReviewQuorumSubstitutesSynthesisTarget(t *testing.T
 		"mol-review-quorum.review-lane-one.attempt.1": {
 			"gc.run_target":         "target-a",
 			"gc.provider":           "provider-a",
-			"gc.model":              "model-a",
+			"opt_model":             "model-a",
 			"gc.review_quorum_lane": "primary",
 		},
 		"mol-review-quorum.review-lane-two.attempt.1": {
 			"gc.run_target":         "target-b",
 			"gc.provider":           "provider-b",
-			"gc.model":              "model-b",
+			"opt_model":             "model-b",
 			"gc.review_quorum_lane": "secondary",
 		},
 	}

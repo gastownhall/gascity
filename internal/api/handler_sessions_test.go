@@ -1273,6 +1273,50 @@ func TestHumaSessionCloseWithdrawsOverflowQueuedWaitNudges(t *testing.T) {
 	assertQueuedWaitNudgesWithdrawn(t, fs, firstNudgeID, laterPageNudgeID)
 }
 
+// Regression test for ga-frfj2d: the Huma close handler must route through
+// worker.Handle.CloseDetailed (the worker boundary), like the legacy close
+// handler, instead of constructing a session.Manager directly. The worker
+// boundary emits a "close" worker operation event; the direct manager
+// bypass did not.
+func TestHumaSessionCloseEmitsWorkerCloseOperationEvent(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Close Op Event")
+
+	w := httptest.NewRecorder()
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/close", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var closeOps []WorkerOperationEventPayload
+	for _, event := range fs.eventProv.(*events.Fake).Events {
+		if event.Type != events.WorkerOperation {
+			continue
+		}
+		var payload WorkerOperationEventPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal worker operation payload: %v", err)
+		}
+		if payload.Operation == "close" {
+			closeOps = append(closeOps, payload)
+		}
+	}
+	if len(closeOps) != 1 {
+		t.Fatalf("got %d close worker operation events, want 1 (Huma close must route through the worker boundary)", len(closeOps))
+	}
+	if closeOps[0].SessionID != info.ID {
+		t.Errorf("close operation session_id = %q, want %q", closeOps[0].SessionID, info.ID)
+	}
+	if closeOps[0].Result != "succeeded" {
+		t.Errorf("close operation result = %q, want %q", closeOps[0].Result, "succeeded")
+	}
+}
+
 func TestLegacySessionCloseContinuesAfterWaitLookupLimit(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

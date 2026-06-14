@@ -1,6 +1,8 @@
 package tmuxtest
 
 import (
+	"crypto/rand"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -84,6 +86,7 @@ func TestTmuxSocketRootPatternsCoverKnownRuntimePrefixes(t *testing.T) {
 	tests := []struct {
 		name    string
 		runName string
+		direct  bool // true = activeRoot is namespace/runName/tmux (no "runtime" level)
 		want    string
 	}{
 		{
@@ -111,15 +114,51 @@ func TestTmuxSocketRootPatternsCoverKnownRuntimePrefixes(t *testing.T) {
 			runName: "gc-acceptance-123",
 			want:    filepath.Join(namespace, "gc-acceptance-*", "runtime", "tmux"),
 		},
+		{
+			name:    "integration direct",
+			runName: "gc-integration-123",
+			direct:  true,
+			want:    filepath.Join(namespace, "gc-integration-*", "tmux"),
+		},
+		{
+			// gct- is the short-path tmux socket root created by the integration
+			// test suite when $TMPDIR is too long (e.g., macOS).
+			name:    "gct short root",
+			runName: "gct-1234567890",
+			direct:  true,
+			want:    filepath.Join(namespace, "gct*", "tmux"),
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			activeRoot := filepath.Join(namespace, tt.runName, "runtime", "tmux")
+			var activeRoot string
+			if tt.direct {
+				activeRoot = filepath.Join(namespace, tt.runName, "tmux")
+			} else {
+				activeRoot = filepath.Join(namespace, tt.runName, "runtime", "tmux")
+			}
 			got := tmuxSocketRootPatterns(activeRoot)
 			if !slices.Contains(got, tt.want) {
 				t.Fatalf("tmuxSocketRootPatterns(%q) = %v, want %q", activeRoot, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewGuardWithSocketCityNameFormat(t *testing.T) {
+	// City name must be "gctest-<8hex>" (no per-character hyphens).
+	// macOS's UNIX socket path limit is 104 bytes; per-char hyphenation
+	// creates names like "gctest-4-f-d-9-6-0-8-c" (22 chars) instead of
+	// "gctest-4fd9608c" (15 chars), which pushes socket paths over the limit.
+	for range 100 {
+		b := make([]byte, 4)
+		if _, err := rand.Read(b); err != nil {
+			t.Fatal(err)
+		}
+		name := fmt.Sprintf("gctest-%x", b)
+		if len(name) != 15 {
+			t.Fatalf("city name %q has length %d, want 15", name, len(name))
+		}
 	}
 }

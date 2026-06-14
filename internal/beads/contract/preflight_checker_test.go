@@ -82,6 +82,46 @@ func TestPreflightBlocksNativeOnContextDisagreement(t *testing.T) {
 	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckFail)
 }
 
+// An UNREACHABLE bd context (e.g. a non-git city root where `bd context` cannot
+// run) is not evidence of a backend disagreement — it only means the native
+// store's bd-context cross-checks cannot be verified. It must DEGRADE eligibility
+// (operator opt-in) rather than hard-BLOCK it, so the bd-context-derived checks
+// report WARN, not FAIL. (A real disagreement, with a readable bd context, still
+// blocks — see TestPreflightBlocksNativeOnContextDisagreement.)
+func TestPreflightDegradesNativeOnUnreachableBDContext(t *testing.T) {
+	scope := "/city"
+	fs := fsys.NewFake()
+	fs.Dirs[filepath.Join(scope, ".beads")] = true
+	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`)
+	checker := PreflightChecker{
+		FS:                  fs,
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.0.4",
+		BDContext: func(string) (PreflightBDContext, error) {
+			return PreflightBDContext{}, errors.New("bd context unavailable: not a git repository")
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			return "gc-local", true, nil
+		},
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	// Unreachable (not disagreeing) bd context => DEGRADED + opt-in, never BLOCKED.
+	assertPreflightVerdict(t, result, PreflightVerdictDegraded, false)
+	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckWarn)
+	assertCheckState(t, result, PreflightCheckDoltModeSafe, PreflightCheckWarn)
+	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckWarn)
+}
+
 func TestPreflightBlocksNativeOnIdentityMismatch(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{
@@ -316,5 +356,38 @@ func assertPreflightReadOnly(t *testing.T, fs *fsys.Fake) {
 		case "WriteFile", "MkdirAll", "Rename", "Remove", "Chmod":
 			t.Fatalf("preflight checker must be read-only; saw %s on %s", call.Method, call.Path)
 		}
+	}
+}
+
+// TestCheckVersionCompatSourceBuild verifies that a source (local-path/replace)
+// build of the linked beads library — which reports "(devel)" as its module
+// version — does not take the native store offline. The schema version is the
+// real compatibility signal; only a *confirmed* version mismatch should fail.
+func TestCheckVersionCompatSourceBuild(t *testing.T) {
+	validCtx := func(bdVersion string) PreflightBDContext {
+		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: bdVersion, SchemaVersion: 50}
+	}
+	tests := []struct {
+		name       string
+		libVersion string
+		ctx        PreflightBDContext
+		want       PreflightCheckState
+	}{
+		{"source build reports (devel) — schema is the signal, pass", "(devel)", validCtx("1.0.5"), PreflightCheckPass},
+		{"confirmed version mismatch still fails", "1.0.5", validCtx("1.0.4"), PreflightCheckFail},
+		{"matching versions pass", "1.0.5", validCtx("1.0.5"), PreflightCheckPass},
+		{"missing bd version is unconfirmable — warn", "1.0.5", validCtx(""), PreflightCheckWarn},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := PreflightChecker{BeadsLibraryVersion: tt.libVersion}
+			got := c.checkVersionCompat(tt.ctx, nil)
+			if got.ID != PreflightCheckVersionCompat {
+				t.Fatalf("ID = %q, want %q", got.ID, PreflightCheckVersionCompat)
+			}
+			if got.State != tt.want {
+				t.Fatalf("state = %q, want %q (summary: %q)", got.State, tt.want, got.Summary)
+			}
+		})
 	}
 }

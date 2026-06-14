@@ -56,10 +56,18 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 	// Pin a wide TTL so every request in this test lands in the same time
 	// bucket; this isolates the "index churn must not bust the cache" property
 	// from wall-clock bucket-boundary timing. The TTL-expiry/staleness bound is
-	// covered separately by TestHandleStatusCacheExpiresOnTTL.
+	// covered separately by TestHandleStatusCacheExpiresOnTTL. The TTL floor is
+	// pinned off so the bucket cache alone carries the assertion; the floor's
+	// own behavior is covered by
+	// TestHandleStatusServesRecentResponseDespiteIndexAdvance.
 	oldTTL := timeBucketResponseCacheTTL
 	timeBucketResponseCacheTTL = time.Hour
-	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+	oldFloor := statusResponseTTLFloor
+	statusResponseTTLFloor = 0
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		statusResponseTTLFloor = oldFloor
+	})
 
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
@@ -109,7 +117,12 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 func TestHandleStatusCacheExpiresOnTTL(t *testing.T) {
 	oldTTL := timeBucketResponseCacheTTL
 	timeBucketResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
-	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+	oldFloor := statusResponseTTLFloor
+	statusResponseTTLFloor = 0 // floor off: each request must reach the rebuild
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		statusResponseTTLFloor = oldFloor
+	})
 
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}

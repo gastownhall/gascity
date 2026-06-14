@@ -94,9 +94,10 @@ func beadCountCadence(total int) time.Duration {
 	}
 }
 
-// recordReconcileLatencyLocked appends a bd-list duration sample to the
-// rolling latency window, dropping the oldest sample once the window is
-// full. Caller must hold c.mu (write lock).
+// recordReconcileLatencyLocked appends a reconcile read sample to the rolling
+// latency window, dropping the oldest sample once the window is full. Success
+// samples include backing.List plus ready-projection enrichment. Caller must
+// hold c.mu (write lock).
 func (c *CachingStore) recordReconcileLatencyLocked(d time.Duration) {
 	if len(c.latencyWindow) < cacheLatencyWindowSize {
 		c.latencyWindow = append(c.latencyWindow, d)
@@ -257,8 +258,8 @@ func (c *CachingStore) runReconciliation() {
 
 	bdStart := time.Now()
 	fresh, err := c.backing.List(ListQuery{AllowScan: true, SkipLabels: true, TierMode: TierBoth})
-	bdLatency := time.Since(bdStart)
 	if err != nil {
+		bdLatency := time.Since(bdStart)
 		c.mu.Lock()
 		c.syncFailures++
 		if (IsPartialResult(err) || c.syncFailures >= maxCacheSyncFailures) && (c.state == cacheLive || c.state == cachePartial) {
@@ -270,6 +271,14 @@ func (c *CachingStore) runReconciliation() {
 		c.updateStatsLocked()
 		c.mu.Unlock()
 		return
+	}
+	enriched, enrichErr := c.enrichReadyProjectionForCache(fresh)
+	bdLatency := time.Since(bdStart)
+	projectionFailed := enrichErr != nil
+	if enrichErr != nil {
+		c.recordProblem("reconcile ready projection", enrichErr)
+	} else {
+		fresh = enriched
 	}
 
 	freshByID := make(map[string]Bead, len(fresh))
@@ -287,6 +296,9 @@ func (c *CachingStore) runReconciliation() {
 
 	c.mu.Lock()
 	now := time.Now()
+	if projectionFailed {
+		c.preserveCachedReadyProjectionLocked(freshByID, depMap, useFreshDeps)
+	}
 	if c.mutationSeq != startSeq {
 		var adds, removes, updates int64
 		notifications := make([]cacheNotification, 0, len(freshByID))
@@ -624,4 +636,45 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 		c.mu.Unlock()
 	}
 	return confirmedClosed
+}
+
+func (c *CachingStore) preserveCachedReadyProjectionLocked(items map[string]Bead, depMap map[string][]Dep, useFreshDeps bool) {
+	for id, item := range items {
+		if item.IsBlocked != nil {
+			continue
+		}
+		cached, ok := c.beads[id]
+		if !ok || cached.IsBlocked == nil {
+			continue
+		}
+		freshDeps := c.depsForReconcileLocked(id, item, depMap, useFreshDeps)
+		if depsChanged(c.deps[id], freshDeps) {
+			continue
+		}
+		if c.readyBlockingDependencyTargetStatusChangedLocked(freshDeps, items) {
+			continue
+		}
+		item.IsBlocked = cloneBoolPtr(cached.IsBlocked)
+		items[id] = item
+	}
+}
+
+func (c *CachingStore) readyBlockingDependencyTargetStatusChangedLocked(deps []Dep, items map[string]Bead) bool {
+	for _, dep := range deps {
+		if !isReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		cachedTarget, cachedOK := c.beads[dep.DependsOnID]
+		freshTarget, freshOK := items[dep.DependsOnID]
+		if !freshOK {
+			continue
+		}
+		if !cachedOK {
+			return true
+		}
+		if cachedTarget.Status != freshTarget.Status {
+			return true
+		}
+	}
+	return false
 }

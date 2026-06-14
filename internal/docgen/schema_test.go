@@ -2,8 +2,12 @@ package docgen
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/invopop/jsonschema"
 )
 
 // defProperties extracts the properties map for a named $defs entry.
@@ -312,6 +316,49 @@ func TestPackSchemaAliasFieldHidden(t *testing.T) {
 	props := defProperties(t, raw, "PackConfig")
 	if _, ok := props["agents"]; ok {
 		t.Errorf("PackConfig should hide the legacy %q alias (jsonschema:\"-\") for agent_defaults", "agents")
+	}
+}
+
+// TestAddGoCommentsFilteredSkipsHiddenDirs verifies that addGoCommentsFiltered
+// does not enter directories whose name begins with ".". This guards against
+// the TOCTOU failure where .gc/*/pr-checkout/ dirs are deleted by mpr cleanup
+// while a schema-gen walk is in progress: if the hidden dir is unreadable or
+// disappears mid-walk, a plain r.AddGoComments(".", ...) surfaces an I/O error;
+// the filtered variant must skip hidden dirs entirely so no such error occurs.
+func TestAddGoCommentsFilteredSkipsHiddenDirs(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Visible source dir with a Go struct — should be processed normally.
+	if err := os.MkdirAll(filepath.Join(tmp, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	goSrc := "package pkg\n\n// Widget is a widget.\ntype Widget struct{}\n"
+	if err := os.WriteFile(filepath.Join(tmp, "pkg", "widget.go"), []byte(goSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hidden dir made unreadable: if walked it triggers "permission denied".
+	gcDir := filepath.Join(tmp, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gcDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(gcDir, 0o755) })
+
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(orig) }()
+
+	r := &jsonschema.Reflector{FieldNameTag: "toml"}
+	if err := addGoCommentsFiltered(r, "example.com/test", "."); err != nil {
+		t.Errorf("addGoCommentsFiltered failed with unreadable hidden dir: %v", err)
 	}
 }
 

@@ -41,6 +41,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The synthetic bundled-pack cache key now folds in the running binary's
+  embedded-pack content hash, so two `gc` binaries with different bundled-pack
+  content resolve to different cache directories instead of fighting over one.
+  Previously the cache directory was keyed only on namespace+source+commit, so a
+  version-skewed deploy (controller and agents on different `gc` builds) left
+  both binaries materializing one shared directory in turn: each `gc import
+  install` was promptly clobbered by the other binary, re-wedging every `gc bd`
+  citywide with "bundled pack cache content hash does not match current binary"
+  roughly hourly. With the content hash in the key, `gc import install` for a
+  given binary sticks for that binary regardless of other versions running.
+  Note: deploying a binary with changed bundled-pack content still requires a
+  one-time `gc import install` (or bootstrap materialize) to populate the new
+  cache directory; that install is now durable rather than transient (ga-s9p).
+
 - Pool respawn after `gc runtime drain-ack` no longer waits up to a full patrol
   interval (default 60 s) before the replacement session starts. The async kill
   goroutine now pokes the controller once after the session is gone so Phase 2

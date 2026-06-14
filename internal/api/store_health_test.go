@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -185,7 +186,7 @@ func TestBuildStatusBodyIncludesStoreHealth(t *testing.T) {
 	state := newFakeState(t)
 	s := &Server{state: state}
 
-	body := s.buildStatusBody(false)
+	body := s.buildStatusBody(context.Background(), false)
 	if body.StoreHealth == nil {
 		t.Fatal("StoreHealth = nil, want populated")
 	}
@@ -207,7 +208,7 @@ func TestBuildStatusBodyIncludesBeadsDiagnostic(t *testing.T) {
 	}
 	s := &Server{state: state}
 
-	body := s.buildStatusBody(false)
+	body := s.buildStatusBody(context.Background(), false)
 	if body.Beads == nil {
 		t.Fatal("Beads = nil, want diagnostic")
 	}

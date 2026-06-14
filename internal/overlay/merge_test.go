@@ -628,3 +628,160 @@ func TestMergeSettingsJSON_EmptyArrayPreservesBase(t *testing.T) {
 		t.Errorf("SessionStart entries = %d, want 1 (base preserved with empty overlay)", len(arr))
 	}
 }
+
+func TestWrapsBareHooks(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{".claude/settings.json", true},
+		// Other providers keep bare entries verbatim.
+		{".gemini/settings.json", false},
+		{".codex/hooks.json", false},
+		{".cursor/hooks.json", false},
+		{".github/hooks/gascity.json", false},
+		{"settings.json", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := WrapsBareHooks(tt.path); got != tt.want {
+			t.Errorf("WrapsBareHooks(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
+// preToolUse is a small helper to pull the PreToolUse array out of a merged
+// settings document.
+func preToolUse(t *testing.T, merged []byte) []any {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(merged, &doc); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	hooks, ok := doc["hooks"].(map[string]any)
+	if !ok {
+		t.Fatalf("no hooks map in result: %s", merged)
+	}
+	arr, ok := hooks["PreToolUse"].([]any)
+	if !ok {
+		t.Fatalf("no PreToolUse array in result: %s", merged)
+	}
+	return arr
+}
+
+func innerCommand(t *testing.T, entry any) string {
+	t.Helper()
+	m, ok := entry.(map[string]any)
+	if !ok {
+		t.Fatalf("entry is not an object: %v", entry)
+	}
+	inner, ok := m["hooks"].([]any)
+	if !ok || len(inner) == 0 {
+		t.Fatalf("entry has no wrapped hooks array: %v", m)
+	}
+	return inner[0].(map[string]any)["command"].(string)
+}
+
+func TestMergeSettingsJSON_WrapBareHooks_NormalizesOverlayBareEntry(t *testing.T) {
+	// A bare {type,command} entry from the overlay is the exact shape the ubs
+	// pack shipped; with WithWrapBareHooks it must become valid Claude form.
+	base := `{}`
+	over := `{"hooks":{"PreToolUse":[{"type":"command","command":"scan"}]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over), WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	arr := preToolUse(t, result)
+	if len(arr) != 1 {
+		t.Fatalf("PreToolUse entries = %d, want 1", len(arr))
+	}
+	entry := arr[0].(map[string]any)
+	if entry["matcher"] != "" {
+		t.Errorf("matcher = %v, want empty string", entry["matcher"])
+	}
+	if got := innerCommand(t, entry); got != "scan" {
+		t.Errorf("inner command = %q, want scan", got)
+	}
+}
+
+func TestMergeSettingsJSON_WrapBareHooks_NormalizesBaseBareEntry(t *testing.T) {
+	// Models the accumulated agent file: a stale bare entry already in the
+	// destination (base) plus the overlay's wrapped entry. After merge both
+	// must be valid (carry a "hooks" array) — no /doctor error.
+	base := `{"hooks":{"PreToolUse":[{"type":"command","command":"scan"}]}}`
+	over := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"scan"}]}]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over), WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	arr := preToolUse(t, result)
+	if len(arr) != 2 {
+		t.Fatalf("PreToolUse entries = %d, want 2", len(arr))
+	}
+	for i, e := range arr {
+		m := e.(map[string]any)
+		if _, ok := m["hooks"]; !ok {
+			t.Errorf("entry[%d] = %v lacks a hooks array (invalid Claude shape)", i, m)
+		}
+	}
+}
+
+func TestMergeSettingsJSON_WrapBareHooks_PreservesDistinctBareEntries(t *testing.T) {
+	// Two distinct bare commands must both survive (no collapse / data loss).
+	base := `{"hooks":{"PreToolUse":[{"type":"command","command":"a"}]}}`
+	over := `{"hooks":{"PreToolUse":[{"type":"command","command":"b"}]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over), WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	arr := preToolUse(t, result)
+	if len(arr) != 2 {
+		t.Fatalf("PreToolUse entries = %d, want 2 (no data loss)", len(arr))
+	}
+	seen := map[string]bool{}
+	for _, e := range arr {
+		seen[innerCommand(t, e)] = true
+	}
+	if !seen["a"] || !seen["b"] {
+		t.Errorf("expected both commands a and b preserved, got %v", seen)
+	}
+}
+
+func TestMergeSettingsJSON_WrapBareHooks_LeavesWrappedUnchanged(t *testing.T) {
+	base := `{}`
+	over := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"scan"}]}]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over), WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	arr := preToolUse(t, result)
+	if len(arr) != 1 {
+		t.Fatalf("PreToolUse entries = %d, want 1", len(arr))
+	}
+	if arr[0].(map[string]any)["matcher"] != "Bash" {
+		t.Errorf("matcher = %v, want Bash (already-wrapped entry must be unchanged)", arr[0].(map[string]any)["matcher"])
+	}
+}
+
+func TestMergeSettingsJSON_NoWrap_LeavesBareEntries(t *testing.T) {
+	// Without the option, Codex/Cursor-style bare entries are preserved verbatim
+	// (merged by command identity), never wrapped.
+	base := `{"hooks":{"PreToolUse":[{"command":"lint.sh"}]}}`
+	over := `{"hooks":{"PreToolUse":[{"command":"lint.sh","on":"always"}]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over))
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	arr := preToolUse(t, result)
+	if len(arr) != 1 {
+		t.Fatalf("PreToolUse entries = %d, want 1 (replaced by identity)", len(arr))
+	}
+	if _, wrapped := arr[0].(map[string]any)["hooks"]; wrapped {
+		t.Errorf("bare entry was wrapped without WithWrapBareHooks: %v", arr[0])
+	}
+}

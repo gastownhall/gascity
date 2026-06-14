@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 
@@ -75,6 +76,18 @@ func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 
 func (s *beadPolicyStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	return s.Store.Ready(expandPolicyReadyQuery(query...))
+}
+
+// Count implements beads.Counter with the same read-tier expansion as List.
+// The embedded Store interface does not promote optional capabilities, so
+// the delegation must be explicit. Inner stores without a Counter report
+// ErrCountUnsupported, signaling callers to fall back to List.
+func (s *beadPolicyStore) Count(ctx context.Context, query beads.ListQuery, excludeTypes ...string) (int, error) {
+	counter, ok := s.Store.(beads.Counter)
+	if !ok {
+		return 0, fmt.Errorf("counting beads: policy-wrapped store: %w", beads.ErrCountUnsupported)
+	}
+	return counter.Count(ctx, expandPolicyReadTier(query), excludeTypes...)
 }
 
 func (s *beadPolicyStore) Handles() beads.StoreHandles {

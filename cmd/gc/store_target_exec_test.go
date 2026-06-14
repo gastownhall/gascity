@@ -117,6 +117,24 @@ func envSliceValue(env []string, key string) string {
 	return ""
 }
 
+func TestSetExecProjectedBackendEnvEmptyDisablesAutoBackup(t *testing.T) {
+	// The exec-store projection is the 5th bd env-projection site (alongside
+	// bdRuntimeEnv, cityRuntimeProcessEnv, sessionBackendEnv, and recovery).
+	// It must force bd's PersistentPostRun auto-backup off (ga-0eq), even when
+	// the ambient env tries to enable it.
+	env := map[string]string{
+		"BD_BACKUP_ENABLED":    "true",
+		"BEADS_BACKUP_ENABLED": "true",
+	}
+	setExecProjectedBackendEnvEmpty(env)
+	if got := env["BD_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BD_BACKUP_ENABLED = %q, want false", got)
+	}
+	if got := env["BEADS_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BEADS_BACKUP_ENABLED = %q, want false", got)
+	}
+}
+
 func TestProviderUsesBdStoreContract(t *testing.T) {
 	tests := []struct {
 		provider string

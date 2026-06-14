@@ -724,6 +724,8 @@ func TestContainsPromptIndicator(t *testing.T) {
 		{name: "codex prompt with nbsp", content: "›\u00a0", want: true},
 		{name: "codex prompt with placeholder", content: "› Improve documentation in @filename", want: true},
 		{name: "claude prompt with text", content: "❯ run tests", want: true},
+		{name: "boxed grok prompt", content: "│ ❯ ", want: true},
+		{name: "boxed grok prompt with text", content: "│ ❯ start working", want: true},
 		{name: "codex numbered menu row", content: "› 1. Update now (runs `bun install -g @openai/codex`)", want: false},
 		{name: "empty content", content: "", want: false},
 		{name: "no prompt", content: "loading...", want: false},

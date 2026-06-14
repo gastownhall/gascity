@@ -735,6 +735,60 @@ func TestCmdMailSendToControllerRecipientIsRejected(t *testing.T) {
 	}
 }
 
+// TestCmdMailSendTrailingSlashHumanRecipientResolvesToHuman pins the default
+// escalation recipient contract: pack scripts address the reserved human
+// mailbox, and the trailing-slash target form must resolve to it instead of
+// falling through to live-session resolution.
+func TestCmdMailSendTrailingSlashHumanRecipientResolvesToHuman(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	if sender, ok := reservedMailSenderIdentity("human/"); !ok || sender != "human" {
+		t.Fatalf("reservedMailSenderIdentity(human/) = %q, %v; want human, true", sender, ok)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "controller", "", "ESCALATION: test", "escalation body", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend(human/) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	all, err := store.List(beads.ListQuery{
+		Type:      "message",
+		Status:    "open",
+		TierMode:  beads.TierBoth,
+		AllowScan: true,
+	})
+	if err != nil {
+		t.Fatalf("List messages: %v", err)
+	}
+	var messages []beads.Bead
+	for _, b := range all {
+		if b.Type == "message" {
+			messages = append(messages, b)
+		}
+	}
+	if len(messages) != 1 {
+		t.Fatalf("message beads = %d, want 1: %#v", len(messages), messages)
+	}
+	if messages[0].Assignee != "human" {
+		t.Fatalf("message Assignee = %q, want human", messages[0].Assignee)
+	}
+}
+
 func TestResolveDefaultMailTargetsForCommand_HumanDefaultWhenNoEnv(t *testing.T) {
 	t.Setenv("GC_MAIL", "fake")
 	_ = os.Unsetenv("GC_ALIAS")
@@ -2533,6 +2587,58 @@ func TestMailArchiveMultiSuccess(t *testing.T) {
 	}
 	if n := len(rec.events); n != 3 {
 		t.Errorf("recorded events = %d, want 3", n)
+	}
+}
+
+func TestMailArchiveManyJSONEmitsBatchShape(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for i := 0; i < 3; i++ {
+		if _, err := mp.Send("human", "mayor", "", "batch"); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailArchiveManyJSON(mp, events.Discard, []string{"gc-1", "gc-2", "gc-3"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailArchiveManyJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("unexpected stderr: %q", stderr.String())
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if _, ok := raw["id"]; ok {
+		t.Fatalf("batch archive JSON included singular id field: %s", stdout.String())
+	}
+
+	var got struct {
+		SchemaVersion string   `json:"schema_version"`
+		OK            bool     `json:"ok"`
+		Command       string   `json:"command"`
+		Action        string   `json:"action"`
+		IDs           []string `json:"ids"`
+		Count         int      `json:"count"`
+		AlreadyDone   bool     `json:"already_done"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal JSON result: %v", err)
+	}
+	if got.SchemaVersion != "1" || !got.OK || got.Command != "mail.archive" || got.Action != "archive" {
+		t.Fatalf("unexpected envelope: %+v", got)
+	}
+	if strings.Join(got.IDs, ",") != "gc-1,gc-2,gc-3" {
+		t.Fatalf("ids = %v, want [gc-1 gc-2 gc-3]", got.IDs)
+	}
+	if got.Count != 3 {
+		t.Fatalf("count = %d, want 3", got.Count)
+	}
+	if got.AlreadyDone {
+		t.Fatal("already_done = true, want false")
 	}
 }
 

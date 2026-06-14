@@ -48,6 +48,10 @@ func (s *Server) computeStoreHealth() *StatusStoreHealth {
 	if cityPath == "" {
 		return nil
 	}
+	// WalkSize is a synchronous, uncancellable disk walk; the
+	// storeHealthCacheTTL cache bounds how often it runs. Plumbing
+	// context/timeout through WalkSize is deferred until it shows up
+	// in profiles.
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
 	rows := countBeadStoreRows(s.state.CityBeadStore())
 	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider())
@@ -74,7 +78,10 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 }
 
 // countBeadStoreRows returns the number of beads in store. Zero when
-// store is nil or the scan fails — the ratio is best-effort.
+// store is nil or the scan fails — the ratio is best-effort. The
+// closed-inclusive query is never answerable from the in-memory cache,
+// so this path always hydrates; counting closed history without
+// hydration needs backend support (#1896 follow-up).
 func countBeadStoreRows(store beads.Store) int {
 	if store == nil {
 		return 0

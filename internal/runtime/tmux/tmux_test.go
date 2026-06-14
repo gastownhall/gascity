@@ -2343,6 +2343,12 @@ func TestMatchesPromptPrefix(t *testing.T) {
 
 		// Bare prompt character without any space
 		{"bare prompt no space", "❯", regularPrefix, true},
+
+		// Boxed prompt: TUIs (e.g. grok) render the input line inside a box
+		// border, so the captured line is "│ ❯ …" rather than "❯ …".
+		{"boxed prompt bare", "│ ❯ ", regularPrefix, true},
+		{"boxed prompt with content", "│ ❯ do the work", regularPrefix, true},
+		{"heavy box border", "┃ ❯ ", regularPrefix, true},
 	}
 
 	for _, tt := range tests {
@@ -2353,6 +2359,16 @@ func TestMatchesPromptPrefix(t *testing.T) {
 					tt.line, tt.prefix, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestProviderEnvSkipsEscapeGrok guards the grok engagement fix: grok's TUI
+// treats a pre-Enter Escape as "clear input", so synthesizing one between the
+// pasted prompt and the submit Enter prevents submission and the worker idles
+// at the welcome screen forever. grok must be on the skip list.
+func TestProviderEnvSkipsEscapeGrok(t *testing.T) {
+	if !providerEnvSkipsEscape("grok") {
+		t.Error("grok must skip pre-Enter Escape (TUI treats Escape as clear-input)")
 	}
 }
 

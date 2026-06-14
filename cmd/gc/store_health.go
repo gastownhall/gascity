@@ -33,8 +33,8 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastG
 
 // collectStoreHealth measures the Dolt store at cityPath and the latest
 // maintenance event via ep, returning a populated *StoreHealth.
-// store.List(AllowScan) provides the live row count; callers without a
-// store pass nil and LiveRows is reported as zero.
+// liveRowCount provides the live row count; callers without a store pass
+// nil and LiveRows is reported as zero.
 func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
 	rows := liveRowCount(store)

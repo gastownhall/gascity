@@ -64,6 +64,7 @@ func (m *MemStore) snapshot() (int, []Bead, []Dep) {
 func cloneBead(b Bead) Bead {
 	b.Priority = cloneIntPtr(b.Priority)
 	b.DeferUntil = cloneTimePtr(b.DeferUntil)
+	b.IsBlocked = cloneBoolPtr(b.IsBlocked)
 	b.Metadata = maps.Clone(b.Metadata)
 	b.Labels = slices.Clone(b.Labels)
 	b.Needs = slices.Clone(b.Needs)

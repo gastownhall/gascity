@@ -993,6 +993,21 @@ func (cr *CityRuntime) tick(
 		manualReply = cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, trace, source)
 		if manualReload != nil {
 			manualReloadCompleted = true
+			// #3206 defense-in-depth: a manual reload's reply is already final
+			// here unless soft-reload acceptance will amend it from
+			// post-reconcile state. For every other manual reload, send the
+			// reply now — before dispatchOrders and the session-reconcile
+			// phases — so reload-reply latency does not scale with order count.
+			// AUTO ticks (manualReload == nil) are unaffected and keep the
+			// dispatch-before-reply ordering. The end-of-tick
+			// completeManualReload() is idempotent, so soft Applied/NoChange
+			// reloads still reply after applySoftReloadAcceptance. This
+			// condition is the exact negation of the soft-acceptance guard
+			// below.
+			if !(manualReload.soft && //nolint:staticcheck // QF1001: explicit negation of the soft-acceptance guard below, kept for readability
+				(manualReply.Outcome == reloadOutcomeApplied || manualReply.Outcome == reloadOutcomeNoChange)) {
+				completeManualReload()
+			}
 		}
 	}
 	if ctx.Err() != nil {

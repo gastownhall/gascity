@@ -52,7 +52,7 @@ type fakeState struct {
 	maintenance   MaintenanceProvider
 }
 
-func newFakeState(t *testing.T) *fakeState {
+func newFakeState(t testing.TB) *fakeState {
 	t.Helper()
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)

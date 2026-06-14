@@ -68,6 +68,10 @@ type Bead struct {
 	// nil or past means ready). Create paths preserve it; UpdateOpts does not
 	// mutate it.
 	DeferUntil *time.Time `json:"defer_until,omitempty"`
+	// IsBlocked carries bd's denormalized ready-work projection. Nil means the
+	// store did not provide the projection and cached ready falls back to
+	// dependency-derived readiness for backward compatibility.
+	IsBlocked *bool `json:"is_blocked,omitempty"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
@@ -116,6 +120,14 @@ func cloneIntPtr(v *int) *int {
 }
 
 func cloneTimePtr(v *time.Time) *time.Time {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
+}
+
+func cloneBoolPtr(v *bool) *bool {
 	if v == nil {
 		return nil
 	}

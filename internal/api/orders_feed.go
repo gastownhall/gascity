@@ -226,6 +226,12 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 				"gc.formula_contract": "graph.v2",
 			},
 			IncludeClosed: true,
+			// The root-only projection reads only id/status/created/metadata,
+			// never labels, so skip the per-root label hydration on this
+			// closed-history scan — same rows and order, less work per root
+			// (gascity#3253). Bounding this scan further is not contract-safe
+			// because the feed orders by computed status rank, not created_at.
+			SkipLabels: true,
 		})
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {

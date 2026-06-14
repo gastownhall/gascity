@@ -114,6 +114,7 @@ func TestEnsureCanonicalConfigCreatesManagedShape(t *testing.T) {
 		"issue-prefix: gc",
 		"dolt.auto-start: false",
 		"export.auto: false",
+		"backup.enabled: false",
 		"dolt:",
 		"disable-event-flush: true",
 		"gc.endpoint_origin: managed_city",
@@ -313,6 +314,79 @@ func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
 		}
 		if !strings.Contains(text, "export.auto: false") {
 			t.Fatalf("config should force export.auto: false:\n%s", text)
+		}
+	})
+}
+
+func TestEnsureCanonicalConfigForcesAutoBackupOff(t *testing.T) {
+	// bd's PersistentPostRun auto-backup (the hardcoded "backup_export" Dolt
+	// remote) syncs on nearly every invocation. A stuck-looping backup_export
+	// sync saturated the commit path and wedged the whole town on 2026-06-08
+	// (ga-0eq). Managed scopes back up through mol-dog-backup, so this must be
+	// forced off at config time — not just via BD_BACKUP_ENABLED env-var
+	// suppression, which leaks when bd is invoked outside the gc wrapper
+	// (agents, humans, bd setup) or before a rig scope is canonicalized.
+	t.Run("sets false when key is absent", func(t *testing.T) {
+		fs := fsys.OSFS{}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		input := strings.Join([]string{
+			"issue-prefix: gc",
+			"dolt.auto-start: false",
+			"",
+		}, "\n")
+		if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "backup.enabled: false") {
+			t.Fatalf("config should force backup.enabled: false:\n%s", data)
+		}
+	})
+
+	t.Run("overrides explicit true", func(t *testing.T) {
+		fs := fsys.OSFS{}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		input := strings.Join([]string{
+			"issue-prefix: gc",
+			"backup.enabled: true",
+			"",
+		}, "\n")
+		if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if strings.Contains(text, "backup.enabled: true") {
+			t.Fatalf("config should scrub backup.enabled: true:\n%s", text)
+		}
+		if !strings.Contains(text, "backup.enabled: false") {
+			t.Fatalf("config should force backup.enabled: false:\n%s", text)
 		}
 	})
 }

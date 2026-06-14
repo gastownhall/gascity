@@ -54,7 +54,7 @@ func TestSupportedProviders(t *testing.T) {
 	want := map[string]bool{
 		"claude": true, "codex": true, "gemini": true, "kiro": true, "opencode": true,
 		"groq": true, "cerebras": true, "copilot": true, "cursor": true, "pi": true, "omp": true,
-		"antigravity": true,
+		"antigravity": true, "kimi": true,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("SupportedProviders() = %v, want %d entries", got, len(want))
@@ -1436,7 +1436,7 @@ func TestInstallClaudeSurfacesNonObjectOverride(t *testing.T) {
 // are materialized from the embedded core pack overlay into the workdir.
 func TestInstallOverlayManagedProviders(t *testing.T) {
 	fs := fsys.NewFake()
-	providers := []string{"codex", "gemini", "opencode", "copilot", "cursor", "kiro", "pi", "omp", "antigravity"}
+	providers := []string{"codex", "gemini", "opencode", "copilot", "cursor", "kiro", "pi", "omp", "antigravity", "kimi"}
 	if err := Install(fs, "/city", "/work", providers); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -1452,6 +1452,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"/work/.pi/extensions/gc-hooks.js",
 		"/work/.omp/hooks/gc-hook.ts",
 		"/work/.agents/hooks.json",
+		"/work/.kimi/config.toml",
+		"/work/.kimi/hooks/gascity-session-start.py",
 	} {
 		if _, ok := fs.Files[rel]; !ok {
 			t.Errorf("expected overlay-managed provider file %s to be written", rel)
@@ -1488,7 +1490,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	antigravityHooks := string(fs.Files["/work/.agents/hooks.json"])
 	for hookName, wantCommand := range map[string]string{
-		"gascity-prime":       "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity",
+		"gascity-prime":       `GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity`,
 		"gascity-nudge-drain": "gc nudge drain --inject --hook-format antigravity",
 		"gascity-mail-check":  "gc mail check --inject --hook-format antigravity",
 	} {
@@ -1504,14 +1506,18 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 2",
+		"const GC_OPENCODE_HOOK_VERSION = 5",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
 		`runWithWarning(directory, "handoff", "--auto", "context cycle")`,
 		"output.context.push(handoff)",
 		"logRunFailure",
+		"logRunStderr",
 		"mirrorTranscript(directory, client",
+		"providerSessionEnv(sessionID)",
+		"GC_PROVIDER_SESSION_ID",
+		"GC_PROVIDER_SESSION_ID_REQUIRED",
 	} {
 		if !strings.Contains(opencodeHooks, want) {
 			t.Errorf("OpenCode plugin missing marker %q:\n%s", want, opencodeHooks)
@@ -1539,6 +1545,28 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	} {
 		if strings.Contains(string(fs.Files[rel]), "gc hook --inject") {
 			t.Errorf("fresh overlay-managed provider file %s should not install no-op gc hook --inject", rel)
+		}
+	}
+	kimiConfig := string(fs.Files["/work/.kimi/config.toml"])
+	for _, want := range []string{
+		`event = "SessionStart"`,
+		`command = "python3 .kimi/hooks/gascity-session-start.py"`,
+	} {
+		if !strings.Contains(kimiConfig, want) {
+			t.Errorf("Kimi config missing marker %q:\n%s", want, kimiConfig)
+		}
+	}
+	kimiHook := string(fs.Files["/work/.kimi/hooks/gascity-session-start.py"])
+	for _, want := range []string{
+		`payload.get("session_id")`,
+		`GC_PROVIDER_SESSION_ID`,
+		`GC_PROVIDER_SESSION_ID_REQUIRED`,
+		`GC_MANAGED_SESSION_HOOK`,
+		`GC_HOOK_EVENT_NAME`,
+		`gc", "prime", "--hook`,
+	} {
+		if !strings.Contains(kimiHook, want) {
+			t.Errorf("Kimi SessionStart hook missing marker %q:\n%s", want, kimiHook)
 		}
 	}
 	var kiroAgent struct {
@@ -1649,9 +1677,12 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
-		"GC_PI_HOOK_VERSION",
+		"const GC_PI_HOOK_VERSION = 7",
 		"gc hook --inject",
-		`run(["prime", "--hook"], ctx.cwd)`,
+		`run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`,
+		"GC_PROVIDER_SESSION_ID",
+		"GC_PROVIDER_SESSION_ID_REQUIRED",
+		`stdio: ["ignore", "pipe", "inherit"]`,
 		"gc handoff --auto",
 		"mirrorTempCounter",
 		"fs.rmSync(tmp",
@@ -1708,14 +1739,20 @@ func TestPiHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 // gc prime --hook
 // gc hook --inject
 // gc handoff --auto
-const GC_PI_HOOK_VERSION = 4;
-run(["prime", "--hook"], ctx.cwd);
+const GC_PI_HOOK_VERSION = 7;
+run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx));
 run(["hook", "--inject"], ctx.cwd);
 run(["handoff", "--auto", "context cycle"], ctx.cwd);
 let mirrorTempCounter = 0;
+GC_PROVIDER_SESSION_ID;
+GC_PROVIDER_SESSION_ID_REQUIRED;
+stdio: ["ignore", "pipe", "inherit"];
+function providerSessionEnv(ctx) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 4"), []byte("GC_PI_HOOK_VERSION = 3"), 1)
-	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 4"), []byte("GC_PI_HOOK_VERSION = 5"), 1)
+	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 7"), []byte("GC_PI_HOOK_VERSION = 6"), 1)
+	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 7"), []byte("GC_PI_HOOK_VERSION = 8"), 1)
+	missingStderrForward := bytes.Replace(current, []byte(`stdio: ["ignore", "pipe", "inherit"];
+`), nil, 1)
 
 	if !piHookNeedsUpgrade(stale) {
 		t.Fatal("stale Pi hook version did not request upgrade")
@@ -1725,6 +1762,9 @@ let mirrorTempCounter = 0;
 	}
 	if piHookNeedsUpgrade(future) {
 		t.Fatal("newer Pi hook version requested downgrade")
+	}
+	if !piHookNeedsUpgrade(missingStderrForward) {
+		t.Fatal("Pi hook without child stderr forwarding did not request upgrade")
 	}
 }
 
@@ -1753,12 +1793,14 @@ export default {
 		t.Fatal("legacy OMP object-export hook was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OMP_HOOK_VERSION = 1",
+		"const GC_OMP_HOOK_VERSION = 2",
 		`export default function gascityOmpExtension(pi: ExtensionAPI)`,
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
 		"GC_PROVIDER_SESSION_ID",
+		"GC_PROVIDER_SESSION_ID_REQUIRED",
+		`stdio: ["ignore", "pipe", "inherit"]`,
 		"logRunFailure",
 	} {
 		if !strings.Contains(data, want) {
@@ -1773,7 +1815,7 @@ export default {
 
 func TestOMPHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for Oh My Pi (OMP).
-const GC_OMP_HOOK_VERSION = 1;
+const GC_OMP_HOOK_VERSION = 2;
 function logRunFailure(args: string[], cwd: string | undefined, err: unknown) {}
 function providerSessionEnv(ctx: { sessionManager?: { getSessionId?: () => string } }): Record<string, string> {}
 export default function gascityOmpExtension(pi: ExtensionAPI) {
@@ -1782,9 +1824,12 @@ export default function gascityOmpExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", () => {});
 }
 GC_PROVIDER_SESSION_ID;
+GC_PROVIDER_SESSION_ID_REQUIRED;
+stdio: ["ignore", "pipe", "inherit"];
 `)
-	stale := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 1"), []byte("GC_OMP_HOOK_VERSION = 0"), 1)
-	future := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 1"), []byte("GC_OMP_HOOK_VERSION = 2"), 1)
+	stale := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 2"), []byte("GC_OMP_HOOK_VERSION = 1"), 1)
+	future := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 2"), []byte("GC_OMP_HOOK_VERSION = 3"), 1)
+	missingRequiredProvider := bytes.Replace(current, []byte("GC_PROVIDER_SESSION_ID_REQUIRED;\n"), nil, 1)
 
 	if !ompHookNeedsUpgrade(stale) {
 		t.Fatal("stale OMP hook version did not request upgrade")
@@ -1794,6 +1839,9 @@ GC_PROVIDER_SESSION_ID;
 	}
 	if ompHookNeedsUpgrade(future) {
 		t.Fatal("newer OMP hook version requested downgrade")
+	}
+	if !ompHookNeedsUpgrade(missingRequiredProvider) {
+		t.Fatal("OMP hook without required provider session marker did not request upgrade")
 	}
 }
 
@@ -1838,12 +1886,15 @@ export default async function gascityPlugin() {
 		t.Fatal("stale OpenCode managed plugin was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 2",
+		"const GC_OPENCODE_HOOK_VERSION = 5",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
 		`runWithWarning(directory, "handoff", "--auto", "context cycle")`,
 		"logRunFailure",
+		"logRunStderr",
+		"GC_PROVIDER_SESSION_ID",
+		"GC_PROVIDER_SESSION_ID_REQUIRED",
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("upgraded OpenCode plugin missing marker %q:\n%s", want, data)
@@ -1857,18 +1908,24 @@ export default async function gascityPlugin() {
 
 func TestOpenCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for OpenCode.
-const GC_OPENCODE_HOOK_VERSION = 2;
+const GC_OPENCODE_HOOK_VERSION = 5;
 const GC_BIN = process.env.GC_BIN || "gc";
 const PATH_PREFIX =
   "/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:";
 function logRunFailure(args, directory, err) {}
+function logRunStderr(stderr) {}
 async function runWithWarning(directory, ...args) {}
+function providerSessionEnv(sessionID) {}
 "experimental.session.compacting";
+logRunStderr(stderr);
 runWithWarning(directory, "handoff", "--auto", "context cycle");
 output.context.push(handoff);
+GC_PROVIDER_SESSION_ID;
+GC_PROVIDER_SESSION_ID_REQUIRED;
 `)
-	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 2"), []byte("GC_OPENCODE_HOOK_VERSION = 1"), 1)
-	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 2"), []byte("GC_OPENCODE_HOOK_VERSION = 3"), 1)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 5"), []byte("GC_OPENCODE_HOOK_VERSION = 4"), 1)
+	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 5"), []byte("GC_OPENCODE_HOOK_VERSION = 6"), 1)
+	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -1878,6 +1935,9 @@ output.context.push(handoff);
 	}
 	if opencodeHookNeedsUpgrade(future) {
 		t.Fatal("newer OpenCode hook version requested downgrade")
+	}
+	if !opencodeHookNeedsUpgrade(missingStderrLog) {
+		t.Fatal("OpenCode hook without child stderr logging did not request upgrade")
 	}
 }
 

@@ -14,7 +14,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"golang.org/x/term"
 )
@@ -111,11 +110,7 @@ func supervisorCityStopTimeout(cityPath string) time.Duration {
 }
 
 func effectiveCityName(cityPath string) (string, error) {
-	if err := MaterializeBuiltinPacks(cityPath); err != nil {
-		return "", fmt.Errorf("materializing builtin packs: %w", err)
-	}
-	tomlPath := filepath.Join(cityPath, "city.toml")
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	cfg, _, err := loadCityConfigWithBuiltinPacks(cityPath)
 	if err != nil {
 		return "", err
 	}

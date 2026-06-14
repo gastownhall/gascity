@@ -4822,6 +4822,30 @@ func TestValidateAgentsSameNameDifferentDir(t *testing.T) {
 	}
 }
 
+func TestValidateAgentsSameNameDifferentBinding(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", SourceDir: "packs/maintenance"},
+		{Name: "dog", BindingName: "dolt", SourceDir: "packs/bd/dolt"},
+	}
+	if err := ValidateAgents(agents); err != nil {
+		t.Errorf("ValidateAgents: unexpected error for qualified same-name agents: %v", err)
+	}
+}
+
+func TestValidateAgentsSameNameSameBinding(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", BindingName: "dolt", SourceDir: "packs/bd/dolt"},
+		{Name: "dog", BindingName: "dolt", SourceDir: "packs/other-dolt"},
+	}
+	err := ValidateAgents(agents)
+	if err == nil {
+		t.Fatal("expected error for duplicate binding-qualified name")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("error = %q, want 'duplicate'", err)
+	}
+}
+
 func TestValidateAgentsSameNameSameDir(t *testing.T) {
 	agents := []Agent{
 		{Name: "polecat", Dir: "frontend"},
@@ -7744,6 +7768,7 @@ func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
 		{"opencode", []string{"opencode"}},
 		{"kiro", []string{"kiro"}},
 		{"groq", []string{"groq"}},
+		{"kimi", []string{"kimi"}},
 		{"claude", nil},
 	}
 	for _, tc := range cases {
@@ -7751,5 +7776,30 @@ func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("defaultInstallAgentHooksForProvider(%q) = %v, want %v", tc.provider, got, tc.want)
 		}
+	}
+}
+
+func TestCityWithProvidersInstallsKimiHooksByDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		city City
+	}{
+		{
+			name: "wizard",
+			city: WizardCityWithProviders("test-city", "kimi", []string{"kimi"}),
+		},
+		{
+			name: "gastown",
+			city: GastownCityWithProviders("test-city", "kimi", []string{"kimi"}),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.city.Workspace.InstallAgentHooks
+			want := []string{"kimi"}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("Workspace.InstallAgentHooks = %v, want %v", got, want)
+			}
+		})
 	}
 }

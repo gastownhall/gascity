@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1710,6 +1711,50 @@ func (c *capturingRecorder) strandedEvents() []events.Event {
 		}
 	}
 	return out
+}
+
+// session.stranded must carry a typed payload with the stranded work
+// bead IDs and session identity, not just the human-readable Message —
+// machine consumers (pack-level recovery subscribers) act on the
+// payload, not on message text. Regression test for ga-kmoj9c.
+func TestEmitSessionStrandedDiagnostic_CarriesTypedPayload(t *testing.T) {
+	store := beads.NewMemStore()
+	session, work := createDetachedStrandedWork(t, store, "")
+
+	if sample, ok := events.LookupPayload(events.SessionStranded); !ok {
+		t.Fatal("no payload registered for session.stranded")
+	} else if _, typed := sample.(api.SessionStrandedPayload); !typed {
+		t.Fatalf("registered session.stranded payload = %T, want api.SessionStrandedPayload", sample)
+	}
+
+	rec := emitStrandedDiagnosticForTest(t, store, &session)
+	stranded := rec.strandedEvents()
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events = %d, want 1; events: %+v", len(stranded), rec.events)
+	}
+	e := stranded[0]
+	if !strings.Contains(e.Message, work.ID) {
+		t.Fatalf("session.stranded message = %q, want operator text still listing work bead %q", e.Message, work.ID)
+	}
+	if len(e.Payload) == 0 {
+		t.Fatal("session.stranded payload is empty, want typed api.SessionStrandedPayload")
+	}
+	var payload api.SessionStrandedPayload
+	if err := json.Unmarshal(e.Payload, &payload); err != nil {
+		t.Fatalf("decoding session.stranded payload: %v", err)
+	}
+	if payload.SessionID != session.ID {
+		t.Fatalf("payload.SessionID = %q, want %q", payload.SessionID, session.ID)
+	}
+	if payload.SessionName != "worker-mc-dead" {
+		t.Fatalf("payload.SessionName = %q, want %q", payload.SessionName, "worker-mc-dead")
+	}
+	if payload.Template != "worker" {
+		t.Fatalf("payload.Template = %q, want %q", payload.Template, "worker")
+	}
+	if len(payload.WorkBeadIDs) != 1 || payload.WorkBeadIDs[0] != work.ID {
+		t.Fatalf("payload.WorkBeadIDs = %v, want [%q]", payload.WorkBeadIDs, work.ID)
+	}
 }
 
 func TestEmitSessionStrandedDiagnostic_DetachedProbeAliveSuppressesEvent(t *testing.T) {
