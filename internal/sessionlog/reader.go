@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -765,6 +766,269 @@ func FindCodexSessionFile(searchPaths []string, workDir string) string {
 		}
 	}
 	return bestPath
+}
+
+// FindCodexSessionFileNear resolves a codex rollout transcript with a
+// strictly bounded lookup: it opens only the local-date day directories
+// (YYYY/MM/DD) intersecting [anchor-1m, anchor+window] under each merged
+// codex root (plus symlinked extra roots, one level), filters files by the
+// rollout filename timestamp ("rollout-2006-01-02T15-04-05-<uuid>.jsonl",
+// written in local time by the codex CLI) falling inside that window with a
+// 1-hour DST-fold tolerance on both sides, and confirms candidates via the
+// session_meta cwd on the first line. Exactly one physically distinct cwd
+// match is returned; multiple matches are refused as ambiguous (mirroring
+// Manager.TranscriptPath's same-workdir guard) and zero matches, a zero
+// anchor, or a non-positive window return "". Unlike
+// FindCodexSessionFile it never walks the full date tree, so it is safe to
+// call inside a prompt operation.
+//
+// "Local time" means the codex CLI's local time at write: filenames are
+// parsed in THIS process's time.Local, so when the codex process ran under
+// a different timezone than gc (containerized agents, or a host TZ change
+// between write and read) the parsed timestamp shifts by the offset and an
+// otherwise-valid rollout falls outside the window — discovery then returns
+// "" and telemetry silently records nothing, consistent with the bounded
+// best-effort contract.
+func FindCodexSessionFileNear(searchPaths []string, workDir string, anchor time.Time, window time.Duration) string {
+	if workDir == "" || anchor.IsZero() || window <= 0 {
+		return ""
+	}
+	start := anchor.Add(-time.Minute)
+	end := anchor.Add(window)
+	var matches []string
+	seen := make(map[string]bool)
+	for _, root := range mergeCodexSearchPaths(searchPaths) {
+		collectCodexRolloutsNear(root, workDir, start, end, true, seen, &matches)
+		if len(matches) > 1 {
+			return ""
+		}
+	}
+	if len(matches) != 1 {
+		return ""
+	}
+	return matches[0]
+}
+
+// appendCodexRolloutMatch appends path to matches unless its physical
+// identity was already seen. One rollout is commonly reachable through two
+// lexical paths (a configured root holding the aimux symlink AND the
+// symlink's target listed directly); without physical dedup that single file
+// would trip the ambiguity refusal. EvalSymlinks is used for identity
+// comparison only — the FIRST lexical path is kept so the paired extractor's
+// lexical containment validation still passes. On resolve error the lexical
+// path itself is the identity.
+func appendCodexRolloutMatch(path string, seen map[string]bool, matches *[]string) {
+	key := path
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		key = resolved
+	}
+	if seen[key] {
+		return
+	}
+	seen[key] = true
+	*matches = append(*matches, path)
+}
+
+// collectCodexRolloutsNear appends in-window cwd-matching rollouts under one
+// codex root to matches, deduplicated by physical identity via
+// appendCodexRolloutMatch (seen is shared across roots by the caller).
+// followExtraRoots permits one level of recursion into symlinked non-date
+// roots (aimux-managed accounts), matching findCodexSessionFileIn's
+// treatment of them. Recursion keeps the symlink-LEXICAL path
+// (root/<link>/...) rather than the resolved target: the paired extractor
+// (ExtractCodexTailUsageFromSearchPaths) validates containment lexically
+// against the merged search roots, so a resolved path outside them would be
+// discovered here only to be rejected there.
+//
+// The filename-timestamp filter accepts a 1-hour tolerance on both sides of
+// [start, end]: during the autumn DST fold the wall time embedded in the
+// filename is ambiguous and time.ParseInLocation can resolve it 1h off, so a
+// genuinely in-window rollout would otherwise fail the exact filter. The cwd
+// confirmation still guards attribution. The day-dir iteration is likewise
+// padded by one calendar day on each side — the tolerance can cross local
+// midnight, and startOfLocalDay in zones whose DST transition falls AT
+// midnight (e.g. America/Santiago) can land on 23:00 of the previous day and
+// skip the final calendar day; ENOENT readdirs are free.
+func collectCodexRolloutsNear(root, workDir string, start, end time.Time, followExtraRoots bool, seen map[string]bool, matches *[]string) {
+	tolStart := start.Add(-time.Hour)
+	tolEnd := end.Add(time.Hour)
+	firstDay := startOfLocalDay(start.In(time.Local)).AddDate(0, 0, -1)
+	lastDay := startOfLocalDay(end.In(time.Local)).AddDate(0, 0, 1)
+	for day := firstDay; !day.After(lastDay); day = day.AddDate(0, 0, 1) {
+		dayDir := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
+		entries, err := os.ReadDir(dayDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			ts, ok := codexRolloutFilenameTime(e.Name())
+			if !ok || ts.Before(tolStart) || ts.After(tolEnd) {
+				continue
+			}
+			path := filepath.Join(dayDir, e.Name())
+			if codexSessionCWD(path) == workDir {
+				appendCodexRolloutMatch(path, seen, matches)
+				if len(*matches) > 1 {
+					return
+				}
+			}
+		}
+	}
+	if !followExtraRoots {
+		return
+	}
+	rootEntries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, e := range rootEntries {
+		if e.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		name := e.Name()
+		if len(name) == 4 && name >= "2000" && name <= "2099" {
+			continue
+		}
+		// os.ReadDir follows the symlink on its own; non-directory or
+		// dangling links simply fail every ReadDir in the recursion.
+		collectCodexRolloutsNear(filepath.Join(root, name), workDir, start, end, false, seen, matches)
+		if len(*matches) > 1 {
+			return
+		}
+	}
+}
+
+// codexByIDDayDirCap bounds the day directories scanned per root by
+// FindCodexSessionFileByID (~ one year plus padding). Ranges larger than the
+// cap scan only the most recent cap days, iterating backward from the
+// newest, so a pathologically old notBefore cannot turn the keyed lookup
+// into an unbounded readdir sweep.
+const codexByIDDayDirCap = 370
+
+// FindCodexSessionFileByID resolves a codex rollout transcript by session
+// identity: the codex CLI names rollouts
+// "rollout-<localtime>-<session-uuid>.jsonl" where the uuid suffix equals
+// the session_meta payload.id, so a captured session id keys the file
+// directly — including resumed sessions, which APPEND to the original
+// rollout whose filename timestamp predates any later wake. Local-day dirs
+// (same year/month/day layout and one-level symlinked extra roots as
+// collectCodexRolloutsNear) from one day before notBefore through one day
+// after notAfter are enumerated newest-first, capped at codexByIDDayDirCap
+// per root; candidates match by FILENAME ONLY (no file opens), deduplicate
+// by physical identity (keeping the first lexical path so the paired
+// extractor's lexical containment validation still passes), and multiple
+// distinct physical matches are refused as ambiguous. The single match is
+// confirmed via the session_meta cwd exactly like FindCodexSessionFileNear
+// before being returned; empty inputs or a zero notAfter return "".
+func FindCodexSessionFileByID(searchPaths []string, workDir, sessionID string, notBefore, notAfter time.Time) string {
+	workDir = strings.TrimSpace(workDir)
+	sessionID = strings.TrimSpace(sessionID)
+	if workDir == "" || sessionID == "" || notAfter.IsZero() {
+		return ""
+	}
+	suffix := "-" + sessionID + ".jsonl"
+	firstDay := startOfLocalDay(notBefore.In(time.Local)).AddDate(0, 0, -1)
+	lastDay := startOfLocalDay(notAfter.In(time.Local)).AddDate(0, 0, 1)
+	if lastDay.Before(firstDay) {
+		return ""
+	}
+	var matches []string
+	seen := make(map[string]bool)
+	for _, root := range mergeCodexSearchPaths(searchPaths) {
+		collectCodexRolloutsByID(root, suffix, firstDay, lastDay, true, seen, &matches)
+		if len(matches) > 1 {
+			return ""
+		}
+	}
+	if len(matches) != 1 {
+		return ""
+	}
+	if codexSessionCWD(matches[0]) != workDir {
+		return ""
+	}
+	return matches[0]
+}
+
+// collectCodexRolloutsByID appends rollouts whose filename carries the
+// "rollout-" prefix and the keyed "-<sessionID>.jsonl" suffix under one
+// codex root, deduplicated by physical identity via appendCodexRolloutMatch
+// (seen is shared across roots by the caller). Day dirs are scanned newest
+// first so the per-root codexByIDDayDirCap drops the oldest days of an
+// oversized range. followExtraRoots permits one level of recursion into
+// symlinked non-date roots, mirroring collectCodexRolloutsNear.
+func collectCodexRolloutsByID(root, suffix string, firstDay, lastDay time.Time, followExtraRoots bool, seen map[string]bool, matches *[]string) {
+	scanned := 0
+	for day := lastDay; !day.Before(firstDay) && scanned < codexByIDDayDirCap; day = day.AddDate(0, 0, -1) {
+		scanned++
+		dayDir := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
+		entries, err := os.ReadDir(dayDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, suffix) {
+				continue
+			}
+			appendCodexRolloutMatch(filepath.Join(dayDir, name), seen, matches)
+			if len(*matches) > 1 {
+				return
+			}
+		}
+	}
+	if !followExtraRoots {
+		return
+	}
+	rootEntries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, e := range rootEntries {
+		if e.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		name := e.Name()
+		if len(name) == 4 && name >= "2000" && name <= "2099" {
+			continue
+		}
+		// os.ReadDir follows the symlink on its own; non-directory or
+		// dangling links simply fail every ReadDir in the recursion.
+		collectCodexRolloutsByID(filepath.Join(root, name), suffix, firstDay, lastDay, false, seen, matches)
+		if len(*matches) > 1 {
+			return
+		}
+	}
+}
+
+// codexRolloutFilenameTime parses the local-time timestamp embedded in a
+// codex rollout filename ("rollout-2006-01-02T15-04-05-<uuid>.jsonl").
+func codexRolloutFilenameTime(name string) (time.Time, bool) {
+	const prefix = "rollout-"
+	const layout = "2006-01-02T15-04-05"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".jsonl") {
+		return time.Time{}, false
+	}
+	rest := name[len(prefix):]
+	if len(rest) < len(layout) {
+		return time.Time{}, false
+	}
+	ts, err := time.ParseInLocation(layout, rest[:len(layout)], time.Local)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts, true
+}
+
+// startOfLocalDay truncates t to local midnight.
+func startOfLocalDay(t time.Time) time.Time {
+	year, month, day := t.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, time.Local)
 }
 
 // findCodexSessionFileIn searches a Codex sessions directory for the most

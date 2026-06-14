@@ -5,16 +5,21 @@ import (
 	"os"
 )
 
-// TailUsage is the per-invocation token usage parsed from one assistant
-// entry in the tail of a session transcript.
+// TailUsage is the per-invocation token usage parsed from one
+// usage-bearing entry in the tail of a session transcript. It is the
+// family-generic shape shared by the claude (ExtractTailUsage) and codex
+// (ExtractCodexTailUsage) extractors.
 type TailUsage struct {
-	// EntryUUID is the transcript entry identifier (Claude DAG uuid). When
-	// one API response spans several content-block entries, this is the
-	// uuid of the LAST entry observed for the message.
+	// EntryUUID is the family-specific transcript entry identifier: the
+	// Claude DAG uuid (the LAST entry observed when one API response spans
+	// several content-block entries) or the codex token_count line timestamp.
 	EntryUUID string
-	// MessageID is the provider message identifier (msg_*) shared by every
-	// content-block entry of one API response. Empty when the transcript
-	// entry carries no message id.
+	// MessageID is the family-specific invocation collapse identity used
+	// for deduplication: the Claude provider message id (msg_*, shared by
+	// every content-block entry of one API response) or the codex
+	// cumulative-total identity ("total:<total_tokens>", shared by
+	// duplicate token_count emissions). Empty when the transcript entry
+	// carries no collapse identity.
 	MessageID string
 	// Model is the provider model identifier that produced the entry.
 	Model string
