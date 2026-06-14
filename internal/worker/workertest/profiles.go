@@ -132,15 +132,10 @@ func Phase1Profiles() []Profile {
 				RecallResponseContains: "The fixture models normalized transcript history.",
 				ResetResponseContains:  "I cannot repeat the earlier fixture summary because this chat is fresh.",
 			},
-			Usage: UsageExpectation{
-				Supported:         true,
-				Invocations:       1,
-				InputTokens:       100,
-				OutputTokens:      40,
-				CacheReadTokens:   10,
-				Model:             "gemini-2.5-pro",
-				DefaultCostPriced: false,
-			},
+			// gemini is deprecated and its invocation-usage extractor was
+			// dropped (PR #3485): no Usage expectation, so WC-TX-USAGE-001 /
+			// WC-USAGE-COST-001 report it Unsupported (out of scope), matching
+			// worker.InvocationUsageFamily.
 		},
 		{
 			ID:       ProfileKimiTmuxCLI,
