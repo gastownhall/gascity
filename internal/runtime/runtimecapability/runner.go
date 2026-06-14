@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +24,10 @@ const (
 	sentinelContent = "GC_CAPABILITY_WORKSPACE_OK"
 	// probeSessionEnv is injected and read back by the identity probe.
 	probeSessionEnv = "GC_SESSION"
+	// ledgerEnv is the gc beads API endpoint injected for the ledger probe;
+	// the runtime makes it reachable from the session (directly here, via a
+	// sandbox->host tunnel for a remote runtime). A conformant `bd` reads it.
+	ledgerEnv = "GC_BEADS_API"
 )
 
 // Options tune a capability run. The zero value is CI-ready.
@@ -89,8 +95,22 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 		return Report{}, fmt.Errorf("writing sentinel: %w", err)
 	}
 
+	// The ledger double: the gc beads API the session's bd must reach. The
+	// runtime is handed its URL (via the start-config env) and is responsible
+	// for making it reachable from the session. Locally that's direct; for a
+	// remote runtime it's a sandbox->host tunnel (the deferred transport).
+	ledger := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/v0/beads/ready" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":[]}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ledger.Close()
+
 	name := opts.SessionName
-	if status, detail := r.startSession(ctx, name, workDir); status != StatusPass {
+	if status, detail := r.startSession(ctx, name, workDir, ledger.URL); status != StatusPass {
 		// Start itself failed — every declared capability fails with the reason.
 		for _, cb := range catalog {
 			if declared[cb.Code] {
@@ -135,11 +155,11 @@ func (r *runner) handshake(ctx context.Context) runtime.ProtocolInfo {
 
 // startSession starts a session whose start-config carries work_dir + the
 // probe identity env, so a capability-providing runtime materializes them.
-func (r *runner) startSession(ctx context.Context, name, workDir string) (Status, string) {
+func (r *runner) startSession(ctx context.Context, name, workDir, ledgerURL string) (Status, string) {
 	cfg, _ := json.Marshal(map[string]any{
 		"work_dir": workDir,
 		"command":  r.opts.Command,
-		"env":      map[string]string{probeSessionEnv: name},
+		"env":      map[string]string{probeSessionEnv: name, ledgerEnv: ledgerURL},
 	})
 	_, code, err := r.invoke(ctx, r.opts.StartTimeout, cfg, "start", name)
 	switch {

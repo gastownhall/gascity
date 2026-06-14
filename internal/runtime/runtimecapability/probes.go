@@ -19,6 +19,7 @@ var probes = map[Code]probe{
 	CapWorkspace: probeWorkspace,
 	CapTooling:   probeTooling,
 	CapIdentity:  probeIdentity,
+	CapLedger:    probeLedger,
 }
 
 // probeWorkspace verifies the start-config work_dir was materialized: the
@@ -70,4 +71,21 @@ func probeIdentity(ctx context.Context, r *runner, name string) (Status, string)
 		return StatusFail, "no run-as user in session (whoami empty)"
 	}
 	return StatusPass, fmt.Sprintf("%s=%s, user=%s injected", probeSessionEnv, name, strings.TrimSpace(who))
+}
+
+// probeLedger verifies the session's bd can reach the work ledger: `bd ready`
+// inside the session must succeed, which requires the runtime to have made the
+// gc beads API reachable from the session (the GC_BEADS_API endpoint the
+// runner injects — pointed at a real endpoint locally, at a sandbox->host
+// tunnel for a remote runtime). Transport-agnostic: the probe only asserts bd
+// reaches the ledger, not how.
+func probeLedger(ctx context.Context, r *runner, name string) (Status, string) {
+	out, code, unsupported := r.execIn(ctx, name, "bd ready")
+	if unsupported {
+		return StatusFail, "declares env.ledger but has no exec op to verify it"
+	}
+	if code != 0 {
+		return StatusFail, fmt.Sprintf("`bd ready` failed in session (exit %d) — bd cannot reach the ledger: %s", code, strings.TrimSpace(out))
+	}
+	return StatusPass, "bd reaches the work ledger from the session"
 }

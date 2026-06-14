@@ -34,6 +34,7 @@ const (
 	CapWorkspace Code = "env.workspace"
 	CapTooling   Code = "env.tooling"
 	CapIdentity  Code = "env.identity"
+	CapLedger    Code = "env.ledger"
 )
 
 // Capability is one environment guarantee a runtime may declare and that
@@ -50,6 +51,7 @@ var catalog = []Capability{
 	{CapWorkspace, "the start-config work_dir is materialized in the session (file transfer in)"},
 	{CapTooling, "the agent toolchain (gc, bd, git, …) is installed and runnable in the session"},
 	{CapIdentity, "the session identity/env (GC_* vars, run-as user) is injected"},
+	{CapLedger, "the session's bd can reach the work ledger (the gc beads API) — transport (tunnel) is the runtime's concern"},
 }
 
 // Catalog returns the capability list in probe order (a copy).

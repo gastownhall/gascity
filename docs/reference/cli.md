@@ -3120,6 +3120,7 @@ gc runtime conformance <name|executable> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--env` | bool |  | also run the environment-plane capability suite (env.* guarantees) |
 | `--json` | bool |  | emit a machine-readable JSON report |
 
 ## gc runtime drain

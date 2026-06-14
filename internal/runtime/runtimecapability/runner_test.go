@@ -16,14 +16,16 @@ type refConfig struct {
 	materializeWorkspace bool
 	installTooling       bool
 	injectIdentity       bool
+	wireLedger           bool
 }
 
 func goldenConfig() refConfig {
 	return refConfig{
-		caps:                 []string{"env.workspace", "env.tooling", "env.identity"},
+		caps:                 []string{"env.workspace", "env.tooling", "env.identity", "env.ledger"},
 		materializeWorkspace: true,
 		installTooling:       true,
 		injectIdentity:       true,
+		wireLedger:           true,
 	}
 }
 
@@ -47,13 +49,24 @@ func writeRef(t *testing.T, cfg refConfig) string {
 	if !cfg.materializeWorkspace {
 		materialize = `mkdir -p "$D/workdir"` // create the dir but DON'T copy the work_dir
 	}
-	install := `mkdir -p "$D/bin"; for tprog in gc bd git; do printf '#!/bin/sh\necho "%s version (ref)\n"' "$tprog" > "$D/bin/$tprog"; chmod +x "$D/bin/$tprog"; done`
+	// gc/git are version printers; bd is a smart shim: `bd version` prints, and
+	// `bd ready` proves ledger reachability by hitting $GC_BEADS_API over HTTP
+	// (curl, wget fallback) — so the ledger probe tests real reachability.
+	install := `mkdir -p "$D/bin"
+for tprog in gc git; do printf '#!/bin/sh\necho "%s version (ref)\n"' "$tprog" > "$D/bin/$tprog"; chmod +x "$D/bin/$tprog"; done
+printf '#!/bin/sh\nif [ "$1" = ready ]; then [ -n "$GC_BEADS_API" ] || exit 1; command -v curl >/dev/null 2>&1 && exec curl -fsS -o /dev/null "$GC_BEADS_API/v0/beads/ready"; exec wget -q -O /dev/null "$GC_BEADS_API/v0/beads/ready"; fi\necho "bd version (ref)"\n' > "$D/bin/bd"; chmod +x "$D/bin/bd"`
 	if !cfg.installTooling {
 		install = `mkdir -p "$D/bin"` // no gc/bd/git installed
 	}
 	inject := `printf 'export GC_SESSION=%s\n' "$sess" > "$D/env"`
 	if !cfg.injectIdentity {
-		inject = `: > "$D/env"` // empty env
+		inject = `: > "$D/env"` // empty env (kept so ledger wiring can append)
+	}
+	// wire the work ledger: export GC_BEADS_API into the session env so the
+	// session's bd can reach it. Gated so a mutant can break exactly ledger.
+	wire := `printf 'export GC_BEADS_API=%s\n' "$led" >> "$D/env"`
+	if !cfg.wireLedger {
+		wire = `:` // ledger endpoint not wired into the session
 	}
 
 	body := fmt.Sprintf(`#!/bin/sh
@@ -66,7 +79,9 @@ case "$op" in
     cfg=$(cat)
     wd=$(printf '%%s' "$cfg" | sed -n 's/.*"work_dir":"\([^"]*\)".*/\1/p')
     sess=$(printf '%%s' "$cfg" | sed -n 's/.*"GC_SESSION":"\([^"]*\)".*/\1/p')
+    led=$(printf '%%s' "$cfg" | sed -n 's/.*"GC_BEADS_API":"\([^"]*\)".*/\1/p')
     mkdir -p "$D"
+    %s
     %s
     %s
     %s
@@ -85,7 +100,7 @@ case "$op" in
   is-running) [ -d "$D" ] && echo true || echo false ;;
   *) exit 2 ;;
 esac
-`, state, capsJSON, materialize, install, inject)
+`, state, capsJSON, materialize, install, inject, wire)
 
 	path := filepath.Join(t.TempDir(), "gc-runtime-ref")
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
@@ -154,6 +169,7 @@ func TestEveryCapabilityIsGated(t *testing.T) {
 		{CapWorkspace, func(c *refConfig) { c.materializeWorkspace = false }},
 		{CapTooling, func(c *refConfig) { c.installTooling = false }},
 		{CapIdentity, func(c *refConfig) { c.injectIdentity = false }},
+		{CapLedger, func(c *refConfig) { c.wireLedger = false }},
 	}
 	covered := map[Code]bool{}
 	for _, m := range mutants {
