@@ -10,6 +10,9 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementTranscriptDiscovery                 RequirementCode = "WC-TX-001"
 	RequirementTranscriptNormalization             RequirementCode = "WC-TX-002"
 	RequirementTranscriptDiagnostics               RequirementCode = "WC-TX-003"
+	RequirementTranscriptUsage                     RequirementCode = "WC-TX-USAGE-001"
+	RequirementInvocationUsageCost                 RequirementCode = "WC-USAGE-COST-001"
+	RequirementInvocationUsageRecording            RequirementCode = "WC-USAGE-RECORD-001"
 	RequirementContinuationContinuity              RequirementCode = "WC-CONT-001"
 	RequirementFreshSessionIsolation               RequirementCode = "WC-CONT-002"
 	RequirementStartupOutcomeBound                 RequirementCode = "WC-BRINGUP-001"
@@ -64,6 +67,16 @@ func Phase1Catalog() []Requirement {
 			Description: "The profile transcript normalizes into the canonical message shape.",
 		},
 		{
+			Code:        RequirementTranscriptUsage,
+			Group:       "transcript",
+			Description: "The profile transcript yields the expected per-invocation token usage for families with invocation-telemetry support; families without an extractor are explicitly out of scope.",
+		},
+		{
+			Code:        RequirementInvocationUsageCost,
+			Group:       "transcript",
+			Description: "Extracted per-invocation usage is priceable: it carries the model pricing key, default pricing applies only where the family has shipped default rates, and an operator-configured rate yields a positive cost estimate.",
+		},
+		{
 			Code:        RequirementContinuationContinuity,
 			Group:       "continuation",
 			Description: "The continued transcript preserves prior normalized history and logical conversation identity.",
@@ -72,6 +85,22 @@ func Phase1Catalog() []Requirement {
 			Code:        RequirementFreshSessionIsolation,
 			Group:       "continuation",
 			Description: "A fresh session fixture does not alias the prior logical conversation.",
+		},
+	}
+}
+
+// TelemetryHandleCatalog returns worker-handle invocation-telemetry
+// requirements. Unlike the transcript catalog, these are handle-behavior
+// rules (which handle records gc.agent.tokens.* on a prompt op), so they are
+// enforced by worker-package handle tests rather than the fixture-driven
+// profile runner; the catalog registers them as the conformance contract of
+// record.
+func TelemetryHandleCatalog() []Requirement {
+	return []Requirement{
+		{
+			Code:        RequirementInvocationUsageRecording,
+			Group:       "telemetry",
+			Description: "A prompt operation on a transcript-backed SessionHandle records gc.agent.tokens.*; a runtime-only RuntimeHandle is permanently excluded (ga-tkvb31).",
 		},
 	}
 }

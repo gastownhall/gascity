@@ -94,6 +94,19 @@ func (a SessionLogAdapter) CodexTailUsage(path string) ([]sessionlog.TailUsage, 
 	return sessionlog.ExtractCodexTailUsageFromSearchPaths(a.SearchPaths, path)
 }
 
+// InvocationUsage reads per-invocation token usage from a discovered
+// transcript using the SAME extractor the prompt-op telemetry gate uses for
+// the provider's invocation-usage family (invocationUsageSpecs). It returns
+// (nil, nil) for families without invocation-telemetry support, so callers can
+// treat "no extractor" and "no usage" uniformly.
+func (a SessionLogAdapter) InvocationUsage(provider, path string) ([]sessionlog.TailUsage, error) {
+	family, ok := InvocationUsageFamily(provider)
+	if !ok {
+		return nil, nil
+	}
+	return invocationUsageSpecs[family].extract(a, path)
+}
+
 // TailActivity reads the transcript tail activity without loading full history.
 func (a SessionLogAdapter) TailActivity(path string) (TailActivity, error) {
 	meta, err := a.TailMeta(path)

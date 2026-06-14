@@ -108,8 +108,12 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if transcriptProvider == "" {
 		transcriptProvider = strings.TrimSpace(info.Provider)
 	}
-	// Provider-family (not role-name) gate: see the doc comment above.
-	spec, ok := invocationUsageSpecs[invocationUsageFamily(transcriptProvider)]
+	// Provider-family (not role-name) gate: see the doc comment above. The
+	// normalized family keys the gate, the telemetry label, and the pricing
+	// lookup below, so the recorded provider can never drift from the family
+	// that gated the record.
+	providerFamily := invocationUsageFamily(transcriptProvider)
+	spec, ok := invocationUsageSpecs[providerFamily]
 	if !ok {
 		return
 	}
@@ -134,16 +138,6 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if agentName == "" {
 		agentName = strings.TrimSpace(info.SessionName)
 	}
-	// The provider label and pricing key must be the provider family (for
-	// example "claude"), never the profile string ("claude/tmux-cli").
-	providerFamily := profileFamily(h.session.Profile)
-	if providerFamily == "" {
-		providerFamily = strings.TrimSpace(info.Provider)
-	}
-	if providerFamily == "" {
-		providerFamily = strings.TrimSpace(h.session.Provider)
-	}
-
 	for _, u := range pending {
 		labels := telemetry.InvocationLabels{
 			AgentName: agentName,
@@ -219,9 +213,21 @@ func invocationUsageFamily(provider string) string {
 	return ""
 }
 
+// InvocationUsageFamily resolves the provider's invocation-usage family and
+// reports whether the worker has a per-invocation token/cost extractor
+// registered for it. It is the canonical query for invocation-telemetry
+// support: the worker conformance suite uses it so usage coverage stays
+// aligned with invocationUsageSpecs — adding a family there forces a
+// conformance decision rather than leaving a silent gap.
+func InvocationUsageFamily(provider string) (family string, supported bool) {
+	family = invocationUsageFamily(provider)
+	_, supported = invocationUsageSpecs[family]
+	return family, supported
+}
+
 // discoverInvocationTranscriptViaManager resolves the transcript through
 // Manager.TranscriptPath — safe for families whose route there is cheap
-// (claude keyed lookup, gemini bounded project scan). Errors are swallowed.
+// (claude keyed lookup). Errors are swallowed.
 func discoverInvocationTranscriptViaManager(h *SessionHandle, id string, _ beads.Bead) string {
 	path, err := h.manager.TranscriptPath(id, h.adapter.SearchPaths)
 	if err != nil {
