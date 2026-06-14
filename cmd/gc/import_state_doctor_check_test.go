@@ -1018,3 +1018,168 @@ version = "`+dummyOldPin+`"
 		t.Fatalf("pack.toml was NOT rolled back, missing old pin:\n%s", packData)
 	}
 }
+
+// TestImportStateDoctorCheckRepinsSupersededCityRootImport is a regression for
+// the attempt-1 review (codex, major): packv2-import-state detects superseded
+// canonical pins across the effective root import set, which includes
+// top-level city.toml [imports.*] overrides (see applyCityRootImportOverridesFS),
+// but the superseded-pin fix path only re-pinned pack.toml, rig, and
+// default-rig imports. A superseded pin declared solely in a top-level
+// city.toml [imports.*] override was therefore left untouched, so
+// "gc doctor --fix" kept reporting the same violation.
+func TestImportStateDoctorCheckRepinsSupersededCityRootImport(t *testing.T) {
+	clearGCEnv(t)
+	dummyOldPin := "sha:1234567890abcdef1234567890abcdef12345678"
+	prevSuperseded := config.SupersededBundledPackImportVersions
+	config.SupersededBundledPackImportVersions = append(config.SupersededBundledPackImportVersions, dummyOldPin)
+	t.Cleanup(func() {
+		config.SupersededBundledPackImportVersions = prevSuperseded
+	})
+
+	cityDir := t.TempDir()
+	// The superseded pin lives only in the top-level city.toml [imports.*]
+	// override; pack.toml carries no offending import.
+	writeCityToml(t, cityDir, `[workspace]
+name = "demo"
+
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "`+dummyOldPin+`"
+`)
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 2
+`)
+
+	check := newImportStateDoctorCheck(cityDir)
+	result := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error for superseded city-root pin; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
+		t.Fatalf("details = %v, want superseded-canonical-pin entry", result.Details)
+	}
+
+	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+
+	cityData, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cityText := string(cityData)
+	if strings.Contains(cityText, dummyOldPin) {
+		t.Fatalf("city.toml still pins the superseded version in its root [imports.*] override:\n%s", cityText)
+	}
+	if !strings.Contains(cityText, config.BundledPackImportVersion) {
+		t.Fatalf("city.toml root import was not re-pinned to the current canonical version:\n%s", cityText)
+	}
+
+	after := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if strings.Contains(strings.Join(after.Details, "\n"), "superseded-canonical-pin") {
+		t.Fatalf("superseded-canonical-pin still reported after fix:\n%v", after.Details)
+	}
+}
+
+// TestImportStateDoctorCheckRewritesLegacyCityRootImport is a regression for
+// the attempt-1 review (codex, major): packv2-import-state detects legacy
+// public-pack sources across the effective root import set, which includes
+// top-level city.toml [imports.*] overrides (see applyCityRootImportOverridesFS),
+// but the legacy-public-pack fix path only rewrote pack.toml, rig, and
+// default-rig imports. A legacy .gc/system/packs source declared solely in a
+// top-level city.toml [imports.*] override was therefore left untouched, so
+// "gc doctor --fix" kept reporting it.
+func TestImportStateDoctorCheckRewritesLegacyCityRootImport(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	// The legacy public-pack source lives only in the top-level city.toml
+	// [imports.*] override.
+	writeCityToml(t, cityDir, `[workspace]
+name = "demo"
+
+[imports.gastown]
+source = ".gc/system/packs/gastown"
+`)
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+`)
+
+	prevResolve := resolveWave1PublicPackImports
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() {
+		resolveWave1PublicPackImports = prevResolve
+		syncImports = prevSync
+		installLockedImports = prevInstall
+		checkInstalledImports = prevCheck
+	})
+
+	targets := map[string]wave1PublicPackImportTarget{
+		"gastown": {
+			Binding: "gastown",
+			Import:  config.Import{Source: "https://packages.example/gastown.git", Version: "^1.2"},
+		},
+		"maintenance": {Binding: "maintenance", Remove: true},
+	}
+	resolveWave1PublicPackImports = func(_ []string) (map[string]wave1PublicPackImportTarget, error) {
+		return targets, nil
+	}
+	lock := &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			targets["gastown"].Import.Source: {Version: "1.2.3", Commit: "abc"},
+		},
+	}
+	syncImports = func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		for key, imp := range imports {
+			if strings.HasPrefix(imp.Source, ".gc/system/packs/") || strings.HasPrefix(imp.Source, "examples/gastown/packs/") {
+				t.Fatalf("imports still contains a legacy source at %s after the rewrite: %#v", key, imports)
+			}
+		}
+		return lock, nil
+	}
+	installLockedImports = func(_ string) (*packman.Lockfile, error) {
+		return lock, nil
+	}
+	checkInstalledImports = func(_ string, imports map[string]config.Import) (*packman.CheckReport, error) {
+		for key, imp := range imports {
+			if strings.HasPrefix(imp.Source, ".gc/system/packs/") || strings.HasPrefix(imp.Source, "examples/gastown/packs/") {
+				return &packman.CheckReport{Issues: []packman.CheckIssue{{Code: "legacy-leftover", ImportName: key, Source: imp.Source}}}, nil
+			}
+		}
+		return &packman.CheckReport{CheckedSources: 1}, nil
+	}
+
+	check := newImportStateDoctorCheck(cityDir)
+	result := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error for legacy city-root import; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "legacy-public-pack-source") {
+		t.Fatalf("details = %v, want legacy-public-pack-source entry", result.Details)
+	}
+
+	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+
+	cityData, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cityText := string(cityData)
+	if strings.Contains(cityText, ".gc/system/packs/gastown") {
+		t.Fatalf("city.toml still contains the legacy public-pack source in its root [imports.*] override:\n%s", cityText)
+	}
+	if !strings.Contains(cityText, "https://packages.example/gastown.git") {
+		t.Fatalf("city.toml root import was not rewritten to the migrated gastown source:\n%s", cityText)
+	}
+
+	after := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if after.Status != doctor.StatusOK {
+		t.Fatalf("status after fix = %v, want OK; result=%#v", after.Status, after)
+	}
+}

@@ -389,11 +389,11 @@ func (c *builtinImportDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 // packv2-import-state check owns: wave-1 public-pack sources
 // (gastown/maintenance under the retired tree) are detected and rewritten
 // there, and double-reporting them here with different guidance would
-// conflict. The import-state check only reads pack.toml, city.toml rig
-// imports, and root-pack default-rig imports; city.toml's top-level
-// [imports] table and all fragment import-source refs stay here because
-// no other check names them. Include-list references to those packs stay
-// here too — the import-state check only reads declared imports.
+// conflict. The import-state check reads pack.toml and root city.toml
+// declared imports, including top-level overrides, rig imports, and
+// default-rig imports. Fragment import-source refs stay here because no
+// other check names them. Include-list references to those packs stay here
+// too — the import-state check only reads declared imports.
 func doctorOwnedLegacyRefs(cityPath string, refs []legacySystemPacksRef) []legacySystemPacksRef {
 	owned := make([]legacySystemPacksRef, 0, len(refs))
 	for _, ref := range refs {
@@ -411,10 +411,7 @@ func importStateOwnsWave1Ref(ref legacySystemPacksRef) bool {
 	if ref.File == "pack.toml" {
 		return true
 	}
-	if ref.File != "city.toml" {
-		return false
-	}
-	return !strings.HasPrefix(ref.Surface, "imports.")
+	return ref.File == "city.toml"
 }
 
 // splitLegacyRefsByFixability mirrors what Fix can rewrite: city.toml
@@ -422,11 +419,12 @@ func importStateOwnsWave1Ref(ref legacySystemPacksRef) bool {
 // after the replacement pack.toml import lands) or that reference the
 // folded-into-core maintenance pack (removed), and city.toml references
 // whose pack has a canonical bundled import (converted/rewritten in
-// place). Everything else — fragments, pack.toml, wave-1 public-pack
-// import sources (Fix never rewrites those; the packv2-import-state
-// check owns their semantics, including the maintenance removal), and
-// non-builtin packs under the retired tree on every surface including
-// workspace.includes — needs the manual edit named in the detail line.
+// place). Everything else — fragments, pack.toml, fragment-authored
+// wave-1 public-pack import sources (Fix never rewrites those; the
+// packv2-import-state check owns root-declared wave-1 semantics,
+// including the maintenance removal), and non-builtin packs under the
+// retired tree on every surface including workspace.includes — needs the
+// manual edit named in the detail line.
 func splitLegacyRefsByFixability(cityPath string, refs []legacySystemPacksRef) (auto, manual []legacySystemPacksRef) {
 	for _, ref := range refs {
 		switch {
@@ -578,6 +576,16 @@ func (c *builtinImportDoctorCheck) Fix(_ *doctor.CheckContext) error {
 	}
 
 	// 3. Refresh the lockfile + caches so the new imports resolve offline.
+	// Only when steps 1-2 actually landed or rewrote imports. When the sole
+	// detected condition is one this Fix does not own — a manual-migration
+	// reference or an uninspectable fragment — steps 1-2 are no-ops (order is
+	// empty and nothing migrated), so resyncing every declared import here
+	// would turn an advisory warning into a hard --fix failure whenever an
+	// unrelated import is momentarily unresolvable (e.g. offline, or a sibling
+	// superseded pin the packv2-import-state check repairs later in the run).
+	if len(order) == 0 && !changed {
+		return nil
+	}
 	allImports, err := collectAllImportsFS(fsys.OSFS{}, c.cityPath)
 	if err != nil {
 		return fmt.Errorf("reading declared imports: %w", err)

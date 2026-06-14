@@ -205,36 +205,50 @@ func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) error {
 		return fmt.Errorf("%s: %w", action, cause)
 	}
 
+	// Compute every pack.toml and city.toml change before writing anything, so
+	// a post-detection city.toml read failure cannot leave pack.toml
+	// half-rewritten (the rollback snapshots only cover writes we reach).
 	manifest, err := loadCityPackManifestFS(fs, cityPath)
 	if err != nil {
 		return err
 	}
 	packChanged := bump(manifest.Imports)
 	defaultRigChanged := bump(manifest.Defaults.Rig.Imports)
+
+	var cfg *config.City
+	cityChanged := false
+	cityExists := true
+	if _, err := fs.Stat(cityTomlPath); err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		cityExists = false
+	}
+	if cityExists {
+		cfg, err = loadCityImportManifestFS(fs, cityPath)
+		if err != nil {
+			return err
+		}
+		// Top-level [imports.*] overrides are part of the effective import set
+		// the check detects (see applyCityRootImportOverridesFS), so they must
+		// be re-pinned too or doctor --fix re-reports the same violation.
+		if bump(cfg.Imports) {
+			cityChanged = true
+		}
+		for i := range cfg.Rigs {
+			if bump(cfg.Rigs[i].Imports) {
+				cityChanged = true
+			}
+		}
+		if bump(cfg.Defaults.Rig.Imports) {
+			cityChanged = true
+		}
+	}
+
 	if packChanged || defaultRigChanged {
 		if err := writeCityPackManifest(fs, cityPath, manifest); err != nil {
 			return rollback("writing pack.toml", err)
 		}
-	}
-
-	if _, err := fs.Stat(cityTomlPath); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	cfg, err := loadCityImportManifestFS(fs, cityPath)
-	if err != nil {
-		return err
-	}
-	cityChanged := false
-	for i := range cfg.Rigs {
-		if bump(cfg.Rigs[i].Imports) {
-			cityChanged = true
-		}
-	}
-	if bump(cfg.Defaults.Rig.Imports) {
-		cityChanged = true
 	}
 	if cityChanged {
 		if err := writeCityImportManifestFS(fs, cityPath, cfg); err != nil {
@@ -472,6 +486,14 @@ func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[s
 	if err != nil {
 		return false, err
 	}
+	// Top-level [imports.*] overrides are part of the effective import set the
+	// check detects (see applyCityRootImportOverridesFS), so legacy public-pack
+	// sources there must be rewritten too or doctor --fix re-reports them.
+	cityRootChanged, _, err := rewriteLegacyPublicPackImportMap(cityPath, cfg.Imports, targets)
+	if err != nil {
+		return false, fmt.Errorf("city.toml imports: %w", err)
+	}
+	cityChanged = cityChanged || cityRootChanged
 	for i := range cfg.Rigs {
 		rigChanged, _, err := rewriteLegacyPublicPackImportMap(cityPath, cfg.Rigs[i].Imports, targets)
 		if err != nil {

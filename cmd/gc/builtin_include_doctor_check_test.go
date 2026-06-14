@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/migrate"
+	"github.com/gastownhall/gascity/internal/packman"
 )
 
 func TestLegacySystemPacksInclude(t *testing.T) {
@@ -946,28 +947,39 @@ func TestEnsureBundledImportBindingSemanticEquivalence(t *testing.T) {
 	}
 }
 
-// TestBuiltinImportDoctorCheck_ReportsWave1CityImportsAsManual pins the
-// reporting hand-off for city.toml's top-level [imports] table: wave-1
-// public-pack sources (gastown/maintenance under the retired tree) are
-// normally deferred to the packv2-import-state check, but that check
-// never reads city.toml [imports], so references there must be reported
-// here as manual migrations — they are what keeps the retired tree
-// preserved, and no other check names them. Fix must not rewrite them:
-// the import-state check owns wave-1 rewrite semantics, including the
-// maintenance removal.
-func TestBuiltinImportDoctorCheck_ReportsWave1CityImportsAsManual(t *testing.T) {
+// TestDoDoctorFixConvergesWave1CityRootImportsThroughImportState pins the
+// doctor-check handoff for city.toml's top-level [imports] table: the
+// builtin-pack-imports check runs before packv2-import-state, but wave-1
+// public-pack sources there are still owned by packv2-import-state. The first
+// check must not report them as manual or it can block the later automatic
+// rewrite.
+func TestDoDoctorFixConvergesWave1CityRootImportsThroughImportState(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	coreSource, ok := builtinpacks.CanonicalImportSource("core")
+	if !ok {
+		t.Fatal("core builtin source missing")
+	}
+	coreVersion := config.BundledSourcePinnedVersion(coreSource)
 	dir := writeBuiltinImportTestCity(t, `[workspace]
 name = "demo"
 
 [beads]
 provider = "file"
 
+[imports.core]
+source = "`+coreSource+`"
+version = "`+coreVersion+`"
+
 [imports.legacy-gastown]
 source = ".gc/system/packs/gastown"
 
 [imports.legacy-maintenance]
 source = ".gc/system/packs/maintenance"
+`)
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 2
 `)
 	for _, stale := range []string{"gastown", "maintenance"} {
 		staleDir := filepath.Join(dir, citylayout.SystemPacksRoot, stale)
@@ -979,37 +991,75 @@ source = ".gc/system/packs/maintenance"
 		}
 	}
 
-	check := newBuiltinImportDoctorCheck(dir)
-	r := check.Run(nil)
-	if r.Status != doctor.StatusError {
-		t.Fatalf("Run() status = %v, want error for wave-1 city imports; message=%s details=%v", r.Status, r.Message, r.Details)
+	prevCityFlag := cityFlag
+	prevResolve := resolveWave1PublicPackImports
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		resolveWave1PublicPackImports = prevResolve
+		syncImports = prevSync
+		installLockedImports = prevInstall
+		checkInstalledImports = prevCheck
+	})
+	cityFlag = dir
+	t.Setenv("GC_CITY_PATH", dir)
+	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
+
+	targets := map[string]wave1PublicPackImportTarget{
+		"gastown": {
+			Binding: "legacy-gastown",
+			Import:  config.Import{Source: "https://packages.example/gastown.git", Version: "^1.2"},
+		},
+		"maintenance": {Binding: "legacy-maintenance", Remove: true},
 	}
-	details := strings.Join(r.Details, "\n")
-	if !strings.Contains(details, "legacy-system-packs-manual | city.toml imports.legacy-gastown.source") {
-		t.Errorf("Run() details missing manual entry for imports.legacy-gastown.source:\n%s", details)
+	resolveWave1PublicPackImports = func(_ []string) (map[string]wave1PublicPackImportTarget, error) {
+		return targets, nil
 	}
-	if !strings.Contains(details, "public gascity-packs source") {
-		t.Errorf("Run() details missing public-source guidance for the gastown import:\n%s", details)
+	syncImports = func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		packs := make(map[string]packman.LockedPack, len(imports))
+		for _, imp := range imports {
+			source := strings.TrimSpace(imp.Source)
+			if source == "" {
+				continue
+			}
+			packs[source] = packman.LockedPack{Version: "1.2.3", Commit: "abc123"}
+		}
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: packs}, nil
 	}
-	if !strings.Contains(details, "legacy-system-packs-manual | city.toml imports.legacy-maintenance.source") {
-		t.Errorf("Run() details missing manual entry for imports.legacy-maintenance.source:\n%s", details)
+	installLockedImports = func(cityRoot string) (*packman.Lockfile, error) {
+		return packman.ReadLockfile(fsys.OSFS{}, cityRoot)
 	}
-	if !strings.Contains(details, "folded into the bundled core pack") {
-		t.Errorf("Run() details missing maintenance removal guidance:\n%s", details)
+	checkInstalledImports = func(_ string, _ map[string]config.Import) (*packman.CheckReport, error) {
+		return &packman.CheckReport{CheckedSources: 1}, nil
 	}
 
-	if err := check.Fix(nil); err != nil {
-		t.Fatalf("Fix(): %v", err)
+	var stdout, stderr bytes.Buffer
+	if code := doDoctor(true, false, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc doctor --fix = %d, want 0; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
-	after, err := loadCityImportManifestFS(fsys.OSFS{}, dir)
+	output := stdout.String() + stderr.String()
+	if strings.Contains(output, "legacy-system-packs-manual | city.toml imports.") {
+		t.Fatalf("builtin-pack-imports reported city-root imports as manual before import-state could fix them:\n%s", output)
+	}
+
+	cityData, err := os.ReadFile(filepath.Join(dir, "city.toml"))
 	if err != nil {
-		t.Fatalf("re-reading city.toml manifest: %v", err)
+		t.Fatal(err)
 	}
-	if got := after.Imports["legacy-gastown"].Source; got != ".gc/system/packs/gastown" {
-		t.Errorf("Fix rewrote the wave-1 gastown import source to %q; the import-state check owns that rewrite", got)
+	cityText := string(cityData)
+	if strings.Contains(cityText, ".gc/system/packs/") {
+		t.Fatalf("city.toml still references the retired system-packs tree after doctor --fix:\n%s", cityText)
 	}
-	if got := after.Imports["legacy-maintenance"].Source; got != ".gc/system/packs/maintenance" {
-		t.Errorf("Fix rewrote the wave-1 maintenance import source to %q; the import-state check owns its removal", got)
+	if !strings.Contains(cityText, "https://packages.example/gastown.git") {
+		t.Fatalf("city.toml root gastown import was not rewritten by packv2-import-state:\n%s", cityText)
+	}
+	if strings.Contains(cityText, "legacy-maintenance") {
+		t.Fatalf("city.toml root maintenance import was not removed by packv2-import-state:\n%s", cityText)
+	}
+	if r := newImportStateDoctorCheck(dir).Run(&doctor.CheckContext{CityPath: dir}); r.Status != doctor.StatusOK {
+		t.Fatalf("packv2-import-state after doctor --fix = %v, want OK; message=%s details=%v", r.Status, r.Message, r.Details)
 	}
 }
 
@@ -1403,5 +1453,87 @@ func TestMigrateLegacySystemPacksManifestPreservesImportOptions(t *testing.T) {
 	rig := manifest.Rigs[0].Imports["core"]
 	if rig.Source != coreSource || rig.Version != coreVersion || rig.Shadow != "silent" {
 		t.Errorf("rig import = %+v, want source %q version %q shadow=silent", rig, coreSource, coreVersion)
+	}
+}
+
+// TestBuiltinImportDoctorCheck_FixSkipsResyncWhenNoOwnedMutation is a
+// regression for the attempt-1 review (claude, major): when the only detected
+// condition is one this Fix does not own — here a wave-1 public-pack import in
+// a user-authored config fragment — steps 1-2 make no mutation, so the step-3
+// lockfile/cache resync must be skipped. Resyncing every declared import for
+// work this check did not own would turn an advisory warning into a hard
+// "gc doctor --fix" failure whenever an unrelated import is momentarily
+// unresolvable.
+func TestBuiltinImportDoctorCheck_FixSkipsResyncWhenNoOwnedMutation(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"init", "--skip-provider-readiness", "--provider", "claude", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc init = %d; stderr=%s", code, stderr.String())
+	}
+	// A freshly initialized city already imports every required builtin, so
+	// this check owns no add/migrate mutation.
+	if r := newBuiltinImportDoctorCheck(dir).Run(nil); r.Status != doctor.StatusOK {
+		t.Fatalf("precondition: builtin-import status after init = %v, want OK; details=%v", r.Status, r.Details)
+	}
+
+	// Add a wave-1 public-pack fragment import plus its retired-tree pack so
+	// Run reports a manual migration without giving this Fix anything to add
+	// or rewrite. Root city.toml imports are owned by packv2-import-state.
+	cityPath := filepath.Join(dir, "city.toml")
+	cityData, err := os.ReadFile(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cityPath, append([]byte("include = [\"legacy-wave1.toml\"]\n"), cityData...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fragment := `[imports.legacy-gastown]
+source = ".gc/system/packs/gastown"
+`
+	fragPath := filepath.Join(dir, "legacy-wave1.toml")
+	if err := os.WriteFile(fragPath, []byte(fragment), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	staleDir := filepath.Join(dir, citylayout.SystemPacksRoot, "gastown")
+	if err := os.MkdirAll(staleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleDir, "pack.toml"), []byte("[pack]\nname = \"gastown\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := newBuiltinImportDoctorCheck(dir)
+	if r := check.Run(nil); r.Status != doctor.StatusError {
+		t.Fatalf("Run() status = %v, want error for the wave-1 manual import; details=%v", r.Status, r.Details)
+	}
+
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+	})
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		t.Fatal("Fix resynced the lockfile despite owning no mutation (steps 1-2 were no-ops)")
+		return nil, nil
+	}
+	installLockedImports = func(_ string) (*packman.Lockfile, error) {
+		t.Fatal("Fix reinstalled locked imports despite owning no mutation (steps 1-2 were no-ops)")
+		return nil, nil
+	}
+
+	if err := check.Fix(nil); err != nil {
+		t.Fatalf("Fix(): %v", err)
+	}
+
+	// The fragment import needs a user edit; this Fix must leave it.
+	after, err := os.ReadFile(fragPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != fragment {
+		t.Fatalf("Fix rewrote the wave-1 fragment import:\n%s", after)
 	}
 }
