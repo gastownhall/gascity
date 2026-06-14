@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/pricing"
 	worker "github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -138,6 +139,83 @@ func TranscriptUsageResult(profile Profile, snapshot *Snapshot) Result {
 	default:
 		return Pass(profile.ID, RequirementTranscriptUsage, "extracted the expected per-invocation token usage from the profile transcript").WithEvidence(evidence)
 	}
+}
+
+// TranscriptUsageCostResult validates that a profile's extracted usage is
+// priceable. Each usage-bearing invocation must carry the expected model (the
+// pricing lookup key); the shipped default registry must price the family only
+// when UsageExpectation.DefaultCostPriced is set; and an operator-configured
+// rate for (family, model) must always yield a positive cost estimate.
+// Families without an invocation-usage extractor are out of scope. A drift
+// between worker support and the profile expectation fails, mirroring
+// TranscriptUsageResult.
+func TranscriptUsageCostResult(profile Profile, snapshot *Snapshot) Result {
+	family, supported := worker.InvocationUsageFamily(profile.Provider)
+	evidence := phase1UsageEvidence(profile, snapshot, family, supported)
+	switch {
+	case supported != profile.Usage.Supported:
+		return Fail(profile.ID, RequirementInvocationUsageCost,
+			fmt.Sprintf("usage-support drift: worker extractor present=%t for family %q but profile expectation supported=%t", supported, family, profile.Usage.Supported)).WithEvidence(evidence)
+	case !supported:
+		return Unsupported(profile.ID, RequirementInvocationUsageCost,
+			fmt.Sprintf("provider family %q has no invocation-usage extractor (out of scope)", family)).WithEvidence(evidence)
+	case snapshot == nil:
+		return Fail(profile.ID, RequirementInvocationUsageCost, "missing snapshot").WithEvidence(evidence)
+	case strings.TrimSpace(profile.Usage.Model) == "":
+		return Fail(profile.ID, RequirementInvocationUsageCost, "profile usage expectation is missing the expected model").WithEvidence(evidence)
+	}
+
+	adapter := worker.SessionLogAdapter{SearchPaths: []string{snapshot.FixtureRoot}}
+	usages, err := adapter.InvocationUsage(profile.Provider, snapshot.TranscriptPath)
+	if err != nil {
+		return Fail(profile.ID, RequirementInvocationUsageCost,
+			fmt.Sprintf("extract %s invocation usage: %v", family, err)).WithEvidence(evidence)
+	}
+	if len(usages) == 0 {
+		return Fail(profile.ID, RequirementInvocationUsageCost, "no usage-bearing invocations to price").WithEvidence(evidence)
+	}
+
+	defaults := pricing.New(pricing.DefaultPricings())
+	configured := pricing.New(pricing.DefaultPricings())
+	configured.SetLayer(pricing.LayerCity, []pricing.ModelPricing{{
+		Provider:     family,
+		Model:        profile.Usage.Model,
+		Tier:         pricing.Tier{PromptUSDPer1M: 1, CompletionUSDPer1M: 1, CacheReadUSDPer1M: 1, CacheCreationUSDPer1M: 1},
+		LastVerified: "2026-01-01",
+	}})
+
+	var configuredCost float64
+	for _, usage := range usages {
+		if usage.Model != profile.Usage.Model {
+			return Fail(profile.ID, RequirementInvocationUsageCost,
+				fmt.Sprintf("invocation model = %q, want %q (the model label is the pricing lookup key)", usage.Model, profile.Usage.Model)).WithEvidence(evidence)
+		}
+		priced := pricing.Usage{
+			PromptTokens:        usage.InputTokens,
+			CompletionTokens:    usage.OutputTokens,
+			CacheReadTokens:     usage.CacheReadTokens,
+			CacheCreationTokens: usage.CacheCreationTokens,
+		}
+		if _, ok := defaults.Estimate(family, usage.Model, priced); ok != profile.Usage.DefaultCostPriced {
+			return Fail(profile.ID, RequirementInvocationUsageCost,
+				fmt.Sprintf("default-registry priced=%t for %s/%s, want %t", ok, family, usage.Model, profile.Usage.DefaultCostPriced)).WithEvidence(evidence)
+		}
+		cost, ok := configured.Estimate(family, usage.Model, priced)
+		if !ok {
+			return Fail(profile.ID, RequirementInvocationUsageCost,
+				fmt.Sprintf("operator-configured rate did not price %s/%s", family, usage.Model)).WithEvidence(evidence)
+		}
+		configuredCost += cost
+	}
+	if configuredCost <= 0 {
+		return Fail(profile.ID, RequirementInvocationUsageCost,
+			fmt.Sprintf("operator-configured cost = %v, want > 0", configuredCost)).WithEvidence(evidence)
+	}
+	evidence["expected_model"] = profile.Usage.Model
+	evidence["default_cost_priced"] = fmt.Sprintf("%t", profile.Usage.DefaultCostPriced)
+	evidence["configured_cost_usd"] = fmt.Sprintf("%g", configuredCost)
+	return Pass(profile.ID, RequirementInvocationUsageCost,
+		"extracted usage is priceable: expected model present, default pricing matches family support, operator rate yields positive cost").WithEvidence(evidence)
 }
 
 // DiscoverTranscript resolves the provider-native transcript path for a profile fixture root.

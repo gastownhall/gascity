@@ -44,6 +44,14 @@ type UsageExpectation struct {
 	InputTokens     int
 	OutputTokens    int
 	CacheReadTokens int
+	// Model is the model identifier every usage-bearing invocation must carry
+	// (the pricing lookup key). Empty for unsupported families.
+	Model string
+	// DefaultCostPriced reports whether pricing.DefaultPricings() has a rate
+	// for (family, Model) — true for families with shipped default rates
+	// (claude), false for families priced only by operator config
+	// (codex, gemini).
+	DefaultCostPriced bool
 }
 
 // Profile identifies the worker profile and its phase-1 fixture bundle.
@@ -75,11 +83,13 @@ func Phase1Profiles() []Profile {
 				ResetResponseContains:  "I cannot repeat the earlier summary because this is a fresh session.",
 			},
 			Usage: UsageExpectation{
-				Supported:       true,
-				Invocations:     1,
-				InputTokens:     100,
-				OutputTokens:    40,
-				CacheReadTokens: 10,
+				Supported:         true,
+				Invocations:       1,
+				InputTokens:       100,
+				OutputTokens:      40,
+				CacheReadTokens:   10,
+				Model:             "claude-sonnet-4-6",
+				DefaultCostPriced: true,
 			},
 		},
 		{
@@ -98,11 +108,13 @@ func Phase1Profiles() []Profile {
 				ResetResponseContains:  "I cannot repeat the earlier adapter summary because this session started fresh.",
 			},
 			Usage: UsageExpectation{
-				Supported:       true,
-				Invocations:     1,
-				InputTokens:     100,
-				OutputTokens:    40,
-				CacheReadTokens: 10,
+				Supported:         true,
+				Invocations:       1,
+				InputTokens:       100,
+				OutputTokens:      40,
+				CacheReadTokens:   10,
+				Model:             "gpt-5-codex",
+				DefaultCostPriced: false,
 			},
 		},
 		{
@@ -121,11 +133,13 @@ func Phase1Profiles() []Profile {
 				ResetResponseContains:  "I cannot repeat the earlier fixture summary because this chat is fresh.",
 			},
 			Usage: UsageExpectation{
-				Supported:       true,
-				Invocations:     1,
-				InputTokens:     100,
-				OutputTokens:    40,
-				CacheReadTokens: 10,
+				Supported:         true,
+				Invocations:       1,
+				InputTokens:       100,
+				OutputTokens:      40,
+				CacheReadTokens:   10,
+				Model:             "gemini-2.5-pro",
+				DefaultCostPriced: false,
 			},
 		},
 		{
