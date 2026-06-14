@@ -1729,15 +1729,24 @@ func newOrderSweepNudgeMailCmd(stdout, stderr io.Writer) *cobra.Command {
 	quiet := false
 	cmd := &cobra.Command{
 		Use:   "sweep-nudge-mail",
-		Short: "Close stale delivered nudge beads and read mail beads",
-		Long: `Close stale delivered nudge beads and read mail beads.
+		Short: "Close stale nudge/mail beads, then delete long-closed ones",
+		Long: `Close stale delivered nudge beads and read mail beads, then delete the
+long-closed ones so the live issues table stops growing unbounded.
 
 Nudge beads that are past --nudge-ttl and not in the live nudge queue are
 closed. Read mail beads past --mail-ttl are closed. A budget cap of ` + fmt.Sprintf("%d", nudgeMailSweepCloseBudget) + ` closes
 per invocation prevents runaway sweeps under load.
 
-Use --dry-run to log what would be closed without making any changes.
-The controller watchdog also runs this sweep automatically every 5 minutes.`,
+After closing, an archive-then-delete tail deletes closed nudge/mail beads
+older than their configured delete-after-close TTL
+([beads.policies.nudge] default 24h, [beads.policies.mail] default 72h),
+cascading their events/labels rows. Deletion is bounded to ` + fmt.Sprintf("%d", nudgeMailRetentionDeleteBudget) + ` beads per
+invocation and never touches open work, live nudges, or beads another bead
+still depends on.
+
+Use --dry-run to log what would be closed and deleted without making any
+changes. The controller watchdog also runs this sweep automatically every 5
+minutes.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, dryRun, quiet, stdout, stderr) != 0 {
@@ -1767,6 +1776,12 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool,
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	cfg, err := loadCityConfig(cityPath, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	retentionPolicy := nudgeMailRetentionPolicyForConfig(cfg)
 	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err)     //nolint:errcheck // best-effort stderr
@@ -1788,62 +1803,84 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool,
 
 	now := time.Now()
 	if dryRun {
-		return cmdOrderSweepNudgeMailDryRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+		return cmdOrderSweepNudgeMailDryRun(store, statePtr, now, nudgeTTL, mailTTL, retentionPolicy, quiet, stdout, stderr)
 	}
-	return cmdOrderSweepNudgeMailRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+	return cmdOrderSweepNudgeMailRun(store, statePtr, now, nudgeTTL, mailTTL, retentionPolicy, quiet, stdout, stderr)
 }
 
-func cmdOrderSweepNudgeMailDryRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+func cmdOrderSweepNudgeMailDryRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, retentionPolicy nudgeMailRetentionPolicy, quiet bool, stdout, stderr io.Writer) int {
 	counts, err := countStaleNudgeMail(store, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	retention, retentionErr := countClosedNudgeMailRetention(store, nudgeState, now, retentionPolicy, nudgeMailRetentionDeleteBudget)
+	if retentionErr != nil {
+		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", retentionErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if quiet {
 		return 0
 	}
-	if counts.NudgeClosed == 0 && counts.MailClosed == 0 {
-		fmt.Fprintln(stdout, "nudge-mail-sweep: nothing to close (0 stale nudge beads, 0 stale mail beads)") //nolint:errcheck // best-effort stdout
+	if counts.NudgeClosed == 0 && counts.MailClosed == 0 && retention.NudgeDeleted == 0 && retention.MailDeleted == 0 {
+		fmt.Fprintln(stdout, "nudge-mail-sweep: nothing to close or delete (0 stale nudge beads, 0 stale mail beads)") //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	fmt.Fprintf(stdout, "[DRY RUN] nudge-mail-sweep: would close %d nudge bead(s), %d mail bead(s)  (no changes made)\n", //nolint:errcheck
-		counts.NudgeClosed, counts.MailClosed)
+	fmt.Fprintf(stdout, "[DRY RUN] nudge-mail-sweep: would close %d nudge bead(s), %d mail bead(s); would delete %d closed nudge bead(s), %d closed mail bead(s)  (no changes made)\n", //nolint:errcheck
+		counts.NudgeClosed, counts.MailClosed, retention.NudgeDeleted, retention.MailDeleted)
 	return 0
 }
 
-func cmdOrderSweepNudgeMailRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
-	result, sweepErr := sweepStaleNudgeMail(store, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
-
-	if sweepErr != nil {
-		// Per-bead errors are joined via errors.Join (Unwrap() []error): print each
-		// to stderr and continue; the overall sweep is not fatal. A fatal list error
-		// is a single wrapped error that does not implement that interface: surface
-		// it and fail so an unreadable store does not silently "succeed".
-		type unwrapper interface{ Unwrap() []error }
-		if u, ok := sweepErr.(unwrapper); ok {
-			for _, e := range u.Unwrap() {
-				fmt.Fprintf(stderr, "nudge-mail-sweep: ERROR %v — skipping\n", e) //nolint:errcheck // best-effort stderr
-			}
-		} else {
-			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", sweepErr) //nolint:errcheck // best-effort stderr
-			return 1
+// reportNudgeMailSweepError prints a sweep error to stderr and reports whether
+// it was fatal. Joined per-bead errors (errors.Join exposes Unwrap() []error)
+// are non-fatal: each is logged and skipped so one bad bead does not abort the
+// sweep. Any other error means the sweep could not run at all (e.g. an
+// unreadable store) and is fatal, so the caller fails rather than silently
+// "succeeding".
+func reportNudgeMailSweepError(err error, stderr io.Writer) (fatal bool) {
+	if err == nil {
+		return false
+	}
+	if u, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range u.Unwrap() {
+			fmt.Fprintf(stderr, "nudge-mail-sweep: ERROR %v — skipping\n", e) //nolint:errcheck // best-effort stderr
 		}
+		return false
+	}
+	fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
+	return true
+}
+
+func cmdOrderSweepNudgeMailRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, retentionPolicy nudgeMailRetentionPolicy, quiet bool, stdout, stderr io.Writer) int {
+	result, sweepErr := sweepStaleNudgeMail(store, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
+	if reportNudgeMailSweepError(sweepErr, stderr) {
+		return 1
+	}
+
+	// Archive-then-delete tail: prune closed nudge/mail beads past their
+	// delete-after-close TTL. Runs after the close phase so the jsonl export has
+	// long since captured the rows (the delete TTLs dwarf the 5-minute export
+	// cadence), keeping the jsonl as the system of record before deletion.
+	retention, retentionErr := sweepClosedNudgeMailRetention(store, nudgeState, now, retentionPolicy, nudgeMailRetentionDeleteBudget)
+	if reportNudgeMailSweepError(retentionErr, stderr) {
+		return 1
 	}
 
 	if quiet {
 		return 0
 	}
 
-	total := result.NudgeClosed + result.MailClosed
-	if total == 0 {
-		fmt.Fprintln(stdout, "nudge-mail-sweep: nothing to close (0 stale nudge beads, 0 stale mail beads)") //nolint:errcheck // best-effort stdout
+	closed := result.NudgeClosed + result.MailClosed
+	deleted := retention.NudgeDeleted + retention.MailDeleted
+	if closed == 0 && deleted == 0 {
+		fmt.Fprintln(stdout, "nudge-mail-sweep: nothing to close or delete (0 stale nudge beads, 0 stale mail beads)") //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	budgetLine := fmt.Sprintf("[budget: %d/%d used]", total, nudgeMailSweepCloseBudget)
-	if total >= nudgeMailSweepCloseBudget {
-		budgetLine = fmt.Sprintf("[budget: %d/%d — cap reached, re-run to continue]", total, nudgeMailSweepCloseBudget)
+	budgetLine := fmt.Sprintf("[budget: %d/%d used]", closed, nudgeMailSweepCloseBudget)
+	if closed >= nudgeMailSweepCloseBudget {
+		budgetLine = fmt.Sprintf("[budget: %d/%d — cap reached, re-run to continue]", closed, nudgeMailSweepCloseBudget)
 	}
-	fmt.Fprintf(stdout, "nudge-mail-sweep: closed %d nudge bead(s), %d mail bead(s)  %s\n", //nolint:errcheck // best-effort stdout
-		result.NudgeClosed, result.MailClosed, budgetLine)
+	fmt.Fprintf(stdout, "nudge-mail-sweep: closed %d nudge bead(s), %d mail bead(s); deleted %d closed nudge bead(s), %d closed mail bead(s)  %s\n", //nolint:errcheck // best-effort stdout
+		result.NudgeClosed, result.MailClosed, retention.NudgeDeleted, retention.MailDeleted, budgetLine)
 	return 0
 }

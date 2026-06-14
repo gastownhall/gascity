@@ -2236,7 +2236,7 @@ gc order
 | [gc order list](#gc-order-list) | List available orders |
 | [gc order run](#gc-order-run) | Execute an order manually |
 | [gc order show](#gc-order-show) | Show details of an order |
-| [gc order sweep-nudge-mail](#gc-order-sweep-nudge-mail) | Close stale delivered nudge beads and read mail beads |
+| [gc order sweep-nudge-mail](#gc-order-sweep-nudge-mail) | Close stale nudge/mail beads, then delete long-closed ones |
 | [gc order sweep-tracking](#gc-order-sweep-tracking) | Close stale and prune closed order-tracking beads |
 
 ## gc order check
@@ -2324,14 +2324,23 @@ gc order show <name> [flags]
 
 ## gc order sweep-nudge-mail
 
-Close stale delivered nudge beads and read mail beads.
+Close stale delivered nudge beads and read mail beads, then delete the
+long-closed ones so the live issues table stops growing unbounded.
 
 Nudge beads that are past --nudge-ttl and not in the live nudge queue are
 closed. Read mail beads past --mail-ttl are closed. A budget cap of 50 closes
 per invocation prevents runaway sweeps under load.
 
-Use --dry-run to log what would be closed without making any changes.
-The controller watchdog also runs this sweep automatically every 5 minutes.
+After closing, an archive-then-delete tail deletes closed nudge/mail beads
+older than their configured delete-after-close TTL
+([beads.policies.nudge] default 24h, [beads.policies.mail] default 72h),
+cascading their events/labels rows. Deletion is bounded to 500 beads per
+invocation and never touches open work, live nudges, or beads another bead
+still depends on.
+
+Use --dry-run to log what would be closed and deleted without making any
+changes. The controller watchdog also runs this sweep automatically every 5
+minutes.
 
 ```
 gc order sweep-nudge-mail [flags]

@@ -802,6 +802,45 @@ func TestApplyBeadPolicyDefaults_PreservesOtherPolicies(t *testing.T) {
 	}
 }
 
+func TestApplyBeadPolicyDefaults_SetsNudgeAndMailDefaults(t *testing.T) {
+	cfg := &City{}
+	ApplyBeadPolicyDefaults(cfg)
+
+	nudge, ok := cfg.Beads.Policies[BeadPolicyNudge]
+	if !ok {
+		t.Fatal("nudge policy not set after ApplyBeadPolicyDefaults")
+	}
+	if nudge.DeleteAfterClose != "24h" {
+		t.Errorf("nudge.delete_after_close = %q, want 24h", nudge.DeleteAfterClose)
+	}
+	mail, ok := cfg.Beads.Policies[BeadPolicyMail]
+	if !ok {
+		t.Fatal("mail policy not set after ApplyBeadPolicyDefaults")
+	}
+	if mail.DeleteAfterClose != "72h" {
+		t.Errorf("mail.delete_after_close = %q, want 72h", mail.DeleteAfterClose)
+	}
+}
+
+func TestApplyBeadPolicyDefaults_DoesNotOverrideExplicitNudgeOrMail(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				BeadPolicyNudge: {DeleteAfterClose: "1h"},
+				BeadPolicyMail:  {DeleteAfterClose: "2h"},
+			},
+		},
+	}
+	ApplyBeadPolicyDefaults(cfg)
+
+	if got := cfg.Beads.Policies[BeadPolicyNudge].DeleteAfterClose; got != "1h" {
+		t.Errorf("nudge.delete_after_close = %q, want 1h (explicit value must not be overridden)", got)
+	}
+	if got := cfg.Beads.Policies[BeadPolicyMail].DeleteAfterClose; got != "2h" {
+		t.Errorf("mail.delete_after_close = %q, want 2h (explicit value must not be overridden)", got)
+	}
+}
+
 func TestApplyBeadPolicyDefaults_StorageFieldPreserved(t *testing.T) {
 	cfg := &City{
 		Beads: BeadsConfig{

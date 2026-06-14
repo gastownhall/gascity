@@ -1522,6 +1522,20 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	if total > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog closed %d nudge bead(s), %d mail bead(s)\n", cr.logPrefix, result.NudgeClosed, result.MailClosed) //nolint:errcheck // best-effort stderr
 	}
+
+	// Archive-then-delete tail: prune closed nudge/mail beads past their
+	// delete-after-close TTL so the live issues table stops growing unbounded.
+	// Runs after the close phase; the jsonl export (5m cadence) has long since
+	// captured these rows — the delete TTLs (nudge 24h, mail 72h) dwarf that
+	// cadence — so the jsonl remains the system of record before deletion.
+	retentionPolicy := nudgeMailRetentionPolicyForConfig(cr.cfg)
+	retention, retentionErr := sweepClosedNudgeMailRetention(store, statePtr, now, retentionPolicy, nudgeMailRetentionDeleteBudget)
+	if retentionErr != nil && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog retention: %v\n", cr.logPrefix, retentionErr) //nolint:errcheck // best-effort stderr
+	}
+	if retention.NudgeDeleted+retention.MailDeleted > 0 && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog deleted %d closed nudge bead(s), %d closed mail bead(s)\n", cr.logPrefix, retention.NudgeDeleted, retention.MailDeleted) //nolint:errcheck // best-effort stderr
+	}
 }
 
 func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it

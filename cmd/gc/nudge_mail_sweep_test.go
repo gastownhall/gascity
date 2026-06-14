@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -453,7 +455,7 @@ func TestCmdOrderSweepNudgeMailRun_NothingToClose(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, nil, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailRetentionPolicy{}, false, &stdout, &stderr)
 	if !strings.Contains(stdout.String(), "nothing to close") {
 		t.Errorf("expected 'nothing to close' message, got: %q", stdout.String())
 	}
@@ -468,7 +470,7 @@ func TestCmdOrderSweepNudgeMailRun_NormalOutput(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailRetentionPolicy{}, false, &stdout, &stderr)
 	out := stdout.String()
 	if !strings.Contains(out, "nudge-mail-sweep: closed") {
 		t.Errorf("expected 'nudge-mail-sweep: closed' in output, got: %q", out)
@@ -491,7 +493,7 @@ func TestCmdOrderSweepNudgeMailRun_CapReachedMessage(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailRetentionPolicy{}, false, &stdout, &stderr)
 	if !strings.Contains(stdout.String(), "cap reached") {
 		t.Errorf("expected 'cap reached' in output when budget is full, got: %q", stdout.String())
 	}
@@ -508,7 +510,7 @@ func TestCmdOrderSweepNudgeMailRun_PerBeadErrorPrintedToStderr(t *testing.T) {
 	store := &nudgeSweepFailingClose{MemStore: mem, failIDs: map[string]bool{failID: true}}
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailRetentionPolicy{}, false, &stdout, &stderr)
 	if !strings.Contains(stderr.String(), "ERROR") {
 		t.Errorf("expected ERROR line on stderr for failing bead, got: %q", stderr.String())
 	}
@@ -523,7 +525,7 @@ func TestCmdOrderSweepNudgeMailRun_QuietSuppressesOutput(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, nil, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, true, &stdout, &stderr)
+	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailRetentionPolicy{}, true, &stdout, &stderr)
 	if stdout.String() != "" {
 		t.Errorf("expected empty stdout with --quiet, got: %q", stdout.String())
 	}
@@ -534,7 +536,7 @@ func TestCmdOrderSweepNudgeMailDryRun_NothingToClose(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, nil, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailRetentionPolicy{}, false, &stdout, &stderr)
 	if !strings.Contains(stdout.String(), "nothing to close") {
 		t.Errorf("expected 'nothing to close' for empty store dry-run, got: %q", stdout.String())
 	}
@@ -549,7 +551,7 @@ func TestCmdOrderSweepNudgeMailDryRun_ShowsWouldClose(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailRetentionPolicy{}, false, &stdout, &stderr)
 	out := stdout.String()
 	if !strings.HasPrefix(out, "[DRY RUN]") {
 		t.Errorf("expected '[DRY RUN]' prefix, got: %q", out)
@@ -571,7 +573,7 @@ func TestCmdOrderSweepNudgeMailDryRun_NoBeadsClosed(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailRetentionPolicy{}, false, &stdout, &stderr)
 
 	// The bead should remain open.
 	open, _ := store.ListOpen()
@@ -597,7 +599,7 @@ func TestCmdOrderSweepNudgeMailDryRun_ListErrorReturnsNonZero(t *testing.T) {
 	store := &nudgeSweepFailingList{MemStore: beads.NewMemStoreFrom(100, nil, nil)}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	code := cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailRetentionPolicy{}, false, &stdout, &stderr)
 	if code == 0 {
 		t.Errorf("expected non-zero exit code on list error, got %d", code)
 	}
@@ -617,7 +619,7 @@ func TestCmdOrderSweepNudgeMailRun_ListErrorReturnsNonZero(t *testing.T) {
 	store := &nudgeSweepFailingList{MemStore: beads.NewMemStoreFrom(100, nil, nil)}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	code := cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailRetentionPolicy{}, false, &stdout, &stderr)
 	if code == 0 {
 		t.Errorf("expected non-zero exit code on list error, got %d", code)
 	}
@@ -708,5 +710,395 @@ func TestCountStaleNudgeMail_MatchesSweepCounts(t *testing.T) {
 	}
 	if counts.MailClosed != 1 {
 		t.Errorf("count: MailClosed = %d, want 1", counts.MailClosed)
+	}
+}
+
+// --- gc order sweep-nudge-mail: archive-then-delete retention (#3342 Option A) ---
+
+// closedNudgeSeed builds a closed nudge bead whose close time (UpdatedAt) is
+// closedAt. CreatedAt is set slightly earlier so created-time and close-time
+// filters are distinguishable.
+func closedNudgeSeed(id, nudgeID string, closedAt time.Time) beads.Bead {
+	b := nudgeSeed(id, nudgeID, closedAt.Add(-time.Minute))
+	b.Status = "closed"
+	b.UpdatedAt = closedAt
+	return b
+}
+
+// closedMailSeed builds a closed read mail bead whose close time (UpdatedAt) is
+// closedAt.
+func closedMailSeed(id string, closedAt time.Time) beads.Bead {
+	b := mailSeed(id, closedAt.Add(-time.Minute))
+	b.Status = "closed"
+	b.UpdatedAt = closedAt
+	return b
+}
+
+func retentionBeadPresent(t *testing.T, store beads.Store, id string) bool {
+	t.Helper()
+	_, err := store.Get(id)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		return false
+	}
+	t.Fatalf("unexpected error getting %s: %v", id, err)
+	return false
+}
+
+func testNudgeMailRetentionPolicy() nudgeMailRetentionPolicy {
+	return nudgeMailRetentionPolicy{
+		nudgeDeleteAfterClose: 24 * time.Hour,
+		mailDeleteAfterClose:  72 * time.Hour,
+	}
+}
+
+func TestSweepClosedNudgeMailRetention_TTLBoundaries(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	policy := testNudgeMailRetentionPolicy()
+
+	seed := []beads.Bead{
+		closedNudgeSeed("n-old", "n-old", now.Add(-policy.nudgeDeleteAfterClose-time.Second)),     // delete
+		closedNudgeSeed("n-fresh", "n-fresh", now.Add(-policy.nudgeDeleteAfterClose+time.Second)), // keep
+		closedMailSeed("m-old", now.Add(-policy.mailDeleteAfterClose-time.Second)),                // delete
+		closedMailSeed("m-fresh", now.Add(-policy.mailDeleteAfterClose+time.Second)),              // keep
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	result, err := sweepClosedNudgeMailRetention(store, nil, now, policy, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NudgeDeleted != 1 {
+		t.Errorf("NudgeDeleted = %d, want 1", result.NudgeDeleted)
+	}
+	if result.MailDeleted != 1 {
+		t.Errorf("MailDeleted = %d, want 1", result.MailDeleted)
+	}
+	if retentionBeadPresent(t, store, "n-old") {
+		t.Error("n-old should have been deleted")
+	}
+	if !retentionBeadPresent(t, store, "n-fresh") {
+		t.Error("n-fresh should have been kept (within TTL)")
+	}
+	if retentionBeadPresent(t, store, "m-old") {
+		t.Error("m-old should have been deleted")
+	}
+	if !retentionBeadPresent(t, store, "m-fresh") {
+		t.Error("m-fresh should have been kept (within TTL)")
+	}
+}
+
+func TestSweepClosedNudgeMailRetention_OpenWorkNeverDeleted(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	policy := testNudgeMailRetentionPolicy()
+
+	// Open + in_progress nudge/mail, all far past the delete TTL by age. The
+	// closed-only status filter must keep them: deleting open/in_progress work
+	// would lose the work queue (NDI gate "never touch open/in_progress").
+	openNudge := nudgeSeed("n-open", "n-open", now.Add(-policy.nudgeDeleteAfterClose-time.Hour))
+	openNudge.UpdatedAt = now.Add(-policy.nudgeDeleteAfterClose - time.Hour)
+	inProgressNudge := nudgeSeed("n-inprog", "n-inprog", now.Add(-policy.nudgeDeleteAfterClose-time.Hour))
+	inProgressNudge.Status = "in_progress"
+	inProgressNudge.UpdatedAt = now.Add(-policy.nudgeDeleteAfterClose - time.Hour)
+	openMail := mailSeed("m-open", now.Add(-policy.mailDeleteAfterClose-time.Hour))
+	openMail.UpdatedAt = now.Add(-policy.mailDeleteAfterClose - time.Hour)
+	inProgressMail := mailSeed("m-inprog", now.Add(-policy.mailDeleteAfterClose-time.Hour))
+	inProgressMail.Status = "in_progress"
+	inProgressMail.UpdatedAt = now.Add(-policy.mailDeleteAfterClose - time.Hour)
+	store := beads.NewMemStoreFrom(100, []beads.Bead{openNudge, inProgressNudge, openMail, inProgressMail}, nil)
+
+	result, err := sweepClosedNudgeMailRetention(store, nil, now, policy, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NudgeDeleted != 0 || result.MailDeleted != 0 {
+		t.Errorf("deleted = %+v, want zero (open/in_progress work must never be deleted)", result)
+	}
+	for _, id := range []string{"n-open", "n-inprog", "m-open", "m-inprog"} {
+		if !retentionBeadPresent(t, store, id) {
+			t.Errorf("non-closed bead %q must not be deleted", id)
+		}
+	}
+}
+
+func TestSweepClosedNudgeMailRetention_LiveNudgeProtected(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	policy := testNudgeMailRetentionPolicy()
+
+	const liveID = "live-nudge"
+	seed := []beads.Bead{
+		closedNudgeSeed("n-live", liveID, now.Add(-policy.nudgeDeleteAfterClose-time.Hour)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	state := &nudgequeue.State{Pending: []nudgequeue.Item{{ID: liveID}}}
+
+	result, err := sweepClosedNudgeMailRetention(store, state, now, policy, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NudgeDeleted != 0 {
+		t.Errorf("NudgeDeleted = %d, want 0 (live nudge ID must be protected)", result.NudgeDeleted)
+	}
+	if !retentionBeadPresent(t, store, "n-live") {
+		t.Error("closed nudge whose ID is still live must not be deleted")
+	}
+}
+
+func TestSweepClosedNudgeMailRetention_InFlightNudgeProtected(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	policy := testNudgeMailRetentionPolicy()
+
+	const inFlightID = "inflight-nudge"
+	seed := []beads.Bead{
+		closedNudgeSeed("n-inflight", inFlightID, now.Add(-policy.nudgeDeleteAfterClose-time.Hour)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	state := &nudgequeue.State{InFlight: []nudgequeue.Item{{ID: inFlightID}}}
+
+	result, err := sweepClosedNudgeMailRetention(store, state, now, policy, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NudgeDeleted != 0 {
+		t.Errorf("NudgeDeleted = %d, want 0 (in-flight nudge ID must be protected)", result.NudgeDeleted)
+	}
+	if !retentionBeadPresent(t, store, "n-inflight") {
+		t.Error("closed nudge whose ID is still in-flight must not be deleted")
+	}
+}
+
+// TestSweepClosedNudgeMailRetention_BudgetTopsUpAcrossPhases verifies the
+// combined budget is computed from beads actually deleted, not from candidates
+// scanned: when phase 1 (nudge) under-delivers because a candidate is skipped by
+// a gate, phase 2 (mail) gets the unused budget rather than losing it.
+func TestSweepClosedNudgeMailRetention_BudgetTopsUpAcrossPhases(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	policy := testNudgeMailRetentionPolicy()
+
+	const liveID = "live-nudge"
+	seed := []beads.Bead{
+		// Two nudge candidates: one live-protected (skipped), one deletable.
+		closedNudgeSeed("n-live", liveID, now.Add(-policy.nudgeDeleteAfterClose-2*time.Minute)),
+		closedNudgeSeed("n-del", "n-del", now.Add(-policy.nudgeDeleteAfterClose-time.Minute)),
+		// Three mail candidates, all deletable.
+		closedMailSeed("m-0", now.Add(-policy.mailDeleteAfterClose-3*time.Minute)),
+		closedMailSeed("m-1", now.Add(-policy.mailDeleteAfterClose-2*time.Minute)),
+		closedMailSeed("m-2", now.Add(-policy.mailDeleteAfterClose-time.Minute)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	state := &nudgequeue.State{Pending: []nudgequeue.Item{{ID: liveID}}}
+
+	// Budget 3: 1 nudge deleted (n-del; n-live skipped) + 2 mail deleted = 3 total.
+	result, err := sweepClosedNudgeMailRetention(store, state, now, policy, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NudgeDeleted != 1 {
+		t.Errorf("NudgeDeleted = %d, want 1 (n-del; n-live is live-protected)", result.NudgeDeleted)
+	}
+	if result.MailDeleted != 2 {
+		t.Errorf("MailDeleted = %d, want 2 (phase 2 receives the unused budget)", result.MailDeleted)
+	}
+	if total := result.NudgeDeleted + result.MailDeleted; total != 3 {
+		t.Errorf("total deleted = %d, want 3 (budget cap)", total)
+	}
+}
+
+func TestSweepClosedNudgeMailRetention_OwnershipEdgeSkip(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	policy := testNudgeMailRetentionPolicy()
+
+	seed := []beads.Bead{
+		closedNudgeSeed("n-owned", "n-owned", now.Add(-policy.nudgeDeleteAfterClose-time.Hour)),
+	}
+	// Another bead depends on n-owned: DepList(id, "up") returns this edge, so
+	// the bead is left for a graph-aware reaper rather than severed here.
+	deps := []beads.Dep{{IssueID: "dependent", DependsOnID: "n-owned", Type: "blocks"}}
+	store := beads.NewMemStoreFrom(100, seed, deps)
+
+	result, err := sweepClosedNudgeMailRetention(store, nil, now, policy, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NudgeDeleted != 0 {
+		t.Errorf("NudgeDeleted = %d, want 0 (bead with an inbound dependency must be skipped)", result.NudgeDeleted)
+	}
+	if !retentionBeadPresent(t, store, "n-owned") {
+		t.Error("bead with an inbound dependency must not be deleted")
+	}
+}
+
+func TestSweepClosedNudgeMailRetention_BudgetCap(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	policy := testNudgeMailRetentionPolicy()
+
+	const total = 5
+	seed := make([]beads.Bead, total)
+	for i := range seed {
+		id := fmt.Sprintf("n-%d", i)
+		seed[i] = closedNudgeSeed(id, id, now.Add(-policy.nudgeDeleteAfterClose-time.Duration(i+1)*time.Minute))
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	result, err := sweepClosedNudgeMailRetention(store, nil, now, policy, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NudgeDeleted != 3 {
+		t.Errorf("NudgeDeleted = %d, want 3 (budget cap)", result.NudgeDeleted)
+	}
+	remaining := 0
+	for i := 0; i < total; i++ {
+		if retentionBeadPresent(t, store, fmt.Sprintf("n-%d", i)) {
+			remaining++
+		}
+	}
+	if remaining != total-3 {
+		t.Errorf("remaining closed nudge beads = %d, want %d", remaining, total-3)
+	}
+}
+
+func TestSweepClosedNudgeMailRetention_BudgetZeroIsUnlimited(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	policy := testNudgeMailRetentionPolicy()
+
+	const total = 5
+	seed := make([]beads.Bead, total)
+	for i := range seed {
+		id := fmt.Sprintf("n-%d", i)
+		seed[i] = closedNudgeSeed(id, id, now.Add(-policy.nudgeDeleteAfterClose-time.Duration(i+1)*time.Minute))
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	result, err := sweepClosedNudgeMailRetention(store, nil, now, policy, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NudgeDeleted != total {
+		t.Errorf("NudgeDeleted = %d, want %d (budget 0 = unlimited)", result.NudgeDeleted, total)
+	}
+}
+
+func TestSweepClosedNudgeMailRetention_DisabledPolicyDeletesNothing(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	// Zero-valued policy: both TTLs non-positive => deletion disabled.
+	seed := []beads.Bead{
+		closedNudgeSeed("n-old", "n-old", now.Add(-100*time.Hour)),
+		closedMailSeed("m-old", now.Add(-100*time.Hour)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	result, err := sweepClosedNudgeMailRetention(store, nil, now, nudgeMailRetentionPolicy{}, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NudgeDeleted != 0 || result.MailDeleted != 0 {
+		t.Errorf("deleted = %+v, want zero (disabled policy must delete nothing)", result)
+	}
+	if !retentionBeadPresent(t, store, "n-old") || !retentionBeadPresent(t, store, "m-old") {
+		t.Error("disabled policy must not delete any bead")
+	}
+}
+
+func TestCountClosedNudgeMailRetention_DryRunMakesNoChanges(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	policy := testNudgeMailRetentionPolicy()
+
+	seed := []beads.Bead{
+		closedNudgeSeed("n-old", "n-old", now.Add(-policy.nudgeDeleteAfterClose-time.Hour)),
+		closedMailSeed("m-old", now.Add(-policy.mailDeleteAfterClose-time.Hour)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	counts, err := countClosedNudgeMailRetention(store, nil, now, policy, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if counts.NudgeDeleted != 1 || counts.MailDeleted != 1 {
+		t.Errorf("counts = %+v, want NudgeDeleted=1 MailDeleted=1", counts)
+	}
+	if !retentionBeadPresent(t, store, "n-old") || !retentionBeadPresent(t, store, "m-old") {
+		t.Error("dry-run must not delete any bead")
+	}
+}
+
+func TestSweepClosedNudgeMailRetention_NilStoreErrors(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	_, err := sweepClosedNudgeMailRetention(nil, nil, now, testNudgeMailRetentionPolicy(), 0)
+	if err == nil {
+		t.Fatal("expected error for nil store, got nil")
+	}
+}
+
+// nudgeRetentionFailingDelete wraps MemStore and forces Delete to fail for
+// specific bead IDs, exercising the per-bead-error continuation path.
+type nudgeRetentionFailingDelete struct {
+	*beads.MemStore
+	failIDs map[string]bool
+}
+
+func (s *nudgeRetentionFailingDelete) Delete(id string) error {
+	if s.failIDs[id] {
+		return fmt.Errorf("forced delete failure for %s", id)
+	}
+	return s.MemStore.Delete(id)
+}
+
+func TestSweepClosedNudgeMailRetention_PerBeadDeleteFailureContinues(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	policy := testNudgeMailRetentionPolicy()
+
+	seed := []beads.Bead{
+		closedNudgeSeed("n-fail", "n-fail", now.Add(-policy.nudgeDeleteAfterClose-2*time.Minute)),
+		closedNudgeSeed("n-ok", "n-ok", now.Add(-policy.nudgeDeleteAfterClose-time.Minute)),
+	}
+	mem := beads.NewMemStoreFrom(100, seed, nil)
+	store := &nudgeRetentionFailingDelete{MemStore: mem, failIDs: map[string]bool{"n-fail": true}}
+
+	result, err := sweepClosedNudgeMailRetention(store, nil, now, policy, 0)
+	if err == nil {
+		t.Fatal("expected a joined per-bead error, got nil")
+	}
+	if !strings.Contains(err.Error(), "n-fail") {
+		t.Errorf("error should mention the failing bead, got: %v", err)
+	}
+	if result.NudgeDeleted != 1 {
+		t.Errorf("NudgeDeleted = %d, want 1 (the non-failing bead)", result.NudgeDeleted)
+	}
+	if retentionBeadPresent(t, store, "n-ok") {
+		t.Error("n-ok should have been deleted")
+	}
+	if !retentionBeadPresent(t, store, "n-fail") {
+		t.Error("n-fail should remain (delete failed)")
+	}
+}
+
+func TestNudgeMailRetentionPolicyForConfig(t *testing.T) {
+	// Nil config falls back to the controller defaults (24h / 72h).
+	def := nudgeMailRetentionPolicyForConfig(nil)
+	if def.nudgeDeleteAfterClose != 24*time.Hour {
+		t.Errorf("nil cfg nudge TTL = %v, want 24h", def.nudgeDeleteAfterClose)
+	}
+	if def.mailDeleteAfterClose != 72*time.Hour {
+		t.Errorf("nil cfg mail TTL = %v, want 72h", def.mailDeleteAfterClose)
+	}
+
+	// Explicit config values override the defaults.
+	cfg := &config.City{
+		Beads: config.BeadsConfig{
+			Policies: map[string]config.BeadPolicyConfig{
+				config.BeadPolicyNudge: {DeleteAfterClose: "1h"},
+				config.BeadPolicyMail:  {DeleteAfterClose: "2h"},
+			},
+		},
+	}
+	got := nudgeMailRetentionPolicyForConfig(cfg)
+	if got.nudgeDeleteAfterClose != time.Hour {
+		t.Errorf("configured nudge TTL = %v, want 1h", got.nudgeDeleteAfterClose)
+	}
+	if got.mailDeleteAfterClose != 2*time.Hour {
+		t.Errorf("configured mail TTL = %v, want 2h", got.mailDeleteAfterClose)
 	}
 }

@@ -4319,11 +4319,39 @@ func ApplyAgentDefaults(cfg *City) {
 // both values stay in sync.
 const DefaultOrderTrackingDeleteAfterClose = "7d"
 
+// DefaultNudgeDeleteAfterClose is the canonical default closed-bead TTL for the
+// nudge policy. Applied by ApplyBeadPolicyDefaults when
+// [beads.policies.nudge].delete_after_close is unset. The 24h window is far
+// longer than the 10-minute nudge close TTL, leaving ample room for incident
+// inspection and for the periodic jsonl archiver to capture the row before it
+// becomes eligible for deletion. cmd/gc/nudge_mail_sweep.go derives its runtime
+// fallback from this constant so both values stay in sync.
+const DefaultNudgeDeleteAfterClose = "24h"
+
+// DefaultMailDeleteAfterClose is the canonical default closed-bead TTL for the
+// mail policy. Applied by ApplyBeadPolicyDefaults when
+// [beads.policies.mail].delete_after_close is unset. The 72h window is far
+// longer than the 60-minute mail close TTL for the same reasons as the nudge
+// default. cmd/gc/nudge_mail_sweep.go derives its runtime fallback from this
+// constant so both values stay in sync.
+const DefaultMailDeleteAfterClose = "72h"
+
+const (
+	// BeadPolicyNudge names the [beads.policies.nudge] policy that governs
+	// delete-after-close retention for delivered nudge beads.
+	BeadPolicyNudge = "nudge"
+	// BeadPolicyMail names the [beads.policies.mail] policy that governs
+	// delete-after-close retention for read mail beads.
+	BeadPolicyMail = "mail"
+)
+
 // ApplyBeadPolicyDefaults fills in controller-managed defaults for bead
 // policies that have sane non-empty defaults. Call after all config
 // composition layers have been merged so user-supplied values take
 // precedence. Currently:
 //   - [beads.policies.order_tracking].delete_after_close defaults to "7d".
+//   - [beads.policies.nudge].delete_after_close defaults to "24h".
+//   - [beads.policies.mail].delete_after_close defaults to "72h".
 func ApplyBeadPolicyDefaults(cfg *City) {
 	if cfg == nil {
 		return
@@ -4331,10 +4359,19 @@ func ApplyBeadPolicyDefaults(cfg *City) {
 	if cfg.Beads.Policies == nil {
 		cfg.Beads.Policies = make(map[string]BeadPolicyConfig)
 	}
-	p := cfg.Beads.Policies["order_tracking"]
+	setBeadPolicyDeleteAfterCloseDefault(cfg, "order_tracking", DefaultOrderTrackingDeleteAfterClose)
+	setBeadPolicyDeleteAfterCloseDefault(cfg, BeadPolicyNudge, DefaultNudgeDeleteAfterClose)
+	setBeadPolicyDeleteAfterCloseDefault(cfg, BeadPolicyMail, DefaultMailDeleteAfterClose)
+}
+
+// setBeadPolicyDeleteAfterCloseDefault sets delete_after_close for the named
+// policy only when the loaded config left it empty, preserving any
+// user-supplied value and any other fields already present on the policy.
+func setBeadPolicyDeleteAfterCloseDefault(cfg *City, name, def string) {
+	p := cfg.Beads.Policies[name]
 	if p.DeleteAfterClose == "" {
-		p.DeleteAfterClose = DefaultOrderTrackingDeleteAfterClose
-		cfg.Beads.Policies["order_tracking"] = p
+		p.DeleteAfterClose = def
+		cfg.Beads.Policies[name] = p
 	}
 }
 
