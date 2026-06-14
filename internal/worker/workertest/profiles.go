@@ -32,6 +32,20 @@ type ContinuationOracle struct {
 	ResetResponseContains  string
 }
 
+// UsageExpectation is the per-invocation token-usage contract a profile's
+// fresh fixture must satisfy. Supported mirrors whether the worker registers
+// an invocation-usage extractor for the profile's family
+// (worker.InvocationUsageFamily); the token fields are the aggregate the
+// matching extractor must yield across the fresh fixture's usage-bearing
+// invocations. Unsupported families leave Supported false and the totals zero.
+type UsageExpectation struct {
+	Supported       bool
+	Invocations     int
+	InputTokens     int
+	OutputTokens    int
+	CacheReadTokens int
+}
+
 // Profile identifies the worker profile and its phase-1 fixture bundle.
 type Profile struct {
 	ID           ProfileID
@@ -39,6 +53,7 @@ type Profile struct {
 	WorkDir      string
 	Fixtures     ProfileFixtureSet
 	Continuation ContinuationOracle
+	Usage        UsageExpectation
 }
 
 // Phase1Profiles returns the canonical phase-1 worker-core profiles.
@@ -59,6 +74,13 @@ func Phase1Profiles() []Profile {
 				RecallResponseContains: "Phase 1 covers transcript normalization and continuation semantics.",
 				ResetResponseContains:  "I cannot repeat the earlier summary because this is a fresh session.",
 			},
+			Usage: UsageExpectation{
+				Supported:       true,
+				Invocations:     1,
+				InputTokens:     100,
+				OutputTokens:    40,
+				CacheReadTokens: 10,
+			},
 		},
 		{
 			ID:       ProfileCodexTmuxCLI,
@@ -75,6 +97,13 @@ func Phase1Profiles() []Profile {
 				RecallResponseContains: "The adapter reads provider transcripts into a canonical history.",
 				ResetResponseContains:  "I cannot repeat the earlier adapter summary because this session started fresh.",
 			},
+			Usage: UsageExpectation{
+				Supported:       true,
+				Invocations:     1,
+				InputTokens:     100,
+				OutputTokens:    40,
+				CacheReadTokens: 10,
+			},
 		},
 		{
 			ID:       ProfileGeminiTmuxCLI,
@@ -90,6 +119,13 @@ func Phase1Profiles() []Profile {
 				RecallPromptContains:   "Repeat the exact fixture summary from earlier before answering.",
 				RecallResponseContains: "The fixture models normalized transcript history.",
 				ResetResponseContains:  "I cannot repeat the earlier fixture summary because this chat is fresh.",
+			},
+			Usage: UsageExpectation{
+				Supported:       true,
+				Invocations:     1,
+				InputTokens:     100,
+				OutputTokens:    40,
+				CacheReadTokens: 10,
 			},
 		},
 		{

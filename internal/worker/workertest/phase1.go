@@ -18,6 +18,7 @@ type NormalizedMessage struct {
 // Snapshot is the phase-1 normalized transcript view.
 type Snapshot struct {
 	SessionID          string
+	FixtureRoot        string
 	TranscriptPath     string
 	TranscriptPathHint string
 	History            *worker.HistorySnapshot
@@ -80,6 +81,65 @@ func TranscriptNormalizationResult(profile Profile, snapshot *Snapshot) Result {
 	}
 }
 
+// TranscriptUsageResult validates per-invocation token-usage extraction for a
+// snapshot. Families with an invocation-usage extractor
+// (worker.InvocationUsageFamily) must yield the profile's expected usage
+// aggregate from the fresh fixture; families without one are out of scope and
+// reported Unsupported. A mismatch between the worker's support and the
+// profile's UsageExpectation.Supported is a drift failure — adding a family to
+// invocationUsageSpecs (or here) without the other forces this requirement to
+// fail rather than leaving a silent gap.
+func TranscriptUsageResult(profile Profile, snapshot *Snapshot) Result {
+	family, supported := worker.InvocationUsageFamily(profile.Provider)
+	evidence := phase1UsageEvidence(profile, snapshot, family, supported)
+	switch {
+	case supported != profile.Usage.Supported:
+		return Fail(profile.ID, RequirementTranscriptUsage,
+			fmt.Sprintf("usage-support drift: worker extractor present=%t for family %q but profile expectation supported=%t", supported, family, profile.Usage.Supported)).WithEvidence(evidence)
+	case !supported:
+		return Unsupported(profile.ID, RequirementTranscriptUsage,
+			fmt.Sprintf("provider family %q has no invocation-usage extractor (out of scope)", family)).WithEvidence(evidence)
+	case snapshot == nil:
+		return Fail(profile.ID, RequirementTranscriptUsage, "missing snapshot").WithEvidence(evidence)
+	}
+
+	adapter := worker.SessionLogAdapter{SearchPaths: []string{snapshot.FixtureRoot}}
+	usages, err := adapter.InvocationUsage(profile.Provider, snapshot.TranscriptPath)
+	if err != nil {
+		return Fail(profile.ID, RequirementTranscriptUsage,
+			fmt.Sprintf("extract %s invocation usage: %v", family, err)).WithEvidence(evidence)
+	}
+
+	var inputSum, outputSum, cacheReadSum int
+	for _, usage := range usages {
+		inputSum += usage.InputTokens
+		outputSum += usage.OutputTokens
+		cacheReadSum += usage.CacheReadTokens
+	}
+	evidence["extracted_invocations"] = fmt.Sprintf("%d", len(usages))
+	evidence["extracted_input_tokens"] = fmt.Sprintf("%d", inputSum)
+	evidence["extracted_output_tokens"] = fmt.Sprintf("%d", outputSum)
+	evidence["extracted_cache_read_tokens"] = fmt.Sprintf("%d", cacheReadSum)
+
+	want := profile.Usage
+	switch {
+	case len(usages) != want.Invocations:
+		return Fail(profile.ID, RequirementTranscriptUsage,
+			fmt.Sprintf("usage-bearing invocations = %d, want %d", len(usages), want.Invocations)).WithEvidence(evidence)
+	case inputSum != want.InputTokens:
+		return Fail(profile.ID, RequirementTranscriptUsage,
+			fmt.Sprintf("input tokens = %d, want %d", inputSum, want.InputTokens)).WithEvidence(evidence)
+	case outputSum != want.OutputTokens:
+		return Fail(profile.ID, RequirementTranscriptUsage,
+			fmt.Sprintf("output tokens = %d, want %d", outputSum, want.OutputTokens)).WithEvidence(evidence)
+	case cacheReadSum != want.CacheReadTokens:
+		return Fail(profile.ID, RequirementTranscriptUsage,
+			fmt.Sprintf("cache-read tokens = %d, want %d", cacheReadSum, want.CacheReadTokens)).WithEvidence(evidence)
+	default:
+		return Pass(profile.ID, RequirementTranscriptUsage, "extracted the expected per-invocation token usage from the profile transcript").WithEvidence(evidence)
+	}
+}
+
 // DiscoverTranscript resolves the provider-native transcript path for a profile fixture root.
 func DiscoverTranscript(profile Profile, fixtureRoot string) (string, error) {
 	adapter := worker.SessionLogAdapter{SearchPaths: []string{fixtureRoot}}
@@ -114,6 +174,7 @@ func LoadSnapshot(profile Profile, fixtureRoot string) (*Snapshot, error) {
 
 	return &Snapshot{
 		SessionID:          strings.TrimSpace(history.ProviderSessionID),
+		FixtureRoot:        fixtureRoot,
 		TranscriptPath:     path,
 		TranscriptPathHint: rel,
 		History:            history,
@@ -307,6 +368,23 @@ func phase1SnapshotEvidence(snapshot *Snapshot) map[string]string {
 			evidence["tail_degraded_reason"] = snapshot.History.TailState.DegradedReason
 		}
 		evidence["message_count"] = fmt.Sprintf("%d", len(snapshot.Messages))
+	}
+	return evidence
+}
+
+func phase1UsageEvidence(profile Profile, snapshot *Snapshot, family string, supported bool) map[string]string {
+	evidence := phase1SnapshotEvidence(snapshot)
+	if evidence == nil {
+		evidence = map[string]string{}
+	}
+	evidence["usage_family"] = family
+	evidence["worker_usage_supported"] = fmt.Sprintf("%t", supported)
+	evidence["profile_usage_supported"] = fmt.Sprintf("%t", profile.Usage.Supported)
+	if profile.Usage.Supported {
+		evidence["expected_invocations"] = fmt.Sprintf("%d", profile.Usage.Invocations)
+		evidence["expected_input_tokens"] = fmt.Sprintf("%d", profile.Usage.InputTokens)
+		evidence["expected_output_tokens"] = fmt.Sprintf("%d", profile.Usage.OutputTokens)
+		evidence["expected_cache_read_tokens"] = fmt.Sprintf("%d", profile.Usage.CacheReadTokens)
 	}
 	return evidence
 }

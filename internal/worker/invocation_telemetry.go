@@ -219,6 +219,18 @@ func invocationUsageFamily(provider string) string {
 	return ""
 }
 
+// InvocationUsageFamily resolves the provider's invocation-usage family and
+// reports whether the worker has a per-invocation token/cost extractor
+// registered for it. It is the canonical query for invocation-telemetry
+// support: the worker conformance suite uses it so usage coverage stays
+// aligned with invocationUsageSpecs — adding a family there forces a
+// conformance decision rather than leaving a silent gap.
+func InvocationUsageFamily(provider string) (family string, supported bool) {
+	family = invocationUsageFamily(provider)
+	_, supported = invocationUsageSpecs[family]
+	return family, supported
+}
+
 // discoverInvocationTranscriptViaManager resolves the transcript through
 // Manager.TranscriptPath — safe for families whose route there is cheap
 // (claude keyed lookup, gemini bounded project scan). Errors are swallowed.

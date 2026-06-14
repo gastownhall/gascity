@@ -12,6 +12,7 @@ func TestPhase1CatalogProfilesStayAligned(t *testing.T) {
 	expectedCodes := []RequirementCode{
 		RequirementTranscriptDiscovery,
 		RequirementTranscriptNormalization,
+		RequirementTranscriptUsage,
 		RequirementContinuationContinuity,
 		RequirementFreshSessionIsolation,
 	}
@@ -79,6 +80,18 @@ func TestPhase1Conformance(t *testing.T) {
 				reporter.Require(t, TranscriptNormalizationResult(profile, fresh))
 			})
 
+			t.Run(string(RequirementTranscriptUsage), func(t *testing.T) {
+				result := TranscriptUsageResult(profile, fresh)
+				if result.Status == ResultUnsupported {
+					// Families without an invocation-usage extractor are out of
+					// scope: record the outcome but do not fail the suite.
+					reporter.Record(result)
+					t.Skip(result.Detail)
+					return
+				}
+				reporter.Require(t, result)
+			})
+
 			t.Run(string(RequirementContinuationContinuity), func(t *testing.T) {
 				reporter.Require(t, ContinuationResult(profile, fresh, continued))
 			})
@@ -123,6 +136,43 @@ func TestPhase1ContinuationOracleRequiresRestartRecallSignal(t *testing.T) {
 	if err := result.Err(); err == nil {
 		t.Fatal("ContinuationResult should fail without recall response anchor")
 	}
+}
+
+func TestTranscriptUsageResultDetectsMismatchAndDrift(t *testing.T) {
+	base := Phase1Profiles()[0] // claude/tmux-cli, a supported family
+	snapshot := mustLoadSnapshot(t, base, base.Fixtures.FreshRoot)
+
+	t.Run("expected totals must match the extracted usage", func(t *testing.T) {
+		bad := base
+		bad.Usage.InputTokens = base.Usage.InputTokens + 999
+		result := TranscriptUsageResult(bad, snapshot)
+		if result.Err() == nil {
+			t.Fatal("TranscriptUsageResult should fail when expected input tokens diverge from the fixture")
+		}
+	})
+
+	t.Run("supported family declaring no expectation is drift", func(t *testing.T) {
+		drift := base
+		drift.Usage = UsageExpectation{} // Supported:false while the worker supports claude
+		result := TranscriptUsageResult(drift, snapshot)
+		if result.Status != ResultFail {
+			t.Fatalf("status = %q, want fail (worker supports the family but the profile declares none)", result.Status)
+		}
+	})
+
+	t.Run("unsupported family is reported out of scope", func(t *testing.T) {
+		var pi Profile
+		for _, profile := range Phase1Profiles() {
+			if profile.ID == ProfilePiTmuxCLI {
+				pi = profile
+				break
+			}
+		}
+		result := TranscriptUsageResult(pi, &Snapshot{})
+		if result.Status != ResultUnsupported {
+			t.Fatalf("status = %q, want unsupported for a family with no invocation-usage extractor", result.Status)
+		}
+	})
 }
 
 func mustLoadSnapshot(t *testing.T, profile Profile, fixtureRoot string) *Snapshot {
