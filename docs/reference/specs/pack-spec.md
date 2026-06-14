@@ -68,7 +68,10 @@ constraints and lockfile resolution, not by a loader comparing `[pack].version`
 directly.
 
 The `requires_gc` field is optional metadata for the minimum compatible `gc`
-version. It is parsed as pack metadata.
+version. It is parsed and preserved as pack metadata. The current loader,
+importer, and doctor surfaces do not enforce the constraint during load,
+import, or validation; enforcement must be introduced by an explicit future
+implementation change before pack authors can rely on it as a hard gate.
 
 ### 0.3. Pack Contents
 
@@ -207,7 +210,7 @@ requires_gc = ">=0.13.0"
 | `name` | string | yes | Pack identifier and provenance label. Must not be empty. |
 | `schema` | integer | yes | Pack format version. Must be `2` for this specification. |
 | `version` | string | no | Pack version metadata. |
-| `requires_gc` | string | no | Minimum compatible `gc` version metadata. |
+| `requires_gc` | string | no | Minimum compatible `gc` version metadata. Parsed and preserved; not currently enforced during load/import/doctor. |
 | `description` | string | no | Human-readable pack summary. |
 | `requires` | array of tables | no | Agent requirements validated after expansion. |
 
@@ -775,9 +778,10 @@ version selection, cache population, and lockfile update occur before or around
 loading. They must produce a concrete pack root directory whose `pack.toml` can
 be loaded by this specification.
 
-The `gc pack` command surface is registry discovery and local registry
-configuration: `gc pack registry add`, `list`, `remove`, `refresh`, `search`,
-and `show`.
+The `gc pack` command surface is registry discovery, local registry
+configuration, authentication, and publish submission: `gc pack registry add`,
+`list`, `remove`, `refresh`, `search`, `show`, `login`, `whoami`, and
+`publish`.
 
 Registry handles are not durable dependency coordinates. The shipped registry
 commands may accept a handle such as `main:gascity` while searching or

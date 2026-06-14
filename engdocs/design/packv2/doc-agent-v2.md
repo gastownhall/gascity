@@ -1,5 +1,11 @@
 # Agent Definition v.next
 
+> **Historical PackV2 design note.** This page preserves design history and
+> rollout rationale. For current pack authoring guidance, use
+> `docs/reference/specs/pack-spec.md`, `docs/guides/understanding-packs.md`,
+> and `docs/guides/shareable-packs.md`. When this note disagrees with shipped
+> behavior, prefer the current docs, generated reference, code, and tests.
+
 **GitHub Issue:** [gastownhall/gascity#356](https://github.com/gastownhall/gascity/issues/356)
 
 Title: `feat: Agent Definition v.next — agents as directories`

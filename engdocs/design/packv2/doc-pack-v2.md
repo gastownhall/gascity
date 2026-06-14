@@ -1,5 +1,11 @@
 # Pack/City Model v.next
 
+> **Historical PackV2 design note.** This page preserves design history and
+> rollout rationale. For current pack authoring guidance, use
+> `docs/reference/specs/pack-spec.md`, `docs/guides/understanding-packs.md`,
+> and `docs/guides/shareable-packs.md`. When this note disagrees with shipped
+> behavior, prefer the current docs, generated reference, code, and tests.
+
 **GitHub Issue:** [gastownhall/gascity#360](https://github.com/gastownhall/gascity/issues/360) (supersedes [#159](https://github.com/gastownhall/gascity/issues/159))
 
 Title: `feat: Pack/City Model v.next — cities as packs, import model, managed state`

@@ -133,23 +133,43 @@ binding.
 ## Registry Discovery
 
 Registries help you find packs, but they do not change the authored import
-shape. The registry commands available in this release are discovery and cache
-management commands:
+shape. The registry commands available in this release cover discovery, cache
+management, authentication, and publish submission:
 
 ```text
 gc pack registry add main https://github.com/gastownhall/gascity-packs.git
 gc pack registry refresh main
 gc pack registry search gastown
-gc pack registry show gastown
+gc pack registry show main:gastown
+gc pack registry login
+gc pack registry publish .
+gc pack registry whoami
 gc pack registry list
 gc pack registry remove main
 ```
 
 When a registry entry is used to add or migrate a pack, the durable
 `pack.toml` entry stores the entry's resolved `source` and optional `version`,
-not the registry handle. Publishing registry content is still a registry-repo
-workflow in this wave: edit the registry catalog, review it, and refresh the
-local registry cache before searching or showing new entries.
+not the registry handle.
+
+The first public registry is the `gascity-packs` catalog:
+
+```text
+gc pack registry add main https://github.com/gastownhall/gascity-packs.git
+gc pack registry refresh main
+gc pack registry search gascity
+gc pack registry show main:gascity
+```
+
+Registry caches are local. Search and show warn when a registry cache is older
+than the freshness window. The default window is 24 hours. Set
+`GC_REGISTRY_FRESHNESS` to a positive Go duration string, such as `1h` or
+`30m`, to change that warning window. Invalid, zero, or negative values warn.
+Pass `--refresh` to `gc pack registry search` or `gc pack registry show` when
+you want that command to fetch the latest catalog before reading it.
+
+See [Public Registry Packs](/guides/registry-showcase) for the first-party
+packs currently advertised through the public registry.
 
 ## City Usage
 
