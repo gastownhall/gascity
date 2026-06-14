@@ -167,6 +167,8 @@ func newIsolatedAcceptanceEnv(t *testing.T) *helpers.Env {
 	if err := helpers.WriteSupervisorConfig(gcHome); err != nil {
 		t.Fatalf("acceptance: %v", err)
 	}
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	return helpers.NewEnv(testEnv.Get("GC_ACCEPTANCE_GC_BIN"), gcHome, runtimeDir)
 }
 
