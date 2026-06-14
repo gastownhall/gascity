@@ -546,6 +546,9 @@ name = "demo"
 [beads]
 provider = "file"
 
+[session]
+provider = "fake"
+
 [imports.actual]
 source = "https://github.com/gastownhall/gc-actual-packs"
 `), 0o644); err != nil {
@@ -585,6 +588,9 @@ name = "demo"
 [beads]
 provider = "file"
 
+[session]
+provider = "fake"
+
 [[rigs]]
 name = "demo-rig"
 path = "rig"
@@ -623,6 +629,9 @@ name = "demo"
 
 [beads]
 provider = "file"
+
+[session]
+provider = "fake"
 
 [defaults.rig.imports.actual]
 source = "https://github.com/gastownhall/gc-actual-packs"
