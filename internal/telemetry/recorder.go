@@ -353,20 +353,19 @@ func RecordAgentMaxAgeKill(ctx context.Context, agentName string) {
 	)
 }
 
-// RecordReconcileCycle records a reconciliation cycle with counts (metrics + log event).
-func RecordReconcileCycle(ctx context.Context, started, stopped, skipped int) {
+// RecordReconcileCycle records a reconciliation cycle (metrics + log event).
+// The metric carries only the cycle count and the started attribute: stops
+// are applied asynchronously and skips are per-session decisions, so no
+// honest per-tick counts exist for them.
+func RecordReconcileCycle(ctx context.Context, started int) {
 	initInstruments()
 	inst.reconcileCycleTotal.Add(ctx, 1,
 		metric.WithAttributes(
 			attribute.Int("started", started),
-			attribute.Int("stopped", stopped),
-			attribute.Int("skipped", skipped),
 		),
 	)
 	emit(ctx, "reconcile.cycle", otellog.SeverityInfo,
 		otellog.Int("started", started),
-		otellog.Int("stopped", stopped),
-		otellog.Int("skipped", skipped),
 	)
 }
 
