@@ -9721,6 +9721,361 @@ func TestJsonlExportPushFailureEscalatesOncePerUnresolvedFailure(t *testing.T) {
 	}
 }
 
+// writeWatermarkDoltStub emits a `dolt` shim that distinguishes the full issues
+// dump from a since-watermark delta query (#3342): any query containing
+// `updated_at >=` returns deltaPayload, a bare issues SELECT returns
+// fullPayload, and supplemental tables return empty. Every invocation is
+// appended to DOLT_ARGS_LOG when set so tests can assert the query shape and
+// supplemental-skip behavior.
+func writeWatermarkDoltStub(t *testing.T, binDir, fullPayload, deltaPayload string) {
+	t.Helper()
+	body := "#!/bin/sh\n" +
+		"if [ -n \"${DOLT_ARGS_LOG:-}\" ]; then\n" +
+		"  printf '%s\\n' \"$*\" >> \"$DOLT_ARGS_LOG\"\n" +
+		"fi\n" +
+		"case \"$*\" in\n" +
+		"  *\"SHOW TABLES FROM\"*\"LIKE 'wisps'\"*)\n" +
+		"    printf 'Tables_in_db\\nwisps\\n'\n" +
+		"    ;;\n" +
+		"  *\"SHOW DATABASES\"*)\n" +
+		"    printf 'Database\\nbeads\\n'\n" +
+		"    ;;\n" +
+		"  *\"updated_at >=\"*)\n" +
+		"    printf '%s\\n' '" + deltaPayload + "'\n" +
+		"    ;;\n" +
+		"  *\"FROM \\`beads\\`.issues\"*)\n" +
+		"    printf '%s\\n' '" + fullPayload + "'\n" +
+		"    ;;\n" +
+		"  *\"SELECT *\"*)\n" +
+		"    printf '{\"rows\":[]}\\n'\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	writeExecutable(t, filepath.Join(binDir, "dolt"), body)
+}
+
+// seedArchiveWithIssuesPayload initializes a git archive repo with one committed
+// beads/issues.jsonl holding the given `{"rows":[...]}` payload, so a later
+// delta run has a prior snapshot to merge into. Default branch is `main`.
+func seedArchiveWithIssuesPayload(t *testing.T, archiveRepo, payload string) {
+	t.Helper()
+	dbDir := filepath.Join(archiveRepo, "beads")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dbDir, "issues.jsonl"), []byte(payload+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	steps := [][]string{
+		{"-c", "init.defaultBranch=main", "init", "-q"},
+		{"config", "user.email", "test@example.invalid"},
+		{"config", "user.name", "test"},
+		{"add", "-A"},
+		{"commit", "-q", "-m", "seed"},
+	}
+	for _, args := range steps {
+		full := append([]string{"-C", archiveRepo}, args...)
+		if out, err := exec.Command("git", full...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+}
+
+// writeWatermarkState pre-seeds the export state with an issues watermark and
+// full-snapshot epoch for the test DB ("beads") so a run takes the delta (or
+// forced-full) path.
+func writeWatermarkState(t *testing.T, stateFile, watermark string, fullAt int64) {
+	t.Helper()
+	state := map[string]any{
+		"export_watermarks": map[string]any{
+			"beads": map[string]any{
+				"issues": map[string]any{
+					"updated_at_watermark": watermark,
+					"full_at":              fullAt,
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateFile, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// readWatermarkState returns the stored issues watermark and full_at epoch for
+// the test DB ("beads").
+func readWatermarkState(t *testing.T, stateFile string) (string, int64) {
+	t.Helper()
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state struct {
+		ExportWatermarks map[string]struct {
+			Issues struct {
+				Watermark string  `json:"updated_at_watermark"`
+				FullAt    float64 `json:"full_at"`
+			} `json:"issues"`
+		} `json:"export_watermarks"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, data)
+	}
+	e := state.ExportWatermarks["beads"]
+	return e.Issues.Watermark, int64(e.Issues.FullAt)
+}
+
+// TestJsonlExportFullSnapshotRecordsWatermark verifies the first export for a DB
+// is a full snapshot (no since-watermark filter, supplemental tables refreshed)
+// and records the high-water updated_at plus a full_at epoch for the next pass.
+func TestJsonlExportFullSnapshotRecordsWatermark(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+
+	scriptBody, err := os.ReadFile(coreScriptPath("jsonl-export.sh"))
+	if err != nil {
+		t.Fatalf("ReadFile(jsonl-export.sh): %v", err)
+	}
+	if got := extractShellDefault(t, string(scriptBody), "GC_JSONL_FULL_SNAPSHOT_INTERVAL"); got != "3600" {
+		t.Fatalf("GC_JSONL_FULL_SNAPSHOT_INTERVAL default = %q, want 3600", got)
+	}
+
+	full := `{"rows":[{"id":"a","updated_at":"2026-06-14T08:00:00Z"},{"id":"b","updated_at":"2026-06-14T12:00:00Z"}]}`
+	writeWatermarkDoltStub(t, binDir, full, `{"rows":[]}`)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["DOLT_ARGS_LOG"] = doltLog
+
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	doltData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt args log): %v", err)
+	}
+	dolt := string(doltData)
+	if strings.Contains(dolt, "updated_at >=") {
+		t.Fatalf("first export must be a full snapshot, not a delta:\n%s", dolt)
+	}
+	if !strings.Contains(dolt, "FROM `beads`.`comments`") {
+		t.Fatalf("full snapshot must refresh supplemental tables:\n%s", dolt)
+	}
+
+	wm, fullAt := readWatermarkState(t, stateFile)
+	if wm != "2026-06-14T12:00:00Z" {
+		t.Fatalf("watermark = %q, want 2026-06-14T12:00:00Z (max updated_at)", wm)
+	}
+	if fullAt <= 0 {
+		t.Fatalf("full_at = %d, want a recorded epoch > 0", fullAt)
+	}
+}
+
+// TestJsonlExportDeltaMergesSinceWatermark verifies a delta cycle exports only
+// rows updated at/after the stored watermark, merges them into the prior
+// snapshot (delta wins on id collision, prior-only rows retained), skips the
+// supplemental tables, and advances the watermark to the delta high-water mark.
+func TestJsonlExportDeltaMergesSinceWatermark(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+
+	prior := `{"rows":[{"id":"p1","title":"one","updated_at":"2026-06-14T09:00:00Z"},{"id":"p2","title":"two-old","updated_at":"2026-06-14T10:00:00Z"}]}`
+	seedArchiveWithIssuesPayload(t, archiveRepo, prior)
+	// A recent full snapshot keeps this pass on the delta path.
+	writeWatermarkState(t, stateFile, "2026-06-14T10:00:00Z", time.Now().Unix())
+
+	delta := `{"rows":[{"id":"p2","title":"two-new","updated_at":"2026-06-14T11:00:00Z"},{"id":"p3","title":"three","updated_at":"2026-06-14T11:30:00Z"}]}`
+	// A wrong full-path would surface this sentinel row instead of the merge.
+	full := `{"rows":[{"id":"FULL","title":"wrong","updated_at":"2026-06-14T23:00:00Z"}]}`
+	writeWatermarkDoltStub(t, binDir, full, delta)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["DOLT_ARGS_LOG"] = doltLog
+
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	doltData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt args log): %v", err)
+	}
+	dolt := string(doltData)
+	if !strings.Contains(dolt, "updated_at >= '2026-06-14T10:00:00Z'") {
+		t.Fatalf("delta export must query since the stored watermark:\n%s", dolt)
+	}
+	for _, banned := range []string{"FROM `beads`.`comments`", "FROM `beads`.`labels`", "FROM `beads`.`metadata`"} {
+		if strings.Contains(dolt, banned) {
+			t.Fatalf("delta cycle must skip supplemental re-export; saw %q:\n%s", banned, dolt)
+		}
+	}
+
+	merged, err := os.ReadFile(filepath.Join(archiveRepo, "beads", "issues.jsonl"))
+	if err != nil {
+		t.Fatalf("ReadFile(merged issues.jsonl): %v", err)
+	}
+	var payload struct {
+		Rows []struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(merged, &payload); err != nil {
+		t.Fatalf("Unmarshal(merged): %v\n%s", err, merged)
+	}
+	got := map[string]string{}
+	for _, r := range payload.Rows {
+		got[r.ID] = r.Title
+	}
+	want := map[string]string{"p1": "one", "p2": "two-new", "p3": "three"}
+	if len(payload.Rows) != len(want) {
+		t.Fatalf("merged row count = %d, want %d\nrows: %s", len(payload.Rows), len(want), merged)
+	}
+	for id, title := range want {
+		if got[id] != title {
+			t.Fatalf("merged row %q title = %q, want %q\nrows: %s", id, got[id], title, merged)
+		}
+	}
+
+	wm, _ := readWatermarkState(t, stateFile)
+	if wm != "2026-06-14T11:30:00Z" {
+		t.Fatalf("watermark = %q, want 2026-06-14T11:30:00Z (delta high-water)", wm)
+	}
+}
+
+// TestJsonlExportMigrationFromPreWatermarkState verifies the upgrade path: an
+// archive that already has a committed issues.jsonl but a state file lacking any
+// export_watermarks key must take a full snapshot (not a delta), refresh
+// supplemental tables, and record a valid watermark + full_at without corrupting
+// state. Regression guard for the @tsv leading-tab parse that mis-read an empty
+// watermark as "0" and skipped the full cycle.
+func TestJsonlExportMigrationFromPreWatermarkState(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+
+	prior := `{"rows":[{"id":"p1","title":"one","updated_at":"2026-06-14T09:00:00Z"}]}`
+	seedArchiveWithIssuesPayload(t, archiveRepo, prior)
+	// Pre-watermark state: a populated state object with no export_watermarks key.
+	if err := os.WriteFile(stateFile, []byte(`{"last_logged_mode":"local-only"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	full := `{"rows":[{"id":"p1","title":"one","updated_at":"2026-06-14T09:00:00Z"},{"id":"p9","title":"nine","updated_at":"2026-06-14T13:00:00Z"}]}`
+	delta := `{"rows":[{"id":"SHOULD_NOT_APPEAR","updated_at":"2026-06-14T20:00:00Z"}]}`
+	writeWatermarkDoltStub(t, binDir, full, delta)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["DOLT_ARGS_LOG"] = doltLog
+
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	doltData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt args log): %v", err)
+	}
+	dolt := string(doltData)
+	if strings.Contains(dolt, "updated_at >=") {
+		t.Fatalf("migration with no watermark must be a full snapshot, not a delta:\n%s", dolt)
+	}
+	if !strings.Contains(dolt, "FROM `beads`.`metadata`") {
+		t.Fatalf("migration full snapshot must refresh supplemental tables:\n%s", dolt)
+	}
+
+	wm, fullAt := readWatermarkState(t, stateFile)
+	if wm != "2026-06-14T13:00:00Z" {
+		t.Fatalf("watermark = %q, want 2026-06-14T13:00:00Z (recorded on migration full cycle)", wm)
+	}
+	if fullAt <= 0 {
+		t.Fatalf("full_at = %d, want a recorded epoch > 0 (state must not be corrupted)", fullAt)
+	}
+	// Pre-existing state keys must survive the watermark write.
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("state file is not valid JSON after migration (corruption?): %v\n%s", err, stateData)
+	}
+}
+
+// TestJsonlExportForcesFullSnapshotAfterInterval verifies an ancient full_at
+// forces a full snapshot (no delta filter, supplemental tables refreshed) even
+// when a watermark exists, and that full_at is refreshed to a recent epoch.
+func TestJsonlExportForcesFullSnapshotAfterInterval(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+
+	prior := `{"rows":[{"id":"p1","title":"one","updated_at":"2026-06-14T09:00:00Z"}]}`
+	seedArchiveWithIssuesPayload(t, archiveRepo, prior)
+	// full_at far in the past → interval elapsed → forced full snapshot.
+	writeWatermarkState(t, stateFile, "2026-06-14T09:00:00Z", 1000)
+
+	full := `{"rows":[{"id":"p1","title":"one","updated_at":"2026-06-14T09:00:00Z"},{"id":"p9","title":"nine","updated_at":"2026-06-14T14:00:00Z"}]}`
+	delta := `{"rows":[{"id":"SHOULD_NOT_APPEAR","updated_at":"2026-06-14T20:00:00Z"}]}`
+	writeWatermarkDoltStub(t, binDir, full, delta)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["DOLT_ARGS_LOG"] = doltLog
+
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	doltData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt args log): %v", err)
+	}
+	dolt := string(doltData)
+	if strings.Contains(dolt, "updated_at >=") {
+		t.Fatalf("interval-elapsed export must be a full snapshot, not a delta:\n%s", dolt)
+	}
+	if !strings.Contains(dolt, "FROM `beads`.`labels`") {
+		t.Fatalf("forced full snapshot must refresh supplemental tables:\n%s", dolt)
+	}
+
+	merged, err := os.ReadFile(filepath.Join(archiveRepo, "beads", "issues.jsonl"))
+	if err != nil {
+		t.Fatalf("ReadFile(issues.jsonl): %v", err)
+	}
+	if strings.Contains(string(merged), "SHOULD_NOT_APPEAR") {
+		t.Fatalf("forced full snapshot must not merge a delta:\n%s", merged)
+	}
+
+	wm, fullAt := readWatermarkState(t, stateFile)
+	if wm != "2026-06-14T14:00:00Z" {
+		t.Fatalf("watermark = %q, want 2026-06-14T14:00:00Z", wm)
+	}
+	if fullAt <= 1000 {
+		t.Fatalf("full_at = %d, want refreshed to a recent epoch", fullAt)
+	}
+}
+
 // gateSweepEnv constructs the env for a gate-sweep.sh invocation with a
 // PATH-shimmed bd stub that logs every call to BD_LOG.
 func gateSweepEnv(t *testing.T) (binDir, bdLog string, env map[string]string) {
@@ -10061,7 +10416,8 @@ func TestPruneBranchesNoOpWhenNoGcBranches(t *testing.T) {
 const wispTimestampLayout = "2006-01-02T15:04:05"
 
 // wispCompactEnv installs a `bd` stub that returns the supplied beadsJSON on
-// `bd list --json --all -n 0` and logs all other bd subcommands to BD_LOG.
+// the bounded `bd list --json --all --sort updated --reverse -n <limit>` scan
+// and logs all other bd subcommands to BD_LOG.
 // BD_LOG is pre-created empty so skip-path tests can still assert on its
 // (empty) contents. TZ=UTC is pinned for cross-platform date parsing — see
 // wispTimestampLayout. jq is whatever is on PATH.
@@ -10076,13 +10432,15 @@ func wispCompactEnv(t *testing.T, beadsJSON string) (bdLog string, env map[strin
 	stubPath := filepath.Join(binDir, "bd")
 	// Stub fails fast on any subcommand or flag shape the script doesn't
 	// currently use. This pins the script's bd contract — a regression that
-	// dropped `--json` or `--all` from `bd list` would otherwise silently
-	// pass because cat would still emit valid JSON.
+	// dropped `--json`/`--all`, or reverted the bounded oldest-first scan
+	// (`--sort updated --reverse -n <limit>`) back to the unbounded `-n 0`
+	// form, would otherwise silently pass because cat would still emit valid
+	// JSON. See gastownhall/gascity#3342.
 	writeExecutable(t, stubPath, fmt.Sprintf(`#!/bin/sh
 case "$1" in
   list)
     case "$*" in
-      *"--json"*"--all"*"-n 0"*)
+      *"--json"*"--all"*"--sort updated"*"--reverse"*"-n "*)
         cat <<'EOF'
 %s
 EOF
@@ -10268,6 +10626,29 @@ func TestWispCompactSkipsNonEphemeralBeads(t *testing.T) {
 		if strings.Contains(s, banned) {
 			t.Fatalf("non-ephemeral bead must be ignored; saw %q in bd log:\n%s", banned, s)
 		}
+	}
+}
+
+// TestWispCompactBoundsScanOldestFirst pins the #3342 contention fix: the
+// candidate scan must be bounded (`-n "$WISP_COMPACT_LIMIT"`, default 5000) and
+// ordered oldest-updated-first (`--sort updated --reverse`) so each run drains
+// the stale backlog instead of walking the whole table. The unbounded `-n 0`
+// form must not reappear.
+func TestWispCompactBoundsScanOldestFirst(t *testing.T) {
+	body, err := os.ReadFile(coreScriptPath("wisp-compact.sh"))
+	if err != nil {
+		t.Fatalf("ReadFile(wisp-compact.sh): %v", err)
+	}
+	script := string(body)
+
+	if got := extractShellDefault(t, script, "GC_WISP_COMPACT_LIMIT"); got != "5000" {
+		t.Fatalf("GC_WISP_COMPACT_LIMIT default = %q, want 5000", got)
+	}
+	if !strings.Contains(script, `bd list --json --all --sort updated --reverse -n "$WISP_COMPACT_LIMIT"`) {
+		t.Fatalf("wisp-compact must scan oldest-first with a bounded limit; script:\n%s", script)
+	}
+	if strings.Contains(script, "bd list --json --all -n 0") {
+		t.Fatalf("wisp-compact must not reintroduce the unbounded `-n 0` scan; script:\n%s", script)
 	}
 }
 
@@ -10473,7 +10854,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
-	if !strings.Contains(string(logData), "list --json --all -n 0") {
+	if !strings.Contains(string(logData), "list --json --all --sort updated --reverse -n 5000") {
 		t.Fatalf("bd list call not observed:\n%s", logData)
 	}
 

@@ -42,6 +42,14 @@ ARCHIVE_REPO="${GC_JSONL_ARCHIVE_REPO:-$PACK_STATE_DIR/jsonl-archive}"
 # transition, so operators who missed the first line still see the current
 # configuration. Default one week.
 MODE_RELOG_INTERVAL_SECONDS="${GC_JSONL_MODE_RELOG_INTERVAL:-604800}"
+# How often (seconds) to force a full issues-table snapshot instead of a
+# since-watermark delta. Between full snapshots the issues export pulls only rows
+# updated at/after the stored high-water mark and merges them into the prior
+# snapshot, so the 5-minute pass stops re-dumping the whole table and fighting
+# live writers (gastownhall/gascity#3342). The periodic full snapshot is the
+# authoritative backstop: delta is best-effort (updated_at formats are mixed), so
+# a full cycle re-syncs every row and keeps compaction effective. Default 1h.
+FULL_SNAPSHOT_INTERVAL_SECONDS="${GC_JSONL_FULL_SNAPSHOT_INTERVAL:-3600}"
 
 # Cached archive mode ("push" or "local-only"). Resolved once on the first
 # get_archive_mode call and reused thereafter so every push checkpoint in a
@@ -132,6 +140,34 @@ validate_exported_issues() {
             error("issues export must be a JSON object with a rows array")
         end
     '
+}
+
+# Merge a since-watermark delta export into the prior full snapshot, keyed by
+# issue id (delta wins). Both inputs are `dolt sql -r json` payloads
+# (`{"rows":[...]}`); the output is the same shape holding the union of rows with
+# prior ordering preserved and updated rows replaced in place. Rows present only
+# in the prior snapshot are retained — a delta never drops a row, which preserves
+# the archive-before-delete guarantee #3342 retention depends on.
+merge_issue_delta() {
+    local prior="$1"
+    local delta="$2"
+
+    jq -n -c \
+        --slurpfile prior "$prior" \
+        --slurpfile delta "$delta" \
+        '{rows: (
+            (($prior[0].rows // []) + ($delta[0].rows // []))
+            | reduce .[] as $r ({}; .[$r.id] = $r)
+            | [ .[] ]
+        )}'
+}
+
+# Highest updated_at across an issues payload, or empty when no row carries one.
+# Feeds the next delta's since-watermark. Lexicographic max matches RFC3339
+# chronological order; mixed CURRENT_TIMESTAMP space-formats are tolerated
+# because the periodic full snapshot re-syncs anything a delta misses.
+issue_payload_watermark() {
+    jq -r '[.rows[]? | .updated_at // empty] | max // ""'
 }
 
 normalize_pending_spike_alert_state() {
@@ -286,6 +322,33 @@ clear_pending_archive_push() {
 
 has_pending_archive_push() {
     [ "$(read_state_json | jq -r '.pending_archive_push // false')" = "true" ]
+}
+
+# Per-database issues-export watermark accessors. State shape:
+#   .export_watermarks[<db>].issues = {updated_at_watermark, full_at}
+# full_at is the unix epoch of the last full snapshot; updated_at_watermark is the
+# high-water mark feeding the next delta export. Emits two lines — the watermark
+# (possibly empty) then full_at (0 when none recorded) — read separately so an
+# empty watermark stays in the first field rather than shifting under leading-tab
+# whitespace stripping in `read`.
+read_db_export_watermark() {
+    local db="$1"
+    read_state_json | jq -r --arg db "$db" '
+        (.export_watermarks[$db].issues // {})
+        | (.updated_at_watermark // ""), (.full_at // 0 | tostring)'
+}
+
+write_db_export_watermark() {
+    local db="$1"
+    local watermark="$2"
+    local full_at="$3"
+    write_state_json "$(
+        read_state_json | jq -c \
+            --arg db "$db" \
+            --arg wm "$watermark" \
+            --argjson full "$full_at" \
+            '.export_watermarks[$db].issues = {updated_at_watermark: $wm, full_at: $full}'
+    )"
 }
 
 refresh_archive_remote_main() {
@@ -909,15 +972,50 @@ while IFS= read -r DB; do
     DB_DIR="$ARCHIVE_REPO/$DB"
     mkdir -p "$DB_DIR"
 
-    # Step 1: Export issues table.
+    # Decide between a full snapshot and a since-watermark delta. A full
+    # snapshot is required on the first export for this DB, when the prior
+    # snapshot file is missing, when no watermark has been recorded yet, or once
+    # the full-snapshot interval has elapsed. Otherwise export only the rows
+    # updated at/after the watermark and merge them into the prior snapshot, so
+    # the 5-minute pass stops re-dumping the whole table (gastownhall/gascity#3342).
+    { IFS= read -r DB_WATERMARK; IFS= read -r DB_FULL_AT; } < <(read_db_export_watermark "$DB")
+    NOW_TS=$(date -u +%s)
+    NEED_FULL=0
+    if [ -z "$DB_WATERMARK" ] || [ ! -f "$DB_DIR/issues.jsonl" ]; then
+        NEED_FULL=1
+    elif [ "$DB_FULL_AT" -le 0 ] || [ "$((NOW_TS - DB_FULL_AT))" -ge "$FULL_SNAPSHOT_INTERVAL_SECONDS" ]; then
+        NEED_FULL=1
+    fi
+
+    # Step 1: Export issues table (full snapshot or merged delta).
     ISSUE_EXPORT_TMP=$(mktemp "$DB_DIR/issues.jsonl.tmp.XXXXXX")
-    if ! dolt_sql -r json -q "SELECT * FROM \`$DB\`.issues $SCRUB_FILTER" > "$ISSUE_EXPORT_TMP" 2>/dev/null; then
-        rm -f "$ISSUE_EXPORT_TMP"
-        discard_failed_db_outputs "$DB"
-        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
-        FAILED_DBS="${FAILED_DBS}$DB
+    if [ "$NEED_FULL" -eq 1 ]; then
+        if ! dolt_sql -r json -q "SELECT * FROM \`$DB\`.issues $SCRUB_FILTER" > "$ISSUE_EXPORT_TMP" 2>/dev/null; then
+            rm -f "$ISSUE_EXPORT_TMP"
+            discard_failed_db_outputs "$DB"
+            FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
+            FAILED_DBS="${FAILED_DBS}$DB
 "
-        continue
+            continue
+        fi
+        DB_FULL_AT="$NOW_TS"
+    else
+        if [ -n "$SCRUB_FILTER" ]; then
+            DELTA_FILTER="$SCRUB_FILTER AND updated_at >= '$DB_WATERMARK'"
+        else
+            DELTA_FILTER="WHERE updated_at >= '$DB_WATERMARK'"
+        fi
+        DELTA_TMP=$(mktemp "$DB_DIR/issues.jsonl.delta.XXXXXX")
+        if ! dolt_sql -r json -q "SELECT * FROM \`$DB\`.issues $DELTA_FILTER" > "$DELTA_TMP" 2>/dev/null \
+            || ! merge_issue_delta "$DB_DIR/issues.jsonl" "$DELTA_TMP" > "$ISSUE_EXPORT_TMP" 2>/dev/null; then
+            rm -f "$ISSUE_EXPORT_TMP" "$DELTA_TMP"
+            discard_failed_db_outputs "$DB"
+            FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
+            FAILED_DBS="${FAILED_DBS}$DB
+"
+            continue
+        fi
+        rm -f "$DELTA_TMP"
     fi
     if ! mv -f "$ISSUE_EXPORT_TMP" "$DB_DIR/issues.jsonl"; then
         rm -f "$ISSUE_EXPORT_TMP"
@@ -928,10 +1026,14 @@ while IFS= read -r DB; do
         continue
     fi
 
-    # Export supplemental tables (best-effort).
-    for TABLE in comments config dependencies labels metadata; do
-        dolt_sql -r json -q "SELECT * FROM \`$DB\`.\`$TABLE\`" > "$DB_DIR/$TABLE.jsonl" 2>/dev/null || true
-    done
+    # Export supplemental tables (best-effort). These tables have no watermark
+    # column, so they are refreshed only on a full snapshot; delta cycles keep
+    # the prior copies rather than re-dumping them every pass.
+    if [ "$NEED_FULL" -eq 1 ]; then
+        for TABLE in comments config dependencies labels metadata; do
+            dolt_sql -r json -q "SELECT * FROM \`$DB\`.\`$TABLE\`" > "$DB_DIR/$TABLE.jsonl" 2>/dev/null || true
+        done
+    fi
 
     # Step 2: Validate the exported JSON payload and optionally scrub it. Even
     # when SCRUB=false we still fail the DB on malformed JSON so corrupt live
@@ -990,6 +1092,15 @@ while IFS= read -r DB; do
     TOTAL_EXPORTED=$((TOTAL_EXPORTED + CURRENT_COUNT))
 
     STAGE_PATHS+=("$DB" "$DB.jsonl")
+
+    # Record the high-water mark and snapshot time so the next pass can run a
+    # delta. Derived from the persisted (post-scrub) payload; an empty result —
+    # rows without an updated_at column — keeps the prior watermark so we stay on
+    # full cycles rather than advancing past rows we never observed. Merging only
+    # grows the snapshot, so the watermark is monotonic and never regresses.
+    NEW_WATERMARK=$(issue_payload_watermark < "$DB_DIR/issues.jsonl")
+    [ -n "$NEW_WATERMARK" ] || NEW_WATERMARK="$DB_WATERMARK"
+    write_db_export_watermark "$DB" "$NEW_WATERMARK" "$DB_FULL_AT"
 
     # Step 3: Spike detection — compare record counts against previous commit.
     PREV_COUNT=0
