@@ -50,7 +50,7 @@ type UsageExpectation struct {
 	// DefaultCostPriced reports whether pricing.DefaultPricings() has a rate
 	// for (family, Model) — true for families with shipped default rates
 	// (claude), false for families priced only by operator config
-	// (codex, gemini).
+	// (codex).
 	DefaultCostPriced bool
 }
 

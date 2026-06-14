@@ -100,11 +100,11 @@ func (a SessionLogAdapter) CodexTailUsage(path string) ([]sessionlog.TailUsage, 
 // (nil, nil) for families without invocation-telemetry support, so callers can
 // treat "no extractor" and "no usage" uniformly.
 func (a SessionLogAdapter) InvocationUsage(provider, path string) ([]sessionlog.TailUsage, error) {
-	spec, ok := invocationUsageSpecs[invocationUsageFamily(provider)]
+	family, ok := InvocationUsageFamily(provider)
 	if !ok {
 		return nil, nil
 	}
-	return spec.extract(a, path)
+	return invocationUsageSpecs[family].extract(a, path)
 }
 
 // TailActivity reads the transcript tail activity without loading full history.
