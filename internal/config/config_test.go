@@ -2817,6 +2817,13 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 			if strings.Contains(demand, legacyEmbedded) {
 				t.Errorf("EffectivePoolDemandQuery() embeds target in migration predicate %q in %q", legacyEmbedded, demand)
 			}
+			reworkPredicate := bdListReworkPoolDemandShell(false)
+			if !strings.Contains(wq, reworkPredicate) {
+				t.Errorf("EffectiveWorkQuery() missing rework predicate %q in %q", reworkPredicate, wq)
+			}
+			if !strings.Contains(demand, reworkPredicate) {
+				t.Errorf("EffectivePoolDemandQuery() missing rework predicate %q in %q", reworkPredicate, demand)
+			}
 		})
 	}
 }
@@ -2843,6 +2850,121 @@ esac
 `)
 	if strings.TrimSpace(out) != "1" {
 		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 1 (overlap must dedup by bead id)", strings.TrimSpace(out))
+	}
+}
+
+// TestEffectivePoolDemandQueryCountsReworkBeads verifies that the reconciler
+// count-form includes beads that have started_at set (rejected rework beads)
+// which bd ready silently excludes. These beads are open, unassigned, and
+// routed to the target pool but were previously claimed and then reset by the
+// refinery on rejection. Without this tier they are permanently invisible to
+// the pool-demand probe (gcy-r4o).
+func TestEffectivePoolDemandQueryCountsReworkBeads(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	// bd ready returns nothing (normal case for rework beads — started_at excludes them).
+	// bd list returns a rework bead (started_at set) and a fresh bead (started_at empty).
+	// The rework filter must select only the one with started_at set.
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"list"*"--status=open"*"--no-assignee"*"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"rework-a","started_at":"2026-01-01T00:00:00Z","issue_type":"bug"},{"id":"fresh-b","started_at":""}]'
+    ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "1" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 1 (rework bead with started_at set)", strings.TrimSpace(out))
+	}
+}
+
+// TestEffectiveWorkQueryFindsReworkBead verifies that the worker's hook/work
+// query (first-row form) returns a rework bead visible only via bd list
+// (started_at excludes it from bd ready). This is the worker-side counterpart
+// to TestEffectivePoolDemandQueryCountsReworkBeads (gcy-r4o).
+func TestEffectiveWorkQueryFindsReworkBead(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; rework filter exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"list"*"--status=open"*"--no-assignee"*"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"rework-a","started_at":"2026-01-01T00:00:00Z","issue_type":"bug","priority":2}]'
+    ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(strings.TrimSpace(out), `"rework-a"`) {
+		t.Fatalf("EffectiveWorkQuery() output = %q, want rework-a bead", strings.TrimSpace(out))
+	}
+}
+
+// TestEffectivePoolDemandQueryReworkDedupWithReady verifies that a bead
+// visible in both bd ready and the rework tier is not double-counted.
+func TestEffectivePoolDemandQueryReworkDedupWithReady(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"list"*"--status=open"*"--no-assignee"*"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"overlap","started_at":"2026-01-01T00:00:00Z","issue_type":"bug"}]'
+    ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"overlap"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "1" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 1 (overlap deduped by id)", strings.TrimSpace(out))
+	}
+}
+
+// TestEffectivePoolDemandQueryExcludesEpicReworkBeads verifies that rework
+// beads of type epic are filtered out, consistent with the bd ready tier
+// (--exclude-type=epic). An epic bead with started_at set must not inflate
+// pool demand and trigger a spurious spawn.
+func TestEffectivePoolDemandQueryExcludesEpicReworkBeads(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; rework filter exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"list"*"--status=open"*"--no-assignee"*"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"epic-rework","started_at":"2026-01-01T00:00:00Z","issue_type":"epic"}]'
+    ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "0" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 0 (epic rework must be excluded)", strings.TrimSpace(out))
 	}
 }
 
@@ -3185,8 +3307,18 @@ func TestEffectiveScaleCheckUsesReadyOnly(t *testing.T) {
 	if !strings.Contains(check, "--limit 0") {
 		t.Errorf("missing --limit 0 for complete ready count")
 	}
-	if strings.Contains(check, "2>/dev/null") || strings.Contains(check, "${ready:-0}") || strings.Contains(check, "|| echo 0") {
+	// bd ready lines must propagate failures (|| exit $?), not suppress them.
+	// The rework tier (bd list) may redirect stderr because it is non-critical;
+	// the check here is specific to bd ready masking, not all stderr redirects.
+	if strings.Contains(check, "${ready:-0}") || strings.Contains(check, "|| echo 0") {
 		t.Errorf("default scale_check masks bd ready failures as zero: %q", check)
+	}
+	// bd ready must not be followed by 2>/dev/null without a corresponding || exit $?.
+	// Scan each semicolon-delimited segment.
+	for _, seg := range strings.Split(check, ";") {
+		if strings.Contains(seg, "bd ready") && strings.Contains(seg, "2>/dev/null") && !strings.Contains(seg, "|| exit $?") {
+			t.Errorf("bd ready stderr masked without || exit $? in segment %q", strings.TrimSpace(seg))
+		}
 	}
 	if strings.Contains(check, "${molecules:-0}") {
 		t.Errorf("unexpected ${molecules:-0} in arithmetic sum")
