@@ -2568,6 +2568,55 @@ esac
 	}
 }
 
+// TestEffectiveWorkQueryMultiSessionProbesPoolEvenWhenNamed verifies that a
+// multi-session (pool) agent can claim routed pool work even when the session
+// was started as a named session (GC_SESSION_ORIGIN="named"). Named pool
+// members (e.g. polecats with namepool identities) run as origin="named" but
+// must still probe their pool — otherwise the pool-demand probe gate blocks
+// them and routed beads sit unclaimed (gcy-2w7).
+func TestEffectiveWorkQueryMultiSessionProbesPoolEvenWhenNamed(t *testing.T) {
+	maxSess := 5
+	a := Agent{Name: "polecat", Dir: "gascity-source", MaxActiveSessions: &maxSess}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "named",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=gascity-source/polecat"*"--unassigned"*)
+    printf '[{"id":"pool-routed-work","issue_type":"task","status":"open"}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if !strings.Contains(out, "pool-routed-work") {
+		t.Fatalf("EffectiveWorkQuery() for pool agent with GC_SESSION_ORIGIN=named did not find routed pool work: %q", out)
+	}
+}
+
+// TestEffectiveWorkQuerySingletonDoesNotProbePoolWhenNamed verifies that a
+// singleton agent (max_active_sessions=1) does NOT probe the pool when the
+// session was started as a named session (GC_SESSION_ORIGIN="named"). The
+// origin gate must still apply to prevent singleton agents from accidentally
+// consuming generic pool demand.
+func TestEffectiveWorkQuerySingletonDoesNotProbePoolWhenNamed(t *testing.T) {
+	maxSess := 1
+	a := Agent{Name: "mayor", MaxActiveSessions: &maxSess}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "named",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=mayor"*"--unassigned"*)
+    printf '[{"id":"pool-routed-work","issue_type":"task","status":"open"}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if strings.Contains(out, "pool-routed-work") {
+		t.Fatalf("EffectiveWorkQuery() for singleton agent with GC_SESSION_ORIGIN=named must not consume generic pool demand: %q", out)
+	}
+}
+
 // TestEffectivePoolDemandQueryCountsRoutedTo verifies the reconciler count-form
 // counts gc.routed_to demand — the spawn-side counterpart to the worker claim
 // path for the canonical persisted routing key.

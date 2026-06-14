@@ -3784,16 +3784,26 @@ func (a *Agent) effectiveWorkQuery(includeEphemeralReady bool) string {
 	}
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
+	// Named pool members (multi-session agents such as polecats with namepool
+	// identities) run as GC_SESSION_ORIGIN="named" but must still probe their
+	// pool for routed demand. The origin gate was introduced to prevent singleton
+	// named agents (mayor, witness) from accidentally consuming generic pool work,
+	// but it incorrectly blocks named pool workers. Skip the gate for agents that
+	// support multiple sessions — they are pool workers by definition.
+	originGate := poolDemandOriginGateScript()
+	if a.SupportsMultipleSessions() {
+		originGate = ""
+	}
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(includeEphemeralReady) +
-			poolDemandOriginGateScript() +
+			originGate +
 			poolDemandFirstRowFunctionScript(includeEphemeralReady) +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
-		poolDemandOriginGateScript() +
+		originGate +
 		poolDemandFirstRowFunctionScript(includeEphemeralReady) +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +

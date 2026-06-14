@@ -70,19 +70,23 @@ template = "reviewer"
 	}
 }
 
-func TestPhase0ConfigDefaults_WorkQueryIsOriginAware(t *testing.T) {
-	a := Agent{Name: "worker", Dir: "myrig"}
+func TestPhase0ConfigDefaults_WorkQueryIsOriginAwareForSingletonAgents(t *testing.T) {
+	// Singleton agents (max_active_sessions=1, e.g. mayor, witness) retain the
+	// GC_SESSION_ORIGIN gate so they don't accidentally consume generic pool demand.
+	// Multi-session pool agents skip the gate — tested separately in config_test.go.
+	maxSess := 1
+	a := Agent{Name: "worker", Dir: "myrig", MaxActiveSessions: &maxSess}
 
 	got := a.EffectiveWorkQuery()
 
 	if !strings.Contains(got, "GC_SESSION_ORIGIN") {
-		t.Fatalf("EffectiveWorkQuery() = %q, want origin-aware GC_SESSION_ORIGIN branch", got)
+		t.Fatalf("EffectiveWorkQuery() for singleton = %q, want origin-aware GC_SESSION_ORIGIN branch", got)
 	}
 	if !strings.Contains(got, "ephemeral") {
-		t.Fatalf("EffectiveWorkQuery() = %q, want origin-specific ephemeral generic queue tier", got)
+		t.Fatalf("EffectiveWorkQuery() for singleton = %q, want origin-specific ephemeral generic queue tier", got)
 	}
 	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target"`) || !strings.Contains(got, "-- myrig/worker") {
-		t.Fatalf("EffectiveWorkQuery() = %q, want qualified config route argument", got)
+		t.Fatalf("EffectiveWorkQuery() for singleton = %q, want qualified config route argument", got)
 	}
 }
 
