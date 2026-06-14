@@ -28,7 +28,7 @@ Protocol executable — run by humans and runtime-pack CIs.`,
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			known := []string{"drain", "undrain", "drain-check", "drain-ack", "request-restart", "check"}
+			known := []string{"drain", "undrain", "drain-check", "drain-ack", "request-restart", "check", "conformance"}
 			fmt.Fprintf(stderr, "gc runtime: unknown subcommand %q\nAvailable subcommands: %v\n", args[0], known) //nolint:errcheck // best-effort stderr
 			return errExit
 		},
@@ -40,6 +40,7 @@ Protocol executable — run by humans and runtime-pack CIs.`,
 		newRuntimeDrainAckCmd(stdout, stderr),
 		newRuntimeRequestRestartCmd(stdout, stderr),
 		newRuntimeCheckCmd(stdout, stderr),
+		newRuntimeConformanceCmd(stdout, stderr),
 	)
 	return cmd
 }
