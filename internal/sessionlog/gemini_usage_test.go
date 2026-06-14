@@ -195,6 +195,73 @@ func TestExtractGeminiUsageJSONLSetMessages(t *testing.T) {
 	}
 }
 
+// TestExtractGeminiUsageJSONLReappendLastWins pins last-occurrence-wins when
+// one message id is re-appended with DIFFERENT non-null token values —
+// gemini-cli re-pushes the final gemini message once its real tokens arrive,
+// so a partial copy can precede the full copy under the same id. A first-wins
+// regression would silently record the stale (partial) counts; the existing
+// re-append fixture cannot catch it because its first copy carries tokens:null
+// and is skipped before the dedup branch is reached.
+func TestExtractGeminiUsageJSONLReappendLastWins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-reappend.jsonl")
+	lines := []string{
+		`{"sessionId":"a4e7203e-8840-4c58-91f1-5ab32f11e807","projectHash":"hash","startTime":"2026-06-10T10:00:00.000Z","lastUpdated":"2026-06-10T10:00:09.000Z","kind":"main"}`,
+		`{"id":"r25da806-1959-4f73-ae67-a512dead6001","timestamp":"2026-06-10T10:00:05.000Z","type":"gemini","content":"partial","model":"gemini-3-pro","tokens":{"input":100,"output":10,"cached":0,"thoughts":0,"tool":0,"total":110}}`,
+		`{"id":"r25da806-1959-4f73-ae67-a512dead6001","timestamp":"2026-06-10T10:00:06.000Z","type":"gemini","content":"final","model":"gemini-3-pro","tokens":{"input":900,"output":60,"cached":0,"thoughts":0,"tool":0,"total":960}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	usages, err := ExtractGeminiUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractGeminiUsage: %v", err)
+	}
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1 (one id collapses to a single entry): %+v", len(usages), usages)
+	}
+	u := usages[0]
+	if u.InputTokens != 900 || u.OutputTokens != 60 {
+		t.Errorf("usage = (%d,%d), want (900,60) — the LATER re-appended copy must win, not the first (100,10)", u.InputTokens, u.OutputTokens)
+	}
+}
+
+// TestExtractGeminiUsageJSONLSetMessagesIDCollision pins the byMessageID reset
+// on a $set.messages replay: gemini-cli compaction re-emits ORIGINAL message
+// objects under their original ids, so a $set.messages array routinely carries
+// an id that already appeared before the rewrite. The replay must reset the
+// id index along with the usage slice; without the reset, the stale index
+// would address the cleared slice and panic.
+func TestExtractGeminiUsageJSONLSetMessagesIDCollision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-set-collision-usage.jsonl")
+	lines := []string{
+		`{"sessionId":"b4e7203e-8840-4c58-91f1-5ab32f11e808","projectHash":"hash","startTime":"2026-06-10T10:00:00.000Z","lastUpdated":"2026-06-10T10:00:09.000Z","kind":"main"}`,
+		// Pre-$set token-bearing message whose id is re-emitted inside the $set.
+		`{"id":"a25da806-1959-4f73-ae67-a512dead6001","timestamp":"2026-06-10T10:00:01.000Z","type":"gemini","content":"pre","model":"gemini-3-pro","tokens":{"input":5000,"output":900,"cached":4000,"thoughts":100,"tool":0,"total":6000}}`,
+		`{"$set":{"messages":[` +
+			`{"id":"a25da806-1959-4f73-ae67-a512dead6001","timestamp":"2026-06-10T10:00:02.000Z","type":"gemini","content":"replayed","model":"gemini-3-pro","tokens":{"input":900,"output":60,"cached":800,"thoughts":20,"tool":0,"total":980}},` +
+			`{"id":"c25da806-1959-4f73-ae67-a512dead6003","timestamp":"2026-06-10T10:00:03.000Z","type":"gemini","content":"new","model":"gemini-3-flash","tokens":{"input":10,"output":5,"cached":0,"thoughts":0,"tool":0,"total":15}}` +
+			`]}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	usages, err := ExtractGeminiUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractGeminiUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want 2 (replayed colliding id + new id): %+v", len(usages), usages)
+	}
+	if usages[0].MessageID != "a25da806-1959-4f73-ae67-a512dead6001" || usages[0].InputTokens != 100 {
+		t.Errorf("first = (%q,%d), want the REPLAYED colliding id with input 100, not the pre-$set 1000", usages[0].MessageID, usages[0].InputTokens)
+	}
+	if usages[1].MessageID != "c25da806-1959-4f73-ae67-a512dead6003" {
+		t.Errorf("second.MessageID = %q, want the new $set-embedded id", usages[1].MessageID)
+	}
+}
+
 // TestExtractGeminiUsageJSONLLargeFinalRecord pins whole-file extraction:
 // gemini re-appends the ENTIRE message record on every update, so the final
 // token-bearing record of tool-using turns routinely exceeds a 64KB tail
@@ -471,6 +538,47 @@ func TestReadGeminiFileJSONLSetMessages(t *testing.T) {
 				got = append(got, m.UUID)
 			}
 			t.Fatalf("messages = %v, want only the original message ($set without a messages array must not clear)", got)
+		}
+	})
+
+	t.Run("id-colliding messages array replays without stale index", func(t *testing.T) {
+		// gemini-cli compaction re-emits ORIGINAL message objects under their
+		// original ids, so a $set.messages array routinely carries an id seen
+		// before the rewrite. The replay must reset byID with the slice;
+		// without the reset, the stale index addresses the cleared slice and
+		// panics (index out of range) instead of replaying.
+		path := filepath.Join(t.TempDir(), "session-set-collision.jsonl")
+		lines := []string{
+			`{"sessionId":"d4e7203e-8840-4c58-91f1-5ab32f11e809","projectHash":"hash","startTime":"2026-06-10T10:00:00.000Z","lastUpdated":"2026-06-10T10:00:09.000Z","kind":"main"}`,
+			`{"id":"a25da806-1959-4f73-ae67-a512dead6001","timestamp":"2026-06-10T10:00:01.000Z","type":"user","content":"pre one"}`,
+			`{"id":"b25da806-1959-4f73-ae67-a512dead6002","timestamp":"2026-06-10T10:00:02.000Z","type":"gemini","content":"pre two","model":"gemini-3-pro"}`,
+			`{"$set":{"messages":[{"id":"a25da806-1959-4f73-ae67-a512dead6001","timestamp":"2026-06-10T10:00:03.000Z","type":"user","content":"replayed one"},{"id":"c25da806-1959-4f73-ae67-a512dead6003","timestamp":"2026-06-10T10:00:04.000Z","type":"gemini","content":"replayed three","model":"gemini-3-pro"}]}}`,
+			`{"id":"d25da806-1959-4f73-ae67-a512dead6004","timestamp":"2026-06-10T10:00:05.000Z","type":"user","content":"after compaction"}`,
+		}
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+
+		sess, err := ReadGeminiFile(path, 0)
+		if err != nil {
+			t.Fatalf("ReadGeminiFile: %v", err)
+		}
+		want := []string{
+			"a25da806-1959-4f73-ae67-a512dead6001",
+			"c25da806-1959-4f73-ae67-a512dead6003",
+			"d25da806-1959-4f73-ae67-a512dead6004",
+		}
+		var got []string
+		for _, m := range sess.Messages {
+			got = append(got, m.UUID)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("messages = %v, want %v (replayed colliding id + new id + post-$set append)", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("message %d = %q, want %q", i, got[i], want[i])
+			}
 		}
 	})
 }
