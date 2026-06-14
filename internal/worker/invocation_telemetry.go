@@ -38,19 +38,14 @@ func defaultPricingRegistry() *pricing.Registry {
 // keystroke-delivery time, so the transcript tail at that point holds
 // previously COMPLETED invocations — the turn this operation triggers is
 // recorded by the next prompt operation on the session. Entries beyond the
-// extractor's scan window (a 64KB tail for claude and codex; gemini scans
-// the whole recording but stops early at any line over its 50MB line cap)
-// or after the final prompt op of a session go unrecorded.
+// extractor's scan window (a 64KB tail for claude and codex) or after the
+// final prompt op of a session go unrecorded.
 //
 // Coverage is per transcript provider family, driven by the
 // invocationUsageSpecs registry, with per-family discovery bounds:
 //
 //   - claude: Manager.TranscriptPath (session-key stat or ambiguity-guarded
 //     project-slug listing — cheap) + the Claude JSONL tail extractor.
-//   - gemini: Manager.TranscriptPath, whose gemini route is already bounded
-//     (projects.json plus first-level .project_root reads and per-candidate
-//     chats readdirs — never a recursive date-tree walk) + the gemini
-//     chat-recording extractor (legacy .json and gemini-cli >=0.45 .jsonl).
 //   - codex: identity-first. When the session bead carries a session_key
 //     (captured from the codex hook; codex rollout filenames end in the
 //     same uuid), the rollout is resolved by that suffix via
@@ -182,12 +177,8 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // no transcript — but the strength of that bound varies by family. The
 // codex route is identity-bound (session_key matched against the rollout
 // filename uuid) or wake-window+cwd bounded, and the claude route is
-// session-keyed with an ambiguity-guarded same-workdir fallback. The gemini
-// route, however, is newest-mtime-wins keyed by workdir with NO
-// session-identity or recency bound: a foreign gemini-cli session sharing
-// the workdir can be silently misattributed (telemetry-only risk; tracked
-// in ga-ypt2g9). All errors are swallowed so telemetry never affects
-// operations.
+// session-keyed with an ambiguity-guarded same-workdir fallback. All errors
+// are swallowed so telemetry never affects operations.
 type invocationUsageSpec struct {
 	discover func(h *SessionHandle, id string, b beads.Bead) string
 	extract  func(a SessionLogAdapter, path string) ([]sessionlog.TailUsage, error)
@@ -208,10 +199,6 @@ var invocationUsageSpecs = map[string]invocationUsageSpec{
 		discover: discoverInvocationTranscriptViaManager,
 		extract:  SessionLogAdapter.TailUsage,
 	},
-	"gemini": {
-		discover: discoverInvocationTranscriptViaManager,
-		extract:  SessionLogAdapter.GeminiUsage,
-	},
 	"codex": {
 		discover: discoverCodexInvocationTranscript,
 		extract:  SessionLogAdapter.CodexTailUsage,
@@ -220,15 +207,14 @@ var invocationUsageSpecs = map[string]invocationUsageSpec{
 
 // invocationUsageFamily resolves a provider string to its registered
 // invocation-usage family key: claude-family providers (including
-// claude-eco) match by name, codex and gemini resolve through
-// sessionlog.ProviderFamily, and everything else returns "" (unregistered).
+// claude-eco) match by name, codex resolves through sessionlog.ProviderFamily,
+// and everything else returns "" (unregistered).
 func invocationUsageFamily(provider string) string {
 	if strings.Contains(strings.ToLower(provider), "claude") {
 		return "claude"
 	}
-	switch family := sessionlog.ProviderFamily(provider); family {
-	case "codex", "gemini":
-		return family
+	if sessionlog.ProviderFamily(provider) == "codex" {
+		return "codex"
 	}
 	return ""
 }

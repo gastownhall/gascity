@@ -8,9 +8,9 @@ package telemetry
 // bounds cardinality.
 //
 // Emission coverage: recorded for the transcript-backed provider families
-// (claude, codex, gemini) driven through worker.SessionHandle prompt
-// operations. Runtime-only sessions (worker.RuntimeHandle) are permanently
-// out of scope (ga-tkvb31).
+// (claude, codex) driven through worker.SessionHandle prompt operations.
+// Runtime-only sessions (worker.RuntimeHandle) are permanently out of scope
+// (ga-tkvb31).
 
 import (
 	"context"

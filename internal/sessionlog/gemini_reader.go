@@ -1,9 +1,7 @@
 package sessionlog
 
 import (
-	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,54 +10,12 @@ import (
 	"time"
 )
 
-// geminiScanBufferCap caps one JSONL line while scanning gemini chat
-// recordings. The default scanner buffer is 64KB; gemini records can be
-// large (tool results accumulate into one re-appended message, and a
-// $set.messages patch carries the entire conversation). Variable so tests
-// can lower it to pin the oversized-line tolerance cheaply.
-var geminiScanBufferCap = 50 * 1024 * 1024
-
-// geminiScanInitialBuffer returns the initial scanner buffer capacity for
-// gemini JSONL scans, clamped to geminiScanBufferCap: bufio.Scanner's
-// effective line cap is the LARGER of the max and the initial capacity, so
-// the initial allocation must never exceed the configured cap.
-func geminiScanInitialBuffer() int {
-	const initial = 256 * 1024
-	if geminiScanBufferCap < initial {
-		return geminiScanBufferCap
-	}
-	return initial
-}
-
-// geminiSetPatch is the {"$set":{...}} metadata-patch line gemini-cli
-// >=0.45 appends to JSONL chat recordings. Only the messages field matters
-// for replay: a non-nil array means the CLI rewrote the whole conversation
-// (updateMessagesFromHistory) and accumulated state must be replaced.
-type geminiSetPatch struct {
-	Set *struct {
-		Messages []json.RawMessage `json:"messages"`
-	} `json:"$set"`
-}
-
-// ReadGeminiFile reads a Gemini session recording and converts it to the
+// ReadGeminiFile reads a Gemini session JSON file and converts it to the
 // standard Session format used by GC session transcripts.
 //
-// Legacy gemini-cli stores sessions at
-// ~/.gemini/tmp/<project>/chats/session-*.json as a single JSON object with
-// a linear messages[] array. gemini-cli >=0.45 writes
-// chats/session-*.jsonl instead: the first line is the metadata object,
-// subsequent lines are message records (re-appended when a message is
-// updated, e.g. once its token counts arrive — the last occurrence wins),
-// {"$set":...} metadata patch lines — skipped, except a non-nil
-// $set.messages array, which REPLACES the accumulated conversation (the
-// CLI's updateMessagesFromHistory writes one on compaction/context-scrub
-// and on initialize() after resume) — and {"$rewindTo":"<id>"} rewind
-// records, which delete the target message and everything after it
-// (matching gemini-cli's own replay).
+// Gemini stores sessions at ~/.gemini/tmp/<project>/chats/session-*.json as a
+// single JSON object with a linear messages[] array.
 func ReadGeminiFile(path string, _ int) (*Session, error) {
-	if strings.HasSuffix(path, ".jsonl") {
-		return readGeminiJSONLFile(path)
-	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -87,116 +43,6 @@ func ReadGeminiFile(path string, _ int) (*Session, error) {
 		messages = append(messages, entry)
 	}
 
-	return &Session{
-		ID:       sessionID,
-		Messages: messages,
-	}, nil
-}
-
-// readGeminiJSONLFile parses the gemini-cli >=0.45 JSONL chat recording:
-// line one is the metadata object (sessionId source), message records carry
-// an id and are deduplicated last-occurrence-wins in their original
-// position, and {"$set":...} patches plus malformed lines are tolerated.
-// Two record kinds mirror gemini-cli's replay (loadConversationRecord):
-// {"$rewindTo":"<id>"} deletes the target message and every later message
-// (an unknown target clears the whole conversation so far), and a non-nil
-// {"$set":{"messages":[...]}} array clears the accumulated state and
-// replays the embedded messages in array order. An oversized line (a
-// whole-conversation $set patch grows with conversation size and can exceed
-// geminiScanBufferCap) stops the scan softly: everything parsed before it
-// is returned with nil error, matching the tolerate-malformed-lines posture
-// — gemini-cli's own replay and the legacy path have no per-line cap.
-func readGeminiJSONLFile(path string) (*Session, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close() //nolint:errcheck // read-only file
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, geminiScanInitialBuffer()), geminiScanBufferCap)
-
-	sessionID := ""
-	var messages []*Entry
-	// byID maps a message id to its index in messages so re-appended
-	// records of one message replace the original in place.
-	byID := make(map[string]int)
-	idx := 0
-	// appendMsg routes one message record (top-level line or $set-embedded
-	// object) through parse + last-occurrence-wins dedup.
-	appendMsg := func(raw json.RawMessage, id string) {
-		entry := parseGeminiMessage(raw, idx)
-		if entry == nil {
-			return
-		}
-		if i, seen := byID[id]; seen {
-			messages[i] = entry
-			return
-		}
-		byID[id] = len(messages)
-		messages = append(messages, entry)
-		idx++
-	}
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var probe struct {
-			ID        string `json:"id"`
-			SessionID string `json:"sessionId"`
-			RewindTo  string `json:"$rewindTo"`
-		}
-		if err := json.Unmarshal(line, &probe); err != nil {
-			continue
-		}
-		if sessionID == "" && strings.TrimSpace(probe.SessionID) != "" {
-			sessionID = strings.TrimSpace(probe.SessionID)
-		}
-		if probe.RewindTo != "" {
-			if i, ok := byID[probe.RewindTo]; ok {
-				for id, idx := range byID {
-					if idx >= i {
-						delete(byID, id)
-					}
-				}
-				messages = messages[:i]
-			} else {
-				messages = nil
-				byID = make(map[string]int)
-			}
-			continue
-		}
-		if probe.ID == "" {
-			// Metadata object or {"$set":...} patch line. A non-nil
-			// $set.messages array replaces the whole conversation.
-			var patch geminiSetPatch
-			if err := json.Unmarshal(line, &patch); err == nil && patch.Set != nil && patch.Set.Messages != nil {
-				messages = nil
-				byID = make(map[string]int)
-				for _, raw := range patch.Set.Messages {
-					var embedded struct {
-						ID string `json:"id"`
-					}
-					if err := json.Unmarshal(raw, &embedded); err != nil || embedded.ID == "" {
-						continue
-					}
-					appendMsg(append(json.RawMessage(nil), raw...), embedded.ID)
-				}
-			}
-			continue
-		}
-		appendMsg(append(json.RawMessage(nil), line...), probe.ID)
-	}
-	// bufio.ErrTooLong is a soft stop (see the doc comment); any other scan
-	// error still fails the read.
-	if err := scanner.Err(); err != nil && !errors.Is(err, bufio.ErrTooLong) {
-		return nil, fmt.Errorf("scanning gemini session file: %w", err)
-	}
-
-	if sessionID == "" {
-		sessionID = geminiSessionID(path)
-	}
 	return &Session{
 		ID:       sessionID,
 		Messages: messages,
@@ -369,8 +215,7 @@ func geminiContentText(raw json.RawMessage) string {
 }
 
 // FindGeminiSessionFile searches Gemini's tmp sessions directory
-// (~/.gemini/tmp/<project>/chats/session-*.json legacy recordings and
-// session-*.jsonl gemini-cli >=0.45 recordings) for the most recently
+// (~/.gemini/tmp/<project>/chats/session-*.json) for the most recently
 // modified session matching workDir.
 func FindGeminiSessionFile(searchPaths []string, workDir string) string {
 	if workDir == "" {
@@ -494,11 +339,7 @@ func newestGeminiSessionInChats(chatsDir string) string {
 		if entry.IsDir() {
 			continue
 		}
-		// Accept both the legacy single-JSON sessions (session-*.json) and
-		// the gemini-cli >=0.45 JSONL sessions (session-*.jsonl). The
-		// "session-" prefix excludes subagent <id>.jsonl recordings.
-		if !strings.HasPrefix(entry.Name(), "session-") ||
-			(!strings.HasSuffix(entry.Name(), ".json") && !strings.HasSuffix(entry.Name(), ".jsonl")) {
+		if !strings.HasPrefix(entry.Name(), "session-") || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
 		path := filepath.Join(chatsDir, entry.Name())
