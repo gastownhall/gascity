@@ -28,6 +28,9 @@ type Options struct {
 	OpTimeout time.Duration
 	// StartTimeout bounds the start op. Default: 120s.
 	StartTimeout time.Duration
+
+	// ownWorkDir is a fresh temp work dir Run created and must remove.
+	ownWorkDir string
 }
 
 func (o *Options) applyDefaults() {
@@ -37,8 +40,16 @@ func (o *Options) applyDefaults() {
 	if o.Command == "" {
 		o.Command = "sleep 300"
 	}
+	// A fresh empty work dir, not the shared os.TempDir(): a runtime that
+	// materializes the work_dir into the session must not be handed the whole
+	// system temp tree (full of unrelated files, sockets, etc.).
 	if o.WorkDir == "" {
-		o.WorkDir = os.TempDir()
+		if d, err := os.MkdirTemp("", "gc-rpp-workdir-"); err == nil {
+			o.WorkDir = d
+			o.ownWorkDir = d
+		} else {
+			o.WorkDir = os.TempDir()
+		}
 	}
 	if o.OpTimeout <= 0 {
 		o.OpTimeout = 30 * time.Second
@@ -61,6 +72,9 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 		return Report{}, fmt.Errorf("resolving executable %q: %w", executable, err)
 	}
 	opts.applyDefaults()
+	if opts.ownWorkDir != "" {
+		defer func() { _ = os.RemoveAll(opts.ownWorkDir) }()
+	}
 	r := &runner{path: path, opts: opts}
 	report := Report{Executable: path}
 

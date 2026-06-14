@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/gastownhall/gascity/internal/runtime/runtimecapability"
 	"github.com/gastownhall/gascity/internal/runtime/runtimecontract"
 	"github.com/spf13/cobra"
 )
@@ -20,7 +21,7 @@ import (
 // a gascity runtime. A runtime pack's CI runs it against its installed
 // executable with no Go imports from gascity.
 func newRuntimeConformanceCmd(stdout, stderr io.Writer) *cobra.Command {
-	var asJSON bool
+	var asJSON, withEnv bool
 	cmd := &cobra.Command{
 		Use:   "conformance <name|executable>",
 		Short: "Run the golden RPP conformance suite against a runtime executable",
@@ -74,12 +75,43 @@ any required requirement fails.`,
 					len(report.Results), report.Summary.Passed, report.Summary.Failed, report.Summary.Skipped)
 			}
 
-			if report.Failed() {
+			failed := report.Failed()
+
+			// --env additionally runs the environment-plane capability suite
+			// (RUNTIME-RPP-012): verify the env.* guarantees the runtime
+			// declares in its handshake.
+			if withEnv {
+				capReport, err := runtimecapability.Run(ctx, target, runtimecapability.Options{})
+				if err != nil {
+					fmt.Fprintf(stderr, "gc runtime conformance: capability run: %v\n", err) //nolint:errcheck
+					return errExit
+				}
+				if asJSON {
+					enc := json.NewEncoder(stdout)
+					enc.SetIndent("", "  ")
+					_ = enc.Encode(capReport)
+				} else {
+					fmt.Fprintf(stdout, "\nenvironment capabilities (declared: %v):\n", capReport.Capabilities) //nolint:errcheck
+					for _, res := range capReport.Results {
+						line := fmt.Sprintf("%-4s %s  %s", res.Status, res.Code, res.Title)
+						if res.Detail != "" {
+							line += " — " + res.Detail
+						}
+						fmt.Fprintln(stdout, line) //nolint:errcheck
+					}
+					fmt.Fprintf(stdout, "%d capabilities: %d passed, %d failed, %d skipped\n", //nolint:errcheck
+						len(capReport.Results), capReport.Summary.Passed, capReport.Summary.Failed, capReport.Summary.Skipped)
+				}
+				failed = failed || capReport.Failed()
+			}
+
+			if failed {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit a machine-readable JSON report")
+	cmd.Flags().BoolVar(&withEnv, "env", false, "also run the environment-plane capability suite (env.* guarantees)")
 	return cmd
 }
