@@ -32,7 +32,7 @@ func findCityWithOptions(dir string, opts cityDiscoveryOptions) (string, error) 
 		if citylayout.HasCityConfig(dir) {
 			return dir, nil
 		}
-		if legacy == "" && citylayout.HasRuntimeRoot(dir) && !isIgnoredLegacyRuntimeRoot(dir, opts.ignoredLegacyRuntime) {
+		if legacy == "" && !isCityDiscoveryCeiling(dir, opts.ceilingDirs) && citylayout.HasRuntimeRoot(dir) && !isIgnoredLegacyRuntimeRoot(dir, opts.ignoredLegacyRuntime) {
 			legacy = dir
 		}
 		if isCityDiscoveryCeiling(dir, opts.ceilingDirs) {
@@ -58,14 +58,18 @@ func implicitCityDiscoveryOptions() cityDiscoveryOptions {
 }
 
 func implicitCityDiscoveryCeilings() []string {
+	var paths []string
 	if raw := strings.TrimSpace(os.Getenv("GC_CEILING_DIRECTORIES")); raw != "" {
-		return normalizeDiscoveryPaths(strings.Split(raw, string(os.PathListSeparator)))
+		paths = append(paths, strings.Split(raw, string(os.PathListSeparator))...)
 	}
 	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
-		return nil
+	if err == nil && strings.TrimSpace(home) != "" {
+		paths = append(paths, home)
 	}
-	return normalizeDiscoveryPaths([]string{home})
+	if tmp := strings.TrimSpace(os.TempDir()); tmp != "" {
+		paths = append(paths, tmp)
+	}
+	return normalizeDiscoveryPaths(paths)
 }
 
 func implicitIgnoredLegacyRuntimeRoots() []string {
