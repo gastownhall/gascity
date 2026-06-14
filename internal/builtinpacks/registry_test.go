@@ -357,6 +357,101 @@ func testRepoRoot(t *testing.T) string {
 	return root
 }
 
+// Fast-path tests for ValidateSyntheticRepoFast. The fast path checks root
+// existence, type, symlink status, marker read/parse/schema/repository/commit,
+// and marker content hash against the memoized binary hash. It does not walk
+// the materialized file set. Tampered file content, tampered file mode, and
+// unexpected-file cases are intentionally full-validator-only checks; see
+// TestValidateSyntheticRepoRejectsTamperedContent,
+// TestValidateSyntheticRepoRejectsTamperedMode, and
+// TestValidateSyntheticRepoRejectsUnexpectedFiles.
+
+func TestValidateSyntheticRepoFastAcceptsValidRepo(t *testing.T) {
+	dst := materializeTestRepo(t)
+	if err := ValidateSyntheticRepoFast(dst, testCommit); err != nil {
+		t.Fatalf("ValidateSyntheticRepoFast: %v", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastAcceptsEquivalentCommit(t *testing.T) {
+	dst := materializeTestRepo(t)
+	if err := ValidateSyntheticRepoFast(dst, "ABCDEF1"); err != nil {
+		t.Fatalf("ValidateSyntheticRepoFast with abbreviated uppercase commit: %v", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsSymlinkRoot(t *testing.T) {
+	dst := materializeTestRepo(t)
+	link := filepath.Join(t.TempDir(), "cache-link")
+	if err := os.Symlink(dst, link); err != nil {
+		t.Fatalf("Symlink(cache-link): %v", err)
+	}
+	err := ValidateSyntheticRepoFast(link, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted symlink root")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("error = %v, want symlink detail", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsNonDirectoryRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "cache")
+	writeFile(t, root, "not a directory")
+	err := ValidateSyntheticRepoFast(root, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted non-directory root")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("error = %v, want not-a-directory detail", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsMissingMarker(t *testing.T) {
+	dst := materializeTestRepo(t)
+	if err := os.Remove(filepath.Join(dst, syntheticMarkerFile)); err != nil {
+		t.Fatalf("Remove(marker): %v", err)
+	}
+	err := ValidateSyntheticRepoFast(dst, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted missing marker")
+	}
+	if !strings.Contains(err.Error(), "missing bundled pack cache marker") {
+		t.Fatalf("error = %v, want missing marker detail", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsWrongCommit(t *testing.T) {
+	dst := materializeTestRepo(t)
+	err := ValidateSyntheticRepoFast(dst, "0000000000000000000000000000000000000000")
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted wrong commit")
+	}
+	if !strings.Contains(err.Error(), "commit") {
+		t.Fatalf("error = %v, want commit detail", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsWrongContentHash(t *testing.T) {
+	dst := materializeTestRepo(t)
+	markerPath := filepath.Join(dst, syntheticMarkerFile)
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("ReadFile(marker): %v", err)
+	}
+	tampered := strings.Replace(string(data), "sha256:", "sha256:tampered", 1)
+	if err := os.WriteFile(markerPath, []byte(tampered), 0o644); err != nil {
+		t.Fatalf("WriteFile(marker): %v", err)
+	}
+	err = ValidateSyntheticRepoFast(dst, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted wrong content hash")
+	}
+	if !strings.Contains(err.Error(), "content hash") {
+		t.Fatalf("error = %v, want content hash detail", err)
+	}
+}
+
 func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {
 	want, err := SyntheticContentHash()
 	if err != nil {
