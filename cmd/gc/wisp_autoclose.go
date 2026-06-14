@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
@@ -68,6 +69,9 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
 	attachments, err := collectAttachedBeads(parent, store, beads.HandlesFor(store).Live)
 	if err == nil || len(attachments) > 0 {
 		for _, attached := range attachments {
+			if attachedMoleculeIsParked(store, attached) {
+				continue
+			}
 			closed, err := closeAttachedWispSubtree(store, attached)
 			if err != nil || closed == 0 {
 				continue
@@ -83,6 +87,29 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
 		return
 	}
 	fmt.Fprintf(stdout, "Auto-closed %d generated spec bead(s) on %s\n", closed, beadID) //nolint:errcheck // best-effort stdout
+}
+
+// attachedMoleculeIsParked reports whether the attached root is a live molecule
+// deliberately parked at an open descendant — e.g. a human-gate step plus the
+// finalize step it blocks. Such a subtree is designed to outlive the owner
+// dispatch/loop bead whose close triggered this hook, so force-closing it here
+// would steamroll the human checkpoint before the maintainer acts (the PR #3474
+// finalize defect).
+//
+// The predicate mirrors the terminality guard the sibling `gc molecule
+// autoclose` path already applies (autocloseMoleculeIfComplete): a subtree with
+// open descendants is left open, so the two close-time auto-closers agree. We
+// additionally require the attached root itself to still be open, because a
+// parked molecule is always live. An already-terminal root with leftover open
+// steps is an orphan, not a parked checkpoint, and still reaps — preserving the
+// descendant-cleanup intent this hook was built for. A stepless/ephemeral wisp
+// has zero descendants -> (true, 0) -> not parked -> still reaped.
+func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) bool {
+	if convoycore.IsTerminalStatus(attached.Status) {
+		return false
+	}
+	terminal, descendants := subtreeTerminalExcludingRoot(store, attached.ID)
+	return !terminal && descendants > 0
 }
 
 func closeAttachedWispSubtree(store beads.Store, attached beads.Bead) (int, error) {

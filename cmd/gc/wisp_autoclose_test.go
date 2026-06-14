@@ -56,31 +56,76 @@ func TestWispAutocloseClosesMetadataAttachedMolecule(t *testing.T) {
 	}
 }
 
-func TestWispAutocloseClosesAttachedMoleculeDescendants(t *testing.T) {
+func TestWispAutoclosePreservesParkedMoleculeSubtree(t *testing.T) {
+	// Regression for PR #3474: when a dispatch/loop bead closes, the
+	// on_close wisp-autoclose hook must NOT force-close an attached molecule that
+	// is parked at an open human-gate plus the finalize step it blocks. The
+	// molecule root is still open (live, awaiting the maintainer), so the whole
+	// subtree must survive — otherwise the gate-close -> finalize handoff is
+	// destroyed before the human ever acts.
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{
-		Title:    "work item",
+		Title:    "dispatch/loop bead",
 		Metadata: map[string]string{"molecule_id": "gc-2"},
 	}) // gc-1
-	_, _ = store.Create(beads.Bead{Title: "molecule root", Type: "molecule"})        // gc-2
-	_, _ = store.Create(beads.Bead{Title: "step", Type: "task", ParentID: "gc-2"})   // gc-3
-	_, _ = store.Create(beads.Bead{Title: "nested", Type: "task", ParentID: "gc-3"}) // gc-4
+	_, _ = store.Create(beads.Bead{Title: "molecule root", Type: "molecule"}) // gc-2 (open, parked)
+	_, _ = store.Create(beads.Bead{
+		Title:    "human-gate",
+		Type:     "task",
+		ParentID: "gc-2",
+		Metadata: map[string]string{"gc.step_ref": "mol-adopt-pr.human-gate"},
+	}) // gc-3 (open, parked gate)
+	_, _ = store.Create(beads.Bead{
+		Title:    "finalize",
+		Type:     "task",
+		ParentID: "gc-2",
+		Metadata: map[string]string{"gc.step_ref": "mol-adopt-pr.finalize"},
+	}) // gc-4 (open, blocked by the gate)
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
 	doWispAutocloseWith(store, "gc-1", &stdout)
 
-	if !strings.Contains(stdout.String(), "Auto-closed molecule gc-2 on gc-1") {
-		t.Fatalf("stdout = %q, want metadata auto-close message", stdout.String())
+	if stdout.String() != "" {
+		t.Fatalf("parked molecule must not be auto-closed, got %q", stdout.String())
 	}
 	for _, id := range []string{"gc-2", "gc-3", "gc-4"} {
 		b, err := store.Get(id)
 		if err != nil {
 			t.Fatalf("Get(%s): %v", id, err)
 		}
-		if b.Status != "closed" {
-			t.Fatalf("%s status = %q, want closed", id, b.Status)
+		if b.Status != "open" {
+			t.Fatalf("%s status = %q, want open (parked subtree preserved)", id, b.Status)
 		}
+	}
+}
+
+func TestWispAutocloseForceClosesTerminalMoleculeSubtree(t *testing.T) {
+	// A molecule whose descendants are all terminal is genuinely complete — no
+	// parked checkpoint remains — so the owner-close reap still force-closes the
+	// open root. Preserves the original wisp-cleanup intent for finished work.
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{
+		Title:    "dispatch/loop bead",
+		Metadata: map[string]string{"molecule_id": "gc-2"},
+	}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "molecule root", Type: "molecule"})      // gc-2 (open)
+	_, _ = store.Create(beads.Bead{Title: "step", Type: "task", ParentID: "gc-2"}) // gc-3 (terminal)
+	_ = store.Close("gc-3")
+	_ = store.Close("gc-1")
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, "gc-1", &stdout)
+
+	if !strings.Contains(stdout.String(), "Auto-closed molecule gc-2 on gc-1") {
+		t.Fatalf("stdout = %q, want auto-close message for terminal subtree", stdout.String())
+	}
+	root, err := store.Get("gc-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("molecule root status = %q, want closed", root.Status)
 	}
 }
 
