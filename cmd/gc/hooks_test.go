@@ -97,6 +97,54 @@ func TestInstallBeadHooksPreservesUserOwnedSameNameHook(t *testing.T) {
 	}
 }
 
+// TestInstallBeadHooksRemovesLegacyUnstampedHook verifies that hooks written
+// by older gc versions (using "# Installed by gc" without a gc-hook-stamp)
+// are also removed by installBeadHooks, so pre-stamp deployments converge.
+func TestInstallBeadHooksRemovesLegacyUnstampedHook(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, ".beads", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyContent := []byte("#!/bin/sh\n# Installed by gc\n\"$GC_BIN\" event emit --bead \"$BEADS_BEAD_ID\" on_close\n")
+	hookPath := filepath.Join(hooksDir, "on_close")
+	if err := os.WriteFile(hookPath, legacyContent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installBeadHooks(dir, ""); err != nil {
+		t.Fatalf("installBeadHooks: %v", err)
+	}
+
+	if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
+		t.Errorf("legacy unstamped gc hook should be removed (stat err=%v)", err)
+	}
+}
+
+// TestInstallBeadHooksPreservesUserOwnedLegacyNamedHook verifies that a
+// user-authored hook that happens to mention "gc" in its body but does NOT
+// carry the legacy gc pattern is left untouched.
+func TestInstallBeadHooksPreservesUserOwnedLegacyNamedHook(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, ".beads", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	userContent := []byte("#!/bin/sh\n# Installed by gc\n# user-extended hook, not the old forwarder pattern\nmy-tool notify\n")
+	hookPath := filepath.Join(hooksDir, "on_create")
+	if err := os.WriteFile(hookPath, userContent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installBeadHooks(dir, ""); err != nil {
+		t.Fatalf("installBeadHooks: %v", err)
+	}
+
+	if _, err := os.Stat(hookPath); err != nil {
+		t.Errorf("user hook with only the marker comment (no forwarder body) must be preserved: %v", err)
+	}
+}
+
 // TestInstallBeadHooksInitIntegration verifies that gc init does NOT install
 // bd event-forwarding hooks; autoclose now runs in the controller.
 func TestInstallBeadHooksInitIntegration(t *testing.T) {

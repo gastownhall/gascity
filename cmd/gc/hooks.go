@@ -19,11 +19,19 @@ func hookStampLine() string {
 	return fmt.Sprintf("# gc-hook-stamp: %s %s", date, commit)
 }
 
-// isGCManagedHook reports whether the hook content was written by gc (i.e.
-// contains a gc-hook-stamp line). Only gc-managed hooks are removed during
-// cleanup; user-authored hooks with the same filename are left untouched.
+// isGCManagedHook reports whether the hook content was written by gc.
+// It recognizes both the current gc-hook-stamp format and the legacy
+// "# Installed by gc" marker used before stamping was introduced.
+// Only gc-managed hooks are removed during cleanup; user-authored hooks
+// with the same filename are left untouched.
 func isGCManagedHook(content []byte) bool {
-	return parseHookStampDate(content) != ""
+	if parseHookStampDate(content) != "" {
+		return true
+	}
+	// Legacy hooks written by older gc versions use "# Installed by gc"
+	// as the first marker line and invoke "$GC_BIN" event emit per write.
+	return bytes.Contains(content, []byte("# Installed by gc")) &&
+		bytes.Contains(content, []byte(`"$GC_BIN" event emit`))
 }
 
 // parseHookStampDate extracts the build date from a hook script's stamp line.
