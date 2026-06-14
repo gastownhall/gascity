@@ -93,23 +93,29 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
 // deliberately parked at an open descendant — e.g. a human-gate step plus the
 // finalize step it blocks. Such a subtree is designed to outlive the owner
 // dispatch/loop bead whose close triggered this hook, so force-closing it here
-// would steamroll the human checkpoint before the maintainer acts (the PR #3474
+// would steamroll the human checkpoint before the maintainer acts (the #3474
 // finalize defect).
 //
 // The predicate mirrors the terminality guard the sibling `gc molecule
-// autoclose` path already applies (autocloseMoleculeIfComplete): a subtree with
-// open descendants is left open, so the two close-time auto-closers agree. We
-// additionally require the attached root itself to still be open, because a
-// parked molecule is always live. An already-terminal root with leftover open
-// steps is an orphan, not a parked checkpoint, and still reaps — preserving the
-// descendant-cleanup intent this hook was built for. A stepless/ephemeral wisp
-// has zero descendants -> (true, 0) -> not parked -> still reaped.
+// autoclose` path applies (autocloseMoleculeIfComplete leaves a non-terminal
+// subtree open), so the two close-time auto-closers agree. We additionally
+// require the attached root itself to still be open: an already-terminal root
+// with leftover open steps is an orphan, not a parked checkpoint, and still
+// reaps — preserving the descendant-cleanup intent this hook was built for.
+//
+// subtreeTerminalExcludingRoot returns (true, 0) for a stepless/ephemeral wisp
+// (terminal, so not parked -> still reaped) and (false, 0) on a subtree-walk
+// error. We deliberately treat that walk error as parked, matching the
+// sibling's fail-safe `if !terminal { return }`: force-closing a possibly
+// human-pending subtree because a transient store read failed is the very
+// destructive behavior #3474 removes, and a genuinely complete wisp left open
+// on a read error is still reaped by the redundant later close paths.
 func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) bool {
 	if convoycore.IsTerminalStatus(attached.Status) {
 		return false
 	}
-	terminal, descendants := subtreeTerminalExcludingRoot(store, attached.ID)
-	return !terminal && descendants > 0
+	terminal, _ := subtreeTerminalExcludingRoot(store, attached.ID)
+	return !terminal
 }
 
 func closeAttachedWispSubtree(store beads.Store, attached beads.Bead) (int, error) {

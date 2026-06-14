@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -126,6 +128,43 @@ func TestWispAutocloseForceClosesTerminalMoleculeSubtree(t *testing.T) {
 	}
 	if root.Status != "closed" {
 		t.Fatalf("molecule root status = %q, want closed", root.Status)
+	}
+}
+
+// walkFailingStore makes the subtree walk in subtreeTerminalExcludingRoot ->
+// molecule.ListSubtree fail for one root, by erroring its logical-member
+// ListByMetadata lookup. It models a transient store read failure while the
+// root bead itself is still resolvable.
+type walkFailingStore struct {
+	beads.Store
+	failID string
+}
+
+func (s *walkFailingStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if filters[beadmeta.RootBeadIDMetadataKey] == s.failID {
+		return nil, fmt.Errorf("subtree walk unavailable for %s", s.failID)
+	}
+	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+func TestAttachedMoleculeIsParkedPreservesOnWalkError(t *testing.T) {
+	// Fail-safe arm of the #3474 fix: when the subtree walk errors (a transient
+	// store read failure), the attached molecule must be classified as parked
+	// and preserved, not force-closed. subtreeTerminalExcludingRoot maps a walk
+	// error to (false, 0); the guard must treat that as parked, mirroring the
+	// sibling autocloseMoleculeIfComplete's `if !terminal { return }`. This is
+	// the only behavior that distinguishes the guard from the dropped
+	// `&& descendants > 0` clause — end-to-end the close path's own walk also
+	// fails on a persistent error, so it must be pinned at the predicate.
+	base := beads.NewMemStore()
+	root, err := base.Create(beads.Bead{Title: "molecule root", Type: "molecule"})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	store := &walkFailingStore{Store: base, failID: root.ID}
+
+	if !attachedMoleculeIsParked(store, root) {
+		t.Fatal("attachedMoleculeIsParked = false on subtree walk error, want true (fail-safe preserve)")
 	}
 }
 
