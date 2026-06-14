@@ -376,11 +376,10 @@ test-worker-inference:
 ## test-worker-inference-phase3: alias for the live worker inference conformance package
 test-worker-inference-phase3: test-worker-inference
 
-## test-acceptance: run acceptance tests (Tier A — fast, <5 min, every PR).
-## ACCEPTANCE_TIMEOUT overrides the go-test timeout (defaults to 5m on
-## Linux; Mac CI bumps it because launchd-mediated supervisor start is
-## noticeably slower than systemd).
-ACCEPTANCE_TIMEOUT ?= 5m
+## test-acceptance: run acceptance tests (Tier A — command-level PR gate).
+## ACCEPTANCE_TIMEOUT overrides the go-test timeout. The unsharded local/CI
+## target runs the command-heavy Tier A package serially; RC gate shards it.
+ACCEPTANCE_TIMEOUT ?= 15m
 test-acceptance:
 	$(TEST_ENV) go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) ./test/acceptance/...
 

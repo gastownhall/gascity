@@ -63,7 +63,7 @@ func TestMain(m *testing.M) {
 // template creates a working city with city.toml, prompts, and formulas.
 func TestInitMinimal(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	if !c.HasFile("city.toml") {
 		t.Fatal("city.toml not created")
@@ -90,7 +90,7 @@ func TestInitMinimal(t *testing.T) {
 // cover the pinned import, the lock entry, and composition results.
 func TestInitGastown(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	if !c.HasFile("city.toml") {
 		t.Fatal("city.toml not created")
@@ -181,11 +181,10 @@ version = "` + config.PublicGastownPackVersion + `"
 
 	// Re-running gc init on an existing city triggers the resume path,
 	// which syncs the lock and installs the pinned imports.
-	out, err := c.GC("init", "--skip-provider-readiness", c.Dir)
+	out, err := c.GC("init", "--skip-provider-readiness", "--no-start", c.Dir)
 	if err != nil {
 		t.Fatalf("gc init resume failed — Bug 4 regression:\n%s", out)
 	}
-	t.Cleanup(c.CleanupRuntime)
 	// Positive assertions: the lock pins the import and config composes.
 	if !c.HasFile("packs.lock") {
 		t.Fatal("packs.lock not written by gc init resume — Bug 4 regression")
@@ -207,11 +206,10 @@ func TestInitPublicGastownPackStartsFromCanonicalImport(t *testing.T) {
 		t.Fatalf("writing public gastown template: %v", err)
 	}
 
-	out, err := helpers.RunGC(testEnv, "", "init", "--file", templatePath, "--skip-provider-readiness", c.Dir)
+	out, err := helpers.RunGC(testEnv, "", "init", "--file", templatePath, "--skip-provider-readiness", "--no-start", c.Dir)
 	if err != nil {
 		t.Fatalf("gc init --file public gastown failed: %v\n%s", err, out)
 	}
-	t.Cleanup(c.CleanupRuntime)
 
 	packToml := c.ReadFile("pack.toml")
 	if !strings.Contains(packToml, `source = "`+config.PublicGastownPackSource+`"`) {
@@ -231,12 +229,6 @@ func TestInitPublicGastownPackStartsFromCanonicalImport(t *testing.T) {
 
 	if out, err := c.GC("config", "show", "--validate"); err != nil {
 		t.Fatalf("config validation after public gastown init failed: %v\n%s", err, out)
-	}
-	if out, err := c.GC("stop", c.Dir); err != nil {
-		t.Fatalf("gc stop after public gastown init failed: %v\n%s", err, out)
-	}
-	if out, err := c.GC("unregister", c.Dir); err != nil {
-		t.Fatalf("gc unregister after public gastown init failed: %v\n%s", err, out)
 	}
 
 	c.StartWithSupervisor()
@@ -280,7 +272,7 @@ func TestInitRegistryIsolation(t *testing.T) {
 // a valid city even when running non-interactively.
 func TestInitCustom(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	if !c.HasFile("city.toml") {
 		t.Fatal("city.toml not created")

@@ -802,6 +802,37 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 	}
 }
 
+func TestCmdInitNoStartSkipsSupervisorRegistration(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	calledRegister := false
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		calledRegister = true
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init", "--provider", "claude", "--skip-provider-readiness", "--no-start", cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc init --no-start = %d, want 0; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if calledRegister {
+		t.Fatal("registerCityWithSupervisor should not run when --no-start is set")
+	}
+	if !strings.Contains(stdout.String(), "Skipping supervisor startup") {
+		t.Fatalf("stdout = %q, want no-start progress", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Next: cd ") {
+		t.Fatalf("stdout = %q, want next start command", stdout.String())
+	}
+}
+
 func TestShellQuotePathQuotesMetacharacters(t *testing.T) {
 	got := shellQuotePathForOS("/tmp/test&dir", "linux")
 	want := "'/tmp/test&dir'"

@@ -75,7 +75,7 @@ func TestSupervisorStatus(t *testing.T) {
 
 func TestSupervisorReload(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	// Reload triggers immediate reconciliation.
 	out, err := helpers.RunGC(testEnv, "", "supervisor", "reload")

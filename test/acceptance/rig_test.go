@@ -52,7 +52,7 @@ func createGitRig(t *testing.T) string {
 
 func TestRigListGastownCity(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	t.Run("ListSucceeds", func(t *testing.T) {
 		out, err := c.GC("rig", "list")
@@ -79,7 +79,7 @@ func TestRigListGastownCity(t *testing.T) {
 
 func TestRigLifecycle(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	rigDir := createGitRig(t)
 	rigName := "testrig"
@@ -155,7 +155,7 @@ func TestRigLifecycle(t *testing.T) {
 
 func TestRigErrors(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("StatusMissingName", func(t *testing.T) {
 		_, err := c.GC("rig", "status")

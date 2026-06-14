@@ -212,7 +212,8 @@ func SupersededBundledPinTarget(source, version string) (string, bool) {
 	}
 	var superseded []string
 	var current string
-	if repository == builtinpacks.PublicRepository {
+	switch repository {
+	case builtinpacks.PublicRepository:
 		switch name {
 		case "gastown":
 			superseded, current = SupersededPublicGastownPackVersions, PublicGastownPackVersion
@@ -221,14 +222,14 @@ func SupersededBundledPinTarget(source, version string) (string, bool) {
 		default:
 			return "", false
 		}
-	} else if repository == builtinpacks.Repository {
+	case builtinpacks.Repository:
 		switch name {
 		case "core", "bd", "dolt":
 			superseded, current = SupersededBundledPackImportVersions, BundledPackImportVersion
 		default:
 			return "", false
 		}
-	} else {
+	default:
 		return "", false
 	}
 	v := strings.TrimSpace(version)
@@ -283,22 +284,22 @@ func IsBundledSourceAtCanonicalPin(source, commit string) bool {
 // be installed for real, exactly like any other remote import. This
 // fallback keeps cities composable before the first "gc import install"
 // writes the lock.
-func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, error, bool) {
+func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, bool, error) {
 	if !builtinpacks.IsSource(source) {
-		return "", nil, false
+		return "", false, nil
 	}
 	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
 	if declared := strings.TrimSpace(declaredVersion); declared != "" &&
 		strings.TrimPrefix(declared, "sha:") != commit {
-		return "", nil, false
+		return "", false, nil
 	}
 	cacheRoot, err := GlobalRepoCacheRoot()
 	if err != nil {
-		return "", fmt.Errorf("resolving global repo cache root: %w", err), true
+		return "", true, fmt.Errorf("resolving global repo cache root: %w", err)
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
 	if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
-		return cacheDir, nil, true
+		return cacheDir, true, nil
 	}
 	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
 		if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
@@ -306,9 +307,9 @@ func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, er
 		}
 		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, commit)
 	}); err != nil {
-		return "", fmt.Errorf("hydrating synthetic repo cache: %w", err), true
+		return "", true, fmt.Errorf("hydrating synthetic repo cache: %w", err)
 	}
-	return cacheDir, nil, true
+	return cacheDir, true, nil
 }
 
 func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (string, error) {
@@ -316,7 +317,7 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (str
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if cacheDir, err, ok := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
+			if cacheDir, ok, err := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
 				if err != nil {
 					return "", fmt.Errorf("resolving remote import %s without lock: %w", source, err)
 				}
@@ -333,7 +334,7 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (str
 	}
 	entry, ok := lock.Packs[source]
 	if !ok || entry.Commit == "" {
-		if cacheDir, err, ok := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
+		if cacheDir, ok, err := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
 			if err != nil {
 				return "", fmt.Errorf("resolving remote import %s without lock entry: %w", source, err)
 			}

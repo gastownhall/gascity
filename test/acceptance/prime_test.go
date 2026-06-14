@@ -17,7 +17,7 @@ import (
 
 func TestPrimeGastownCity(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	t.Run("NamedAgent_OutputsRenderedPrompt", func(t *testing.T) {
 		out, err := c.GC("prime", "mayor")
@@ -103,7 +103,7 @@ func TestPrimeGastownCity(t *testing.T) {
 
 func TestPrimeTutorialCity(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("NoArgs_ReturnsPrompt", func(t *testing.T) {
 		out, err := c.GC("prime")

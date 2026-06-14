@@ -18,7 +18,7 @@ import (
 
 func TestMailLifecycle(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	// Send a message from "human" to "mayor".
 	out, err := c.GC("mail", "send", "mayor", "--from", "human",
@@ -168,7 +168,7 @@ func TestMailLifecycle(t *testing.T) {
 
 func TestMailErrorPaths(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("ReadMissingID", func(t *testing.T) {
 		_, err := c.GC("mail", "read")

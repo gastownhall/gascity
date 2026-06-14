@@ -58,7 +58,7 @@ func agentCount(cfg *config.City, name string) int {
 // single gc init call.
 func TestRegression_GastownConfig(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(c.Dir, "city.toml"))
 	if err != nil {
@@ -196,7 +196,7 @@ func TestRegression_GastownConfig(t *testing.T) {
 // packs/ directory. They share a single gc init call.
 func TestRegression_GastownPackArtifacts(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 	packDir := gastownCachePackDir(t, c)
 
 	// PR #3044: invalid TOML escape in a formula file broke 5 CI tests.
@@ -338,7 +338,7 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 // single gc init call and rig setup.
 func TestRegression_GastownWithRigs(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	rig1 := t.TempDir()
 	rig2 := t.TempDir()

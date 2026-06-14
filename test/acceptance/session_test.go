@@ -20,7 +20,7 @@ import (
 
 func TestSessionErrors(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("NoSubcommand", func(t *testing.T) {
 		out, err := c.GC("session")

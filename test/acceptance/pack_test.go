@@ -21,7 +21,7 @@ import (
 // packs/ directory.
 func TestGastownPackMaterialization(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 	packDir := gastownCachePackDir(t, c)
 
 	t.Run("GastownScriptsExecutable", func(t *testing.T) {
