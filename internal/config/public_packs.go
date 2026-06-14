@@ -40,7 +40,11 @@ const (
 // untouched. When bumping BundledPackImportVersion, append the old value
 // here.
 var SupersededBundledPackImportVersions = []string{
-	// Currently empty, ready for future pin bumps.
+	// Older Pack v2 lockfiles stored the bundled-pack content hash as the
+	// canonical pin for gascity.git bundled packs. That value is not a git
+	// commit, so current binaries must re-pin it offline instead of trying to
+	// fetch it as an exact commit.
+	"sha:282d2bf26b1a9396016e90b0128c1cd16b719f4d3af7cd0ea06cf25fbc426d18",
 }
 
 // SupersededPublicGastownPackVersions lists previous canonical pins for the

@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
+	"github.com/gastownhall/gascity/internal/remotesource"
 )
 
 type importStateDoctorCheck struct {
@@ -61,7 +62,7 @@ func (c *importStateDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 		r.Details = details
 		return r
 	}
-	if details := supersededBundledPinDetails(imports); len(details) > 0 {
+	if details := supersededBundledPinDetails(c.cityPath, imports); len(details) > 0 {
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("%d bundled import(s) pinned at a superseded canonical version", len(details))
 		r.FixHint = `run "gc doctor --fix" to re-pin superseded canonical bundled imports to the current canonical version`
@@ -128,7 +129,7 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 			return fmt.Errorf("reading migrated imports: %w", err)
 		}
 	}
-	if len(supersededBundledPinDetails(imports)) > 0 {
+	if len(supersededBundledPinDetails(c.cityPath, imports)) > 0 {
 		if err := rewriteSupersededBundledPinsFS(fsys.OSFS{}, c.cityPath); err != nil {
 			return err
 		}
@@ -153,10 +154,11 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 // supersededBundledPinDetails reports bundled imports pinned at a
 // superseded canonical version (a pin an older gc release wrote as
 // canonical). Deliberate pins at other commits are not flagged.
-func supersededBundledPinDetails(imports map[string]config.Import) []string {
+func supersededBundledPinDetails(cityPath string, imports map[string]config.Import) []string {
+	lockTargets := supersededBundledLockTargets(fsys.OSFS{}, cityPath)
 	var names []string
 	for name, imp := range imports {
-		if _, ok := config.SupersededBundledPinTarget(imp.Source, imp.Version); ok {
+		if current, _ := supersededBundledTarget(imp, lockTargets); current != "" {
 			names = append(names, name)
 		}
 	}
@@ -164,17 +166,18 @@ func supersededBundledPinDetails(imports map[string]config.Import) []string {
 	details := make([]string, 0, len(names))
 	for _, name := range names {
 		imp := imports[name]
-		current, _ := config.SupersededBundledPinTarget(imp.Source, imp.Version)
-		details = append(details, fmt.Sprintf("superseded-canonical-pin | %s | %s | pinned at superseded canonical %s; current canonical is %s", name, imp.Source, imp.Version, current))
+		current, version := supersededBundledTarget(imp, lockTargets)
+		details = append(details, fmt.Sprintf("superseded-canonical-pin | %s | %s | pinned at superseded canonical %s; current canonical is %s", name, imp.Source, version, current))
 	}
 	return details
 }
 
 func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) error {
+	lockTargets := supersededBundledLockTargets(fs, cityPath)
 	bump := func(imports map[string]config.Import) bool {
 		changed := false
 		for name, imp := range imports {
-			if current, ok := config.SupersededBundledPinTarget(imp.Source, imp.Version); ok {
+			if current, _ := supersededBundledTarget(imp, lockTargets); current != "" {
 				imp.Version = current
 				imports[name] = imp
 				changed = true
@@ -239,6 +242,42 @@ func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) error {
 		}
 	}
 	return nil
+}
+
+type supersededBundledPin struct {
+	current string
+	version string
+}
+
+func supersededBundledLockTargets(fs fsys.FS, cityPath string) map[string]supersededBundledPin {
+	lock, err := readImportLockfile(fs, cityPath)
+	if err != nil || len(lock.Packs) == 0 {
+		return nil
+	}
+	targets := make(map[string]supersededBundledPin)
+	for source, locked := range lock.Packs {
+		version := strings.TrimSpace(locked.Version)
+		if version == "" && strings.TrimSpace(locked.Commit) != "" {
+			version = "sha:" + strings.TrimSpace(locked.Commit)
+		}
+		if current, ok := config.SupersededBundledPinTarget(source, version); ok {
+			targets[source] = supersededBundledPin{current: current, version: version}
+		}
+	}
+	return targets
+}
+
+func supersededBundledTarget(imp config.Import, lockTargets map[string]supersededBundledPin) (current, version string) {
+	version = strings.TrimSpace(imp.Version)
+	if current, ok := config.SupersededBundledPinTarget(imp.Source, version); ok {
+		return current, version
+	}
+	if version == "" {
+		if target, ok := lockTargets[imp.Source]; ok {
+			return target.current, target.version
+		}
+	}
+	return "", ""
 }
 
 func defaultWave1PublicPackImports(packNames []string) (map[string]wave1PublicPackImportTarget, error) {
@@ -323,7 +362,11 @@ func legacyPublicPackNames(imports map[string]config.Import, cityPath string) []
 func legacyPublicPackForSource(cityPath, source string) (string, bool) {
 	source = strings.TrimSpace(source)
 	if isRemoteImportSource(source) {
-		return "", false
+		parsed := remotesource.Parse(source)
+		if normalizeGascityRepoURL(parsed.CloneURL) != "https://github.com/gastownhall/gascity" {
+			return "", false
+		}
+		return legacyPublicPackSubpath(parsed.Subpath)
 	}
 	source = strings.TrimSpace(filepath.Clean(source))
 	if source == "." || source == "" {
@@ -345,6 +388,20 @@ func legacyPublicPackForSource(cityPath, source string) (string, bool) {
 			if strings.HasSuffix(path, suffix) {
 				return pack, true
 			}
+		}
+	}
+	return "", false
+}
+
+func normalizeGascityRepoURL(raw string) string {
+	return strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(raw), "/"), ".git")
+}
+
+func legacyPublicPackSubpath(subpath string) (string, bool) {
+	subpath = filepath.ToSlash(filepath.Clean(strings.TrimSpace(subpath)))
+	for _, pack := range []string{"gastown", "maintenance"} {
+		if subpath == "examples/gastown/packs/"+pack {
+			return pack, true
 		}
 	}
 	return "", false

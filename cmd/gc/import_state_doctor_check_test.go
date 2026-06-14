@@ -293,7 +293,7 @@ func TestLegacyPublicPackForSourceIgnoresRemoteSubdirectorySources(t *testing.T)
 	cityDir := filepath.Join(string(filepath.Separator), "city")
 	cases := []string{
 		"https://example.com/repo.git//examples/gastown/packs/gastown",
-		"ssh://example.com/repo.git//.gc/system/packs/gastown",
+		"ssh://github.com/gastownhall/gascity.git//examples/gastown/packs/gastown",
 		"git@example.com:org/repo.git//examples/gastown/packs/maintenance",
 		"github.com/org/repo//examples/gastown/packs/maintenance",
 		"file:///repo/examples/gastown/packs/gastown",
@@ -302,6 +302,35 @@ func TestLegacyPublicPackForSourceIgnoresRemoteSubdirectorySources(t *testing.T)
 		t.Run(source, func(t *testing.T) {
 			if got, ok := legacyPublicPackForSource(cityDir, source); ok {
 				t.Fatalf("legacyPublicPackForSource(%q) = %q, true; want false", source, got)
+			}
+		})
+	}
+}
+
+func TestLegacyPublicPackForSourceDetectsCanonicalRemotePublicPacks(t *testing.T) {
+	cityDir := filepath.Join(string(filepath.Separator), "city")
+	cases := []struct {
+		source string
+		pack   string
+	}{
+		{
+			source: "https://github.com/gastownhall/gascity.git//examples/gastown/packs/gastown",
+			pack:   "gastown",
+		},
+		{
+			source: "https://github.com/gastownhall/gascity.git//examples/gastown/packs/maintenance",
+			pack:   "maintenance",
+		},
+		{
+			source: "github.com/gastownhall/gascity//examples/gastown/packs/maintenance",
+			pack:   "maintenance",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.source, func(t *testing.T) {
+			got, ok := legacyPublicPackForSource(cityDir, tc.source)
+			if !ok || got != tc.pack {
+				t.Fatalf("legacyPublicPackForSource(%q) = %q, %v; want %q, true", tc.source, got, ok, tc.pack)
 			}
 		})
 	}
@@ -840,6 +869,93 @@ version = "`+dummyOldPin+`"
 	}
 	if !strings.Contains(string(packData), config.BundledPackImportVersion) {
 		t.Fatalf("pack.toml missing current canonical pin:\n%s", packData)
+	}
+}
+
+func TestImportStateDoctorCheckReportsLegacyContentHashBundledPin(t *testing.T) {
+	clearGCEnv(t)
+	const oldContentHashPin = "sha:282d2bf26b1a9396016e90b0128c1cd16b719f4d3af7cd0ea06cf25fbc426d18"
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 2
+
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "`+oldContentHashPin+`"
+`)
+
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() { checkInstalledImports = prevCheck })
+	checkInstalledImports = func(_ string, _ map[string]config.Import) (*packman.CheckReport, error) {
+		t.Fatal("checkInstalledImports should not run before superseded content-hash pins are re-pinned")
+		return nil, nil
+	}
+
+	result := newImportStateDoctorCheck(cityDir).Run(&doctor.CheckContext{CityPath: cityDir})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error for superseded content-hash pin; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), oldContentHashPin) ||
+		!strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
+		t.Fatalf("details = %v, want superseded content-hash pin detail", result.Details)
+	}
+}
+
+func TestImportStateDoctorCheckMigratesLockOnlyLegacyContentHashPin(t *testing.T) {
+	clearGCEnv(t)
+	const oldContentHashCommit = "282d2bf26b1a9396016e90b0128c1cd16b719f4d3af7cd0ea06cf25fbc426d18"
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 2
+
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+`)
+	if err := os.WriteFile(filepath.Join(cityDir, "packs.lock"), []byte(`schema = 1
+
+[packs."https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"]
+version = "sha:`+oldContentHashCommit+`"
+commit = "`+oldContentHashCommit+`"
+fetched = "2026-06-11T17:08:05Z"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := newImportStateDoctorCheck(cityDir)
+	result := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error for lock-only superseded pin; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), oldContentHashCommit) ||
+		!strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
+		t.Fatalf("details = %v, want lock-only superseded content-hash pin detail", result.Details)
+	}
+
+	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	packData, err := os.ReadFile(filepath.Join(cityDir, "pack.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(packData), config.BundledPackImportVersion) {
+		t.Fatalf("pack.toml missing current canonical pin after fix:\n%s", packData)
+	}
+	lockData, err := os.ReadFile(filepath.Join(cityDir, "packs.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(lockData), oldContentHashCommit) {
+		t.Fatalf("packs.lock still contains old content-hash pin after fix:\n%s", lockData)
+	}
+	if !strings.Contains(string(lockData), strings.TrimPrefix(config.BundledPackImportVersion, "sha:")) {
+		t.Fatalf("packs.lock missing current canonical commit after fix:\n%s", lockData)
 	}
 }
 
