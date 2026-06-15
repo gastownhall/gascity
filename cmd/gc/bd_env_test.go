@@ -2074,10 +2074,13 @@ func TestBdCommandRunnerForCityPinsCityStoreEnv(t *testing.T) {
 
 func TestBdCommandRunnerForCityClearsAmbientDoltEnvWhenManagedRuntimeUnavailable(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("DOLT_DATABASE", "ambient-db")
 	t.Setenv("GC_DOLT_HOST", "ambient.invalid")
 	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("GC_DOLT_DATABASE", "ambient-db")
 	t.Setenv("GC_DOLT_USER", "ambient-user")
 	t.Setenv("GC_DOLT_PASSWORD", "ambient-pass")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "ambient-db")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.invalid")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
 	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-user")
@@ -2096,20 +2099,23 @@ dolt.auto-start: false
 	}
 
 	runner := bdCommandRunnerForCity(cityDir)
-	out, err := runner(cityDir, "sh", "-c", `printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_DOLT_USER" "$GC_DOLT_PASSWORD" "$BEADS_DOLT_SERVER_HOST" "$BEADS_DOLT_SERVER_PORT" "$BEADS_DOLT_SERVER_USER" "$BEADS_DOLT_PASSWORD"`)
+	out, err := runner(cityDir, "sh", "-c", `printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$DOLT_DATABASE" "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_DOLT_DATABASE" "$GC_DOLT_USER" "$GC_DOLT_PASSWORD" "$BEADS_DOLT_SERVER_DATABASE" "$BEADS_DOLT_SERVER_HOST" "$BEADS_DOLT_SERVER_PORT" "$BEADS_DOLT_SERVER_USER" "$BEADS_DOLT_PASSWORD"`)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	lines := strings.Split(string(out), "\n")
-	if len(lines) != 9 {
-		t.Fatalf("lines = %q, want 9 lines including trailing newline", string(out))
+	if len(lines) != 12 {
+		t.Fatalf("lines = %q, want 12 lines including trailing newline", string(out))
 	}
 	for i, name := range []string{
+		"DOLT_DATABASE",
 		"GC_DOLT_HOST",
 		"GC_DOLT_PORT",
+		"GC_DOLT_DATABASE",
 		"GC_DOLT_USER",
 		"GC_DOLT_PASSWORD",
+		"BEADS_DOLT_SERVER_DATABASE",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
@@ -2118,6 +2124,123 @@ dolt.auto-start: false
 		if lines[i] != "" {
 			t.Fatalf("%s = %q, want empty when managed runtime is unavailable", name, lines[i])
 		}
+	}
+}
+
+func TestBdCommandRunnerForCityProjectsCanonicalDoltDatabase(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("DOLT_DATABASE", "ambient")
+	t.Setenv("GC_DOLT_DATABASE", "ambient")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "ambient")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = origRunner })
+
+	var captured map[string]string
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		captured = map[string]string{}
+		for key, value := range env {
+			captured[key] = value
+		}
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			return []byte("ok"), nil
+		}
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: 127.0.0.1
+dolt.port: 3307
+dolt.user: gascity
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"city-project"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := bdCommandRunnerForCity(cityDir)
+	if _, err := runner(cityDir, "bd", "context", "--json"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := captured["GC_DOLT_DATABASE"]; got != "hq" {
+		t.Fatalf("GC_DOLT_DATABASE = %q, want hq", got)
+	}
+	if got := captured["BEADS_DOLT_SERVER_DATABASE"]; got != "hq" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want hq", got)
+	}
+	if got := captured["DOLT_DATABASE"]; got != "" {
+		t.Fatalf("DOLT_DATABASE = %q, want empty stale ambient guard", got)
+	}
+}
+
+func TestPreflightBDContextReaderRunsCityScopeFromRigGitWorktree(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = origRunner })
+
+	var capturedDir string
+	var capturedEnv map[string]string
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		capturedEnv = map[string]string{}
+		for key, value := range env {
+			capturedEnv[key] = value
+		}
+		return func(dir string, _ string, _ ...string) ([]byte, error) {
+			capturedDir = dir
+			return []byte(`{"backend":"dolt","dolt_mode":"server","bd_version":"1.0.4","schema_version":1}`), nil
+		}
+	}
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "rig")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: 127.0.0.1
+dolt.port: 3307
+dolt.user: gascity
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"city-project"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n\n[[rigs]]\nname = \"repo\"\npath = \""+filepath.ToSlash(rigDir)+"\"\nprefix = \"repo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, err := preflightBDContextReader(cityDir)(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ctx.Backend != "dolt" || ctx.DoltMode != "server" {
+		t.Fatalf("context = %+v, want dolt/server", ctx)
+	}
+	if capturedDir != rigDir {
+		t.Fatalf("preflight work dir = %q, want rig git worktree %q", capturedDir, rigDir)
+	}
+	if got := capturedEnv["BEADS_DIR"]; got != filepath.Join(cityDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want city beads dir", got)
+	}
+	if got := capturedEnv["BEADS_DOLT_SERVER_DATABASE"]; got != "hq" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want hq", got)
 	}
 }
 

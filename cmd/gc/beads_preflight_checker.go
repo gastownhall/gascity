@@ -4,9 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -21,7 +26,20 @@ func newBeadsPreflightChecker(cityPath, provider string) contract.PreflightCheck
 
 func preflightBDContextReader(cityPath string) func(scope string) (contract.PreflightBDContext, error) {
 	return func(scope string) (contract.PreflightBDContext, error) {
-		out, err := bdCommandRunnerForCity(cityPath)(scope, "bd", "context", "--json")
+		scopeRoot := resolveStoreScopeRoot(cityPath, scope)
+		cfg, _ := loadCityConfig(cityPath, io.Discard)
+		envFn := func(_ string) (map[string]string, error) {
+			if samePath(scopeRoot, cityPath) {
+				env, err := bdRuntimeEnvWithError(cityPath)
+				if env != nil {
+					env["BEADS_DIR"] = filepath.Join(scopeRoot, ".beads")
+				}
+				return env, err
+			}
+			return bdRuntimeEnvForRigWithError(cityPath, cfg, scopeRoot)
+		}
+		workDir := preflightBDContextWorkDir(cityPath, scopeRoot, cfg)
+		out, err := bdCommandRunnerWithManagedRetryErr(cityPath, envFn)(workDir, "bd", "context", "--json")
 		if err != nil {
 			return contract.PreflightBDContext{}, err
 		}
@@ -41,6 +59,34 @@ func preflightBDContextReader(cityPath string) func(scope string) (contract.Pref
 			SchemaVersion: raw.SchemaVersion,
 		}, nil
 	}
+}
+
+func preflightBDContextWorkDir(cityPath, scopeRoot string, cfg *config.City) string {
+	if looksLikeGitWorktree(scopeRoot) {
+		return scopeRoot
+	}
+	if samePath(scopeRoot, cityPath) && cfg != nil {
+		for i := range cfg.Rigs {
+			rigPath := resolveStoreScopeRoot(cityPath, cfg.Rigs[i].Path)
+			if looksLikeGitWorktree(rigPath) {
+				return rigPath
+			}
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil && looksLikeGitWorktree(cwd) {
+		return cwd
+	}
+	return scopeRoot
+}
+
+func looksLikeGitWorktree(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		return true
+	}
+	return false
 }
 
 func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (string, bool, error) {

@@ -7,7 +7,13 @@ import "testing"
 // order's [order.env] must not be able to re-enable the destructive
 // backup_export sync that wedged the town on 2026-06-08.
 func TestReservedExecEnvKeysIncludeBdAutoBackup(t *testing.T) {
-	for _, key := range []string{"BD_BACKUP_ENABLED", "BEADS_BACKUP_ENABLED"} {
+	for _, key := range []string{
+		"BD_BACKUP_ENABLED",
+		"BEADS_BACKUP_ENABLED",
+		"BEADS_DOLT_SERVER_DATABASE",
+		"DOLT_DATABASE",
+		"GC_DOLT_DATABASE",
+	} {
 		if !IsReservedExecEnvKey(key) {
 			t.Errorf("IsReservedExecEnvKey(%q) = false, want true", key)
 		}
