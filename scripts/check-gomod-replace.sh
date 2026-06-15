@@ -32,6 +32,15 @@ check_replace_rhs() {
 	local stripped="$1" rhs="$2"
 	local version="" path_part="$rhs"
 
+	# Strip an inline `// comment` from the RHS before splitting; otherwise the
+	# trailing comment tokens defeat the two-token path/version match below and
+	# an unreleased version slips through (e.g. `=> mod v1.0.5-pseudo // why`).
+	if [[ "$rhs" == *"//"* ]]; then
+		rhs="${rhs%%//*}"
+	fi
+	rhs="${rhs%"${rhs##*[![:space:]]}"}"   # trim trailing whitespace
+	path_part="$rhs"
+
 	# Split into path and optional version (last space-separated token).
 	if [[ "$rhs" =~ ^([^ ]+)[[:space:]]+([^ ]+)$ ]]; then
 		path_part="${BASH_REMATCH[1]}"

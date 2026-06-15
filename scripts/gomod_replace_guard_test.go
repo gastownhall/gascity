@@ -182,6 +182,55 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 		})
 	}
 
+	inlineCommentCases := []struct {
+		name     string
+		gomod    string
+		wantFail bool
+	}{
+		{
+			"inline_comment_pseudo_version",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads v1.0.5 => github.com/steveyegge/beads v1.0.5-0.20260611054652-dc0561af28e9 // emergency fix\n",
+			true,
+		},
+		{
+			"inline_comment_git_ref",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads => github.com/steveyegge/beads main // pin branch\n",
+			true,
+		},
+		{
+			"inline_comment_local_path",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads => ./local/beads // dev\n",
+			true,
+		},
+		{
+			"inline_comment_released_semver",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads v1.0.4 => github.com/steveyegge/beads v1.0.5 // bump\n",
+			false,
+		},
+		{
+			"multi_line_block_inline_comment_pseudo_version",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace (\n\tgithub.com/steveyegge/beads v1.0.5 => github.com/steveyegge/beads v1.0.5-0.20260611054652-dc0561af28e9 // emergency fix\n)\n",
+			true,
+		},
+		{
+			"multi_line_block_inline_comment_released",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace (\n\tgithub.com/steveyegge/beads v1.0.4 => github.com/steveyegge/beads v1.0.5 // bump\n)\n",
+			false,
+		},
+	}
+	for _, tc := range inlineCommentCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			out, code := runScript(t, tc.gomod)
+			if tc.wantFail && code == 0 {
+				t.Fatalf("expected non-zero exit for inline-comment case %q, got 0\n%s", tc.name, out)
+			}
+			if !tc.wantFail && code != 0 {
+				t.Fatalf("expected exit 0 for inline-comment case %q, got %d\n%s", tc.name, code, out)
+			}
+		})
+	}
+
 	t.Run("failure_message_mentions_policy", func(t *testing.T) {
 		gomod := "module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads => ./local/beads\n"
 		out, code := runScript(t, gomod)
