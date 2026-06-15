@@ -280,7 +280,7 @@ run_rest_full_shard_modulo() {
   local excluded excluded_name test_name
 
   excluded=""
-  for excluded_name in "${formula_tests[@]}" "${rest_smoke_tests[@]}" TestBdStoreConformance; do
+  for excluded_name in "${formula_tests[@]}" "${rest_smoke_tests[@]}" TestBdStoreConformance TestBdStoreMailWispInsert; do
     excluded+="${excluded_name}"$'\n'
   done
 
@@ -356,7 +356,7 @@ case "$shard" in
     run_pkg_tests "$pkg" "${review_formulas_recovery_tests[@]}"
     ;;
   bdstore)
-    run_pkg_tests "$pkg" TestBdStoreConformance
+    run_pkg_tests "$pkg" TestBdStoreConformance TestBdStoreMailWispInsert
     ;;
   rest-smoke)
     run_rest_smoke_shard

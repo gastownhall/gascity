@@ -161,6 +161,76 @@ func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 	}
 }
 
+// TestBdStoreMailWispInsert verifies that creating an ephemeral mail message
+// bead via BdStore succeeds through the full bd CLI → Dolt SQL stack.
+//
+// Regression tripwire for the 2026-06-11 P0 incident: gc mail send broke in
+// production with "Field 'id' doesn't have a default value" because the bd CLI
+// code omitted id on INSERT INTO wisp_events while a newer schema migration had
+// dropped the DEFAULT (UUID()). The e2e mail tests use the file beads provider
+// and never touch Dolt SQL; this test closes that gap by exercising the
+// BdStore → bd create --ephemeral → Dolt → wisp_events INSERT path directly.
+func TestBdStoreMailWispInsert(t *testing.T) {
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
+
+	rootDir := t.TempDir()
+	doltDataDir := filepath.Join(rootDir, "dolt")
+	wsDir := filepath.Join(rootDir, "ws")
+	serverPort := startSharedDoltServer(t, env, doltDataDir)
+
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("creating workspace: %v", err)
+	}
+	gitCmd := exec.Command("git", "init", "--quiet")
+	gitCmd.Dir = wsDir
+	if out, err := gitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	runBDInit(t, env, wsDir, "mc", serverPort)
+	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
+
+	store := beads.NewBdStore(wsDir, beads.ExecCommandRunner())
+
+	// Create an ephemeral message bead — exercises bd create --ephemeral →
+	// Dolt SQL INSERT INTO wisps + INSERT INTO wisp_events.
+	// A NOT NULL / no-DEFAULT failure on wisp_events.id reproduces the incident.
+	sent, err := store.Create(beads.Bead{
+		Title:     "hello from bdstore mail regression",
+		Type:      "message",
+		Assignee:  "builder",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("BdStore Create ephemeral message (wisp_events INSERT): %v", err)
+	}
+	if !sent.Ephemeral {
+		t.Fatalf("Ephemeral = false on returned bead %s, want true", sent.ID)
+	}
+	if sent.ID == "" {
+		t.Fatal("returned bead has empty ID")
+	}
+
+	// List with TierWisps to confirm the bead is readable after the INSERT.
+	results, err := store.List(beads.ListQuery{
+		TierMode: beads.TierWisps,
+		Assignee: "builder",
+	})
+	if err != nil {
+		t.Fatalf("BdStore List wisp beads: %v", err)
+	}
+	var found bool
+	for _, b := range results {
+		if b.ID == sent.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("sent bead %s not in BdStore List(TierWisps); got %d beads total", sent.ID, len(results))
+	}
+}
+
 func configureCustomTypes(t *testing.T, env []string, wsDir string, customTypes []string) {
 	t.Helper()
 

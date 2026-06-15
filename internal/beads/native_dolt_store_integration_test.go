@@ -50,6 +50,70 @@ func TestNativeDoltStoreRegularUpdateEventRecording(t *testing.T) {
 	}
 }
 
+// TestNativeDoltStoreEphemeralMailSend verifies that creating an ephemeral message
+// bead (the gc mail send code path) succeeds through the upstream beads library.
+//
+// Regression tripwire for the 2026-06-11 P0 incident: a beads version-skew broke
+// gc mail send with "Field 'id' doesn't have a default value" because a newer
+// schema migration dropped DEFAULT (UUID()) from wisp_events.id while the linked
+// beads code still omitted id on INSERT. Released beads v1.0.5 is coherent, so
+// this test PASSES today. It FAILS if a future go.mod upgrade ships a version
+// where code and schema disagree on wisp_events.id.
+func TestNativeDoltStoreEphemeralMailSend(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "mail-wisp-regression", "gc")
+
+	// Create an ephemeral message bead — the beadmail.Send() path.
+	// Ephemeral=true routes the INSERT to wisps + wisp_events tables.
+	// A NOT NULL / missing-DEFAULT failure here reproduces the 2026-06-11 incident.
+	sent, err := store.Create(Bead{
+		Title:     "hello from mail regression",
+		Type:      "message",
+		Assignee:  "builder",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral message bead (wisp_events INSERT): %v", err)
+	}
+	if !sent.Ephemeral {
+		t.Fatalf("Ephemeral = false on returned bead %s, want true", sent.ID)
+	}
+	if sent.ID == "" {
+		t.Fatal("returned bead has empty ID")
+	}
+
+	// List with TierWisps to confirm the bead is retrievable after the INSERT.
+	results, err := store.List(ListQuery{
+		TierMode: TierWisps,
+		Assignee: "builder",
+	})
+	if err != nil {
+		t.Fatalf("List wisp beads: %v", err)
+	}
+	var found bool
+	for _, b := range results {
+		if b.ID == sent.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("created wisp bead %s not in List(TierWisps); got %d beads total", sent.ID, len(results))
+	}
+}
+
 func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
