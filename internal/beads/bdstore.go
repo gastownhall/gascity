@@ -1040,10 +1040,27 @@ func (s *BdStore) Get(id string) (Bead, error) {
 	// BdStore read/write path (ga-gellq1).
 	out, err := s.runBDTransientRead("show", "--json", id)
 	if err != nil {
-		if isBdNotFound(err) {
-			return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
+		if !isBdNotFound(err) {
+			return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
 		}
-		return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
+		// bd show only queries the issues table; ephemeral beads live in the
+		// wisps table and are invisible to it. Fall back to bd query with
+		// ephemeral=true and id=<id> so Get succeeds for wisp-tier beads
+		// (e.g. auto-handoff mail created by gc handoff --auto). Only IDs
+		// that look like bead IDs are eligible: callers also pass through
+		// non-bead names (e.g. slash-qualified session recipients), which
+		// must not leak into a supplemental wisp query.
+		if isWispQueryableID(id) {
+			wisps, queryErr := s.getEphemeralByID(id)
+			if queryErr == nil {
+				for _, b := range wisps {
+					if b.ID == id {
+						return b, nil
+					}
+				}
+			}
+		}
+		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
 	}
 	var issues []bdIssue
 	if err := json.Unmarshal(extractJSON(out), &issues); err != nil {
@@ -2408,6 +2425,48 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 		return filtered, fmt.Errorf("bd query: %w", parseErr)
 	}
 	return filtered, nil
+}
+
+// getEphemeralByID looks up a single wisp-tier bead by exact ID using bd query.
+// bd show does not expose the wisps table, so this is the fallback for Get.
+// isWispQueryableID reports whether id is safe to interpolate into a bd query
+// clause as a bead ID: non-empty, ASCII letters/digits/hyphens only. Session
+// names ("rig/agent.name") and other non-bead identifiers are excluded so the
+// wisp-tier Get fallback never issues supplemental queries for them.
+func isWispQueryableID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
+	clause := "ephemeral=true AND id=" + id
+	args := []string{"query", "--json", clause, "--all", "--limit", "1"}
+	out, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		if isBdQueryUnsupported(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("bd query (wisp by id): %w", err)
+	}
+	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	result := make([]Bead, len(issues))
+	for i := range issues {
+		result[i] = issues[i].toBead()
+		result[i].Ephemeral = true
+	}
+	if parseErr != nil {
+		return result, fmt.Errorf("bd query (wisp by id): %w", parseErr)
+	}
+	return result, nil
 }
 
 func isBdQueryUnsupported(err error) bool {
