@@ -1027,7 +1027,11 @@ func TestDoStartSession_TreatsDeadlineAfterReadyAsSuccessWhenSessionAlive(t *tes
 	ops := &fakeStartOps{
 		hasSessionResult: true,
 		waitReadyHook: func() {
-			time.Sleep(5 * time.Millisecond)
+			// Block until context expires so ctx.Err() is guaranteed non-nil when
+			// the hook returns. time.Sleep(N) races with the context timer under
+			// high parallel load: if the timer goroutine is delayed, ctx.Err() can
+			// return nil after the sleep, causing an extra acceptStartupDialogs call.
+			<-ctx.Done()
 		},
 	}
 
