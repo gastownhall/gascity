@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/usage"
 )
 
 type workerOperation string
@@ -142,6 +143,11 @@ func (e *operationEvent) finish(err error) {
 	}
 	e.target.populateOperationEventIdentity(&e.payload)
 	e.target.recordWorkerOperationEvent(e.payload)
+	// Model usage facts only flow from bead-backed SessionHandles (RuntimeHandle
+	// has no transcript/sink); type-assert rather than widen the target interface.
+	if sh, ok := e.target.(*SessionHandle); ok {
+		sh.recordModelUsageFact(e.payload)
+	}
 }
 
 func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPayload) {
@@ -240,6 +246,54 @@ func resolveRunID(bead beads.Bead, sessionID string) string {
 		return v
 	}
 	return strings.TrimSpace(sessionID)
+}
+
+// modelUsageFactFromPayload builds a model usage fact from a finished operation
+// payload, or returns ok=false when no per-invocation token usage was captured.
+//
+// Token capture itself is wired by the invocation-telemetry seam (PR #3442);
+// until that lands these fields are zero and no model fact is emitted. This
+// emission path is forward-compatible: once tokens (and ideally a provider
+// message id) populate the payload, model facts flow to the usage sink with no
+// further change. The op id is a safe per-operation dedup fallback; #3442 should
+// switch UpstreamReqID/IdempotencyKey to the provider message id.
+func modelUsageFactFromPayload(p operationEventPayload) (usage.UsageFact, bool) {
+	if p.PromptTokens == 0 && p.CompletionTokens == 0 && p.CacheReadTokens == 0 && p.CacheCreationTokens == 0 {
+		return usage.UsageFact{}, false
+	}
+	unpriced := p.Unpriced != nil && *p.Unpriced
+	reqID := strings.TrimSpace(p.OpID)
+	runID := strings.TrimSpace(p.RunID)
+	return usage.UsageFact{
+		RunID:               runID,
+		StepID:              strings.TrimSpace(p.BeadID),
+		Worker:              strings.TrimSpace(p.SessionName),
+		Kind:                usage.KindModel,
+		Model:               strings.TrimSpace(p.Model),
+		Provider:            strings.TrimSpace(p.Provider),
+		InputTokens:         p.PromptTokens,
+		OutputTokens:        p.CompletionTokens,
+		CacheReadTokens:     p.CacheReadTokens,
+		CacheCreationTokens: p.CacheCreationTokens,
+		CostUSDEstimate:     p.CostUSDEstimate,
+		Unpriced:            unpriced,
+		UpstreamReqID:       reqID,
+		At:                  p.FinishedAt.UnixMilli(),
+		IdempotencyKey:      usage.ModelIdempotencyKey(runID, reqID),
+	}, true
+}
+
+// recordModelUsageFact emits a model usage fact for a finished operation when
+// per-invocation token usage is present. Best-effort and non-blocking.
+func (h *SessionHandle) recordModelUsageFact(p operationEventPayload) {
+	if h.usageSink == nil || h.usageSink == usage.Discard {
+		return
+	}
+	f, ok := modelUsageFactFromPayload(p)
+	if !ok {
+		return
+	}
+	_ = h.usageSink.Record(context.Background(), f)
 }
 
 func (h *SessionHandle) recordWorkerOperationEvent(payload operationEventPayload) {
