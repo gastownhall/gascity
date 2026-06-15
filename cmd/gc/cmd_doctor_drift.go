@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -132,7 +133,7 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		}
 		r.Message = fmt.Sprintf("%d drift issue%s between rig-local Dolt state and managed city topology", len(errors), plural)
 		r.Details = append(append([]string{}, errors...), warnings...)
-		r.FixHint = "stop the rig-local Dolt server, or acknowledge explicit rig-local ownership with `gc rig set-endpoint <rig> --self --port <port> --force`; use --external for non-local servers; remove stale .dolt/sql-server.info files"
+		r.FixHint = "`gc doctor --fix` re-pins rig port-file drift; for a live rig-local Dolt, stop it or acknowledge explicit ownership with `gc rig set-endpoint <rig> --self --port <port> --force` (use --external for non-local servers); remove stale .dolt/sql-server.info files"
 		return r
 	}
 	plural := ""
@@ -161,11 +162,18 @@ func (c *doltDriftCheck) CanFix() bool {
 // path that `gc start` runs at startup, so a stale rig port file no longer
 // requires a full restart to correct. The doctor framework re-runs Run
 // afterward to verify (and to surface any remaining non-re-pinnable drift).
-func (c *doltDriftCheck) Fix(_ *doctor.CheckContext) error {
+func (c *doltDriftCheck) Fix(ctx *doctor.CheckContext) error {
 	if c.cfg == nil {
 		return fmt.Errorf("dolt-drift: no city config available to re-pin port files")
 	}
-	return syncConfiguredDoltPortFiles(c.cityPath, c.cfg.Dolt, config.EffectiveHQPrefix(c.cfg), c.cfg.Rigs, os.Stderr)
+	// Thread the framework's output writer so re-pin diagnostics are captured
+	// with the rest of doctor output (and discarded on the JSON-collect path);
+	// fall back to stderr for direct out-of-framework calls.
+	warn := io.Writer(os.Stderr)
+	if ctx != nil && ctx.Output != nil {
+		warn = ctx.Output
+	}
+	return syncConfiguredDoltPortFiles(c.cityPath, c.cfg.Dolt, config.EffectiveHQPrefix(c.cfg), c.cfg.Rigs, warn)
 }
 
 // rigLocalDoltPIDFromSQLServerInfo reads the colon-separated PID:PORT:UUID
