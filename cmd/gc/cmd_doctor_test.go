@@ -493,6 +493,7 @@ dolt_port = "3308"
 }
 
 func TestDoDoctorRegistersStaleLocalPackDirCheck(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -612,6 +613,7 @@ source = "https://github.com/gastownhall/gc-actual-packs"
 }
 
 func TestDoDoctorRegistersStaleLocalPackDirCheckForDefaultRigRemoteImport(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
 	cityDir := t.TempDir()
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)

@@ -1852,6 +1852,7 @@ func TestRequireWorkflowServeFollowSessionEnvAllowsManagedSession(t *testing.T) 
 }
 
 func TestRunWorkflowServeReturnsControlErrorWithoutQuarantine(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
 	clearInheritedBeadsEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()

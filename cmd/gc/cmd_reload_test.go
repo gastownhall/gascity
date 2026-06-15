@@ -535,6 +535,7 @@ func TestReloadControlReadTimeoutWaitIncludesRequestedTimeout(t *testing.T) {
 }
 
 func TestSendReloadControlRequestNoChange(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
 	sp := runtime.NewFake()
 
 	var reconcileCount atomic.Int32
@@ -608,6 +609,7 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 }
 
 func TestReloadConfigTracedRescansOrdersWhenConfigRevisionUnchanged(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
 	clearInheritedBeadsEnv(t)
 	t.Setenv("GC_BEADS", "")
 
@@ -735,6 +737,7 @@ func warningsWithoutV1Surfaces(in []string) []string {
 }
 
 func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
 	sp := runtime.NewFake()
 
 	var reconcileCount atomic.Int32

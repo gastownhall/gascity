@@ -445,6 +445,7 @@ func TestControllerStateRuntimeUpdateIgnoresEmptyRevisionDuringPendingMutation(t
 }
 
 func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
 	configureTestDoltIdentityEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "")
@@ -484,6 +485,7 @@ func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 }
 
 func TestControllerStateMutationRefreshKeepsBuiltinOrdersAndClearsPending(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
 	configureTestDoltIdentityEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "")

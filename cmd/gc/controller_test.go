@@ -1801,6 +1801,7 @@ func readSessionCircuitResetSocketReply(t *testing.T, conn net.Conn) sessionCirc
 }
 
 func TestControllerReloadInvalidConfig(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond
 	t.Cleanup(func() { debounceDelay = old })
@@ -1878,6 +1879,7 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 }
 
 func TestControllerReloadCityNameChange(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond
 	t.Cleanup(func() { debounceDelay = old })
