@@ -685,6 +685,269 @@ func TestWispGC_ListErrorFailsRun(t *testing.T) {
 	}
 }
 
+// withCloseAbandonedEnforced runs fn with the abandoned-root closer forced
+// into enforce mode, restoring the prior package state afterward. Tests must
+// not depend on the GC_WISP_GC_CLOSE_ABANDONED env var (which defaults to
+// dry-run).
+func withCloseAbandonedEnforced(t *testing.T, fn func()) {
+	t.Helper()
+	prev := closeAbandonedEnforced
+	closeAbandonedEnforced = func() bool { return true }
+	defer func() { closeAbandonedEnforced = prev }()
+	fn()
+}
+
+// withCloseAbandonedTTL runs fn with the abandoned-root TTL temporarily set to
+// ttl, restoring the prior value afterward.
+func withCloseAbandonedTTL(t *testing.T, ttl time.Duration, fn func()) {
+	t.Helper()
+	prev := wispGCCloseAbandonedTTL
+	wispGCCloseAbandonedTTL = ttl
+	defer func() { wispGCCloseAbandonedTTL = prev }()
+	fn()
+}
+
+func TestWispGC_ClosesAbandonedOpenRootWhenAllDescendantsTerminal(t *testing.T) {
+	now := time.Now()
+	// Root CreatedAt is recent (within the 1h closed-root purge TTL below) but
+	// idle past the close TTL we shrink to 5m, so the sweep closes it without
+	// the same-tick purge then deleting it (letting us assert the close state).
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "mol-root",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata:  map[string]string{"gc.formula_contract": "graph.v2"},
+		},
+		{
+			ID:        "mol-root.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			ParentID:  "mol-root",
+		},
+		{
+			ID:        "mol-root.2",
+			Status:    "tombstone",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			ParentID:  "mol-root",
+		},
+	})
+	if err := store.DepAdd("mol-root.1", "mol-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-root.1->mol-root): %v", err)
+	}
+	if err := store.DepAdd("mol-root.2", "mol-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-root.2->mol-root): %v", err)
+	}
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(store, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("mol-root")
+	if err != nil {
+		t.Fatalf("Get(mol-root): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("mol-root status = %q, want closed", root.Status)
+	}
+	if got := root.Metadata["close_reason"]; got != abandonedRootCloseReason {
+		t.Fatalf("close_reason = %q, want %q", got, abandonedRootCloseReason)
+	}
+}
+
+func TestWispGC_LeavesOpenRootWithLiveDescendant(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithMetadata("mol-root", now.Add(-2*time.Hour), "open", "molecule", map[string]string{"gc.formula_contract": "graph.v2"}),
+		{
+			ID:        "mol-root.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-root",
+		},
+		{
+			ID:        "mol-root.2",
+			Status:    "in_progress",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-root",
+		},
+	})
+	if err := store.DepAdd("mol-root.1", "mol-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-root.1->mol-root): %v", err)
+	}
+	if err := store.DepAdd("mol-root.2", "mol-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-root.2->mol-root): %v", err)
+	}
+
+	withCloseAbandonedEnforced(t, func() {
+		wg := newWispGC(5*time.Minute, time.Hour, 0)
+		if _, err := wg.runGC(store, now); err != nil {
+			t.Fatalf("runGC: %v", err)
+		}
+	})
+
+	root, err := store.Get("mol-root")
+	if err != nil {
+		t.Fatalf("Get(mol-root): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("mol-root status = %q, want open (live descendant)", root.Status)
+	}
+}
+
+func TestWispGC_LeavesSteplessRoot(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithMetadata("mol-root", now.Add(-2*time.Hour), "open", "molecule", map[string]string{"gc.formula_contract": "graph.v2"}),
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		wg := newWispGC(5*time.Minute, time.Hour, 0)
+		if _, err := wg.runGC(store, now); err != nil {
+			t.Fatalf("runGC: %v", err)
+		}
+	})
+
+	root, err := store.Get("mol-root")
+	if err != nil {
+		t.Fatalf("Get(mol-root): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("stepless mol-root status = %q, want open (must not race instantiator)", root.Status)
+	}
+}
+
+func TestWispGC_RespectsTTLCutoff(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		// Root last active 30m ago — younger than the 1h close TTL below.
+		{
+			ID:        "mol-root",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-2 * time.Hour),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata:  map[string]string{"gc.formula_contract": "graph.v2"},
+		},
+		{
+			ID:        "mol-root.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-root",
+		},
+	})
+	if err := store.DepAdd("mol-root.1", "mol-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-root.1->mol-root): %v", err)
+	}
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, time.Hour, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(store, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("mol-root")
+	if err != nil {
+		t.Fatalf("Get(mol-root): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("mol-root status = %q, want open (within TTL)", root.Status)
+	}
+}
+
+func TestWispGC_SkipsZFCExemptRoot(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithMetadata("zfc-root", now.Add(-2*time.Hour), "open", "molecule", map[string]string{
+			"gc.formula_contract": "graph.v2",
+			"gc.gc_exempt":        "true",
+		}),
+		{
+			ID:        "zfc-root.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "zfc-root",
+		},
+	})
+	if err := store.DepAdd("zfc-root.1", "zfc-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(zfc-root.1->zfc-root): %v", err)
+	}
+
+	withCloseAbandonedEnforced(t, func() {
+		wg := newWispGC(5*time.Minute, time.Hour, 0)
+		if _, err := wg.runGC(store, now); err != nil {
+			t.Fatalf("runGC: %v", err)
+		}
+	})
+
+	root, err := store.Get("zfc-root")
+	if err != nil {
+		t.Fatalf("Get(zfc-root): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("ZFC-exempt root status = %q, want open (must never auto-close)", root.Status)
+	}
+}
+
+func TestWispGC_DryRunDefaultDoesNotClose(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithMetadata("mol-root", now.Add(-2*time.Hour), "open", "molecule", map[string]string{"gc.formula_contract": "graph.v2"}),
+		{
+			ID:        "mol-root.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-root",
+		},
+	})
+	if err := store.DepAdd("mol-root.1", "mol-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-root.1->mol-root): %v", err)
+	}
+
+	// Default (no enforce override): closeAbandonedEnforced reads the env var
+	// which is unset under the env-stripped test harness, so the sweep must be
+	// dry-run and mutate nothing — but it should log the would-close candidate.
+	// Shrink the close TTL so the 2h-idle root is eligible (otherwise the TTL
+	// guard would skip it and there would be nothing to dry-run-log).
+	var logOutput string
+	withCloseAbandonedTTL(t, 5*time.Minute, func() {
+		logOutput = captureWispGCLog(t, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(store, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("mol-root")
+	if err != nil {
+		t.Fatalf("Get(mol-root): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("mol-root status = %q, want open (dry-run default must not close)", root.Status)
+	}
+	if !strings.Contains(logOutput, "would be closed (dry-run") {
+		t.Fatalf("log output = %q, want dry-run would-close log", logOutput)
+	}
+}
+
 type gcQueryKey struct {
 	Status   string
 	Type     string
