@@ -4526,3 +4526,166 @@ func TestFormatNudgeInjectOutputStripsSystemReminderBreakoutSequence(t *testing.
 		t.Fatalf("Message-field tag breakout survived stripping:\n%s", got)
 	}
 }
+
+// countingNudgeStore wraps a shared MemStore and counts CloseStore calls so a
+// test can assert that per-tick poll helpers release every store they open.
+// closeBeadStoreHandle peels policy/Router/Caching wrappers and finally calls
+// CloseStore() on the unwrapped store; a leaking helper that never closes the
+// store it opened leaves opens > closes.
+type countingNudgeStore struct {
+	*beads.MemStore
+	closes *int
+}
+
+// CloseStore satisfies the interface{ CloseStore() error } that
+// closeBeadStoreHandle type-asserts against; the error return is required by
+// that contract even though this fake never fails.
+//
+//nolint:unparam // error return mandated by the CloseStore interface
+func (s *countingNudgeStore) CloseStore() error {
+	*s.closes++
+	return nil
+}
+
+// installCountingNudgeStoreSeam swaps openNudgeBeadStore for a fake that hands
+// out a fresh countingNudgeStore over a single shared MemStore on every call
+// (mirroring the deployed binary, where each per-tick open resolves to the same
+// backing native store). It returns pointers to the open and close counters and
+// restores the original seam via t.Cleanup. Tests using it must stay serial.
+func installCountingNudgeStoreSeam(t *testing.T) (opens, closes *int) {
+	t.Helper()
+	backing := beads.NewMemStore()
+	var openCount, closeCount int
+	prev := openNudgeBeadStore
+	openNudgeBeadStore = func(string) beads.Store {
+		openCount++
+		return &countingNudgeStore{MemStore: backing, closes: &closeCount}
+	}
+	t.Cleanup(func() { openNudgeBeadStore = prev })
+	return &openCount, &closeCount
+}
+
+// TestNudgePollHelpersCloseEveryStoreTheyOpen pins the connection-leak fix: the
+// per-tick poll helpers that unconditionally open a bead store
+// (claimDueQueuedNudgesMatching, listQueuedNudges, listQueuedNudgesForTarget,
+// ackQueuedNudgesWithOutcome, releaseQueuedNudgeClaims) must release it via
+// closeBeadStoreHandle so connections do not accumulate across poll iterations.
+func TestNudgePollHelpersCloseEveryStoreTheyOpen(t *testing.T) {
+	opens, closes := installCountingNudgeStoreSeam(t)
+	dir := t.TempDir()
+	now := time.Now()
+
+	item := newQueuedNudgeWithOptions("worker", "do work", "session", now, queuedNudgeOptions{ID: "n-leak"})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	// Drive the unconditional per-tick helpers a few times, as a poll loop would.
+	for i := 0; i < 3; i++ {
+		if _, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return false }); err != nil {
+			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
+		}
+		if _, _, _, err := listQueuedNudges(dir, "worker", now); err != nil {
+			t.Fatalf("listQueuedNudges: %v", err)
+		}
+		target := nudgeTarget{cityPath: dir}
+		if _, _, _, err := listQueuedNudgesForTarget(dir, target, now); err != nil {
+			t.Fatalf("listQueuedNudgesForTarget: %v", err)
+		}
+		if err := releaseQueuedNudgeClaims(dir, []string{"n-leak"}); err != nil {
+			t.Fatalf("releaseQueuedNudgeClaims: %v", err)
+		}
+		if err := ackQueuedNudgesWithOutcome(dir, []string{"absent"}, "injected", "", "test"); err != nil {
+			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
+		}
+	}
+
+	if *opens == 0 {
+		t.Fatalf("expected per-tick helpers to open the bead store, got 0 opens")
+	}
+	if *opens != *closes {
+		t.Fatalf("bead store leak: opens=%d closes=%d (every per-tick open must be released)", *opens, *closes)
+	}
+}
+
+// TestEnqueueQueuedNudgeWithStoreClosesOnlyOwnedStore pins the ownStore guard:
+// enqueueQueuedNudgeWithStore must close the store it opens itself (store==nil
+// path) but must NOT close a store passed in by the caller, since the caller
+// owns that handle's lifecycle.
+func TestEnqueueQueuedNudgeWithStoreClosesOnlyOwnedStore(t *testing.T) {
+	opens, closes := installCountingNudgeStoreSeam(t)
+
+	// store==nil: the helper opens and must close exactly that store.
+	dir := t.TempDir()
+	ownItem := newQueuedNudgeWithOptions("worker", "owned", "session", time.Now(), queuedNudgeOptions{ID: "n-own"})
+	if err := enqueueQueuedNudgeWithStore(dir, nil, ownItem); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore(nil store): %v", err)
+	}
+	if *opens != 1 {
+		t.Fatalf("opens=%d, want 1 (helper should open its own store when passed nil)", *opens)
+	}
+	if *closes != 1 {
+		t.Fatalf("closes=%d, want 1 (helper must release the store it opened)", *closes)
+	}
+
+	// store!=nil: the caller's store must not be opened or closed by the helper.
+	passedCloses := 0
+	passed := &countingNudgeStore{MemStore: beads.NewMemStore(), closes: &passedCloses}
+	dir2 := t.TempDir()
+	passedItem := newQueuedNudgeWithOptions("worker", "passed", "session", time.Now(), queuedNudgeOptions{ID: "n-passed"})
+	if err := enqueueQueuedNudgeWithStore(dir2, passed, passedItem); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore(passed store): %v", err)
+	}
+	if *opens != 1 {
+		t.Fatalf("opens=%d, want 1 (helper must not open when a store is passed in)", *opens)
+	}
+	if passedCloses != 0 {
+		t.Fatalf("caller-owned store closed %d times, want 0 (helper must not close a passed-in store)", passedCloses)
+	}
+}
+
+// TestRecordQueuedNudgeFailureDetailedClosesOnlyOwnedStore pins the same
+// ownStore guard for recordQueuedNudgeFailureDetailed.
+func TestRecordQueuedNudgeFailureDetailedClosesOnlyOwnedStore(t *testing.T) {
+	opens, closes := installCountingNudgeStoreSeam(t)
+	now := time.Now()
+
+	// store==nil: opened and closed by the helper.
+	dir := t.TempDir()
+	item := newQueuedNudgeWithOptions("worker", "fail", "session", now, queuedNudgeOptions{ID: "n-fail"})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	// enqueueQueuedNudge opened+closed its own store via the seam already, so
+	// measure the deltas around the recordQueuedNudgeFailureDetailed call.
+	opensBefore := *opens
+	closesBefore := *closes
+	if _, err := recordQueuedNudgeFailureDetailed(dir, nil, []string{"n-fail"}, context.DeadlineExceeded, now); err != nil {
+		t.Fatalf("recordQueuedNudgeFailureDetailed(nil store): %v", err)
+	}
+	if *opens != opensBefore+1 {
+		t.Fatalf("opens delta=%d, want 1 (helper should open its own store when passed nil)", *opens-opensBefore)
+	}
+	if *closes != closesBefore+1 {
+		t.Fatalf("closes delta=%d, want 1 (helper must release the store it opened)", *closes-closesBefore)
+	}
+
+	// store!=nil: caller's store must not be closed.
+	passedCloses := 0
+	passed := &countingNudgeStore{MemStore: beads.NewMemStore(), closes: &passedCloses}
+	dir2 := t.TempDir()
+	item2 := newQueuedNudgeWithOptions("worker", "fail2", "session", now, queuedNudgeOptions{ID: "n-fail2"})
+	if err := enqueueQueuedNudgeWithStore(dir2, passed, item2); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore(passed store): %v", err)
+	}
+	closesAfterEnqueue := *closes
+	if _, err := recordQueuedNudgeFailureDetailed(dir2, passed, []string{"n-fail2"}, context.DeadlineExceeded, now); err != nil {
+		t.Fatalf("recordQueuedNudgeFailureDetailed(passed store): %v", err)
+	}
+	if *closes != closesAfterEnqueue {
+		t.Fatalf("shared seam store closed during passed-store call (closes=%d, want %d)", *closes, closesAfterEnqueue)
+	}
+	if passedCloses != 0 {
+		t.Fatalf("caller-owned store closed %d times, want 0 (helper must not close a passed-in store)", passedCloses)
+	}
+}

@@ -1467,6 +1467,7 @@ func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time
 
 func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
 	store := openNudgeBeadStore(cityPath)
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 	var claimed []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		if err := recoverExpiredInFlightNudges(state, store, now); err != nil {
@@ -1502,6 +1503,7 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 
 func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
 	store := openNudgeBeadStore(cityPath)
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 	var pending []queuedNudge
 	var inFlight []queuedNudge
 	var dead []queuedNudge
@@ -1537,6 +1539,7 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 
 func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
 	store := openNudgeBeadStore(cityPath)
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 	var pending []queuedNudge
 	var inFlight []queuedNudge
 	var dead []queuedNudge
@@ -1622,8 +1625,13 @@ func takeQueuedNudgesByID(items []queuedNudge, id string, removed []queuedNudge)
 }
 
 func enqueueQueuedNudgeWithStore(cityPath string, store beads.Store, item queuedNudge) error {
+	ownStore := false
 	if store == nil {
 		store = openNudgeBeadStore(cityPath)
+		ownStore = true
+	}
+	if ownStore {
+		defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 	}
 	beadID, created, err := ensureQueuedNudgeBead(store, item)
 	if err != nil {
@@ -1720,6 +1728,7 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 		return nil
 	}
 	store := openNudgeBeadStore(cityPath)
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		want[id] = true
@@ -1768,6 +1777,7 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 		return nil
 	}
 	store := openNudgeBeadStore(cityPath)
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		want[id] = true
@@ -1810,12 +1820,22 @@ func recordQueuedNudgeFailureWithStore(cityPath string, store beads.Store, ids [
 	return err
 }
 
+// The dead-lettered slice is part of the helper's API (tests assert on it and
+// the *Detailed name promises it), even though the only production caller today
+// is recordQueuedNudgeFailureWithStore, which discards it.
+//
+//nolint:unparam // first result is an intentional diagnostic API
 func recordQueuedNudgeFailureDetailed(cityPath string, store beads.Store, ids []string, cause error, now time.Time) ([]queuedNudge, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	ownStore := false
 	if store == nil {
 		store = openNudgeBeadStore(cityPath)
+		ownStore = true
+	}
+	if ownStore {
+		defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 	}
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
