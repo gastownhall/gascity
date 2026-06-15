@@ -61,8 +61,15 @@ var (
 	workflowServeIdlePollAttempts  = 3
 	workflowServeWakeSweepInterval = 1 * time.Second
 	workflowServeMaxIdleSleep      = 30 * time.Second
-	workflowServeWaitForWake       = waitForRelevantWorkflowWakeWithTrace
-	workflowTraceNow               = time.Now
+	// workflowServeWakeDebounce is the coalescing window opened once the first
+	// relevant event wakes the --follow loop. Additional buffered events that
+	// arrive during the window are drained and folded into the same wake so a
+	// burst of N bead.* events (e.g. an mc-wisp-* event storm) collapses into a
+	// single work/ready re-scan instead of N heavy per-event Dolt scans.
+	// Injectable so tests can shrink it. Fixes gastownhall/gascity#3206.
+	workflowServeWakeDebounce = 250 * time.Millisecond
+	workflowServeWaitForWake  = waitForRelevantWorkflowWakeWithTrace
+	workflowTraceNow          = time.Now
 	// The trace helper is intentionally process-global because workflowTracef
 	// does not carry per-invocation context. Nested installs (serve ->
 	// runControlDispatcherWithStore) reuse the active dedup map so one bad trace
@@ -593,6 +600,16 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 				} else {
 					workflowTracef("serve wake-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
 				}
+				// Coalesce a burst: keep draining buffered events for a short
+				// debounce window so N relevant events collapse into one drain.
+				// runWorkflowServeFollow does exactly one drain per return=true,
+				// so the trailing events are already covered by that single
+				// re-scan — no event is dropped, only batched.
+				if coalesced, err := coalesceWorkflowWakeBurst(eventCh); err != nil {
+					return false, err
+				} else if coalesced > 0 {
+					workflowTracef("serve wake-coalesce extra=%d debounce=%s", coalesced, workflowServeWakeDebounce)
+				}
 				return true, nil
 			}
 			workflowTracef("serve ignore-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
@@ -603,6 +620,34 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 				workflowTracef("serve wake-sweep")
 			}
 			return false, nil
+		}
+	}
+}
+
+// coalesceWorkflowWakeBurst drains additional buffered events from eventCh for
+// the workflowServeWakeDebounce window after a relevant event has already
+// decided to wake the loop. It returns the number of extra events it folded
+// into this wake so the caller emits a single drain for the whole burst. A
+// watcher error encountered while draining is surfaced so the serve loop still
+// terminates on a fatal stream failure. Events are only batched here, never
+// dropped: the caller's single re-scan already reflects every drained event.
+func coalesceWorkflowWakeBurst(eventCh <-chan workflowWatchResult) (int, error) {
+	if workflowServeWakeDebounce <= 0 {
+		return 0, nil
+	}
+	debounce := time.NewTimer(workflowServeWakeDebounce)
+	defer debounce.Stop()
+
+	coalesced := 0
+	for {
+		select {
+		case res := <-eventCh:
+			if res.err != nil {
+				return coalesced, res.err
+			}
+			coalesced++
+		case <-debounce.C:
+			return coalesced, nil
 		}
 	}
 }

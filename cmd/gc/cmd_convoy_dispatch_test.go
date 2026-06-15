@@ -5974,6 +5974,52 @@ func TestWaitForRelevantWorkflowWakeTraceIncludesBackoffState(t *testing.T) {
 	}
 }
 
+func TestWaitForRelevantWorkflowWakeCoalescesBurst(t *testing.T) {
+	prevDebounce := workflowServeWakeDebounce
+	workflowServeWakeDebounce = 50 * time.Millisecond
+	defer func() { workflowServeWakeDebounce = prevDebounce }()
+
+	const burst = 8
+	eventCh := make(chan workflowWatchResult, burst)
+	for i := 0; i < burst; i++ {
+		eventCh <- workflowWatchResult{evt: events.Event{Type: events.BeadUpdated, Subject: fmt.Sprintf("mc-wisp-%d", i)}}
+	}
+
+	// A single wait call must drain the whole buffered burst and return exactly
+	// one wake, so runWorkflowServeFollow performs one re-scan for the burst
+	// rather than one per event.
+	eventWake, err := waitForRelevantWorkflowWake(eventCh, time.Second)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !eventWake {
+		t.Fatal("eventWake = false, want true when a relevant burst arrives")
+	}
+	if leftover := len(eventCh); leftover != 0 {
+		t.Fatalf("eventCh still has %d buffered events after one wake; want 0 (burst not coalesced)", leftover)
+	}
+}
+
+func TestWaitForRelevantWorkflowWakeBurstSurfacesWatcherErr(t *testing.T) {
+	prevDebounce := workflowServeWakeDebounce
+	workflowServeWakeDebounce = 50 * time.Millisecond
+	defer func() { workflowServeWakeDebounce = prevDebounce }()
+
+	eventCh := make(chan workflowWatchResult, 2)
+	eventCh <- workflowWatchResult{evt: events.Event{Type: events.BeadUpdated, Subject: "gc-1"}}
+	eventCh <- workflowWatchResult{err: os.ErrDeadlineExceeded}
+
+	// A fatal stream error that arrives during the coalescing window must still
+	// terminate the serve loop, not be swallowed by the debounce drain.
+	eventWake, err := waitForRelevantWorkflowWake(eventCh, time.Second)
+	if err == nil {
+		t.Fatal("wait returned nil err, want watcher err surfaced from coalescing window")
+	}
+	if eventWake {
+		t.Fatal("eventWake = true on error path, want false")
+	}
+}
+
 func TestWorkflowTracefWarnsOnceWhenTracePathCannotBeOpened(t *testing.T) {
 	tracePath := filepath.Join(t.TempDir(), "missing", "workflow-trace.log")
 	t.Setenv("GC_WORKFLOW_TRACE", tracePath)
