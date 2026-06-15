@@ -203,6 +203,8 @@ type City struct {
 	Mail MailConfig `toml:"mail,omitempty"`
 	// Events configures the events provider backend.
 	Events EventsConfig `toml:"events,omitempty"`
+	// Usage configures the usage-fact sink backend.
+	Usage UsageConfig `toml:"usage,omitempty"`
 	// Dolt configures optional dolt server connection overrides.
 	Dolt DoltConfig `toml:"dolt,omitempty"`
 	// Formulas is the legacy [formulas] table; authored [formulas].dir is
@@ -1641,6 +1643,15 @@ type EventsConfig struct {
 	// Rotation configures file-backed JSONL rotation. Defaults are applied
 	// by EventsRotationConfig helper methods when this table is absent.
 	Rotation EventsRotationConfig `toml:"rotation,omitempty"`
+}
+
+// UsageConfig holds usage-fact sink settings.
+type UsageConfig struct {
+	// Provider selects the usage sink backend:
+	//   - "discard" / "fake" → drop all facts
+	//   - "exec:<script>" → user-supplied script (JSON fact per line on stdin)
+	//   - "" / "local" → durable file-backed JSONL at .gc/usage.jsonl (default)
+	Provider string `toml:"provider,omitempty"`
 }
 
 const (

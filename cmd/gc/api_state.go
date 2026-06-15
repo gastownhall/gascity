@@ -33,6 +33,7 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
+	"github.com/gastownhall/gascity/usage"
 )
 
 // controllerState implements api.State and api.StateMutator.
@@ -48,6 +49,7 @@ type controllerState struct {
 	cityBeadsDiagnostic    *beads.BeadsDiagnostic
 	cityMailProv           mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv              events.Provider
+	usageSink              usage.Sink
 	editor                 *configedit.Editor
 	cityName               string
 	cityPath               string
@@ -115,6 +117,10 @@ func newControllerState(
 		ctx = context.Background()
 	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
+	usageProvider := ""
+	if cfg != nil {
+		usageProvider = cfg.Usage.Provider
+	}
 	var beadEventStartSeq uint64
 	if ep != nil {
 		if seq, err := ep.LatestSeq(); err == nil {
@@ -126,6 +132,7 @@ func newControllerState(
 		sp:                sp,
 		cacheCtx:          ctx,
 		eventProv:         ep,
+		usageSink:         newUsageSinkByName(usageProvider, filepath.Join(cityPath, ".gc", "usage.jsonl")),
 		editor:            configedit.NewEditor(fsys.OSFS{}, tomlPath),
 		cityName:          cityName,
 		cityPath:          cityPath,
@@ -1010,6 +1017,17 @@ func (cs *controllerState) EventProvider() events.Provider {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.eventProv
+}
+
+// UsageSink returns the usage-fact sink. Never nil: usage.Discard when usage is
+// disabled or unset.
+func (cs *controllerState) UsageSink() usage.Sink {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.usageSink == nil {
+		return usage.Discard
+	}
+	return cs.usageSink
 }
 
 // CityName returns the city name.

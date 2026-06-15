@@ -33,6 +33,7 @@ import (
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/usage"
 )
 
 type sessionProviderContext struct {
@@ -818,6 +819,24 @@ func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, 
 		return events.NewFailFake(), nil
 	default:
 		return newFileEventsRecorder(eventsPath, eventsCfg, stderr)
+	}
+}
+
+// newUsageSinkByName returns a usage.Sink for the resolved provider name.
+//
+//   - "discard" / "fake" → drop all facts
+//   - "exec:<script>" → user-supplied script (JSON fact per line on stdin)
+//   - default / "local" → durable file-backed JSONL sink at usagePath
+func newUsageSinkByName(v, usagePath string) usage.Sink {
+	v = strings.TrimSpace(v)
+	if strings.HasPrefix(v, "exec:") {
+		return usage.NewExecSink(strings.TrimPrefix(v, "exec:"))
+	}
+	switch v {
+	case "discard", "fake":
+		return usage.Discard
+	default: // "" or "local"
+		return usage.NewLocalSink(usagePath)
 	}
 }
 

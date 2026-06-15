@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/usage"
 )
 
 var (
@@ -247,6 +248,7 @@ type SessionHandleConfig struct {
 	SearchPaths []string
 	Adapter     SessionLogAdapter
 	Recorder    events.Recorder
+	UsageSink   usage.Sink
 	Session     SessionSpec
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
@@ -259,6 +261,7 @@ type SessionHandle struct {
 	manager        *sessionpkg.Manager
 	adapter        SessionLogAdapter
 	recorder       events.Recorder
+	usageSink      usage.Sink
 	searchPaths    []string
 	session        SessionSpec
 	sessionID      string

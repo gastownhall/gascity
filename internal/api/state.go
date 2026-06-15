@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
+	"github.com/gastownhall/gascity/usage"
 )
 
 // MaintenanceProvider is the subset of supervisor.StoreMaintenanceLoop that
@@ -70,6 +71,9 @@ type State interface {
 
 	// EventProvider returns the event provider, or nil if events are disabled.
 	EventProvider() events.Provider
+
+	// UsageSink returns the usage-fact sink (never nil; usage.Discard when off).
+	UsageSink() usage.Sink
 
 	// CityName returns the city name.
 	CityName() string

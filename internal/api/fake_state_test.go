@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
+	"github.com/gastownhall/gascity/usage"
 )
 
 // newPostRequest creates a POST httptest request with the X-GC-Request header
@@ -94,6 +95,7 @@ func (f *fakeState) MailProviders() map[string]mail.Provider {
 	return map[string]mail.Provider{f.cityName: f.cityMailProv}
 }
 func (f *fakeState) EventProvider() events.Provider        { return f.eventProv }
+func (f *fakeState) UsageSink() usage.Sink                 { return usage.Discard }
 func (f *fakeState) CityName() string                      { return f.cityName }
 func (f *fakeState) CityPath() string                      { return f.cityPath }
 func (f *fakeState) Version() string                       { return "test" }
