@@ -980,12 +980,14 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, "BEADS_ACTOR")
 	env = filterEnv(env, "GC_DOLT_HOST")
 	env = filterEnv(env, "GC_DOLT_PORT")
+	env = filterEnv(env, "GC_DOLT_DATABASE")
 	env = filterEnv(env, "GC_DOLT_USER")
 	env = filterEnv(env, "GC_DOLT_PASSWORD")
 	env = filterEnv(env, managedDoltTestModeEnv)
 	env = filterEnv(env, managedDoltTestParentEnv)
 	env = filterEnv(env, "BEADS_DOLT_SERVER_HOST")
 	env = filterEnv(env, "BEADS_DOLT_SERVER_PORT")
+	env = filterEnv(env, "BEADS_DOLT_SERVER_DATABASE")
 	env = filterEnv(env, "BEADS_DOLT_SERVER_USER")
 	env = filterEnv(env, "BEADS_DOLT_HOST")
 	env = filterEnv(env, "BEADS_DOLT_PORT")
@@ -998,6 +1000,7 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, "GC_SUPERVISOR_LOG_TEE")
 	env = filterEnv(env, "DOLT_HOST")
 	env = filterEnv(env, "DOLT_PORT")
+	env = filterEnv(env, "DOLT_DATABASE")
 	env = filterEnv(env, "DOLT_USER")
 	env = filterEnv(env, "DOLT_PASSWORD")
 	env = filterEnv(env, integrationGCBinaryEnv)
@@ -1442,6 +1445,7 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	t.Setenv("BEADS_DIR", "/host/beads")
 	t.Setenv("GC_DOLT_HOST", "ambient-host")
 	t.Setenv("GC_DOLT_PORT", "0")
+	t.Setenv("GC_DOLT_DATABASE", "ambient-db")
 	t.Setenv("GC_DOLT_USER", "ambient-user")
 	t.Setenv("GC_DOLT_PASSWORD", "ambient-password")
 	t.Setenv("BEADS_DIR", "/host/beads")
@@ -1449,6 +1453,7 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	t.Setenv("BEADS_DIR", "/host/repo/.beads")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads-host")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "0")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "ambient-db")
 	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-beads-user")
 	t.Setenv("BEADS_DOLT_HOST", "ambient-legacy-host")
 	t.Setenv("BEADS_DOLT_PORT", "0")
@@ -1458,6 +1463,7 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	t.Setenv("BEADS_DOLT_PASSWORD", "ambient-beads-password")
 	t.Setenv("DOLT_HOST", "ambient-raw-host")
 	t.Setenv("DOLT_PORT", "0")
+	t.Setenv("DOLT_DATABASE", "ambient-raw-db")
 	t.Setenv("DOLT_USER", "ambient-raw-user")
 	t.Setenv("DOLT_PASSWORD", "ambient-raw-password")
 	t.Setenv("BEADS_DIR", "/host/beads")
@@ -1499,12 +1505,14 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		"GC_BEADS_SCOPE_ROOT",
 		"GC_DOLT_HOST",
 		"GC_DOLT_PORT",
+		"GC_DOLT_DATABASE",
 		"GC_DOLT_USER",
 		"GC_DOLT_PASSWORD",
 		"BEADS_ACTOR",
 		"BEADS_DIR",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_DATABASE",
 		"BEADS_DOLT_SERVER_USER",
 		"BEADS_DOLT_HOST",
 		"BEADS_DOLT_PORT",
@@ -1514,6 +1522,7 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		"BEADS_DOLT_PASSWORD",
 		"DOLT_HOST",
 		"DOLT_PORT",
+		"DOLT_DATABASE",
 		"DOLT_USER",
 		"DOLT_PASSWORD",
 		"BEADS_DIR",
@@ -1571,6 +1580,7 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_DOLT_HOST", "ambient-host")
 	t.Setenv("GC_DOLT_PORT", "1234")
+	t.Setenv("GC_DOLT_DATABASE", "ambient-db")
 	t.Setenv("GC_DOLT_USER", "ambient-user")
 	t.Setenv("GC_DOLT_PASSWORD", "ambient-password")
 	t.Setenv("GC_DOLT_STATE_FILE", "/host/dolt-state.json")
@@ -1582,6 +1592,7 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	t.Setenv("GC_DOLT_MANAGED_LOCAL", "1")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads-host")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "5678")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "ambient-db")
 	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-beads-user")
 	t.Setenv("BEADS_DOLT_PASSWORD", "ambient-beads-password")
 	t.Setenv("BEADS_DOLT_HOST", "ambient-legacy-host")
@@ -1613,6 +1624,7 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 		"GC_DOLT",
 		"GC_DOLT_HOST",
 		"GC_DOLT_PORT",
+		"GC_DOLT_DATABASE",
 		"GC_DOLT_USER",
 		"GC_DOLT_PASSWORD",
 		"GC_DOLT_STATE_FILE",
@@ -1624,6 +1636,7 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 		"GC_DOLT_MANAGED_LOCAL",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_DATABASE",
 		"BEADS_DOLT_SERVER_USER",
 		"BEADS_DOLT_PASSWORD",
 		"BEADS_DOLT_HOST",
@@ -1699,14 +1712,17 @@ func TestStandaloneBdEnvIsolatesAmbientDoltConfig(t *testing.T) {
 	t.Setenv("GC_DOLT", "server")
 	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
 	t.Setenv("GC_DOLT_PORT", "0")
+	t.Setenv("GC_DOLT_DATABASE", "ambient-db")
 	t.Setenv("GC_DOLT_USER", "ambient-user")
 	t.Setenv("GC_DOLT_PASSWORD", "ambient-password")
 	t.Setenv("BEADS_DIR", "/host/beads")
 	t.Setenv("BEADS_DOLT_AUTO_START", "0")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "0")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "ambient-db")
 	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-user")
 	t.Setenv("BEADS_DOLT_PASSWORD", "ambient-password")
+	t.Setenv("DOLT_DATABASE", "ambient-raw-db")
 
 	dir := filepath.Join(t.TempDir(), "standalone")
 	got := parseEnvList(standaloneBdEnv(t, dir))
@@ -1732,13 +1748,16 @@ func TestStandaloneBdEnvIsolatesAmbientDoltConfig(t *testing.T) {
 		"GC_DOLT",
 		"GC_DOLT_HOST",
 		"GC_DOLT_PORT",
+		"GC_DOLT_DATABASE",
 		"GC_DOLT_USER",
 		"GC_DOLT_PASSWORD",
 		"BEADS_DOLT_AUTO_START",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_DATABASE",
 		"BEADS_DOLT_SERVER_USER",
 		"BEADS_DOLT_PASSWORD",
+		"DOLT_DATABASE",
 	} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s leaked into standalone bd env: %v", key, got)
