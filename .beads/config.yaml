@@ -8,3 +8,6 @@ export.auto: false
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
 types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step
+dolt:
+  disable-event-flush: true
+backup.enabled: false

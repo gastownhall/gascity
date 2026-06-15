@@ -244,6 +244,55 @@ func MaterializeSyntheticRepo(dst, commit string) error {
 	return nil
 }
 
+// ValidateSyntheticRepoFast verifies that dir is a synthetic bundled-pack cache
+// for the current binary content and the source's canonical pin commit without
+// walking the materialized file set. It is the resolution-path variant: callers
+// on the hot pack-resolution path use it to gate cache hits cheaply. Full
+// file-set and file-content integrity is verified only by ValidateSyntheticRepo.
+func ValidateSyntheticRepoFast(dir, commit string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("missing bundled pack cache marker")
+		}
+		return fmt.Errorf("checking bundled pack cache root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("bundled pack cache root %q is a symlink", dir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("bundled pack cache root %q is not a directory", dir)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, syntheticMarkerFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("missing bundled pack cache marker")
+		}
+		return fmt.Errorf("reading bundled pack cache marker: %w", err)
+	}
+	var marker syntheticMarker
+	if _, err := toml.Decode(string(data), &marker); err != nil {
+		return fmt.Errorf("parsing bundled pack cache marker: %w", err)
+	}
+	if marker.Schema != 1 {
+		return fmt.Errorf("unsupported bundled pack cache marker schema %d", marker.Schema)
+	}
+	if marker.Repository != Repository {
+		return fmt.Errorf("bundled pack cache repository %q does not match %q", marker.Repository, Repository)
+	}
+	if !gitutil.SameCommit(marker.Commit, commit) {
+		return fmt.Errorf("bundled pack cache commit %q does not match %q", marker.Commit, commit)
+	}
+	wantHash, err := syntheticContentHashOnce()
+	if err != nil {
+		return err
+	}
+	if marker.ContentHash != wantHash {
+		return fmt.Errorf("bundled pack cache content hash %q does not match current binary %q", marker.ContentHash, wantHash)
+	}
+	return nil
+}
+
 // ValidateSyntheticRepo verifies that dir is a synthetic bundled-pack cache
 // created for the current binary content and the source's canonical pin
 // commit (the only commit production callers materialize).
@@ -282,7 +331,7 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	if !gitutil.SameCommit(marker.Commit, commit) {
 		return fmt.Errorf("bundled pack cache commit %q does not match %q", marker.Commit, commit)
 	}
-	wantHash, err := SyntheticContentHash()
+	wantHash, err := syntheticContentHashOnce()
 	if err != nil {
 		return err
 	}

@@ -5189,8 +5189,8 @@ exit 99
 	if !ok || state.Backend != "postgres" || state.PostgresDatabase != "beads_pg" {
 		t.Fatalf("metadata state = %+v, ok=%v; want postgres metadata preserved", state, ok)
 	}
-	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "hooks", "on_create")); err != nil {
-		t.Fatalf("expected hooks installed for postgres scope: %v", err)
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "hooks", "on_create")); !os.IsNotExist(err) {
+		t.Fatalf("gc must not install bd event hooks for postgres scope (stat err=%v)", err)
 	}
 }
 
@@ -5357,8 +5357,8 @@ exit 99
 	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "metadata.json")); !os.IsNotExist(err) {
 		t.Fatalf("inherited postgres rig should not be pinned with local metadata, stat err = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); err != nil {
-		t.Fatalf("expected hooks installed for inherited postgres rig: %v", err)
+	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); !os.IsNotExist(err) {
+		t.Fatalf("gc must not install bd event hooks for inherited postgres rig (stat err=%v)", err)
 	}
 }
 
@@ -5401,8 +5401,8 @@ exit 99
 			if string(data) != tc.metadata {
 				t.Fatalf("metadata = %s, want preserved %s", data, tc.metadata)
 			}
-			if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); err != nil {
-				t.Fatalf("expected hooks installed for inherited postgres rig: %v", err)
+			if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); !os.IsNotExist(err) {
+				t.Fatalf("gc must not install bd event hooks for inherited postgres rig (stat err=%v)", err)
 			}
 		})
 	}
@@ -5462,8 +5462,8 @@ esac
 	if _, err := os.Stat(initArgsFile); err != nil {
 		t.Fatalf("expected bd init attempt, stat err = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); err != nil {
-		t.Fatalf("expected hooks installed for adopted rig: %v", err)
+	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); !os.IsNotExist(err) {
+		t.Fatalf("gc must not install bd event hooks for adopted rig (stat err=%v)", err)
 	}
 }
 
@@ -5520,8 +5520,8 @@ esac
 	if _, err := os.Stat(providerArgsFile); err != nil {
 		t.Fatalf("expected provider init attempt, stat err = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); err != nil {
-		t.Fatalf("expected hooks installed for adopted rig: %v", err)
+	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); !os.IsNotExist(err) {
+		t.Fatalf("gc must not install bd event hooks for adopted canonical exec rig (stat err=%v)", err)
 	}
 }
 

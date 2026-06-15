@@ -15,7 +15,7 @@ const (
 	nudgeMailSweepDefaultMailTTL      = 60 * time.Minute
 	nudgeMailSweepCloseBudget         = 50
 	nudgeMailSweepWatchdogInterval    = 5 * time.Minute
-	nudgeMailSweepWatchdogCloseBudget = 50
+	nudgeMailSweepWatchdogCloseBudget = 500
 
 	// nudgeMailSweepNudgeCloseReason is the close_reason stamped on stale nudge
 	// beads before close. The 20-character floor satisfies validation.on-close=error.

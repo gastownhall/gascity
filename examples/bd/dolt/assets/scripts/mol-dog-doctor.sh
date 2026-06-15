@@ -11,6 +11,7 @@ set -euo pipefail
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
 . "$PACK_DIR/assets/scripts/latency.sh"
+. "$PACK_DIR/assets/scripts/advisory_state.sh"
 . "$PACK_DIR/assets/scripts/_notify.sh"
 
 PORT="$GC_DOLT_PORT"
@@ -23,6 +24,10 @@ LATENCY_WARN_MS="${GC_DOCTOR_LATENCY_WARN_MS:-$(( ${GC_DOCTOR_LATENCY_WARN_S:-1}
 CONN_WARN_PCT="${GC_DOCTOR_CONN_WARN_PCT:-80}"
 BACKUP_STALE_S="${GC_DOCTOR_BACKUP_STALE_S:-43200}"  # 2x 6h backup interval
 BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
+# Advisory dedup state (#3409): records the signature of the last-sent [MEDIUM]
+# advisory so a persistent condition collapses into one rolling alert instead of
+# a fresh bead every 5-min tick. DOLT_STATE_DIR is set by runtime.sh.
+ADVISORY_STATE_FILE="${GC_DOCTOR_ADVISORY_STATE_FILE:-$DOLT_STATE_DIR/doctor-advisory-state}"
 
 dolt_sql() {
     DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" \
@@ -196,14 +201,29 @@ fi
 
 WARNINGS="${LATENCY_WARN}${CONN_WARN}${ORPHAN_WARN}${BACKUP_STALE}"
 if [ -n "$WARNINGS" ]; then
-    if ! send_escalation \
-        "Dolt health advisory [MEDIUM]" \
-        "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
+    # Dedup (#3409): key on which conditions are active — not their tick-volatile
+    # values (exact latency ms, connection count, backup age) — and re-send only
+    # when that set changes. Record after a successful send so a failed
+    # escalation retries next tick. The CRITICAL "server unreachable" path above
+    # is never deduped, so a true outage always alerts.
+    ADVISORY_SIG=""
+    if [ -n "$LATENCY_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}latency "; fi
+    if [ -n "$CONN_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}conn "; fi
+    if [ -n "$ORPHAN_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}orphan "; fi
+    if [ -n "$BACKUP_STALE" ]; then ADVISORY_SIG="${ADVISORY_SIG}backup "; fi
+    if advisory_changed "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"; then
+        if send_escalation \
+            "Dolt health advisory [MEDIUM]" \
+            "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
 Connections: ${CONN_COUNT}/${CONN_MAX}${CONN_WARN}
 Disk: ${DISK_USAGE}
 Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
-        :
+            advisory_record "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"
+        fi
     fi
+else
+    # Healthy: forget the last advisory so a future condition re-alerts.
+    advisory_clear "$ADVISORY_STATE_FILE"
 fi
 
 SUMMARY="doctor — server: ok, latency: ${LATENCY_MS}ms, conns: ${CONN_COUNT}/${CONN_MAX}, disk: ${DISK_USAGE}, orphans: ${ORPHAN_COUNT}"

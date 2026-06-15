@@ -728,6 +728,27 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		return 1
 	}
 
+	// Record the run in the order-tracking history index so a manual formula
+	// `gc order run` advances the cooldown clock, matching dispatcher-driven
+	// (order_dispatch.go) and event-exec (doOrderRunExecTracked) runs. The wisp
+	// root above carries only "order-run:<scoped>" — never labelOrderTracking,
+	// since molecule roots don't auto-close — so without a dedicated tracking
+	// bead the run is invisible to the labelOrderTracking history index. Post-PR
+	// the index-hit gate suppresses the per-order fallback, so an unindexed manual
+	// run no longer advances cooldown and the order can re-fire mid-cooldown
+	// (#3294). Create it closed: its CreatedAt is the cooldown marker, and a
+	// lingering open tracking bead would read as in-flight work and block
+	// re-dispatch (ga-jra/ga-lo8c). Best-effort: the wisp already launched.
+	if tracking, err := store.Create(beads.Bead{
+		Title:     "order:" + scoped,
+		Labels:    []string{"order-run:" + scoped, labelOrderTracking},
+		NoHistory: true,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc order run: recording tracking bead: %v\n", err) //nolint:errcheck
+	} else if err := store.Close(tracking.ID); err != nil {
+		fmt.Fprintf(stderr, "gc order run: closing tracking bead: %v\n", err) //nolint:errcheck
+	}
+
 	if jsonOutput {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc order run", orderRunJSON{
 			SchemaVersion: "1",

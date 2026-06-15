@@ -495,25 +495,16 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 }
 
 // initAndHookDir is the atomic unit of bead store initialization:
-// init the directory, then install event hooks. The ordering matters
-// because init (bd init) may recreate .beads/ and wipe existing hooks.
+// init the directory, then remove any stale gc-managed bead event hooks.
+// The ordering matters because init (bd init) may recreate .beads/ and
+// wipe existing hooks. installBeadHooks only removes gc-stamped hooks and
+// is always safe to run regardless of event_hooks config.
 func initAndHookDir(cityPath, dir, prefix string) error {
-	// Honor [beads] event_hooks=false: skip installing the bd write hooks
-	// (on_create/on_update/on_close). Those hooks fork a full `gc event emit`
-	// per bead write — a real CPU/connection-churn source under load — and a
-	// city that opts out of them must not have them silently reinstalled on
-	// every reconcile. Default (unset) stays true. Load failure → default true.
-	installHooks := true
-	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
-		installHooks = cfg.Beads.EventHooksEnabled()
-	}
 	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
 		return err
 	} else if usesPostgres {
-		if installHooks {
-			if err := installBeadHooks(dir, cityPath); err != nil {
-				return fmt.Errorf("install hooks at %s: %w", dir, err)
-			}
+		if err := installBeadHooks(dir, cityPath); err != nil {
+			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
 		return nil
 	}
@@ -549,10 +540,8 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		}
 	}
 	// Non-fatal: hooks are convenience (event forwarding), not critical.
-	if installHooks {
-		if err := installBeadHooks(dir, cityPath); err != nil {
-			return fmt.Errorf("install hooks at %s: %w", dir, err)
-		}
+	if err := installBeadHooks(dir, cityPath); err != nil {
+		return fmt.Errorf("install hooks at %s: %w", dir, err)
 	}
 	return nil
 }
