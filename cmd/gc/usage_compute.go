@@ -66,9 +66,12 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 	if err != nil {
 		return false
 	}
+	// Prefer the recorded sleep time as the interval end, but only when it falls
+	// after this interval's start — slept_at can be stale for non-sleep terminal
+	// states (drained/archived) that don't refresh it. Otherwise use now.
 	end := now
 	if sleptRaw := strings.TrimSpace(meta["slept_at"]); sleptRaw != "" {
-		if t, perr := time.Parse(time.RFC3339, sleptRaw); perr == nil {
+		if t, perr := time.Parse(time.RFC3339, sleptRaw); perr == nil && t.After(startedAt) {
 			end = t
 		}
 	}
