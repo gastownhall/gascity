@@ -21,31 +21,39 @@ type rawDBGetter interface {
 	DB() *sql.DB
 }
 
-// repairDependenciesIDDefault ensures the dependencies.id column has DEFAULT
-// (uuid()). Migration 0043 adds it via PREPARE/EXECUTE, which Dolt silently
-// strips the expression default from on some versions. Without the default the
-// beadslib INSERT fails with "Field 'id' doesn't have a default value" because
-// the library never supplies id explicitly, relying on the expression default.
-// This repair is idempotent: it checks INFORMATION_SCHEMA before altering.
-func repairDependenciesIDDefault(db *sql.DB) error {
-	var hasDefault int
+// idDefaultRepairTables lists the char(36) id columns whose DEFAULT (uuid())
+// some Dolt versions silently strip from the expression default that beads
+// migrations add via PREPARE/EXECUTE. Without the default, beadslib INSERTs
+// that never supply id fail with "Field 'id' doesn't have a default value":
+//   - dependencies: DepAdd (migration 0043)
+//   - events / wisp_events: RecordEventInTable, reached when gc stamps
+//     metadata (e.g. gc.routed_to during sling) on a non-ephemeral bead.
+var idDefaultRepairTables = []string{"dependencies", "events", "wisp_events"}
+
+// repairIDDefault ensures table.id has DEFAULT (uuid()). It is idempotent and
+// tolerant of an absent table (e.g. wisp_events): it checks INFORMATION_SCHEMA
+// and only issues the ALTER when the id column exists without a default.
+//
+//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+func repairIDDefault(db *sql.DB, table string) error {
+	var idCols, withDefault int
 	err := db.QueryRow(`
-		SELECT COUNT(*)
+		SELECT COUNT(*), COUNT(COLUMN_DEFAULT)
 		FROM INFORMATION_SCHEMA.COLUMNS
 		WHERE TABLE_SCHEMA = DATABASE()
-		  AND TABLE_NAME = 'dependencies'
+		  AND TABLE_NAME = ?
 		  AND COLUMN_NAME = 'id'
-		  AND COLUMN_DEFAULT IS NOT NULL
-	`).Scan(&hasDefault)
+	`, table).Scan(&idCols, &withDefault)
 	if err != nil {
-		return fmt.Errorf("checking dependencies.id default: %w", err)
+		return fmt.Errorf("checking %s.id default: %w", table, err)
 	}
-	if hasDefault > 0 {
+	if idCols == 0 || withDefault > 0 {
+		// Table/column absent, or the default is already present.
 		return nil
 	}
-	_, err = db.Exec("ALTER TABLE `dependencies` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())")
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())", table))
 	if err != nil {
-		return fmt.Errorf("repairing dependencies.id default: %w", err)
+		return fmt.Errorf("repairing %s.id default: %w", table, err)
 	}
 	return nil
 }
@@ -200,9 +208,12 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 		return nil, fmt.Errorf("reading native issue prefix: %w", err)
 	}
 	if accessor, ok := storage.(rawDBGetter); ok {
-		if repairErr := repairDependenciesIDDefault(accessor.DB()); repairErr != nil {
-			// Log but don't fail: the error will surface on the first DepAdd.
-			fmt.Fprintf(os.Stderr, "WARNING: gc beads: %v\n", repairErr)
+		for _, table := range idDefaultRepairTables {
+			if repairErr := repairIDDefault(accessor.DB(), table); repairErr != nil {
+				// Log but don't fail: the error will surface on the first
+				// DepAdd / event-recording write against the affected table.
+				fmt.Fprintf(os.Stderr, "WARNING: gc beads: %v\n", repairErr)
+			}
 		}
 	}
 	return newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix), nil

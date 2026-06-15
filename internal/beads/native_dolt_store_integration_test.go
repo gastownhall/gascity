@@ -114,6 +114,62 @@ func TestNativeDoltStoreEphemeralMailSend(t *testing.T) {
 	}
 }
 
+// TestNativeDoltStoreEventsIDDefaultRepair reproduces the live-DB regression
+// where Dolt stripped DEFAULT (uuid()) from events.id: RecordEventInTable
+// (reached via SetMetadata on a non-ephemeral bead) then fails because the
+// upstream INSERT omits the id column. It proves repairIDDefault restores the
+// default so the write succeeds — the same self-heal gc applies at store open.
+func TestNativeDoltStoreEventsIDDefaultRepair(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	accessor, ok := storage.(rawDBGetter)
+	if !ok {
+		t.Skip("storage does not expose a raw DB")
+	}
+	db := accessor.DB()
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "events-default-repair", "gc")
+
+	// Create while the default is intact (Create itself records an event).
+	bead, err := store.Create(Bead{Title: "events id default repair bead"})
+	if err != nil {
+		t.Fatalf("Create bead: %v", err)
+	}
+
+	// Reproduce the regression: strip the DEFAULT from events.id.
+	if _, err := db.Exec("ALTER TABLE `events` MODIFY COLUMN `id` char(36) NOT NULL"); err != nil {
+		t.Fatalf("strip events.id default: %v", err)
+	}
+	if err := store.SetMetadata(bead.ID, "gc.routed_to", "gascity/builder"); err == nil {
+		t.Fatalf("SetMetadata succeeded with events.id default stripped, want failure")
+	}
+
+	// Repair restores the default; the same write then succeeds.
+	if err := repairIDDefault(db, "events"); err != nil {
+		t.Fatalf("repairIDDefault(events): %v", err)
+	}
+	if err := store.SetMetadata(bead.ID, "gc.routed_to", "gascity/builder"); err != nil {
+		t.Fatalf("SetMetadata after repair: %v", err)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get after repair: %v", err)
+	}
+	if got.Metadata["gc.routed_to"] != "gascity/builder" {
+		t.Fatalf("Metadata[gc.routed_to] = %q, want %q", got.Metadata["gc.routed_to"], "gascity/builder")
+	}
+}
+
 func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
