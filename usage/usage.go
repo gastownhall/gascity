@@ -1,5 +1,5 @@
-// Package usage defines tenant-free usage facts emitted by gascity workers and
-// runtimes, plus a narrow write-only [Sink] for recording them.
+// Package usage defines usage facts emitted by gascity workers and runtimes,
+// plus a narrow write-only [Sink] for recording them.
 //
 // A [UsageFact] accounts for one unit of resource use — either model tokens for
 // a single invocation or compute wall-seconds for one awake interval — and is
@@ -8,9 +8,9 @@
 // external aggregator.
 //
 // This package is deliberately dependency-free (standard library only). It holds
-// no tenancy, identity, or pricing logic: cost is computed by the emitter and
-// stored on the fact as a plain estimate. Keeping it free of internal/ imports
-// lets code outside this module consume it.
+// no identity or pricing logic: cost is computed by the emitter and stored on
+// the fact as a plain estimate. Keeping it free of internal/ imports lets code
+// outside this module consume it.
 package usage
 
 import (
