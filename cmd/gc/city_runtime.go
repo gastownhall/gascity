@@ -2082,6 +2082,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if store == nil {
 		return
 	}
+	cr.emitDueComputeFacts(ctx)
 	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
 		if trace != nil {
 			trace.RecordControllerOperation(site, TraceReasonRetained, TraceOutcomeComplete, name, time.Since(start), fields)

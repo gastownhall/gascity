@@ -126,6 +126,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"state":                     string(StateActive),
 				"state_reason":              "creation_complete",
 				"creation_complete_at":      now.UTC().Format(time.RFC3339),
+				"awake_started_at":          now.UTC().Format(time.RFC3339),
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
 				"sleep_reason":              "",
