@@ -4,15 +4,42 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 const mailReadMetadataKey = "mail.read"
+
+// wispGCReapOrphanBatchCap bounds how many orphaned closed wisp descendants a
+// single sweep will reap. The orphaned-closure backlog (~8k rows) drains over
+// roughly cap-sized batches across successive sweeps so no single tick does an
+// unbounded amount of deletion work.
+var wispGCReapOrphanBatchCap = 500
+
+// reapOrphansEnforced reports whether orphaned-closed-wisp reaping should
+// actually delete rows. It defaults to dry-run (false) unless the
+// GC_WISP_GC_REAP_ORPHANS env var is set to a truthy value. Indirected through
+// a package var so tests can toggle enforcement without touching the
+// environment.
+var reapOrphansEnforced = func() bool { return parseWispGCBoolEnv(os.Getenv("GC_WISP_GC_REAP_ORPHANS")) }
+
+// parseWispGCBoolEnv interprets an environment value as a boolean. Unset, empty,
+// and unparseable values are treated as false so the dry-run default holds.
+func parseWispGCBoolEnv(raw string) bool {
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return v
+}
 
 // wispGC performs mechanical garbage collection of closed molecules that
 // have exceeded their TTL. Follows the nil-guard tracker pattern used by
@@ -90,6 +117,10 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 		closurePurged, closureDeleteErr := purgeExpiredBeadClosures(store, entries, cutoff)
 		purged += closurePurged
 		deleteErr = errors.Join(deleteErr, closureDeleteErr)
+
+		orphanReaped, orphanErr := reapOrphanedClosedWisps(store, cutoff, wispGCReapOrphanBatchCap)
+		purged += orphanReaped
+		deleteErr = errors.Join(deleteErr, orphanErr)
 	}
 
 	if m.mailRetentionTTL > 0 {
@@ -135,6 +166,112 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 	}
 	appendUnique(wisps)
 	return entries, nil
+}
+
+// reapOrphanedClosedWisps reaps closed wisp-tier descendants whose owning root
+// is gone or already terminal but which the root-rooted closure purge never
+// enumerates (their root is absent from, or never appears in, the closed-root
+// list). Candidates are closed wisp-tier rows carrying a gc.root_bead_id
+// pointer and older than cutoff.
+//
+// Safety: a descendant is reaped only when its root is provably collectible —
+// the root Get returns ErrNotFound (root gone) or the root is terminal
+// (closed/tombstone). A live/open root, or any other (unreadable) Get error,
+// causes the descendant to be SKIPPED so an in-flight workflow is never
+// stripped of its closed steps.
+//
+// With GC_WISP_GC_REAP_ORPHANS unset the function mutates nothing: it counts
+// the would-be reaps and logs a dry-run notice. Per-bead delete errors are
+// joined and never abort the sweep. The batch cap bounds reaps per sweep so the
+// backlog drains over multiple ticks.
+func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("reaping orphaned closed wisps: bead store unavailable")
+	}
+
+	candidates, err := store.List(beads.ListQuery{
+		Status:    "closed",
+		TierMode:  beads.TierWisps,
+		AllowScan: true,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing closed wisp-tier rows: %w", err)
+	}
+
+	enforce := reapOrphansEnforced()
+
+	// rootCollectible caches the per-root reap decision so many siblings
+	// sharing one dead root cost a single Get.
+	rootCollectible := make(map[string]bool)
+	var collectErr error
+
+	reaped := 0
+	var deleteErr error
+	for _, c := range candidates {
+		if batchCap > 0 && reaped >= batchCap {
+			break
+		}
+
+		rootID := c.Metadata[beadmeta.RootBeadIDMetadataKey]
+		if rootID == "" {
+			// No root pointer — out of scope for orphan reaping.
+			continue
+		}
+
+		// Reuse the closure purge's age semantics: skip zero/recent rows.
+		if c.CreatedAt.IsZero() || !c.CreatedAt.Before(cutoff) {
+			continue
+		}
+
+		decision, cached := rootCollectible[rootID]
+		if !cached {
+			root, getErr := store.Get(rootID)
+			switch {
+			case errors.Is(getErr, beads.ErrNotFound):
+				decision = true // root gone
+			case getErr == nil && convoycore.IsTerminalStatus(root.Status):
+				decision = true // root terminal
+			case getErr == nil:
+				decision = false // root live/open — never reap its descendants
+			default:
+				// Any other Get error: cannot prove safe — skip without caching
+				// as collectible. Surface so the sweep records the failure.
+				decision = false
+				collectErr = errors.Join(collectErr, fmt.Errorf("resolving root %q for orphan %q: %w", rootID, c.ID, getErr))
+			}
+			rootCollectible[rootID] = decision
+		}
+		if !decision {
+			continue
+		}
+
+		if !enforce {
+			reaped++
+			continue
+		}
+
+		if err := deleteWorkflowBead(store, c.ID); err != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("reaping orphaned closed wisp %q: %w", c.ID, err))
+			continue
+		}
+		reaped++
+	}
+
+	if reaped > 0 {
+		if enforce {
+			log.Printf("wisp gc: reaped %d orphaned closed wisp(s)", reaped)
+		} else {
+			log.Printf("wisp gc: %d orphaned closed wisp(s) would be reaped (dry-run; set GC_WISP_GC_REAP_ORPHANS=1 to enforce)", reaped)
+		}
+	}
+
+	if !enforce {
+		// Dry-run never mutates: report would-be count via log only, return 0
+		// purged so callers don't over-count deletions that did not happen.
+		return 0, errors.Join(collectErr, deleteErr)
+	}
+
+	return reaped, errors.Join(collectErr, deleteErr)
 }
 
 func readMessageWispGCEntries(store beads.Store) ([]beads.Bead, error) {

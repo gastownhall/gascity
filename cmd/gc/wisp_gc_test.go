@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -685,6 +686,170 @@ func TestWispGC_ListErrorFailsRun(t *testing.T) {
 	}
 }
 
+func TestWispGC_ReapsClosedOrphanWhenRootAbsent(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	// Root "ghost-root" is never inserted: the orphan descendant's root is gone.
+	store := newGCStore([]beads.Bead{
+		makeGCOrphanWisp("orphan-1", now.Add(-2*time.Hour), "ghost-root"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "orphan-1")
+}
+
+func TestWispGC_ReapsClosedOrphanWhenRootClosed(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		// Closed task root (terminal) without gc.kind=wisp so the root-rooted
+		// closure purge does not enumerate it; the orphan path must still reap.
+		makeGCBead("term-root", now.Add(-2*time.Hour), "closed", "task"),
+		makeGCOrphanWisp("orphan-2", now.Add(-2*time.Hour), "term-root"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "orphan-2")
+	// The terminal root itself is out of scope for the orphan path.
+	if _, err := store.Get("term-root"); err != nil {
+		t.Fatalf("term-root should remain: %v", err)
+	}
+}
+
+func TestWispGC_DoesNotReapWhenRootOpen(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("live-root", now.Add(-2*time.Hour), "in_progress", "molecule"),
+		makeGCOrphanWisp("orphan-live", now.Add(-2*time.Hour), "live-root"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; descendant of a live root must never be reaped", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deleted = %v, want none", store.deletedIDs)
+	}
+	if _, err := store.Get("orphan-live"); err != nil {
+		t.Fatalf("orphan-live must still be Get-able while root is open: %v", err)
+	}
+}
+
+func TestWispGC_DryRunDefaultReapsNothing(t *testing.T) {
+	withReapOrphansEnforced(t, false)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCOrphanWisp("orphan-dry", now.Add(-2*time.Hour), "ghost-root"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	var purged int
+	var runErr error
+	logOutput := captureWispGCLog(t, func() {
+		purged, runErr = wg.runGC(store, now)
+	})
+	if runErr != nil {
+		t.Fatalf("runGC: %v", runErr)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 in dry-run", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deleted = %v, want none in dry-run", store.deletedIDs)
+	}
+	if _, err := store.Get("orphan-dry"); err != nil {
+		t.Fatalf("orphan-dry must survive dry-run: %v", err)
+	}
+	if !strings.Contains(logOutput, "would be reaped") {
+		t.Fatalf("log = %q, want dry-run notice containing %q", logOutput, "would be reaped")
+	}
+}
+
+func TestWispGC_ReapHonorsBatchCap(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	withReapOrphanBatchCap(t, 1)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCOrphanWisp("orphan-cap-1", now.Add(-2*time.Hour), "ghost-root"),
+		makeGCOrphanWisp("orphan-cap-2", now.Add(-2*time.Hour), "ghost-root"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 (batch cap)", purged)
+	}
+	if len(store.deletedIDs) != 1 {
+		t.Fatalf("deleted = %v, want exactly 1 per sweep", store.deletedIDs)
+	}
+}
+
+func TestWispGC_ReapSkipsRowsWithoutRootPointer(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	// Closed wisp-tier row with no gc.root_bead_id pointer: out of scope.
+	noRoot := makeGCBeadWithMetadata("no-root", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	noRoot.Ephemeral = true
+	store := newGCStore([]beads.Bead{noRoot})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; rows without a root pointer are out of scope", purged)
+	}
+	if _, err := store.Get("no-root"); err != nil {
+		t.Fatalf("no-root must be preserved: %v", err)
+	}
+}
+
+func TestWispGC_ReapDeleteErrorSurfacedAndContinues(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCOrphanWisp("orphan-err", now.Add(-2*time.Hour), "ghost-root"),
+		makeGCOrphanWisp("orphan-ok", now.Add(-2*time.Hour), "ghost-root"),
+	})
+	store.deleteErrors["orphan-err"] = fmt.Errorf("delete failed")
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err == nil {
+		t.Fatal("expected reap delete error to be surfaced")
+	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err = %v, want delete failure to be included", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 (other orphan still reaped)", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "orphan-ok")
+}
+
 type gcQueryKey struct {
 	Status   string
 	Type     string
@@ -765,6 +930,36 @@ func makeGCMessageWisp(id string, createdAt time.Time, metadata map[string]strin
 		Metadata:  metadata,
 		Ephemeral: true,
 	}
+}
+
+// makeGCOrphanWisp builds a closed wisp-tier descendant carrying a
+// gc.root_bead_id pointer. Ephemeral:true places it in the wisp tier so the
+// orphan reaper's TierWisps query sees it. It deliberately omits gc.kind=wisp so
+// the root-rooted closure purge does not enumerate it as a root.
+func makeGCOrphanWisp(id string, createdAt time.Time, rootID string) beads.Bead {
+	bead := makeGCBeadWithMetadata(id, createdAt, "closed", "task", map[string]string{
+		beadmeta.RootBeadIDMetadataKey: rootID,
+	})
+	bead.Ephemeral = true
+	return bead
+}
+
+// withReapOrphansEnforced toggles the enforcement indirection for the duration
+// of a test, restoring the prior value on cleanup.
+func withReapOrphansEnforced(t *testing.T, enforce bool) {
+	t.Helper()
+	prev := reapOrphansEnforced
+	reapOrphansEnforced = func() bool { return enforce }
+	t.Cleanup(func() { reapOrphansEnforced = prev })
+}
+
+// withReapOrphanBatchCap overrides the per-sweep reap cap for the duration of a
+// test, restoring the prior value on cleanup.
+func withReapOrphanBatchCap(t *testing.T, batchCap int) {
+	t.Helper()
+	prev := wispGCReapOrphanBatchCap
+	wispGCReapOrphanBatchCap = batchCap
+	t.Cleanup(func() { wispGCReapOrphanBatchCap = prev })
 }
 
 func captureWispGCLog(t *testing.T, fn func()) string {
