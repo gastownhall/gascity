@@ -24,7 +24,7 @@ schema = 2
 
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 ```
 
 ```toml
@@ -34,7 +34,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 ```
 
 ```bash
@@ -52,7 +52,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -70,7 +70,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -124,7 +124,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 
 [[rigs.patches]]
 agent = "gastown.refinery"
@@ -253,7 +253,7 @@ base = "builtin:claude"
 
 [defaults.rig.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 
 [daemon]
 patrol_interval = "30s"
@@ -320,7 +320,7 @@ schema = 2
 # bundled copy. The gastown pack is no longer a local directory.
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:817f85e155e2b0b0c375835b076103108f8a4724"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 ```
 
 ### The gastown pack — the reusable defaults

@@ -457,10 +457,10 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 	// that gates gc bd close must appear after --unset-metadata.
 	assertContainsInOrder(t, body,
 		"--set-metadata merge_result=merged",
-		"--set-metadata merged_sha=$MERGED_SHA",
-		"--set-metadata merged_target=$TARGET",
+		`--set-metadata merged_sha="$MERGED_SHA"`,
+		`--set-metadata merged_target="$TARGET"`,
 		"--unset-metadata rejection_reason &&",
-		`gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"`,
+		`gc bd close "$WORK" --reason "Merged to $TARGET at $MERGED_SHORT"`,
 	)
 
 	// mr/pr handoff path: same chained shape, different metadata fields.
@@ -530,8 +530,8 @@ func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
 	assertContainsInOrder(t, body,
 		`**If MERGE_STRATEGY = "direct" (default):**`,
 		`branch_has_real_change "origin/$TARGET" temp ||`,
-		"git merge --ff-only temp",
-		`gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"`,
+		`git -C "$MERGE_WT" merge --ff-only "$TEMP_SHA"`,
+		`gc bd close "$WORK" --reason "Merged to $TARGET at $MERGED_SHORT"`,
 	)
 
 	// mr/pr publication path: guard precedes the push and the close.
