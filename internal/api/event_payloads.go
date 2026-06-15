@@ -418,6 +418,16 @@ type WorkerOperationEventPayload struct {
 	// Wired: TODO — pricing.Registry exists (PR #1272); finish-time
 	// wiring to compute cost from token counts is pending.
 	CostUSDEstimate float64 `json:"cost_usd_estimate,omitempty" doc:"Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam)."`
+	// RunID is the run-root identifier this operation belongs to, resolved
+	// per-operation from the work/session bead metadata chain (workflow_id ||
+	// molecule_id || gc.root_bead_id-or-self || bead id || session id for
+	// manual chat). Wired: YES — resolved at finish() via resolveRunID.
+	RunID string `json:"run_id,omitempty" doc:"Run-root identifier for rolling this operation up to a workflow/molecule/chat run (best-effort)."`
+	// Unpriced is a tri-state flag: absent = pricing not evaluated, true =
+	// tokens observed but no price resolved (CostUSDEstimate not authoritative),
+	// false = priced. Wired: TODO — set alongside CostUSDEstimate by the pricing
+	// tier; currently always absent.
+	Unpriced *bool `json:"unpriced,omitempty" doc:"True when tokens were observed but no price resolved (best-effort tri-state; absent = not evaluated)."`
 }
 
 // IsEventPayload marks WorkerOperationEventPayload as an events.Payload variant.

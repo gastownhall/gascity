@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -68,6 +69,16 @@ type operationEventPayload struct {
 	CacheCreationTokens int     `json:"cache_creation_tokens,omitempty"`
 	LatencyMs           int64   `json:"latency_ms,omitempty"`
 	CostUSDEstimate     float64 `json:"cost_usd_estimate,omitempty"`
+
+	// RunID is the run-root this operation belongs to, resolved per-operation
+	// from the bead metadata chain (workflow_id || molecule_id ||
+	// gc.root_bead_id-or-self || bead id || session id for manual chat). Lets
+	// consumers roll per-operation cost/latency up to a run.
+	RunID string `json:"run_id,omitempty"`
+	// Unpriced is a tri-state flag: nil = pricing not evaluated, true = tokens
+	// observed but no price resolved (CostUSDEstimate not authoritative), false
+	// = priced. Mirrors the Queued/Delivered pointer convention.
+	Unpriced *bool `json:"unpriced,omitempty"`
 }
 
 type operationEventTarget interface {
@@ -140,7 +151,7 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 	if payload.SessionID == "" {
 		payload.SessionID = h.currentSessionID()
 	}
-	if info, ok := h.currentOperationSessionInfo(); ok {
+	if info, bead, ok := h.currentOperationSessionInfo(); ok {
 		payload.SessionID = info.ID
 		fallback := h.operationEventFallbackSessionName()
 		if payload.SessionName == "" || payload.SessionName == fallback {
@@ -157,6 +168,22 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 		}
 		if strings.TrimSpace(payload.AgentName) == "" {
 			payload.AgentName = strings.TrimSpace(info.Alias)
+		}
+		// Per-operation run-root resolution. When a mutable work-bead pointer
+		// has been stamped on the session bead, prefer the work bead's run
+		// chain; otherwise resolve off the session bead (manual chat → session
+		// id).
+		runBead := bead
+		if payload.BeadID == "" {
+			payload.BeadID = strings.TrimSpace(bead.Metadata["gc.active_work_bead"])
+		}
+		if payload.BeadID != "" {
+			if _, wb, err := h.manager.GetWithBead(payload.BeadID); err == nil {
+				runBead = wb
+			}
+		}
+		if strings.TrimSpace(payload.RunID) == "" {
+			payload.RunID = resolveRunID(runBead, info.ID)
 		}
 	}
 	if payload.SessionName == "" {
@@ -180,16 +207,39 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 	}
 }
 
-func (h *SessionHandle) currentOperationSessionInfo() (sessionpkg.Info, bool) {
+func (h *SessionHandle) currentOperationSessionInfo() (sessionpkg.Info, beads.Bead, bool) {
 	id := h.currentSessionID()
 	if id == "" {
-		return sessionpkg.Info{}, false
+		return sessionpkg.Info{}, beads.Bead{}, false
 	}
-	info, err := h.manager.Get(id)
+	info, bead, err := h.manager.GetWithBead(id)
 	if err != nil {
-		return sessionpkg.Info{}, false
+		return sessionpkg.Info{}, beads.Bead{}, false
 	}
-	return info, true
+	return info, bead, true
+}
+
+// resolveRunID derives the run-root identifier for an operation from a bead's
+// metadata chain, falling back to the bead's own id and finally the session id
+// (the manual-chat case, where the session bead is the run root). Order:
+// workflow_id (graph) || molecule_id (poured/wisp) || gc.root_bead_id-or-self
+// (nested) || bead id || session id.
+func resolveRunID(bead beads.Bead, sessionID string) string {
+	if bead.Metadata != nil {
+		if v := strings.TrimSpace(bead.Metadata["workflow_id"]); v != "" {
+			return v
+		}
+		if v := strings.TrimSpace(bead.Metadata["molecule_id"]); v != "" {
+			return v
+		}
+		if v := strings.TrimSpace(bead.Metadata["gc.root_bead_id"]); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimSpace(bead.ID); v != "" {
+		return v
+	}
+	return strings.TrimSpace(sessionID)
 }
 
 func (h *SessionHandle) recordWorkerOperationEvent(payload operationEventPayload) {

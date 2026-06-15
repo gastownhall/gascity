@@ -14950,6 +14950,10 @@
           "result": {
             "type": "string"
           },
+          "run_id": {
+            "description": "Run-root identifier for rolling this operation up to a workflow/molecule/chat run (best-effort).",
+            "type": "string"
+          },
           "session_id": {
             "type": "string"
           },
@@ -14965,6 +14969,10 @@
           },
           "transport": {
             "type": "string"
+          },
+          "unpriced": {
+            "description": "True when tokens were observed but no price resolved (best-effort tri-state; absent = not evaluated).",
+            "type": "boolean"
           }
         },
         "required": [
