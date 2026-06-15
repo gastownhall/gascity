@@ -7,7 +7,9 @@
 // By default tests use tmux. Set GC_SESSION=subprocess to use the subprocess
 // provider instead (no tmux required).
 //
-// Session safety: all test cities use the "gctest-<8hex>" naming prefix.
+// Session safety: no-guard test cities use randomized 6-letter lowercase
+// names (see uniqueCityName) so they spread across distinct Dolt DB
+// prefixes instead of all collapsing to "gc".
 // Three layers of cleanup (pre-sweep, per-test t.Cleanup, post-sweep)
 // prevent orphan tmux sessions on developer boxes.
 package integration
