@@ -3176,6 +3176,117 @@ dolt.user: canonical-user
 	}
 }
 
+func TestBdRuntimeEnvExternalCityAndExplicitRigUsePinnedDatabasesAndSharedCredentials(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_DOLT_PASSWORD", "")
+	t.Setenv("GC_DOLT_DATABASE", "stale-db")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "stale-db")
+	t.Setenv("DOLT_DATABASE", "stale-db")
+
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "codex_prompts")
+	for _, dir := range []string{cityPath, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: cp
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: unverified
+dolt.auto-start: false
+dolt.host: 127.0.0.1
+dolt.port: 3307
+dolt.user: gascity
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{
+  "backend": "dolt",
+  "database": "dolt",
+  "dolt_database": "hq",
+  "dolt_mode": "server",
+  "project_id": "city-project"
+}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: codex-prompts
+gc.endpoint_origin: explicit
+gc.endpoint_status: unverified
+dolt.auto-start: false
+dolt.host: 127.0.0.1
+dolt.port: 3307
+dolt.user: gascity
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{
+  "backend": "dolt",
+  "database": "dolt",
+  "dolt_database": "codex_prompts",
+  "dolt_mode": "server",
+  "project_id": "rig-project"
+}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	credentialsPath := filepath.Join(t.TempDir(), "credentials")
+	if err := os.WriteFile(credentialsPath, []byte("[127.0.0.1:3307]\npassword=shared-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
+
+	cityEnv := mustBdRuntimeEnv(t, cityPath)
+	for key, want := range map[string]string{
+		"GC_DOLT_HOST":               "127.0.0.1",
+		"GC_DOLT_PORT":               "3307",
+		"GC_DOLT_USER":               "gascity",
+		"GC_DOLT_PASSWORD":           "shared-secret",
+		"GC_DOLT_DATABASE":           "hq",
+		"BEADS_DOLT_SERVER_DATABASE": "hq",
+		"BEADS_DOLT_SERVER_HOST":     "127.0.0.1",
+		"BEADS_DOLT_SERVER_PORT":     "3307",
+		"BEADS_DOLT_SERVER_USER":     "gascity",
+		"BEADS_DOLT_PASSWORD":        "shared-secret",
+		"BEADS_CREDENTIALS_FILE":     credentialsPath,
+		"BEADS_DIR":                  filepath.Join(cityPath, ".beads"),
+		"DOLT_DATABASE":              "",
+	} {
+		if got := cityEnv[key]; got != want {
+			t.Fatalf("city env[%s] = %q, want %q", key, got, want)
+		}
+	}
+
+	rigEnv := mustBdRuntimeEnvForRig(t, cityPath, &config.City{Rigs: []config.Rig{{
+		Name: "codex-prompts",
+		Path: rigDir,
+	}}}, rigDir)
+	for key, want := range map[string]string{
+		"GC_DOLT_HOST":               "127.0.0.1",
+		"GC_DOLT_PORT":               "3307",
+		"GC_DOLT_USER":               "gascity",
+		"GC_DOLT_PASSWORD":           "shared-secret",
+		"GC_DOLT_DATABASE":           "codex_prompts",
+		"BEADS_DOLT_SERVER_DATABASE": "codex_prompts",
+		"BEADS_DOLT_SERVER_HOST":     "127.0.0.1",
+		"BEADS_DOLT_SERVER_PORT":     "3307",
+		"BEADS_DOLT_SERVER_USER":     "gascity",
+		"BEADS_DOLT_PASSWORD":        "shared-secret",
+		"BEADS_CREDENTIALS_FILE":     credentialsPath,
+		"BEADS_DIR":                  filepath.Join(rigDir, ".beads"),
+		"GC_RIG":                     "codex-prompts",
+		"GC_RIG_ROOT":                rigDir,
+		"DOLT_DATABASE":              "",
+	} {
+		if got := rigEnv[key]; got != want {
+			t.Fatalf("rig env[%s] = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestBdRuntimeEnvIgnoresAmbientBeadsPasswordWithoutScopedSecret(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
