@@ -31,12 +31,22 @@ func usingSubprocess() bool {
 }
 
 // uniqueCityName generates a random city name for test isolation.
+//
+// Names like "gctest-{hex}" all derive to Dolt DB prefix "gc" via
+// DeriveBeadsPrefix, causing dirty-table schema migration failures when
+// tests share a Dolt server and a prior run crashes. Instead, generate
+// a 6-letter random name: DeriveBeadsPrefix returns the first 2 chars,
+// giving 26² = 676 distinct prefixes across the test suite.
 func uniqueCityName() string {
-	b := make([]byte, 4)
+	b := make([]byte, 6)
 	if _, err := rand.Read(b); err != nil {
 		panic("generating random city name: " + err.Error())
 	}
-	return fmt.Sprintf("gctest-%x", b)
+	name := make([]byte, 6)
+	for i, c := range b {
+		name[i] = 'a' + c%26
+	}
+	return string(name)
 }
 
 // setupCity creates a city directory, initializes it, writes a city.toml
