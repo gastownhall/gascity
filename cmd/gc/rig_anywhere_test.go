@@ -1189,6 +1189,20 @@ func TestRigAnywhere_WriteBeadsEnvGTRoot(t *testing.T) {
 // ===========================================================================
 
 func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
+	// Ambient-isolation for every subtest: these cases build their own
+	// temp cities/registries and assume no real city is in scope. A stray
+	// GC_CITY/GC_DIR in the environment, or a cwd nested inside a live city
+	// (e.g. a polecat worktree under <city>/.gc/worktrees), makes
+	// resolveRigToContext's local-city fallback load that ambient city —
+	// whose pack imports may be unfetched in the test's empty pack cache —
+	// and fail spuriously. Subtests that need a specific cwd override it via
+	// setCwd below.
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	setCwd(t, t.TempDir())
+
 	t.Run("rig_not_registered_anywhere", func(t *testing.T) {
 		t.Setenv("GC_HOME", t.TempDir())
 
