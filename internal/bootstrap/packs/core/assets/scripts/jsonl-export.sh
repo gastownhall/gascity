@@ -148,6 +148,13 @@ validate_exported_issues() {
 # prior ordering preserved and updated rows replaced in place. Rows present only
 # in the prior snapshot are retained — a delta never drops a row, which preserves
 # the archive-before-delete guarantee #3342 retention depends on.
+#
+# Rows are keyed only on a non-empty string id. Rows with a null/missing/empty id
+# (forbidden by the issues PRIMARY KEY, but possible in a corrupt export) are not
+# valid object keys: keying them would collapse every anomalous row onto one
+# entry and a null id aborts the whole merge with "Cannot index object with
+# null". Such rows are instead carried through verbatim so a corrupt export
+# surfaces in the archive rather than silently losing rows.
 merge_issue_delta() {
     local prior="$1"
     local delta="$2"
@@ -155,10 +162,17 @@ merge_issue_delta() {
     jq -n -c \
         --slurpfile prior "$prior" \
         --slurpfile delta "$delta" \
-        '{rows: (
-            (($prior[0].rows // []) + ($delta[0].rows // []))
-            | reduce .[] as $r ({}; .[$r.id] = $r)
-            | [ .[] ]
+        '
+        def keyed: (.id // "") | (type == "string" and . != "");
+        ($prior[0].rows // []) as $p
+        | ($delta[0].rows // []) as $d
+        | {rows: (
+            (
+                reduce ($p + $d | .[]) as $r ({};
+                    if ($r | keyed) then .[$r.id] = $r else . end)
+                | [ .[] ]
+            )
+            + (($p + $d) | map(select(keyed | not)))
         )}'
 }
 
@@ -348,6 +362,30 @@ write_db_export_watermark() {
             --arg wm "$watermark" \
             --argjson full "$full_at" \
             '.export_watermarks[$db].issues = {updated_at_watermark: $wm, full_at: $full}'
+    )"
+}
+
+# Snapshot the whole .export_watermarks sub-state before the export loop so a
+# post-loop failure can roll it back. The loop advances each DB's watermark in
+# lockstep with writing its snapshot file, but the archive is git-committed once
+# after the loop. If staging or the commit fails the snapshot is discarded back
+# to HEAD (discard_staged_archive_outputs); the watermark must roll back with it,
+# or the next delta cycle queries `updated_at >= <advanced-watermark>` and skips
+# the rows in the lost window — which Option A retention can then delete before
+# the next full snapshot, breaking the archive-before-delete ordering #3342
+# relies on. Emits the current value (or `null` when no watermarks are recorded).
+snapshot_export_watermarks() {
+    read_state_json | jq -c '.export_watermarks // null'
+}
+
+# Restore .export_watermarks to a value captured by snapshot_export_watermarks,
+# leaving every other state field untouched. A null snapshot (no watermarks
+# before the loop) deletes the key so the state matches its pre-loop shape.
+restore_export_watermarks() {
+    local snapshot="$1"
+    write_state_json "$(
+        read_state_json | jq -c --argjson wm "$snapshot" \
+            'if $wm == null then del(.export_watermarks) else .export_watermarks = $wm end'
     )"
 }
 
@@ -951,6 +989,10 @@ should_halt_for_jsonl_spike() {
     return 0
 }
 
+# Capture the pre-loop watermark state so a post-loop staging/commit failure can
+# restore it. Must run before the loop advances any per-DB watermark.
+EXPORT_WATERMARKS_SNAPSHOT=$(snapshot_export_watermarks)
+
 while IFS= read -r DB; do
     [ -z "$DB" ] && continue
     TOTAL_DBS=$((TOTAL_DBS + 1))
@@ -1137,6 +1179,7 @@ cd "$ARCHIVE_REPO"
 if [ "${#STAGE_PATHS[@]}" -gt 0 ]; then
     if ! git add -A -- "${STAGE_PATHS[@]}"; then
         discard_staged_archive_outputs
+        restore_export_watermarks "$EXPORT_WATERMARKS_SNAPSHOT"
         echo "jsonl-export: staging archive outputs failed" >&2
         exit 1
     fi
@@ -1153,6 +1196,7 @@ if [ "$HALTED" -eq 1 ]; then
             "[HALT] backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED (spike detected; push skipped)" \
             "HALT baseline" || {
             discard_staged_archive_outputs
+            restore_export_watermarks "$EXPORT_WATERMARKS_SNAPSHOT"
             exit 1
         }
         set_pending_archive_push
@@ -1204,6 +1248,7 @@ commit_archive_snapshot \
     "backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED" \
     "archive snapshot" || {
     discard_staged_archive_outputs
+    restore_export_watermarks "$EXPORT_WATERMARKS_SNAPSHOT"
     exit 1
 }
 set_pending_archive_push

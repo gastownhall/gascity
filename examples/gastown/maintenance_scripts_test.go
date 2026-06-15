@@ -10076,6 +10076,125 @@ func TestJsonlExportForcesFullSnapshotAfterInterval(t *testing.T) {
 	}
 }
 
+// TestJsonlExportCommitFailureRollsBackWatermark verifies the per-DB issues
+// watermark advanced inside the export loop is rolled back when the post-loop
+// archive commit fails. Without the rollback the next delta cycle would query
+// `updated_at >= <advanced-watermark>` and skip the rows in the discarded
+// snapshot's window — and if Option A retention deletes those closed rows before
+// the next full snapshot they are unrecoverable, breaking the archive-before-
+// delete ordering #3342 retention relies on.
+func TestJsonlExportCommitFailureRollsBackWatermark(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	const priorWatermark = "2026-06-14T09:00:00Z"
+	prior := `{"rows":[{"id":"p1","title":"one","updated_at":"` + priorWatermark + `"}]}`
+	seedArchiveWithIssuesPayload(t, archiveRepo, prior)
+	// A recent full snapshot keeps this pass on the delta path, so the loop
+	// advances the watermark before the commit is attempted.
+	writeWatermarkState(t, stateFile, priorWatermark, time.Now().Unix())
+
+	// A committed delta would advance the watermark to this newer updated_at; a
+	// sentinel full payload would surface only on a wrong (full-snapshot) path.
+	delta := `{"rows":[{"id":"p2","title":"two","updated_at":"2026-06-14T12:00:00Z"}]}`
+	full := `{"rows":[{"id":"FULL","title":"wrong","updated_at":"2026-06-14T23:00:00Z"}]}`
+	writeWatermarkDoltStub(t, binDir, full, delta)
+	writeJsonlExportGCStub(t, binDir)
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	writeGitSubcommandFailureStub(t, binDir, realGit, "commit")
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	out, runErr := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
+	if runErr == nil {
+		t.Fatalf("expected script to fail when git commit fails on the delta path; output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "archive snapshot commit failed") {
+		t.Fatalf("expected archive-snapshot commit failure diagnostic, got:\n%s", out)
+	}
+
+	wm, _ := readWatermarkState(t, stateFile)
+	if wm != priorWatermark {
+		t.Fatalf("commit failure must roll the watermark back to %q, got %q (advanced past an uncommitted snapshot)", priorWatermark, wm)
+	}
+}
+
+// TestJsonlExportDeltaMergePreservesAnomalousNullIDRows verifies the delta merge
+// keys rows on a non-empty id only: an anomalous null/empty-id row (forbidden by
+// the issues PRIMARY KEY but possible in a corrupt export) is preserved rather
+// than collapsed onto a single object key — and a null id no longer aborts the
+// whole merge with a jq "Cannot index object with null" error.
+func TestJsonlExportDeltaMergePreservesAnomalousNullIDRows(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	// Prior snapshot: one keyed row plus an anomalous empty-id row.
+	prior := `{"rows":[{"id":"p1","title":"one","updated_at":"2026-06-14T09:00:00Z"},{"id":"","title":"anon-prior","updated_at":"2026-06-14T08:00:00Z"}]}`
+	seedArchiveWithIssuesPayload(t, archiveRepo, prior)
+	writeWatermarkState(t, stateFile, "2026-06-14T08:00:00Z", time.Now().Unix())
+
+	// Delta updates the keyed row and carries a second anomalous row, this one
+	// with a null id — the case that aborts the buggy merge entirely.
+	delta := `{"rows":[{"id":"p1","title":"one-new","updated_at":"2026-06-14T11:00:00Z"},{"id":null,"title":"anon-delta","updated_at":"2026-06-14T11:30:00Z"}]}`
+	full := `{"rows":[{"id":"FULL","title":"wrong","updated_at":"2026-06-14T23:00:00Z"}]}`
+	writeWatermarkDoltStub(t, binDir, full, delta)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	merged, err := os.ReadFile(filepath.Join(archiveRepo, "beads", "issues.jsonl"))
+	if err != nil {
+		t.Fatalf("ReadFile(merged issues.jsonl): %v", err)
+	}
+	var payload struct {
+		Rows []struct {
+			ID    *string `json:"id"`
+			Title string  `json:"title"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(merged, &payload); err != nil {
+		t.Fatalf("Unmarshal(merged): %v\n%s", err, merged)
+	}
+	if len(payload.Rows) != 3 {
+		t.Fatalf("merged row count = %d, want 3 (keyed p1 + both anomalous rows); rows: %s", len(payload.Rows), merged)
+	}
+
+	var keyedTitle string
+	anomalousTitles := map[string]bool{}
+	for _, r := range payload.Rows {
+		if r.ID != nil && *r.ID == "p1" {
+			keyedTitle = r.Title
+			continue
+		}
+		// id is null or empty → anomalous; it must survive the merge.
+		anomalousTitles[r.Title] = true
+	}
+	if keyedTitle != "one-new" {
+		t.Fatalf("keyed row p1 title = %q, want one-new (delta wins); rows: %s", keyedTitle, merged)
+	}
+	for _, want := range []string{"anon-prior", "anon-delta"} {
+		if !anomalousTitles[want] {
+			t.Fatalf("anomalous row %q was dropped by the merge; rows: %s", want, merged)
+		}
+	}
+}
+
 // gateSweepEnv constructs the env for a gate-sweep.sh invocation with a
 // PATH-shimmed bd stub that logs every call to BD_LOG.
 func gateSweepEnv(t *testing.T) (binDir, bdLog string, env map[string]string) {
