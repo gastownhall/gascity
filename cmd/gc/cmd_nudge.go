@@ -1166,6 +1166,14 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	if target.sessionName == "" {
 		return
 	}
+	// Reap stale poller PID files before deciding whether to spawn. Owning
+	// processes only remove their PID file via the release closure, so any
+	// poller that is killed/crashes/os.Exit's leaves the .pid behind forever.
+	// This low-frequency hook keeps the pollers directory from growing without
+	// bound. The sibling .pid.lock is intentionally left in place (removing it
+	// races concurrent acquirers — see reapStaleNudgePoller). Best-effort:
+	// never block a spawn.
+	_ = reapStaleNudgePollers(target.cityPath)
 	// Supervisor-hosted dispatcher owns delivery in supervisor mode; the
 	// per-session poller would race with it and reintroduce the bd-shellout
 	// load it was designed to eliminate.
@@ -2037,6 +2045,70 @@ func withNudgeQueueState(cityPath string, fn func(*nudgeQueueState) error) error
 
 func nudgePollerPIDPath(cityPath, sessionName, agentName string) string {
 	return citylayout.RuntimePath(cityPath, "nudges", "pollers", nudgepoller.PollerFileStem(sessionName, agentName)+".pid")
+}
+
+// reapStaleNudgePollers removes orphaned nudge poller PID files left behind by
+// pollers that were killed, crashed, or os.Exit'd without running their release
+// closure. A *.pid file is stale when its contents are unparseable or its PID
+// is no longer alive. The sibling .pid.lock file is deliberately NOT removed —
+// it is the stable per-key flock mutex inode and removing it under the lock
+// would race concurrent acquirers (see reapStaleNudgePoller). The work is done
+// under the same per-file lock the lease path uses so a concurrently starting
+// poller is never raced. It is best-effort: a missing pollers directory is a
+// no-op and per-file errors are accumulated and returned without aborting the
+// sweep.
+func reapStaleNudgePollers(cityPath string) error {
+	pollersDir := citylayout.RuntimePath(cityPath, "nudges", "pollers")
+	entries, err := os.ReadDir(pollersDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading nudge pollers dir: %w", err)
+	}
+	var errs []error
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".pid") {
+			continue
+		}
+		pidPath := filepath.Join(pollersDir, entry.Name())
+		if err := reapStaleNudgePoller(pidPath); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// reapStaleNudgePoller removes pidPath when the PID it names is unparseable or
+// no longer alive. It takes the per-file lock so the liveness check and removal
+// cannot race a poller acquiring the same lease, mirroring exactly what the
+// lease release closure does (which is safe).
+func reapStaleNudgePoller(pidPath string) error {
+	return withNudgePollerPIDLock(pidPath, func() error {
+		data, err := os.ReadFile(pidPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read nudge poller pid %q: %w", pidPath, err)
+		}
+		pidText := strings.TrimSpace(string(data))
+		var pid int
+		if n, parseErr := fmt.Sscanf(pidText, "%d", &pid); parseErr == nil && n == 1 && pidutil.Alive(pid) {
+			return nil
+		}
+		// Remove ONLY the stale .pid. The sibling .pid.lock is intentionally
+		// left in place: it is the stable per-key flock mutex inode. Calling
+		// os.Remove on it while we hold LOCK_EX would let a third concurrent
+		// acquirer create a brand-new lock inode and run its critical section
+		// alongside a blocked acquirer that inherited the now-orphaned inode,
+		// breaking mutual exclusion and double-spawning pollers — exactly what
+		// the lease exists to prevent. Leave the lock inode permanently stable.
+		if err := os.Remove(pidPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale nudge poller pid %q: %w", pidPath, err)
+		}
+		return nil
+	})
 }
 
 var errNudgePollerRunning = errors.New("nudge poller already running")

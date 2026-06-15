@@ -3517,6 +3517,117 @@ func TestExistingPollerPIDPreservesSameTargetAfterDifferentTarget(t *testing.T) 
 	}
 }
 
+// deadPID starts and reaps a short-lived process so its PID is guaranteed to
+// refer to no live process for the duration of the test.
+func deadPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start(true): %v", err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("Wait(true): %v", err)
+	}
+	if pidutil.Alive(pid) {
+		t.Skipf("reaped PID %d still reported alive (PID reuse); skipping", pid)
+	}
+	return pid
+}
+
+func TestReapStaleNudgePollersRemovesDeadPID(t *testing.T) {
+	cityPath := t.TempDir()
+	pidPath := nudgePollerPIDPath(cityPath, "sess-worker", "session-id")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", deadPID(t))), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := reapStaleNudgePollers(cityPath); err != nil {
+		t.Fatalf("reapStaleNudgePollers: %v", err)
+	}
+
+	if _, err := os.Stat(pidPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dead pid file still exists after reap: %v", err)
+	}
+}
+
+func TestReapStaleNudgePollersRemovesUnparseablePID(t *testing.T) {
+	cityPath := t.TempDir()
+	pidPath := nudgePollerPIDPath(cityPath, "sess-worker", "session-id")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte("not-a-pid\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := reapStaleNudgePollers(cityPath); err != nil {
+		t.Fatalf("reapStaleNudgePollers: %v", err)
+	}
+
+	if _, err := os.Stat(pidPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unparseable pid file still exists after reap: %v", err)
+	}
+}
+
+func TestReapStaleNudgePollersKeepsLivePID(t *testing.T) {
+	cityPath := t.TempDir()
+	pidPath := nudgePollerPIDPath(cityPath, "sess-worker", "session-id")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := reapStaleNudgePollers(cityPath); err != nil {
+		t.Fatalf("reapStaleNudgePollers: %v", err)
+	}
+
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Fatalf("live pid file was removed by reap: %v", err)
+	}
+}
+
+func TestReapStaleNudgePollersLeavesLock(t *testing.T) {
+	cityPath := t.TempDir()
+	pidPath := nudgePollerPIDPath(cityPath, "sess-worker", "session-id")
+	lockPath := pidPath + ".lock"
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", deadPID(t))), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid): %v", err)
+	}
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile(lock): %v", err)
+	}
+
+	if err := reapStaleNudgePollers(cityPath); err != nil {
+		t.Fatalf("reapStaleNudgePollers: %v", err)
+	}
+
+	if _, err := os.Stat(pidPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dead pid file still exists after reap: %v", err)
+	}
+	// The .pid.lock is the stable per-key flock mutex inode. The reaper must
+	// leave it in place: removing it under flock races concurrent acquirers
+	// and can break mutual exclusion (double-spawn). Assert it survives.
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock file was removed by reap (must remain stable): %v", err)
+	}
+}
+
+func TestReapStaleNudgePollersMissingDirNoOp(t *testing.T) {
+	cityPath := t.TempDir() // no .gc/nudges/pollers dir created
+	if err := reapStaleNudgePollers(cityPath); err != nil {
+		t.Fatalf("reapStaleNudgePollers on missing dir: %v", err)
+	}
+}
+
 func startPollerLikeProcess(t *testing.T, cityPath, agentName string) *exec.Cmd {
 	t.Helper()
 	const sessionName = "sess-worker"
