@@ -2117,12 +2117,16 @@ func acquireProviderSemaphoreForOp(cityPath, op string) (func(), error) {
 }
 
 // providerOpTimeout returns the context timeout for a given lifecycle
-// operation. The "start" and "recover" operations get a longer timeout
-// because dolt server startup can take 30+ seconds for large data dirs.
-// All other operations use 30s.
+// operation. The "start", "recover", and "init" operations get a longer
+// timeout: dolt server startup can take 30+ seconds for large data dirs, and
+// initializing a rig's bead store can likewise exceed 30s when it creates or
+// migrates a database on a busy shared dolt server. Under the old 30s budget,
+// init of an existing-but-unmigrated rig DB during a config reload was
+// SIGKILLed, leaving the supervisor "keeping old config" so newly configured
+// rigs never came online. All other operations use 30s.
 var providerOpTimeout = func(op string) time.Duration {
 	switch op {
-	case "start", "recover":
+	case "start", "recover", "init":
 		return 120 * time.Second
 	default:
 		return 30 * time.Second
