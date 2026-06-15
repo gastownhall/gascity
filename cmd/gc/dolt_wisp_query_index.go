@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -79,6 +80,22 @@ func applyWispQueryIndexesToDB(ctx context.Context, port, database string, stder
 			// Non-fatal: log and continue. Some statements may fail if the
 			// table doesn't exist yet (fresh install before first bd init).
 			fmt.Fprintf(stderr, "wisp-query-index: %s: %v\n", stmt, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+
+	// Persist the schema change so the indexes survive reset/sync, matching
+	// the schemas/wisps-composite-index migration convention. Fail-open:
+	// "nothing to commit" (idempotent re-run) and any other commit error are
+	// logged, never returned.
+	for _, stmt := range []string{
+		"CALL DOLT_ADD('.')",
+		"CALL DOLT_COMMIT('-m', 'gc: add wisp-query performance indexes (gcy-0m1)', '--author', 'gascity-builder <builder@gascity.local>')",
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+				break
+			}
+			fmt.Fprintf(stderr, "wisp-query-index commit: %s: %v\n", stmt, err) //nolint:errcheck
 		}
 	}
 	return nil
