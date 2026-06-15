@@ -269,23 +269,6 @@ func TestCloseMoleculeWithReasonTrimsWhitespace(t *testing.T) {
 	}
 }
 
-// TestCloseHookScriptIncludesMoleculeAutoclose asserts the bd close
-// hook script wired by gc forwards bead closes to `gc molecule
-// autoclose` alongside the existing convoy and wisp autoclose calls.
-// Without this wiring the new code is unreachable in production.
-func TestCloseHookScriptIncludesMoleculeAutoclose(t *testing.T) {
-	script := closeHookScript("")
-	if !strings.Contains(script, "molecule autoclose") {
-		t.Fatalf("close hook script missing 'molecule autoclose' dispatch:\n%s", script)
-	}
-	// Sanity: the existing siblings are still present.
-	for _, sib := range []string{"convoy autoclose", "wisp autoclose", "bead.closed"} {
-		if !strings.Contains(script, sib) {
-			t.Errorf("close hook script missing %q (regression in sibling wiring):\n%s", sib, script)
-		}
-	}
-}
-
 // TestMoleculeAutocloseClosesWorkflowRootOnSourceBeadClose is the headline
 // regression: a graph.v2 workflow wisp (issue_type "task", not
 // "molecule") with no expanded step children orphans when the worker closes

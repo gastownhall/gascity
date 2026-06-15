@@ -3749,7 +3749,7 @@ exit 0
 	if !strings.Contains(gcLogText, "mail send human -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
 		t.Fatalf("reaper did not send escalation mail for session-prune anomaly:\n%s", gcLogText)
 	}
-	if !strings.Contains(gcLogText, "gm: 1500 closed session beads pruned in one run (threshold: 1000)") {
+	if !strings.Contains(gcLogText, "gm: 1500 closed session beads pruned (pattern=gm-* threshold: 1000)") {
 		t.Fatalf("reaper escalation did not include session-prune anomaly:\n%s", gcLogText)
 	}
 	if !strings.Contains(gcLogText, "sessions-pruned:1500") {

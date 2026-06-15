@@ -35,6 +35,7 @@ func TestTutorial03Sessions(t *testing.T) {
 		t.Fatalf("seed reviewer scaffold: %v\n%s", err, out)
 	}
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "agent.toml"), "dir = \"my-project\"\nprovider = \""+tutorialReviewerProvider()+"\"\n", 0o644)
+	registerTutorialReviewerProvider(t, myCity)
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "prompt.template.md"), "# Reviewer\nReview code.\n", 0o644)
 	writeFile(t, filepath.Join(myProject, "hello.py"), "print(\"Hello, World!\")\n", 0o644)
 	ws.noteWarning("TODO(issue #632): once bare agent/template names reliably resolve to the enclosing rig in acceptance-style paths, simplify tutorial 03 back to bare `reviewer` references from inside ~/my-project")

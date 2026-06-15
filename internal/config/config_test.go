@@ -748,6 +748,79 @@ func TestBeadsConfigRoundTripPreservesStagedFields(t *testing.T) {
 	}
 }
 
+func TestApplyBeadPolicyDefaults_NilCityIsNoop(t *testing.T) {
+	ApplyBeadPolicyDefaults(nil) // must not panic
+	t.Log("nil city is a noop")
+}
+
+func TestApplyBeadPolicyDefaults_SetsOrderTrackingDefault(t *testing.T) {
+	cfg := &City{}
+	ApplyBeadPolicyDefaults(cfg)
+
+	p, ok := cfg.Beads.Policies["order_tracking"]
+	if !ok {
+		t.Fatal("order_tracking policy not set after ApplyBeadPolicyDefaults")
+	}
+	if p.DeleteAfterClose != "7d" {
+		t.Errorf("order_tracking.delete_after_close = %q, want 7d", p.DeleteAfterClose)
+	}
+}
+
+func TestApplyBeadPolicyDefaults_DoesNotOverrideExplicitValue(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"order_tracking": {DeleteAfterClose: "48h"},
+			},
+		},
+	}
+	ApplyBeadPolicyDefaults(cfg)
+
+	p := cfg.Beads.Policies["order_tracking"]
+	if p.DeleteAfterClose != "48h" {
+		t.Errorf("order_tracking.delete_after_close = %q, want 48h (explicit value must not be overridden)", p.DeleteAfterClose)
+	}
+}
+
+func TestApplyBeadPolicyDefaults_PreservesOtherPolicies(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"control": {DeleteAfterClose: "24h"},
+			},
+		},
+	}
+	ApplyBeadPolicyDefaults(cfg)
+
+	control := cfg.Beads.Policies["control"]
+	if control.DeleteAfterClose != "24h" {
+		t.Errorf("control.delete_after_close = %q, want 24h (must be preserved)", control.DeleteAfterClose)
+	}
+	orderTracking := cfg.Beads.Policies["order_tracking"]
+	if orderTracking.DeleteAfterClose != "7d" {
+		t.Errorf("order_tracking.delete_after_close = %q, want 7d", orderTracking.DeleteAfterClose)
+	}
+}
+
+func TestApplyBeadPolicyDefaults_StorageFieldPreserved(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"order_tracking": {Storage: BeadStorageNoHistory},
+			},
+		},
+	}
+	ApplyBeadPolicyDefaults(cfg)
+
+	p := cfg.Beads.Policies["order_tracking"]
+	if p.DeleteAfterClose != "7d" {
+		t.Errorf("order_tracking.delete_after_close = %q, want 7d (default should be applied when only Storage is set)", p.DeleteAfterClose)
+	}
+	if p.Storage != BeadStorageNoHistory {
+		t.Errorf("order_tracking.storage = %q, want no_history (must be preserved)", p.Storage)
+	}
+}
+
 func TestParseSessionSection(t *testing.T) {
 	data := []byte(`
 [workspace]

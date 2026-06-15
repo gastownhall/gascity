@@ -193,6 +193,9 @@ func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Conte
 		if err := extmsg.ReassignSessionBindings(ctx, store, b.ID, replacementID, now); err != nil {
 			return fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", b.ID, replacementID, err)
 		}
+		if err := extmsg.ReassignSessionParticipants(ctx, store, b.ID, replacementID); err != nil {
+			return fmt.Errorf("reassign external message participants from retired session %s to %s: %w", b.ID, replacementID, err)
+		}
 	}
 	return nil
 }

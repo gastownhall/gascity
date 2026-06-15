@@ -101,7 +101,7 @@ generate:
 
 ## check-schema: verify generated docs are up to date
 check-schema: generate
-	@git diff --exit-code docs/schema/ docs/reference/ || \
+	@git diff --exit-code docs/reference/ || \
 		(echo "Error: generated docs stale. Run 'make generate'" && exit 1)
 
 ## clean: remove build artifacts
@@ -376,11 +376,10 @@ test-worker-inference:
 ## test-worker-inference-phase3: alias for the live worker inference conformance package
 test-worker-inference-phase3: test-worker-inference
 
-## test-acceptance: run acceptance tests (Tier A — fast, <5 min, every PR).
-## ACCEPTANCE_TIMEOUT overrides the go-test timeout (defaults to 5m on
-## Linux; Mac CI bumps it because launchd-mediated supervisor start is
-## noticeably slower than systemd).
-ACCEPTANCE_TIMEOUT ?= 5m
+## test-acceptance: run acceptance tests (Tier A — command-level PR gate).
+## ACCEPTANCE_TIMEOUT overrides the go-test timeout. The unsharded local/CI
+## target runs the command-heavy Tier A package serially; RC gate shards it.
+ACCEPTANCE_TIMEOUT ?= 15m
 test-acceptance:
 	$(TEST_ENV) go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) ./test/acceptance/...
 
@@ -632,7 +631,7 @@ diagrams-excalidraw:
 		out="$$out_dir/$$base.svg"; \
 		if [ ! -e "$$out" ] || [ "$$f" -nt "$$out" ]; then \
 			echo "excalidraw -> $$out"; \
-			npx -y @swiftlysingh/excalidraw-cli convert "$$f" --format svg --output "$$out"; \
+			npx -y @swiftlysingh/excalidraw-cli convert "$$f" --format svg --padding 16 --output "$$out"; \
 			rendered=$$((rendered+1)); \
 		fi; \
 	done; \
@@ -681,15 +680,15 @@ dashboard-ci: dashboard-check
 	fi
 
 ## spec-ci: regenerate the OpenAPI spec + generated Go client, fail on drift.
-## Used by CI to enforce that internal/api/openapi.json, docs/schema JSON
+## Used by CI to enforce that internal/api/openapi.json, docs/reference/schema JSON
 ## artifacts, compatibility .txt mirrors, and internal/api/genclient/client_gen.go
 ## are all in lock-step with Huma.
 spec-ci: install-oapi-codegen
 	go run ./cmd/genspec
 	go generate ./internal/api/genclient
-	@if ! git diff --quiet -- internal/api/openapi.json docs/schema/openapi.json docs/schema/openapi.txt docs/schema/events.json docs/schema/events.txt internal/api/genclient/client_gen.go; then \
+	@if ! git diff --quiet -- internal/api/openapi.json docs/reference/schema/openapi.json docs/reference/schema/openapi.txt docs/reference/schema/events.json docs/reference/schema/events.txt internal/api/genclient/client_gen.go; then \
 		echo "ERROR: spec/client artifacts drifted — run 'make spec-ci' locally and commit." >&2; \
-		git --no-pager diff --stat -- internal/api/openapi.json docs/schema/openapi.json docs/schema/openapi.txt docs/schema/events.json docs/schema/events.txt internal/api/genclient/client_gen.go; \
+		git --no-pager diff --stat -- internal/api/openapi.json docs/reference/schema/openapi.json docs/reference/schema/openapi.txt docs/reference/schema/events.json docs/reference/schema/events.txt internal/api/genclient/client_gen.go; \
 		exit 1; \
 	fi
 

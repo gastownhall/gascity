@@ -146,12 +146,16 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 	if err := authorizeMutation(caller, group.RootConversation); err != nil {
 		return ConversationGroupParticipant{}, err
 	}
+	// Capture the stable session name so the participant survives respawn.
+	// Best-effort: empty when the selector resolves to no session bead.
+	sessionName := sessionNameForSelector(s.store, sessionID)
 	title := groupID + "/" + handle
 	fields := encodeMetadataFields(input.Metadata, map[string]string{
 		"schema_version": strconv.Itoa(schemaVersion),
 		"group_id":       groupID,
 		"handle":         handle,
 		"session_id":     sessionID,
+		"session_name":   sessionName,
 		"public":         strconv.FormatBool(input.Public),
 	})
 	var out ConversationGroupParticipant
@@ -184,7 +188,9 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 			pendingCleanup = removeSessionID(pendingCleanup, sessionID)
 			updateFields := mapsClone(fields)
 			updateFields["previous_session_id_pending_cleanup"] = encodePendingCleanupSessionIDs(pendingCleanup)
-			labelsToAdd, labelsToRemove := recordLabels(item.Labels, []string{groupParticipantSessionLabel(record.SessionID)}, []string{groupParticipantSessionLabel(sessionID)})
+			labelsToAdd, labelsToRemove := recordLabels(item.Labels,
+				participantSessionLabels(record.SessionID, record.SessionName),
+				participantSessionLabels(sessionID, sessionName))
 			if err := s.store.Update(item.ID, beads.UpdateOpts{
 				Title:        &title,
 				Labels:       labelsToAdd,
@@ -203,58 +209,16 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 			if err != nil {
 				return err
 			}
-			if s.transcript == nil {
-				return nil
-			}
-			_, err = s.transcript.EnsureMembership(ctx, EnsureMembershipInput{
-				Caller:         groupTranscriptCaller(),
-				Conversation:   group.RootConversation,
-				SessionID:      sessionID,
-				BackfillPolicy: MembershipBackfillAll,
-				Owner:          MembershipOwnerGroup,
-				Now:            timeNow(),
-			})
-			if err != nil {
-				return wrapTranscriptSyncError("ensure transcript membership after participant upsert", err)
-			}
-			if len(pendingCleanup) == 0 {
-				return nil
-			}
-			activeSessions, err := s.activeParticipantSessionCounts(ctx, groupID)
-			if err != nil {
-				return err
-			}
-			remainingCleanup := make([]string, 0, len(pendingCleanup))
-			var cleanupErr error
-			for _, cleanupSessionID := range pendingCleanup {
-				if activeSessions[cleanupSessionID] > 0 {
-					continue
-				}
-				err = s.transcript.RemoveMembership(ctx, RemoveMembershipInput{
-					Caller:       groupTranscriptCaller(),
-					Conversation: group.RootConversation,
-					SessionID:    cleanupSessionID,
-					Owner:        MembershipOwnerGroup,
-					Now:          timeNow(),
-				})
-				if err == nil || errors.Is(err, ErrMembershipNotFound) {
-					continue
-				}
-				cleanupErr = err
-				remainingCleanup = append(remainingCleanup, cleanupSessionID)
-			}
-			if err := s.setParticipantPendingCleanup(item.ID, remainingCleanup); err != nil {
-				return err
-			}
-			if len(remainingCleanup) > 0 {
-				return wrapTranscriptSyncError("remove transcript membership after participant reassignment", cleanupErr)
-			}
-			return nil
+			return s.migrateParticipantGroupMembership(ctx, group, item.ID, sessionID, pendingCleanup)
+		}
+		createLabels := []string{"gc:extmsg-participant", labelGroupParticipantBase, groupParticipantLabel(groupID), groupParticipantSessionLabel(sessionID)}
+		if sessionName != "" {
+			createLabels = append(createLabels, groupParticipantSessionNameLabel(sessionName))
 		}
 		created, err := s.store.Create(beads.Bead{
 			Title:    title,
 			Type:     "task",
-			Labels:   []string{"gc:extmsg-participant", labelGroupParticipantBase, groupParticipantLabel(groupID), groupParticipantSessionLabel(sessionID)},
+			Labels:   createLabels,
 			Metadata: fields,
 		})
 		if err != nil {
@@ -264,21 +228,7 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 		if err != nil {
 			return err
 		}
-		if s.transcript == nil {
-			return nil
-		}
-		_, err = s.transcript.EnsureMembership(ctx, EnsureMembershipInput{
-			Caller:         groupTranscriptCaller(),
-			Conversation:   group.RootConversation,
-			SessionID:      sessionID,
-			BackfillPolicy: MembershipBackfillAll,
-			Owner:          MembershipOwnerGroup,
-			Now:            timeNow(),
-		})
-		if err != nil {
-			return wrapTranscriptSyncError("ensure transcript membership after participant upsert", err)
-		}
-		return nil
+		return s.migrateParticipantGroupMembership(ctx, group, created.ID, sessionID, nil)
 	})
 	if err != nil {
 		return ConversationGroupParticipant{}, err
@@ -406,6 +356,7 @@ func (s *groupService) ResolveInbound(ctx context.Context, event ExternalInbound
 	}
 	byHandle := make(map[string]ConversationGroupParticipant, len(participants))
 	for _, participant := range participants {
+		overlayLiveParticipantSessionID(s.store, &participant)
 		byHandle[participant.Handle] = participant
 	}
 	if explicit := normalizeHandle(event.ExplicitTarget); explicit != "" {
@@ -468,6 +419,7 @@ func (s *groupService) ResolveOutbound(ctx context.Context, ref ConversationRef,
 		return nil, err
 	}
 	for _, participant := range participants {
+		overlayLiveParticipantSessionID(s.store, &participant)
 		if participant.SessionID == sessionID {
 			return &GroupOutboundDecision{
 				Match:       GroupRouteParticipantMatch,
@@ -623,6 +575,78 @@ func (s *groupService) setParticipantPendingCleanup(participantID string, sessio
 	return nil
 }
 
+// migrateParticipantGroupMembership ensures newSessionID owns the group's
+// transcript membership on the root conversation, then retires the group-owned
+// membership for any session in retiredSessionIDs that no active participant in
+// the group still references. A retired session whose membership cannot be
+// removed yet — a live participant still uses it, or the remove failed — is
+// written back onto the participant bead's previous_session_id_pending_cleanup
+// metadata so a later mutation retries it.
+//
+// Both UpsertParticipant (when a handle's session changes) and
+// ReassignSessionParticipants (canonical respawn handover) move a group
+// participant to a new session, so both must carry the session-ID-keyed
+// membership with it; sharing this helper keeps those paths from drifting.
+// Callers must hold groupParticipantsMutationLock for the group and should have
+// already persisted retiredSessionIDs to that metadata so an ensure failure
+// still leaves a durable cleanup record.
+//
+// The ensure/remove writes timestamp with the package timeNow() clock rather
+// than a caller-threaded now (as the sibling ReassignSessionBindings uses):
+// this helper is shared with UpsertParticipant, which has no caller-supplied
+// now, and timeNow is the package-wide clock seam (frozen in tests), so a single
+// clock source keeps both callers consistent without plumbing a now through the
+// participant upsert API. The timestamp is a touched-at marker, so the
+// sub-operation instant difference is immaterial.
+func (s *groupService) migrateParticipantGroupMembership(ctx context.Context, group ConversationGroupRecord, participantID, newSessionID string, retiredSessionIDs []string) error {
+	if s.transcript == nil {
+		return nil
+	}
+	if _, err := s.transcript.EnsureMembership(ctx, EnsureMembershipInput{
+		Caller:         groupTranscriptCaller(),
+		Conversation:   group.RootConversation,
+		SessionID:      newSessionID,
+		BackfillPolicy: MembershipBackfillAll,
+		Owner:          MembershipOwnerGroup,
+		Now:            timeNow(),
+	}); err != nil {
+		return wrapTranscriptSyncError("ensure transcript membership after participant session migration", err)
+	}
+	if len(retiredSessionIDs) == 0 {
+		return nil
+	}
+	activeSessions, err := s.activeParticipantSessionCounts(ctx, group.ID)
+	if err != nil {
+		return err
+	}
+	remainingCleanup := make([]string, 0, len(retiredSessionIDs))
+	var cleanupErr error
+	for _, cleanupSessionID := range retiredSessionIDs {
+		if activeSessions[cleanupSessionID] > 0 {
+			continue
+		}
+		err = s.transcript.RemoveMembership(ctx, RemoveMembershipInput{
+			Caller:       groupTranscriptCaller(),
+			Conversation: group.RootConversation,
+			SessionID:    cleanupSessionID,
+			Owner:        MembershipOwnerGroup,
+			Now:          timeNow(),
+		})
+		if err == nil || errors.Is(err, ErrMembershipNotFound) {
+			continue
+		}
+		cleanupErr = err
+		remainingCleanup = append(remainingCleanup, cleanupSessionID)
+	}
+	if err := s.setParticipantPendingCleanup(participantID, remainingCleanup); err != nil {
+		return err
+	}
+	if len(remainingCleanup) > 0 {
+		return wrapTranscriptSyncError("remove transcript membership after participant session migration", cleanupErr)
+	}
+	return nil
+}
+
 func groupParticipantsMutationLock(groupID string) string {
 	return groupParticipantLabel(groupID) + ":mutation"
 }
@@ -698,6 +722,25 @@ func removeSessionID(sessionIDs []string, target string) []string {
 	return pendingCleanupSessionIDsFromMetadata(map[string]string{"previous_session_id_pending_cleanup": encodePendingCleanupSessionIDs(out)})
 }
 
+// participantReassignmentPending reports whether a group-participant bead still
+// needs its session reassigned from oldSessionID to newSessionID. It is true
+// when the bead still points at the retired session, or when a prior attempt
+// already swapped session_id to the replacement but left the retired session in
+// previous_session_id_pending_cleanup — meaning transcript membership migration
+// had not completed yet, so a retry must finish the handover. The retired-session
+// lookup label is retained until that point precisely so such a partially
+// migrated participant remains discoverable by ReassignSessionParticipants.
+func participantReassignmentPending(metadata map[string]string, oldSessionID, newSessionID string) bool {
+	switch strings.TrimSpace(metadata["session_id"]) {
+	case oldSessionID:
+		return true
+	case newSessionID:
+		return slices.Contains(pendingCleanupSessionIDsFromMetadata(metadata), oldSessionID)
+	default:
+		return false
+	}
+}
+
 func decodeGroupBead(b beads.Bead) (ConversationGroupRecord, error) {
 	ref, err := conversationRefFromMetadata(b.Metadata)
 	if err != nil {
@@ -723,11 +766,31 @@ func decodeGroupBead(b beads.Bead) (ConversationGroupRecord, error) {
 //nolint:unparam // error return reserved for future decoding failures
 func decodeParticipantBead(b beads.Bead) (ConversationGroupParticipant, error) {
 	return ConversationGroupParticipant{
-		ID:        b.ID,
-		GroupID:   strings.TrimSpace(b.Metadata["group_id"]),
-		Handle:    normalizeHandle(b.Metadata["handle"]),
-		SessionID: strings.TrimSpace(b.Metadata["session_id"]),
-		Public:    parseBool(b.Metadata, "public"),
-		Metadata:  decodePrefixedMetadata(b.Metadata),
+		ID:          b.ID,
+		GroupID:     strings.TrimSpace(b.Metadata["group_id"]),
+		Handle:      normalizeHandle(b.Metadata["handle"]),
+		SessionID:   strings.TrimSpace(b.Metadata["session_id"]),
+		SessionName: strings.TrimSpace(b.Metadata["session_name"]),
+		Public:      parseBool(b.Metadata, "public"),
+		Metadata:    decodePrefixedMetadata(b.Metadata),
 	}, nil
+}
+
+// overlayLiveParticipantSessionID re-points a participant at its session's
+// current live bead when the stored session_id has gone stale across a
+// respawn. It mutates only the in-memory copy — persistent healing is
+// ReassignSessionParticipants' job (runs on session handover).
+func overlayLiveParticipantSessionID(store beads.Store, participant *ConversationGroupParticipant) {
+	overlayLiveSessionID(store, participant.SessionName, participant.SessionID, &participant.SessionID)
+}
+
+// participantSessionLabels returns the label set for a participant given its
+// session ID (volatile) and optional session name (stable). The session-name
+// label is omitted when name is empty (legacy participants without one).
+func participantSessionLabels(sessionID, sessionName string) []string {
+	labels := []string{groupParticipantSessionLabel(sessionID)}
+	if sessionName != "" {
+		labels = append(labels, groupParticipantSessionNameLabel(sessionName))
+	}
+	return labels
 }

@@ -51,9 +51,13 @@ func newConvoyCmd(stdout, stderr io.Writer) *cobra.Command {
 A convoy is a named graph of beads with dependencies. Convoys
 group related issues via tracks dependencies.
 
-Convoys are distinct from workflows (compiler-v2 formula-compiled
-DAGs managed by the dispatch subsystem) — gc convoy commands do
-not operate on workflow roots.`,
+Convoys are distinct from workflows — the DAGs compiled from
+v2 formulas and managed by the dispatch
+subsystem. The convoy lifecycle subcommands (create, list, status,
+target, add, close, check, stranded, land) do not operate on
+workflow roots; the dispatch subcommands (control, delete,
+delete-source, reopen-source) manage workflow trees and their
+control beads.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {

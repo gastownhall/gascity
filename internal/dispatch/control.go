@@ -1510,10 +1510,20 @@ func copyNonGCMetadata(dst, src map[string]string) {
 
 func updateMetadataAndClose(store beads.Store, beadID string, metadata map[string]string) error {
 	status := "closed"
-	return store.Update(beadID, beads.UpdateOpts{
+	if err := store.Update(beadID, beads.UpdateOpts{
 		Status:   &status,
 		Metadata: metadata,
-	})
+	}); err != nil {
+		return err
+	}
+	bead, err := store.Get(beadID)
+	if err != nil {
+		return fmt.Errorf("verifying close of %s: %w", beadID, err)
+	}
+	if bead.Status == "closed" {
+		return nil
+	}
+	return store.Close(beadID)
 }
 
 // Note: listByWorkflowRoot, setOutcomeAndClose, propagateRetrySubjectMetadata,

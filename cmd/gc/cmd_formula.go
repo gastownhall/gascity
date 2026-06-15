@@ -25,6 +25,12 @@ func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "formula",
 		Short: "Manage and inspect formulas",
+		Long: `Manage and inspect formulas.
+
+A formula is a reusable TOML method for how multi-step work should be done
+(a bead is the work itself). See docs/reference/specs/formula-spec-v2.md for
+the file format, the formulas v2 contract, and the [requires]
+formula_compiler opt-in.`,
 	}
 
 	cmd.AddCommand(newFormulaListCmd(stdout, stderr))
@@ -42,8 +48,10 @@ func newFormulaListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "List available formulas",
 		Long: `List all formulas available in the city's formula search paths.
 
-Formulas are discovered from city-level and rig-level formula directories
-configured via packs and formulas_dir settings.`,
+Formulas are discovered from the well-known formulas/ directories of
+city and rig pack layers, the city's own formulas/ directory, and the
+rig-local formulas_dir directory. Later layers win for same-named
+formulas.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cityPath, paths, rows := listFormulaRows(stderr)
 			if jsonOutput {
@@ -609,7 +617,13 @@ With --attach=<bead-id>, the sub-DAG is created as children of the given
 bead. The bead gains a blocking dependency on the sub-DAG root, so it won't
 close until the sub-DAG completes. This is the core primitive for late-bound
 DAG expansion — any agent, script, or workflow step can call it to expand a
-bead into a sub-workflow at runtime.`,
+bead into a sub-workflow at runtime.
+
+With --attach on a v2 formula — one declaring
+[requires] formula_compiler = ">=2.0.0" — the invocation runs under a
+per-source workflow lock and is idempotent: a repeat cook for the same
+source bead reuses the live workflow instead of duplicating it, and a
+conflicting live workflow from the same source is an error.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cityPath, err := resolveCity()
@@ -642,7 +656,7 @@ bead into a sub-workflow at runtime.`,
 					err := sourceworkflow.WithLock(cmd.Context(), cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef), attach, func() error {
 						inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
 						if err != nil {
-							return fmt.Errorf("prepare graph.v2 invocation: %w", err)
+							return fmt.Errorf("prepare formulas v2 invocation: %w", err)
 						}
 						printGraphV2Deprecations(stderr, inv.Deprecations)
 						cookVars = inv.Vars
@@ -655,7 +669,7 @@ bead into a sub-workflow at runtime.`,
 						}
 						graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
 						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
-							return fmt.Errorf("decorate graph.v2 recipe: %w", err)
+							return fmt.Errorf("decorate formulas v2 recipe: %w", err)
 						}
 						if graphRootKey != "" {
 							unlock := graphv2.LockKey(graphRootKey)
@@ -735,7 +749,7 @@ bead into a sub-workflow at runtime.`,
 
 				inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
 				if err != nil {
-					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare graph.v2 invocation: %w", err))
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
 				}
 				printGraphV2Deprecations(stderr, inv.Deprecations)
 				cookVars = inv.Vars
@@ -784,7 +798,7 @@ bead into a sub-workflow at runtime.`,
 
 			inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, "", cookVars)
 			if err != nil {
-				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare graph.v2 invocation: %w", err))
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
 			}
 			printGraphV2Deprecations(stderr, inv.Deprecations)
 			cookVars = inv.Vars
@@ -931,14 +945,14 @@ func closeFormulaCookFailedGraphV2Roots(store beads.Store, recipe *formula.Recip
 	}
 	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 0)
 	if err != nil {
-		return fmt.Errorf("looking up failed graph.v2 roots for key %s: %w", key, err)
+		return fmt.Errorf("looking up failed formulas v2 roots for key %s: %w", key, err)
 	}
 	for _, root := range matches {
 		if root.Status == "closed" || root.Metadata["molecule_failed"] != "true" {
 			continue
 		}
 		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {
-			return fmt.Errorf("closing failed graph.v2 root %s: %w", root.ID, err)
+			return fmt.Errorf("closing failed formulas v2 root %s: %w", root.ID, err)
 		}
 	}
 	return nil
@@ -954,13 +968,13 @@ func existingFormulaCookGraphV2Root(store beads.Store, recipe *formula.Recipe) (
 	}
 	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 2)
 	if err != nil {
-		return nil, fmt.Errorf("looking up graph.v2 root key %s: %w", key, err)
+		return nil, fmt.Errorf("looking up formulas v2 root key %s: %w", key, err)
 	}
 	if len(matches) == 0 {
 		return nil, nil
 	}
 	if len(matches) > 1 {
-		return nil, fmt.Errorf("graph.v2 root key %s has multiple live roots: %s, %s", key, matches[0].ID, matches[1].ID)
+		return nil, fmt.Errorf("formulas v2 root key %s has multiple live roots: %s, %s", key, matches[0].ID, matches[1].ID)
 	}
 	rootStep := recipe.RootStep()
 	idMapping := map[string]string{}

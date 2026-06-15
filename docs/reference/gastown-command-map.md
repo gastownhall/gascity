@@ -60,10 +60,10 @@ See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https:
 | `gt ready` | `bd ready` | This stays bead-centric more than city-centric. |
 | `gt done` | no single direct equivalent | In Gas City this is usually a bead close, metadata transition, convoy action, or formula step. |
 | `gt unsling` | no direct equivalent | Usually replaced by bead edits plus re-routing with `bd` and `gc sling`. |
-| `gt formula` | `gc formula list/show/cook`, `gc sling --formula`, `gc order` | `gc formula` manages formulas (list, show, cook). `gc sling --formula` dispatches as a wisp. |
-| `gt mol` | `gc formula cook`, `bd mol ...` | `gc formula cook` creates molecules; `bd` handles bead-level operations. |
+| `gt formula` | `gc formula list/show/cook/version-check`, `gc sling --formula`, `gc order` | `gc formula` manages formulas (list, show, cook, version-check — `version-check` detects whether the on-disk formula file changed after a bead was cooked from it). `gc sling --formula` dispatches a v1 formula as a wisp and a v2 formula as a workflow. |
+| `gt mol` | `gc formula cook`, `bd mol ...` | `gc formula cook` creates molecules (v1) or workflows (v2); `bd` handles bead-level operations. |
 | `gt mq` | no direct generic `gc` command | Gastown-style merge queue behavior lives in the pack and formulas, not a generic SDK namespace. |
-| `gt gate` | `gc wait` | Durable waits are the closest SDK concept. |
+| `gt gate` | `gc wait`; formula `[steps.gate]` | Durable waits are the closest SDK concept. Formulas also carry gates natively — a step-level `[steps.gate]` (types such as `gh:run`, `gh:pr`, `timer`, `human`, `mail`) or `[[compose.gate]]` rules — the closer match when migrating molecule workflows. See [Steps](/reference/specs/formula-spec-v2#13-steps). |
 | `gt park` | `gc wait` | Same underlying idea: stop and resume around a dependency or gate. |
 | `gt resume` | `gc wait ready`, `gc session wake`, `gc mail check` | Depends on whether the action is a parked wait, sleeping session, or handoff/mail resume. |
 | `gt synthesis` | partial: `gc converge`, formulas, convoys | No one-command parity. |

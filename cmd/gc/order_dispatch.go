@@ -41,7 +41,6 @@ const (
 	orderTrackingSweepOrder                = "order-tracking-sweep"
 	orderTrackingBeadPolicyName            = "order_tracking"
 	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
-	defaultOrderTrackingDeleteAfterClose   = 7 * 24 * time.Hour
 	minClosedOrderTrackingRetained         = 10
 	legacyOrderTrackingRetentionBucket     = "\x00legacy-unscoped-order-tracking"
 	orderTrackingSweepWatchdogInterval     = 30 * time.Second
@@ -86,6 +85,12 @@ const (
 	// closed order-tracking beads deleted per watchdog invocation.
 	orderTrackingRetentionWatchdogDeleteBudget = 100
 )
+
+// defaultOrderTrackingDeleteAfterClose is derived from the canonical config
+// constant so both load-time defaults and the runtime fallback stay in sync.
+var defaultOrderTrackingDeleteAfterClose = config.BeadPolicyConfig{
+	DeleteAfterClose: config.DefaultOrderTrackingDeleteAfterClose,
+}.DeleteAfterCloseDuration()
 
 var (
 	// shellExecPostCancelWaitDelay is os/exec's pipe-close wait after
@@ -809,14 +814,15 @@ func (idx *orderDispatchTrackingIndex) lastRunFunc(
 				latest = last
 			}
 		}
-		if fallback != nil {
-			last, err := fallback(scopedName)
-			if err != nil {
-				return time.Time{}, err
-			}
-			if last.After(latest) {
-				latest = last
-			}
+		// The in-memory history index (limit orderTrackingHistoryIndexLimit,
+		// newest-first) is authoritative for any recently-run order: a non-zero
+		// entry is that order's true last run. Only a genuine index miss pays
+		// the per-order fallback query. Without this gate, every cooldown/cron
+		// order runs the fallback on each cold-cache (post-reload) dispatch —
+		// N serial bd-queries that hang gc reload/gc doctor (#3201; residual of
+		// #3191, which #3197's per-query cap bounded but did not eliminate).
+		if latest.IsZero() && fallback != nil {
+			return fallback(scopedName)
 		}
 		return latest, nil
 	}
@@ -968,6 +974,33 @@ func (m *memoryOrderDispatcher) rememberLastRun(orderName string, storeKeys []st
 	}
 	if existing, ok := m.lastRunCache[key]; !ok || existing.IsZero() || last.After(existing) {
 		m.lastRunCache[key] = last
+	}
+}
+
+// carryLastRunCacheFrom copies warm last-run entries from a previous
+// dispatcher into this one, so a reload/rescan-triggered rebuild reuses them
+// instead of cold-starting and re-querying every order (#3201). last-run times
+// are historical truth unaffected by a config reload; entries only ever move
+// forward. Callers invoke this after draining the previous dispatcher, when no
+// goroutine still writes its cache.
+func (m *memoryOrderDispatcher) carryLastRunCacheFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	prev.cacheMu.Lock()
+	defer prev.cacheMu.Unlock()
+	if len(prev.lastRunCache) == 0 {
+		return
+	}
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.lastRunCache == nil {
+		m.lastRunCache = make(map[string]time.Time, len(prev.lastRunCache))
+	}
+	for key, last := range prev.lastRunCache {
+		if existing, ok := m.lastRunCache[key]; !ok || last.After(existing) {
+			m.lastRunCache[key] = last
+		}
 	}
 }
 
@@ -1233,7 +1266,7 @@ func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) str
 	if strings.TrimSpace(a.Pool) == "" || formula.RecipeHasReadySurface(recipe) {
 		return ""
 	}
-	return fmt.Sprintf("warning: pool order %q uses formula %q whose root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or graph.v2 before routing it to a pool.", a.ScopedName(), a.Formula)
+	return fmt.Sprintf("warning: pool order %q uses formula %q whose root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or formulas v2 before routing it to a pool.", a.ScopedName(), a.Formula)
 }
 
 func redactOrderEnvError(err error, env []string) string {
@@ -2867,7 +2900,7 @@ func qualifyPoolInDir(pool, dir, scope string, cfg *config.City, cleanHint strin
 	// Exact SourceDir matches (and their binding closure) take priority over
 	// tail matches: distinct packs can share the same trailing two path
 	// components (a city-local fork at packs/<name> vs the builtin pack
-	// materialized at .gc/system/packs/<name>), and a hint that names one of
+	// served from the user-global cache), and a hint that names one of
 	// them exactly must not go ambiguous because the other tail-matches.
 	switch {
 	case len(exactQualified) == 1:

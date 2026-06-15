@@ -24,6 +24,7 @@ func TestAllAndSourceAreDeterministic(t *testing.T) {
 		"bd=examples/bd",
 		"dolt=examples/bd/dolt",
 		"gastown=examples/gastown/packs/gastown",
+		"gascity=",
 	}
 	if strings.Join(first, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("All = %v, want %v", first, want)
@@ -34,8 +35,13 @@ func TestAllAndSourceAreDeterministic(t *testing.T) {
 		if !ok {
 			t.Fatalf("Source(%q) ok = false, want true", pack.Name)
 		}
-		if source != Repository+"//"+pack.Subpath {
-			t.Fatalf("Source(%q) = %q, want canonical source", pack.Name, source)
+		wantSource := Repository + "//" + pack.Subpath
+		if pack.Subpath == "" {
+			// Public-registry-only packs are addressed by the public source.
+			wantSource = PublicRepository + "//" + pack.Name
+		}
+		if source != wantSource {
+			t.Fatalf("Source(%q) = %q, want %q", pack.Name, source, wantSource)
 		}
 	}
 }
@@ -127,10 +133,15 @@ func TestMaterializeSyntheticRepoRejectsUnsafeDestination(t *testing.T) {
 	}
 }
 
-func TestMaterializeSyntheticRepoProductionCallersStayInPackman(t *testing.T) {
+func TestMaterializeSyntheticRepoProductionCallersStayAllowlisted(t *testing.T) {
 	repoRoot := testRepoRoot(t)
 	allowed := map[string]bool{
+		// packman owns locked cache hydration for pack installs.
 		"internal/packman/cache.go": true,
+		// config's composition self-heal re-materializes the canonical
+		// bundled pin under the repo-cache write lock when packs.lock has
+		// no entry yet; config cannot route through packman (import cycle).
+		"internal/config/pack_include.go": true,
 	}
 	var offenders []string
 	if err := filepath.WalkDir(repoRoot, func(path string, entry fs.DirEntry, err error) error {
@@ -171,7 +182,7 @@ func TestMaterializeSyntheticRepoProductionCallersStayInPackman(t *testing.T) {
 		t.Fatalf("WalkDir(%q): %v", repoRoot, err)
 	}
 	if len(offenders) > 0 {
-		t.Fatalf("MaterializeSyntheticRepo production callers = %v, want only internal/packman/cache.go", offenders)
+		t.Fatalf("MaterializeSyntheticRepo production callers = %v, want only the allowlisted callers (packman cache hydration, config bundled self-heal)", offenders)
 	}
 }
 
@@ -344,6 +355,101 @@ func testRepoRoot(t *testing.T) string {
 		t.Fatalf("repo root %q missing go.mod: %v", root, err)
 	}
 	return root
+}
+
+// Fast-path tests for ValidateSyntheticRepoFast. The fast path checks root
+// existence, type, symlink status, marker read/parse/schema/repository/commit,
+// and marker content hash against the memoized binary hash. It does not walk
+// the materialized file set. Tampered file content, tampered file mode, and
+// unexpected-file cases are intentionally full-validator-only checks; see
+// TestValidateSyntheticRepoRejectsTamperedContent,
+// TestValidateSyntheticRepoRejectsTamperedMode, and
+// TestValidateSyntheticRepoRejectsUnexpectedFiles.
+
+func TestValidateSyntheticRepoFastAcceptsValidRepo(t *testing.T) {
+	dst := materializeTestRepo(t)
+	if err := ValidateSyntheticRepoFast(dst, testCommit); err != nil {
+		t.Fatalf("ValidateSyntheticRepoFast: %v", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastAcceptsEquivalentCommit(t *testing.T) {
+	dst := materializeTestRepo(t)
+	if err := ValidateSyntheticRepoFast(dst, "ABCDEF1"); err != nil {
+		t.Fatalf("ValidateSyntheticRepoFast with abbreviated uppercase commit: %v", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsSymlinkRoot(t *testing.T) {
+	dst := materializeTestRepo(t)
+	link := filepath.Join(t.TempDir(), "cache-link")
+	if err := os.Symlink(dst, link); err != nil {
+		t.Fatalf("Symlink(cache-link): %v", err)
+	}
+	err := ValidateSyntheticRepoFast(link, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted symlink root")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("error = %v, want symlink detail", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsNonDirectoryRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "cache")
+	writeFile(t, root, "not a directory")
+	err := ValidateSyntheticRepoFast(root, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted non-directory root")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("error = %v, want not-a-directory detail", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsMissingMarker(t *testing.T) {
+	dst := materializeTestRepo(t)
+	if err := os.Remove(filepath.Join(dst, syntheticMarkerFile)); err != nil {
+		t.Fatalf("Remove(marker): %v", err)
+	}
+	err := ValidateSyntheticRepoFast(dst, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted missing marker")
+	}
+	if !strings.Contains(err.Error(), "missing bundled pack cache marker") {
+		t.Fatalf("error = %v, want missing marker detail", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsWrongCommit(t *testing.T) {
+	dst := materializeTestRepo(t)
+	err := ValidateSyntheticRepoFast(dst, "0000000000000000000000000000000000000000")
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted wrong commit")
+	}
+	if !strings.Contains(err.Error(), "commit") {
+		t.Fatalf("error = %v, want commit detail", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsWrongContentHash(t *testing.T) {
+	dst := materializeTestRepo(t)
+	markerPath := filepath.Join(dst, syntheticMarkerFile)
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("ReadFile(marker): %v", err)
+	}
+	tampered := strings.Replace(string(data), "sha256:", "sha256:tampered", 1)
+	if err := os.WriteFile(markerPath, []byte(tampered), 0o644); err != nil {
+		t.Fatalf("WriteFile(marker): %v", err)
+	}
+	err = ValidateSyntheticRepoFast(dst, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted wrong content hash")
+	}
+	if !strings.Contains(err.Error(), "content hash") {
+		t.Fatalf("error = %v, want content hash detail", err)
+	}
 }
 
 func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {

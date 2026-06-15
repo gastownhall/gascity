@@ -1,7 +1,7 @@
 ---
 title: Tutorial 01 - Cities and Rigs
 sidebarTitle: 01 - Cities and Rigs
-description: Create a city, sling work to an agent, add a rig, and configure multiple agents.
+description: Create a city, add a project as a rig, and sling your first work to an agent.
 ---
 
 ## Setup
@@ -58,33 +58,24 @@ $ gc init ~/my-city
 Welcome to Gas City SDK!
 
 Choose a config template:
-  1. minimal   — default coding agent (default)
-  2. gastown   — multi-agent orchestration pack
-  3. custom    — empty workspace, configure it yourself
+  1. gascity   — planning & implementation skills pack (default)
+  2. minimal   — default coding agent
+  3. gastown   — multi-agent orchestration pack
+  4. custom    — empty workspace, configure it yourself
 Template [1]:
 
 Choose your coding agent:
-  1. Claude Code  (default)
-  2. Codex CLI
+  1. Claude Code
+  2. Codex
   3. Gemini CLI
-  4. Grok Build
-  5. Cursor Agent
-  6. GitHub Copilot
-  7. Sourcegraph AMP
-  8. OpenCode
-  9. Groq (OpenCode)
-  10. Cerebras (OpenCode)
-  11. Auggie CLI
-  12. Pi Coding Agent
-  13. Oh My Pi (OMP)
-  14. Custom command
-Agent [1]:
+If you don't see your coding agent, configure it and restart the wizard.
+Agent: 1
 [1/8] Creating runtime scaffold
 [2/8] Installing hooks (Claude Code)
-[3/8] Scaffolding agent prompts
+[3/8] Writing default prompts
 [4/8] Writing pack.toml
 [5/8] Writing city configuration
-Created minimal config (Level 1) in "my-city".
+Created gascity config (Level 1) in "my-city".
 [6/8] Checking provider readiness
 [7/8] Registering city with supervisor
 Registered city 'my-city' (/Users/csells/my-city)
@@ -93,16 +84,21 @@ Installed launchd service: /Users/csells/Library/LaunchAgents/com.gascity.superv
 
 ~
 $ gc cities
-NAME        PATH
-my-city     /Users/csells/my-city
+NAME     PATH
+my-city  /Users/csells/my-city
 ```
 
+The agent menu lists only the coding agents the wizard finds configured on
+your machine — today it can probe Claude Code, Codex, Gemini CLI, and
+Antigravity. If exactly one is configured, the wizard selects it without
+asking.
+
 You can avoid the prompts and just specify what provider you want. Here's the
-same command, just providing the provider explicitly.
+same command, with the provider supplied explicitly.
 
 ```shell
 ~
-$ gc init ~/my-city --provider claude
+$ gc init ~/my-city --default-provider claude
 ```
 
 Gas City created the city directory, registered it, and started it. A city
@@ -115,7 +111,7 @@ $ cd ~/my-city
 
 ~/my-city
 $ ls
-agents  assets  city.toml  commands  doctor  formulas  orders  overlay  pack.toml  template-fragments
+agents  assets  city.toml  commands  doctor  formulas  orders  overlays  pack.toml  template-fragments
 ```
 
 At the top level of the city directory:
@@ -123,17 +119,26 @@ At the top level of the city directory:
 - `pack.toml` — the portable pack definition layer
 - `city.toml` — city-local deployment and runtime settings
 
-This city comes with a built-in `mayor` agent. The mayor's prompt lives at
+This city comes with a city-local `mayor` agent. The mayor's prompt lives at
 `agents/mayor/prompt.template.md`, and `pack.toml` defines the always-on mayor
-session that uses it. Assuming you chose the default `minimal` config
-template and default provider, `city.toml` keeps the shared runtime settings:
+session that uses it. Assuming you chose the default `gascity` config template
+and Claude Code, `city.toml` keeps the shared runtime settings:
 
 ```shell
 ~/my-city
 $ cat city.toml
 [workspace]
 provider = "claude"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
+
+[providers]
+[providers.claude]
+base = "builtin:claude"
+ready_delay_ms = 0
+
+[daemon]
+formula_v2 = true
+
+... # commented mail-retention example elided
 ```
 
 The portable pack definition lives next to it:
@@ -145,31 +150,50 @@ $ cat pack.toml
 name = "my-city"
 schema = 2
 
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "sha:<pinned commit>"
+
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "sha:<pinned commit>"
+
+[imports.gascity]
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+version = "sha:<pinned commit>"
+
 [[named_session]]
 template = "mayor"
 mode = "always"
 ```
 
 The `[workspace]` section in `city.toml` sets shared runtime defaults such as
-the provider. The `includes` entries are written by `gc init` and point at the
-builtin packs bundled with the `gc` binary, which Gas City materializes under
-`.gc/system/packs/`: `core` (housekeeping orders, doctor checks, default
-prompts, and core formulas) and — for cities on the default `bd` beads
-provider — `bd`, which brings in its `dolt` helper pack. If these includes go
-missing, `gc doctor --fix` restores them. The machine-local workspace identity
-lives in `.gc/site.toml` instead, which is how `gc cities`, `gc status`, and
-other commands still know this city is named `my-city`.
+the provider. The `[providers.claude]` table registers your chosen provider
+against the builtin `claude` preset, and `[daemon]`'s `formula_v2 = true`
+turns on the v2 formula compiler — the default for new cities (you'll meet
+formulas in [Tutorial 05](/tutorials/05-formulas)). The `[imports]` entries
+in `pack.toml` are explicit pack composition, not hidden load-time behavior.
+`core` and, for cities on the default `bd` beads provider, `bd` are bundled
+system packs that resolve offline from the user-global pack cache. The
+`gascity` import is the public planning and implementation skills pack pinned
+to the registry release embedded with this `gc` binary. If required builtin
+imports go missing, `gc doctor --fix` restores them. The machine-local
+workspace identity lives in `.gc/site.toml` instead, which is how `gc
+cities`, `gc status`, and other commands still know this city is named
+`my-city`.
 
-The built-in `mayor` comes from the scaffolded `agents/mayor/` content, and
-`[[named_session]]` keeps a `mayor` session running so you can talk to it at
-any time. When you add more agents later, Gas City creates `agents/<name>/`,
-with `prompt.template.md` for the prompt and `agent.toml` for any per-agent
+The `mayor` session comes from the scaffolded `agents/mayor/` content and the
+explicit `[[named_session]]` entry, so you can talk to it at any time. When
+you add more agents later, Gas City creates `agents/<name>/`, with
+`prompt.template.md` for the prompt and `agent.toml` for any per-agent
 overrides.
 
-Gas City also gives you an implicit agent for each supported provider — so
-`claude`, `codex`, and `gemini` are available as agent names even though they're
-not listed in `pack.toml`. These use the provider's defaults with no custom
-prompt.
+Gas City also derives a worker template for each provider declared in
+`city.toml`'s `[providers]` table — so `claude` is available as a template
+name (and, once you add a rig, `<rig>/claude`) even though it is not a
+hardcoded role. Provider-derived workers use the core pack's stock
+pool-worker prompt and get `mol-do-work` as their default sling formula —
+more on that in a moment.
 
 To check on the status of your city, use `gc status`:
 
@@ -178,27 +202,33 @@ To check on the status of your city, use `gc status`:
 $ gc status
 my-city  /Users/csells/my-city
   Controller: supervisor-managed (PID 83621)
+  API:        http://127.0.0.1:8372
   Authority: supervisor process PID 83621
   Suspended:  no
 
 Agents:
-  dog                     scaled (min=0, max=2)
-    dog-1                 stopped
-    dog-2                 stopped
+  dolt.dog                scaled (min=0, max=2)
+    dolt.dog-1            stopped
+    dolt.dog-2            stopped
+  control-dispatcher      stopped
 
-0/2 agents running
+0/3 agents running
 
 Named sessions:
   mayor                   reserved-unmaterialized (always)
+  control-dispatcher      reserved-unmaterialized (on_demand)
 ```
 
-Depending on your version, `gc status` may list named sessions by state as
-`awake` or `active` — the two are equivalent.
+A named session shows `reserved-unmaterialized` until the controller
+materializes it; once the mayor session is up, its state reads `awake` (or
+`active` — the two are equivalent).
 
-The `dog` pool is a background utility agent from the bundled `dolt` pack
-(pulled in through the `bd` include you saw in `city.toml`). It handles Dolt
-database housekeeping for the beads backend. You don't need to interact with
-it — ignore it for now.
+The `dolt.dog` pool is a background utility agent from the bundled `dolt` pack
+(pulled in transitively through the explicit `bd` import you saw in
+`pack.toml` — the `dolt.` prefix is the import binding it arrived through).
+It handles Dolt database housekeeping for the beads backend. `control-dispatcher` is SDK
+infrastructure: the controller uses it to advance formula workflows. You don't
+need to interact with either — ignore them for now.
 
 ## Adding a rig
 
@@ -236,6 +266,9 @@ provider = "claude"
 
 [[rigs]]
 name = "my-project"
+
+[daemon]
+formula_v2 = true
 ```
 
 The machine-local workspace identity and path binding live in `.gc/site.toml`:
@@ -269,8 +302,9 @@ Rigs in /Users/csells/my-city:
 ## Slinging your first work
 
 You assign work to agents by "slinging" it — think of it as tossing a task to
-someone who knows what to do. To sling work on a rig, start from inside the rig
-directory and target the rig-scoped agent explicitly:
+someone who knows what to do. To sling work on a rig, target the rig-scoped
+agent explicitly; we'll also hop into the rig directory so we can inspect the
+results:
 
 ```shell
 ~/my-city
@@ -279,31 +313,34 @@ $ cd ~/my-project
 ~/my-project
 $ gc sling my-project/claude "Write hello world in python to the file hello.py"
 Created mp-ff9 — "Write hello world in python to the file hello.py"
-Attached wisp mp-6yh (default formula "mol-do-work") to mp-ff9
-Auto-convoy mp-4tl
-Slung mp-ff9 → my-project/claude
+Attached workflow mp-6yh (formula "mol-do-work") to mp-ff9
 ```
 
 Because the target is `my-project/claude`, the work stays scoped to this rig.
 
 The `gc sling` command created a work item in our city (called a "bead") and
-dispatched it to the `claude` agent. You can watch it progress:
+dispatched it to the `claude` agent. Two more things happened behind the
+scenes: sling instantiated a workflow from the agent's default formula
+(`mol-do-work` — read the bead, do the work, close it), and it created an
+input convoy that tracks your bead so the workflow knows what to act on. You
+can watch the bead progress:
 
 ```shell
-~/my-city
+~/my-project
 $ gc bd show mp-ff9 --watch
-✓ mp-ff9 · Write hello world in python to the file hello.py   [● P2 · CLOSED]
-Owner: Chris Sells · Assignee: claude-mp-208 · Type: task
+○ mp-ff9 · Write hello world in python to the file hello.py   [● P2 · OPEN]
+Owner: Chris Sells · Type: task
 Created: 2026-04-07 · Updated: 2026-04-07
 
-NOTES
-Done: created hello.py
-
-PARENT
-  ↑ ○ mp-6yh: sling-mp-ff9 ● P2
+BLOCKS
+  ← ○ mp-4tl: input convoy for mp-ff9 ● P2
 
 Watching for changes... (Press Ctrl+C to exit)
 ```
+
+The `BLOCKS` line shows the input convoy that sling created to track the bead.
+When the agent finishes the work, the watch view updates and the bead's status
+flips from `OPEN` to `CLOSED`.
 
 Once the bead moves to `CLOSED`, you can see the results:
 
@@ -313,16 +350,16 @@ $ ls
 hello.py
 ```
 
-Success! You just dispatched work to an AI agent and gotten results back.
+Success! You just dispatched work to an AI agent and got results back.
 
 ## What's next
 
-You've created a city, slung work to agents, added a project as a rig, and slung
-work to that rig. From here:
+You've created a city, added a project as a rig, and slung work to an agent on
+that rig. From here:
 
 - **[Agents](/tutorials/02-agents)** — go deeper on agent configuration:
   prompts, sessions, scope, working directories
 - **[Sessions](/tutorials/03-sessions)** — interactive conversations with
   agents, polecats and crew
-- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
-  dependencies and variables
+- **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
+  done: steps, dependencies, and variables

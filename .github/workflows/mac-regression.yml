@@ -1,6 +1,34 @@
 name: Mac Regression
 
 on:
+  workflow_call:
+    inputs:
+      suite:
+        description: Which macOS suite to run
+        required: false
+        type: string
+        default: full
+      pr_number:
+        description: Pull request number for label-dispatched runs
+        required: false
+        type: string
+      head_repo:
+        description: Pull request head repository for label-dispatched runs
+        required: false
+        type: string
+      head_sha:
+        description: Pull request head SHA for label-dispatched runs
+        required: false
+        type: string
+      head_ref:
+        description: Pull request head ref for label-dispatched runs
+        required: false
+        type: string
+      force_blacksmith:
+        description: Force all jobs in the reusable mac regression graph onto Blacksmith runners.
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       suite:
@@ -60,7 +88,7 @@ env:
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: ${{ github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.force_blacksmith && 'blacksmith-2vcpu-ubuntu-2404' || (github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest') }}
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -76,6 +104,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          FORCE_BLACKSMITH: ${{ inputs.force_blacksmith }}
         run: |
           python3 .github/workflows/scripts/runner_policy.py
 

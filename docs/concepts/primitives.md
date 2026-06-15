@@ -81,7 +81,7 @@ bd update <bead-id> --claim
 bd close <bead-id> --reason "Shipped in v1.1.0"
 ```
 
-> By default the store is backed by Dolt through the `bd` CLI, with one Dolt server per city. The city and its rigs share that server but stay logically separate by `issue_prefix`. See [Beads Storage Topology](/internals/beads-topology) for where the files live.
+> By default the store is backed by Dolt through the `bd` CLI, with one Dolt server per city. The city and its rigs share that server but stay logically separate by `issue_prefix`. See [Beads Storage Topology](/reference/internal/beads-topology) for where the files live.
 
 <Tip>
 A **label** is just a string tag on a bead (e.g. `pool:dog`, `rig:tower-of-hanoi`). Labels drive pool dispatch and rig scoping, and you can query by them with `bd list --label <name>`. They are how higher-level mechanisms route and group work without any new storage.
@@ -124,7 +124,7 @@ Config is assembled from several sources:
 - **`pack.toml`** — reusable configuration directories (packs) that define agents and prompts.
 - **`agents/<name>/agent.toml`** — one file per agent; optional per-agent overrides (provider, rig scope, model, pool size). Lives under the `agents/` directory of *any* pack — the city root (yes, a city is also a pack, called the root pack), an imported pack, or a rig-level import.
 - **`formulas/*.toml`** — one file per formula; can live at the city root (`<city-root>/formulas/`) or inside a pack (`<pack-dir>/formulas/`).
-- **`orders/*.toml`** — one file per order (a formula with an Event Bus gate condition); same placement rules as formula files.
+- **`orders/*.toml`** — one file per order (a trigger — `cooldown`, `cron`, `condition`, `event`, or `manual` — plus either a formula to instantiate or an exec command to run); same placement rules as formula files.
 
 These files serve distinct purposes:
 
@@ -225,11 +225,15 @@ gc session nudge mayor "Check mail and hook status, then act accordingly"
 
 ### Formulas & Molecules
 
-A **formula** is a reusable, multi-step workflow written as TOML.
+A **formula** is a reusable, parameterized *method* — how a piece of multi-step work should be done — written as TOML. It is not the work itself: a bead is the unit of work, and a convoy is a graph of related work. Applying a formula is what produces that work.
 
-A **molecule** is a formula *instantiated at runtime*: one root bead plus child step beads in the Beads Store, with progress tracked by closing those beads.
+A **molecule** is a formula *instantiated at runtime* — the work a formula produces: a root bead plus one bead per step in the Beads Store, with progress tracked by closing those beads.
 
 A **wisp** is an ephemeral molecule that auto-closes and is garbage-collected after a configurable time-to-live (TTL).
+
+Formulas compile under one of two contracts, and the contract determines the shape of those beads. Under the **v1 compiler** — the default when a formula declares nothing — the molecule is a tree: a root bead with the step beads attached as parent-child children.
+
+Under **formulas v2** — which a formula opts into by declaring `[requires] formula_compiler = ">=2.0.0"`, and which the host enables by default via the `[daemon] formula_v2` switch — the compiler emits a flat graph instead: a workflow root, step beads linked only by blocking dependencies (no parent-child edges), and controller-owned control beads, ending in a `workflow-finalize` step the root blocks on until the whole graph completes. The base constructs — steps, `needs`, conditions, loops, variables — are common to both contracts; the v2-only constructs and the full opt-in details live in [Choosing a Compiler Contract](/guides/understanding-formulas#choosing-a-compiler-contract).
 
 Instantiating a molecule from a formula is pure composition from the primitives: [Config](#config) supplies the formula definition (a `formulas/*.toml` file), and the [Beads Store](#beads-store) holds the resulting root bead and step beads. Steps declare dependencies on each other with `needs`, so the store's readiness queries naturally schedule them in the right order.
 
@@ -239,6 +243,9 @@ Instantiating a molecule from a formula is pure composition from the primitives:
 # formulas/pancakes.toml
 formula = "pancakes"
 description = "Make pancakes from scratch"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [[steps]]
 id = "dry"
@@ -258,7 +265,7 @@ needs = ["dry", "wet"]
 ```
 
 ```shell
-# See available formulas, then dispatch one as a molecule
+# See available formulas, then dispatch one to an agent
 gc formula list
 gc sling worker pancakes --formula
 ```
@@ -285,12 +292,12 @@ It composes the primitives end to end:
 # Sling a single task to an agent
 gc sling claude "Create a script that prints hello world"
 
-# Sling a formula — expands into a multi-step molecule
+# Sling a formula — starts a multi-step workflow (pancakes declares v2)
 gc sling worker pancakes --formula
 ```
 
 <Tip>
-A **convoy** is a container bead that groups related work as one tracked batch; child beads link to it via their parent. Dispatch can create a convoy for you so a fan-out of related tasks reports progress as a unit.
+A **convoy** is a container bead that groups related work as one tracked batch. Membership is recorded as `tracks` dependency edges from the convoy to each member — tracking never changes a member's parent and blocks nothing. Dispatch can create a convoy for you so a fan-out of related tasks reports progress as a unit.
 </Tip>
 
 ### Health Patrol
@@ -333,5 +340,5 @@ This is why all role behavior is configuration and the SDK has *zero* hardcoded 
 - [Architecture Overview](/concepts/architecture-overview) — the top-down view these primitives compose into.
 - [Tutorials](/tutorials/index) — the guided, end-to-end path through every concept above.
 - [Tutorial 06: Beads](/tutorials/06-beads) — go deeper on the Beads Store that underpins everything here.
-- [Beads Storage Topology](/internals/beads-topology) — how a city and its rigs share one store under the hood.
+- [Beads Storage Topology](/reference/internal/beads-topology) — how a city and its rigs share one store under the hood.
 - [Reference](/reference/index) — command, config, formula, and provider lookup.

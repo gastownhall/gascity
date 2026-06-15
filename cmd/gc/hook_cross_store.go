@@ -81,6 +81,40 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 	})
 }
 
+// appendCityHookStore appends the CITY store as a best-effort federated entry
+// for a rig-scoped agent — the mirror of the #2877 city→rig read federation in
+// the opposite direction. Root-only (city-store) beads can be assigned to a
+// rig-scoped agent (e.g. singleton patrol wisps created at city scope for a
+// rig witness), and none of the agent's other entries reach them: the rig
+// store is its primary, and a rig-backed agent's own work-query env is ALSO
+// rig-scoped (controllerWorkQueryEnv switches to rig coordinates whenever the
+// agent has a configured rig). A city view of the agent (Dir cleared) keeps
+// controllerWorkQueryEnv at city coordinates; identity overrides are preserved
+// so the query still matches work routed/assigned to this agent. Best-effort:
+// returns stores unchanged when the city env cannot be built, and the city
+// entry is appended LAST so the rig store keeps firstStoreWithWork's
+// emit-on-timeout contract as the primary entry.
+func appendCityHookStore(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) []hookStore {
+	if cfg == nil || a == nil {
+		return stores
+	}
+	view := *a
+	view.Dir = ""
+	cityEnv, err := hookQueryEnv(cityPath, cfg, &view)
+	if err != nil || cityEnv == nil {
+		return stores
+	}
+	for _, k := range hookIdentityEnvKeys {
+		if v, ok := identityOverrides[k]; ok {
+			cityEnv[k] = v
+		}
+	}
+	return append(stores, hookStore{
+		dir: cityPath,
+		env: mergeRuntimeEnv(os.Environ(), cityEnv),
+	})
+}
+
 // rigScopedHookRig returns the rig whose store a rig-scoped agent must ALSO
 // query, or "" if none applies. A rig-scoped agent's identity is "<rig>/<name>"
 // (its GC_AGENT) and its routed work lives in the <rig> store, which the agent's

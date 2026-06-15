@@ -14,9 +14,10 @@ import (
 
 // DoltBackupCheck verifies that a rig's Dolt database has a backup remote
 // configured. `gc rig add` provisions the rig but does not register a
-// backup; without a backup remote, mol-dog backup automation silently treats
-// the database as ineligible. This check catches that gap up-front in
-// `gc doctor`.
+// backup. mol-dog-backup auto-configures a local <db>-backup remote on its
+// next run (#3176), so this warning self-heals within one backup interval;
+// it catches the not-yet-covered window up-front in `gc doctor` and stays
+// loud when the backup dog itself is failing.
 //
 // Two signals satisfy the check; either is sufficient:
 //

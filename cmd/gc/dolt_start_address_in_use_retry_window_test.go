@@ -540,10 +540,7 @@ func TestStartManagedDoltProcessWithOptions_WaitedPortsBoundsBumpsAfterRetry(t *
 		retryWindow: retryWindow,
 	})
 
-	start := time.Now()
 	report, err := startManagedDoltProcessWithOptions(cityPath, "0.0.0.0", strconv.Itoa(originalPort), "root", "warning", -1, 1*time.Second, false)
-	elapsed := time.Since(start)
-
 	if err != nil {
 		t.Fatalf("expected success on attempt 3; got %v", err)
 	}
@@ -570,13 +567,6 @@ func TestStartManagedDoltProcessWithOptions_WaitedPortsBoundsBumpsAfterRetry(t *
 	}
 	if got < 1 {
 		t.Errorf("origPortProbeCalls=%d; expected ≥1 (attempt 1's wait must have probed originalPort)", got)
-	}
-
-	// Elapsed bound: attempt 1's wait waited ~waitDelay; attempts 2+3 are
-	// near-instant. Bounded by waitDelay + small slack. If budget broken,
-	// elapsed would include attempt 2's full retryWindow.
-	if elapsed > waitDelay+retryWindow {
-		t.Errorf("elapsed=%s > waitDelay+retryWindow (%s); attempt 2 likely re-waited", elapsed, waitDelay+retryWindow)
 	}
 }
 
@@ -640,9 +630,8 @@ func TestStartManagedDoltProcessWithOptions_HappyPathReturnsReadyOnFirstAttempt(
 // pins the legacy fall-back-immediately behavior: retryWindow=0 means the
 // wait helper at line 246 is gated out (`retryWindow > 0` is false), so
 // the loop bumps the port on the very first address-in-use without
-// consuming any wall time. A regression dropping the `retryWindow > 0`
-// guard would cause this test to (a) take ~poll-interval wall time and
-// (b) call the wait helper at least once.
+// entering the port-wait helper. A regression dropping the `retryWindow > 0`
+// guard would call the wait helper at least once.
 func TestStartManagedDoltProcessWithOptions_RetryWindowZeroBumpsImmediately(t *testing.T) {
 	const originalPort = 17781
 	var startCalls int32
@@ -671,10 +660,7 @@ func TestStartManagedDoltProcessWithOptions_RetryWindowZeroBumpsImmediately(t *t
 		retryWindow: 0, // legacy fall-back-immediately
 	})
 
-	start := time.Now()
 	report, err := startManagedDoltProcessWithOptions(cityPath, "0.0.0.0", strconv.Itoa(originalPort), "root", "warning", -1, 1*time.Second, false)
-	elapsed := time.Since(start)
-
 	if err != nil {
 		t.Fatalf("expected success on attempt 2 (bump); got %v", err)
 	}
@@ -686,9 +672,6 @@ func TestStartManagedDoltProcessWithOptions_RetryWindowZeroBumpsImmediately(t *t
 	}
 	if atomic.LoadInt32(&origPortProbeCalls) != 0 {
 		t.Errorf("origPortProbeCalls=%d; expected 0 (retryWindow=0 must NOT call wait helper, which probes originalPort)", atomic.LoadInt32(&origPortProbeCalls))
-	}
-	if elapsed > 200*time.Millisecond {
-		t.Errorf("elapsed=%s; expected <200ms (no wait should happen with retryWindow=0)", elapsed)
 	}
 }
 

@@ -20,11 +20,11 @@ This page is laid out as a deliberate sequence so you are never untangling sever
 1. [Gas Town Recap](#gas-town-recap) recaps what Gas Town gives you, one domain at a time, so the rest has something to anchor to
 2. [How Gas City Works](#how-gas-city-works) does just that — presenting the small set of building blocks it offers in place of Gas Town's machinery
 3. [Mapping Tables](#mapping-tables) maps Gas Town onto Gas City one domain at a time:
-   1. [roles](#roles-→-gas-city-equivalents)
-   2. [mechanisms](#mechanisms-/-behaviors-→-gas-city-equivalents)
-   3. [filesystem/state](#filesystem-/-state-layout-→-gas-city-equivalents)
-   4. [workflows](#workflows-→-gas-city-equivalents)
-   5. [commands](#commands-→-gas-city-equivalents).
+   1. [roles](#roles--gas-city-equivalents)
+   2. [mechanisms](#mechanisms--behaviors--gas-city-equivalents)
+   3. [filesystem/state](#filesystem--state-layout--gas-city-equivalents)
+   4. [workflows](#workflows--gas-city-equivalents)
+   5. [commands](#commands--gas-city-equivalents).
 
 The prose sections after the tables ([What Usually Maps Cleanly](#what-usually-maps-cleanly) and so on...) go deeper on the patterns that matter most, before a short pointer to the [config recipes](/guides/gastown-config-recipes) and a closing ramp checklist.
 
@@ -87,7 +87,7 @@ They are *not* Gas Town formulas; formulas are a mechanism (see above). This dom
 
 Everything is driven through the `gt` CLI — install, rig, session, sling, convoy, formula, mail, and dozens more.
 
-The full command-by-command translation lives in [Commands → Gas City Equivalents](#commands-→-gas-city-equivalents).
+The full command-by-command translation lives in [Commands → Gas City Equivalents](#commands--gas-city-equivalents).
 
 So we covered the parts Gas Town gives you. Next: the small set of building blocks Gas City offers in their place — and then the domain-by-domain map.
 
@@ -108,7 +108,7 @@ Gas City gives you a small set of building blocks. There are **five primitives**
 …and **four derived mechanisms** composed from them:
 
 - **Messaging** — mail and nudges.
-- **Formulas & Molecules** — workflow templates and their runtime instances.
+- **Formulas & Molecules** — a formula is the reusable method for how work is done; a molecule is the work it produces at runtime.
 - **Dispatch** (`gc sling`) — find or spawn an agent and route work to it.
 - **Health Patrol** — stall detection and restart-with-backoff.
 
@@ -120,9 +120,10 @@ So when you move from Gas Town to Gas City, the default mental model becomes:
 
 - reusable behavior lives in `pack.toml` plus pack directories
 - deployment choices live in `city.toml`
-- even the builtin packs are explicit: `gc init` writes their includes into
-  `city.toml` (`[workspace] includes = [".gc/system/packs/core", ...]`) —
-  nothing is spliced into config composition implicitly
+- even the builtin packs are explicit: `gc init` writes pinned
+  `[imports.core]`/`[imports.bd]` entries into `pack.toml` (resolved from
+  the user-global pack cache) — nothing is spliced into config composition
+  implicitly
 - machine-local bindings and runtime state live in `.gc/`
 - every durable work item is a bead
 - agents are generic; roles come from prompts, formulas, orders, and config
@@ -135,11 +136,11 @@ For the full treatment of these building blocks, read the [Primitives Reference]
 
 You have seen what Gas Town gives you and the building blocks Gas City offers in their place. The five following tables connect the two, one domain at a time, in the same order as the recap above:
 
-- [roles](#roles-→-gas-city-equivalents)
-- [mechanisms](#mechanisms-/-behaviors-→-gas-city-equivalents)
-- [filesystem/state](#filesystem-/-state-layout-→-gas-city-equivalents)
-- [workflows](#workflows-→-gas-city-equivalents)
-- [commands](#commands-→-gas-city-equivalents).
+- [roles](#roles--gas-city-equivalents)
+- [mechanisms](#mechanisms--behaviors--gas-city-equivalents)
+- [filesystem/state](#filesystem--state-layout--gas-city-equivalents)
+- [workflows](#workflows--gas-city-equivalents)
+- [commands](#commands--gas-city-equivalents).
 
 Each table is preceded by a one-sentence scope statement so you always know which domain you are in.
 
@@ -167,7 +168,7 @@ Each table is preceded by a one-sentence scope statement so you always know whic
 | Witness lifecycle tracking | Waits, formulas, session scale config, controller wake/sleep, event bus | The mechanisms are first-class; modeling a "witness" on top of them is optional pack behavior. |
 | Plugin (scheduled / event / conditional automation) | Order — exec order or formula order | Use an **exec order** for shell or controller-side logic; a **formula order** to instantiate agent-driven work. |
 | Convoy as an orchestration runtime | Convoy beads + `gc sling` + formulas | Convoys stay bead-backed grouping and lineage; there is no special convoy runtime layer you must use. |
-| Formula runner inside Town workflows | Formula resolution + backend-owned execution | Gas City resolves and dispatches formulas; multi-step execution is backend-dependent today. `bd` is the production path. |
+| Formula runner inside Town workflows | In-process formula compiler + controller execution | Gas City compiles formulas and instantiates molecules itself. For v2 formulas (host-enabled by default), the controller executes the workflow's control beads; agents execute the work beads. See [Choosing a Compiler Contract](/guides/understanding-formulas#choosing-a-compiler-contract). |
 | Path-derived identity | Explicit agent identity, rig scope, env, bead metadata | Do not port code or prompts that assume the directory path implies who the agent is. |
 
 ### Filesystem / State Layout → Gas City Equivalents
@@ -190,11 +191,11 @@ Each table is preceded by a one-sentence scope statement so you always know whic
 | Gas Town workflow | Gas City equivalent | Where to go deeper |
 |---|---|---|
 | Spin up a worker | `gc start` + a persistent agent config (`agents/<name>/`) | [Tutorial 02 — Agents](/tutorials/02-agents), [Shareable Packs](/guides/shareable-packs) |
-| Send a task to the mayor | `gc sling "<description>"` (or `bd create` + a bead hook) | [`gc sling`](/reference/cli#gc-sling), [Tutorial 06 — Beads](/tutorials/06-beads) |
+| Send a task to the mayor | `gc sling mayor "<description>"` (or `bd create` + a bead hook) | [`gc sling`](/reference/cli#gc-sling), [Tutorial 06 — Beads](/tutorials/06-beads) |
 | Inspect what's stuck | `gc session list`, then `gc session peek <name>` | [`gc session list`](/reference/cli#gc-session-list), [`gc session peek`](/reference/cli#gc-session-peek) |
 | Restart a stalled agent | `gc session reset <name>` (or let health patrol auto-restart it) | [`gc session reset`](/reference/cli#gc-session-reset) |
 | Share a config across teams | A shareable pack: `pack.toml` + `agents/<name>/`, imported by each city | [Shareable Packs](/guides/shareable-packs) |
-| Run a one-shot job | A formula or exec order dispatched on demand (`gc sling --formula <name>`) | [Tutorial 07 — Orders](/tutorials/07-orders), [Tutorial 05 — Formulas](/tutorials/05-formulas) |
+| Run a one-shot job | A formula or exec order dispatched on demand (`gc sling <target> <formula> --formula`) | [Tutorial 07 — Orders](/tutorials/07-orders), [Tutorial 05 — Formulas](/tutorials/05-formulas) |
 | Watch live agent output | `gc session attach <name>` for an interactive live view, or `gc session peek <name>` for a non-attaching snapshot | [`gc session attach`](/reference/cli#gc-session-attach), [`gc session peek`](/reference/cli#gc-session-peek) |
 
 <Note>
@@ -391,8 +392,8 @@ If you already know Gas Town, this is the shortest path to becoming effective in
 1. Read the [Architecture Overview](/concepts/architecture-overview) for the top-down mental model, then the [Primitives Reference](/concepts/primitives) for the nine building blocks in user terms.
 2. Skim the [CLI reference](/reference/cli) alongside the [Gas Town → Gas City Command Map](/reference/gastown-command-map) so the `gt` → `gc` muscle memory transfers.
 3. Read [Tutorial 07 — Orders](/tutorials/07-orders) and mentally remap "plugins" to "orders".
-4. Read [Tutorial 05 — Formulas](/tutorials/05-formulas) and remember that formulas are resolved by Gas City but executed by the configured beads backend.
-5. Work through [Tutorial 02 — Agents](/tutorials/02-agents) and [Shareable Packs](/guides/shareable-packs) to see the PackV2 `agents/<name>/` layout end to end.
+4. Read [Tutorial 05 — Formulas](/tutorials/05-formulas) and remember that Gas City compiles and instantiates formulas itself; for v2 formulas the controller drives the workflow's control beads while agents execute the work beads.
+5. Work through [Tutorial 02 — Agents](/tutorials/02-agents) and [Shareable Packs](/guides/shareable-packs) to see the `agents/<name>/` pack layout end to end.
 6. Read [A Complete Gastown Example](/guides/gastown-config-recipes#a-complete-gastown-example) — the city, root pack, and nested pack assembled into one runnable topology.
 
 If you keep those points straight, most of the Gas Town to Gas City ramp goes quickly.

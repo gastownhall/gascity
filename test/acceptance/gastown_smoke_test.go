@@ -30,7 +30,7 @@ import (
 // initialized city, reducing redundant gc init calls.
 func TestGastownSmoke(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	t.Run("ConfigLoads", func(t *testing.T) {
 		cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(c.Dir, "city.toml"))
@@ -261,7 +261,7 @@ func TestGastownSmoke_InitStatusStop(t *testing.T) {
 // rig-scoped agents appear in the expanded config.
 func TestGastownSmoke_WithRig(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	// Create a minimal git repo to serve as a rig.
 	rigDir := filepath.Join(helpers.TempDir(t), "myrig")

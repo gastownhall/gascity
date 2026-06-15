@@ -353,7 +353,7 @@ beads_rust (br) binary as a real external provider (build tag:
 
 - [Architecture glossary](glossary.md) -- authoritative definitions of
   bead, molecule, convoy, label, and other terms used in this document
-- [Formula file reference](../../docs/reference/formula.md) -- formula file layout,
+- [Formula spec (v2)](../../docs/reference/specs/formula-spec-v2.md) -- formula file layout,
   layer resolution, and how stores instantiate molecules from formulas
 - [Beadmail provider](https://github.com/gastownhall/gascity/tree/main/internal/mail/beadmail/) -- how inter-agent
   messaging composes on top of bead store (mail = beads with type

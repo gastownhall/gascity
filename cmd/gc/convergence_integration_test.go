@@ -1132,10 +1132,10 @@ title = "Work {{convoy_id}}"
 
 	_, err = adapter.PourSpeculativeWisp(parent.ID, "graph-flow", convergence.IdempotencyKey(parent.ID, 1), nil, "")
 	if err == nil {
-		t.Fatal("PourSpeculativeWisp succeeded, want graph.v2 rejection")
+		t.Fatal("PourSpeculativeWisp succeeded, want v2 formula rejection")
 	}
-	if !strings.Contains(err.Error(), "do not support graph.v2") {
-		t.Fatalf("error = %q, want graph.v2 rejection", err)
+	if !strings.Contains(err.Error(), "do not support v2 formula") {
+		t.Fatalf("error = %q, want v2 formula rejection", err)
 	}
 }
 

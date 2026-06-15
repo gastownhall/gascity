@@ -78,6 +78,23 @@ func (c *City) Init(provider string) {
 	})
 }
 
+// InitNoStart runs gc init without registering or starting the city.
+func (c *City) InitNoStart(provider string) {
+	c.t.Helper()
+	args := []string{"init", "--skip-provider-readiness", "--no-start"}
+	if provider != "" {
+		args = append(args, "--provider", provider)
+	}
+	args = append(args, c.Dir)
+	out, err := RunGC(c.Env, "", args...)
+	if err != nil {
+		c.t.Fatalf("gc init --no-start failed: %v\n%s", err, out)
+	}
+	c.t.Cleanup(func() {
+		c.cleanupScaffoldOnly()
+	})
+}
+
 // InitFrom runs gc init --from to copy an example city directory.
 func (c *City) InitFrom(srcDir string) {
 	c.t.Helper()
@@ -87,6 +104,18 @@ func (c *City) InitFrom(srcDir string) {
 	}
 	c.t.Cleanup(func() {
 		c.cleanupRuntime()
+	})
+}
+
+// InitFromNoStart runs gc init --from without registering or starting the city.
+func (c *City) InitFromNoStart(srcDir string) {
+	c.t.Helper()
+	out, err := RunGC(c.Env, "", "init", "--from", srcDir, "--skip-provider-readiness", "--no-start", c.Dir)
+	if err != nil {
+		c.t.Fatalf("gc init --from %s --no-start failed: %v\n%s", srcDir, err, out)
+	}
+	c.t.Cleanup(func() {
+		c.cleanupScaffoldOnly()
 	})
 }
 
@@ -107,11 +136,10 @@ func (c *City) RigAdd(rigPath string, include string) {
 		c.t.Fatalf("acceptance: seeding Claude state for rig %s: %v", rigPath, err)
 	}
 	// Rig temp dirs are often created with t.TempDir() after Init/InitFrom has
-	// already registered its cleanup. Registering another best-effort stop +
-	// unregister cleanup here ensures those temp dirs are removed only after rig
-	// runtime state under .gc has been torn down.
+	// already registered city cleanup. Registering another best-effort city
+	// cleanup here keeps the rig registration from outliving its temp dir.
 	c.t.Cleanup(func() {
-		c.cleanupRuntime()
+		c.cleanupScaffoldOnly()
 	})
 }
 
@@ -239,6 +267,16 @@ func (c *City) cleanupRuntime() {
 	}
 	if out, err := RunGC(c.Env, "", "supervisor", "stop", "--wait"); err != nil {
 		c.t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
+	}
+}
+
+func (c *City) cleanupScaffoldOnly() {
+	c.t.Helper()
+	if out, err := RunGC(c.Env, c.Dir, "stop", c.Dir); err != nil {
+		c.t.Logf("cleanup: gc stop %s: %v\n%s", c.Dir, err, out)
+	}
+	if out, err := RunGC(c.Env, c.Dir, "unregister", c.Dir); err != nil {
+		c.t.Logf("cleanup: gc unregister %s: %v\n%s", c.Dir, err, out)
 	}
 }
 

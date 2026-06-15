@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
@@ -43,6 +44,14 @@ func TestMain(m *testing.M) {
 
 	testEnv = helpers.NewEnv(gcBinary, gcHome, runtimeDir)
 
+	// In-process config loads and packman cache lookups must resolve the
+	// same isolated GC_HOME the subprocess env uses. internal/testenv
+	// scrubs GC_HOME at test-binary init, so opt back in explicitly here;
+	// otherwise pinned bundled imports cannot resolve the repo cache.
+	if err := os.Setenv("GC_HOME", gcHome); err != nil {
+		panic("acceptance: setting GC_HOME: " + err.Error())
+	}
+
 	code := m.Run()
 
 	// Best-effort supervisor stop.
@@ -54,7 +63,7 @@ func TestMain(m *testing.M) {
 // template creates a working city with city.toml, prompts, and formulas.
 func TestInitMinimal(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	if !c.HasFile("city.toml") {
 		t.Fatal("city.toml not created")
@@ -81,7 +90,7 @@ func TestInitMinimal(t *testing.T) {
 // cover the pinned import, the lock entry, and composition results.
 func TestInitGastown(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	if !c.HasFile("city.toml") {
 		t.Fatal("city.toml not created")
@@ -129,31 +138,41 @@ func TestInitGastown(t *testing.T) {
 }
 
 // TestInitGastownResumeAfterFailure simulates the scenario where gc init wrote
-// city.toml and pack.toml but failed before builtin packs were materialized. A
-// subsequent gc init (resume) should materialize packs before loading config.
+// city.toml and pack.toml but failed before the import lockfile was written. A
+// subsequent gc init (resume) should sync the lock and hydrate the bundled
+// cache so the pinned import resolves before config load.
 func TestInitGastownResumeAfterFailure(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 
-	// Simulate partial PackV2 init but DON'T create .gc/system/packs.
+	// Simulate partial PackV2 init: manifests exist but no packs.lock. A
+	// real init writes the required builtin imports (core for this beads
+	// provider) alongside the requested pack, so mirror that manifest shape
+	// at the running binary's canonical pins.
 	c.WriteConfig(`[workspace]
 name = "partial"
 `)
+	coreSource, ok := builtinpacks.Source("core")
+	if !ok {
+		t.Fatal("builtinpacks has no core source")
+	}
 	packToml := `[pack]
 name = "partial"
 schema = 2
 
-[imports.gastown]
-source = ".gc/system/packs/gastown"
+[imports.core]
+source = "` + coreSource + `"
+version = "` + config.BundledSourcePinnedVersion(coreSource) + `"
 
-[defaults.rig.imports.gastown]
-source = ".gc/system/packs/gastown"
+[imports.gastown]
+source = "` + config.PublicGastownPackSource + `"
+version = "` + config.PublicGastownPackVersion + `"
 `
 	if err := os.WriteFile(filepath.Join(c.Dir, "pack.toml"), []byte(packToml), 0o644); err != nil {
 		t.Fatalf("writing pack.toml: %v", err)
 	}
 
 	// Ensure full scaffold exists so gc init resume recognizes this as a city.
-	for _, sub := range []string{".gc", ".gc/cache", ".gc/runtime", ".gc/system"} {
+	for _, sub := range []string{".gc", ".gc/cache", ".gc/runtime"} {
 		os.MkdirAll(filepath.Join(c.Dir, sub), 0o755) //nolint:errcheck
 	}
 	if err := os.WriteFile(filepath.Join(c.Dir, ".gc", "events.jsonl"), nil, 0o644); err != nil {
@@ -161,15 +180,17 @@ source = ".gc/system/packs/gastown"
 	}
 
 	// Re-running gc init on an existing city triggers the resume path,
-	// which calls finalizeInit → MaterializeBuiltinPacks.
-	out, err := c.GC("init", "--skip-provider-readiness", c.Dir)
-	if err != nil && containsSubstr(out, "pack.toml: no such file or directory") {
-		t.Fatalf("gc init resume failed with missing packs — Bug 4 regression:\n%s", out)
+	// which syncs the lock and installs the pinned imports.
+	out, err := c.GC("init", "--skip-provider-readiness", "--no-start", c.Dir)
+	if err != nil {
+		t.Fatalf("gc init resume failed — Bug 4 regression:\n%s", out)
 	}
-	t.Cleanup(c.CleanupRuntime)
-	// Positive assertion: packs must have been materialized.
-	if !c.HasFile(".gc/system/packs/gastown/pack.toml") {
-		t.Fatal(".gc/system/packs/gastown/pack.toml not materialized after resume — Bug 4 regression")
+	// Positive assertions: the lock pins the import and config composes.
+	if !c.HasFile("packs.lock") {
+		t.Fatal("packs.lock not written by gc init resume — Bug 4 regression")
+	}
+	if out, err := c.GC("config", "show", "--validate"); err != nil {
+		t.Fatalf("gc config show --validate after resume failed: %v\n%s", err, out)
 	}
 }
 
@@ -185,11 +206,10 @@ func TestInitPublicGastownPackStartsFromCanonicalImport(t *testing.T) {
 		t.Fatalf("writing public gastown template: %v", err)
 	}
 
-	out, err := helpers.RunGC(testEnv, "", "init", "--file", templatePath, "--skip-provider-readiness", c.Dir)
+	out, err := helpers.RunGC(testEnv, "", "init", "--file", templatePath, "--skip-provider-readiness", "--no-start", c.Dir)
 	if err != nil {
 		t.Fatalf("gc init --file public gastown failed: %v\n%s", err, out)
 	}
-	t.Cleanup(c.CleanupRuntime)
 
 	packToml := c.ReadFile("pack.toml")
 	if !strings.Contains(packToml, `source = "`+config.PublicGastownPackSource+`"`) {
@@ -209,12 +229,6 @@ func TestInitPublicGastownPackStartsFromCanonicalImport(t *testing.T) {
 
 	if out, err := c.GC("config", "show", "--validate"); err != nil {
 		t.Fatalf("config validation after public gastown init failed: %v\n%s", err, out)
-	}
-	if out, err := c.GC("stop", c.Dir); err != nil {
-		t.Fatalf("gc stop after public gastown init failed: %v\n%s", err, out)
-	}
-	if out, err := c.GC("unregister", c.Dir); err != nil {
-		t.Fatalf("gc unregister after public gastown init failed: %v\n%s", err, out)
 	}
 
 	c.StartWithSupervisor()
@@ -258,7 +272,7 @@ func TestInitRegistryIsolation(t *testing.T) {
 // a valid city even when running non-interactively.
 func TestInitCustom(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	if !c.HasFile("city.toml") {
 		t.Fatal("city.toml not created")

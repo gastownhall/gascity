@@ -81,6 +81,17 @@ var (
 	inst     recorderInstruments
 )
 
+// ResetInstrumentsForTest re-arms the lazy instrument bindings (recorder and
+// invocation instruments) so the next Record* call re-registers them against
+// the current global MeterProvider. It exists so tests can swap in a
+// manual-reader SDK provider and observe emissions (mirroring ResetForTest).
+// Must be called only from tests, after swapping the global provider, and
+// again after restoring it.
+func ResetInstrumentsForTest() {
+	instOnce = sync.Once{}
+	invInstOnce = sync.Once{}
+}
+
 // initInstruments registers all recorder metric instruments against the current
 // global MeterProvider. Must be called after telemetry.Init so the real
 // provider is set. Also called lazily on first use as a safety net.

@@ -111,6 +111,7 @@ type CityRuntime struct {
 	fsPressureEpisodeLogged    bool
 
 	convScopes          map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
+	convScopesMu        sync.RWMutex                 // guards convScopes map pointer
 	convergenceReqCh    chan convergenceRequest      // receives CLI commands from controller.sock
 	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
@@ -873,6 +874,14 @@ func (d *tickDebouncer) fired() <-chan struct{} {
 	return d.fireCh
 }
 
+// convScope returns the convergence scope for the given rig name under a read
+// lock so callers outside the run() goroutine can safely read the map.
+func (cr *CityRuntime) convScope(rig string) *convergenceScope {
+	cr.convScopesMu.RLock()
+	defer cr.convScopesMu.RUnlock()
+	return cr.convScopes[rig]
+}
+
 func convergenceStartupComplete(cr *CityRuntime) bool {
 	if cr.convScopes == nil || cr.convergenceReqCh == nil {
 		return true
@@ -1092,6 +1101,9 @@ func (cr *CityRuntime) tick(
 		phaseStart = time.Now()
 		beadWorktreesReaped := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.rec, cr.stderr)
 		recordPhase(TraceSiteControllerTickPhase, "reap_closed_bead_worktrees", phaseStart, map[string]any{"reaped": beadWorktreesReaped})
+		phaseStart = time.Now()
+		agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.stderr)
+		recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})
 	}
 	if ctx.Err() != nil {
 		return
@@ -1162,6 +1174,13 @@ func (cr *CityRuntime) tick(
 	phaseStart = time.Now()
 	reapStaleExtmsgBindings(ctx, cr.cityBeadStore(), time.Now(), cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_bindings", phaseStart, nil)
+	// Re-point group participants at respawned sessions and carry their
+	// group-owned transcript membership; the participant side has no read-time
+	// membership overlay, so this backstop is what converges binding-less
+	// participants the binding reaper never sees.
+	phaseStart = time.Now()
+	reapStaleExtmsgParticipants(ctx, cr.cityBeadStore(), cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_participants", phaseStart, nil)
 	phaseStart = time.Now()
 	result = refreshDesiredStateWithSessionBeads(
 		result,
@@ -1269,6 +1288,19 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot 
 	}
 }
 
+// replaceOrderDispatcher installs next as the active order dispatcher, carrying
+// warm last-run data from the outgoing dispatcher so a rebuild (reload or
+// rescan) reuses it instead of cold-starting and re-querying every order
+// (#3201). Call after draining the outgoing dispatcher.
+func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
+	if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
+		if nextMem, ok := next.(*memoryOrderDispatcher); ok {
+			nextMem.carryLastRunCacheFrom(prev)
+		}
+	}
+	cr.od = next
+}
+
 func (cr *CityRuntime) rescanOrderDispatcher(ctx context.Context, cityRoot string, cfg *config.City, cmdName string, now time.Time) (bool, string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1288,7 +1320,7 @@ func (cr *CityRuntime) rescanOrderDispatcher(ctx context.Context, cityRoot strin
 		cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
 		drainCancel()
 	}
-	cr.od = buildOrderDispatcherFromOrderSet(cityRoot, cfg, snapshot.Orders, cr.rec, cr.stderr)
+	cr.replaceOrderDispatcher(buildOrderDispatcherFromOrderSet(cityRoot, cfg, snapshot.Orders, cr.rec, cr.stderr))
 	cr.orderSet = snapshot.Orders
 	cr.orderSetSignature = snapshot.Signature
 	if summary != "unchanged" {
@@ -1890,7 +1922,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
 	orderSummary := orderSetChangeSummary(cr.orderSet, orderSnapshot.Orders)
-	cr.od = nextOD
+	cr.replaceOrderDispatcher(nextOD)
 	cr.orderSet = orderSnapshot.Orders
 	cr.orderSetSignature = orderSnapshot.Signature
 	cr.orderRescanLast = time.Now()

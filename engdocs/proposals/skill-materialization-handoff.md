@@ -272,7 +272,7 @@ Don't commit on behalf of the user unless asked.
 - `cmd/gc/cmd_doctor.go`, `cmd_mcp.go`, `cmd_skill.go`,
   `cmd_skill_test.go`, `init_provider_readiness.go`, `pool.go`,
   `pool_test.go`
-- `docs/reference/cli.md`, `config.md`, `docs/schema/city-schema.json`
+- `docs/reference/cli.md`, `config.md`, `docs/reference/schema/city-schema.json`
 - `internal/bootstrap/bootstrap.go`, `bootstrap_test.go`
 - `internal/config/compose.go`, `compose_test.go`, `config.go`,
   `config_test.go`, `field_sync_test.go`, `implicit_test.go`, `pack.go`,

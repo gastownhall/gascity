@@ -99,6 +99,7 @@ func cityDoltConfigHasLifecycleFields(cfg config.DoltConfig) bool {
 	return cfg.Host != "" ||
 		cfg.Port != 0 ||
 		cfg.ArchiveLevel != nil ||
+		cfg.AutoGCEnabled != nil ||
 		cfg.MaxConnections != 0 ||
 		cfg.ReadTimeoutMillis != 0 ||
 		cfg.WriteTimeoutMillis != 0 ||
@@ -494,25 +495,16 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 }
 
 // initAndHookDir is the atomic unit of bead store initialization:
-// init the directory, then install event hooks. The ordering matters
-// because init (bd init) may recreate .beads/ and wipe existing hooks.
+// init the directory, then remove any stale gc-managed bead event hooks.
+// The ordering matters because init (bd init) may recreate .beads/ and
+// wipe existing hooks. installBeadHooks only removes gc-stamped hooks and
+// is always safe to run regardless of event_hooks config.
 func initAndHookDir(cityPath, dir, prefix string) error {
-	// Honor [beads] event_hooks=false: skip installing the bd write hooks
-	// (on_create/on_update/on_close). Those hooks fork a full `gc event emit`
-	// per bead write — a real CPU/connection-churn source under load — and a
-	// city that opts out of them must not have them silently reinstalled on
-	// every reconcile. Default (unset) stays true. Load failure → default true.
-	installHooks := true
-	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
-		installHooks = cfg.Beads.EventHooksEnabled()
-	}
 	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
 		return err
 	} else if usesPostgres {
-		if installHooks {
-			if err := installBeadHooks(dir, cityPath); err != nil {
-				return fmt.Errorf("install hooks at %s: %w", dir, err)
-			}
+		if err := installBeadHooks(dir, cityPath); err != nil {
+			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
 		return nil
 	}
@@ -548,10 +540,8 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		}
 	}
 	// Non-fatal: hooks are convenience (event forwarding), not critical.
-	if installHooks {
-		if err := installBeadHooks(dir, cityPath); err != nil {
-			return fmt.Errorf("install hooks at %s: %w", dir, err)
-		}
+	if err := installBeadHooks(dir, cityPath); err != nil {
+		return fmt.Errorf("install hooks at %s: %w", dir, err)
 	}
 	return nil
 }
@@ -1376,17 +1366,24 @@ func writeDoltPortFile(dir, port, scopeLabel string, warn io.Writer) {
 		}
 		fmt.Fprintf(warn, "WARN: %s .beads/dolt-server.port rewrite %s → %s (managed city port)\n", label, existing, trimmedPort) //nolint:errcheck // best-effort stderr
 	}
-	if err := ensureBeadsDir(fsys.OSFS{}, filepath.Dir(portFile)); err != nil {
+	writePath, err := resolveDoltPortFileWritePath(fsys.OSFS{}, portFile)
+	if err != nil {
 		return
 	}
-	_ = fsys.WriteFileAtomic(fsys.OSFS{}, portFile, []byte(trimmedPort+"\n"), 0o644)
+	if err := ensureBeadsDir(fsys.OSFS{}, filepath.Dir(writePath)); err != nil {
+		return
+	}
+	_ = fsys.WriteFileAtomic(fsys.OSFS{}, writePath, []byte(trimmedPort+"\n"), 0o644)
 }
 
 func removeDoltPortFile(dir string) {
 	if dir == "" {
 		return
 	}
-	_ = os.Remove(filepath.Join(dir, ".beads", "dolt-server.port"))
+	// Resolve through any operator symlink so cleanup clears the target and
+	// preserves the link, mirroring writeDoltPortFile's symlink-preserving
+	// write path (ga-lurp5d). Best-effort: ignore the resolve/remove error.
+	_ = removeResolvedDoltPortFile(fsys.OSFS{}, dir)
 }
 
 func removeScopeLocalDoltServerArtifacts(dir string) error {
@@ -1998,6 +1995,7 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		"GC_DOLT_LOCK_FILE",
 		"GC_DOLT_CONFIG_FILE",
 		"GC_DOLT_ARCHIVE_LEVEL",
+		"GC_DOLT_AUTO_GC_ENABLED",
 		"GC_DOLT_MAX_CONNECTIONS",
 		"GC_DOLT_READ_TIMEOUT_MILLIS",
 		"GC_DOLT_WRITE_TIMEOUT_MILLIS",
@@ -2031,6 +2029,9 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		dc, _ := v.(config.DoltConfig)
 		if dc.ArchiveLevel != nil {
 			env = append(env, fmt.Sprintf("GC_DOLT_ARCHIVE_LEVEL=%d", *dc.ArchiveLevel))
+		}
+		if dc.AutoGCEnabled != nil {
+			env = append(env, fmt.Sprintf("GC_DOLT_AUTO_GC_ENABLED=%t", *dc.AutoGCEnabled))
 		}
 		if dc.MaxConnections > 0 {
 			env = append(env, fmt.Sprintf("GC_DOLT_MAX_CONNECTIONS=%d", dc.MaxConnections))

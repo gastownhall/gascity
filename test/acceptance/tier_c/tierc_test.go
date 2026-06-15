@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -35,7 +36,10 @@ import (
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
-var testEnvC *helpers.Env
+var (
+	testEnvC                *helpers.Env
+	attachedWorkflowPattern = regexp.MustCompile(`(?m)^Attached workflow (\S+)\b`)
+)
 
 const tierCStartupTimeout = "3m"
 
@@ -261,14 +265,15 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 		t.Fatalf("gc sling: %v\n%s", err, out)
 	}
 	t.Logf("Slung work to polecat: %s", strings.TrimSpace(out))
+	attachedWorkflowID := parseAttachedWorkflowID(out)
 
 	routeKey := gastownRigAgent(rigName, "polecat")
 	readyOut, err := bdCmd(testEnvC, rigDir, "ready", "--metadata-field", "gc.routed_to="+routeKey, "--unassigned", "--json", "--limit=20")
 	require.NoError(t, err, "bd ready")
 	var ready []beadJSON
 	require.NoError(t, json.Unmarshal([]byte(readyOut), &ready), "unmarshal ready queue")
-	require.Len(t, ready, 1, "expected only the outer bead in the routed ready queue")
-	require.NotContains(t, ready[0].ID, ".", "expected outer bead id, not a step id")
+	require.Len(t, ready, 1, "expected only the routed source/workflow root in the ready queue")
+	require.NotContains(t, ready[0].ID, ".", "expected source/workflow root id, not a step id")
 
 	outerID := ready[0].ID
 	outerOut, err := bdCmd(testEnvC, rigDir, "show", outerID, "--json")
@@ -276,8 +281,11 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	var outer []beadJSON
 	require.NoError(t, json.Unmarshal([]byte(outerOut), &outer), "unmarshal outer bead")
 	require.Len(t, outer, 1, "expected one outer bead")
-	moleculeID := metaString(outer[0].Metadata, "molecule_id")
-	require.NotEmpty(t, moleculeID, "outer bead should carry molecule_id metadata")
+	moleculeID := attachedRootID(outer[0])
+	if moleculeID == "" {
+		moleculeID = attachedWorkflowID
+	}
+	require.NotEmpty(t, moleculeID, "routed bead should carry or be the attached workflow/molecule root")
 
 	rootOut, err := bdCmd(testEnvC, rigDir, "show", moleculeID, "--json")
 	require.NoError(t, err, "bd show molecule root")
@@ -402,14 +410,22 @@ func TestGastown_MayorDispatchPipeline(t *testing.T) {
 	c.RigAdd(rigDir, "packs/gastown")
 	seedGastownClaudeProjects(t, c, rigName)
 
-	// Limit pool sizes.
-	c.AppendToConfig("\n[[rigs.overrides]]\nagent = \"polecat\"\n[rigs.overrides.pool]\nmin = 1\nmax = 1\n")
+	// Keep polecat idle until the mayor creates routed work. A warm min=1
+	// polecat can see the fixture TODO and directly mutate the repo before the
+	// mayor dispatch path has anything to prove.
+	c.AppendToConfig("\n[[rigs.overrides]]\nagent = \"polecat\"\n[rigs.overrides.pool]\nmin = 0\nmax = 1\n")
 
 	c.StartWithSupervisor()
 	time.Sleep(15 * time.Second)
 
-	// Send mail to mayor asking to implement a feature.
-	out, err := c.GC("mail", "send", "mayor", "Please add a greet() function to app.py that prints 'hello'")
+	// Send durable mail, then notify the mayor so an idle session processes it.
+	dispatchTarget := gastownRigAgent(rigName, "polecat")
+	body := fmt.Sprintf(
+		"Create a rig work bead in rig %q for this task, then dispatch it with `gc sling %s <bead-id>`: add a greet() function to app.py that prints 'hello'. Do not edit the file directly as mayor.",
+		rigName,
+		dispatchTarget,
+	)
+	out, err := c.GC("mail", "send", "--notify", "mayor", "-s", "Dispatch app.py greet work to polecat", "-m", body)
 	if err != nil {
 		t.Fatalf("gc mail send: %v\n%s", err, out)
 	}
@@ -588,6 +604,27 @@ func metaString(meta map[string]any, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(v))
+}
+
+func attachedRootID(bead beadJSON) string {
+	if id := metaString(bead.Metadata, "molecule_id"); id != "" {
+		return id
+	}
+	if id := metaString(bead.Metadata, "workflow_id"); id != "" {
+		return id
+	}
+	if metaString(bead.Metadata, "gc.kind") == "workflow" || metaString(bead.Metadata, "gc.formula_contract") == "graph.v2" {
+		return bead.ID
+	}
+	return ""
+}
+
+func parseAttachedWorkflowID(output string) string {
+	match := attachedWorkflowPattern.FindStringSubmatch(output)
+	if len(match) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(match[1])
 }
 
 func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
@@ -950,6 +987,18 @@ func TestUniqueRigName(t *testing.T) {
 		if got := uniqueRigName(tc.testName); got != tc.want {
 			t.Errorf("uniqueRigName(%q) = %q, want %q", tc.testName, got, tc.want)
 		}
+	}
+}
+
+func TestParseAttachedWorkflowID(t *testing.T) {
+	output := `Created pir-pgi — "Create a file called feature.txt containing 'new feature'"
+Attached workflow pir-swc (formula "mol-polecat-work") to pir-swc
+`
+	if got := parseAttachedWorkflowID(output); got != "pir-swc" {
+		t.Fatalf("parseAttachedWorkflowID() = %q, want pir-swc", got)
+	}
+	if got := parseAttachedWorkflowID("Created pir-pgi\n"); got != "" {
+		t.Fatalf("parseAttachedWorkflowID() = %q, want empty", got)
 	}
 }
 

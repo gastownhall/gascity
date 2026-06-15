@@ -100,6 +100,7 @@ const (
 	Graphv2RootKeyMetadataKey            = "gc.graphv2_root_key"
 	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
 	InputConvoyIDMetadataKey             = "gc.input_convoy_id"
+	InstantiatingMetadataKey             = "gc.instantiating"
 	ItemRootKeyMetadataKey               = "gc.item_root_key"
 	KindMetadataKey                      = "gc.kind"
 	LastFailureClassMetadataKey          = "gc.last_failure_class"
@@ -258,6 +259,7 @@ var KnownMetadataKeys = []string{
 	Graphv2RootKeyMetadataKey,
 	IdempotencyKeyMetadataKey,
 	InputConvoyIDMetadataKey,
+	InstantiatingMetadataKey,
 	ItemRootKeyMetadataKey,
 	KindMetadataKey,
 	LastFailureClassMetadataKey,

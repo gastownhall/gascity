@@ -247,6 +247,53 @@ func TestCitySchemaOmitsLegacyPackSourceSurface(t *testing.T) {
 	}
 }
 
+func TestPublicImportSchemaOnlyExposesSourceAndVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		generate func() (interface{}, error)
+	}{
+		{name: "city", generate: func() (interface{}, error) { return GenerateCitySchema() }},
+		{name: "pack", generate: func() (interface{}, error) { return GeneratePackSchema() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := tc.generate()
+			if err != nil {
+				t.Fatalf("generate schema: %v", err)
+			}
+			data, err := json.Marshal(s)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var raw map[string]interface{}
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+
+			props := defProperties(t, raw, "Import")
+			for _, want := range []string{"source", "version"} {
+				if _, ok := props[want]; !ok {
+					t.Fatalf("Import schema missing public field %q in %v", want, props)
+				}
+			}
+			for _, hidden := range []string{"export", "transitive", "shadow"} {
+				if _, ok := props[hidden]; ok {
+					t.Fatalf("Import schema exposes compatibility field %q in %v", hidden, props)
+				}
+			}
+			if len(props) != 2 {
+				t.Fatalf("Import schema properties = %v, want exactly source and version", props)
+			}
+
+			defs := raw["$defs"].(map[string]interface{})
+			imp := defs["Import"].(map[string]interface{})
+			required, _ := imp["required"].([]interface{})
+			if len(required) != 1 || required[0] != "source" {
+				t.Fatalf("Import.required = %v, want [source]", required)
+			}
+		})
+	}
+}
+
 func TestGeneratePackSchema(t *testing.T) {
 	s, err := GeneratePackSchema()
 	if err != nil {

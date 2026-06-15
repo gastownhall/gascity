@@ -775,7 +775,7 @@ disables PR path gating and runs the full deterministic Linux suite:
 - `scripts/test-integration-shard`
 - CI image build files
 - `internal/api/openapi.json`
-- `docs/schema/openapi.*`
+- `docs/reference/schema/openapi.*`
 - `internal/api/genclient/**`
 - `cmd/gc/dashboard/**`
 - `internal/**`

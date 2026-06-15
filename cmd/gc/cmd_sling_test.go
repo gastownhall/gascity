@@ -1682,9 +1682,8 @@ func TestCmdSlingDefaultFormulaDoesNotMaterializePoolSession(t *testing.T) {
 	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
 		t.Fatalf("ensurePersistedScopeLocalFileStore(city): %v", err)
 	}
-	cityToml := `[workspace]
+	cityToml := builtinImportsTOML("core") + `[workspace]
 name = "demo"
-includes = [".gc/system/packs/core"]
 
 [beads]
 provider = "file"
@@ -1699,6 +1698,7 @@ max_active_sessions = 1
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
+	writeBuiltinImportsLock(t, cityDir, "core")
 	t.Chdir(cityDir)
 
 	var stdout, stderr bytes.Buffer
@@ -4962,15 +4962,16 @@ func TestReloadControllerConfigUsesControllerReloadCommand(t *testing.T) {
 }
 
 func TestPokeSupervisorReturnsWithoutWaitingForReloadAck(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 	t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
-	runtimeDir := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "gc")
-	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(%q): %v", runtimeDir, err)
+	sockPath := supervisorSocketPath()
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(sockPath), err)
 	}
 
-	lis, err := net.Listen("unix", supervisorSocketPath())
+	lis, err := net.Listen("unix", sockPath)
 	if err != nil {
-		t.Fatalf("Listen(unix, %q): %v", supervisorSocketPath(), err)
+		t.Fatalf("Listen(unix, %q): %v", sockPath, err)
 	}
 	defer lis.Close() //nolint:errcheck
 

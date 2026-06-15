@@ -438,7 +438,7 @@ both `sling_query` and `work_query` together or neither.
 - [CLAUDE.md](https://github.com/gastownhall/gascity/blob/main/CLAUDE.md) -- design principles including "the
   controller drives all SDK infrastructure operations" (layering
   invariant 6)
-- [Formula file reference](../../docs/reference/formula.md) -- formula structure,
+- [Formula spec (v2)](../../docs/reference/specs/formula-spec-v2.md) -- formula structure,
   layer resolution, and wisp instantiation inputs
 - [TESTING.md](https://github.com/gastownhall/gascity/blob/main/TESTING.md) -- testing philosophy and tier
   boundaries for the fake-injection approach used in dispatch tests

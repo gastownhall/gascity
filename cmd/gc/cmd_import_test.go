@@ -93,7 +93,7 @@ name = "mayor"
 scope = "city"
 
 [providers.default]
-type = "claude"
+base = "builtin:claude"
 
 [[commands]]
 name = "status"
@@ -145,6 +145,7 @@ session_live = ["echo hi"]
 		`append_fragments = ["pack-fragment"]`,
 		`name = "mayor"`,
 		`[providers.default]`,
+		`base = "builtin:claude"`,
 		`[[commands]]`,
 		`session_live = ["echo hi"]`,
 		`[imports.tools]`,
@@ -152,6 +153,58 @@ session_live = ["echo hi"]
 		if !strings.Contains(text, want) {
 			t.Fatalf("pack.toml missing %q:\n%s", want, text)
 		}
+	}
+}
+
+// Regression for the ga-lurp5d follow-up review: gc import add rewrites
+// pack.toml through the reduced cityPackManifest struct. When the on-disk
+// pack.toml carries a key this gc binary does not recognize, the rewrite must
+// refuse rather than silently drop it (the city.toml rewrite guard's contract,
+// now extended to pack.toml).
+func TestDoImportAddRefusesUnknownPackTomlKeys(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	original := `[pack]
+name = "demo"
+schema = 1
+
+[future_unknown_section]
+knob = "keep-me"
+`
+	writePackToml(t, dir, original)
+
+	prevResolve := resolveImportVersion
+	prevConstraint := defaultImportConstraint
+	prevSync := syncImports
+	t.Cleanup(func() {
+		resolveImportVersion = prevResolve
+		defaultImportConstraint = prevConstraint
+		syncImports = prevSync
+	})
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
+	}
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{Schema: packman.LockfileSchema}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, "https://github.com/example/tools.git", "", "", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("code = 0, want non-zero refusal; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "future_unknown_section") {
+		t.Fatalf("stderr = %q, want mention of future_unknown_section", stderr.String())
+	}
+	// The pack.toml must survive an aborted rewrite unchanged.
+	data, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(pack.toml): %v", err)
+	}
+	if string(data) != original {
+		t.Fatalf("pack.toml was rewritten despite refusal:\n%s", data)
 	}
 }
 
@@ -467,7 +520,7 @@ func TestDoImportAddPlainDirectoryOmitsVersion(t *testing.T) {
 	if err := os.MkdirAll(localPack, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writePackToml(t, localPack, "[pack]\nname = \"local\"\nschema = 1\n")
+	writePackToml(t, localPack, "[pack]\nname = \"suggested-display-name\"\nschema = 1\n")
 
 	prevSync := syncImports
 	t.Cleanup(func() { syncImports = prevSync })
@@ -494,6 +547,20 @@ func TestDoImportAddPlainDirectoryOmitsVersion(t *testing.T) {
 	}
 	if imp.Version != "" {
 		t.Fatalf("Version = %q, want empty", imp.Version)
+	}
+	text, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(pack.toml): %v", err)
+	}
+	for _, forbidden := range []string{
+		"suggested-display-name",
+		"export",
+		"transitive",
+		"shadow",
+	} {
+		if strings.Contains(string(text), forbidden) {
+			t.Fatalf("authored import leaked %q into pack.toml:\n%s", forbidden, string(text))
+		}
 	}
 }
 
@@ -1467,6 +1534,7 @@ func TestDoImportListTreeShowsDependencyGraph(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCmdCachedPackGit(t)
 
 	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
@@ -1710,6 +1778,7 @@ func TestDoImportListWithRigShowsOnlyRigScopedClosure(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCmdCachedPackGit(t)
 
 	writeCityToml(t, dir, `
@@ -1913,6 +1982,7 @@ func TestDoImportWhyExplainsTransitiveImport(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCmdCachedPackGit(t)
 
 	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
@@ -2004,6 +2074,7 @@ func TestDoImportAddRemoteEndToEndLoadsImportedPack(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	repo := initImportBarePackRepo(t, "remote-pack", "v1.2.3", `
 [pack]
@@ -2049,6 +2120,7 @@ func TestDoImportAddRemoteSubpathEndToEndLoadsImportedPack(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	repo := initImportBarePackRepo(t, "mono", "v1.2.3", `
 [pack]
@@ -2110,6 +2182,7 @@ func TestDoImportAddRemoteSHAPinEndToEndLoadsImportedPack(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	repo := initImportBarePackRepo(t, "sha-pack", "", `
 [pack]
@@ -2259,6 +2332,119 @@ scope = "city"
 	}
 }
 
+// The pack rewrite key-loss guards must not refuse legitimate packs: every
+// section the gc binary recognizes has to decode cleanly into the structs the
+// writers round-trip (initPackConfig for gc agent suspend, cityPackManifest for
+// import-manifest rewrites). This pins zero false positives for the known pack
+// schema, so the guards fire only on genuinely unknown keys. The fixture must
+// include the sections where the reduced structs historically diverged from
+// config.PackConfig — the legacy [agents] alias and [[pricing]] — because those
+// are the keys the guards would otherwise flag as unrecognized.
+func TestGuardPackRewriteKeyLossAcceptsKnownPackSchema(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	packPath := filepath.Join(dir, "pack.toml")
+	src := `[pack]
+name = "full-pack"
+schema = 1
+version = "1.0.0"
+description = "exercises known sections"
+
+[imports.gastown]
+source = "https://example/gastown.git"
+version = "^1.2"
+
+[agent_defaults]
+provider = "claude"
+
+[agents]
+append_fragments = ["legacy-alias"]
+
+[defaults.rig.imports.review]
+source = "https://example/review.git"
+
+[providers.claude]
+base = "builtin:claude"
+
+[[pricing]]
+provider = "claude"
+model = "claude-opus-4-8"
+last_verified = "2026-06-01"
+
+[pricing.tier]
+prompt_usd_per_1m = 15.0
+completion_usd_per_1m = 75.0
+
+[[agent]]
+name = "worker"
+provider = "claude"
+`
+	if err := os.WriteFile(packPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.GuardRewriteKeyLoss[initPackConfig](fsys.OSFS{}, packPath); err != nil {
+		t.Fatalf("GuardRewriteKeyLoss[initPackConfig] = %v, want nil for known schema", err)
+	}
+	if err := config.GuardRewriteKeyLoss[cityPackManifest](fsys.OSFS{}, packPath); err != nil {
+		t.Fatalf("GuardRewriteKeyLoss[cityPackManifest] = %v, want nil for known schema", err)
+	}
+}
+
+// An import-manifest rewrite must round-trip [[pricing]] (which compose.go
+// consumes) and canonicalize the legacy [agents] alias into [agent_defaults],
+// rather than refusing the rewrite or silently dropping recognized data. This
+// pins the cityPackManifest reduced struct as a faithful superset of the pack
+// schema it guards.
+func TestWriteCityPackManifestPreservesPricingAndFoldsAgentsAlias(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 1
+
+[agents]
+append_fragments = ["legacy-alias"]
+
+[[pricing]]
+provider = "claude"
+model = "claude-opus-4-8"
+last_verified = "2026-06-01"
+
+[pricing.tier]
+prompt_usd_per_1m = 15.0
+completion_usd_per_1m = 75.0
+`)
+
+	manifest, err := loadCityPackManifestFS(fs, "/city")
+	if err != nil {
+		t.Fatalf("loadCityPackManifestFS: %v", err)
+	}
+	if err := writeCityPackManifest(fs, "/city", manifest); err != nil {
+		t.Fatalf("writeCityPackManifest: %v", err)
+	}
+
+	out := string(fs.Files["/city/pack.toml"])
+	for _, want := range []string{
+		"[[pricing]]",
+		`provider = "claude"`,
+		`model = "claude-opus-4-8"`,
+		`last_verified = "2026-06-01"`,
+		"prompt_usd_per_1m",
+		"completion_usd_per_1m",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rewritten pack.toml dropped %q:\n%s", want, out)
+		}
+	}
+	// The alias value survives, canonicalized under [agent_defaults]; the legacy
+	// [agents] table name is not re-emitted.
+	if !strings.Contains(out, "[agent_defaults]") || !strings.Contains(out, `append_fragments = ["legacy-alias"]`) {
+		t.Fatalf("rewritten pack.toml dropped the [agents] alias value:\n%s", out)
+	}
+	if strings.Contains(out, "[agents]") {
+		t.Fatalf("rewritten pack.toml still contains the legacy [agents] table:\n%s", out)
+	}
+}
+
 func TestDoImportAddBareGitHubSourceDefaultsVersion(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
@@ -2359,18 +2545,7 @@ name = "demo-pack"
 schema = 1
 `)
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("Chdir(%q): %v", dir, err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(cwd); err != nil {
-			t.Fatalf("restore cwd: %v", err)
-		}
-	})
+	t.Chdir(dir)
 
 	prevCityFlag := cityFlag
 	prevRigFlag := rigFlag
@@ -2566,18 +2741,7 @@ name = "demo-pack"
 schema = 1
 `)
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("Chdir(%q): %v", dir, err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(cwd); err != nil {
-			t.Fatalf("restore cwd: %v", err)
-		}
-	})
+	t.Chdir(dir)
 
 	prevCityFlag := cityFlag
 	prevRigFlag := rigFlag
@@ -2943,4 +3107,76 @@ func gitOutputImportE(t *testing.T, dir string, args ...string) (string, error) 
 		return "", fmt.Errorf("%w\n%s", err, string(out))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// TestLocalGitRepoRootIgnoresPoisonedGitEnv proves localGitRepoRoot resolves
+// the toplevel of the requested targetDir even when git-locating environment
+// variables point at an unrelated repository. Running gc inside a pre-commit
+// hook or nested worktree tooling exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE
+// for the parent repo; the import probe must strip those so the local import
+// target is resolved from its own working directory.
+func TestLocalGitRepoRootIgnoresPoisonedGitEnv(t *testing.T) {
+	repo := t.TempDir()
+	mustGitImport(t, repo, "init")
+	// Capture git's own resolved toplevel before poisoning so symlink
+	// normalization matches localGitRepoRoot's later result.
+	wantRoot := gitOutputImport(t, repo, "rev-parse", "--show-toplevel")
+
+	poison := t.TempDir()
+	mustGitImport(t, poison, "init")
+	t.Setenv("GIT_DIR", filepath.Join(poison, ".git"))
+	t.Setenv("GIT_WORK_TREE", poison)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(poison, ".git", "index"))
+
+	got, ok, err := localGitRepoRoot(repo)
+	if err != nil {
+		t.Fatalf("localGitRepoRoot with poisoned git env: %v", err)
+	}
+	if !ok {
+		t.Fatalf("localGitRepoRoot ok = false, want true for an initialized repo")
+	}
+	if got != wantRoot {
+		t.Fatalf("localGitRepoRoot = %q, want %q (must ignore poisoned GIT_DIR)", got, wantRoot)
+	}
+}
+
+// TestDefaultImportHeadCommitIgnoresPoisonedGitEnv proves defaultImportHeadCommit
+// resolves the HEAD of the requested source under a poisoned git environment.
+// `git ls-remote <url>` lists refs from the explicit URL, so the sanitized
+// environment is defense-in-depth (against config injection or a future change
+// that relies on local repo discovery); the resolved HEAD must still be the
+// requested source's, never the leaked parent's.
+func TestDefaultImportHeadCommitIgnoresPoisonedGitEnv(t *testing.T) {
+	repo := t.TempDir()
+	mustGitImport(t, repo, "init")
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	mustGitImport(t, repo, "add", ".")
+	mustGitImport(t, repo, "commit", "-m", "initial")
+	wantHead := gitOutputImport(t, repo, "rev-parse", "HEAD")
+
+	// A second repo whose HEAD differs from the source.
+	poison := t.TempDir()
+	mustGitImport(t, poison, "init")
+	if err := os.WriteFile(filepath.Join(poison, "p.txt"), []byte("poison\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(poison): %v", err)
+	}
+	mustGitImport(t, poison, "add", ".")
+	mustGitImport(t, poison, "commit", "-m", "poison")
+	poisonHead := gitOutputImport(t, poison, "rev-parse", "HEAD")
+	if poisonHead == wantHead {
+		t.Fatalf("poison HEAD unexpectedly equals source HEAD %s", wantHead)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(poison, ".git"))
+	t.Setenv("GIT_WORK_TREE", poison)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(poison, ".git", "index"))
+
+	got, err := defaultImportHeadCommit(repo)
+	if err != nil {
+		t.Fatalf("defaultImportHeadCommit with poisoned git env: %v", err)
+	}
+	if got != wantHead {
+		t.Fatalf("defaultImportHeadCommit = %q, want %q (must resolve the requested source)", got, wantHead)
+	}
 }

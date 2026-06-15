@@ -425,7 +425,17 @@ func writeCityAndRigSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City, 
 	if err != nil {
 		return err
 	}
-	snapshot, err := snapshotCityAndSiteFiles(fs, writePath, SiteBindingPath(cityRoot))
+	// Snapshot the .gc/site.toml target persistSiteBinding actually writes,
+	// not the link itself: resolve-only (no key-loss guard, the rollback
+	// rewrites snapshotted bytes), mirroring the resolved forward write so a
+	// post-city.toml binding failure restores the target instead of renaming
+	// over (or removing) a symlinked site binding.
+	sitePath := SiteBindingPath(cityRoot)
+	resolvedSitePath, err := fsys.ResolveSymlinks(fs, sitePath)
+	if err != nil {
+		return fmt.Errorf("resolving site binding %q for rewrite: %w", sitePath, err)
+	}
+	snapshot, err := snapshotCityAndSiteFiles(fs, writePath, resolvedSitePath)
 	if err != nil {
 		return err
 	}
@@ -446,14 +456,23 @@ func writeCityAndRigSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City, 
 // renaming a temp file over the link would replace the link itself, so the
 // rewrite must follow the chain and write at the final target instead. It
 // also refuses the rewrite when the current on-disk content would lose keys
-// in the round-trip (see guardCityRewriteKeyLoss). Every code path that
-// rewrites an existing city.toml must resolve through this helper.
+// in the round-trip (see GuardCityRewriteKeyLoss).
+//
+// Every code path that rewrites an existing city.toml from a re-marshaled
+// struct must resolve through this helper. Two classes are exempt because
+// only half the protection applies: lossless byte-preserving writers that
+// follow the link anyway (an os.WriteFile append or rewrite keeps existing
+// bytes and truncates through the link; switching one to a temp-file +
+// rename write revokes its exemption), and resolve-only restore or repair
+// paths that write previously-snapshotted or stripped bytes back (they
+// resolve via fsys.ResolveSymlinks but must skip the key-loss guard, which
+// would falsely refuse whenever unrelated unknown keys are present).
 func ResolveCityRewritePath(fs fsys.FS, tomlPath string) (string, error) {
 	writePath, err := fsys.ResolveSymlinks(fs, tomlPath)
 	if err != nil {
 		return "", fmt.Errorf("resolving %s for rewrite: %w", tomlPath, err)
 	}
-	if err := guardCityRewriteKeyLoss(fs, writePath); err != nil {
+	if err := GuardCityRewriteKeyLoss(fs, writePath); err != nil {
 		return "", err
 	}
 	return writePath, nil
@@ -478,7 +497,7 @@ func ResolveCityAppendPath(fs fsys.FS, tomlPath string) (string, error) {
 	return writePath, nil
 }
 
-// guardCityRewriteKeyLoss refuses to rewrite a city.toml whose current
+// GuardCityRewriteKeyLoss refuses to rewrite a city.toml whose current
 // on-disk content contains keys this gc binary does not recognize: the
 // struct round-trip would silently drop them (ga-lurp5d dropped
 // agent_defaults.provider and beads.bd_compatibility in production this
@@ -486,10 +505,33 @@ func ResolveCityAppendPath(fs fsys.FS, tomlPath string) (string, error) {
 // file is also refused: callers load the config from this same path before
 // mutating it, so unparsable content here means the file changed underneath
 // us and a rewrite would destroy whatever is there now.
-func guardCityRewriteKeyLoss(fs fsys.FS, path string) error {
-	md, ok, err := decodeCityForGuard(fs, path)
-	if err != nil || !ok {
-		return err
+func GuardCityRewriteKeyLoss(fs fsys.FS, path string) error {
+	return GuardRewriteKeyLoss[City](fs, path)
+}
+
+// GuardRewriteKeyLoss refuses to rewrite a TOML config whose current on-disk
+// content contains keys that struct T does not recognize. T must be the struct
+// the caller marshals back (or a faithful superset of it) so that every key T
+// fails to decode is genuinely one the rewrite would silently drop. It backs
+// GuardCityRewriteKeyLoss for city.toml and the equivalent pack.toml rewrite
+// guards (gc agent suspend, import-manifest rewrites), all of which round-trip
+// a config through a reduced struct and would otherwise drop newer or manual
+// keys at a checked-in target. A missing file is fine — there is nothing to
+// lose. An unparsable file is refused: callers load from this same path before
+// mutating it, so unparsable content means the file changed underneath us and
+// a rewrite would destroy whatever is there now.
+func GuardRewriteKeyLoss[T any](fs fsys.FS, path string) error {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("reading %s before rewrite: %w", path, err)
+	}
+	var cfg T
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return fmt.Errorf("refusing to rewrite %s: current content does not parse, rewriting would destroy it: %w", path, err)
 	}
 	undecoded := md.Undecoded()
 	if len(undecoded) == 0 {
@@ -633,9 +675,13 @@ func PersistWorkspaceSiteBinding(fs fsys.FS, cityRoot, name, prefix string) erro
 
 func persistSiteBinding(fs fsys.FS, cityRoot string, binding SiteBinding) error {
 	path := SiteBindingPath(cityRoot)
+	writePath, err := fsys.ResolveSymlinks(fs, path)
+	if err != nil {
+		return fmt.Errorf("resolving site binding %q for rewrite: %w", path, err)
+	}
 	if len(binding.Rigs) == 0 && binding.WorkspaceName == "" && binding.WorkspacePrefix == "" {
-		if err := fs.Remove(path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("removing site binding %q: %w", path, err)
+		if err := fs.Remove(writePath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing site binding %q: %w", writePath, err)
 		}
 		return nil
 	}
@@ -646,14 +692,14 @@ func persistSiteBinding(fs fsys.FS, cityRoot string, binding SiteBinding) error 
 	if err := enc.Encode(binding); err != nil {
 		return fmt.Errorf("marshaling site binding: %w", err)
 	}
-	if err := fs.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("creating runtime dir %q: %w", filepath.Dir(path), err)
+	if err := fs.MkdirAll(filepath.Dir(writePath), 0o755); err != nil {
+		return fmt.Errorf("creating runtime dir %q: %w", filepath.Dir(writePath), err)
 	}
 	// Skip the write when on-disk content already matches. Keeps repeated
 	// rig/suspend/resume/agent commands idempotent instead of churning
 	// .gc/site.toml mtime (and breaking watcher debounce logic).
-	if err := fsys.WriteFileIfChangedAtomic(fs, path, buf.Bytes(), 0o644); err != nil {
-		return fmt.Errorf("writing site binding %q: %w", path, err)
+	if err := fsys.WriteFileIfChangedAtomic(fs, writePath, buf.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("writing site binding %q: %w", writePath, err)
 	}
 	return nil
 }

@@ -489,7 +489,7 @@ func scopedBeadsProviderOverride(cityPath, scopeRoot string) (string, bool) {
 
 // normalizeRawBeadsProvider maps the city-managed gc-beads-bd wrapper back to
 // the logical "bd" provider for command-time store selection. Managed sessions
-// set GC_BEADS=exec:<cityPath>/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh
+// set GC_BEADS=exec:<cityPath>/.gc/scripts/gc-beads-bd.sh (the stable shim)
 // so lifecycle operations stay pinned to the city's Dolt server, but general
 // gc commands still need a CRUD-capable store.
 func normalizeRawBeadsProvider(cityPath, provider string) string {
@@ -498,7 +498,7 @@ func normalizeRawBeadsProvider(cityPath, provider string) string {
 		return provider
 	}
 	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
-	if samePath(script, gcBeadsBdScriptPath(cityPath)) || samePath(script, legacyGcBeadsBdScriptPath(cityPath)) {
+	if samePath(script, gcBeadsBdScriptPath(cityPath)) || samePath(script, legacySystemPacksGcBeadsBdScriptPath(cityPath)) {
 		return "bd"
 	}
 	return provider
@@ -644,7 +644,7 @@ func bdProviderMismatchHint(scopeRoot, resolvedProvider string) string {
 }
 
 // beadsProvider returns the bead store provider name for lifecycle operations.
-// Maps "bd" → "exec:<cityPath>/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh"
+// Maps "bd" → "exec:<cityPath>/.gc/scripts/gc-beads-bd.sh" (the stable shim)
 // so all lifecycle operations route through the exec: protocol. Other providers
 // pass through unchanged.
 //
@@ -659,14 +659,21 @@ func beadsProvider(cityPath string) string {
 	return raw
 }
 
-// gcBeadsBdScriptPath returns the absolute path to the gc-beads-bd script
-// inside the materialized bd pack (.gc/system/packs/bd/assets/scripts/).
+// gcBeadsBdScriptPath returns the stable per-city gc-beads-bd entrypoint:
+// a generated shim under .gc/scripts that execs the bundled bd pack's
+// lifecycle script in the user-global repo cache. The shim path never
+// changes across binary upgrades, so session environments and provider
+// pins stay valid while the cache target moves with the binary content.
 func gcBeadsBdScriptPath(cityPath string) string {
-	return filepath.Join(cityPath, citylayout.SystemPacksRoot, "bd", "assets", "scripts", "gc-beads-bd.sh")
+	return filepath.Join(cityPath, ".gc", "scripts", "gc-beads-bd.sh")
 }
 
-func legacyGcBeadsBdScriptPath(cityPath string) string {
-	return filepath.Join(cityPath, ".gc", "scripts", "gc-beads-bd.sh")
+// legacySystemPacksGcBeadsBdScriptPath is the retired materialized-pack
+// location (.gc/system/packs/bd/assets/scripts). Sessions and provider
+// pins created by older binaries may still reference it; provider
+// normalization keeps matching it.
+func legacySystemPacksGcBeadsBdScriptPath(cityPath string) string {
+	return filepath.Join(cityPath, citylayout.SystemPacksRoot, "bd", "assets", "scripts", "gc-beads-bd.sh")
 }
 
 // mailProviderName returns the mail provider name.

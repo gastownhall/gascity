@@ -348,7 +348,7 @@ prompt = "do work"
 	if code != 0 {
 		t.Fatalf("gc lint = %d, want 0 (warnings-only exits 0)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "gc.output_json is legacy") {
+	if !strings.Contains(stderr.String(), "gc.output_json is deprecated; use drain in v2 formulas") {
 		t.Errorf("stderr = %q, want gc.output_json warning", stderr.String())
 	}
 }

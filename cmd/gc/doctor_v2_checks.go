@@ -283,7 +283,16 @@ func rewriteWithoutDefaultFormulasDir(path string) error {
 	if !changed {
 		return fmt.Errorf("could not locate [formulas].dir assignment")
 	}
-	return fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, path, []byte(rendered), 0o644)
+	// Resolve-only, like the rollback snapshots: the rewrite is a lossless
+	// textual strip of one declaration, so the key-loss guard in
+	// config.ResolveCityRewritePath would falsely refuse it whenever
+	// unrelated unknown keys are present. Writing at the unresolved path
+	// would replace a symlinked config with a regular file.
+	writePath, err := fsys.ResolveSymlinks(fsys.OSFS{}, path)
+	if err != nil {
+		return err
+	}
+	return fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, writePath, []byte(rendered), 0o644)
 }
 
 func stripDefaultFormulasDirDeclaration(source string) (string, bool) {

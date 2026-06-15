@@ -323,6 +323,7 @@ func setupLockedPackRefTest(t *testing.T, ref, commit string) (cityDir, cacheDir
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityDir = filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
 	writeTestFile(t, cityDir, "packs.lock", fmt.Sprintf(`
@@ -385,6 +386,7 @@ func TestResolvePackRefFallsBackToIncludeCacheWhenUnlocked(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityDir := filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
 
@@ -405,9 +407,75 @@ func TestResolvePackRefFallsBackToIncludeCacheWhenUnlocked(t *testing.T) {
 // under a binary built from another. The synthetic cache key therefore folds in
 // the running binary's content hash; the legacy namespace+source+commit key did
 // not, so both binaries collided on one directory and ping-ponged its marker.
+// The synthetic derivation applies only at the source's canonical pin: any
+// other commit on a bundled source is an ordinary remote import and keeps the
+// plain source+commit key.
+// TestResolveBundledSourceWithoutLockHitsFastPathOnPreMaterializedCache demonstrates
+// that the read-lock pre-check in resolveBundledSourceWithoutLock uses the fast
+// (marker-only) validator and returns the cache dir without acquiring the write lock.
+func TestResolveBundledSourceWithoutLockHitsFastPathOnPreMaterializedCache(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := builtinpacks.MustSource("core")
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
+	cacheRoot, err := GlobalRepoCacheRoot()
+	if err != nil {
+		t.Fatalf("GlobalRepoCacheRoot: %v", err)
+	}
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
+	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+
+	got, ok, err := resolveBundledSourceWithoutLock(source, "")
+	if err != nil {
+		t.Fatalf("resolveBundledSourceWithoutLock: %v", err)
+	}
+	if !ok {
+		t.Fatal("resolveBundledSourceWithoutLock returned ok=false for a known bundled source")
+	}
+	if got != cacheDir {
+		t.Fatalf("resolveBundledSourceWithoutLock = %q, want %q", got, cacheDir)
+	}
+}
+
+// TestValidateInstalledRemoteCacheAcceptsBundledCanonicalPinFast demonstrates
+// that validateInstalledRemoteCache routes bundled sources at the canonical pin
+// through the fast (marker-only) validator.
+func TestValidateInstalledRemoteCacheAcceptsBundledCanonicalPinFast(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := builtinpacks.MustSource("core")
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
+	cacheRoot, err := GlobalRepoCacheRoot()
+	if err != nil {
+		t.Fatalf("GlobalRepoCacheRoot: %v", err)
+	}
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
+	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+
+	if err := validateInstalledRemoteCache(source, cacheDir, commit); err != nil {
+		t.Fatalf("validateInstalledRemoteCache: %v", err)
+	}
+}
+
 func TestRepoCacheKeyIncludesSyntheticContentComponent(t *testing.T) {
 	source := builtinpacks.MustSource("core")
-	const commit = "abc123"
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
 
 	component := builtinpacks.SyntheticCacheKeyComponent()
 	if component == "" {
@@ -424,6 +492,12 @@ func TestRepoCacheKeyIncludesSyntheticContentComponent(t *testing.T) {
 	}
 	if got == legacy {
 		t.Fatalf("RepoCacheKey(synthetic) %q must differ from legacy namespace-only key %q", got, legacy)
+	}
+
+	const otherCommit = "abc123def456abc123def456abc123def456abc123de"
+	plain := repoCacheKeyTestSum(normalized + otherCommit)
+	if got := RepoCacheKey(source, otherCommit); got != plain {
+		t.Fatalf("RepoCacheKey(non-canonical bundled pin) = %q, want plain remote key %q", got, plain)
 	}
 }
 

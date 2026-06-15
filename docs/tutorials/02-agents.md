@@ -4,8 +4,8 @@ sidebarTitle: 02 - Agents
 description: Define agents and use them to execute work.
 ---
 
-In [Tutorial 01](/tutorials/01-cities-and-rigs), you created a city, slung work to an
-implicit agent, and added a rig. The implicit agents (`claude`, `codex`, etc.)
+In [Tutorial 01](/tutorials/01-cities-and-rigs), you created a city, added a
+rig, and slung work to an implicit agent. The implicit agents (`claude`, `codex`, etc.)
 are convenient, but they have no custom prompt — they're just the raw provider.
 In this tutorial, you'll define your own agents with specific roles and use them
 to get work done.
@@ -39,6 +39,24 @@ This section sets `provider = "codex"`. If you don't have Codex installed and
 configured, substitute another provider you do have (e.g., `provider =
 "claude"`); the rest of the walkthrough is the same.
 </Note>
+
+One more piece of wiring: a city's provider catalog is explicit. `gc init`
+registered your default provider (`claude`), but any other provider an agent
+references must also be registered in `city.toml` — otherwise every `gc`
+command fails with `provider catalog is missing referenced providers`.
+Register the builtin alias:
+
+```toml
+# city.toml — register the second provider
+[providers.codex]
+base = "builtin:codex"
+```
+
+(If you forget, `gc doctor --fix` adds missing builtin provider aliases for
+you. If you substituted a different provider above, register that one instead
+— `base = "builtin:<name>"` works for any provider Gas City ships a builtin
+preset for. And if you substituted `claude`, skip this step: `gc init`
+already registered it.)
 
 You'll want to create a prompt for the new agent. Let's first see what
 `gc prime` returns when you don't name an agent — without an agent argument,
@@ -114,10 +132,13 @@ If you wanted to get fancy, you could also set the model and permission mode:
 ```toml
 dir = "my-project"
 provider = "codex"
-option_defaults = { model = "sonnet", permission_mode = "plan" }
+option_defaults = { model = "o4-mini", permission_mode = "suggest" }
 ```
 
-That file would live at `agents/reviewer/agent.toml`.
+That file would live at `agents/reviewer/agent.toml`. Valid values come from
+each provider's options schema, so they differ per provider — `o4-mini` is a
+Codex model, while the same key on a `claude` agent would take values like
+`sonnet` or `haiku`.
 
 Now that your agent is available, it's time to sling some work to it:
 
@@ -135,7 +156,11 @@ Your new reviewer agent is scoped to the `my-project` rig, so from inside that
 directory you can target it explicitly as `my-project/reviewer`. Gas City
 started a Codex session, loaded the prompt from
 `agents/reviewer/prompt.template.md`, and delivered the task to the rig-scoped
-reviewer. You can watch progress with `bd show` as you already know. And when
+reviewer. The output looks a little different from Tutorial 01's sling, and
+that's expected: implicit agents like `claude` come with `mol-do-work` as
+their default sling formula, but a custom agent has none until you configure
+one — so there's no `Attached workflow` line here. The bead is delivered
+directly, and sling creates an auto-convoy to track it. You can watch progress with `bd show` as you already know. And when
 the work is done, you can check the file system for the review you requested:
 
 ```shell
@@ -158,11 +183,11 @@ tutorial](/tutorials/03-sessions).
 
 ## What's next
 
-You've defined agents with custom prompts, interacted with them through
-sessions and configured different agents with different providers. From here:
+You've defined an agent with a custom prompt, pointed it at a different
+provider, and slung work to it directly. From here:
 
 - **[Sessions](/tutorials/03-sessions)** — session lifecycle, sleep/wake,
   suspension, named sessions
-- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
-  dependencies and variables
+- **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
+  done: steps, dependencies, and variables
 - **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all

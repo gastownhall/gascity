@@ -4,6 +4,8 @@ INDEX_NAME="idx_wisps_type_status_assignee"
 INDEX_COLUMNS="issue_type, status, assignee"
 STATUS_INDEX_NAME="idx_wisps_status"
 STATUS_INDEX_COLUMNS="status"
+DEFER_UNTIL_INDEX_NAME="idx_wisps_defer_until"
+DEFER_UNTIL_INDEX_COLUMNS="defer_until"
 COMMIT_AUTHOR="gascity-builder <builder@gascity.local>"
 
 die() {
@@ -259,11 +261,7 @@ show_wisps_indexes() {
     dolt_sql_csv "USE \`$DOLT_DB\`; SHOW INDEX FROM wisps;"
 }
 
-index_rows() {
-    local output="$1"
-
-    printf '%s\n' "$output" | awk -F, -v idx="$INDEX_NAME" 'NR > 1 && $3 == idx { count++ } END { print count + 0 }'
-}
+index_rows() { index_rows_for "$1" "$INDEX_NAME"; }
 
 verify_index_definition() {
     local output="$1"
@@ -284,23 +282,35 @@ verify_index_definition() {
     fi
 }
 
-status_index_rows() {
-    local output="$1"
+index_rows_for() {
+    local output="$1" name="$2"
 
-    printf '%s\n' "$output" | awk -F, -v idx="$STATUS_INDEX_NAME" 'NR > 1 && $3 == idx { count++ } END { print count + 0 }'
+    printf '%s\n' "$output" | awk -F, -v idx="$name" 'NR > 1 && $3 == idx { count++ } END { print count + 0 }'
 }
 
-verify_status_index_definition() {
-    local output="$1"
+verify_single_column_index() {
+    local output="$1" name="$2" col="$3"
     local count
 
-    count=$(status_index_rows "$output")
+    count=$(index_rows_for "$output" "$name")
     if [ "$count" -ne 1 ]; then
-        die "index $STATUS_INDEX_NAME has $count column rows; expected exactly 1 for ($STATUS_INDEX_COLUMNS)"
+        die "index $name has $count column rows; expected exactly 1 for ($col)"
     fi
 
-    printf '%s\n' "$output" | awk -F, -v idx="$STATUS_INDEX_NAME" 'NR > 1 && $3 == idx && $4 == "1" && $5 == "status" { found = 1 } END { exit found ? 0 : 1 }' \
-        || die "index $STATUS_INDEX_NAME exists but does not match ($STATUS_INDEX_COLUMNS)"
+    printf '%s\n' "$output" | awk -F, -v idx="$name" -v c="$col" 'NR > 1 && $3 == idx && $4 == "1" && $5 == c { found = 1 } END { exit found ? 0 : 1 }' \
+        || die "index $name exists but does not match ($col)"
+}
+
+status_index_rows() { index_rows_for "$1" "$STATUS_INDEX_NAME"; }
+
+verify_status_index_definition() {
+    verify_single_column_index "$1" "$STATUS_INDEX_NAME" "$STATUS_INDEX_COLUMNS"
+}
+
+defer_until_index_rows() { index_rows_for "$1" "$DEFER_UNTIL_INDEX_NAME"; }
+
+verify_defer_until_index_definition() {
+    verify_single_column_index "$1" "$DEFER_UNTIL_INDEX_NAME" "$DEFER_UNTIL_INDEX_COLUMNS"
 }
 
 commit_schema_change() {

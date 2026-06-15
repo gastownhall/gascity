@@ -56,7 +56,7 @@ func (c *FormulaRequirementsCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("%d formula requirement warning(s)", warnings)
 	}
-	r.FixHint = `replace legacy contract = "graph.v2" with [requires] formula_compiler = ">=2.0.0"; enable [daemon] formula_v2 or lower requirements; fix invalid requirements and parent/child conflicts`
+	r.FixHint = `replace deprecated contract = "graph.v2" with [requires] formula_compiler = ">=2.0.0"; enable [daemon] formula_v2 or lower requirements; fix invalid requirements and parent/child conflicts`
 	return r
 }
 

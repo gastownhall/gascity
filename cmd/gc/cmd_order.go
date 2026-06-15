@@ -114,9 +114,11 @@ func newOrderRunCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Execute an order manually",
 		Long: `Execute an order manually, bypassing its trigger conditions.
 
-Instantiates a wisp from the order's formula and routes it to the
-configured target (if any). Useful for testing orders or triggering
-them outside their normal schedule.
+Formula orders instantiate a wisp from the order's formula and route it
+to the configured target (if any). Exec orders run their script directly
+— no wisp is created, and --json is rejected because the exec body may
+write arbitrary stdout. Useful for testing orders or triggering them
+outside their normal schedule.
 Use --rig to disambiguate same-name orders in different rigs.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -128,7 +130,7 @@ Use --rig to disambiguate same-name orders in different rigs.`,
 		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to disambiguate same-name orders")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output (formula orders only; rejected for exec orders)")
 	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	return cmd
 }
@@ -724,6 +726,27 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	if err := store.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+
+	// Record the run in the order-tracking history index so a manual formula
+	// `gc order run` advances the cooldown clock, matching dispatcher-driven
+	// (order_dispatch.go) and event-exec (doOrderRunExecTracked) runs. The wisp
+	// root above carries only "order-run:<scoped>" — never labelOrderTracking,
+	// since molecule roots don't auto-close — so without a dedicated tracking
+	// bead the run is invisible to the labelOrderTracking history index. Post-PR
+	// the index-hit gate suppresses the per-order fallback, so an unindexed manual
+	// run no longer advances cooldown and the order can re-fire mid-cooldown
+	// (#3294). Create it closed: its CreatedAt is the cooldown marker, and a
+	// lingering open tracking bead would read as in-flight work and block
+	// re-dispatch (ga-jra/ga-lo8c). Best-effort: the wisp already launched.
+	if tracking, err := store.Create(beads.Bead{
+		Title:     "order:" + scoped,
+		Labels:    []string{"order-run:" + scoped, labelOrderTracking},
+		NoHistory: true,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc order run: recording tracking bead: %v\n", err) //nolint:errcheck
+	} else if err := store.Close(tracking.ID); err != nil {
+		fmt.Fprintf(stderr, "gc order run: closing tracking bead: %v\n", err) //nolint:errcheck
 	}
 
 	if jsonOutput {

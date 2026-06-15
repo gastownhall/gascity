@@ -502,11 +502,10 @@ func freshRestartSessionKey(tp TemplateParams, meta map[string]string) (string, 
 		strings.TrimSpace(meta["resume_style"]) != "" {
 		return "", true
 	}
-	newKey, err := sessionpkg.GenerateSessionKey()
-	if err != nil {
-		return "", false
-	}
-	return newKey, true
+	// No resume capability detected in provider config or bead metadata.
+	// Return hasCapability=true so the caller clears any stored session_key;
+	// leaving a stale key would trigger stale-key detection on the next start.
+	return "", true
 }
 
 // allDependenciesAliveForTemplate checks that all template dependencies of a

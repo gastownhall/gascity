@@ -30,6 +30,7 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 		dataDir      string
 		logLevel     string
 		archiveLevel int
+		autoGC       bool
 		maxConns     int
 		readTimeout  int
 		writeTimeout int
@@ -47,6 +48,7 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			doltConfig := config.DoltConfig{
 				ArchiveLevel:       &archiveLevel,
+				AutoGCEnabled:      &autoGC,
 				MaxConnections:     maxConns,
 				ReadTimeoutMillis:  readTimeout,
 				WriteTimeoutMillis: writeTimeout,
@@ -64,6 +66,7 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 	writeManaged.Flags().StringVar(&dataDir, "data-dir", "", "Dolt data directory")
 	writeManaged.Flags().StringVar(&logLevel, "log-level", "warning", "Dolt log level")
 	writeManaged.Flags().IntVar(&archiveLevel, "archive-level", 0, "Dolt auto_gc archive_level (0=off, 1=on)")
+	writeManaged.Flags().BoolVar(&autoGC, "auto-gc-enabled", true, "enable Dolt incremental auto-GC")
 	writeManaged.Flags().IntVar(&maxConns, "max-connections", 0, "Dolt listener max_connections (0=managed default)")
 	writeManaged.Flags().IntVar(&readTimeout, "read-timeout-millis", 0, "Dolt listener read_timeout_millis (0=managed default)")
 	writeManaged.Flags().IntVar(&writeTimeout, "write-timeout-millis", 0, "Dolt listener write_timeout_millis (0=managed default)")
@@ -130,6 +133,8 @@ func writeManagedDoltConfigFile(path, host, port, dataDir, logLevel string, dolt
 		logLevel = "warning"
 	}
 	archiveLevel := doltConfig.EffectiveArchiveLevel()
+	autoGCEnabled := doltConfig.EffectiveAutoGCEnabled()
+	autoGCSysVar := doltConfig.AutoGCSysVar()
 	maxConnections := doltConfig.EffectiveMaxConnections()
 	readTimeoutMillis := doltConfig.EffectiveReadTimeoutMillis()
 	writeTimeoutMillis := doltConfig.EffectiveWriteTimeoutMillis()
@@ -166,11 +171,16 @@ listener:
 
 data_dir: %q
 
-# auto_gc is disabled — dolt#10944 load-avg gating means upstream auto-GC effectively never fires.
-# Compaction-driven scheduled GC replaces it. See gastownhall/gascity#1918, #1200, #1977 for context.
+# Incremental auto-GC bounds the noms journal so it never reaches GB scale,
+# shrinking both the unclean-stop corruption window and the recovery blast
+# radius (#3176). Historically OFF to work around dolt#10944 (load-avg gating
+# that never fired); fixed upstream in dolt 2.0.3 and the managed floor is
+# 2.1.0+. Scheduled compaction (gc dolt compact) still handles history
+# flattening — see #1918, #1200 for that lineage. Override via city.toml
+# [dolt] auto_gc_enabled or GC_DOLT_AUTO_GC_ENABLED.
 behavior:
   auto_gc_behavior:
-    enable: false
+    enable: %t
     archive_level: %d
 
 # Managed Gas City workloads generate short-lived probe and metadata queries.
@@ -179,12 +189,12 @@ behavior:
 # Keep stats disabled for managed servers; use explicit gc dolt maintenance
 # commands for storage cleanup instead of background workers.
 system_variables:
-  dolt_auto_gc_enabled: "OFF"
+  dolt_auto_gc_enabled: %q
   dolt_stats_enabled: "OFF"
   dolt_stats_gc_enabled: "OFF"
   dolt_stats_memory_only: "ON"
   dolt_stats_paused: "ON"
-%s`, logLevel, port, host, maxConnections, readTimeoutMillis, writeTimeoutMillis, dataDir, archiveLevel, waitTimeoutLine)
+%s`, logLevel, port, host, maxConnections, readTimeoutMillis, writeTimeoutMillis, dataDir, autoGCEnabled, archiveLevel, autoGCSysVar, waitTimeoutLine)
 	if err := fsys.WriteFileAtomic(fsys.OSFS{}, path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write config file: %w", err)
 	}

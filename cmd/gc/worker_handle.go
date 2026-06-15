@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
@@ -98,7 +99,7 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 	if resolved == nil {
 		return runtime.Config{}
 	}
-	return runtime.Config{
+	hints := agent.StartupHints{
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
@@ -113,6 +114,12 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 		// this does not weaken controller-poll safety.
 		MouseOn: true,
 	}
+	// Project through the single StartupHints → runtime.Config mapping so this
+	// CLI create path can never silently drop a hint field the reconciler
+	// threads (gc-0tna7). It still populates only the provider-resolvable subset
+	// above; closing the remaining create-vs-resume population gap is the
+	// internal/worker.Factory follow-up.
+	return hints.ToRuntimeConfig()
 }
 
 func resolvedRuntimeMCPServersWithConfig(
@@ -548,23 +555,29 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		}
 		sessionLive = expandSessionSetup(agentCfg.SessionLive, setupCtx)
 	}
+	// Project the resolved hint subset through the single StartupHints →
+	// runtime.Config mapping (gc-0tna7), then layer the caller-owned
+	// WorkDir/Env/MCPServers. SessionLive is resolved above (ga-vtkhi) so
+	// resumed sessions re-theme; closing the remaining create-time field gap
+	// is the internal/worker.Factory population follow-up.
+	runtimeHints := agent.StartupHints{
+		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
+		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
+		ReadyDelayMs:           resolved.ReadyDelayMs,
+		ProcessNames:           resolved.ProcessNames,
+		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
+		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
+		SessionLive:            sessionLive,
+	}.ToRuntimeConfig()
+	runtimeHints.WorkDir = workDir
+	runtimeHints.Env = sessionEnv
+	runtimeHints.MCPServers = mcpServers
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
 		Provider:   resolvedWorkerRuntimeProviderLabel(resolved, transport, info),
 		SessionEnv: sessionEnv,
-		Hints: runtime.Config{
-			WorkDir:                workDir,
-			Env:                    sessionEnv,
-			Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
-			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-			ReadyDelayMs:           resolved.ReadyDelayMs,
-			ProcessNames:           resolved.ProcessNames,
-			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-			AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-			MCPServers:             mcpServers,
-			SessionLive:            sessionLive,
-		},
+		Hints:      runtimeHints,
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyGCString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyGCString(resolved.ResumeStyle, info.ResumeStyle),

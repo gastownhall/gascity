@@ -941,7 +941,21 @@ func (s *BdStore) Get(id string) (Bead, error) {
 	if len(issues) == 0 {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
 	}
-	return issues[0].toBead(), nil
+	bead := issues[0].toBead()
+	// Guard against bd's fuzzy/substring ID resolution silently returning a
+	// different bead than requested (gascity#gcy-g4o). bd may resolve a short
+	// ID like "gcy-dv7" to an unrelated bead whose ID contains "dv7" as a
+	// substring (e.g. "gcy-wisp-dv78"). Since gc always passes full bead IDs,
+	// a mismatch means the requested bead does not exist in this store.
+	if bead.ID != id {
+		// bd resolved a DIFFERENT bead (substring collision): the requested ID
+		// does not exist in this store but bd silently matched another one.
+		// Return ErrIDCollision so mutation guards can distinguish this from a
+		// plain absent bead. ErrIDCollision wraps ErrNotFound so existing
+		// errors.Is(err, ErrNotFound) callers remain unaffected.
+		return Bead{}, fmt.Errorf("getting bead %q (resolved to %q): %w", id, bead.ID, ErrIDCollision)
+	}
+	return bead, nil
 }
 
 // Update modifies fields of an existing bead via bd update.
@@ -988,6 +1002,9 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	if len(args) == 3 {
 		return nil
 	}
+	// Internal store callers supply canonical full IDs; the exact-ID collision
+	// guard lives at the CLI/API entry points (cmd_bd.go, huma_handlers_beads.go)
+	// where user-typed short IDs originate (gcy-g4o).
 	err := s.runBDTransientWrite(args...)
 	if err != nil {
 		if isBdNotFound(err) {
@@ -1928,6 +1945,8 @@ func bdCloseArgs(reason string, ids ...string) []string {
 }
 
 func (s *BdStore) close(id, reason string) error {
+	// Internal callers supply canonical full IDs; exact-ID guard lives at the
+	// CLI/API entry points (gcy-g4o).
 	err := s.runBDTransientWrite(bdCloseArgs(reason, id)...)
 	if err != nil {
 		// Some bd error paths collapse to a bare exit status without a helpful
@@ -1966,6 +1985,8 @@ func (s *BdStore) Reopen(id string) error {
 
 // Delete permanently removes a bead from the store via bd delete.
 func (s *BdStore) Delete(id string) error {
+	// Internal callers supply canonical full IDs; exact-ID guard lives at the
+	// CLI/API entry points (gcy-g4o).
 	err := s.runBDTransientWrite("delete", "--force", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {

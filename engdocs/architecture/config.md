@@ -7,7 +7,7 @@ title: "Config System"
 
 > **PackV2 format source of truth:** The public PackV2 format and loader
 > semantics are specified in
-> [Gas City Pack Specification (2.0)](../../docs/specs/pack-spec.md). This
+> [Gas City Pack Specification (2.0)](../../docs/reference/specs/pack-spec.md). This
 > page describes config loading and should defer to that specification for
 > PackV2 file-format details.
 

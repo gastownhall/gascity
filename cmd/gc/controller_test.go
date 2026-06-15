@@ -2208,12 +2208,13 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 
 	dir := shortSocketTempDir(t, "gc-reload-orders-")
 	tomlPath := filepath.Join(dir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\nincludes = [\".gc/system/packs/core\", \".gc/system/packs/bd\"]\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test\"\nschema = 1\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test\"\nschema = 2\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(pack.toml): %v", err)
 	}
+	writeBuiltinImportsFixture(t, dir, "core", "bd")
 
 	result, err := tryReloadConfig(tomlPath, "test", dir)
 	if err != nil {

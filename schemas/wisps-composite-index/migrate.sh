@@ -3,6 +3,7 @@
 # Adds the verified-needed wisps indexes to the Dolt-backed beads wisps table:
 #   - idx_wisps_type_status_assignee for mail-check lookups
 #   - idx_wisps_status for PrimeWisps status=open reconciliation
+#   - idx_wisps_defer_until for the control-dispatcher readiness probe
 #
 # Connection discovery order:
 #   database: GC_DOLT_DATABASE, BEADS_DOLT_DATABASE, then .beads/metadata.json dolt_database
@@ -56,6 +57,21 @@ fi
 
 indexes=$(show_wisps_indexes)
 verify_status_index_definition "$indexes"
+
+rows=$(defer_until_index_rows "$indexes")
+if [ "$rows" -gt 0 ]; then
+    verify_defer_until_index_definition "$indexes"
+    info "index $DEFER_UNTIL_INDEX_NAME already exists on wisps($DEFER_UNTIL_INDEX_COLUMNS)"
+else
+    dolt_sql -q "
+        USE \`$DOLT_DB\`;
+        CREATE INDEX $DEFER_UNTIL_INDEX_NAME ON wisps(defer_until);
+    " >/dev/null
+    changed=true
+fi
+
+indexes=$(show_wisps_indexes)
+verify_defer_until_index_definition "$indexes"
 
 if [ "$changed" = false ]; then
     info "all wisps indexes already exist; no changes needed"

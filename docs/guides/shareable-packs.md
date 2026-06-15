@@ -111,38 +111,65 @@ repository root, prefer the same `/tree/<ref>/<path>` URL a browser can open:
 ```toml
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 ```
 
 Do not write registry handles such as `main:gastown` into `pack.toml`. Registry
 handles are command-time lookup shortcuts; authored pack TOML stores the
 resolved durable `source` and, when needed, `version`.
 
-Packs own their agents. If two packs composed into the same city or rig
-define the same agent name, composition fails with a duplicate-agent error —
-there is no fallback-agent resolution. Give pack agents unambiguous names,
-or drop one of the conflicting imports.
+Packs own their agents. Collision detection keys on the binding-qualified
+name, so two imports that each define a `polecat` agent coexist as
+`gastown.polecat` and `review.polecat`. Composition fails with a
+duplicate-agent error only when two source directories produce the same
+qualified name on the same surface — for example, two unbound legacy includes
+that both define `polecat` — and there is no fallback-agent resolution.
+
+The `[imports.<name>]` key is the local binding chosen by the importing pack.
+An imported pack's own name, or the name displayed in a registry, is display
+metadata and a suggested binding only. It does not override the import
+binding.
 
 ## Registry Discovery
 
 Registries help you find packs, but they do not change the authored import
-shape. The registry commands available in this release are discovery and cache
-management commands:
+shape. The registry commands available in this release cover discovery, cache
+management, authentication, and publish submission:
 
 ```text
-gc pack registry add main https://github.com/gastownhall/gascity-packs.git
+gc pack registry add example https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml
 gc pack registry refresh main
 gc pack registry search gastown
-gc pack registry show gastown
+gc pack registry show main:gastown
+gc pack registry login
+gc pack registry publish .
+gc pack registry whoami
 gc pack registry list
-gc pack registry remove main
+gc pack registry remove example
 ```
 
 When a registry entry is used to add or migrate a pack, the durable
 `pack.toml` entry stores the entry's resolved `source` and optional `version`,
-not the registry handle. Publishing registry content is still a registry-repo
-workflow in this wave: edit the registry catalog, review it, and refresh the
-local registry cache before searching or showing new entries.
+not the registry handle.
+
+The first public registry is the `gascity-packs` catalog, configured by default
+as the built-in `main` registry, so there is nothing to add:
+
+```text
+gc pack registry refresh main
+gc pack registry search gascity
+gc pack registry show main:gascity
+```
+
+Registry caches are local. Search and show warn when a registry cache is older
+than the freshness window. The default window is 24 hours. Set
+`GC_REGISTRY_FRESHNESS` to a positive Go duration string, such as `1h` or
+`30m`, to change that warning window. Invalid, zero, or negative values warn.
+Pass `--refresh` to `gc pack registry search` or `gc pack registry show` when
+you want that command to fetch the latest catalog before reading it.
+
+See [Public Registry Packs](/guides/registry-showcase) for the first-party
+packs currently advertised through the public registry.
 
 ## City Usage
 
@@ -157,7 +184,7 @@ schema = 2
 
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 
 [imports.review]
 source = "./assets/code-review"
@@ -175,7 +202,7 @@ default_sling_target = "backend/gastown.polecat"
 
 [defaults.rig.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 ```
 
 Machine-local rig paths are site bindings managed by `gc`:
@@ -195,7 +222,7 @@ name = "backend"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 
 [rigs.imports.review]
 source = "./assets/code-review"
@@ -205,8 +232,8 @@ Rig-level imports create rig-scoped identities such as
 `backend/gastown.polecat` and `backend/review.reviewer`.
 
 Gas City's built-in packs are not implicit. `gc init` writes explicit
-workspace includes into `city.toml` (`.gc/system/packs/core`, plus
-`.gc/system/packs/bd` for bd-provider cities), and `gc doctor --fix` repairs
+pinned imports into `pack.toml` (`core`, plus `bd` for bd-provider
+cities), and `gc doctor --fix` repairs
 missing or stale entries. The former `maintenance` pack no longer exists; its
 housekeeping orders ship in the bundled `core` pack. See
 [System Packs](/reference/system-packs) for details.
@@ -281,9 +308,15 @@ The loader still exposes some V1 fields for migration and old city support:
 - `workspace.includes`
 - `[[rigs]].includes`
 - `[packs.*]`
-- `[formulas].dir`
 
-Treat those as migration surfaces for your own packs, with one exception:
+`[formulas].dir` is not among them: it does not load at all. A
+`[formulas].dir` declaration is a hard parse error in `city.toml`, in every
+config fragment, and in `pack.toml` (`[formulas].dir is no longer supported;
+use the well-known formulas/ directory`), and `gc doctor` reports any
+remaining declaration through the fixable `v2-formulas-dir` check. Put
+formulas in the well-known `formulas/` directory.
+
+Treat the listed fields as migration surfaces for your own packs, with one exception:
 the built-in system packs compose through explicit `workspace.includes`
 entries in `city.toml` (`gc init` writes them; `gc doctor --fix` repairs
 them). `gc doctor --fix` can migrate root

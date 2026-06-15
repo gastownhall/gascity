@@ -428,6 +428,7 @@ func TestRigUnregisterNotFound(t *testing.T) {
 func TestRegistryMutatorsRefuseHostRegistryDuringTests(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	hostRegistry := filepath.Join(home, ".gc", "cities.toml")
 	r := NewRegistry(hostRegistry)

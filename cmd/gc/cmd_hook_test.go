@@ -803,12 +803,12 @@ func TestHookCommandHookFormatIsIgnoredForNonInjectOutput(t *testing.T) {
 	}
 	cityToml := `[workspace]
 name = "test-city"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [[agent]]
 name = "worker"
 work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
-`
+` + builtinImportsTOML("core", "bd")
+	writeBuiltinImportsLock(t, cityDir, "core", "bd")
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1317,6 +1317,74 @@ dir = "myrig"
 	}
 	if !strings.Contains(out, "rig=myrig") {
 		t.Fatalf("stdout = %q, want GC_RIG=myrig", out)
+	}
+}
+
+// TestCmdHookRigScopedAgentFindsCityStoreWork guards the rig→city read
+// federation: a root-only (city-store) bead assigned to a rig-scoped agent
+// must surface through gc hook. The rig store is the agent's primary entry,
+// and a rig-backed agent's own work-query env is ALSO rig-scoped
+// (controllerWorkQueryEnv switches to rig coordinates when the agent has a
+// configured rig), so without a federated city entry the hook reports empty
+// while assigned city work sits invisible — e.g. singleton patrol wisps
+// created in the city store for a rig-scoped witness. Mirror of the #2877
+// city→rig federation in the opposite direction.
+func TestCmdHookRigScopedAgentFindsCityStoreWork(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_TMUX_SESSION", "host-session")
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "myrig"
+path = %q
+
+[[agent]]
+name = "worker"
+dir = "myrig"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fake bd answers with one ready row ONLY when queried against the
+	// CITY store; every rig-scoped query sees []. This simulates a root-only
+	// bead assigned to the rig-scoped agent.
+	cityBeads := filepath.Join(cityDir, ".beads")
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$BEADS_DIR" in
+  %s*) printf '[{"id":"td-city1","status":"open","assignee":"myrig/worker","title":"root-only city work"}]' ;;
+  *) printf '[]' ;;
+esac
+`, cityBeads)
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", rigDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook() = %d, want 0 (city-store work must surface); stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "td-city1") {
+		t.Fatalf("stdout = %q, want the city-store bead td-city1", stdout.String())
 	}
 }
 

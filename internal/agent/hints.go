@@ -52,3 +52,34 @@ type StartupHints struct {
 	// directory before the agent command starts.
 	CopyFiles []runtime.CopyEntry
 }
+
+// ToRuntimeConfig projects the startup hints onto a runtime.Config. It is the
+// single source for the StartupHints → runtime.Config field mapping: every
+// consumer that builds a runtime.Config from agent-level hints (the reconciler
+// create path and the CLI worker-handle paths) routes through here, so a hint
+// field added above propagates everywhere instead of being threaded one call
+// site at a time. Caller-owned, non-hint fields (Command, Env, MCPServers,
+// WorkDir, PromptSuffix/PromptFlag, FingerprintExtra) are left zero for the
+// caller to populate.
+func (h StartupHints) ToRuntimeConfig() runtime.Config {
+	return runtime.Config{
+		Lifecycle:              h.Lifecycle,
+		ReadyPromptPrefix:      h.ReadyPromptPrefix,
+		ReadyDelayMs:           h.ReadyDelayMs,
+		ProcessNames:           h.ProcessNames,
+		EmitsPermissionWarning: h.EmitsPermissionWarning,
+		AcceptStartupDialogs:   h.AcceptStartupDialogs,
+		MouseOn:                h.MouseOn,
+		Nudge:                  h.Nudge,
+		PreStart:               h.PreStart,
+		SessionSetup:           h.SessionSetup,
+		SessionSetupScript:     h.SessionSetupScript,
+		SessionLive:            h.SessionLive,
+		ProviderName:           h.ProviderName,
+		ProviderOverlayName:    h.ProviderOverlayName,
+		InstallAgentHooks:      h.InstallAgentHooks,
+		PackOverlayDirs:        h.PackOverlayDirs,
+		OverlayDir:             h.OverlayDir,
+		CopyFiles:              h.CopyFiles,
+	}
+}

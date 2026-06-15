@@ -747,47 +747,35 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		}
 		env[startupPromptDeliveredEnv] = "1"
 	}
-	cfg := runtime.Config{
-		Command:      tp.Command,
-		PromptSuffix: promptSuffix,
-		PromptFlag:   promptFlag,
-		Env:          env,
-		MCPServers: func() []runtime.MCPServerConfig {
-			if tp.IsACP {
-				return tp.MCPServers
-			}
-			return nil
-		}(),
-		WorkDir:                tp.WorkDir,
-		Lifecycle:              tp.Hints.Lifecycle,
-		ReadyPromptPrefix:      tp.Hints.ReadyPromptPrefix,
-		ReadyDelayMs:           tp.Hints.ReadyDelayMs,
-		ProcessNames:           tp.Hints.ProcessNames,
-		EmitsPermissionWarning: tp.Hints.EmitsPermissionWarning,
-		AcceptStartupDialogs:   tp.Hints.AcceptStartupDialogs,
-		// ga-c4w: interactive `gc session new` sessions (session_origin=manual)
-		// resolve mouse-on so the tmux wheel drives copy-mode scrollback, even
-		// when the agent config sets no mouse_mode. This is the managed,
-		// reconciler-deferred start seam the original API-only fix missed. Scoped
-		// to manual on purpose: MouseOn is a core-fingerprint field (locked by
-		// runtime.TestConfigFingerprintIncludesMouseOn), so auto-flipping it for
-		// long-lived config-declared/named sessions would force a one-time drift
-		// restart — they follow their resolved Hints.MouseOn (mouse_mode) instead.
-		// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
-		MouseOn:             tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual",
-		Nudge:               nudge,
-		PreStart:            tp.Hints.PreStart,
-		SessionSetup:        tp.Hints.SessionSetup,
-		SessionSetupScript:  tp.Hints.SessionSetupScript,
-		SessionLive:         tp.Hints.SessionLive,
-		ProviderName:        tp.Hints.ProviderName,
-		ProviderOverlayName: tp.Hints.ProviderOverlayName,
-		InstallAgentHooks:   tp.Hints.InstallAgentHooks,
-		PackOverlayDirs:     tp.Hints.PackOverlayDirs,
-		OverlayDir:          tp.Hints.OverlayDir,
-		CopyFiles:           tp.Hints.CopyFiles,
-		FingerprintExtra:    tp.FPExtra,
+	// Startup-hint fields project through the single StartupHints →
+	// runtime.Config mapping (agent.StartupHints.ToRuntimeConfig) so a hint
+	// added to StartupHints reaches this path automatically instead of being
+	// threaded by hand here — the gc-wuofg / gc-0tna7 field-omission class.
+	// The reflective guard is agent.TestStartupHintsToRuntimeConfigPropagatesEveryField.
+	// Caller-owned, non-hint fields and the path-specific Nudge/MouseOn
+	// overrides below are layered on top.
+	cfg := tp.Hints.ToRuntimeConfig()
+	cfg.Command = tp.Command
+	cfg.PromptSuffix = promptSuffix
+	cfg.PromptFlag = promptFlag
+	cfg.Env = env
+	if tp.IsACP {
+		cfg.MCPServers = tp.MCPServers
 	}
+	cfg.WorkDir = tp.WorkDir
+	cfg.FingerprintExtra = tp.FPExtra
+	// Prompt delivery may prepend the startup prompt to the configured nudge.
+	cfg.Nudge = nudge
+	// ga-c4w: interactive `gc session new` sessions (session_origin=manual)
+	// resolve mouse-on so the tmux wheel drives copy-mode scrollback, even
+	// when the agent config sets no mouse_mode. This is the managed,
+	// reconciler-deferred start seam the original API-only fix missed. Scoped
+	// to manual on purpose: MouseOn is a core-fingerprint field (locked by
+	// runtime.TestConfigFingerprintIncludesMouseOn), so auto-flipping it for
+	// long-lived config-declared/named sessions would force a one-time drift
+	// restart — they follow their resolved Hints.MouseOn (mouse_mode) instead.
+	// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
+	cfg.MouseOn = tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual"
 	applyT3BridgeRuntimeConfig(tp, env)
 	return cfg
 }

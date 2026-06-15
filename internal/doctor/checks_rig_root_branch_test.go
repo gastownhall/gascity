@@ -170,6 +170,54 @@ func TestRigRootBranchCheck_NonMainDefaultBranchMatches_OK(t *testing.T) {
 	}
 }
 
+// TestRigRootBranchCheck_IgnoresPoisonedGitEnv proves the rig root-branch check
+// resolves the rig's own branch and dirty state even when git-locating
+// environment variables point at an unrelated repository. Running gc doctor (or
+// gc start warm-up) inside a pre-commit hook or nested worktree exports
+// GIT_DIR/GIT_WORK_TREE for the parent repo; without git.SanitizedEnv() the
+// leaked vars make rev-parse and status report the poisoned repo, so the check
+// would clear (or warn on) the wrong repository.
+func TestRigRootBranchCheck_IgnoresPoisonedGitEnv(t *testing.T) {
+	// Rig is on a non-default branch with a dirty working tree.
+	rigPath := initGitRepoOnBranch(t, "feature")
+	if err := os.WriteFile(filepath.Join(rigPath, "dirty.txt"), []byte("dirty\n"), 0o600); err != nil {
+		t.Fatalf("write dirty file: %v", err)
+	}
+
+	// Unrelated repo on the default branch with a clean tree. Both repos must be
+	// created before poisoning so their own git commands are not redirected. If
+	// the poison vars leak, runGitCommand reads "main" (== default) and isGitDirty
+	// reads a clean tree, wrongly yielding StatusOK with no dirty detail.
+	poison := initGitRepoOnBranch(t, "main")
+	t.Setenv("GIT_DIR", filepath.Join(poison, ".git"))
+	t.Setenv("GIT_WORK_TREE", poison)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(poison, ".git", "index"))
+
+	c := NewRigRootBranchCheck(config.Rig{
+		Name:          "testrig",
+		Path:          rigPath,
+		DefaultBranch: "main",
+	})
+
+	r := c.Run(&CheckContext{})
+
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d (%s), want StatusWarning (runGitCommand must read rig branch via cmd.Dir, not poisoned GIT_DIR)", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "feature") {
+		t.Errorf("message = %q, want rig branch 'feature'", r.Message)
+	}
+	foundDirty := false
+	for _, detail := range r.Details {
+		if strings.Contains(detail, "dirty") {
+			foundDirty = true
+		}
+	}
+	if !foundDirty {
+		t.Errorf("Details = %v, want dirty detail (isGitDirty must read rig tree, not poisoned GIT_WORK_TREE)", r.Details)
+	}
+}
+
 func initGitRepoOnBranch(t *testing.T, branch string) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {

@@ -9474,3 +9474,80 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ZeroLimitDeletesNo
 		t.Fatalf("deleted = %d, want 0 (limit=0 means no budget)", deleted)
 	}
 }
+
+// TestLastRunFuncGatesFallbackOnIndexMiss pins #3201: the per-order fallback
+// (a serial bd-query) must fire only on a genuine index miss. An index hit must
+// return the indexed time without consulting the fallback — otherwise every
+// cooldown/cron order pays the query on each cold-cache dispatch and hangs
+// gc reload/gc doctor.
+func TestLastRunFuncGatesFallbackOnIndexMiss(t *testing.T) {
+	store := beads.NewMemStore()
+	const storeKey = "city"
+	idx := newOrderDispatchTrackingIndex()
+	indexed := time.Now().Add(-time.Hour)
+	// Pre-seed the history index so lastRunForStore reads it without listing
+	// the store. The "\x00history" suffix matches historyEntriesForStore's key.
+	idx.entries[storeKey+"\x00history"] = map[string]orderTrackingSummary{
+		"order-hit": {lastRun: indexed},
+	}
+
+	fallbackCalls := 0
+	fallbackTime := time.Now() // deliberately newer than the indexed entry
+	fallback := func(string) (time.Time, error) {
+		fallbackCalls++
+		return fallbackTime, nil
+	}
+	fn := idx.lastRunFunc([]beads.Store{store}, []string{storeKey}, fallback)
+
+	got, err := fn("order-hit")
+	if err != nil {
+		t.Fatalf("lastRunFunc(order-hit): %v", err)
+	}
+	if !got.Equal(indexed) {
+		t.Errorf("index hit returned %v, want indexed %v", got, indexed)
+	}
+	if fallbackCalls != 0 {
+		t.Errorf("index hit invoked fallback %d times, want 0 (the cold-cache storm)", fallbackCalls)
+	}
+
+	got, err = fn("order-miss")
+	if err != nil {
+		t.Fatalf("lastRunFunc(order-miss): %v", err)
+	}
+	if !got.Equal(fallbackTime) {
+		t.Errorf("index miss returned %v, want fallback %v", got, fallbackTime)
+	}
+	if fallbackCalls != 1 {
+		t.Errorf("index miss invoked fallback %d times, want 1", fallbackCalls)
+	}
+}
+
+// TestCarryLastRunCacheFrom pins the #3201 complement: a rebuilt dispatcher
+// inherits warm last-run entries (forward-only) from its predecessor, and a
+// nil/empty predecessor is a no-op.
+func TestCarryLastRunCacheFrom(t *testing.T) {
+	keys := []string{"city"}
+	older := time.Now().Add(-2 * time.Hour)
+	newer := time.Now().Add(-time.Hour)
+
+	prev := &memoryOrderDispatcher{}
+	prev.rememberLastRun("order-a", keys, newer)
+	prev.rememberLastRun("order-b", keys, older)
+
+	next := &memoryOrderDispatcher{}
+	next.rememberLastRun("order-a", keys, older) // stale; carry must advance it
+	next.carryLastRunCacheFrom(prev)
+
+	if got := next.lastRunCache[orderHistoryCacheKey("order-a", keys)]; !got.Equal(newer) {
+		t.Errorf("order-a = %v, want newer %v (forward-only carry)", got, newer)
+	}
+	if got := next.lastRunCache[orderHistoryCacheKey("order-b", keys)]; !got.Equal(older) {
+		t.Errorf("order-b = %v, want %v", got, older)
+	}
+
+	next.carryLastRunCacheFrom(&memoryOrderDispatcher{}) // empty source
+	next.carryLastRunCacheFrom(nil)                      // nil source
+	if len(next.lastRunCache) != 2 {
+		t.Errorf("cache size = %d after no-op carries, want 2", len(next.lastRunCache))
+	}
+}

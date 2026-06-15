@@ -84,7 +84,7 @@ func isTransientGraphApplyError(err error) bool {
 		return false
 	}
 	text := strings.ToLower(err.Error())
-	if !strings.Contains(text, "bd create --graph") {
+	if !isGraphApplyErrorText(text) {
 		return false
 	}
 	return strings.Contains(text, "i/o timeout") ||
@@ -94,6 +94,14 @@ func isTransientGraphApplyError(err error) bool {
 		strings.Contains(text, "bad connection") ||
 		strings.Contains(text, "connection reset") ||
 		strings.Contains(text, "broken pipe")
+}
+
+func isGraphApplyErrorText(text string) bool {
+	return strings.Contains(text, "bd create --graph") ||
+		strings.Contains(text, "native graph apply") ||
+		strings.Contains(text, "failed to check for dependency cycle") ||
+		strings.Contains(text, "graph create: adding edge") ||
+		strings.Contains(text, "adding edge ")
 }
 
 func instantiateFragmentViaGraphApply(ctx context.Context, store beads.Store, applier beads.GraphApplyStore, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {

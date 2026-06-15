@@ -388,15 +388,15 @@ func TestLoadBaselinePromptUserCustomizationWins(t *testing.T) {
 		t.Fatalf("write user prompt: %v", err)
 	}
 	// Pack default would also exist — should still lose to user customization.
-	packDir := filepath.Join(cityDir, ".gc", "system", "packs", "core", "agents", "polecat")
-	if err := os.MkdirAll(packDir, 0o755); err != nil {
+	packDir := filepath.Join(t.TempDir(), "core")
+	if err := os.MkdirAll(filepath.Join(packDir, "agents", "polecat"), 0o755); err != nil {
 		t.Fatalf("mkdir pack: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(packDir, "prompt.template.md"), []byte("PACK VERSION"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(packDir, "agents", "polecat", "prompt.template.md"), []byte("PACK VERSION"), 0o644); err != nil {
 		t.Fatalf("write pack prompt: %v", err)
 	}
 
-	body, source, own := loadBaselinePrompt(cityDir, "polecat")
+	body, source, own := loadBaselinePrompt(cityDir, "polecat", []string{packDir})
 	if body != "USER VERSION" {
 		t.Errorf("user customization should win, got %q", body)
 	}
@@ -410,15 +410,15 @@ func TestLoadBaselinePromptUserCustomizationWins(t *testing.T) {
 
 func TestLoadBaselinePromptFallsBackToPackDefault(t *testing.T) {
 	cityDir := t.TempDir()
-	packDir := filepath.Join(cityDir, ".gc", "system", "packs", "gastown", "agents", "witness")
-	if err := os.MkdirAll(packDir, 0o755); err != nil {
+	packDir := filepath.Join(t.TempDir(), "gastown")
+	if err := os.MkdirAll(filepath.Join(packDir, "agents", "witness"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(packDir, "prompt.template.md"), []byte("PACK VERSION"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(packDir, "agents", "witness", "prompt.template.md"), []byte("PACK VERSION"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
-	body, source, own := loadBaselinePrompt(cityDir, "witness")
+	body, source, own := loadBaselinePrompt(cityDir, "witness", []string{packDir})
 	if body != "PACK VERSION" {
 		t.Errorf("pack default should be used, got %q", body)
 	}
@@ -433,7 +433,7 @@ func TestLoadBaselinePromptFallsBackToPackDefault(t *testing.T) {
 func TestLoadBaselinePromptUsesEmbeddedMayorForKnownRole(t *testing.T) {
 	// "mayor" exists as embed; should be returned as own baseline.
 	cityDir := t.TempDir() // empty city, no overrides
-	body, source, own := loadBaselinePrompt(cityDir, "mayor")
+	body, source, own := loadBaselinePrompt(cityDir, "mayor", nil)
 	if body == "" {
 		t.Fatalf("embedded mayor.md should be available as baseline")
 	}
@@ -449,7 +449,7 @@ func TestLoadBaselinePromptFallsBackToMayorAsStructuralReference(t *testing.T) {
 	// Unknown role with no overrides — should fall back to mayor.md as
 	// structural reference, marked NOT own.
 	cityDir := t.TempDir()
-	body, source, own := loadBaselinePrompt(cityDir, "totally-novel-role")
+	body, source, own := loadBaselinePrompt(cityDir, "totally-novel-role", nil)
 	if body == "" {
 		t.Fatalf("expected mayor.md fallback to be present")
 	}

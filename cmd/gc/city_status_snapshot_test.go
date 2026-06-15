@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -206,7 +207,7 @@ func TestCityStatusNamedSessionSurfacesLookupErrorWhenSnapshotDegraded(t *testin
 
 	status := namedSessionStatusForCity(
 		"/home/user/city", cfg, store, degraded,
-		"city", "refinery", "on_demand", nil,
+		"city", "refinery", "on_demand", suspensionstate.State{}, nil,
 	)
 	if !strings.HasPrefix(status, "lookup error:") {
 		t.Fatalf("named session status = %q, want a 'lookup error: ...' prefix when snapshot is degraded", status)
@@ -239,7 +240,7 @@ func TestCityStatusNamedSessionsCleanSnapshotStillSilent(t *testing.T) {
 
 	status := namedSessionStatusForCity(
 		"/home/user/city", cfg, store, clean,
-		"city", "refinery", "on_demand", nil,
+		"city", "refinery", "on_demand", suspensionstate.State{}, nil,
 	)
 	if strings.HasPrefix(status, "lookup error:") {
 		t.Fatalf("named session status = %q, want cfg-derived status (no lookup error) when snapshot loaded cleanly", status)

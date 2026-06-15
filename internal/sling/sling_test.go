@@ -3304,6 +3304,205 @@ func TestDoSling_Reassign_DryRunSkipsClear(t *testing.T) {
 	}
 }
 
+// TestClearHumanAssignee_RigStore: clearHumanAssignee clears the assignee on
+// a rig-prefixed bead whose record lives in a source-workflow (rig) store
+// rather than the city primary store. Direct unit test of the multi-store
+// fallback added for gastownhall/gascity#3408.
+func TestClearHumanAssignee_RigStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "human"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	deps := SlingDeps{
+		Store: cityStore,
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+		},
+	}
+	if err := clearHumanAssignee(bead.ID, deps); err != nil {
+		t.Fatalf("clearHumanAssignee: %v", err)
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty after clear in rig store", got.Assignee)
+	}
+}
+
+// TestClearHumanAssignee_PrimaryStoreReadError: a non-ErrNotFound failure from
+// the city primary store must abort the clear with a contextual error rather
+// than falling through to the source-workflow sweep. A real read failure under
+// --force --reassign would otherwise be treated like a miss, so routing could
+// proceed with the human assignee uncleared (or a same-ID bead cleared in a
+// different store). Regression for the gastownhall/gascity#3408 review.
+func TestClearHumanAssignee_PrimaryStoreReadError(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "human"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	sourceSwept := false
+	deps := SlingDeps{
+		Store: &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("backend unavailable")},
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			sourceSwept = true
+			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+		},
+	}
+	err = clearHumanAssignee(bead.ID, deps)
+	if err == nil {
+		t.Fatal("clearHumanAssignee error = nil, want primary read failure")
+	}
+	if !strings.Contains(err.Error(), "backend unavailable") {
+		t.Fatalf("error = %q, want wrapped primary read failure", err)
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %q, want store failure, not a not-found miss", err)
+	}
+	if sourceSwept {
+		t.Fatal("source-workflow stores swept after a primary read failure; want abort before fallback")
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "human" {
+		t.Fatalf("Assignee = %q, want unchanged (clear must not run after a primary read failure)", got.Assignee)
+	}
+}
+
+// TestClearHumanAssignee_SourceStoreReadError: a non-ErrNotFound failure while
+// reading a source-workflow store during the rig-store sweep aborts the clear
+// with a store-ref-qualified error instead of silently skipping the store,
+// which would leave the bead human-assigned and pool-invisible (the #3408
+// symptom) under partial store failure.
+func TestClearHumanAssignee_SourceStoreReadError(t *testing.T) {
+	deps := SlingDeps{
+		Store: beads.NewMemStore(), // bead is absent here, so the sweep runs
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{
+				{Store: &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("rig store unreadable")}, StoreRef: "rig:myrig"},
+			}, nil
+		},
+	}
+	err := clearHumanAssignee("gc-123", deps)
+	if err == nil {
+		t.Fatal("clearHumanAssignee error = nil, want source-store read failure")
+	}
+	if !strings.Contains(err.Error(), "rig store unreadable") {
+		t.Fatalf("error = %q, want wrapped source-store read failure", err)
+	}
+	if !strings.Contains(err.Error(), "rig:myrig") {
+		t.Fatalf("error = %q, want store-ref context to localize the failing store", err)
+	}
+}
+
+// TestClearHumanAssignee_SourceStoreListError: a failure from the
+// SourceWorkflowStores lister itself — the callback returning an error before
+// any store can be scanned, distinct from a per-store Get failure — aborts the
+// clear with a bead-qualified error instead of silently no-op'ing. This is the
+// fail-loud guard for the #3408 --reassign contract: if the source-workflow
+// stores cannot even be listed after a primary-store miss, routing must not
+// proceed as though the bead were absent everywhere and leave it human-assigned.
+func TestClearHumanAssignee_SourceStoreListError(t *testing.T) {
+	deps := SlingDeps{
+		Store: beads.NewMemStore(), // bead is absent here (ErrNotFound), so the sweep runs
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return nil, fmt.Errorf("stores unavailable")
+		},
+	}
+	err := clearHumanAssignee("gc-456", deps)
+	if err == nil {
+		t.Fatal("clearHumanAssignee error = nil, want source-workflow store listing failure")
+	}
+	if !strings.Contains(err.Error(), "listing source-workflow stores") {
+		t.Fatalf("error = %q, want wrapped source-workflow store listing failure", err)
+	}
+	if !strings.Contains(err.Error(), "stores unavailable") {
+		t.Fatalf("error = %q, want underlying lister error preserved", err)
+	}
+	if !strings.Contains(err.Error(), "gc-456") {
+		t.Fatalf("error = %q, want bead ID context to localize the failed clear", err)
+	}
+}
+
+// TestClearHumanAssignee_NilPrimaryStore: with no city primary store, the clear
+// still sweeps the source-workflow stores and clears the assignee where the
+// bead lives, matching the multi-store behavior of sourceWorkflowRootByID. A
+// nil deps.Store must not skip available rig stores.
+func TestClearHumanAssignee_NilPrimaryStore(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "human"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	deps := SlingDeps{
+		Store: nil,
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+		},
+	}
+	if err := clearHumanAssignee(bead.ID, deps); err != nil {
+		t.Fatalf("clearHumanAssignee: %v", err)
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty after clearing via the source-workflow sweep with a nil primary store", got.Assignee)
+	}
+}
+
+// TestDoSling_Reassign_ClearsHumanAssignee_RigStore: --reassign clears a human
+// assignee on a rig-prefixed bead whose record lives in the rig store, not the
+// city primary store. Regression for gastownhall/gascity#3408 — the clear
+// previously no-op'd because clearHumanAssignee only consulted deps.Store, so
+// the bead stayed routed+human-assigned and invisible to the pool scaler.
+func TestDoSling_Reassign_ClearsHumanAssignee_RigStore(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/myrig", Prefix: "gc"},
+		},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "human"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	deps.SourceWorkflowStores = func() ([]SourceWorkflowStore, error) {
+		return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+	}
+	// Force routing: the bead lives only in the rig store, so the city-store
+	// existence validation must be bypassed to reach the reassign clear.
+	opts := SlingOpts{
+		Target:        a,
+		BeadOrFormula: bead.ID,
+		NoFormula:     true,
+		NoConvoy:      true,
+		Reassign:      true,
+		Force:         true,
+	}
+	if _, err := DoSling(opts, deps, nil); err != nil {
+		t.Fatalf("DoSling --reassign on rig-store bead: %v", err)
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty after --reassign", got.Assignee)
+	}
+}
+
 // TestSlingFormulaSearchPaths_RigNameKey: agent.Dir = rig name should
 // resolve to the rig-specific FormulaLayers entry. This is the legacy
 // shape and was already working pre-#1801.

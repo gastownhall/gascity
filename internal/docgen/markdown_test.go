@@ -37,6 +37,58 @@ func TestRenderMarkdownCitySchema(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownFrontmatter(t *testing.T) {
+	s, err := GenerateCitySchema()
+	if err != nil {
+		t.Fatalf("GenerateCitySchema: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := RenderMarkdown(&buf, s); err != nil {
+		t.Fatalf("RenderMarkdown: %v", err)
+	}
+
+	md := buf.String()
+
+	// Mintlify pages carry title+description frontmatter and no body H1.
+	if !strings.HasPrefix(md, "---\ntitle: \"Gas City Configuration\"\ndescription: ") {
+		t.Errorf("missing title/description frontmatter; got prefix %q", md[:min(len(md), 80)])
+	}
+	if strings.Contains(md, "# Gas City Configuration") {
+		t.Error("body H1 should be replaced by frontmatter title")
+	}
+}
+
+func TestRenderMarkdownEmptyFieldTableSuppressed(t *testing.T) {
+	s, err := GenerateCitySchema()
+	if err != nil {
+		t.Fatalf("GenerateCitySchema: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := RenderMarkdown(&buf, s); err != nil {
+		t.Fatalf("RenderMarkdown: %v", err)
+	}
+
+	md := buf.String()
+
+	// FormulasConfig has no schema-visible fields; its section keeps the
+	// heading and description but must not render an empty field table.
+	start := strings.Index(md, "## FormulasConfig")
+	if start < 0 {
+		t.Fatal("missing FormulasConfig section")
+	}
+	rest := md[start+len("## FormulasConfig"):]
+	end := strings.Index(rest, "\n## ")
+	if end < 0 {
+		end = len(rest)
+	}
+	section := rest[:end]
+	if strings.Contains(section, "| Field |") {
+		t.Errorf("FormulasConfig section should not render an empty field table:\n%s", section)
+	}
+}
+
 func TestRenderMarkdownTableFormat(t *testing.T) {
 	s, err := GenerateCitySchema()
 	if err != nil {

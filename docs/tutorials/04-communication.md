@@ -15,7 +15,7 @@ We'll pick up where Tutorial 03 left off. You should have `my-city` running with
 ## Agents talking to each other
 
 Up to this point, you've been managing sessions one at a time — creating them on
-demand for polecats, keeping with alive as crew with named sessions. But a city
+demand for polecats, keeping them alive as crew with named sessions. But a city
 isn't a collection of independent agents working in isolation. It's a system of
 agents that can talk to each other.
 
@@ -74,7 +74,7 @@ ID           FROM   SUBJECT        BODY
 mc-wisp-8t8  human  Review needed  Please look at the auth module changes in my-project
 ```
 
-`gc mail inbox` defaults to unread messages, so there's no STATE column —
+`gc mail inbox` lists only unread messages, so there's no STATE column —
 everything listed is unread by definition.
 
 If you want to see the mayor react right away in `peek` or `logs`, give it a
@@ -85,6 +85,9 @@ turn:
 $ gc session nudge mayor "Check mail and hook status, then act accordingly"
 Nudged mayor
 ```
+
+(As in Tutorial 03, you may see `Queued nudge for mayor` instead — both
+confirm the nudge is on its way.)
 
 The mayor doesn't have to manually check its inbox. Gas City installs provider
 hooks that surface unread mail automatically — on each turn, a hook runs `gc
@@ -139,37 +142,37 @@ reads on every session start — you don't need any TOML in `pack.toml` or
 `city.toml` to get the default behavior, and `grep install_agent_hooks` in a
 fresh city will turn up nothing.
 
-If you want to override that default — say, install hooks for a different
-provider or skip them for a specific agent — you can set
-`install_agent_hooks` at the workspace or agent level:
+Claude is the only provider whose hooks are wired automatically. If an agent
+runs on a different provider — suppose you moved the mayor to Codex — list
+that provider in `install_agent_hooks` on the agent, and Gas City installs
+its hook files into the agent's working directory:
 
 ```toml
-# city.toml — applies to every agent in the city
-[workspace]
-install_agent_hooks = ["claude"]
+# agents/mayor/agent.toml — install hook files for this agent's provider
+install_agent_hooks = ["codex"]
 ```
 
-```toml
-# agents/mayor/agent.toml — per-agent override
-install_agent_hooks = ["claude"]
-```
-
-Agent-local overrides live in `agents/<name>/agent.toml`.
+Agent-local overrides live in `agents/<name>/agent.toml`. (You can also set
+`install_agent_hooks` under `[workspace]` in `city.toml` as a city-wide
+default, but that spelling is deprecated — config load warns and points you
+at the per-agent form — and an agent-level list replaces the workspace one
+rather than adding to it.)
 
 Either way, once a session starts, Gas City installs the hook settings that
 the provider reads. For Claude, this is the `.gc/settings.json` file, which
 fires Gas City commands at key moments — session start, before each turn, and
-on shutdown. Those commands deliver mail, drain nudges, and surface pending
-work.
+right before the provider compacts its context. Those commands surface
+pending work, deliver mail, drain queued nudges, and save a handoff before a
+context cycle.
 
 Without hooks, you'd have to manually tell each agent to run `gc mail check` and
-`gc prime`. With hooks, it happens on every turn.
+`gc prime`. With hooks, it happens automatically.
 
 ## What's next
 
 You've seen the two coordination mechanisms — mail for messages and slung beads
 for work — and the hook infrastructure that wires it all together. From here:
 
-- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
-  dependencies and variables
+- **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
+  done: steps, dependencies, and variables
 - **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all

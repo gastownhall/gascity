@@ -6,15 +6,16 @@ description: Understand the universal work primitive that underlies sessions, ma
 
 If you've been following along, you've been creating beads without knowing it.
 When you started a session — that created a bead. When you sent mail — bead.
-When you cooked a formula — beads. When sling dispatched a wisp — bead.
+When you cooked a formula — beads. When sling dispatched work — bead.
 
 Beads are the universal work primitive in Gas City. Every trackable thing —
 tasks, messages, sessions, molecules, convoys — is a bead in the store. This
 tutorial peels back the layer and shows you what's underneath.
 
-We'll pick up where [Tutorial 03](/tutorials/03-sessions) left off. You
-should have `my-city` running with `my-project` rigged, and agents for `mayor`
-and `reviewer` (along with the corresponding prompts):
+We'll pick up where [Tutorial 05](/tutorials/05-formulas) left off. You
+should have `my-city` running with `my-project` rigged, the `pancakes`
+formula cooked, and agents for `mayor`, `reviewer`, and `worker` (along with
+the corresponding prompts):
 
 ```shell
 ~/my-city
@@ -31,6 +32,8 @@ mode = "always"
 $ cat city.toml
 [workspace]
 provider = "claude"
+
+... # content elided
 
 [[rigs]]
 name = "my-project"
@@ -52,8 +55,9 @@ name = "my-project"
 path = "/Users/csells/my-project"
 ```
 
-Beads are fundamental to the system. You're going to be working with crew to
-turn plans into beads that can be executed in parallel by polecats.
+Beads are fundamental to the system. Everything your agents do — planning,
+working, reporting — turns into beads that can be claimed and executed in
+parallel.
 
 ## What is a bead
 
@@ -63,23 +67,39 @@ A bead is a unit of work with an ID, a title, a status, and a type. We use the
 ```shell
 ~/my-city
 $ bd list
-○ mc-194 ● P2 pancakes
-├── ○ mc-194.3 ● P2 Combine wet and dry
-├── ○ mc-194.4 ● P2 Cook the pancakes
-└── ○ mc-194.5 ● P2 Serve
+○ mc-0ez ● P2 Mix wet ingredients
+○ mc-265 ● P2 Combine wet and dry
+○ mc-79s ● P2 pancakes
+○ mc-9vb ● P2 Finalize workflow
 ○ mc-a4l ● P2 Refactor auth module
+○ mc-b8g ● P2 Mix dry ingredients
 ○ mc-d4g ● P2 Sprint 42
 ○ mc-io4 ● P2 mayor
+○ mc-k3q ● P2 Serve
+○ mc-nia ● P2 Cook the pancakes
 ○ mc-xp7 ● P2 Update API docs
 
-Total: 7 issues (7 open, 0 in progress)
+--------------------------------------------------------------------------------
+Total: 11 issues (11 open, 0 in progress)
+
 Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
 ```
 
-By default `bd list` renders a tree, with parent beads grouping their children.
-The leading glyph is the bead's status, followed by ID, priority (`P2`), and
-title. Pass `--flat` for a single-level list and `--all` to include closed
-beads.
+The seven `pancakes` beads come from cooking the formula in
+[Tutorial 05](/tutorials/05-formulas): a root bead (`mc-79s`), one bead per
+step, and the `Finalize workflow` control step the v2 compiler appends.
+Each one is an independent, top-level bead with its own ID — the ordering
+between them lives in dependency edges, which we'll get to below. (Beads that
+do have parent-child links, such as v1 molecule instances, render as a
+nested tree instead.) The leading glyph is the bead's status, followed by ID,
+priority (`P2`), and title. Pass `--flat` for a single-level list and `--all`
+to include closed beads.
+
+Your own list will differ a bit. `Refactor auth module`, `Sprint 42`, and
+`Update API docs` are beads this page creates below, and if you ran every
+Tutorial 05 command you'll also see the workflow you slung to the mayor and
+the other formulas you cooked. What matters is the shape, not the exact
+inventory.
 
 Every bead has:
 
@@ -94,19 +114,28 @@ Every bead has:
 
 The type determines what a bead represents:
 
-| Type         | What it is                       | Created by                                |
-| ------------ | -------------------------------- | ----------------------------------------- |
-| **task**     | A unit of work                   | `bd create`, formula steps                |
-| **message**  | Inter-agent mail                 | `gc mail send`                            |
-| **session**  | A running agent session          | `gc session new`                          |
-| **molecule** | Persistent formula instance      | `gc formula cook`                         |
-| **wisp**     | Ephemeral formula instance       | `gc sling --formula`                      |
-| **convoy**   | Container grouping related beads | `gc convoy create`, auto-created by sling |
+| Type         | What it is                                          | Created by                                  |
+| ------------ | --------------------------------------------------- | ------------------------------------------- |
+| **task**     | A unit of work — including formula steps and workflow roots | `bd create`, `gc formula cook`, `gc sling` |
+| **message**  | Inter-agent mail                                    | `gc mail send`                              |
+| **session**  | A running agent session                             | `gc session new`                            |
+| **molecule** | v1 formula instance (container root)            | `gc formula cook` on a formula without the v2 requirement |
+| **convoy**   | Container grouping related beads                    | `gc convoy create`, auto-created by sling   |
 
 The type system is simple by design. Gas City doesn't have separate storage for
 tasks vs. messages vs. sessions — they're all beads with different type labels.
 This is what makes the system composable: the same store, the same query
 interface, the same dependency model works for everything.
+
+Notice that a formula instance isn't a special type. When you cook or sling a
+v2 formula (any formula declaring `[requires]
+formula_compiler = ">=2.0.0"`), the root and every step are plain `task` beads;
+the root carries `gc.kind=workflow` metadata marking it as a workflow root. A
+root-only **wisp** — an ephemeral instance where the root bead itself is the
+work, so no container is needed — is likewise a `task`, carrying
+`gc.kind=wisp` metadata. The kind lives in metadata, not in the type column.
+Only v1 formulas — ones without the v2 requirement — create a `molecule`
+container bead with parent-child step children.
 
 ## Creating beads
 
@@ -114,8 +143,8 @@ Most beads are created indirectly:
 
 - `gc session new my-project/reviewer` creates a session bead
 - `gc mail send mayor "Subject" "Body"` creates a message bead
-- `gc formula cook review` creates molecule + step beads
-- `gc sling mayor review --formula` creates a wisp bead + convoy
+- `gc formula cook review` creates a workflow root plus a bead for every step
+- `gc sling mayor review --formula` does the same and routes the work to `mayor`
 
 But you can use `bd` to create them manually:
 
@@ -130,12 +159,18 @@ $ bd create "Refactor auth module" --type feature
 ✓ Created issue: mc-a4l — Refactor auth module
   Priority: P2
   Status: open
+
+$ bd create "Update API docs"
+✓ Created issue: mc-xp7 — Update API docs
+  Priority: P2
+  Status: open
 ```
 
 The exact trailing lines under the `Created issue` header (`Priority:`,
 `Status:`) can vary depending on your installed `bd` version — some builds
 only print `Priority:`, others print both. Either is fine; the bead gets
-created identically.
+created identically. The dependency and convoy examples below use all three
+of these beads.
 
 ## Bead lifecycle
 
@@ -165,7 +200,9 @@ $ bd list --status open --flat
 ```
 
 Note that the flag is `--status` (`--state` is a different command for state
-dimensions).
+dimensions). As with the opening listing, the output here is trimmed to the
+beads this page created — yours will still include the open pancakes beads
+and the mayor's session bead.
 
 ## Beads as execution state
 
@@ -181,7 +218,7 @@ $ bd list --status in_progress --flat
 ◐ mc-io4 [● P2] [session] - mayor
 ```
 
-This is what allows you to use agents sessions as disposable processes for
+This is what allows you to use agent sessions as disposable processes for
 executing work; work isn't held in memory or tracked by a running process — it's
 persisted in the store. If an agent dies, its beads stay open. When the agent
 restarts, its hooks discover the same work and pick up where it left off. If the
@@ -257,16 +294,19 @@ association), **`parent-child`** (containment), and **`discovered-from`** (work
 that surfaced while doing other work). Only `blocks` affects work visibility.
 
 Beads also have a separate _parent-child_ relationship — a bead can set a
-`parent_id` linking it to a container. This is how convoys and molecules group
-their children. The difference: dependencies express ordering ("do A before B"),
-while parent-child expresses containment ("these beads belong to this group"). A
-convoy's children don't depend on each other — they're just members of the same
+`parent_id` linking it to a container, which is how v1 molecules group
+their step children. The current mechanisms group with edges instead: a
+v2 workflow's steps each carry a non-blocking `tracks` edge to their
+root, and convoys track their members the same way (more below). Either way
+the distinction holds: `blocks` expresses ordering ("do A before B"), while
+`tracks` and parent-child express grouping ("these beads belong together"). A
+convoy's members don't depend on each other — they're just part of the same
 batch.
 
 ## Convoys
 
-If you've slung a formula, you've already created a convoy without knowing it —
-Gas City automatically wraps dispatched formula work in one. You'll see them in
+If you've slung an existing bead, you've already created a convoy without
+knowing it — Gas City automatically wraps slung beads in one. You'll see them in
 `bd list` as beads with type `convoy`, and in `gc convoy list` with progress
 summaries. They matter when you need to track a batch of related work as a unit:
 "are all five of these tasks done yet?" is a convoy question.
@@ -280,9 +320,15 @@ $ gc convoy create "Sprint 42" mc-ykp mc-a4l mc-xp7
 Created convoy mc-d4g "Sprint 42" tracking 3 issue(s)
 ```
 
-The convoy is a bead with type `convoy`. The child beads are linked via their
-`ParentID` — the same parent-child mechanism used by molecules, just for
-grouping instead of step ordering.
+The convoy is a bead with type `convoy`. Membership is recorded as `tracks`
+dependency edges from the convoy to each bead — that's the "tracking 3
+issue(s)" in the output. Tracking doesn't change a bead's parent or block
+anything; it's pure grouping.
+
+![Convoy membership shown as tracks edges: a convoy bead ("Sprint 42") with
+dashed tracks edges to three independent work beads (fix login bug, refactor
+auth, update API docs). The members keep their own identity and status and
+are not children of the convoy.](/diagrams/excalidraw-rendered/convoy-tracks-membership.svg)
 
 ```shell
 ~/my-city
@@ -300,8 +346,8 @@ mc-xp7  Update API docs       open    -
 
 ### Auto-close
 
-When a bead closes, Gas City checks whether its parent is a convoy with all
-children now closed. If so, the convoy closes automatically. This happens in the
+When a bead closes, Gas City checks whether any convoy tracking it now has all
+members closed. If so, the convoy closes automatically. This happens in the
 background via the `on_close` hook — no polling, no manual intervention.
 
 Convoys with the **owned** label skip auto-close. These are for workflows where
@@ -318,7 +364,7 @@ When you're done, land it explicitly:
 ```shell
 ~/my-city
 $ gc convoy land mc-0ud
-Landed convoy mc-0ud
+Landed convoy mc-0ud "Auth rewrite"
 ```
 
 ### Adding beads and checking convoys
@@ -399,7 +445,9 @@ The typical flow:
 5. The agent sees the claimed work and acts on it (GUPP: "if you find work on
    your hook, you run it")
 
-For routed pool work, the query checks metadata instead of assignee:
+For work routed to a pool — a group of agents sharing a work queue, which
+[Tutorial 07](/tutorials/07-orders) covers — the query checks metadata instead
+of assignee:
 
 ```shell
 ~/my-city
@@ -407,9 +455,12 @@ $ bd ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=
 ```
 
 Because `mc-xp7` is blocked by `mc-a4l` right now, this query won't return
-anything yet. That's the point: blocked work is invisible to agent work
-queries. Once `mc-a4l` closes, rerun the same query and `mc-xp7` becomes
-eligible.
+it. That's the point: blocked work is invisible to agent work queries.
+Once `mc-a4l` closes, rerun the same query and the readiness barrier is
+gone — though for `mc-xp7` to actually appear here it would also need the
+`gc.routed_to=my-project/worker` routing metadata, which nothing on this
+page has set. Routing decides _which_ queue a bead shows up in; readiness
+decides _whether_ it shows up at all.
 
 This is the "pull" model — agents check for work rather than having work pushed
 to them. It's simple, crash-safe (queued work survives restarts), and scales
@@ -441,13 +492,14 @@ session`, `gc mail`, `gc sling`, `gc formula` — handle bead creation and
 management for you. But when you want to query what work is outstanding across
 the city, create ad-hoc tasks for agents, inspect the dependency graph of a
 formula, or debug why an agent isn't picking up work — that's when you reach for
-`bd` directly.
+`bd` directly. (Listings trimmed to this page's beads, as before — the open
+pancakes beads will show up in yours too.)
 
 ```shell
 ~/my-city
 $ bd list --status open --type task --flat
 ○ mc-xp7 [● P2] [task] - Update API docs
-○ mc-2wx.1 [● P2] [task] - Mix dry ingredients (parent: mc-2wx, blocks: mc-2wx.3)
+○ mc-b8g [● P2] [task] - Mix dry ingredients (blocks: mc-265)
 
 $ bd show mc-a4l
 ○ mc-a4l · Refactor auth module   [● P2 · OPEN]
@@ -460,15 +512,16 @@ METADATA
   branch: feature/auth
   reviewer: sky
 
-PARENT
-  ↑ ○ mc-d4g: Sprint 42 ● P2
-
 BLOCKS
   ← ○ mc-xp7: Update API docs ● P2
+  ← ○ mc-d4g: Sprint 42 ● P2
 
 $ bd close mc-a4l
 ✓ Closed mc-a4l — Refactor auth module: Closed
 ```
+
+The `Sprint 42` entry under `BLOCKS` is the convoy's incoming `tracks` edge —
+grouping, not a blocker.
 
 Beads are the ground truth of the running state of the city. Everything else in
 Gas City — sessions, mail, formulas, convoys — is built on top of them.

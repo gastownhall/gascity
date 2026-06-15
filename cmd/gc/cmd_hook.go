@@ -310,6 +310,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		if rigStores := appendOneRigHookStore(nil, cityPath, cfg, &a, rig, overrides); len(rigStores) > 0 {
 			stores = append(rigStores, stores...)
 		}
+		// A rig-backed agent's own env above is ALSO rig-scoped, so without
+		// this no entry reaches the CITY store and root-only beads assigned
+		// to the agent stay invisible. Best-effort tertiary; see
+		// appendCityHookStore.
+		stores = appendCityHookStore(stores, cityPath, cfg, &a, overrides)
 	}
 
 	runner := func(command, _ string) (string, error) {

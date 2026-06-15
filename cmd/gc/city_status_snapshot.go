@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -301,7 +302,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 	for _, ns := range cfg.NamedSessions {
 		identity := ns.QualifiedName()
 		mode := ns.ModeOrDefault()
-		status := namedSessionStatusForCity(cityPath, cfg, store, statusSnapshot, snapshot.CityName, identity, mode, suspendedRigs)
+		status := namedSessionStatusForCity(cityPath, cfg, store, statusSnapshot, snapshot.CityName, identity, mode, suspState, suspendedRigs)
 		snapshot.NamedSessions = append(snapshot.NamedSessions, cityStatusNamedSession{
 			Identity: identity,
 			Status:   status,
@@ -320,11 +321,12 @@ func namedSessionStatusForCity(
 	cityName string,
 	identity string,
 	mode string,
+	suspState suspensionstate.State,
 	suspendedRigs map[string]bool,
 ) string {
 	status := "reserved-unmaterialized"
 	if spec, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
-		if mode == "always" && namedSessionBlockedBySuspension(cfg, spec.Agent, suspendedRigs) {
+		if mode == "always" && namedSessionBlockedBySuspension(cfg, spec.Agent, suspState, suspendedRigs) {
 			status = "degraded blocked"
 		}
 	}

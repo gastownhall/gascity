@@ -1,8 +1,11 @@
-# Gas City Configuration
+---
+title: "Gas City Configuration"
+description: "Schema for city.toml — the deployment file for a Gas City instance."
+---
 
-Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.
+Schema for city.toml — the deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for pack composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.
 
-> **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec).
+> **Pack format source of truth:** Public pack format and loader semantics are specified in [Gas City Pack Specification](/reference/specs/pack-spec).
 
 > **Auto-generated** — do not edit. Run `go run ./cmd/genschema` to regenerate.
 
@@ -15,9 +18,9 @@ City is the top-level configuration for a Gas City instance.
 | `include` | []string |  |  | Include lists config fragment files to merge into this config. Processed by LoadWithIncludes; not recursive (fragments cannot include). |
 | `workspace` | Workspace | **yes** |  | Workspace holds city-level metadata (name, default provider). |
 | `providers` | map[string]ProviderSpec |  |  | Providers defines named provider presets for agent startup. |
-| `imports` | map[string]Import |  |  | Imports defines named pack imports (V2 mechanism). Each key is a binding name; the value specifies the source and optional version, export, and transitive controls. Processed during ExpandCityPacks. |
+| `imports` | map[string]Import |  |  | Imports defines named pack imports. Each key is a local binding name; the authored public contract stores a durable source plus optional version. Processed during ExpandCityPacks. |
 | `defaults` | PackDefaults |  |  | Defaults holds city-level defaults that seed generated config. The canonical default-rig import table is [defaults.rig.imports]. |
-| `agent` | []Agent |  |  | Agents lists all configured agents in this city. Optional: PackV2 cities compose agents through [imports.*] and ship without any [[agent]] block. |
+| `agent` | []Agent |  |  | Agents lists all configured agents in this city. Pack-composed cities can compose agents through [imports.*] and ship without any [[agent]] block. |
 | `named_session` | []NamedSession |  |  | NamedSessions lists canonical alias-backed sessions built from reusable agent templates. |
 | `rigs` | []Rig |  |  | Rigs lists external projects registered in the city. |
 | `patches` | Patches |  |  | Patches holds targeted modifications applied after fragment merge. |
@@ -26,9 +29,9 @@ City is the top-level configuration for a Gas City instance.
 | `mail` | MailConfig |  |  | Mail configures the mail provider backend. |
 | `events` | EventsConfig |  |  | Events configures the events provider backend. |
 | `dolt` | DoltConfig |  |  | Dolt configures optional dolt server connection overrides. |
-| `formulas` | FormulasConfig |  |  | Formulas configures formula directory settings. |
+| `formulas` | FormulasConfig |  |  | Formulas is the legacy [formulas] table; authored [formulas].dir is rejected at config load. Formulas live in the well-known formulas/ directory. |
 | `daemon` | DaemonConfig |  |  | Daemon configures controller daemon settings. |
-| `orders` | OrdersConfig |  |  | Orders configures order settings (skip list). |
+| `orders` | OrdersConfig |  |  | Orders configures order settings: skip list, max_timeout cap, and per-order overrides. |
 | `api` | APIConfig |  |  | API configures the optional HTTP API server. |
 | `chat_sessions` | ChatSessionsConfig |  |  | ChatSessions configures chat session behavior (auto-suspend). |
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
@@ -255,7 +258,7 @@ BeadPolicyConfig holds storage and retention defaults for a named bead use.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `storage` | string |  |  | Storage selects the intended persistence tier: "history", "no_history", or "ephemeral". Creation paths apply this incrementally as they opt in. Enum: `history`, `no_history`, `ephemeral` |
-| `delete_after_close` | string |  |  | DeleteAfterClose deletes matching GC-owned beads after they have been closed for this duration. Accepts Go duration syntax plus whole-day "d" units, e.g. "7d" or "1d12h". Empty defers to any controller-managed default for the policy type (e.g. order_tracking defaults to 7d). |
+| `delete_after_close` | string |  |  | DeleteAfterClose deletes matching GC-owned beads after they have been closed for this duration. Accepts Go duration syntax plus whole-day "d" units, e.g. "7d" or "1d12h". ApplyBeadPolicyDefaults fills in a non-empty default for recognized policy types (order_tracking: "7d"), so this field is populated after config load even when the city.toml omits it. |
 
 ## BeadsConfig
 
@@ -338,6 +341,7 @@ DoltConfig holds optional dolt server overrides.
 | `port` | integer |  | `0` | Port is the dolt server port. 0 means use ephemeral port allocation (hashed from city path). Set explicitly to override. |
 | `host` | string |  | `localhost` | Host is the dolt server hostname. Defaults to localhost. |
 | `archive_level` | integer |  | `0` | ArchiveLevel controls Dolt's auto_gc archive aggressiveness. 0 disables archive compaction (lower CPU on startup). 1 enables archive compaction (higher CPU on startup). nil (omitted) defaults to 0. |
+| `auto_gc_enabled` | boolean |  | `true` | AutoGCEnabled toggles Dolt's incremental auto-GC on the managed sql-server. Auto-GC bounds the noms journal so it never reaches GB scale, which shrinks both the unclean-stop corruption window and the recovery blast radius. nil (omitted) defaults to true. |
 | `max_connections` | integer |  | `256` | MaxConnections overrides the managed Dolt listener max_connections. 0 means use the managed default. |
 | `read_timeout_millis` | integer |  | `30000` | ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis. 0 means use the managed default. |
 | `write_timeout_millis` | integer |  | `300000` | WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis. 0 means use the managed default. |
@@ -377,10 +381,7 @@ EventsRotationConfig holds file-backed events rotation settings.
 
 ## FormulasConfig
 
-FormulasConfig holds legacy formula directory settings.
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
+FormulasConfig is the legacy [formulas] table with no supported fields: authored [formulas].dir is rejected at config load (use the well-known formulas/ directory instead), and gc doctor flags any declaration as a fixable v2-formulas-dir error.
 
 ## GitHubConfig
 
@@ -435,9 +436,6 @@ Import defines a named import of another pack.
 |-------|------|----------|---------|-------------|
 | `source` | string | **yes** |  | Source is the durable authored pack location: a local path, a remote git URL, or a dereferenceable GitHub tree URL for a pack below a repository root, such as "https://github.com/org/repo/tree/main/packs/foo". Registry handles are lookup-only in this release wave; authored [imports.*] entries store the resolved source plus optional version. |
 | `version` | string |  |  | Version is an optional semver constraint for git-backed imports (e.g., "^1.2"). Empty for local paths. "sha:&lt;hex&gt;" pins a specific commit. |
-| `export` | boolean |  |  | Export re-exports this import's contents into the parent pack's namespace. Consumers of the parent get this import's agents flattened under the parent's binding name. |
-| `transitive` | boolean |  |  | Transitive controls whether this import's own imports are visible to the consumer. Defaults to true (transitive). Set to false to suppress transitive resolution for this specific import. |
-| `shadow` | string |  |  | Shadow controls shadow warnings when the importer defines an agent with the same name as one from this import. "warn" (default) emits a warning; "silent" suppresses it. Enum: `warn`, `silent` |
 
 ## K8sConfig
 
@@ -500,7 +498,7 @@ NamedSession defines a canonical persistent session backed by an agent template.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string |  |  | Name is the configured public session identity. When omitted, Template remains the compatibility identity. |
-| `template` | string | **yes** |  | Template is the referenced agent template name. Root declarations may target imported PackV2 agents via "binding.agent". |
+| `template` | string | **yes** |  | Template is the referenced agent template name. Root declarations may target imported agents via "binding.agent". |
 | `scope` | string |  |  | Scope defines where this named session is instantiated in pack expansion: "city" (one per city) or "rig" (one per rig). Enum: `city`, `rig` |
 | `dir` | string |  |  | Dir is the identity prefix for rig-scoped named sessions after pack expansion. Empty means city-scoped. |
 | `mode` | string |  |  | Mode controls when the controller ensures this named session is live. "on_demand" (default): reserve identity and materialize when work or an explicit reference requires it. "always": keep the canonical session controller-managed. Note: mode="always" is independent of min_active_sessions; both produce sessions, and gc doctor reports accidental duplicate-pool combinations. Enum: `on_demand`, `always` |
@@ -549,7 +547,7 @@ OrderOverride modifies a scanned order's scheduling fields and exec env.
 
 ## OrdersConfig
 
-OrdersConfig holds order settings.
+OrdersConfig holds order settings for orders discovered from flat TOML files (one file per order) in the orders/ directory beside each formula layer (packs, the city directory, and rig-local layers).
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
@@ -681,7 +679,7 @@ Rig defines an external project registered in the city.
 | `default_branch` | string |  |  | DefaultBranch is the rig repository's mainline branch (e.g. "main", "master", "develop"). When set, routing formulas use this as the default merge target instead of probing origin/HEAD at sling time. Captured by `gc rig add` from the rig's git config; set manually for rigs whose mainline isn't reachable via origin/HEAD. |
 | `suspended` | boolean |  |  | Suspended is the deprecated pre-runtime-state suspension flag. Parsed for backwards compatibility and treated as an alias for SuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing cities with `suspended = true` continue to start their rigs suspended after upgrade. Live suspend/resume commands no longer write this field. `gc doctor` flags it and offers `--fix` to rename to suspended_on_start. |
 | `suspended_on_start` | boolean |  |  | SuspendedOnStart is the rig's desired suspension state at city start. When true and no explicit entry exists for this rig in .gc/runtime/suspension-state.json, the rig is treated as suspended. Once the user has explicitly suspended or resumed the rig via `gc rig suspend/resume`, the runtime state wins. |
-| `formulas_dir` | string |  |  | FormulasDir is a rig-local formula directory (Layer 4). Overrides pack formulas for this rig by filename. Relative paths resolve against the city directory. |
+| `formulas_dir` | string |  |  | FormulasDir is a rig-local formula directory — the highest-priority formula layer, above city pack formulas, the city formulas/ directory, and rig pack formulas. Overrides pack formulas for this rig by filename. Relative paths resolve against the city directory. |
 | `includes` | []string |  |  | Includes lists pack directories or URLs for this rig (V1 mechanism). Each entry is a local path, a git source//sub#ref URL, or a GitHub tree URL. |
 | `imports` | map[string]Import |  |  | Imports defines named pack imports for this rig (V2 mechanism). Each key is a binding name; agents from these imports get qualified names like "rigName/bindingName.agentName". |
 | `max_active_sessions` | integer |  |  | MaxActiveSessions is the rig-level cap on total concurrent sessions across all agents in this rig. Nil means inherit from workspace (or unlimited). |

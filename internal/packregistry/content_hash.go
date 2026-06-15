@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
-	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/git"
 )
 
 // PackContentHash returns the canonical sha256 content hash for one pack
@@ -238,36 +238,10 @@ func runRegistryGitBytes(dir string, args ...string) ([]byte, error) {
 	}, args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = dir
-	for _, env := range os.Environ() {
-		key, _, ok := strings.Cut(env, "=")
-		if ok && registryGitEnvBlacklist[key] {
-			continue
-		}
-		cmd.Env = append(cmd.Env, env)
-	}
-	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	cmd.Env = git.HermeticEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return out, nil
-}
-
-var registryGitEnvBlacklist = map[string]bool{
-	"GIT_DIR":                          true,
-	"GIT_WORK_TREE":                    true,
-	"GIT_INDEX_FILE":                   true,
-	"GIT_OBJECT_DIRECTORY":             true,
-	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
-	"GIT_COMMON_DIR":                   true,
-	"GIT_CEILING_DIRECTORIES":          true,
-	"GIT_DISCOVERY_ACROSS_FILESYSTEM":  true,
-	"GIT_NAMESPACE":                    true,
-	"GIT_CONFIG":                       true,
-	"GIT_CONFIG_GLOBAL":                true,
-	"GIT_CONFIG_SYSTEM":                true,
-	"GIT_CONFIG_NOSYSTEM":              true,
-	"GIT_CONFIG_COUNT":                 true,
-	"GIT_EXEC_PATH":                    true,
-	"GIT_PAGER":                        true,
 }

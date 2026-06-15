@@ -419,10 +419,13 @@ func readRespawnMarkers(t *testing.T, path string) []float64 {
 	return ts
 }
 
-// TestLifecycle_PackMaterializationOnStart verifies that gc start
-// materializes gastown packs even if they were deleted after init.
-// This is the end-to-end regression test for Bug 4 (2026-03-18).
-func TestLifecycle_PackMaterializationOnStart(t *testing.T) {
+// TestLifecycle_PackCacheSelfHealsOnStart verifies that gc start re-hydrates
+// the user-global bundled pack cache even if it was deleted after init.
+// End-to-end regression test for Bug 4 (2026-03-18), updated for the
+// imports-based composition model: builtin packs at their canonical pins
+// resolve from the GC_HOME cache that the binary self-heals from its
+// embedded content.
+func TestLifecycle_PackCacheSelfHealsOnStart(t *testing.T) {
 	c := helpers.NewCity(t, testEnvB)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
@@ -435,35 +438,34 @@ func TestLifecycle_PackMaterializationOnStart(t *testing.T) {
 		t.Fatalf("gc unregister after init-from failed: %v\n%s", err, out)
 	}
 
-	systemGastownPack := filepath.Join(".gc", "system", "packs", "gastown", "pack.toml")
-	systemCorePack := filepath.Join(".gc", "system", "packs", "core", "pack.toml")
-
-	// Verify managed system packs exist after init.
-	if !c.HasFile(systemGastownPack) {
-		t.Fatal(".gc/system/packs/gastown/pack.toml not materialized after init")
+	cacheRoot := filepath.Join(testEnvB.Get("GC_HOME"), "cache", "repos")
+	if _, err := os.Stat(cacheRoot); err != nil {
+		t.Fatalf("bundled pack cache missing after init: %v", err)
 	}
 
-	// Delete managed packs to simulate partial init failure.
-	if err := os.RemoveAll(filepath.Join(c.Dir, ".gc", "system", "packs")); err != nil {
+	// Delete the user-global cache to simulate eviction (or a fresh host).
+	if err := os.RemoveAll(cacheRoot); err != nil {
 		t.Fatal(err)
 	}
 
-	// gc start registers with the supervisor, which materializes managed packs
-	// during registration (before config load).
+	// gc start registers with the supervisor; builtin readiness re-hydrates
+	// the bundled cache before config load.
 	out, err := c.GC("start", c.Dir)
 	if err != nil {
 		t.Logf("gc start returned error (may be expected): %v\n%s", err, out)
 	}
 
-	// Wait for the supervisor to materialize managed packs (reconcile tick).
 	found := c.WaitForCondition(func() bool {
-		return c.HasFile(systemGastownPack)
+		entries, readErr := os.ReadDir(cacheRoot)
+		return readErr == nil && len(entries) > 0
 	}, 60*time.Second)
-
 	if !found {
-		t.Fatal(".gc/system/packs/gastown/pack.toml not re-materialized on start — Bug 4 regression")
+		t.Fatal("bundled pack cache not re-hydrated on start — Bug 4 regression")
 	}
-	if !c.HasFile(systemCorePack) {
-		t.Fatal(".gc/system/packs/core/pack.toml not re-materialized on start")
+
+	// The composed config must resolve every pinned import from the
+	// re-hydrated cache.
+	if out, err := c.GC("config", "show", "--validate"); err != nil {
+		t.Fatalf("gc config show --validate after self-heal failed: %v\n%s", err, out)
 	}
 }

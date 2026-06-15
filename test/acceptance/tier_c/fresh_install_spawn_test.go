@@ -121,6 +121,7 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 			return false
 		}
 		sessionBeads := parseBeadListJSON(t, sessionsOut)
+		sessionListOut, sessionListErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "list")
 		for _, sessionBead := range sessionBeads {
 			if metaString(sessionBead.Metadata, "template") != "claude" {
 				continue
@@ -129,11 +130,18 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 			if state != "creating" && state != "active" && state != "awake" {
 				continue
 			}
-			if metaString(sessionBead.Metadata, "session_name") == "" {
+			sessionName := metaString(sessionBead.Metadata, "session_name")
+			if sessionName == "" {
 				continue
 			}
 			spawnedSessionBead = sessionBead
-			return state == "active" || state == "awake"
+			if state == "active" || state == "awake" {
+				return true
+			}
+			if sessionListErr != nil {
+				return false
+			}
+			return sessionListShowsActive(sessionListOut, sessionBead.ID, sessionName)
 		}
 		return false
 	})
@@ -232,7 +240,6 @@ func configureFreshInitClaudePool(t *testing.T, c *helpers.City) {
 	t.Helper()
 	c.WriteV2AgentDir("claude",
 		`provider = "claude"`,
-		`prompt_template = ".gc/system/packs/core/assets/prompts/pool-worker.md"`,
 		`default_sling_formula = "mol-do-work"`,
 		`min_active_sessions = 0`,
 		`max_active_sessions = 1`,
@@ -280,6 +287,54 @@ func parseCreatedBeadID(output string) string {
 		return ""
 	}
 	return strings.TrimSpace(match[1])
+}
+
+func TestSessionListShowsActiveAcceptsLiveStateDuringMetadataLag(t *testing.T) {
+	output := `2026/06/13 22:51:49 WARN native_store_unavailable
+ID           TEMPLATE  STATE   REASON          TARGET              TITLE   AGE  LAST ACTIVE  LAST NUDGE
+a9-wisp-0my  claude    active  session,config  claude-a9-wisp-0my  claude  19s  0s ago       -
+a9-wisp-q0w  claude    creating create,config  s-a9-wisp-q0w       claude  27s  -            -
+`
+
+	if !sessionListShowsActive(output, "a9-wisp-0my", "claude-a9-wisp-0my") {
+		t.Fatal("expected active live session row to satisfy spawned-worker check")
+	}
+	if sessionListShowsActive(output, "a9-wisp-q0w", "s-a9-wisp-q0w") {
+		t.Fatal("creating live session row must not satisfy spawned-worker check")
+	}
+	if sessionListShowsActive(output, "missing", "missing") {
+		t.Fatal("unrelated session must not satisfy spawned-worker check")
+	}
+}
+
+func sessionListShowsActive(output, beadID, sessionName string) bool {
+	beadID = strings.TrimSpace(beadID)
+	sessionName = strings.TrimSpace(sessionName)
+	if beadID == "" && sessionName == "" {
+		return false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		state := fields[2]
+		if state != "active" && state != "awake" {
+			continue
+		}
+		if beadID != "" && fields[0] == beadID {
+			return true
+		}
+		if sessionName == "" {
+			continue
+		}
+		for _, field := range fields[3:] {
+			if field == sessionName {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func parseBeadListJSON(t *testing.T, out string) []beadJSON {

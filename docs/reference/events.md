@@ -28,7 +28,7 @@ The underlying DTOs come from the published OpenAPI document:
 - `HeartbeatEvent`
 
 Download the canonical supervisor spec and the `gc events` JSONL line schema
-from [Schemas](/schema), or read the broader event-bus notes in the
+from [Schemas](/reference/schema), or read the broader event-bus notes in the
 [Supervisor REST API](/reference/api).
 
 ## Output Modes
@@ -156,7 +156,7 @@ payload objects. For example, use
 
 ## Machine-Readable Schema
 
-The <a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/schema/events.json" target="_blank" rel="noopener">events.json</a>
+The <a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/reference/schema/events.json" target="_blank" rel="noopener">events.json</a>
 schema validates one JSON object line from list, watch, or follow mode. It
 contains only framing metadata and `$ref`s into `openapi.json`:
 

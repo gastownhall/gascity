@@ -16,7 +16,7 @@ const restartScript = "commands/restart/run.sh"
 // op. ops that aren't in opExitCodes exit 0.
 func writeFakeBeadsBDForRestart(t *testing.T, cityPath string, opExitCodes map[string]int) string {
 	t.Helper()
-	scriptDir := filepath.Join(cityPath, ".gc", "system", "packs", "bd", "assets", "scripts")
+	scriptDir := filepath.Join(cityPath, ".gc", "scripts")
 	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
 		t.Fatalf("mkdir fake bd dir: %v", err)
 	}

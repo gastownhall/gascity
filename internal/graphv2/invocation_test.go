@@ -419,7 +419,7 @@ title = "Expanded {{convoy_id}}"
 	if err == nil {
 		t.Fatal("PrepareInvocation succeeded, want targetless expanded convoy_id error")
 	}
-	if !strings.Contains(err.Error(), "convoy_id requires a targeted graph.v2 invocation") {
+	if !strings.Contains(err.Error(), "convoy_id requires a targeted formulas v2 invocation") {
 		t.Fatalf("error = %q, want expanded convoy_id target error", err)
 	}
 }
@@ -453,7 +453,7 @@ condition = "!{{convoy_id}}"
 	if err == nil {
 		t.Fatal("PrepareInvocation succeeded, want targetless expanded condition convoy_id error")
 	}
-	if !strings.Contains(err.Error(), "convoy_id requires a targeted graph.v2 invocation") {
+	if !strings.Contains(err.Error(), "convoy_id requires a targeted formulas v2 invocation") {
 		t.Fatalf("error = %q, want expanded condition convoy_id target error", err)
 	}
 }
@@ -477,7 +477,7 @@ condition = "!{{convoy_id}}"
 	if err == nil {
 		t.Fatal("PrepareInvocation succeeded, want targetless conditioned convoy_id error")
 	}
-	if !strings.Contains(err.Error(), "convoy_id requires a targeted graph.v2 invocation") {
+	if !strings.Contains(err.Error(), "convoy_id requires a targeted formulas v2 invocation") {
 		t.Fatalf("error = %q, want conditioned convoy_id target error", err)
 	}
 }
@@ -663,8 +663,8 @@ title = "Legacy item"
 	if err == nil {
 		t.Fatal("PrepareInvocation succeeded, want drain item graph.v2 error")
 	}
-	if !strings.Contains(err.Error(), "must declare contract = \"graph.v2\"") {
-		t.Fatalf("error = %q, want graph.v2 item formula message", err)
+	if !strings.Contains(err.Error(), "must declare the formulas v2 contract ([requires] formula_compiler = \">=2.0.0\")") {
+		t.Fatalf("error = %q, want formulas v2 item formula message", err)
 	}
 	matches, err := store.List(beads.ListQuery{Type: "convoy"})
 	if err != nil {

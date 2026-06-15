@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/emergency"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
@@ -1323,8 +1324,10 @@ func runController(
 	cs.pokeCh = pokeCh
 	cs.configDirty = configDirty
 	cs.services = cr.svc
+	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
 	cs.startBeadEventWatcher(ctx)
+	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)
 
 	// Start API server if configured. Standalone city mode wraps the

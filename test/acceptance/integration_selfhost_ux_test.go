@@ -40,7 +40,7 @@ func TestSelfhostUX_PackV1V2Collision(t *testing.T) {
 
 func TestSelfhostUX_GcStopBypassValidation(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 	c.WriteV1AgentBlock("worker")
 	c.WriteV2AgentDir("worker")
 

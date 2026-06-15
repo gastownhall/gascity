@@ -1,5 +1,6 @@
 // Package bootstrap reconciles legacy user-global implicit-import state for
-// compatibility tooling. Launch-time system packs now come from .gc/system/packs.
+// compatibility tooling. Builtin packs now compose via pinned imports served
+// from the user-global pack cache.
 package bootstrap
 
 import (
@@ -33,9 +34,9 @@ type Entry struct {
 }
 
 // BootstrapPacks is the currently-supported compatibility set. It is empty for
-// the gc import launch path: cities rely on .gc/system/packs and explicit
-// [imports], not user-global implicit imports. Tests may override this list to
-// exercise the compatibility materialization path.
+// the gc import launch path: cities rely on explicit pinned [imports], not
+// user-global implicit imports. Tests may override this list to exercise the
+// compatibility materialization path.
 var BootstrapPacks []Entry
 
 // RetiredBootstrapPacks are legacy implicit imports that older gc releases

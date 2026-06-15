@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
+	gitpkg "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -390,8 +391,12 @@ func (r apiBranchResolver) DefaultBranch(dir string) string {
 	}
 	// Best-effort: read git's origin/HEAD ref for the default branch.
 	// Falls back to empty string if git is unavailable.
-	out, err := exec.CommandContext(context.Background(), "git", "-C", dir,
-		"symbolic-ref", "--short", "refs/remotes/origin/HEAD").Output()
+	cmd := exec.CommandContext(context.Background(), "git", "-C", dir,
+		"symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+	// Sanitize the environment so a leaked GIT_DIR from a parent repo or hook
+	// cannot redirect resolution to the wrong repository's default branch.
+	cmd.Env = gitpkg.SanitizedEnv()
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}

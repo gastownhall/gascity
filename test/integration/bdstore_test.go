@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	bdInitTimeout          = 15 * time.Second
+	bdInitTimeout          = 60 * time.Second
 	doltServerStartupLimit = 10 * time.Second
 )
 

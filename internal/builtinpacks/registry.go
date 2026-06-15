@@ -61,16 +61,40 @@ func All() []Pack {
 		{Name: "bd", Subpath: "examples/bd", FS: bd.PackFS},
 		{Name: "dolt", Subpath: "examples/bd/dolt", FS: dolt.PackFS},
 		{Name: "gastown", Subpath: "examples/gastown/packs/gastown", FS: gascitypacks.Gastown()},
+		// The gascity planning pack never lived in gascity.git: it is
+		// public-registry-only (empty Subpath), served solely through the
+		// PublicRepository alias.
+		{Name: "gascity", Subpath: "", FS: gascitypacks.Gascity()},
 	}
 }
 
 // Source returns the canonical remote import source for a bundled pack.
+// Packs that never lived in gascity.git (empty Subpath) are addressed by
+// their public registry source.
 func Source(name string) (string, bool) {
 	pack, ok := ByName(name)
 	if !ok {
 		return "", false
 	}
+	if pack.Subpath == "" {
+		publicSubpath, ok := publicSubpathForPack(pack.Name)
+		if !ok {
+			return "", false
+		}
+		return PublicRepository + "//" + publicSubpath, true
+	}
 	return Repository + "//" + pack.Subpath, true
+}
+
+// CanonicalImportSource returns the source spelling gc writes for NEW
+// imports of a bundled pack: the public registry source when the pack is
+// published there (matching what gc init templates and the wave-1 doctor
+// migration write), else the gascity.git source.
+func CanonicalImportSource(name string) (string, bool) {
+	if publicSubpath, ok := publicSubpathForPack(name); ok {
+		return PublicRepository + "//" + publicSubpath, true
+	}
+	return Source(name)
 }
 
 // MustSource returns the canonical remote import source for a bundled pack.
@@ -90,6 +114,19 @@ func ByName(name string) (Pack, bool) {
 		}
 	}
 	return Pack{}, false
+}
+
+// SourceLayout reports the bundled pack name and repository a source
+// addresses, normalizing source spellings (tree URLs, //subpath forms)
+// the same way IsSource does.
+func SourceLayout(source string) (name, repository string, ok bool) {
+	normalizedRepo, subpath := splitSource(source)
+	for _, layout := range syntheticPackLayouts() {
+		if normalizedRepo == layout.Repository && subpath == layout.Subpath {
+			return layout.Pack.Name, layout.Repository, true
+		}
+	}
+	return "", "", false
 }
 
 // NameForSource reports the bundled pack addressed by source.
@@ -113,11 +150,13 @@ func syntheticPackLayouts() []syntheticPackLayout {
 	packs := All()
 	layouts := make([]syntheticPackLayout, 0, len(packs)+3)
 	for _, pack := range packs {
-		layouts = append(layouts, syntheticPackLayout{
-			Repository: Repository,
-			Subpath:    pack.Subpath,
-			Pack:       pack,
-		})
+		if pack.Subpath != "" {
+			layouts = append(layouts, syntheticPackLayout{
+				Repository: Repository,
+				Subpath:    pack.Subpath,
+				Pack:       pack,
+			})
+		}
 		for _, legacySubpath := range legacySubpathsForPack(pack.Name) {
 			layouts = append(layouts, syntheticPackLayout{
 				Repository: Repository,
@@ -147,7 +186,7 @@ func legacySubpathsForPack(name string) []string {
 
 func publicSubpathForPack(name string) (string, bool) {
 	switch name {
-	case "gastown":
+	case "gastown", "gascity":
 		return name, true
 	default:
 		return "", false
@@ -161,9 +200,11 @@ func IsSource(source string) bool {
 }
 
 // MaterializeSyntheticRepo writes the running binary's bundled pack tree to dst
-// as a synthetic repository cache for commit. The commit is the lock/cache tag
-// requested by the import resolver; the marker content hash is what binds the
-// cache to the current binary content. The cache is repo-shaped so relative
+// as a synthetic repository cache for commit. Callers pass only a source's
+// CANONICAL pin commit (config.IsBundledSourceAtCanonicalPin gates every
+// production call site — any other commit on a bundled source is fetched
+// from git for real); the marker content hash is what binds the cache to
+// the current binary content. The cache is repo-shaped so relative
 // imports between bundled pack subpaths resolve like a real checkout. Callers
 // must hold any repo-cache write lock for dst and pass only a disposable cache
 // directory; existing contents are removed unconditionally before writing.
@@ -203,8 +244,58 @@ func MaterializeSyntheticRepo(dst, commit string) error {
 	return nil
 }
 
+// ValidateSyntheticRepoFast verifies that dir is a synthetic bundled-pack cache
+// for the current binary content and the source's canonical pin commit without
+// walking the materialized file set. It is the resolution-path variant: callers
+// on the hot pack-resolution path use it to gate cache hits cheaply. Full
+// file-set and file-content integrity is verified only by ValidateSyntheticRepo.
+func ValidateSyntheticRepoFast(dir, commit string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("missing bundled pack cache marker")
+		}
+		return fmt.Errorf("checking bundled pack cache root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("bundled pack cache root %q is a symlink", dir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("bundled pack cache root %q is not a directory", dir)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, syntheticMarkerFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("missing bundled pack cache marker")
+		}
+		return fmt.Errorf("reading bundled pack cache marker: %w", err)
+	}
+	var marker syntheticMarker
+	if _, err := toml.Decode(string(data), &marker); err != nil {
+		return fmt.Errorf("parsing bundled pack cache marker: %w", err)
+	}
+	if marker.Schema != 1 {
+		return fmt.Errorf("unsupported bundled pack cache marker schema %d", marker.Schema)
+	}
+	if marker.Repository != Repository {
+		return fmt.Errorf("bundled pack cache repository %q does not match %q", marker.Repository, Repository)
+	}
+	if !gitutil.SameCommit(marker.Commit, commit) {
+		return fmt.Errorf("bundled pack cache commit %q does not match %q", marker.Commit, commit)
+	}
+	wantHash, err := syntheticContentHashOnce()
+	if err != nil {
+		return err
+	}
+	if marker.ContentHash != wantHash {
+		return fmt.Errorf("bundled pack cache content hash %q does not match current binary %q", marker.ContentHash, wantHash)
+	}
+	return nil
+}
+
 // ValidateSyntheticRepo verifies that dir is a synthetic bundled-pack cache
-// created for the current binary content and requested lock/cache commit tag.
+// created for the current binary content and the source's canonical pin
+// commit (the only commit production callers materialize).
 func ValidateSyntheticRepo(dir, commit string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -240,7 +331,7 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	if !gitutil.SameCommit(marker.Commit, commit) {
 		return fmt.Errorf("bundled pack cache commit %q does not match %q", marker.Commit, commit)
 	}
-	wantHash, err := SyntheticContentHash()
+	wantHash, err := syntheticContentHashOnce()
 	if err != nil {
 		return err
 	}

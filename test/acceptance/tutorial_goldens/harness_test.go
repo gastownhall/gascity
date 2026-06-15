@@ -453,10 +453,45 @@ func ensureTutorialObservePaths(cityTomlPath string, observePaths []string) erro
 	return os.WriteFile(cityTomlPath, []byte(body), 0o644)
 }
 
-var beadIDPattern = regexp.MustCompile(`\b[a-z]{2}-[a-z0-9.]+\b`)
+const beadIDTokenPattern = `[a-z][a-z0-9]*(?:-[a-z0-9]+)+`
+
+var (
+	beadIDPattern        = regexp.MustCompile(`\b` + beadIDTokenPattern + `\b`)
+	beadIDOutputPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?m)\bCreated(?: issue:| bead:| convoy)?\s+(` + beadIDTokenPattern + `)\b`),
+		regexp.MustCompile(`(?m)\bSlung formula [^\n]*?\(wisp root (` + beadIDTokenPattern + `)\)`),
+		regexp.MustCompile(`(?m)\bSlung\s+(` + beadIDTokenPattern + `)\s+(?:\(|->|\x{2192})`),
+		regexp.MustCompile(`(?m)\bSent message\s+(` + beadIDTokenPattern + `)\b`),
+		regexp.MustCompile(`(?m)\bBead\s+(` + beadIDTokenPattern + `)\s+created\b`),
+	}
+)
 
 func firstBeadID(s string) string {
-	return beadIDPattern.FindString(s)
+	for _, pattern := range beadIDOutputPatterns {
+		if match := pattern.FindStringSubmatch(s); len(match) == 2 {
+			return match[1]
+		}
+	}
+	for _, candidate := range beadIDPattern.FindAllString(s, -1) {
+		if looksGeneratedBeadID(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func looksGeneratedBeadID(candidate string) bool {
+	parts := strings.Split(candidate, "-")
+	if len(parts) < 2 {
+		return false
+	}
+	suffix := parts[len(parts)-1]
+	if len(suffix) <= 3 {
+		return true
+	}
+	return strings.IndexFunc(suffix, func(r rune) bool {
+		return r >= '0' && r <= '9'
+	}) >= 0
 }
 
 func mustMkdirAll(t *testing.T, dir string) {
@@ -534,6 +569,56 @@ func TestTutorialShellCommandRehomesTildePaths(t *testing.T) {
 	want := "GC_TUTORIAL_HOME='/tmp/tutorial-home'; cd ${GC_TUTORIAL_HOME}/my-city && gc rig add ${GC_TUTORIAL_HOME}/my-project"
 	if got != want {
 		t.Fatalf("tutorialShellCommand() = %q, want %q", got, want)
+	}
+}
+
+func TestFirstBeadIDPrefersCommandOutputOverWarningPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{
+			name: "created convoy after workspace warning",
+			out: strings.Join([]string{
+				`WARN native_store_unavailable scope=/tmp/gcac/gctutenv/home/my-city`,
+				`WARN native_store_unavailable scope=/tmp/gcac/gctutenv/home/my-project`,
+				`Created convoy mc-7zy "Sprint 42" tracking 3 issue(s)`,
+			}, "\n"),
+			want: "mc-7zy",
+		},
+		{
+			name: "created issue",
+			out:  `Created issue: mc-slk - Deploy v2`,
+			want: "mc-slk",
+		},
+		{
+			name: "sent wisp message",
+			out:  `Sent message mc-wisp-8t8 to mayor`,
+			want: "mc-wisp-8t8",
+		},
+		{
+			name: "slung work",
+			out:  "Slung mp-p956 \u2192 my-project/reviewer",
+			want: "mp-p956",
+		},
+		{
+			name: "slung prompt command reports bead after formula name",
+			out:  `Slung mol-prompt-synth to writer. Bead mc-8t8 created.`,
+			want: "mc-8t8",
+		},
+		{
+			name: "fallback skips path-like workspace name",
+			out:  `WARN scope=/tmp/gcac/gctutenv/home/my-city`,
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := firstBeadID(tt.out); got != tt.want {
+				t.Fatalf("firstBeadID() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

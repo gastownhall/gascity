@@ -627,6 +627,29 @@ user_tables() {
   rm -f "$out_tmp" "$err_tmp"
 }
 
+# committed_tables — emit one table name per line for the tables present in
+# the committed root at <at_head>. Tables visible in information_schema but
+# absent from the committed root (dolt_ignore'd working-set-only tables such
+# as bd's wisp tier, or not-yet-committed new tables) cannot be staged or
+# touched by the flatten's soft-reset+commit, and churn freely under
+# concurrent writers — so flatten integrity verification must be scoped to
+# this set, not to all user tables.
+committed_tables() {
+  db="$1"
+  at_head="$2"
+  out_tmp=$(mktemp)
+  err_tmp=$(mktemp)
+  if ! dolt_query "$db" "SHOW TABLES AS OF '$at_head'" \
+    > "$out_tmp" 2>"$err_tmp"; then
+    printf 'compact: db=%s committed table list probe failed at head=%s\n' "$db" "$at_head" >&2
+    emit_error_file "$db" "$err_tmp"
+    rm -f "$out_tmp" "$err_tmp"
+    return 1
+  fi
+  awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$out_tmp"
+  rm -f "$out_tmp" "$err_tmp"
+}
+
 # row_count — COUNT(*) for one table. Returns "" on error.
 row_count() {
   db="$1"
@@ -644,8 +667,13 @@ table_value_hash() {
 
 db_value_hash() {
   db="$1"
+  # Pinned to the committed root: the bare working-set hash also covers
+  # dolt_ignore'd tables, whose concurrent churn drifts it with no HEAD
+  # movement — a guaranteed false quarantine on a busy db. The flatten only
+  # rewrites committed history, so the committed root is the surface whose
+  # preservation this hash must prove.
   query_single_cell "$db" "database value hash probe failed" \
-    "SELECT DOLT_HASHOF_DB()"
+    "SELECT DOLT_HASHOF_DB('HEAD')"
 }
 
 remote_count() {
@@ -749,14 +777,30 @@ push_remote_refspec() {
     sql -r tabular -q "CALL DOLT_PUSH('--force', '--set-upstream', '$remote', '$refspec_arg')"
 }
 
-# preflight_counts — write "<table> <count> <value-hash>" lines for all user tables.
+# preflight_counts — write "<table> <count> <value-hash>" lines for the user
+# tables present in the committed root at <at_head>. Tables outside that root
+# (dolt_ignore'd working-set-only tables, not-yet-committed new tables) are
+# excluded: the flatten's soft-reset+commit cannot stage or touch them, their
+# concurrent churn is indistinguishable from the gain+drift corruption signal,
+# and the Option A DOLT_DIFF preservation probe structurally fails on a table
+# that exists in no commit — a guaranteed false quarantine on a busy db
+# (observed on hq with bd's wisp tier). The excluded names are recorded in the
+# preflight_excluded_tables global so verify_counts can skip them in the
+# post-flatten table-list comparison symmetrically.
 preflight_counts() {
   db="$1"
   out="$2"
+  at_head="$3"
   tables_tmp=$(mktemp)
   : > "$out"
+  preflight_excluded_tables=""
   if ! user_tables "$db" > "$tables_tmp"; then
     rm -f "$tables_tmp"
+    return 1
+  fi
+  committed_tmp=$(mktemp)
+  if ! committed_tables "$db" "$at_head" > "$committed_tmp"; then
+    rm -f "$tables_tmp" "$committed_tmp"
     return 1
   fi
   preflight_failed=0
@@ -767,6 +811,10 @@ preflight_counts() {
         "$db" "$t" >&2
       preflight_failed=1
       break
+    fi
+    if ! grep -Fxq "$t" "$committed_tmp"; then
+      preflight_excluded_tables="$preflight_excluded_tables $t"
+      continue
     fi
     if ! cnt=$(row_count "$db" "$t"); then
       printf 'compact: db=%s pre-flight row count failed for table=%s\n' "$db" "$t" >&2
@@ -792,7 +840,11 @@ preflight_counts() {
     fi
     printf '%s %s %s\n' "$t" "$cnt" "$table_hash" >> "$out"
   done < "$tables_tmp"
-  rm -f "$tables_tmp"
+  rm -f "$tables_tmp" "$committed_tmp"
+  if [ "$preflight_failed" -eq 0 ] && [ -n "$preflight_excluded_tables" ]; then
+    printf 'compact: db=%s excluding unversioned table(s) from flatten verification (absent from committed root at %s):%s\n' \
+      "$db" "$at_head" "$preflight_excluded_tables"
+  fi
   return "$preflight_failed"
 }
 
@@ -926,6 +978,13 @@ verify_counts() {
   fi
   while IFS= read -r post_table; do
     [ -n "$post_table" ] || continue
+    # Tables excluded from preflight verification (absent from the committed
+    # root at the stable preflight HEAD) stay outside the flatten's blast
+    # radius; skip them here too or every dolt_ignore'd table would read as
+    # "appeared after pre-flight snapshot".
+    case " $preflight_excluded_tables " in
+      *" $post_table "*) continue ;;
+    esac
     if ! valid_table_name "$post_table"; then
       printf 'compact: db=%s invalid table name after flatten table=%s — quarantine and investigate before GC\n' \
         "$db" "$post_table" >&2
@@ -953,6 +1012,43 @@ verify_counts() {
   done < "$post_tables_tmp"
   rm -f "$post_tables_tmp"
   return "$fail"
+}
+
+# db_root_drift_within_verified_tables — prove a committed-root drift benign.
+# Reached only after per-table verification has PASSED: every verified table's
+# working-set value matches the pre-flight snapshot. The flatten's -Am commits
+# the working set by design, so standing uncommitted changes on a tracked
+# table (e.g. a writer's cursor cell) move the committed root across the
+# flatten with no HEAD movement — indistinguishable from corruption by the
+# aggregate hash alone. DOLT_DIFF_STAT between the pre-flight head and the
+# flatten head names exactly which tables differ; if every one is in the
+# verified set, their current values are already proven equal to the
+# pre-flight snapshot and the drift is absorbed working-set state. Any table
+# outside the verified set (system tables such as dolt_schemas), an empty
+# diff, or a probe failure fails closed.
+db_root_drift_within_verified_tables() {
+  db="$1"
+  from="$2"
+  to="$3"
+  preflight_file="$4"
+  [ -n "$from" ] && [ -n "$to" ] || return 1
+  stat_tmp=$(mktemp)
+  if ! dolt_query "$db" \
+    "SELECT table_name FROM DOLT_DIFF_STAT('$from', '$to')" \
+    > "$stat_tmp" 2>/dev/null; then
+    rm -f "$stat_tmp"
+    return 1
+  fi
+  drift_tables=$(awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$stat_tmp")
+  rm -f "$stat_tmp"
+  [ -n "$drift_tables" ] || return 1
+  for drift_t in $drift_tables; do
+    if ! awk -v t="$drift_t" '$1 == t {found=1} END {exit !found}' "$preflight_file"; then
+      return 1
+    fi
+  done
+  db_root_drift_proven_tables="$drift_tables"
+  return 0
 }
 
 oldgen_has_files() {
@@ -1813,7 +1909,7 @@ flatten_database() {
     fi
 
     : > "$preflight_tmp"
-    if ! preflight_counts "$db" "$preflight_tmp"; then
+    if ! preflight_counts "$db" "$preflight_tmp" "$head"; then
       rm -f "$preflight_tmp"
       return 1
     fi
@@ -2123,6 +2219,24 @@ flatten_database() {
       rm -f "$preflight_tmp"
       return 1
     else
+      # Per-table verification passed, no row gain, no HEAD movement — the
+      # remaining benign explanation is standing uncommitted working-set
+      # state on a tracked table that the flatten's -Am committed (observed
+      # on a production hq: one dirty cursor cell in `config`). Prove it by
+      # confining the root diff to the verified table set; defer exactly as
+      # the proven writer-race paths do. Anything else stays quarantined.
+      if db_root_drift_within_verified_tables "$db" "$head" "$flatten_head" "$preflight_tmp"; then
+        printf 'compact: db=%s committed-root drift confined to verified table(s) [%s] via DOLT_DIFF_STAT(%s..%s) with per-table verification passed — absorbed working-set state committed by the flatten, not corruption; deferring, will retry next run\n' \
+          "$db" "${db_root_drift_proven_tables:-}" "$head" "$flatten_head" >&2
+        if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+          "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+          "$compacted_from_head" "$local_branch" "$remote_branch"; then
+          rm -f "$preflight_tmp"
+          return 1
+        fi
+        rm -f "$preflight_tmp"
+        return 0
+      fi
       printf 'compact: db=%s value hash changed without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
       write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed without row-count increase" || {

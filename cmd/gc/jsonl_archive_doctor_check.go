@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/git"
 )
 
 // jsonlArchiveState mirrors the keys the jsonl-export.sh script persists in
@@ -51,6 +52,11 @@ func (c *jsonlArchiveDoctorCheck) git(dir string, args ...string) ([]byte, error
 		return c.runGit(dir, args...)
 	}
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	// Strip leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE (and related) variables
+	// so the archive remote query resolves from the archive repo passed via -C,
+	// not a parent repository inherited from a pre-commit hook or nested worktree
+	// (which would report push-mode health for the wrong repository).
+	cmd.Env = git.SanitizedEnv()
 	return cmd.Output()
 }
 

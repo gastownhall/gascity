@@ -298,7 +298,7 @@ func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name strin
 					return nil, err
 				}
 			}
-			return nil, fmt.Errorf("graph.v2 target is required")
+			return nil, fmt.Errorf("formulas v2 target is required")
 		}
 		if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, true); err != nil {
 			return nil, err

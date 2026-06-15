@@ -3,7 +3,6 @@
 [workspace]
 name = "t3bridge-gastown"
 provider = "codex"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [providers.codex]
 base = "builtin:codex"
@@ -29,3 +28,15 @@ path = "."
 
 [rigs.imports.t3demo]
 source = "packs/t3demo"
+
+# Builtin packs compose through explicit imports; the gc binary pre-seeds
+# these pinned versions offline from its embedded content. Pinning a
+# different commit fetches that commit from git like any remote import.
+# The builtin-pack-imports doctor check repairs missing entries.
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"

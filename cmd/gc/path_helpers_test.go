@@ -31,6 +31,23 @@ func shortSocketTempDir(t *testing.T, prefix string) string {
 	return testutil.ShortTempDir(t, prefix)
 }
 
+func cmdGCTmuxSocketRoot(testTempRoot string) (string, string, error) {
+	parent, err := os.MkdirTemp("/tmp", "gct-")
+	if err != nil {
+		root := filepath.Join(testTempRoot, "tmux")
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			return "", "", fmt.Errorf("creating fallback cmd/gc tmux socket root: %w", err)
+		}
+		return root, "", nil
+	}
+	root := filepath.Join(parent, "tmux")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		_ = os.RemoveAll(parent)
+		return "", "", fmt.Errorf("creating cmd/gc tmux socket root: %w", err)
+	}
+	return root, parent, nil
+}
+
 // clearInheritedBeadsEnv prevents tests that explicitly write
 // [beads]\nprovider = "file" from being silently overridden by an agent
 // session's inherited GC_BEADS=bd, which would trigger gc-beads-bd.sh and

@@ -51,6 +51,20 @@ func TestSplitStrictConfigWarnings_LegacyWorkspaceFieldWarningsAreNonFatal(t *te
 	}
 }
 
+func TestSplitStrictConfigWarnings_IdleSleepMaskingWarningIsNonFatal(t *testing.T) {
+	fatal, nonFatal := splitStrictConfigWarnings([]string{
+		`city.toml: agent "repo/refinery": idle_timeout and sleep_after_idle are both set; idle_timeout takes precedence and sleep_after_idle only applies when the session survives the idle_timeout check`,
+		`city agent "mayor" shadows agent of the same name from import "gs"`,
+	})
+
+	if len(fatal) != 1 || fatal[0] != `city agent "mayor" shadows agent of the same name from import "gs"` {
+		t.Fatalf("fatal = %v, want only the shadow warning", fatal)
+	}
+	if len(nonFatal) != 1 {
+		t.Fatalf("nonFatal = %v, want idle sleep masking warning", nonFatal)
+	}
+}
+
 func TestSplitStrictConfigWarnings_MissingSiteBindingRemainsFatal(t *testing.T) {
 	fatal, nonFatal := splitStrictConfigWarnings([]string{
 		`rig "repo" is declared in city.toml but has no path binding in .gc/site.toml; run ` + "`gc rig add <dir> --name repo`" + ` to bind it`,

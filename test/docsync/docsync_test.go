@@ -27,19 +27,19 @@ func repoRoot() string {
 var (
 	markdownLinkRE    = regexp.MustCompile(`\[[^][]+\]\(([^)]+)\)`)
 	schemaHrefRE      = regexp.MustCompile(`href="[^"]*?/schema/([^"#?]+)"`)
-	schemaGitHubRawRE = regexp.MustCompile(`href="https://raw\.githubusercontent\.com/gastownhall/gascity/main/docs/schema/([^"#?]+)"`)
+	schemaGitHubRawRE = regexp.MustCompile(`href="https://raw\.githubusercontent\.com/gastownhall/gascity/main/docs/reference/schema/([^"#?]+)"`)
 )
 
 // docTreeDirs lists the top-level directories that are documentation trees
 // and should be link-checked. Update this list when adding or removing doc
 // directories. TestDocDirCoverage will fail if a new directory with markdown
 // appears that is not accounted for here or in docTreeIgnored.
-var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates", "specs"}
+var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates"}
 
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,
 // gitignored scratch space for local work).
-var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp"}
+var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp", "worktrees"}
 
 // knownBrokenLinks lists links to docs that do not exist yet. These are
 // excluded from TestLocalMarkdownLinks failures but still logged. Remove
@@ -55,7 +55,7 @@ func TestSchemaDownloadLinksUseGitHubRaw(t *testing.T) {
 	docs := []string{
 		"docs/reference/api.md",
 		"docs/reference/events.md",
-		"docs/schema/index.md",
+		"docs/reference/schema/index.md",
 	}
 
 	for _, rel := range docs {
@@ -75,7 +75,7 @@ func TestSchemaDownloadLinksUseGitHubRaw(t *testing.T) {
 				t.Errorf("%s links /schema/%s via relative path; use GitHub raw URL so downloads work in both local preview and production", rel, target)
 				continue
 			}
-			artifact := filepath.Join(root, "docs", "schema", filepath.FromSlash(target))
+			artifact := filepath.Join(root, "docs", "reference", "schema", filepath.FromSlash(target))
 			if _, err := os.Stat(artifact); err != nil {
 				t.Errorf("%s links /schema/%s but %s is not committed: %v", rel, target, artifact, err)
 			}
@@ -440,7 +440,7 @@ func TestSchemaFreshness(t *testing.T) {
 				}
 				return append(data, '\n'), nil
 			},
-			path: filepath.Join(root, "docs", "schema", "city-schema.json"),
+			path: filepath.Join(root, "docs", "reference", "schema", "city-schema.json"),
 		},
 		{
 			name: "config.md",

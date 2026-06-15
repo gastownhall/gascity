@@ -3,11 +3,10 @@ title: "Understanding Packs"
 description: Learn what packs are, how imports work, and how Gas City turns reusable pack files into city behavior.
 ---
 
-# Understanding Packs
-
 Every reusable capability in Gas City comes from a pack. A pack tells Gas City
-what can be loaded: agents, named sessions, formulas, skills, commands, MCP
-configuration, defaults, and the files those definitions need while running.
+what can be loaded: agents, named sessions, formulas, orders, skills, commands,
+MCP configuration, defaults, and the files those definitions need while
+running.
 
 This guide has two parts:
 
@@ -16,13 +15,13 @@ This guide has two parts:
 - The registry workflow: how to find a pack with `gc`, inspect it, write the
   import, and validate the result.
 
-The [pack specification](/specs/pack-spec) is the public source of truth for
+The [pack specification](/reference/specs/pack-spec) is the public source of truth for
 the exact format. This guide explains the same model in a more practical style.
 
 ## The Pack Model
 
 A pack is a directory with a `pack.toml` file. Only `pack.toml` is required,
-but most useful packs also include agents, prompt templates, formulas,
+but most useful packs also include agents, prompt templates, formulas, orders,
 commands, doctor checks, skills, MCP configuration, or support files.
 
 Here is a small pack:
@@ -98,6 +97,10 @@ city pack
 Registries are catalogs for reusable packs. A registry record tells `gc` the
 pack name, summary, version metadata, and source.
 
+A pack name is display metadata and a suggested local binding. It is not the
+pack's durable identity. The durable coordinate is the authored `source` plus
+the optional `version` constraint or pin.
+
 A registry handle is a short command argument for a pack record. In
 `main:gascity`, `main` is the local registry name on this machine and
 `gascity` is the pack name inside that registry. `main` is not a keyword in
@@ -114,6 +117,7 @@ The distinction looks like this:
 | Value | Example | Used in |
 |---|---|---|
 | Registry handle | `main:gascity` | `gc pack registry` commands, such as search and show. |
+| Import binding | `[imports.gascity]` | Local name in the importing `pack.toml`. |
 | Durable source | `https://github.com/gastownhall/gascity-packs/tree/main/gascity` | Checked-in import TOML. |
 
 For a GitHub-hosted pack inside a repository, use a browser-dereferenceable
@@ -139,11 +143,11 @@ source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^0.1"
 ```
 
-If that pack defines a city-scoped agent named `planner`, the runtime agent is
-named:
+If that pack defines a city-scoped agent named `planner`, the loader stamps it
+with the import binding, and the runtime agent is named:
 
 ```text
-planner
+gascity.planner
 ```
 
 A rig-level import appears under the `[[rigs]]` table that needs it:
@@ -159,10 +163,10 @@ version = "^0.1"
 ```
 
 If that same pack defines a rig-scoped agent named `planner`, the runtime agent
-is stamped with the rig name:
+is stamped with the rig name as well as the binding:
 
 ```text
-checkout-service/planner
+checkout-service/gascity.planner
 ```
 
 The rig `name` becomes the identity prefix. The rig `path` is the filesystem
@@ -192,8 +196,10 @@ pack.
 
 ## Names
 
-Agent names are local names. Import bindings do not become part of runtime
-agent names.
+Agent names are local names inside the pack that defines them. Import bindings
+are local names chosen by the importing file. When a pack is imported, the
+import binding becomes the runtime namespace for imported agent names; the
+imported pack's own name does not override that binding.
 
 If a city imports this dependency:
 
@@ -205,16 +211,19 @@ source = "../packs/review"
 and the imported pack defines `agents/reviewer/agent.toml`, the runtime name is:
 
 ```text
-reviewer
+review_tools.reviewer
 ```
 
-Gas City uses the binding to find and order dependencies while loading config.
-It does not use the binding as a runtime namespace.
+Gas City uses the binding to find and order dependencies while loading config,
+and stamps it on every imported agent as a runtime namespace. Imported agents
+are addressed by their qualified name — `review_tools.reviewer`, not bare
+`reviewer` — in patches, targets, and commands.
 
-If two packs define city-level agents with the same name, config load fails.
-The same rule applies inside a single rig.
-Give one of the agents a different public name, or avoid importing both
-definitions onto the same surface.
+Because the binding qualifies the name, two imports that define agents with the
+same local name do not collide: `gastown.polecat` and `review.polecat` coexist.
+Config load fails only when two source directories produce the same qualified
+name on the same surface — for example, two unbound legacy includes that both
+define a city-level `reviewer`.
 
 ## Defaults And Patches
 
@@ -234,10 +243,11 @@ blank. If a pack explicitly sets the field on an agent, the explicit value
 wins.
 
 A patch changes an agent that already exists. It does not create a new agent.
+Imported agents are targeted by their binding-qualified name:
 
 ```toml
 [[patches.agent]]
-name = "reviewer"
+name = "review_tools.reviewer"
 provider = "codex"
 session_setup_append = ["tmux set status-left '[review]'"]
 ```
@@ -247,7 +257,7 @@ For a rig-scoped agent, use `dir` to select the rig identity prefix:
 ```toml
 [[patches.agent]]
 dir = "checkout-service"
-name = "reviewer"
+name = "review_tools.reviewer"
 provider = "codex"
 ```
 
@@ -395,7 +405,7 @@ An exact SHA pin says which revision must be used:
 ```toml
 [imports.gascity]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:af1640917a24f88126c37a1e3697a619b731cc0f"
 ```
 
 The authored import expresses the source and optional constraint. The lockfile
@@ -414,6 +424,7 @@ state.
 | Refresh cached catalog records | `gc pack registry refresh` |
 | Search for a reusable pack | `gc pack registry search` |
 | Inspect a registry record | `gc pack registry show` |
+| Submit a pack publish request | `gc pack registry publish <path>` |
 | Share a chosen dependency with the team | `[imports.<binding>]` in checked-in TOML |
 | Install or repair authored imports | `gc import install` |
 | Check installed import state without mutating | `gc import check` |
@@ -421,3 +432,30 @@ state.
 
 This separation keeps local discovery flexible without making shared config
 depend on the names or cache layout of one machine.
+
+### Registry Freshness
+
+Registry catalogs are cached locally. `gc pack registry search` and
+`gc pack registry show` read that cache unless you pass `--refresh`, and they
+warn when a configured registry cache is older than the freshness window.
+
+By default, a registry cache is considered fresh for 24 hours. Set
+`GC_REGISTRY_FRESHNESS` to a positive Go duration string when you need a
+different window:
+
+```bash
+GC_REGISTRY_FRESHNESS=1h gc pack registry search gascity
+```
+
+Invalid, zero, or negative values produce a warning and leave the command
+without a custom freshness window. Use `--refresh` when you want a command to
+fetch the latest catalog before reading it:
+
+```bash
+gc pack registry search gascity --refresh
+gc pack registry show main:gascity --refresh
+```
+
+Freshness affects discovery, not authored imports. A stale registry cache can
+hide a newly published pack record from search/show output, but shared
+`pack.toml` still stores durable import `source` and `version` values.

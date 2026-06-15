@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -34,7 +35,7 @@ type deferredRigPatches struct {
 	overrides          []AgentOverride
 }
 
-// PackConfig is the TOML structure of a pack.toml file. PackV2 agent
+// PackConfig is the TOML structure of a pack.toml file. Agent
 // definitions are discovered from agents/<name>/agent.toml; the inline agent
 // list remains schema-visible for migration compatibility with legacy packs.
 type PackConfig struct {
@@ -44,7 +45,7 @@ type PackConfig struct {
 	AgentsDefaults AgentDefaults     `toml:"agents,omitempty" jsonschema:"-"`
 	Defaults       PackDefaults      `toml:"defaults,omitempty" jsonschema:"-"`
 	// Agents holds legacy inline agent templates accepted by the current
-	// loader. New PackV2 packs should define agents under
+	// loader. New packs should define agents under
 	// agents/<name>/agent.toml instead.
 	Agents        []Agent                 `toml:"agent,omitempty"`
 	NamedSessions []NamedSession          `toml:"named_session,omitempty"`
@@ -118,7 +119,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		if len(topoRefs) == 0 && len(rig.Imports) == 0 {
 			// When a rig has only a path (no explicit includes/imports), treat
 			// the path directory itself as an implicit include if it contains a
-			// pack.toml. This supports the packV2 convention where a rig root
+			// pack.toml. This supports the schema-2 convention where a rig root
 			// can carry a pack.toml with agents/ directories.
 			if p := strings.TrimSpace(rig.Path); p != "" {
 				packPath := p
@@ -246,8 +247,11 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 			for _, bindingName := range importNames {
 				imp := rig.Imports[bindingName]
+				if !isOSFileSystem(fs) && builtinpacks.IsSource(imp.Source) {
+					continue
+				}
 
-				impDir, err := resolvePackRef(imp.Source, cityRoot, cityRoot)
+				impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot)
 				if err != nil {
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
@@ -639,11 +643,17 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			if cfg.ImplicitImportBindings != nil && cfg.ImplicitImportBindings[bindingName] {
 				continue
 			}
+			// Bundled builtin sources resolve from the user-global cache
+			// on the real filesystem; hermetic non-OS loads (test fakes)
+			// skip them.
+			if !isOSFileSystem(fs) && builtinpacks.IsSource(imp.Source) {
+				continue
+			}
 
 			// Unlike V1 includes (which skip gracefully for missing remote
 			// subpaths), V2 imports are always fatal on missing source.
 			// A typo in [imports.X].source should not be silently ignored.
-			impDir, err := resolveImportPackRef(imp.Source, cityRoot, cityRoot)
+			impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
@@ -762,7 +772,11 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			cfg.Services = append(cfg.Services, services...)
 			cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
-			if !slices.Contains(BootstrapManagedImportNames(), bindingName) {
+			// Bootstrap-managed implicit imports own their skill
+			// materialization through the compat path; explicit user
+			// imports (including [imports.core]) contribute skills like
+			// any other pack.
+			if cfg.BootstrapImportBindings == nil || !cfg.BootstrapImportBindings[bindingName] {
 				cfg.PackSkills = appendDiscoveredSkills(cfg.PackSkills, stampImportedSkillBinding(skills, bindingName, imp.Export)...)
 			}
 			allPackDirs = appendUnique(allPackDirs, topoDirs...)
@@ -866,10 +880,14 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 	return formulaDirs, allRequires, shadowWarnings, nil
 }
 
-func resolveImportPackRef(ref, declDir, cityRoot string) (string, error) {
+// resolveImportPackRef resolves a V2 import's pack directory.
+// declaredVersion is the import's declared version constraint; it gates the
+// no-lock bundled fallback so a declared non-canonical pin never silently
+// composes the binary's embedded content.
+func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string) (string, error) {
 	if isGitHubTreeURL(ref) {
 		_, subpath, _ := parseGitHubTreeURL(ref)
-		cacheDir, err := resolveInstalledRemoteImport(ref, cityRoot)
+		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot)
 		if err != nil {
 			return "", err
 		}
@@ -880,7 +898,7 @@ func resolveImportPackRef(ref, declDir, cityRoot string) (string, error) {
 	}
 	if isRemoteInclude(ref) {
 		_, subpath, _ := parseRemoteInclude(ref)
-		cacheDir, err := resolveInstalledRemoteImport(ref, cityRoot)
+		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot)
 		if err != nil {
 			return "", err
 		}
@@ -1023,15 +1041,7 @@ func parsePackConfigWithMetadata(data []byte, source string) (PackConfig, toml.M
 }
 
 func normalizePackAgentDefaultsAlias(cfg *PackConfig, meta toml.MetaData) {
-	if !meta.IsDefined("agents") {
-		cfg.AgentsDefaults = AgentDefaults{}
-		return
-	}
-	if meta.IsDefined("agent_defaults") {
-		mergeAgentDefaultsAliasPreferCanonical(&cfg.AgentDefaults, cfg.AgentsDefaults, meta)
-	} else {
-		cfg.AgentDefaults = cfg.AgentsDefaults
-	}
+	FoldAgentDefaultsAlias(&cfg.AgentDefaults, cfg.AgentsDefaults, meta)
 	cfg.AgentsDefaults = AgentDefaults{}
 }
 
@@ -1212,9 +1222,8 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 
 	// Process V2 [imports.X] entries. These are named bindings that
 	// produce agents with qualified names (bindingName.agentName).
-	// Local-path imports are resolved now; remote imports require
-	// gc import install to have already cached them (future work).
-	// Process in sorted order for deterministic output.
+	// Resolution mechanics are described at the resolveImportPackRef call
+	// site below. Process in sorted order for deterministic output.
 	importNames := make([]string, 0, len(tc.Imports))
 	for name := range tc.Imports {
 		importNames = append(importNames, name)
@@ -1224,10 +1233,12 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	for _, bindingName := range importNames {
 		imp := tc.Imports[bindingName]
 
-		// Resolve the import source. For now, only local paths are
-		// supported. Remote sources require the cache populated by
-		// gc import install (which we don't have yet).
-		impDir, err := resolvePackRef(imp.Source, topoDir, cityRoot)
+		// Resolve the import source through the V2-aware resolver: local
+		// paths resolve directly, packs.lock authoritatively resolves
+		// remote sources, and a bundled source at its canonical pin
+		// self-heals from the binary's embedded content when the lock is
+		// absent or lacks the entry — matching city- and rig-scope imports.
+		impDir, err := resolveImportPackRef(imp.Source, imp.Version, topoDir, cityRoot)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: %w", bindingName, err)
 		}
@@ -1859,6 +1870,19 @@ func cachedPackDoctors(cache *packLoadCache, topoDir string) []DiscoveredDoctor 
 	}
 	out := deepCopyDoctors(result.doctors)
 	return out
+}
+
+// isOSFileSystem reports whether fs is the real operating-system
+// filesystem. Bundled builtin pack content only exists there (embedded in
+// the binary, served via the user-global cache), so non-OS loads skip
+// bundled imports.
+func isOSFileSystem(fs fsys.FS) bool {
+	switch fs.(type) {
+	case fsys.OSFS, *fsys.OSFS:
+		return true
+	default:
+		return false
+	}
 }
 
 func cachedPackSkills(cache *packLoadCache, topoDir string) []DiscoveredSkillCatalog {

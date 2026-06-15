@@ -255,7 +255,7 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
 	}
 	if a.SupportsMultipleSessions() && !formula.RecipeHasReadySurface(recipe) {
-		return SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula, Deprecations: inv.Deprecations}, fmt.Errorf("formula %q root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or graph.v2 before routing it to a pool", opts.BeadOrFormula)
+		return SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula, Deprecations: inv.Deprecations}, fmt.Errorf("formula %q root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or formulas v2 before routing it to a pool", opts.BeadOrFormula)
 	}
 	mResult, err := InstantiateSlingFormula(context.Background(), opts.BeadOrFormula, searchPaths, molecule.Options{
 		Title: opts.Title,
@@ -1482,23 +1482,60 @@ func selectedStoreContainer(opts SlingOpts, deps SlingDeps) (beads.Bead, bool) {
 	return b, b.Type == "epic" || beads.IsContainerType(b.Type)
 }
 
-// clearHumanAssignee unsets the bead's assignee if non-empty. No-op when
-// the bead is missing, the assignee is already empty, or the store is
-// unavailable. Errors only on a real store-Update failure with a
-// non-empty assignee. See SlingOpts.Reassign and #1007.
+// clearHumanAssignee unsets the bead's assignee if non-empty. It checks the
+// city primary store (deps.Store) first; if the bead is not there it sweeps
+// the source-workflow stores (deps.SourceWorkflowStores) so rig-prefixed beads
+// — whose record lives in a rig store, not deps.Store — still get cleared.
+// No-op when the assignee is already empty, no store is available, or the bead
+// is absent from every store. Errors on a real primary-store read failure, a
+// store-Update failure, or a SourceWorkflowStores listing/read failure. See
+// SlingOpts.Reassign, #1007, and #3408.
 func clearHumanAssignee(beadID string, deps SlingDeps) error {
-	if deps.Store == nil {
+	if deps.Store != nil {
+		b, err := deps.Store.Get(beadID)
+		if err == nil {
+			return clearAssigneeInStore(deps.Store, beadID, b)
+		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			return fmt.Errorf("reading %s from primary store to clear assignee: %w", beadID, err)
+		}
+		// ErrNotFound: the record is not in the city primary store. For
+		// rig-prefixed beads it lives in a rig store, so fall through to the
+		// source-workflow sweep below.
+	}
+	// Sweep the source-workflow stores and clear the bead in whichever one
+	// holds it. Mirrors the multi-store pattern in sourceWorkflowRootByID,
+	// which likewise consults the workflow stores when deps.Store lacks (or
+	// omits) the bead.
+	if deps.SourceWorkflowStores == nil {
 		return nil
 	}
-	b, err := deps.Store.Get(beadID)
+	stores, err := deps.SourceWorkflowStores()
 	if err != nil {
-		// Bead may not exist locally yet (e.g. with --force routing
-		// against an absent bead). Nothing to clear.
-		return nil
+		return fmt.Errorf("listing source-workflow stores to clear assignee for %s: %w", beadID, err)
 	}
+	for _, info := range stores {
+		if info.Store == nil {
+			continue
+		}
+		b, err := info.Store.Get(beadID)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return fmt.Errorf("reading %s from store %q to clear assignee: %w", beadID, strings.TrimSpace(info.StoreRef), err)
+		}
+		return clearAssigneeInStore(info.Store, beadID, b)
+	}
+	return nil
+}
+
+// clearAssigneeInStore unsets the assignee on b in store, returning nil when
+// the assignee is already empty so no spurious store write occurs.
+func clearAssigneeInStore(store beads.Store, beadID string, b beads.Bead) error {
 	if strings.TrimSpace(b.Assignee) == "" {
 		return nil
 	}
 	empty := ""
-	return deps.Store.Update(beadID, beads.UpdateOpts{Assignee: &empty})
+	return store.Update(beadID, beads.UpdateOpts{Assignee: &empty})
 }

@@ -38,10 +38,10 @@ func TestDoltConfigWriteManagedCmd(t *testing.T) {
 		"host: 127.0.0.1",
 		`data_dir: "/tmp/city/.beads/dolt"`,
 		"archive_level: 0",
-		"enable: false",
+		"enable: true",
 		"back_log: 50",
 		"max_connections_timeout_millis: 5000",
-		`dolt_auto_gc_enabled: "OFF"`,
+		`dolt_auto_gc_enabled: "ON"`,
 		`dolt_stats_enabled: "OFF"`,
 		`dolt_stats_gc_enabled: "OFF"`,
 		`dolt_stats_memory_only: "ON"`,
@@ -164,6 +164,56 @@ func TestDoltConfigWriteManagedCmd_ExplicitArchiveLevel(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "archive_level: 1") {
 		t.Fatalf("config missing archive_level: 1:\n%s", data)
+	}
+}
+
+func TestDoltConfigWriteManagedCmd_AutoGCCanBeDisabled(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-config.yaml")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"dolt-config", "write-managed",
+		"--file", configPath,
+		"--host", "127.0.0.1",
+		"--port", "3311",
+		"--data-dir", "/tmp/city/.beads/dolt",
+		"--auto-gc-enabled=false",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", configPath, err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"enable: false",
+		`dolt_auto_gc_enabled: "OFF"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestWriteManagedDoltConfigFile_AutoGCDefaultsOn(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-config.yaml")
+	if err := writeManagedDoltConfigFile(configPath, "127.0.0.1", "3311", "/tmp/dolt-data", "warning", config.DoltConfig{}); err != nil {
+		t.Fatalf("writeManagedDoltConfigFile: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"enable: true",
+		`dolt_auto_gc_enabled: "ON"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config missing %q:\n%s", want, text)
+		}
 	}
 }
 

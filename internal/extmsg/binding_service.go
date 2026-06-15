@@ -227,14 +227,7 @@ func (s *bindingService) ResolveByConversation(ctx context.Context, ref Conversa
 // labelBindingSessionPrefix label (indexed on the volatile ID) and keep
 // label-based lookups correct across ticks.
 func overlayLiveSession(store beads.Store, record *SessionBindingRecord) {
-	if record.SessionName == "" {
-		return
-	}
-	liveID, err := resolveLiveSessionID(store, record.SessionName)
-	if err != nil || liveID == "" {
-		return
-	}
-	record.SessionID = liveID
+	overlayLiveSessionID(store, record.SessionName, record.SessionID, &record.SessionID)
 }
 
 func (s *bindingService) ListBySession(ctx context.Context, sessionID string) ([]SessionBindingRecord, error) {
@@ -546,6 +539,127 @@ func ReassignSessionBindings(ctx context.Context, store beads.Store, oldSessionI
 			}
 			if err := delivery.ClearForConversation(ctx, oldSessionID, record.Conversation); err != nil {
 				return err
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// newReassignmentTranscript constructs the transcript syncer used by
+// ReassignSessionParticipants. It is a package-level var so tests can substitute
+// a flaky transcript and exercise retry idempotence after a membership-migration
+// failure (mirrors resolveLiveSessionID and timeNow).
+var newReassignmentTranscript = func(store beads.Store, locks *bindingLockPool) groupTranscriptSync {
+	return newTranscriptService(store, locks)
+}
+
+// ReassignSessionParticipants moves active group participants from one session
+// bead ID to another during canonical session repair. It mirrors
+// ReassignSessionBindings: the volatile session_id metadata and the
+// groupParticipantSessionLabel are updated; the stable session_name and
+// groupParticipantSessionNameLabel are left untouched because the name is the
+// same before and after a respawn. Like the participant upsert path, it also
+// carries the group-owned transcript membership (keyed by session ID) to the
+// replacement session and retires the old one, so transcript discovery follows
+// the respawn instead of stranding the conversation on the dead session bead.
+//
+// The handover is retry-idempotent across a partial transcript-migration
+// failure. The participant is discovered by the retired-session lookup label,
+// so that label is retained until migrateParticipantGroupMembership commits:
+// session_id is swapped to the replacement (and the new label added) first so
+// the membership count logic sees the post-handover state, but the retired-session
+// label is dropped only after migration succeeds. A failure therefore leaves the
+// participant rediscoverable by both the retired-session label and
+// participantReassignmentPending, so a later ReassignSessionParticipants call (or
+// the participant reaper) finishes the handover instead of stranding the
+// group-owned membership on the dead session.
+func ReassignSessionParticipants(ctx context.Context, store beads.Store, oldSessionID, newSessionID string) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	if store == nil {
+		return nil
+	}
+	oldSessionID = strings.TrimSpace(oldSessionID)
+	newSessionID = strings.TrimSpace(newSessionID)
+	if oldSessionID == "" || newSessionID == "" || oldSessionID == newSessionID {
+		return nil
+	}
+	items, err := store.List(beads.ListQuery{Label: groupParticipantSessionLabel(oldSessionID)})
+	if err != nil {
+		return fmt.Errorf("list participants by retired session label: %w", err)
+	}
+	locks := sharedBindingLockPool(store)
+	svc := &groupService{store: store, locks: locks, transcript: newReassignmentTranscript(store, locks)}
+	for _, item := range items {
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
+		if !hasLabel(item, "gc:extmsg-participant") || item.Status == "closed" {
+			continue
+		}
+		if !participantReassignmentPending(item.Metadata, oldSessionID, newSessionID) {
+			continue
+		}
+		seedGroupID := strings.TrimSpace(item.Metadata["group_id"])
+		if err := withLockKey(locks, groupParticipantsMutationLock(seedGroupID), func() error {
+			latest, err := store.Get(item.ID)
+			if err != nil {
+				return fmt.Errorf("get participant %s: %w", item.ID, err)
+			}
+			if !hasLabel(latest, "gc:extmsg-participant") || latest.Status == "closed" {
+				return nil
+			}
+			record, err := decodeParticipantBead(latest)
+			if err != nil {
+				return fmt.Errorf("decode participant %s: %w", latest.ID, err)
+			}
+			if !participantReassignmentPending(latest.Metadata, oldSessionID, newSessionID) {
+				return nil
+			}
+			group, err := svc.getGroupByID(record.GroupID)
+			if err != nil {
+				return fmt.Errorf("resolve group %s for participant %s during session reassignment: %w", record.GroupID, record.ID, err)
+			}
+			// Queue the retired session for group-membership cleanup, mirroring
+			// the upsert reassignment path. Persist it in the same update as the
+			// session_id swap so an ensure-membership failure still leaves a
+			// durable cleanup record.
+			pendingCleanup := pendingCleanupSessionIDsFromMetadata(latest.Metadata)
+			pendingCleanup = append(pendingCleanup, oldSessionID)
+			pendingCleanup = removeSessionID(pendingCleanup, newSessionID)
+			// Point the participant at the replacement and add the new session
+			// label, but KEEP the retired-session label until membership migration
+			// commits. The retired-session label is this handover's only
+			// retry-discoverable handle, so dropping it before
+			// migrateParticipantGroupMembership succeeds would strand the
+			// participant on a transcript-sync failure.
+			labelsToAdd, _ := recordLabels(latest.Labels, nil, []string{groupParticipantSessionLabel(newSessionID)})
+			if err := store.Update(record.ID, beads.UpdateOpts{
+				Labels: labelsToAdd,
+				Metadata: map[string]string{
+					"session_id":                          newSessionID,
+					"previous_session_id_pending_cleanup": encodePendingCleanupSessionIDs(pendingCleanup),
+				},
+			}); err != nil {
+				return fmt.Errorf("reassign participant %s from session %s to %s: %w", record.ID, oldSessionID, newSessionID, err)
+			}
+			if err := svc.migrateParticipantGroupMembership(ctx, group, record.ID, newSessionID, pendingCleanup); err != nil {
+				return err
+			}
+			// Membership migration committed: the retired-session label is now
+			// safe to drop, completing the handover.
+			_, labelsToRemove := recordLabels(latest.Labels,
+				[]string{groupParticipantSessionLabel(oldSessionID)},
+				[]string{groupParticipantSessionLabel(newSessionID)})
+			if len(labelsToRemove) == 0 {
+				return nil
+			}
+			if err := store.Update(record.ID, beads.UpdateOpts{RemoveLabels: labelsToRemove}); err != nil {
+				return fmt.Errorf("drop retired session label from participant %s after reassignment to %s: %w", record.ID, newSessionID, err)
 			}
 			return nil
 		}); err != nil {

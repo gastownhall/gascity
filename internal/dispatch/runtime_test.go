@@ -1900,10 +1900,27 @@ type workflowFinalizeCloseFailStore struct {
 	finalizerID string
 }
 
+type closeErrorStore struct {
+	beads.Store
+	failID string
+	err    error
+}
+
+type statusUpdateNoopCloseStore struct {
+	beads.Store
+}
+
 func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.listCalls++
 	s.queries = append(s.queries, query)
 	return s.MemStore.List(query)
+}
+
+func (s statusUpdateNoopCloseStore) Update(id string, opts beads.UpdateOpts) error {
+	if opts.Status != nil && *opts.Status == "closed" {
+		opts.Status = nil
+	}
+	return s.Store.Update(id, opts)
 }
 
 func (s *scopeSkipBatchStore) DepList(id, direction string) ([]beads.Dep, error) {
@@ -2000,9 +2017,30 @@ func filterBeadID(items []beads.Bead, id string) []beads.Bead {
 	return filtered
 }
 
+func (s *workflowFinalizeCloseFailStore) Close(id string) error {
+	if id == s.finalizerID {
+		return errors.New("finalizer close failed")
+	}
+	return s.Store.Close(id)
+}
+
 func (s *workflowFinalizeCloseFailStore) Update(id string, opts beads.UpdateOpts) error {
 	if id == s.finalizerID && opts.Status != nil && *opts.Status == "closed" {
-		return errors.New("finalizer close failed")
+		opts.Status = nil
+	}
+	return s.Store.Update(id, opts)
+}
+
+func (s closeErrorStore) Close(id string) error {
+	if id == s.failID {
+		return s.err
+	}
+	return s.Store.Close(id)
+}
+
+func (s closeErrorStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.failID && opts.Status != nil && *opts.Status == "closed" {
+		opts.Status = nil
 	}
 	return s.Store.Update(id, opts)
 }
@@ -2175,6 +2213,46 @@ func TestProcessWorkflowFinalizeAbortScopeBareCloseFailsWorkflow(t *testing.T) {
 	rootAfter := mustGetBead(t, store, workflow.ID)
 	if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "fail" {
 		t.Fatalf("workflow = status %q outcome %q, want closed/fail", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
+	}
+}
+
+func TestProcessWorkflowFinalizeUsesCloseOperationForTerminalBeads(t *testing.T) {
+	t.Parallel()
+
+	store := statusUpdateNoopCloseStore{Store: beads.NewMemStore()}
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
+	}
+	for _, beadID := range []string{workflow.ID, finalizer.ID} {
+		after := mustGetBead(t, store, beadID)
+		if after.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", beadID, after.Status)
+		}
+		if got := after.Metadata["gc.outcome"]; got != "pass" {
+			t.Fatalf("%s gc.outcome = %q, want pass", beadID, got)
+		}
 	}
 }
 
@@ -2618,19 +2696,6 @@ func (s getErrorStore) Get(id string) (beads.Bead, error) {
 	return s.Store.Get(id)
 }
 
-type updateErrorStore struct {
-	beads.Store
-	failID string
-	err    error
-}
-
-func (s updateErrorStore) Update(id string, opts beads.UpdateOpts) error {
-	if id == s.failID {
-		return s.err
-	}
-	return s.Store.Update(id, opts)
-}
-
 func TestProcessWorkflowFinalizeRetriesWhenSourceBeadLookupFails(t *testing.T) {
 	t.Parallel()
 
@@ -2839,7 +2904,7 @@ func TestProcessWorkflowFinalizeDoesNotCloseSourcesWhenRootCloseFails(t *testing
 
 	f := newSourceChainFinalizeFixture(t)
 	rootCloseErr := errors.New("root close failed")
-	rigStore := updateErrorStore{Store: f.rigStore, failID: f.workflow.ID, err: rootCloseErr}
+	rigStore := closeErrorStore{Store: f.rigStore, failID: f.workflow.ID, err: rootCloseErr}
 	resolver := func(ref string) (beads.Store, error) {
 		switch ref {
 		case "city:test":
@@ -7997,6 +8062,7 @@ func TestRunRalphCheckAllowsAbsoluteCheckPath(t *testing.T) {
 	parent := t.TempDir()
 	home := filepath.Join(parent, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityPath := filepath.Join(parent, "city")
 	storePath := filepath.Join(parent, "rig")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
@@ -8082,6 +8148,7 @@ func TestRunRalphCheckRejectsAbsoluteCheckPathUnderUnrelatedCachedPack(t *testin
 	parent := t.TempDir()
 	home := filepath.Join(parent, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityPath := filepath.Join(parent, "city")
 	storePath := filepath.Join(parent, "rig")
 	activePackRoot := filepath.Join(home, ".gc", "cache", "repos", "active-key", "packs", "workflows")
@@ -8124,6 +8191,7 @@ func TestRunRalphCheckRejectsAbsoluteCheckPathOutsideTrustedRoots(t *testing.T) 
 	parent := t.TempDir()
 	home := filepath.Join(parent, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityPath := filepath.Join(parent, "city")
 	storePath := filepath.Join(parent, "rig")
 	outsideDir := filepath.Join(parent, "outside")
@@ -8171,6 +8239,7 @@ func TestRunRalphCheckRejectsAbsoluteCheckPathSymlinkOutsideTrustedRoots(t *test
 	parent := t.TempDir()
 	home := filepath.Join(parent, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	cityPath := filepath.Join(parent, "city")
 	storePath := filepath.Join(parent, "rig")
 	packDir := filepath.Join(home, ".gc", "cache", "repos", "pack-key")

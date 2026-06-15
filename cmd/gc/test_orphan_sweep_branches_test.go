@@ -67,6 +67,24 @@ func TestCmdGCTestTempRootPrefixUsesShardPrefix(t *testing.T) {
 	}
 }
 
+func TestCmdGCTmuxSocketRootUsesShortPath(t *testing.T) {
+	longMacRoot := filepath.Join("/private/var/folders/pm/cmklcsfj60nd7nfc79g8xmbc0000gn/T", "gcx12345-1234567890")
+
+	root, cleanupRoot, err := cmdGCTmuxSocketRoot(longMacRoot)
+	if err != nil {
+		t.Fatalf("cmdGCTmuxSocketRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cleanupRoot) })
+
+	if !strings.HasPrefix(root, "/tmp/gct-") {
+		t.Fatalf("tmux socket root = %q, want short /tmp/gct-* root", root)
+	}
+	socketPath := filepath.Join(root, "tmux-"+strconv.Itoa(os.Getuid()), "gctest-12345678")
+	if len(socketPath) > 104 {
+		t.Fatalf("tmux socket path length = %d, want <= 104: %s", len(socketPath), socketPath)
+	}
+}
+
 func TestSweepOrphanSkipsNonDirectories(t *testing.T) {
 	root := t.TempDir()
 	// A regular file whose name matches the prefix+PID pattern must not be removed.

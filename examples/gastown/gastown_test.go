@@ -278,10 +278,8 @@ func TestCityTomlParses(t *testing.T) {
 	if cfg.Workspace.Name != "gastown" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "gastown")
 	}
-	wantIncludes := []string{".gc/system/packs/core", ".gc/system/packs/bd"}
-	gotIncludes := cfg.Workspace.LegacyIncludes()
-	if len(gotIncludes) != len(wantIncludes) || gotIncludes[0] != wantIncludes[0] || gotIncludes[1] != wantIncludes[1] {
-		t.Errorf("Workspace.Includes = %v, want %v (explicit builtin pack includes)", gotIncludes, wantIncludes)
+	if gotIncludes := cfg.Workspace.LegacyIncludes(); len(gotIncludes) != 0 {
+		t.Errorf("Workspace.Includes = %v, want none (builtin packs compose via pack.toml imports)", gotIncludes)
 	}
 	if len(cfg.Imports) != 0 {
 		t.Errorf("cfg.Imports = %v, want empty (imports migrated to pack.toml)", cfg.Imports)
@@ -3681,8 +3679,10 @@ func TestPackPromptFilesExist(t *testing.T) {
 
 func TestCityAgentsFilter(t *testing.T) {
 	// Verify config.LoadWithIncludes with both packs produces
-	// only city-scoped agents when no rigs are registered.
-	// Effective dog from gastown override + mayor/deacon/boot = 4.
+	// only city-scoped agents when no rigs are registered:
+	// mayor/deacon/boot + the gastown dog pool + the dolt maintenance dog
+	// contributed by the composed builtin bd pack = 5. The two dogs keep
+	// distinct binding-qualified identities (gastown.dog vs bd.dog).
 	cfg := loadExpanded(t)
 
 	cityAgents := map[string]bool{"mayor": true, "deacon": true, "boot": true, "dog": true}
@@ -3699,8 +3699,8 @@ func TestCityAgentsFilter(t *testing.T) {
 			t.Errorf("city agent %q: dir = %q, want empty", a.Name, a.Dir)
 		}
 	}
-	if explicit != 4 {
-		t.Errorf("got %d explicit agents, want 4 city-scoped agents", explicit)
+	if explicit != 5 {
+		t.Errorf("got %d explicit agents, want 5 city-scoped agents (incl. both dogs)", explicit)
 	}
 }
 
@@ -3709,13 +3709,13 @@ func TestExpandedCityUsesGastownDog(t *testing.T) {
 
 	var dog *config.Agent
 	for i := range cfg.Agents {
-		if cfg.Agents[i].Name == "dog" && !cfg.Agents[i].Implicit {
+		if cfg.Agents[i].Name == "dog" && !cfg.Agents[i].Implicit && cfg.Agents[i].BindingName == "gastown" {
 			dog = &cfg.Agents[i]
 			break
 		}
 	}
 	if dog == nil {
-		t.Fatal("expected explicit dog agent in expanded gastown config")
+		t.Fatal("expected explicit gastown-bound dog agent in expanded gastown config")
 	}
 	if dog.WorkDir != ".gc/agents/dogs/{{.AgentBase}}" {
 		t.Errorf("dog work_dir = %q, want gastown themed work dir", dog.WorkDir)

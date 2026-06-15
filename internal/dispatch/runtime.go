@@ -1397,11 +1397,7 @@ func findScopeBody(all []beads.Bead, rootID, scopeRef string) (beads.Bead, bool)
 }
 
 func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
-	status := "closed"
-	return store.Update(beadID, beads.UpdateOpts{
-		Status:   &status,
-		Metadata: map[string]string{beadmeta.OutcomeMetadataKey: outcome},
-	})
+	return updateMetadataAndClose(store, beadID, map[string]string{beadmeta.OutcomeMetadataKey: outcome})
 }
 
 // ReconcileClosedScopeMember re-reads a just-closed bead and delegates to

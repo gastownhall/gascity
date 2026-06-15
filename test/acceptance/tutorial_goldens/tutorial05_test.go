@@ -39,9 +39,13 @@ func TestTutorial05Formulas(t *testing.T) {
 		t.Fatalf("seed reviewer scaffold: %v\n%s", err, out)
 	}
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "agent.toml"), "dir = \"my-project\"\nprovider = \""+tutorialReviewerProvider()+"\"\n", 0o644)
+	registerTutorialReviewerProvider(t, myCity)
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "prompt.template.md"), "# Reviewer Agent\nReview code.\n", 0o644)
 
 	writeFile(t, filepath.Join(myCity, "formulas", "greeting.toml"), `formula = "greeting"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [vars]
 name = "world"
@@ -52,6 +56,9 @@ title = "Say hello to {{name}}"
 `, 0o644)
 
 	writeFile(t, filepath.Join(myCity, "formulas", "feature-work.toml"), `formula = "feature-work"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [vars.title]
 description = "What this feature is about"
@@ -74,6 +81,9 @@ description = "Work on {{title}} against {{branch}} (priority: {{priority}})"
 
 	writeFile(t, filepath.Join(myCity, "formulas", "deploy-flow.toml"), `formula = "deploy-flow"
 
+[requires]
+formula_compiler = ">=2.0.0"
+
 [vars]
 env = "dev"
 
@@ -88,6 +98,9 @@ condition = "{{env}} == staging"
 `, 0o644)
 
 	writeFile(t, filepath.Join(myCity, "formulas", "retry-deploy.toml"), `formula = "retry-deploy"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [[steps]]
 id = "retries"
@@ -115,7 +128,7 @@ title = "Try to deploy"
 		if err != nil {
 			t.Fatalf("gc formula list: %v\n%s", err, out)
 		}
-		for _, want := range []string{"pancakes", "greeting", "feature-work", "deploy-flow", "retry-deploy"} {
+		for _, want := range []string{"pancakes", "greeting", "feature-work", "deploy-flow", "retry-deploy", "mol-polecat-report", "mol-prompt-synth", "mol-review-quorum"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("formula list missing %q:\n%s", want, out)
 			}
@@ -130,8 +143,8 @@ title = "Try to deploy"
 		if !strings.Contains(out, "Formula: pancakes") {
 			t.Fatalf("formula show missing header:\n%s", out)
 		}
-		if !strings.Contains(out, "Steps (5):") {
-			t.Fatalf("tutorial contract: pancakes should render 5 visible steps, got:\n%s", out)
+		if !strings.Contains(out, "Steps (6):") {
+			t.Fatalf("tutorial contract: pancakes should render 6 visible steps (5 authored + workflow-finalize), got:\n%s", out)
 		}
 	})
 
@@ -160,24 +173,34 @@ EOF`
 		if err != nil {
 			t.Fatalf("gc sling mayor pancakes --formula: %v\n%s", err, out)
 		}
-		if !strings.Contains(strings.ToLower(out), "slung formula") {
+		if !strings.Contains(strings.ToLower(out), "started workflow") {
 			t.Fatalf("formula sling output mismatch:\n%s", out)
 		}
 	})
 
 	t.Run("gc formula cook pancakes", func(t *testing.T) {
-		ws.setCWD(myProject)
+		// The page cooks in the city scope: gc sling refuses cross-store
+		// routes, so the city-scoped worker can only take a city-cooked root.
+		ws.setCWD(myCity)
 		out, err := ws.runShell("gc formula cook pancakes", "")
 		if err != nil {
 			t.Fatalf("gc formula cook pancakes: %v\n%s", err, out)
 		}
-		pancakesRootID = firstBeadID(out)
+		// Parse the "Root: <id>" line rather than the first bead-shaped
+		// token: store WARN lines mention paths like .../my-city, which
+		// the loose bead-ID pattern also matches.
+		for _, line := range strings.Split(out, "\n") {
+			if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Root: "); ok {
+				pancakesRootID = strings.TrimSpace(rest)
+				break
+			}
+		}
 		if pancakesRootID == "" {
 			t.Fatalf("could not parse pancakes root id:\n%s", out)
 		}
 	})
 
-	t.Run("gc sling worker mp-2wx", func(t *testing.T) {
+	t.Run("gc sling worker mc-79s", func(t *testing.T) {
 		if pancakesRootID == "" {
 			t.Fatal("missing pancakes root id")
 		}

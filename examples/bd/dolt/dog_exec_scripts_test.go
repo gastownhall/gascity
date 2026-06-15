@@ -627,7 +627,43 @@ case "$query" in
     print_cell rootcommit
     exit 0
     ;;
-  *"DOLT_HASHOF_DB()"*)
+  *"DOLT_HASHOF_DB"*)
+    if [ "$mode" = "absorbed_ws_db_hash_drift" ] || [ "$mode" = "absorbed_ws_db_hash_drift_system_table" ]; then
+      # Standing uncommitted working-set state absorbed by the flatten's -Am:
+      # the committed root legitimately differs across the flatten while HEAD
+      # never moves and every per-table working-set hash stays stable.
+      if [ "$(current_head)" = "compactcommit" ]; then
+        print_cell hash-root-after-absorb
+      else
+        print_cell hash-root-before
+      fi
+      exit 0
+    fi
+    if [ "$mode" = "ignored_table_db_hash_drift" ]; then
+      case "$query" in
+        *"DOLT_HASHOF_DB('HEAD')"*)
+          # Committed root: stable across the flatten (no versioned change).
+          print_cell "$(current_hash)"
+          ;;
+        *)
+          # Bare working-set hash: drifts between preflight and postflight
+          # because the ignored table churns, with no commit and no HEAD move.
+          calls_file="$state_file.bare-db-hash-calls"
+          calls=0
+          if [ -f "$calls_file" ]; then
+            calls="$(cat "$calls_file")"
+          fi
+          calls=$((calls + 1))
+          printf '%%s\n' "$calls" > "$calls_file"
+          if [ "$calls" -gt 1 ]; then
+            print_cell hash-workingset-drift
+          else
+            print_cell hash-workingset-base
+          fi
+          ;;
+      esac
+      exit 0
+    fi
     if [ "$mode" = "db_hash_failure" ]; then
       printf 'db hash exploded\n' >&2
       exit 48
@@ -684,7 +720,29 @@ case "$query" in
     print_cell hash-blocked-issues
     exit 0
     ;;
-  *"information_schema.tables"*)
+  *"DOLT_HASHOF_TABLE('wisps')"*)
+    if [ "$mode" = "ignored_table_drift" ] && [ "$(current_head)" = "compactcommit" ]; then
+      print_cell hash-wisps-after-churn
+      exit 0
+    fi
+    print_cell hash-wisps-before
+    exit 0
+    ;;
+  *"SHOW TABLES AS OF"*|*"information_schema.tables"*)
+    # ignored_table_* modes model the production hq incident: "wisps" is a
+    # dolt_ignore'd working-set-only table — visible in information_schema
+    # but absent from every commit root, so SHOW TABLES AS OF omits it.
+    if [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_table_db_hash_drift" ]; then
+      case "$query" in
+        *"SHOW TABLES AS OF"*)
+          print_cell beads
+          ;;
+        *)
+          print_cells beads wisps
+          ;;
+      esac
+      exit 0
+    fi
     if [ "$mode" = "table_discovery_failure" ]; then
       printf 'information_schema unavailable\n' >&2
       exit 43
@@ -736,6 +794,14 @@ case "$query" in
     print_cell 10
     exit 0
     ;;
+  *"SELECT COUNT(*) FROM"*"wisps"*)
+    if [ "$mode" = "ignored_table_drift" ] && [ "$(current_head)" = "compactcommit" ]; then
+      print_cell 11
+      exit 0
+    fi
+    print_cell 10
+    exit 0
+    ;;
   *"SELECT COUNT(*) FROM"*"beads"*)
     if [ "$mode" = "row_count_failure" ]; then
       printf 'row count exploded\n' >&2
@@ -761,6 +827,18 @@ case "$query" in
       print_cell 10
     fi
     exit 0
+    ;;
+  *"DOLT_DIFF_STAT"*)
+    if [ "$mode" = "absorbed_ws_db_hash_drift" ]; then
+      print_cell beads
+      exit 0
+    fi
+    if [ "$mode" = "absorbed_ws_db_hash_drift_system_table" ]; then
+      print_cell dolt_schemas
+      exit 0
+    fi
+    printf 'unexpected DOLT_DIFF_STAT query: %%s\n' "$query" >&2
+    exit 64
     ;;
   *"DOLT_RESET"*)
     if [[ "$query" == *"--hard"* ]]; then
@@ -2278,6 +2356,129 @@ func TestCompactScriptStillQuarantinesGainAndHashDriftWithStableHead(t *testing.
 	}
 }
 
+// Production incident (hq, 2026-06-12): bd marks its high-churn wisp tables
+// dolt_ignore'd, so they live only in the working set and exist in no commit
+// root. The flatten (soft reset + commit) cannot stage or touch them, yet they
+// were included in flatten integrity verification: concurrent wisp churn read
+// as gain+drift with a stable HEAD, and the Option A DOLT_DIFF preservation
+// probe structurally fails on a table that exists in no commit ("table not
+// found") — fail-closed permanent quarantine, GC starvation. Unversioned
+// tables must be excluded from flatten integrity verification: the
+// verification set is the tables committed at the stable pre-flight HEAD.
+func TestCompactScriptExcludesUnversionedTableChurnFromVerification(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "ignored_table_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("unversioned-table churn must not fail compaction: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "excluding unversioned table(s) from flatten verification") ||
+		!strings.Contains(out, "wisps") {
+		t.Fatalf("output missing unversioned-table exclusion notice:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("unversioned-table churn must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_HASHOF_TABLE('wisps')") {
+		t.Fatalf("unversioned table must not be count/hash-verified:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("compact must reach full GC after excluding unversioned churn:\n%s", string(data))
+	}
+}
+
+// Companion to the unversioned-table exclusion: the whole-database value hash
+// must be pinned to the committed root (DOLT_HASHOF_DB('HEAD')), not the bare
+// working-set hash, or dolt_ignore'd-table churn drifts the database hash with
+// no HEAD movement and quarantines via the same-count db-hash path.
+func TestCompactScriptPinsDatabaseHashToCommittedRoot(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "ignored_table_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("working-set db hash drift must not fail compaction: %v\n%s", err, out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("working-set db hash drift must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if !strings.Contains(string(data), "DOLT_HASHOF_DB('HEAD')") {
+		t.Fatalf("database value hash must be pinned to the committed root:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("compact must reach full GC when the committed root is stable:\n%s", string(data))
+	}
+}
+
+// Production incident (hq, 2026-06-12, second mode): a bd writer left one
+// uncommitted cell in a tracked table's working set before the compact ran.
+// Per-table verification compares working-set values, so it passed; but the
+// flatten's -Am committed that standing state, so the committed root at the
+// flatten head differs from the pre-flight HEAD root with no HEAD movement —
+// the database-hash check quarantined a by-design absorption. When per-table
+// verification passed and DOLT_DIFF_STAT(pre-flight head, flatten head) is
+// confined to verified tables, the drift is proven to be absorbed working-set
+// state: defer and retry, exactly like the proven writer-race paths.
+func TestCompactScriptDefersAbsorbedWorkingSetDbHashDrift(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "absorbed_ws_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("absorbed working-set drift must defer, not fail: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "absorbed working-set state") ||
+		!strings.Contains(out, "deferring, will retry next run") {
+		t.Fatalf("output missing absorbed working-set defer message:\n%s", out)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("absorbed working-set drift must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if reason := compactMarkerValue(t, pendingGC, "reason"); reason != "writer race during flatten deferred full GC" {
+		t.Fatalf("absorbed working-set defer should record pending-GC retry marker, got reason %q", reason)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("absorbed working-set defer must skip GC this run:\n%s", string(data))
+	}
+}
+
+// The absorbed-working-set proof must stay narrow: a committed-root drift that
+// touches anything OUTSIDE the verified table set (system tables such as
+// dolt_schemas, or a table the preflight never verified) is unexplained and
+// keeps the fail-closed quarantine.
+func TestCompactScriptStillQuarantinesDbHashDriftBeyondVerifiedTables(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "absorbed_ws_db_hash_drift_system_table", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("root drift beyond verified tables must remain a blocking failure:\n%s", out)
+	}
+	if !strings.Contains(out, "value hash changed without row-count increase") {
+		t.Fatalf("output missing same-count db hash drift quarantine notice:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten value hash changed without row-count increase" {
+		t.Fatalf("quarantine reason should identify db hash drift, got %q", reason)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("unexplained db root drift must block full GC:\n%s", string(data))
+	}
+}
+
 func TestCompactScriptFailsOnRowCountDecreaseBeforeGC(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
@@ -3693,6 +3894,125 @@ func TestBackupScriptCountsFailedDatabasesByDatabase(t *testing.T) {
 	}
 }
 
+// writeAutoConfigureFakeDolt fakes a server with prod + archive where only
+// prod has a prod-backup remote. `backup add` exits with addExit so tests can
+// exercise both the auto-configure happy path and the failure accounting.
+func writeAutoConfigureFakeDolt(t *testing.T, binDir string, addExit int) string {
+	t.Helper()
+	logPath := filepath.Join(binDir, "dolt.log")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf 'dolt %%s\n' "$*" >> %s
+if [ "${1:-}" = "version" ]; then
+  printf 'dolt version 2.1.0\n'
+  exit 0
+fi
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nprod\narchive\n'
+    exit 0
+    ;;
+esac
+if [ "${1:-}" = "backup" ] && [ "$#" -eq 1 ]; then
+  if [ "$(basename "$PWD")" = "prod" ]; then
+    printf 'prod-backup file:///backups/prod\n'
+  fi
+  exit 0
+fi
+if [ "${1:-} ${2:-}" = "backup add" ]; then
+  exit %d
+fi
+if [ "${1:-} ${2:-}" = "backup sync" ]; then
+  exit 0
+fi
+exit 0
+`, shellQuote(logPath), addExit))
+	return logPath
+}
+
+// TestBackupScriptAutoConfiguresMissingBackupRemotes asserts auto-discovery
+// covers every user database: DBs without a "<db>-backup" remote get one
+// auto-configured under the backup artifact dir and are then synced. The old
+// behavior silently skipped them, leaving production DBs with zero backup
+// coverage until journal corruption made them unrecoverable (#3176).
+func TestBackupScriptAutoConfiguresMissingBackupRemotes(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	for _, db := range []string{"prod", "archive"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
+	}
+	binDir := t.TempDir()
+	_ = writeDogFakeGC(t, binDir)
+	doltLogPath := writeAutoConfigureFakeDolt(t, binDir, 0)
+
+	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
+	if !strings.Contains(out, "synced: 2/2") {
+		t.Fatalf("unexpected backup summary:\n%s", out)
+	}
+	if !strings.Contains(out, "auto-configured missing backup remote archive-backup") {
+		t.Fatalf("auto-configuration must be logged loudly, output:\n%s", out)
+	}
+	doltLog, err := os.ReadFile(doltLogPath)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	artifactURL := "file://" + filepath.Join(cityPath, ".dolt-backup", "archive")
+	if !strings.Contains(string(doltLog), "backup add archive-backup "+artifactURL) {
+		t.Fatalf("dolt log missing backup add for archive -> %s:\n%s", artifactURL, doltLog)
+	}
+	if strings.Contains(string(doltLog), "backup add prod-backup") {
+		t.Fatalf("prod already has a remote; backup add must not run for it:\n%s", doltLog)
+	}
+	for _, want := range []string{"backup sync prod-backup", "backup sync archive-backup"} {
+		if !strings.Contains(string(doltLog), want) {
+			t.Fatalf("dolt log missing %q:\n%s", want, doltLog)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".dolt-backup", "archive")); err != nil {
+		t.Fatalf("backup artifact dir for archive should be created: %v", err)
+	}
+}
+
+// TestBackupScriptCountsFailedRemoteAutoConfiguration asserts a DB whose
+// backup-remote auto-configuration fails is counted as failed (and escalated
+// via the failure mail) instead of being silently dropped from coverage.
+func TestBackupScriptCountsFailedRemoteAutoConfiguration(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	for _, db := range []string{"prod", "archive"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
+	}
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	doltLogPath := writeAutoConfigureFakeDolt(t, binDir, 1)
+
+	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
+	if !strings.Contains(out, "synced: 1/2") {
+		t.Fatalf("unexpected backup summary:\n%s", out)
+	}
+	doltLog, err := os.ReadFile(doltLogPath)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(doltLog), "backup sync archive-backup") {
+		t.Fatalf("sync must not run for a DB whose remote could not be configured:\n%s", doltLog)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "1/2 databases failed to sync") {
+		t.Fatalf("failure mail should count the unconfigurable database, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "archive(backup add failed)") {
+		t.Fatalf("failure mail should name the failed auto-configuration, log:\n%s", gcLog)
+	}
+}
+
 func TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
@@ -3809,15 +4129,13 @@ exit 0
 	}
 }
 
-// TestDoctorBackupOnlyChecksDBsWithBackupRemote asserts mol-dog-doctor's backup
-// freshness scope mirrors mol-dog-backup.sh — only DBs with a configured
-// "<db>-backup" remote are eligible. Cities with user DBs but no backup
-// remotes (legitimate config) get no false stale-backup alarms.
-//
-// Companion to TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscovery:
-// backup.sh already filters by remote presence; doctor.sh must use the same
-// gate so the two scripts agree on what "backup-eligible" means.
-func TestDoctorBackupOnlyChecksDBsWithBackupRemote(t *testing.T) {
+// TestDoctorWarnsOnUserDBsMissingBackupRemote asserts mol-dog-doctor reports
+// user DBs lacking a "<db>-backup" remote as a coverage gap instead of
+// silently excluding them from the backup-freshness scope. The exclusion is
+// how unconfigured production DBs went unbacked-up until journal corruption
+// made them unrecoverable (#3176). mol-dog-backup.sh auto-configures the
+// missing remote on its next run, so the warning self-heals.
+func TestDoctorWarnsOnUserDBsMissingBackupRemote(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
 	artifactDir := filepath.Join(cityPath, ".dolt-backup")
@@ -3863,8 +4181,8 @@ exit 0
 	if err != nil {
 		t.Fatalf("read gc log: %v", err)
 	}
-	if strings.Contains(string(gcLog), "archive backup missing") {
-		t.Fatalf("doctor warned about archive (no <db>-backup remote configured); should be filtered out:\n%s", gcLog)
+	if !strings.Contains(string(gcLog), "archive backup remote missing") {
+		t.Fatalf("doctor did not warn about archive's missing <db>-backup remote (#3176 coverage gap):\n%s", gcLog)
 	}
 	if !strings.Contains(string(gcLog), "prod backup missing") {
 		t.Fatalf("doctor did not warn about prod (eligible: has prod-backup remote, no artifact); scope filter should not exclude it:\n%s", gcLog)

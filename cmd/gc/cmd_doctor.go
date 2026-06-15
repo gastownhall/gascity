@@ -36,10 +36,13 @@ func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
-bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix for the canonical remediation path, including any
-safe mechanical PackV1-to-PackV2 rewrites that are available on this
-branch.`,
+bead stores, Dolt server health, event log integrity, formula compiler
+requirements (deprecated contract = "graph.v2" opt-ins, missing
+[requires] formula_compiler = ">=2.0.0" declarations, and requirements
+the host's [daemon] formula_v2 setting cannot satisfy), v2 config
+deprecations such as legacy [formulas].dir, and per-rig health. Use
+--fix for the canonical remediation path, including any safe mechanical
+legacy-to-current pack rewrites that are available on this branch.`,
 		Example: `  gc doctor
   gc doctor --fix
   gc doctor --verbose
@@ -162,6 +165,7 @@ func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 type buildDoctorChecksOpts struct {
 	Stderr               io.Writer
 	ControllerRunning    bool
+	SupervisorRunning    bool
 	SkipCityDoltCheck    bool
 	SkipManagedDoltCheck bool
 }
@@ -232,7 +236,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
-		register(newBuiltinIncludeDoctorCheck(cityPath))
+		register(newBuiltinImportDoctorCheck(cityPath))
 		register(newImportStateDoctorCheck(cityPath))
 		register(newJsonlArchiveDoctorCheck(cityPath))
 	}
@@ -261,9 +265,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(&doctor.BeadsRoleCheck{})
 	}
 
-	// Controller check + session checks (gated by controller state).
+	// Controller check + supervisor HTTP check + session checks (gated by controller state).
 	controllerRunning := opts.ControllerRunning
 	register(doctor.NewControllerCheck(cityPath, controllerRunning))
+	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
 
 	if cfgErr == nil && cfg != nil && !controllerRunning {
 		cityName := loadedCityName(cfg, cityPath)
@@ -394,11 +399,13 @@ func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, stdout, stderr io
 		resolveRigPaths(cityPath, cfg.Rigs)
 	}
 	controllerRunning := doctor.IsControllerRunning(cityPath)
+	supervisorRunning := supervisorAliveHook() != 0
 	skipCityDoltCheck := gcDoltSkip() || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
 	for _, check := range buildDoctorChecks(cityPath, cfg, cfgErr, buildDoctorChecksOpts{
 		Stderr:               stderr,
 		ControllerRunning:    controllerRunning,
+		SupervisorRunning:    supervisorRunning,
 		SkipCityDoltCheck:    skipCityDoltCheck,
 		SkipManagedDoltCheck: skipManagedDoltCheck,
 	}) {

@@ -16,6 +16,9 @@ Start with the overview, then dive into the subsystem you need.
 1. **[Glossary](./glossary.md)** — authoritative definitions of all terms
 2. **[Nine Concepts Overview](./nine-concepts.md)** — the 5 primitives + 4
    derived mechanisms that compose Gas City
+3. **[Architecture Invariants](./invariants.md)** — the normative
+   cross-cutting rules: object model at the center, CLI and API as
+   projections over it, typed wire end-to-end
 
 ### Layer 0-1: Primitives
 
@@ -55,7 +58,7 @@ Each is provably composable from the primitives.
     reconciliation tick, order dispatch
 14. **[Orders](./orders.md)** — trigger-conditioned formula/exec
     dispatch, rig-scoped labels
-15. **[Gas City Pack Specification (2.0)](../../docs/specs/pack-spec.md)** —
+15. **[Gas City Pack Specification (2.0)](../../docs/reference/specs/pack-spec.md)** —
     authoritative pack data model, file format, and loader semantics
 
 ### End-to-End Traces

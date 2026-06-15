@@ -144,9 +144,9 @@ FATAL: agent 'mayor': duplicate name
 
 **Cause**
 
-Your pack declares `[[agent]]` blocks (pack v1 layout) for an agent
+Your pack declares `[[agent]]` blocks (legacy inline layout) for an agent
 name that another included pack declares in
-`agents/<name>/agent.toml` (pack v2 layout). Both contribute the same
+`agents/<name>/agent.toml` (current directory layout). Both contribute the same
 agent name; cross-pack agent name collisions are hard errors, so the
 validator refuses the ambiguity.
 

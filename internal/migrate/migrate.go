@@ -159,9 +159,13 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		cityCfg.Agents = nil
 	}
 
-	// Canonical builtin system-pack includes (.gc/system/packs/<name>) are
-	// the supported V2 form written by gc init; they stay in city.toml.
-	// Only other entries are legacy PackV1 includes to migrate.
+	// Canonical builtin system-pack includes (.gc/system/packs/<name>) are a
+	// retired transitional surface that `gc doctor --fix` converts to pinned
+	// [imports] entries. `gc migrate` deliberately preserves them in city.toml
+	// so a city authored by an older binary keeps composing through the
+	// migrate step; the follow-up `gc doctor --fix` completes the conversion.
+	// Only the other entries are legacy PackV1 includes that migrate rewrites
+	// here.
 	builtinIncludes := make([]string, 0, len(cityCfg.Workspace.LegacyIncludes()))
 	for _, inc := range cityCfg.Workspace.LegacyIncludes() {
 		if config.IsBuiltinSystemPackInclude(inc) {
@@ -287,6 +291,14 @@ func packNameStillReferencedByRigIncludes(cityCfg *config.City, name string) boo
 	return false
 }
 
+// loadCityFile reads, parses, and key-loss-guards a city.toml for migration.
+// Migration deliberately uses the real OS filesystem (fsys.OSFS) rather than a
+// parameterized fsys.FS: it is a one-shot CLI step over a concrete city
+// directory the operator names, it already reads bytes via os.ReadFile, and its
+// sibling calls (GuardCityRewriteKeyLoss, ResolveWorkspaceIdentity, and the
+// byte-level city.toml rewrites) all run against that same on-disk tree. No
+// runtime caller migrates over a virtual filesystem, so threading an fsys.FS
+// through the migration path would add abstraction with no consumer.
 func loadCityFile(path string) (*config.City, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -294,6 +306,13 @@ func loadCityFile(path string) (*config.City, error) {
 	}
 	cfg, err := config.Parse(data)
 	if err != nil {
+		return nil, fmt.Errorf("migrate %q: %w", path, err)
+	}
+	// Apply rewrites city.toml from this re-marshaled struct, so keys the
+	// binary does not recognize would vanish silently (the ga-lurp5d
+	// incident class). Refuse before any mutation, mirroring what
+	// loadPackFile does for pack.toml via migrationFatalPackWarnings.
+	if err := config.GuardCityRewriteKeyLoss(fsys.OSFS{}, path); err != nil {
 		return nil, fmt.Errorf("migrate %q: %w", path, err)
 	}
 	if err := config.ResolveWorkspaceIdentity(fsys.OSFS{}, filepath.Dir(path), cfg); err != nil {

@@ -27,7 +27,7 @@ import (
 var validAgentName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // validNamedSessionTemplate matches either a bare agent name ("mayor") or a
-// PackV2 import-qualified template ("gastown.mayor"). Rig qualification is
+// import-qualified template ("gastown.mayor"). Rig qualification is
 // carried separately in NamedSession.Dir, so slashes remain invalid here.
 var validNamedSessionTemplate = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*(\.[a-zA-Z0-9][a-zA-Z0-9_-]*)?$`)
 
@@ -173,19 +173,19 @@ type City struct {
 	// Packs defines named remote pack sources fetched via git (V1 mechanism).
 	//
 	// Legacy pack source map, accepted for migration and fetch/list
-	// compatibility only. PackV2 authored config uses [imports.*] with source
+	// compatibility only. Authored schema-2 config uses [imports.*] with source
 	// plus optional version, so this legacy surface is intentionally omitted
 	// from generated public schemas and reference docs.
 	Packs map[string]PackSource `toml:"packs,omitempty" jsonschema:"-"`
-	// Imports defines named pack imports (V2 mechanism). Each key is a
-	// binding name; the value specifies the source and optional version,
-	// export, and transitive controls. Processed during ExpandCityPacks.
+	// Imports defines named pack imports. Each key is a local
+	// binding name; the authored public contract stores a durable source plus
+	// optional version. Processed during ExpandCityPacks.
 	Imports map[string]Import `toml:"imports,omitempty"`
 	// Defaults holds city-level defaults that seed generated config. The
 	// canonical default-rig import table is [defaults.rig.imports].
 	Defaults PackDefaults `toml:"defaults,omitempty"`
-	// Agents lists all configured agents in this city. Optional: PackV2
-	// cities compose agents through [imports.*] and ship without any
+	// Agents lists all configured agents in this city. Pack-composed cities can
+	// compose agents through [imports.*] and ship without any
 	// [[agent]] block.
 	Agents []Agent `toml:"agent,omitempty"`
 	// NamedSessions lists canonical alias-backed sessions built from
@@ -205,11 +205,14 @@ type City struct {
 	Events EventsConfig `toml:"events,omitempty"`
 	// Dolt configures optional dolt server connection overrides.
 	Dolt DoltConfig `toml:"dolt,omitempty"`
-	// Formulas configures formula directory settings.
+	// Formulas is the legacy [formulas] table; authored [formulas].dir is
+	// rejected at config load. Formulas live in the well-known formulas/
+	// directory.
 	Formulas FormulasConfig `toml:"formulas,omitempty"`
 	// Daemon configures controller daemon settings.
 	Daemon DaemonConfig `toml:"daemon,omitempty"`
-	// Orders configures order settings (skip list).
+	// Orders configures order settings: skip list, max_timeout cap, and
+	// per-order overrides.
 	Orders OrdersConfig `toml:"orders,omitempty"`
 	// API configures the optional HTTP API server.
 	API APIConfig `toml:"api,omitempty"`
@@ -372,7 +375,7 @@ type NamedSession struct {
 	// remains the compatibility identity.
 	Name string `toml:"name,omitempty"`
 	// Template is the referenced agent template name. Root declarations may
-	// target imported PackV2 agents via "binding.agent".
+	// target imported agents via "binding.agent".
 	Template string `toml:"template" jsonschema:"required"`
 	// Scope defines where this named session is instantiated in pack
 	// expansion: "city" (one per city) or "rig" (one per rig).
@@ -523,8 +526,10 @@ type Rig struct {
 	// suspended. Once the user has explicitly suspended or resumed the
 	// rig via `gc rig suspend/resume`, the runtime state wins.
 	SuspendedOnStart bool `toml:"suspended_on_start,omitempty"`
-	// FormulasDir is a rig-local formula directory (Layer 4). Overrides
-	// pack formulas for this rig by filename.
+	// FormulasDir is a rig-local formula directory — the highest-priority
+	// formula layer, above city pack formulas, the city formulas/
+	// directory, and rig pack formulas. Overrides pack formulas for this
+	// rig by filename.
 	// Relative paths resolve against the city directory.
 	FormulasDir string `toml:"formulas_dir,omitempty"`
 	// Includes lists pack directories or URLs for this rig (V1 mechanism).
@@ -707,7 +712,7 @@ type AgentOverride struct {
 // Referenced by name in V1 pack fields and fetched into the cache.
 //
 // PackSource is retained for legacy migration and fetch/list compatibility.
-// PackV2 authored imports use Import.Source and Import.Version instead.
+// Authored schema-2 imports use Import.Source and Import.Version instead.
 type PackSource struct {
 	// Source is the git repository URL.
 	Source string `toml:"source" jsonschema:"required"`
@@ -717,10 +722,9 @@ type PackSource struct {
 	Path string `toml:"path,omitempty"`
 }
 
-// Import defines a named import of another pack. This is the V2
-// replacement for the flat `includes` list. Each import has a binding
-// name (the TOML key), a source (local path or remote URL), and
-// optional version/export/transitive controls.
+// Import defines a named import of another pack. The binding name is the TOML
+// key; authored public config uses source plus optional version. Package names
+// discovered from the imported pack are advisory/display names, not identity.
 type Import struct {
 	// Source is the durable authored pack location: a local path, a remote git
 	// URL, or a dereferenceable GitHub tree URL for a pack below a repository
@@ -731,18 +735,16 @@ type Import struct {
 	// Version is an optional semver constraint for git-backed imports (e.g.,
 	// "^1.2"). Empty for local paths. "sha:<hex>" pins a specific commit.
 	Version string `toml:"version,omitempty"`
-	// Export re-exports this import's contents into the parent pack's
-	// namespace. Consumers of the parent get this import's agents
-	// flattened under the parent's binding name.
-	Export bool `toml:"export,omitempty"`
-	// Transitive controls whether this import's own imports are visible
-	// to the consumer. Defaults to true (transitive). Set to false to
-	// suppress transitive resolution for this specific import.
-	Transitive *bool `toml:"transitive,omitempty"`
-	// Shadow controls shadow warnings when the importer defines an agent
-	// with the same name as one from this import. "warn" (default) emits
-	// a warning; "silent" suppresses it.
-	Shadow string `toml:"shadow,omitempty" jsonschema:"enum=warn,enum=silent"`
+	// Export is a compatibility-only loader knob retained for older
+	// configs. It is intentionally omitted from generated public schemas.
+	Export bool `toml:"export,omitempty" jsonschema:"-"`
+	// Transitive is a compatibility-only loader knob retained for older
+	// configs. Authored public imports are a DAG through source plus version.
+	// It is intentionally omitted from generated public schemas.
+	Transitive *bool `toml:"transitive,omitempty" jsonschema:"-"`
+	// Shadow is a compatibility-only loader knob retained for older
+	// configs. It is intentionally omitted from generated public schemas.
+	Shadow string `toml:"shadow,omitempty" jsonschema:"-"`
 }
 
 // PackMeta holds metadata from a pack's [pack] header.
@@ -776,6 +778,24 @@ func (imp *Import) ImportIsTransitive() bool {
 	return *imp.Transitive
 }
 
+// HasDefaultOptionSemantics reports whether the import carries the
+// default option semantics: not exported, transitive resolution enabled,
+// and shadow handling empty or "warn". This is the option half of the
+// reuse policy composition applies when deciding whether an existing
+// same-source binding can stand in for a converted legacy include
+// (existingDefaultImportBindingForSource); the doctor migration's
+// same-source dedup shares it so the two policies cannot drift.
+func (imp *Import) HasDefaultOptionSemantics() bool {
+	if imp.Export {
+		return false
+	}
+	if imp.Transitive != nil && !*imp.Transitive {
+		return false
+	}
+	shadow := strings.TrimSpace(imp.Shadow)
+	return shadow == "" || shadow == "warn"
+}
+
 // BoundImport preserves the user-visible binding name associated with an
 // import when edit paths need ordered root-pack defaults.
 type BoundImport struct {
@@ -796,7 +816,7 @@ func AddLegacyImports(target map[string]Import, includes []string, packs map[str
 		if _, exists := existingDefaultImportBindingForSource(target, source); exists {
 			continue
 		}
-		binding := uniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
+		binding := UniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
 		target[binding] = Import{Source: source}
 		changed = true
 	}
@@ -810,7 +830,7 @@ func AddOrderedLegacyImports(target map[string]Import, order []string, includes 
 		source := legacyImportSourceFor(include, packs)
 		binding, exists := existingDefaultImportBindingForSource(target, source)
 		if !exists {
-			binding = uniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
+			binding = UniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
 			target[binding] = Import{Source: source}
 			changed = true
 		}
@@ -876,21 +896,21 @@ func existingDefaultImportBindingForSource(target map[string]Import, source stri
 		if imp.Source != source {
 			continue
 		}
-		if strings.TrimSpace(imp.Version) != "" || imp.Export {
+		if strings.TrimSpace(imp.Version) != "" {
 			continue
 		}
-		if imp.Transitive != nil && !*imp.Transitive {
-			continue
-		}
-		shadow := strings.TrimSpace(imp.Shadow)
-		if shadow == "" || shadow == "warn" {
+		if imp.HasDefaultOptionSemantics() {
 			return binding, true
 		}
 	}
 	return "", false
 }
 
-func uniqueLegacyImportBinding(target map[string]Import, base string) string {
+// UniqueLegacyImportBinding returns base when no import occupies it in
+// target, or the first free "base-N" (N ≥ 2) suffix — the binding
+// allocation policy for converting legacy includes into imports when the
+// natural binding collides with an existing import.
+func UniqueLegacyImportBinding(target map[string]Import, base string) string {
 	if base == "" {
 		base = "import"
 	}
@@ -1301,8 +1321,10 @@ type BeadPolicyConfig struct {
 	Storage string `toml:"storage,omitempty" jsonschema:"enum=history,enum=no_history,enum=ephemeral"`
 	// DeleteAfterClose deletes matching GC-owned beads after they have been
 	// closed for this duration. Accepts Go duration syntax plus whole-day "d"
-	// units, e.g. "7d" or "1d12h". Empty defers to any controller-managed
-	// default for the policy type (e.g. order_tracking defaults to 7d).
+	// units, e.g. "7d" or "1d12h". ApplyBeadPolicyDefaults fills in a
+	// non-empty default for recognized policy types (order_tracking: "7d"),
+	// so this field is populated after config load even when the city.toml
+	// omits it.
 	DeleteAfterClose string `toml:"delete_after_close,omitempty"`
 }
 
@@ -1720,6 +1742,11 @@ type DoltConfig struct {
 	// 1 enables archive compaction (higher CPU on startup).
 	// nil (omitted) defaults to 0.
 	ArchiveLevel *int `toml:"archive_level,omitempty" jsonschema:"default=0"`
+	// AutoGCEnabled toggles Dolt's incremental auto-GC on the managed
+	// sql-server. Auto-GC bounds the noms journal so it never reaches
+	// GB scale, which shrinks both the unclean-stop corruption window
+	// and the recovery blast radius. nil (omitted) defaults to true.
+	AutoGCEnabled *bool `toml:"auto_gc_enabled,omitempty" jsonschema:"default=true"`
 	// MaxConnections overrides the managed Dolt listener max_connections.
 	// 0 means use the managed default.
 	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
@@ -1756,6 +1783,25 @@ func (d DoltConfig) EffectiveArchiveLevel() int {
 		return *d.ArchiveLevel
 	}
 	return 0
+}
+
+// EffectiveAutoGCEnabled returns whether Dolt incremental auto-GC is enabled
+// for the managed sql-server, defaulting omitted values to true.
+func (d DoltConfig) EffectiveAutoGCEnabled() bool {
+	if d.AutoGCEnabled != nil {
+		return *d.AutoGCEnabled
+	}
+	return true
+}
+
+// AutoGCSysVar returns the dolt_auto_gc_enabled system-variable value
+// ("ON"/"OFF") matching EffectiveAutoGCEnabled, so the config writer and the
+// doctor contract derive it from one place.
+func (d DoltConfig) AutoGCSysVar() string {
+	if d.EffectiveAutoGCEnabled() {
+		return "ON"
+	}
+	return "OFF"
 }
 
 // EffectiveMaxConnections returns the managed Dolt listener max_connections.
@@ -1807,15 +1853,20 @@ func (d *DoltConfig) DoltLockReleaseTimeoutDuration() time.Duration {
 	return dur
 }
 
-// FormulasConfig holds legacy formula directory settings.
+// FormulasConfig is the legacy [formulas] table with no supported fields:
+// authored [formulas].dir is rejected at config load (use the well-known
+// formulas/ directory instead), and gc doctor flags any declaration as a
+// fixable v2-formulas-dir error.
 type FormulasConfig struct {
-	// Dir is the legacy path to the formulas directory. PackV2 cities and
-	// packs use the well-known formulas/ directory; authored [formulas].dir
-	// is rejected for schema 2 configs.
+	// Dir is the legacy path to the formulas directory. Authored
+	// [formulas].dir is rejected at config load; schema-2 cities and packs
+	// use the well-known formulas/ directory.
 	Dir string `toml:"dir,omitempty" jsonschema:"-"`
 }
 
-// OrdersConfig holds order settings.
+// OrdersConfig holds order settings for orders discovered from flat TOML
+// files (one file per order) in the orders/ directory beside each formula
+// layer (packs, the city directory, and rig-local layers).
 type OrdersConfig struct {
 	// Skip lists order names to exclude from scanning.
 	Skip []string `toml:"skip,omitempty"`
@@ -2791,18 +2842,28 @@ func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefault
 	}
 }
 
-func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
+// FoldAgentDefaultsAlias folds a legacy [agents] alias table into the canonical
+// [agent_defaults] target so a struct round-trip that emits only
+// [agent_defaults] does not silently drop the alias. When both tables are
+// present the canonical values win on overlapping keys and the alias only fills
+// gaps; when only the alias is present its values become the canonical defaults.
+// meta must be the toml.MetaData from decoding the same document. Callers are
+// responsible for clearing their own alias field afterward.
+func FoldAgentDefaultsAlias(canonical *AgentDefaults, alias AgentDefaults, meta toml.MetaData) {
 	if meta.IsDefined("agent_defaults") {
 		if meta.IsDefined("agents") {
-			mergeAgentDefaultsAliasPreferCanonical(&cfg.AgentDefaults, cfg.AgentsDefaults, meta)
+			mergeAgentDefaultsAliasPreferCanonical(canonical, alias, meta)
 		}
-		cfg.AgentsDefaults = AgentDefaults{}
 		return
 	}
 	if meta.IsDefined("agents") {
-		cfg.AgentDefaults = cfg.AgentsDefaults
-		cfg.AgentsDefaults = AgentDefaults{}
+		*canonical = alias
 	}
+}
+
+func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
+	FoldAgentDefaultsAlias(&cfg.AgentDefaults, cfg.AgentsDefaults, meta)
+	cfg.AgentsDefaults = AgentDefaults{}
 }
 
 const (
@@ -3986,7 +4047,14 @@ func InjectImplicitAgents(cfg *City) {
 	// then any custom providers in sorted order.
 	providers := configuredProviderOrder(configured)
 
-	promptTemplate := citylayout.SystemPacksRoot + "/core/assets/prompts/pool-worker.md"
+	// Implicit agents default to the core pack's pool-worker prompt when
+	// the core pack is composed (it resolves from the user-global cache,
+	// so the path is absolute). Without core the template stays empty and
+	// prompt rendering falls back to the embedded baseline.
+	promptTemplate := ""
+	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
+		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.md")
+	}
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
 	if slingFormula == "" {
@@ -4070,6 +4138,32 @@ func ApplyAgentDefaults(cfg *City) {
 				cfg.Agents[i].DefaultSlingFormula = &formula
 			}
 		}
+	}
+}
+
+// DefaultOrderTrackingDeleteAfterClose is the canonical default closed-bead
+// TTL for the order_tracking policy. Applied by ApplyBeadPolicyDefaults when
+// [beads.policies.order_tracking].delete_after_close is unset in city.toml.
+// cmd/gc/order_dispatch.go derives its runtime fallback from this constant so
+// both values stay in sync.
+const DefaultOrderTrackingDeleteAfterClose = "7d"
+
+// ApplyBeadPolicyDefaults fills in controller-managed defaults for bead
+// policies that have sane non-empty defaults. Call after all config
+// composition layers have been merged so user-supplied values take
+// precedence. Currently:
+//   - [beads.policies.order_tracking].delete_after_close defaults to "7d".
+func ApplyBeadPolicyDefaults(cfg *City) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Beads.Policies == nil {
+		cfg.Beads.Policies = make(map[string]BeadPolicyConfig)
+	}
+	p := cfg.Beads.Policies["order_tracking"]
+	if p.DeleteAfterClose == "" {
+		p.DeleteAfterClose = DefaultOrderTrackingDeleteAfterClose
+		cfg.Beads.Policies["order_tracking"] = p
 	}
 }
 
@@ -4709,6 +4803,22 @@ func GastownCity(name, provider, startCommand string) City {
 		return gastownCityWithWorkspace(name, ws, nil)
 	}
 	return GastownCityWithProviders(name, provider, []string{provider})
+}
+
+// GascityCityWithProviders returns a minimal managed city that imports the
+// public gascity planning/implementation skills pack: a single mayor agent
+// plus [imports.gascity] pinned to the registry release. The pack ships
+// skills and formulas only (no agents), so the city shape matches the
+// minimal template with the pack layered on top.
+func GascityCityWithProviders(name, defaultProvider string, providers []string) City {
+	city := WizardCityWithProviders(name, defaultProvider, providers)
+	city.Imports = map[string]Import{
+		"gascity": {
+			Source:  PublicGascityPackSource,
+			Version: PublicGascityPackVersion,
+		},
+	}
+	return city
 }
 
 // GastownCityWithProviders returns a Gas Town city whose default provider is

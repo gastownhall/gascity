@@ -1774,8 +1774,12 @@ prompt_template = %q
 default_sling_formula = "mol-do-work"
 min_active_sessions = 0
 max_active_sessions = 2
-`, provider, citylayout.SystemPacksRoot+"/core/assets/prompts/pool-worker.md")
+`, provider, "agents/"+name+"/prompt.template.md")
 	if err := os.MkdirAll(filepath.Dir(agentPath), 0o755); err != nil {
+		return err
+	}
+	prompt := "You are a pool worker for {{.City.Name}}. Work whatever is on your hook.\n"
+	if err := os.WriteFile(filepath.Join(filepath.Dir(agentPath), "prompt.template.md"), []byte(prompt), 0o644); err != nil {
 		return err
 	}
 	return os.WriteFile(agentPath, []byte(b.String()), 0o644)

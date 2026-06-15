@@ -44,7 +44,7 @@ func TestExampleInit_AllCities_Succeed(t *testing.T) {
 	for _, name := range cities {
 		t.Run(name, func(t *testing.T) {
 			c := helpers.NewCity(t, testEnv)
-			c.InitFrom(filepath.Join(examplesDir, name))
+			c.InitFromNoStart(filepath.Join(examplesDir, name))
 
 			if !c.HasFile("city.toml") {
 				t.Fatal("city.toml not created")
@@ -75,7 +75,7 @@ func TestExampleValidate_AllCities_PassValidation(t *testing.T) {
 		name := e.Name()
 		t.Run(name, func(t *testing.T) {
 			c := helpers.NewCity(t, testEnv)
-			c.InitFrom(filepath.Join(examplesDir, name))
+			c.InitFromNoStart(filepath.Join(examplesDir, name))
 
 			out, err := c.GC("config", "show", "--validate")
 			if err != nil {
@@ -93,7 +93,7 @@ func TestExampleValidate_AllCities_PassValidation(t *testing.T) {
 func TestExamplePacks_PackArtifacts(t *testing.T) {
 	t.Run("Gastown", func(t *testing.T) {
 		c := helpers.NewCity(t, testEnv)
-		c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+		c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 		// The gastown pack arrives via the pinned public import, not a
 		// city-local packs/ copy: the city carries the import pin plus the
@@ -126,7 +126,7 @@ func TestExamplePacks_PackArtifacts(t *testing.T) {
 
 	t.Run("Hyperscale", func(t *testing.T) {
 		c := helpers.NewCity(t, testEnv)
-		c.InitFrom(filepath.Join(helpers.ExamplesDir(), "hyperscale"))
+		c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "hyperscale"))
 
 		expected := []string{
 			"packs/hyperscale/pack.toml",
@@ -142,7 +142,7 @@ func TestExamplePacks_PackArtifacts(t *testing.T) {
 
 	t.Run("Lifecycle", func(t *testing.T) {
 		c := helpers.NewCity(t, testEnv)
-		c.InitFrom(filepath.Join(helpers.ExamplesDir(), "lifecycle"))
+		c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "lifecycle"))
 
 		expected := []string{
 			"packs/lifecycle/pack.toml",
@@ -179,7 +179,7 @@ func TestExampleDoctor_AllCities_RunWithoutCrash(t *testing.T) {
 		name := e.Name()
 		t.Run(name, func(t *testing.T) {
 			c := helpers.NewCity(t, testEnv)
-			c.InitFrom(filepath.Join(examplesDir, name))
+			c.InitFromNoStart(filepath.Join(examplesDir, name))
 
 			// Doctor may return non-zero for warnings, but should not crash.
 			out, _ := c.GC("doctor")

@@ -100,6 +100,9 @@ func runDoltForCompactTest(t *testing.T, doltPath, dir string, args ...string) s
 	defer cancel()
 	cmd := exec.CommandContext(ctx, doltPath, args...)
 	cmd.Dir = dir
+	// Newer dolt CLIs colorize `dolt log` output even without a TTY; ANSI
+	// escapes would corrupt hash parsing in doltHeadForCompactTest.
+	cmd.Env = append(os.Environ(), "NO_COLOR=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("dolt %s failed in %s: %v\n%s", strings.Join(args, " "), dir, err, out)

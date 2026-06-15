@@ -46,7 +46,7 @@ func ReadCachedPackImports(source, commit string) (map[string]config.Import, err
 	}
 	var imports map[string]config.Import
 	if err := config.WithRepoCacheReadLock(root, func() error {
-		if builtinpacks.IsSource(source) {
+		if config.IsBundledSourceAtCanonicalPin(source, commit) {
 			if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
 				gitInfo, gitErr := os.Stat(filepath.Join(cachePath, ".git"))
 				if gitutil.MissingCheckoutMarker(gitInfo, gitErr) {

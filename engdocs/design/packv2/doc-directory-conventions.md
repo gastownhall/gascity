@@ -1,5 +1,11 @@
 # Pack Structure v.next
 
+> **Historical PackV2 design note.** This page preserves design history and
+> rollout rationale. For current pack authoring guidance, use
+> `docs/reference/specs/pack-spec.md`, `docs/guides/understanding-packs.md`,
+> and `docs/guides/shareable-packs.md`. When this note disagrees with shipped
+> behavior, prefer the current docs, generated reference, code, and tests.
+
 **GitHub Issue:** TBD
 
 Title: `feat: Pack structure v.next — principles and standard directory layout for packs and cities`

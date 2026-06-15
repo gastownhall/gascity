@@ -6,9 +6,9 @@ description: See agent output, interact directly with agents, and learn about po
 
 In [Tutorial 02](/tutorials/02-agents), you worked with agents to produce work,
 which created sessions with agents that we haven't seen yet. In this tutorial,
-you'll see and talk with agents via sessions as well as see how agents talk to
-each other. You'll also learn the difference between "polecats" (agents spun up
-on demand to handle work) and "crew" (persistent agents with named sessions),
+you'll see and talk with agents via sessions. You'll also learn the difference
+between "polecats" (agents spun up on demand to handle work) and "crew"
+(persistent agents with named sessions).
 
 To continue with this tutorial, start from where the last two tutorials left
 off: the city root has `pack.toml` and `city.toml`, and Tutorial 02 added the
@@ -29,6 +29,8 @@ mode = "always"
 $ cat city.toml
 [workspace]
 provider = "claude"
+
+... # content elided
 
 [[rigs]]
 name = "my-project"
@@ -61,9 +63,12 @@ conversations. Gas City normalizes all of that behind a single abstraction
 called a **session**. A session is a live process with its own terminal, state,
 and conversation history.
 
-When you sling a bead, you're creating a session. For a transient polecat
-session, the easiest way to inspect it is to look up the live session ID and
-then pass that to `gc session peek`:
+When you sling a bead to an agent that isn't already running, you're creating
+a session. For a transient polecat session, the easiest way to inspect it is
+to look up the live session ID and then pass that to `gc session peek`. (If
+the reviewer already finished Tutorial 02's review and its session was cleaned
+up, sling the same review work again — that gives you a fresh live session to
+watch.)
 
 ```shell
 ~/my-project
@@ -73,7 +78,7 @@ mc-8sfd  my-project/reviewer   creating  create  reviewer-a1b  reviewer  1s   -
 
 ~/my-project
 $ gc session peek mc-8sfd
-› [my-project] reviewer • 2026-04-07T11:56:59
+› [my-city] my-project/reviewer • 2026-04-07T11:56:59
 
   Run `gc prime` to initialize your context.
 
@@ -121,41 +126,40 @@ $ gc session peek mc-8sfd
 • Working (43s • esc to interrupt)
 ```
 
-You'll notice that the result of `gc prime` for our reviewer agent as the first
-input to the `codex` CLI. That's how GC lets Codex know how to act. Then you'll
-notice Codex acting on those instructions by looking for the beads that are
+You'll notice the result of `gc prime` for our reviewer agent shows up as the
+first input to the `codex` CLI. That's how GC lets Codex know how to act. Then
+you'll notice Codex acting on those instructions by looking for the beads that are
 ready for it to act on. It finds one, executes it and out comes our `review.md`
 file.
 
 When an agent has no work to do, it will go idle. And when it's been idle in a
 session created for it to handle work that was slung to it, that session will be
-cleanly shutdown by the GC supervisor process. These transient sessions are
-often used by one-and-done agents know as "polecats". While you could talk to
+cleanly shut down by the GC supervisor process. These transient sessions are
+often used by one-and-done agents known as "polecats". While you could talk to
 one interactively, they're configured to execute beads, go idle and have their
-sessions shutdown ASAP.
+sessions shut down ASAP.
 
 If you want an agent to talk to, you'll want one configured for chatting
 called a "crew" member.
 
 ## Chatting with Crew
 
-Recall from our reviewer agent that it's prompt was authored to ask it to look
+Recall from our reviewer agent that its prompt was authored to ask it to look
 for and immediately start executing work assigned to it. While that work is
 active, you can see it in the list of sessions:
 
 ```shell
 ~/my-project
 $ gc session list
-2026/04/07 21:50:21 tmux state cache: refreshed 2 sessions in 3.82725ms
 ID       TEMPLATE              STATE     REASON          TARGET        TITLE     AGE  LAST ACTIVE
 mc-8sfd  my-project/reviewer   creating  create          reviewer-a1b  reviewer  1s   -
 mc-5o1   mayor                 active    session,config  mayor         mayor     10h  14m ago
 ```
 
 However, once the work is done, the reviewer will go idle and its session will
-be shutdown by GC. On the other hand, you can see from this sample output that
-the mayor has been running for the last ten hours -- since our city was started
--- but we haven't talked to it once? Has it been burning tokens all of this
+be shut down by GC. On the other hand, you can see from this sample output that
+the mayor has been running for the last ten hours — since our city was started
+— but we haven't talked to it once? Has it been burning tokens all of this
 time? Let's take a look:
 
 ```shell
@@ -166,7 +170,7 @@ City is up and idle. No pending work, no agents running besides me. What would
   you like to do?
 ```
 
-So the mayor is clearly idle, but has not been shutdown. Why not? If you look
+So the mayor is clearly idle, but has not been shut down. Why not? If you look
 again at your `pack.toml` file, you'll see the named session that keeps it
 alive:
 
@@ -190,7 +194,6 @@ To talk to the mayor (or any agent in a running session), you "attach" to it:
 ```shell
 ~/my-project
 $ gc session attach mayor
-2026/04/07 22:03:26 tmux state cache: refreshed 1 sessions in 3.828541ms
 Attaching to session mc-5o1 (mayor)...
 ```
 
@@ -212,21 +215,23 @@ into the session's terminal:
 ```shell
 ~/my-city
 $ gc session nudge mayor "What's the current city status?"
-2026/04/07 22:07:28 tmux state cache: refreshed 2 sessions in 3.765375ms
+Nudged mayor
 ```
 
-Gas City confirms the nudge with either `Nudged mayor` or `Queued nudge for mayor`.
+Gas City confirms the nudge with either `Nudged mayor` (delivered to the live
+session) or `Queued nudge for mayor` (queued for delivery when the session is
+ready).
 
 ![mayor nudge screenshot](mayor-nudge.png)
 
-To get a feel for whats's happening in your city, you can see all running
+To get a feel for what's happening in your city, you can see all running
 sessions:
 
 ```shell
 ~/my-city
 $ gc session list
-ID    TEMPLATE  STATE   REASON          TARGET  TITLE  AGE  LAST ACTIVE
-my-4  mayor     active  session,config  mayor   mayor  2m   5s ago
+ID      TEMPLATE  STATE   REASON          TARGET  TITLE  AGE  LAST ACTIVE
+mc-5o1  mayor     active  session,config  mayor   mayor  10h  5s ago
 ```
 
 ## Session logs
@@ -237,12 +242,8 @@ conversation history:
 ```shell
 ~/my-city
 $ gc session logs mayor --tail 2
-07:22:29 [USER] [my-city] mayor • 2026-04-08T00:22:24
-Check the status of mc-wisp-8t8
-
-07:22:31 [ASSISTANT] [my-city] mayor • 2026-04-08T00:22:31
-mc-wisp-8t8 is a review request for the auth module. I've routed it to
-my-project/reviewer.
+22:07:29 [USER] What's the current city status?
+22:07:38 [ASSISTANT] City is up and idle. No pending work, no agents running besides me.
 ```
 
 `--tail N` prints the last N transcript entries (same convention as `tail -n`),
@@ -280,6 +281,6 @@ From here:
 
 - **[Agent-to-Agent Communication](/tutorials/04-communication)** — how agents
   coordinate through mail, slung work, and hooks
-- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
-  dependencies and variables
+- **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
+  done: steps, dependencies, and variables
 - **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all

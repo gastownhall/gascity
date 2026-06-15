@@ -349,7 +349,7 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+	if err := EnsureBuiltinRuntimeAssets(cityPath, os.Stderr); err != nil {
 		fmt.Fprintf(stderr, "%s: materializing builtin packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

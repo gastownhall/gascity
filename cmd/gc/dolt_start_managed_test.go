@@ -948,6 +948,41 @@ max_connections = 1024
 	}
 }
 
+func TestResolveManagedDoltConfigForStartAutoGC(t *testing.T) {
+	tests := []struct {
+		name     string
+		cityToml string
+		envVal   string
+		want     bool
+	}{
+		{name: "defaults on", want: true},
+		{name: "city toml disables", cityToml: "[dolt]\nauto_gc_enabled = false\n", want: false},
+		{name: "city toml overrides env", cityToml: "[dolt]\nauto_gc_enabled = true\n", envVal: "false", want: true},
+		{name: "env false disables", envVal: "false", want: false},
+		{name: "env 0 disables", envVal: "0", want: false},
+		{name: "env OFF disables", envVal: "OFF", want: false},
+		{name: "env ON enables", envVal: "ON", want: true},
+		{name: "unparseable env keeps default", envVal: "maybe", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			body := "[workspace]\nname = \"test\"\n\n" + tt.cityToml
+			if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_DOLT_AUTO_GC_ENABLED", tt.envVal)
+			got, err := resolveManagedDoltConfigForStart(dir, -1)
+			if err != nil {
+				t.Fatalf("resolveManagedDoltConfigForStart: %v", err)
+			}
+			if got.EffectiveAutoGCEnabled() != tt.want {
+				t.Fatalf("EffectiveAutoGCEnabled() = %v, want %v", got.EffectiveAutoGCEnabled(), tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveManagedDoltConfigForStartRejectsInvalidCityDoltConfig(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`

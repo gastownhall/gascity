@@ -471,6 +471,71 @@ func TestBdStoreGetEmptyArray(t *testing.T) {
 	}
 }
 
+// TestBdStoreGetExactIDGuard verifies that BdStore.Get returns ErrIDCollision
+// (which wraps ErrNotFound) when bd's fuzzy resolver returns a different bead
+// than requested (gcy-g4o). e.g. requesting "gcy-dv7" must NOT silently accept
+// "gcy-wisp-dv78". Both errors.Is(err, ErrNotFound) and
+// errors.Is(err, ErrIDCollision) must hold so mutation guards can distinguish
+// a genuine collision from a plain absent bead.
+func TestBdStoreGetExactIDGuard(t *testing.T) {
+	// bd returns a bead whose ID is a superset of the requested ID.
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gcy-dv7`: {
+			out: []byte(`[{"id":"gcy-wisp-dv78","title":"Wrong bead","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Get("gcy-dv7")
+	if err == nil {
+		t.Fatal("Get returned nil error, want ErrIDCollision")
+	}
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("Get error = %v, want errors.Is(err, ErrNotFound) true", err)
+	}
+	if !errors.Is(err, beads.ErrIDCollision) {
+		t.Errorf("Get error = %v, want errors.Is(err, ErrIDCollision) true", err)
+	}
+}
+
+// TestBdStoreMutationsPassThroughOnNotFound verifies that Update/Delete/Close
+// always reach bd directly (internal hot-path callers supply canonical full IDs;
+// the exact-ID collision guard lives at the CLI/API entry points — gcy-g4o).
+func TestBdStoreMutationsPassThroughOnNotFound(t *testing.T) {
+	var updateCalled, deleteCalled, closeCalled bool
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		cmd := strings.Join(append([]string{name}, args...), " ")
+		switch {
+		case strings.HasPrefix(cmd, "bd update "):
+			updateCalled = true
+			return nil, fmt.Errorf("bd: issue not found")
+		case strings.HasPrefix(cmd, "bd delete "):
+			deleteCalled = true
+			return nil, fmt.Errorf("bd: issue not found")
+		case strings.HasPrefix(cmd, "bd close "):
+			closeCalled = true
+			return nil, fmt.Errorf("bd: issue not found")
+		}
+		return nil, fmt.Errorf("unexpected: %s", cmd)
+	}
+	s := beads.NewBdStore("/city", runner)
+	title := "x"
+	_ = s.Update("gcy-dv7", beads.UpdateOpts{Title: &title})
+	_ = s.Delete("gcy-dv7")
+	_ = s.Close("gcy-dv7")
+	if !updateCalled {
+		t.Error("Update did not reach bd when bead was not-found (should pass through)")
+	}
+	if !deleteCalled {
+		t.Error("Delete did not reach bd when bead was not-found (should pass through)")
+	}
+	if !closeCalled {
+		t.Error("Close did not reach bd when bead was not-found (should pass through)")
+	}
+}
+
 // --- Close ---
 
 func TestBdStoreClose(t *testing.T) {
@@ -967,14 +1032,14 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 	}
 
 	want := []string{
-		"bd show --json bd-42",
+		"bd show --json bd-42", // Tx initial Get
 		"bd update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
-		"bd show --json bd-42",
+		"bd show --json bd-42", // honesty re-read after update (close's honesty guard)
 		"bd close --force --json --reason completed during transaction bd-42",
-		"bd show --json bd-42",
+		"bd show --json bd-42", // honesty re-read after close (close's honesty guard)
 		"bd update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
-		"bd show --json bd-42",
-		"bd show --json bd-42",
+		"bd show --json bd-42", // Tx final Get
+		"bd show --json bd-42", // final Get after Tx
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
@@ -1009,9 +1074,9 @@ func TestBdStoreTxCloseOnlyUsesCloseCommand(t *testing.T) {
 	}
 
 	want := []string{
-		"bd show --json bd-42",
+		"bd show --json bd-42", // Tx initial Get
 		"bd close --force --json --reason completed during transaction bd-42",
-		"bd show --json bd-42",
+		"bd show --json bd-42", // honesty re-read after close
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
@@ -1072,7 +1137,7 @@ func TestBdStoreTxPreservesAddsAndRemovesLabels(t *testing.T) {
 	}
 
 	want := []string{
-		"bd show --json bd-42",
+		"bd show --json bd-42", // Tx initial Get
 		"bd update --json bd-42 --title before --status open --type task --add-label b --add-label c --remove-label a",
 	}
 	if !reflect.DeepEqual(commands, want) {

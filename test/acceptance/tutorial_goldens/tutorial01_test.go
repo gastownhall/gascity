@@ -41,8 +41,8 @@ func TestTutorial01Cities(t *testing.T) {
 		})
 
 		t.Run("gc init ~/my-city", func(t *testing.T) {
-			ws.noteWarning("tutorial 01 documents the interactive wizard, but the acceptance harness uses the equivalent non-interactive `gc init ~/my-city --provider claude --skip-provider-readiness` path because the wizard requires a real TTY and CI does not carry interactive Claude auth")
-			out, err := ws.runShell("gc init ~/my-city --provider claude --skip-provider-readiness", "")
+			ws.noteWarning("tutorial 01 documents the interactive wizard, but the acceptance harness uses the equivalent non-interactive `gc init ~/my-city --default-provider claude --skip-provider-readiness` path because the wizard requires a real TTY and CI does not carry interactive Claude auth")
+			out, err := ws.runShell("gc init ~/my-city --default-provider claude --skip-provider-readiness", "")
 			if err != nil {
 				t.Fatalf("gc init wizard: %v\n%s", err, out)
 			}
@@ -70,19 +70,19 @@ func TestTutorial01Cities(t *testing.T) {
 			}
 		})
 
-		t.Run("gc init ~/my-city --provider claude", func(t *testing.T) {
+		t.Run("gc init ~/my-city --default-provider claude", func(t *testing.T) {
 			wsProvider := newTutorialWorkspace(t)
 			wsProvider.attachDiagnostics(t, "tutorial-01-provider-branch")
 
-			out, err := wsProvider.runShell("gc init ~/my-city --provider claude --skip-provider-readiness", "")
+			out, err := wsProvider.runShell("gc init ~/my-city --default-provider claude --skip-provider-readiness", "")
 			if err != nil {
-				t.Fatalf("gc init --provider claude: %v\n%s", err, out)
+				t.Fatalf("gc init --default-provider claude: %v\n%s", err, out)
 			}
 			if _, err := os.Stat(filepath.Join(expandHome(wsProvider.home(), "~/my-city"), "city.toml")); err != nil {
 				t.Fatalf("city.toml missing after explicit provider init: %v", err)
 			}
 			if !strings.Contains(strings.ToLower(out), "created") && !strings.Contains(strings.ToLower(out), "registered") {
-				t.Fatalf("gc init --provider output missing creation marker:\n%s", out)
+				t.Fatalf("gc init --default-provider output missing creation marker:\n%s", out)
 			}
 		})
 
@@ -98,7 +98,7 @@ func TestTutorial01Cities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ls: %v\n%s", err, out)
 			}
-			for _, want := range []string{"city.toml", "pack.toml", "formulas", "orders", "agents"} {
+			for _, want := range []string{"city.toml", "pack.toml", "formulas", "orders", "agents", "overlays"} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("ls output missing %q:\n%s", want, out)
 				}
@@ -110,8 +110,14 @@ func TestTutorial01Cities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("cat city.toml: %v\n%s", err, out)
 			}
-			if !strings.Contains(out, `provider = "claude"`) {
-				t.Fatalf("city.toml missing workspace provider:\n%s", out)
+			for _, want := range []string{
+				`provider = "claude"`,
+				`includes = [".gc/system/packs/core", ".gc/system/packs/bd"]`,
+				`formula_v2 = true`,
+			} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("city.toml missing %q:\n%s", want, out)
+				}
 			}
 		})
 
@@ -138,7 +144,7 @@ func TestTutorial01Cities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("gc status: %v\n%s", err, out)
 			}
-			for _, want := range []string{"my-city", "Controller:"} {
+			for _, want := range []string{"my-city", "Controller:", "Named sessions:", "mayor", "dolt.dog", "control-dispatcher"} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("gc status missing %q:\n%s", want, out)
 				}
@@ -203,6 +209,11 @@ func TestTutorial01Cities(t *testing.T) {
 			out, err := ws.runShell(`gc sling my-project/claude "Write hello world in python to the file hello.py"`, "")
 			if err != nil {
 				t.Fatalf("gc sling rig task: %v\n%s", err, out)
+			}
+			for _, want := range []string{"Created ", "Attached workflow ", `formula "mol-do-work"`} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("gc sling output missing %q:\n%s", want, out)
+				}
 			}
 			helloTaskID = firstBeadID(out)
 			if helloTaskID == "" {

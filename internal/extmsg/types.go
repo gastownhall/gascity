@@ -346,13 +346,19 @@ type ConversationGroupRecord struct {
 }
 
 // ConversationGroupParticipant represents a participant in a conversation group.
+//
+// SessionID is the volatile session bead ID this participant currently resolves
+// to. SessionName is the stable identity the participant was registered under;
+// it survives session respawn and lets ResolveInbound/ResolveOutbound re-point
+// at the current live bead via resolveLiveSessionID.
 type ConversationGroupParticipant struct {
-	ID        string
-	GroupID   string
-	Handle    string
-	SessionID string
-	Public    bool
-	Metadata  map[string]string
+	ID          string
+	GroupID     string
+	Handle      string
+	SessionID   string
+	SessionName string
+	Public      bool
+	Metadata    map[string]string
 }
 
 // GroupRouteMatch classifies how a message was routed within a group.

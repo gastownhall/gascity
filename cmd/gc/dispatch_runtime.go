@@ -656,6 +656,13 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	if beadsCfg.UsesBD105ReadySemantics() {
 		includeEphemeral = " --include-ephemeral"
 	}
+	jqFilter := fmt.Sprintf(
+		`reduce add[] as $item ([]; if (($item.metadata // {})[%q] // "") != "" then . elif any(.[]; .id == $item.id) then . else . + [$item] end)`,
+		beadmeta.InstantiatingMetadataKey,
+	)
+	jqFilter = strings.ReplaceAll(jqFilter, `\`, `\\`)
+	jqFilter = strings.ReplaceAll(jqFilter, `"`, `\"`)
+	jqFilter = strings.ReplaceAll(jqFilter, `$`, `\$`)
 	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target)
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
@@ -688,7 +695,7 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`done; ` +
 		`routed_ready "$GC_CONTROL_TARGET"; ` +
 		`routed_ready "${GC_CONTROL_LEGACY_TARGET:-}"; ` +
-		`if [ -s "$tmp" ]; then jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp"; else printf "[]"; fi` + `'`
+		`if [ -s "$tmp" ]; then jq -s "` + jqFilter + `" "$tmp"; else printf "[]"; fi` + `'`
 	return query
 }
 

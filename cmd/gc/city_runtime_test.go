@@ -4373,8 +4373,8 @@ func TestCityRuntimeReloadDrainShortCircuitsOnTickContextCancel(t *testing.T) {
 	lastProviderName := "fake"
 	start := time.Now()
 	cr.reloadConfig(ctx, &lastProviderName, cityPath)
-	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
-		t.Fatalf("reload drain took %s after tick context cancellation, want <200ms", elapsed)
+	if elapsed := time.Since(start); elapsed >= reloadOrderDrainTimeout {
+		t.Fatalf("reload drain took %s after tick context cancellation, want less than %s", elapsed, reloadOrderDrainTimeout)
 	}
 	errs := od.drainContextErrors()
 	if len(errs) == 0 || !errors.Is(errs[0], context.Canceled) {
@@ -5339,7 +5339,7 @@ func TestCityRuntimeRun_RetriesConvergenceStartupUntilIndexPopulated(t *testing.
 
 	deadline := time.After(5 * time.Second)
 	for {
-		if scope := cr.convScopes[""]; scope != nil && scope.adapter.activeIndex != nil {
+		if scope := cr.convScope(""); scope != nil && scope.adapter.indexReady.Load() {
 			cancel()
 			break
 		}

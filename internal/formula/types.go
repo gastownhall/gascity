@@ -1512,7 +1512,7 @@ func validateRetry(spec *RetrySpec, errs *[]string, prefix string, step *Step) {
 
 func validateDrain(spec *DrainSpec, errs *[]string, prefix string, step *Step, graphV2 bool) {
 	if !graphV2 {
-		*errs = append(*errs, fmt.Sprintf("%s.drain: drain requires contract = \"graph.v2\"", prefix))
+		*errs = append(*errs, fmt.Sprintf("%s.drain: drain steps must declare the formulas v2 contract ([requires] formula_compiler = \">=2.0.0\")", prefix))
 	}
 	switch spec.Context {
 	case "", "separate":

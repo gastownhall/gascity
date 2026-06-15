@@ -24,7 +24,7 @@ import (
 // name so they don't interfere with each other.
 func TestAgentAddCommands(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("NewAgent", func(t *testing.T) {
 		out, err := c.GC("agent", "add", "--name", "reviewer")
@@ -123,7 +123,7 @@ func TestAgentAddCommands(t *testing.T) {
 // city. The ThenResume subtest overwrites city.toml so it runs last.
 func TestAgentSuspendResume(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("SuspendMissingName", func(t *testing.T) {
 		out, err := c.GC("agent", "suspend")
@@ -195,7 +195,7 @@ start_command = "echo hello"
 // ThenResume subtest overwrites city.toml; NotACity uses its own temp dir.
 func TestCitySuspendResume(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("ThenResume", func(t *testing.T) {
 		// Write a config with an agent so hook has something to look for.

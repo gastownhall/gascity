@@ -385,51 +385,15 @@ jobs:
           path: dist/**
           if-no-files-found: error
 
-  macos_fast_tests:
-    name: macOS / fast tests / ${{ matrix.label }}
-    runs-on: blacksmith-12vcpu-macos-15
-    timeout-minutes: ${{ matrix.timeout_minutes }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: fsys-darwin-compile
-            timeout_minutes: 10
-            command: |
-              tmp="$(mktemp -d)"
-              trap 'rm -rf "$tmp"' EXIT
-              GOOS=darwin GOARCH=arm64 go test -c -o "$tmp/fsys.test" ./internal/fsys
-          - label: unit-core
-            timeout_minutes: 30
-            command: |
-              GC_FAST_UNIT=1 go test -timeout 20m $(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc$')
-          - label: cmd-gc-1-of-6
-            timeout_minutes: 30
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 1 6
-          - label: cmd-gc-2-of-6
-            timeout_minutes: 30
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 2 6
-          - label: cmd-gc-3-of-6
-            timeout_minutes: 30
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 3 6
-          - label: cmd-gc-4-of-6
-            timeout_minutes: 30
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 4 6
-          - label: cmd-gc-5-of-6
-            timeout_minutes: 30
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 5 6
-          - label: cmd-gc-6-of-6
-            timeout_minutes: 30
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 6 6
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-macos
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Run macOS fast test shard
-        run: ${{ matrix.command }}
+  mac_regression:
+    name: Mac regression
+    permissions:
+      contents: read
+    uses: ./.github/workflows/mac-regression.yml
+    with:
+      suite: full
+      force_blacksmith: true
+    secrets: inherit
 
   rc_summary:
     name: RC summary
@@ -445,7 +409,7 @@ jobs:
       - ubuntu_integration_shards
       - ubuntu_tutorial
       - ubuntu_goreleaser_snapshot
-      - macos_fast_tests
+      - mac_regression
     env:
       NEEDS_JSON: ${{ toJSON(needs) }}
     steps:
