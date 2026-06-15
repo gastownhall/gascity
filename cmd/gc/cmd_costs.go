@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -13,7 +12,6 @@ import (
 )
 
 func newCostsCmd(stdout, stderr io.Writer) *cobra.Command {
-	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "costs",
 		Short: "Show per-run usage and estimated cost for this city",
@@ -24,16 +22,15 @@ Reads .gc/usage.jsonl (the usage sink output) and groups facts by run id.
 Cost is a list-price estimate for decision support, not an authoritative
 charge; invocations with no pricing are flagged "unpriced" and excluded from
 the cost total.`,
-		Example: "  gc costs\n  gc costs --json",
+		Example: "  gc costs",
 		Args:    cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doCosts(asJSON, stdout, stderr) != 0 {
+			if doCosts(stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
 	return cmd
 }
 
@@ -86,7 +83,7 @@ func aggregateRunCosts(facts []usage.UsageFact) []runCost {
 	return rows
 }
 
-func doCosts(asJSON bool, stdout, stderr io.Writer) int {
+func doCosts(stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc costs: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -99,16 +96,6 @@ func doCosts(asJSON bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 	rows := aggregateRunCosts(facts)
-
-	if asJSON {
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(rows); err != nil {
-			fmt.Fprintf(stderr, "gc costs: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		return 0
-	}
 
 	if len(rows) == 0 {
 		fmt.Fprintf(stdout, "No usage facts recorded yet (%s).\n", usagePath) //nolint:errcheck
