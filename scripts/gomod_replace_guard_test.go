@@ -151,6 +151,37 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 		})
 	}
 
+	multiLineBlockCases := []struct {
+		name  string
+		gomod string
+	}{
+		{
+			"multi_line_block_pseudo_version",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace (\n\tgithub.com/steveyegge/beads v1.0.5 => github.com/steveyegge/beads v1.0.5-0.20260611054652-dc0561af28e9\n)\n",
+		},
+		{
+			"multi_line_block_local_path",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace (\n\tgithub.com/steveyegge/beads => ./local/beads\n)\n",
+		},
+		{
+			"multi_line_block_passes_released",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace (\n\tgithub.com/steveyegge/beads v1.0.4 => github.com/steveyegge/beads v1.0.5\n)\n",
+		},
+	}
+	for _, tc := range multiLineBlockCases {
+		tc := tc
+		wantFail := !strings.HasSuffix(tc.name, "_released")
+		t.Run(tc.name, func(t *testing.T) {
+			out, code := runScript(t, tc.gomod)
+			if wantFail && code == 0 {
+				t.Fatalf("expected non-zero exit for multi-line block case %q, got 0\n%s", tc.name, out)
+			}
+			if !wantFail && code != 0 {
+				t.Fatalf("expected exit 0 for multi-line block released case %q, got %d\n%s", tc.name, code, out)
+			}
+		})
+	}
+
 	t.Run("failure_message_mentions_policy", func(t *testing.T) {
 		gomod := "module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads => ./local/beads\n"
 		out, code := runScript(t, gomod)
