@@ -35,6 +35,13 @@ const (
 	CapTooling   Code = "env.tooling"
 	CapIdentity  Code = "env.identity"
 	CapLedger    Code = "env.ledger"
+	// CapTranscripts: the agent's session transcript is delivered off-box. The
+	// guarantee is SINK-AGNOSTIC — the DEFAULT mechanism is a copy-back to a
+	// controller-local dir (GC_TRANSCRIPTS_DEST), which an operator can override
+	// with a forwarder (cass, S3, a webhook, …). Conformance verifies only the
+	// default copy-back; a specific forwarder/sink is the operator's (and that
+	// forwarder pack's) concern, not gascity's.
+	CapTranscripts Code = "env.transcripts"
 )
 
 // Capability is one environment guarantee a runtime may declare and that
@@ -52,6 +59,7 @@ var catalog = []Capability{
 	{CapTooling, "the agent toolchain (gc, bd, git, …) is installed and runnable in the session"},
 	{CapIdentity, "the session identity/env (GC_* vars, run-as user) is injected"},
 	{CapLedger, "the session's bd can reach the work ledger (the gc beads API) — transport (tunnel) is the runtime's concern"},
+	{CapTranscripts, "the agent's session transcript is delivered off-box (default: copy-back to the controller; overridable with a forwarder) — sink is the operator's concern"},
 }
 
 // Catalog returns the capability list in probe order (a copy).

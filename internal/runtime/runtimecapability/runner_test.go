@@ -17,15 +17,17 @@ type refConfig struct {
 	installTooling       bool
 	injectIdentity       bool
 	wireLedger           bool
+	copyBackTranscripts  bool
 }
 
 func goldenConfig() refConfig {
 	return refConfig{
-		caps:                 []string{"env.workspace", "env.tooling", "env.identity", "env.ledger"},
+		caps:                 []string{"env.workspace", "env.tooling", "env.identity", "env.ledger", "env.transcripts"},
 		materializeWorkspace: true,
 		installTooling:       true,
 		injectIdentity:       true,
 		wireLedger:           true,
+		copyBackTranscripts:  true,
 	}
 }
 
@@ -68,6 +70,14 @@ printf '#!/bin/sh\nif [ "$1" = ready ]; then [ -n "$GC_BEADS_API" ] || exit 1; c
 	if !cfg.wireLedger {
 		wire = `:` // ledger endpoint not wired into the session
 	}
+	// transcript copy-back at stop: deliver the in-session transcript source
+	// (GC_TRANSCRIPTS_SRC) to the controller-local destination (GC_TRANSCRIPTS_DEST),
+	// both from the PROCESS env (available at every op). Gated so a mutant can
+	// break exactly transcripts.
+	copyBack := `[ -n "$GC_TRANSCRIPTS_DEST" ] && [ -d "$GC_TRANSCRIPTS_SRC" ] && { mkdir -p "$GC_TRANSCRIPTS_DEST"; cp -a "$GC_TRANSCRIPTS_SRC/." "$GC_TRANSCRIPTS_DEST/" 2>/dev/null || true; }`
+	if !cfg.copyBackTranscripts {
+		copyBack = `:` // transcript egress not wired (mutant)
+	}
 
 	body := fmt.Sprintf(`#!/bin/sh
 S=%q
@@ -96,11 +106,14 @@ case "$op" in
     PATH="$D/bin:/usr/bin:/bin" sh -c "$cmd"
     exit $?
     ;;
-  stop) rm -rf "$D" ;;
+  stop)
+    %s
+    rm -rf "$D"
+    ;;
   is-running) [ -d "$D" ] && echo true || echo false ;;
   *) exit 2 ;;
 esac
-`, state, capsJSON, materialize, install, inject, wire)
+`, state, capsJSON, materialize, install, inject, wire, copyBack)
 
 	path := filepath.Join(t.TempDir(), "gc-runtime-ref")
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
@@ -170,6 +183,7 @@ func TestEveryCapabilityIsGated(t *testing.T) {
 		{CapTooling, func(c *refConfig) { c.installTooling = false }},
 		{CapIdentity, func(c *refConfig) { c.injectIdentity = false }},
 		{CapLedger, func(c *refConfig) { c.wireLedger = false }},
+		{CapTranscripts, func(c *refConfig) { c.copyBackTranscripts = false }},
 	}
 	covered := map[Code]bool{}
 	for _, m := range mutants {

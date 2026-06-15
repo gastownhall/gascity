@@ -3,6 +3,8 @@ package runtimecapability
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -16,10 +18,11 @@ type probe func(ctx context.Context, r *runner, name string) (Status, string)
 // probes maps each catalog capability to its check. TestProbesCoverCatalog
 // asserts this covers the catalog exactly.
 var probes = map[Code]probe{
-	CapWorkspace: probeWorkspace,
-	CapTooling:   probeTooling,
-	CapIdentity:  probeIdentity,
-	CapLedger:    probeLedger,
+	CapWorkspace:   probeWorkspace,
+	CapTooling:     probeTooling,
+	CapIdentity:    probeIdentity,
+	CapLedger:      probeLedger,
+	CapTranscripts: probeTranscripts,
 }
 
 // probeWorkspace verifies the start-config work_dir was materialized: the
@@ -88,4 +91,39 @@ func probeLedger(ctx context.Context, r *runner, name string) (Status, string) {
 		return StatusFail, fmt.Sprintf("`bd ready` failed in session (exit %d) — bd cannot reach the ledger: %s", code, strings.TrimSpace(out))
 	}
 	return StatusPass, "bd reaches the work ledger from the session"
+}
+
+// probeTranscripts verifies the agent's session transcript is delivered off-box.
+// Unlike the other probes (observed in-session via exec), transcript egress is a
+// TEARDOWN-time concern — the default copy-back pulls the session's transcript
+// dir (GC_TRANSCRIPTS_SRC) to a controller-local destination (GC_TRANSCRIPTS_DEST)
+// at stop; an operator may override the mechanism with a forwarder. So this is
+// the one capability verified ACROSS stop: plant a transcript in the session,
+// stop (firing the egress), then assert it arrived at the destination. The check
+// is SINK-AGNOSTIC — it only asserts the transcript reached GC_TRANSCRIPTS_DEST,
+// never how (a specific forwarder/sink is the operator's concern, not gascity's).
+// Run invokes this after every exec probe, since it ends the session.
+func probeTranscripts(ctx context.Context, r *runner, name string) (Status, string) {
+	marker := "GC_CAPABILITY_TRANSCRIPTS_" + name
+	// Plant a transcript in the session's transcript source dir (in-session,
+	// via exec — for a remote runtime GC_TRANSCRIPTS_SRC is inside the sandbox).
+	plant := fmt.Sprintf("mkdir -p %s && printf '%%s' %q > %s/transcript.jsonl",
+		r.transcriptsSrc, marker, r.transcriptsSrc)
+	_, code, unsupported := r.execIn(ctx, name, plant)
+	if unsupported {
+		return StatusFail, "declares env.transcripts but has no exec op to verify it"
+	}
+	if code != 0 {
+		return StatusFail, fmt.Sprintf("could not plant a transcript in the session (exit %d)", code)
+	}
+	// Stop fires the teardown egress (default copy-back / forwarder flush).
+	r.stop(ctx, name)
+	data, err := os.ReadFile(filepath.Join(r.transcriptsDest, "transcript.jsonl"))
+	if err != nil {
+		return StatusFail, "transcript never reached the destination — copy-back/forwarder egress did not run at stop"
+	}
+	if !strings.Contains(string(data), marker) {
+		return StatusFail, "transcript reached the destination but its content did not match"
+	}
+	return StatusPass, "session transcript delivered off-box (copy-back to the controller destination)"
 }

@@ -28,6 +28,13 @@ const (
 	// the runtime makes it reachable from the session (directly here, via a
 	// sandbox->host tunnel for a remote runtime). A conformant `bd` reads it.
 	ledgerEnv = "GC_BEADS_API"
+	// transcriptsSrcEnv / transcriptsDestEnv are the transcript-egress contract:
+	// the runtime delivers the session's transcript dir (…SRC, in-session) to a
+	// controller-local destination (…DEST) — the default copy-back. An operator
+	// overrides the mechanism (a forwarder to cass/S3/…); the sink is not gascity's
+	// concern. The transcripts probe plants in SRC and asserts arrival in DEST.
+	transcriptsSrcEnv  = "GC_TRANSCRIPTS_SRC"
+	transcriptsDestEnv = "GC_TRANSCRIPTS_DEST"
 )
 
 // Options tune a capability run. The zero value is CI-ready.
@@ -64,6 +71,22 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 	opts.applyDefaults()
 	r := &runner{path: path, opts: opts}
 	report := Report{Executable: path}
+
+	// env.transcripts copy-back contract: an in-session transcript source and a
+	// controller-local destination, exposed via the runtime PROCESS env (opEnv)
+	// for EVERY op — so a runtime can gate env.transcripts on it in the handshake,
+	// and the stateless stop op can re-read it. probeTranscripts plants in src and
+	// asserts the runtime delivered it to dest at stop. (Locally src is
+	// host-visible; for a remote runtime it is inside the sandbox and the egress
+	// is a download.)
+	if r.transcriptsSrc, err = os.MkdirTemp("", "gc-cb-tsrc-"); err != nil {
+		return Report{}, fmt.Errorf("creating transcripts src dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(r.transcriptsSrc) }()
+	if r.transcriptsDest, err = os.MkdirTemp("", "gc-cb-tdest-"); err != nil {
+		return Report{}, fmt.Errorf("creating transcripts dest dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(r.transcriptsDest) }()
 
 	hs := r.handshake(ctx)
 	declared := map[Code]bool{}
@@ -124,12 +147,29 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 	defer r.stop(ctx, name)
 
 	for _, cb := range catalog {
+		if cb.Code == CapTranscripts {
+			continue // teardown-time egress: verified after the exec probes (it stops the session)
+		}
 		if !declared[cb.Code] {
 			report.record(cb, false, StatusSkip, "not declared in handshake")
 			continue
 		}
 		status, detail := probes[cb.Code](ctx, r, name)
 		report.record(cb, true, status, detail)
+	}
+	// env.transcripts runs last: its egress fires at stop, so probeTranscripts
+	// ends the session (the deferred stop is then a no-op). Recorded in catalog
+	// order (transcripts is the last entry).
+	for _, cb := range catalog {
+		if cb.Code != CapTranscripts {
+			continue
+		}
+		if !declared[cb.Code] {
+			report.record(cb, false, StatusSkip, "not declared in handshake")
+		} else {
+			status, detail := probes[cb.Code](ctx, r, name)
+			report.record(cb, true, status, detail)
+		}
 	}
 	return report, nil
 }
@@ -138,6 +178,11 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 type runner struct {
 	path string
 	opts Options
+	// transcriptsSrc/Dest are the env.transcripts copy-back contract dirs: the
+	// in-session source the runtime forwards from, and the controller-local
+	// destination it copies to (asserted by probeTranscripts).
+	transcriptsSrc  string
+	transcriptsDest string
 }
 
 // handshake reads the protocol op's declared capabilities (absent → none).
@@ -159,7 +204,10 @@ func (r *runner) startSession(ctx context.Context, name, workDir, ledgerURL stri
 	cfg, _ := json.Marshal(map[string]any{
 		"work_dir": workDir,
 		"command":  r.opts.Command,
-		"env":      map[string]string{probeSessionEnv: name, ledgerEnv: ledgerURL},
+		"env": map[string]string{
+			probeSessionEnv: name,
+			ledgerEnv:       ledgerURL,
+		},
 	})
 	_, code, err := r.invoke(ctx, r.opts.StartTimeout, cfg, "start", name)
 	switch {
@@ -173,6 +221,21 @@ func (r *runner) startSession(ctx context.Context, name, workDir, ledgerURL stri
 
 func (r *runner) stop(ctx context.Context, name string) {
 	_, _, _ = r.invoke(ctx, r.opts.OpTimeout, nil, "stop", name)
+}
+
+// opEnv is the runtime's process env for every op. The env.transcripts copy-back
+// contract (GC_TRANSCRIPTS_SRC/DEST) rides here — not the per-op start-config —
+// so the runtime can gate the capability in its handshake and the stateless stop
+// op can re-read it without persistence.
+func (r *runner) opEnv() []string {
+	env := os.Environ()
+	if r.transcriptsSrc != "" {
+		env = append(env, transcriptsSrcEnv+"="+r.transcriptsSrc)
+	}
+	if r.transcriptsDest != "" {
+		env = append(env, transcriptsDestEnv+"="+r.transcriptsDest)
+	}
+	return env
 }
 
 // execIn runs a command inside the session via the RPP exec op (command on
@@ -194,6 +257,7 @@ func (r *runner) invoke(ctx context.Context, timeout time.Duration, stdin []byte
 	defer cancel()
 	cmd := exec.CommandContext(opCtx, r.path, args...)
 	cmd.WaitDelay = 2 * time.Second
+	cmd.Env = r.opEnv()
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
