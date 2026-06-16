@@ -721,11 +721,25 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_HASHOF_TABLE('wisps')"*)
-    if [ "$mode" = "ignored_table_drift" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_committed_table_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       print_cell hash-wisps-after-churn
       exit 0
     fi
     print_cell hash-wisps-before
+    exit 0
+    ;;
+  *"SELECT pattern FROM dolt_ignore WHERE ignored"*)
+    # ignored_committed_table_drift: wisps was force-inlined into HEAD by a
+    # dolt#11131 heal but is still dolt_ignore'd — the fix must detect this and
+    # exclude wisps from flatten verification (#3541).
+    case "$mode" in
+      ignored_committed_table_drift)
+        print_cell wisps
+        ;;
+      *)
+        print_cells
+        ;;
+    esac
     exit 0
     ;;
   *"SHOW TABLES AS OF"*|*"information_schema.tables"*)
@@ -741,6 +755,14 @@ case "$query" in
           print_cells beads wisps
           ;;
       esac
+      exit 0
+    fi
+    # ignored_committed_table_drift models a force-healed store (#3541): wisps
+    # was inlined into HEAD by DOLT_ADD('--force',...)+commit, so SHOW TABLES
+    # AS OF HEAD returns it — unlike the normal ignored_table_drift case where
+    # wisps is absent from every commit root. Both queries return wisps here.
+    if [ "$mode" = "ignored_committed_table_drift" ]; then
+      print_cells beads wisps
       exit 0
     fi
     if [ "$mode" = "table_discovery_failure" ]; then
@@ -795,7 +817,7 @@ case "$query" in
     exit 0
     ;;
   *"SELECT COUNT(*) FROM"*"wisps"*)
-    if [ "$mode" = "ignored_table_drift" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_committed_table_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       print_cell 11
       exit 0
     fi
@@ -2388,6 +2410,41 @@ func TestCompactScriptExcludesUnversionedTableChurnFromVerification(t *testing.T
 	}
 	if !strings.Contains(string(data), "DOLT_GC") {
 		t.Fatalf("compact must reach full GC after excluding unversioned churn:\n%s", string(data))
+	}
+}
+
+// Companion to the unversioned-table exclusion: when a force-healed store
+// (dolt#11131) inlines a dolt_ignore'd table into HEAD via DOLT_ADD('--force')
+// + commit, SHOW TABLES AS OF HEAD returns it. The -Am flatten still cannot
+// stage it, so its live count/hash drifts freely under concurrent writers.
+// The fix queries dolt_ignore and excludes any committed table matched by an
+// ignored=1 pattern from flatten integrity verification (#3541).
+func TestCompactScriptExcludesDoltIgnoredCommittedTableFromVerification(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "ignored_committed_table_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("dolt_ignored committed table churn must not fail compaction: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "excluding dolt_ignored committed table(s) from flatten verification") ||
+		!strings.Contains(out, "wisps") {
+		t.Fatalf("output missing dolt_ignored committed table exclusion notice:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("dolt_ignored committed table churn must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_HASHOF_TABLE('wisps')") {
+		t.Fatalf("dolt_ignored committed table must not be hash-verified:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), "SELECT pattern FROM dolt_ignore WHERE ignored") {
+		t.Fatalf("compact must query dolt_ignore to detect ignored committed tables:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("compact must reach full GC after excluding dolt_ignored committed table:\n%s", string(data))
 	}
 }
 
