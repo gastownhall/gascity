@@ -69,7 +69,9 @@ func startStandaloneBdDoltLikeProcess(t *testing.T, dataDir string) *exec.Cmd {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	deadline := time.Now().Add(time.Second)
+	// 10s: must outlast a worst-case processArgsPSTimeout (1s) ps fallback plus
+	// process-exec/proc-reflection latency under heavy parallel CI load.
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if cmd.Process.Signal(syscall.Signal(0)) == nil && processLooksLikeDoltSQLServer(cmd.Process.Pid, dataDir) {
 			return cmd
