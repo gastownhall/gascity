@@ -218,6 +218,99 @@ work_query = "kill -9 $$"
 	}
 }
 
+// TestCmdHookPoolInstanceFallsBackToTemplate verifies that when gc hook is
+// called with an explicit pool-instance name (e.g. "rig/polecat-adhoc-XYZ")
+// that is not in the city config, but GC_TEMPLATE points to the pool binding
+// that IS in config, the hook resolves via GC_TEMPLATE and returns work.
+// This covers the pack-script pattern "gc hook $GC_AGENT" for pool agents.
+func TestCmdHookPoolInstanceFallsBackToTemplate(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Only the pool binding "polecat" is in config — instances are not.
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "polecat"
+work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work item\"}]'"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	// Pool instance env: GC_AGENT/GC_ALIAS = instance name, GC_TEMPLATE = binding.
+	t.Setenv("GC_AGENT", "polecat-adhoc-abc123")
+	t.Setenv("GC_ALIAS", "polecat-adhoc-abc123")
+	t.Setenv("GC_TEMPLATE", "polecat")
+	t.Setenv("GC_SESSION_NAME", "polecat-mc-abc")
+	t.Setenv("GC_SESSION_ID", "mc-abc123")
+
+	var stdout, stderr bytes.Buffer
+	// Simulate "gc hook $GC_AGENT" — positional arg is the instance name.
+	code := cmdHookWithFormat([]string{"polecat-adhoc-abc123"}, false, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithFormat(pool instance arg) = %d, want 0; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "ga-pool1") {
+		t.Errorf("stdout = %q, want to contain work item ga-pool1", stdout.String())
+	}
+}
+
+// TestCmdHookUnrelatedExplicitTargetDoesNotFallBackToTemplate verifies that
+// the GC_TEMPLATE fallback does NOT fire for an unrelated explicit target that
+// is not this instance's own runtime identity. An unresolved explicit arg that
+// matches none of GC_ALIAS/GC_AGENT/GC_SESSION_NAME must error with "not found
+// in config" rather than silently reinterpreting as the template agent.
+func TestCmdHookUnrelatedExplicitTargetDoesNotFallBackToTemplate(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Only the pool binding "polecat" is in config.
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "polecat"
+work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work item\"}]'"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	// Pool instance env: GC_TEMPLATE resolves to "polecat", but the explicit
+	// arg below is neither the instance name nor any runtime identity env.
+	t.Setenv("GC_AGENT", "polecat-adhoc-abc123")
+	t.Setenv("GC_ALIAS", "polecat-adhoc-abc123")
+	t.Setenv("GC_TEMPLATE", "polecat")
+	t.Setenv("GC_SESSION_NAME", "polecat-mc-abc")
+	t.Setenv("GC_SESSION_ID", "mc-abc123")
+
+	var stdout, stderr bytes.Buffer
+	// An unrelated, unresolved explicit target must NOT fall back to the template.
+	code := cmdHookWithFormat([]string{"some-other-missing-agent"}, false, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithFormat(unrelated target) = %d, want 1; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "not found in config") {
+		t.Errorf("stderr = %q, want to contain \"not found in config\"", stderr.String())
+	}
+}
+
 func TestHookNoWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", nil }
 	var stdout, stderr bytes.Buffer
