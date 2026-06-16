@@ -721,11 +721,24 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_HASHOF_TABLE('wisps')"*)
-    if [ "$mode" = "ignored_table_drift" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "force_healed_ignored_table_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       print_cell hash-wisps-after-churn
       exit 0
     fi
     print_cell hash-wisps-before
+    exit 0
+    ;;
+  *"JOIN dolt_ignore"*)
+    # ignored_tables(): the user tables matched by an active dolt_ignore
+    # pattern. Empty for a normal store. The ignored_table_* modes model bd's
+    # dolt_ignore'd wisp tier; force_healed_ignored_table_drift additionally
+    # has it force-inlined into HEAD (present in SHOW TABLES AS OF) yet still
+    # dolt_ignore'd — the dolt#11131-healed shape.
+    case "$mode" in
+      ignored_table_drift|ignored_table_db_hash_drift|force_healed_ignored_table_drift)
+        print_cell wisps
+        ;;
+    esac
     exit 0
     ;;
   *"SHOW TABLES AS OF"*|*"information_schema.tables"*)
@@ -741,6 +754,15 @@ case "$query" in
           print_cells beads wisps
           ;;
       esac
+      exit 0
+    fi
+    # force_healed_ignored_table_drift: the dolt#11131 heal force-inlined the
+    # still-dolt_ignore'd wisp tier into HEAD, so it is present in the committed
+    # root (SHOW TABLES AS OF) as well as information_schema. committed-root
+    # membership alone would keep it in verification; ignored_tables() excludes
+    # it because the flatten's -Am still cannot stage a dolt_ignore'd table.
+    if [ "$mode" = "force_healed_ignored_table_drift" ]; then
+      print_cells beads wisps
       exit 0
     fi
     if [ "$mode" = "table_discovery_failure" ]; then
@@ -795,7 +817,7 @@ case "$query" in
     exit 0
     ;;
   *"SELECT COUNT(*) FROM"*"wisps"*)
-    if [ "$mode" = "ignored_table_drift" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "force_healed_ignored_table_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       print_cell 11
       exit 0
     fi
@@ -2371,7 +2393,7 @@ func TestCompactScriptExcludesUnversionedTableChurnFromVerification(t *testing.T
 	if err != nil {
 		t.Fatalf("unversioned-table churn must not fail compaction: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "excluding unversioned table(s) from flatten verification") ||
+	if !strings.Contains(out, "excluding table(s) from flatten verification") ||
 		!strings.Contains(out, "wisps") {
 		t.Fatalf("output missing unversioned-table exclusion notice:\n%s", out)
 	}
@@ -2388,6 +2410,40 @@ func TestCompactScriptExcludesUnversionedTableChurnFromVerification(t *testing.T
 	}
 	if !strings.Contains(string(data), "DOLT_GC") {
 		t.Fatalf("compact must reach full GC after excluding unversioned churn:\n%s", string(data))
+	}
+}
+
+// Force-healed variant of the unversioned-table exclusion (gascity #3431
+// follow-up). A store recovered via the dolt#11131 schema-encoding heal
+// force-inlines its still-dolt_ignore'd wisp tier into HEAD (DOLT_ADD --force),
+// so the table IS present in the committed root (SHOW TABLES AS OF) — yet the
+// flatten's -Am still cannot stage a dolt_ignore'd table, so its concurrent
+// churn reads as gain+drift exactly like the working-set-only case. Excluding
+// on committed-root absence alone keeps it in verification and false-quarantines
+// it; excluding on dolt_ignore membership too is required.
+func TestCompactScriptExcludesForceHealedIgnoredTableChurnFromVerification(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "force_healed_ignored_table_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("force-healed dolt_ignore'd-table churn must not fail compaction: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "excluding table(s) from flatten verification") ||
+		!strings.Contains(out, "wisps") {
+		t.Fatalf("output missing dolt_ignore'd-table exclusion notice:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("force-healed dolt_ignore'd-table churn must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_HASHOF_TABLE('wisps')") {
+		t.Fatalf("force-inlined-but-ignored table must not be count/hash-verified:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("compact must reach full GC after excluding force-healed ignored churn:\n%s", string(data))
 	}
 }
 

@@ -650,6 +650,31 @@ committed_tables() {
   rm -f "$out_tmp" "$err_tmp"
 }
 
+# ignored_tables — emit one table name per line for the user tables currently
+# matched by an active dolt_ignore pattern. The flatten's `-Am` commit never
+# stages a dolt_ignore'd table, so its working-set churn can diverge from the
+# committed root with no flatten involvement — and committed-root membership
+# alone does not catch this: a store recovered via the dolt#11131
+# schema-encoding heal force-inlines its wisp tier into HEAD (DOLT_ADD --force)
+# while leaving it dolt_ignore'd, so the table is present in committed_tables
+# yet still un-stageable. Excluding on dolt_ignore membership too keeps flatten
+# verification scoped to the surfaces -Am can actually touch.
+ignored_tables() {
+  db="$1"
+  out_tmp=$(mktemp)
+  err_tmp=$(mktemp)
+  if ! dolt_query "$db" \
+    "SELECT DISTINCT t.table_name FROM information_schema.tables t JOIN dolt_ignore i ON t.table_name LIKE i.pattern WHERE t.table_schema = '$db' AND t.table_type = 'BASE TABLE' AND i.ignored = true ORDER BY t.table_name" \
+    > "$out_tmp" 2>"$err_tmp"; then
+    printf 'compact: db=%s dolt_ignore table list probe failed\n' "$db" >&2
+    emit_error_file "$db" "$err_tmp"
+    rm -f "$out_tmp" "$err_tmp"
+    return 1
+  fi
+  awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$out_tmp"
+  rm -f "$out_tmp" "$err_tmp"
+}
+
 # row_count — COUNT(*) for one table. Returns "" on error.
 row_count() {
   db="$1"
@@ -778,15 +803,20 @@ push_remote_refspec() {
 }
 
 # preflight_counts — write "<table> <count> <value-hash>" lines for the user
-# tables present in the committed root at <at_head>. Tables outside that root
-# (dolt_ignore'd working-set-only tables, not-yet-committed new tables) are
-# excluded: the flatten's soft-reset+commit cannot stage or touch them, their
-# concurrent churn is indistinguishable from the gain+drift corruption signal,
-# and the Option A DOLT_DIFF preservation probe structurally fails on a table
-# that exists in no commit — a guaranteed false quarantine on a busy db
-# (observed on hq with bd's wisp tier). The excluded names are recorded in the
-# preflight_excluded_tables global so verify_counts can skip them in the
-# post-flatten table-list comparison symmetrically.
+# tables the flatten can actually touch: present in the committed root at
+# <at_head> AND not matched by an active dolt_ignore pattern. Tables failing
+# either test are excluded — the flatten's soft-reset+commit cannot stage or
+# touch them, their concurrent churn is indistinguishable from the gain+drift
+# corruption signal, and the Option A DOLT_DIFF preservation probe structurally
+# fails on a table that exists in no commit. Two shapes need exclusion:
+# (1) absent from the committed root — dolt_ignore'd working-set-only tables or
+# not-yet-committed new tables; (2) present in the committed root yet still
+# dolt_ignore'd — a force-inlined wisp tier on a dolt#11131-healed store, which
+# committed-root membership alone would wrongly keep in verification. Both are a
+# guaranteed false quarantine on a busy db (observed on hq with bd's wisp tier).
+# The excluded names are recorded in the preflight_excluded_tables global so
+# verify_counts can skip them in the post-flatten table-list comparison
+# symmetrically.
 preflight_counts() {
   db="$1"
   out="$2"
@@ -803,6 +833,11 @@ preflight_counts() {
     rm -f "$tables_tmp" "$committed_tmp"
     return 1
   fi
+  ignored_tmp=$(mktemp)
+  if ! ignored_tables "$db" > "$ignored_tmp"; then
+    rm -f "$tables_tmp" "$committed_tmp" "$ignored_tmp"
+    return 1
+  fi
   preflight_failed=0
   while IFS= read -r t; do
     [ -n "$t" ] || continue
@@ -812,7 +847,7 @@ preflight_counts() {
       preflight_failed=1
       break
     fi
-    if ! grep -Fxq "$t" "$committed_tmp"; then
+    if ! grep -Fxq "$t" "$committed_tmp" || grep -Fxq "$t" "$ignored_tmp"; then
       preflight_excluded_tables="$preflight_excluded_tables $t"
       continue
     fi
@@ -840,9 +875,9 @@ preflight_counts() {
     fi
     printf '%s %s %s\n' "$t" "$cnt" "$table_hash" >> "$out"
   done < "$tables_tmp"
-  rm -f "$tables_tmp" "$committed_tmp"
+  rm -f "$tables_tmp" "$committed_tmp" "$ignored_tmp"
   if [ "$preflight_failed" -eq 0 ] && [ -n "$preflight_excluded_tables" ]; then
-    printf 'compact: db=%s excluding unversioned table(s) from flatten verification (absent from committed root at %s):%s\n' \
+    printf 'compact: db=%s excluding table(s) from flatten verification (absent from committed root at %s, or matched by an active dolt_ignore pattern and unstageable by -Am):%s\n' \
       "$db" "$at_head" "$preflight_excluded_tables"
   fi
   return "$preflight_failed"
