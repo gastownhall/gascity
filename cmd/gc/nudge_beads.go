@@ -30,7 +30,11 @@ const (
 
 type nudgeReference = nudgequeue.Reference
 
-func openNudgeBeadStore(cityPath string) beads.Store {
+// openNudgeBeadStore is a test seam (mirrors the injectable vars in
+// cmd_nudge.go) so tests can substitute a fake beads.Store and assert that
+// per-tick poll helpers close every store they open. Tests that replace this
+// package variable must stay serial; do not use t.Parallel in those tests.
+var openNudgeBeadStore = func(cityPath string) beads.Store {
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		return nil

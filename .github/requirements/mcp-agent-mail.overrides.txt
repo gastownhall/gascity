@@ -3,3 +3,11 @@
 # transitive constraints move past the fixed versions.
 fastmcp>=3.2.0
 authlib>=1.6.9
+
+# Security floor: CVE-2026-48526 (HIGH, auth bypass) in PyJWT < 2.13.0.
+# CVEs in cryptography < 48.0.1. python-multipart and starlette lower-severity
+# issues in the same Trivy scan. Remove once transitive deps carry fixed versions.
+pyjwt>=2.13.0
+cryptography>=48.0.1
+python-multipart>=0.0.30
+starlette>=1.1.0
