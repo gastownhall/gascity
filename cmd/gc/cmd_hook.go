@@ -232,6 +232,24 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 
 	a, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 	if !ok {
+		// Pool instances run with GC_AGENT/GC_ALIAS set to their per-instance name
+		// (e.g. "rig/polecat-adhoc-<hash>") which is not a config entry — only the
+		// pool binding (GC_TEMPLATE, e.g. "rig/polecat") is. When a pack script
+		// invokes "gc hook $GC_AGENT" the positional arg bypasses the no-args
+		// sessionTemplateContext fallback. Retry with GC_TEMPLATE so pool agents
+		// resolve correctly regardless of invocation style.
+		if tpl := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); tpl != "" && tpl != agentName {
+			if ta, tok := resolveAgentIdentity(cfg, tpl, currentRigContext(cfg)); tok {
+				a, ok = ta, true
+				agentName = tpl
+				if !sessionTemplateContext {
+					sessionTemplateContext = strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) != "" ||
+						strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != ""
+				}
+			}
+		}
+	}
+	if !ok {
 		fmt.Fprintf(stderr, "gc hook: agent %q not found in config\n", agentName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
