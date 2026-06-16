@@ -276,6 +276,8 @@ type GitHubPRMonitorPatch struct {
 	NotifyAppend []string `toml:"notify_append,omitempty"`
 	// RepairRoute overrides the repair route target.
 	RepairRoute *string `toml:"repair_route,omitempty"`
+	// RepairWorkflow overrides the formula attached to repair beads.
+	RepairWorkflow *string `toml:"repair_workflow,omitempty"`
 	// WebhookSecretEnv overrides the env var containing the webhook secret.
 	WebhookSecretEnv *string `toml:"webhook_secret_env,omitempty"`
 	// WebhookSecretKey overrides the stable webhook secret key.
@@ -677,6 +679,9 @@ func applyGitHubPRMonitorPatch(cfg *City, patch *GitHubPRMonitorPatch) error {
 		}
 		if patch.RepairRoute != nil {
 			monitor.RepairRoute = *patch.RepairRoute
+		}
+		if patch.RepairWorkflow != nil {
+			monitor.RepairWorkflow = *patch.RepairWorkflow
 		}
 		if patch.WebhookSecretEnv != nil {
 			monitor.WebhookSecretEnv = *patch.WebhookSecretEnv

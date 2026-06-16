@@ -1508,6 +1508,10 @@
           "type": "string",
           "description": "RepairRoute is the operator-supplied route target for repair work."
         },
+        "repair_workflow": {
+          "type": "string",
+          "description": "RepairWorkflow is the formula attached to repair beads created for this\nmonitor. Empty defaults to the standard polecat repair workflow so routed\nrepair work carries the branch/test/push/refinery steps instead of\nsitting as a raw routed task."
+        },
         "webhook_secret_env": {
           "type": "string",
           "description": "WebhookSecretEnv is the environment variable containing the webhook\nHMAC secret. The secret value itself must not be stored in city.toml."
@@ -1584,6 +1588,10 @@
         "repair_route": {
           "type": "string",
           "description": "RepairRoute overrides the repair route target."
+        },
+        "repair_workflow": {
+          "type": "string",
+          "description": "RepairWorkflow overrides the formula attached to repair beads."
         },
         "webhook_secret_env": {
           "type": "string",

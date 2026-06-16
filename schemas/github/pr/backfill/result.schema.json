@@ -133,7 +133,16 @@
           "created": {
             "type": "boolean"
           },
+          "updated": {
+            "type": "boolean"
+          },
+          "dispatched": {
+            "type": "boolean"
+          },
           "route": {
+            "type": "string"
+          },
+          "workflow": {
             "type": "string"
           }
         },
@@ -145,6 +154,14 @@
       "minimum": 0
     },
     "created_repairs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "updated_repairs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "dispatched_repairs": {
       "type": "integer",
       "minimum": 0
     }
