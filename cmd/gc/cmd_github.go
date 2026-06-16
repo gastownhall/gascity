@@ -531,8 +531,8 @@ func writeGitHubPRBackfillText(stdout io.Writer, result githubPRBackfillResult) 
 		fmt.Fprintln(stdout) //nolint:errcheck
 	}
 	if len(result.RepairBeads) > 0 {
-		fmt.Fprintf(stdout, "Repair beads: %d created, %d updated, %d dispatched.\n",
-			result.CreatedRepairs, result.UpdatedRepairs, result.DispatchedRepairs) //nolint:errcheck
+		fmt.Fprintf(stdout, "Repair beads: %d created, %d updated, %d dispatched.\n", //nolint:errcheck
+			result.CreatedRepairs, result.UpdatedRepairs, result.DispatchedRepairs)
 		for _, rb := range result.RepairBeads {
 			action := "existing"
 			switch {
