@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/packman"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -25,6 +26,7 @@ const rigDeferredStoreInitWait = 30 * time.Second
 var (
 	rigReloadControllerConfig = reloadControllerConfig
 	rigWaitForStoreAccessible = waitForRigStoreAccessible
+	rigListSessionProvider    = newSessionProvider
 )
 
 func newRigCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1240,8 +1242,16 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 			Running: hqRunning,
 			Beads:   rigBeadsStatus(fs, cityPath),
 		})
+		// Build the session provider once and share it across rigs:
+		// constructing it per rig reopened the session store and re-forked
+		// tmux probes, making --json scale O(rigs) in subprocesses (~7x
+		// slower than the text path, which skips running-status detection).
+		var sp runtime.Provider
+		if len(cfg.Rigs) > 0 {
+			sp = rigListSessionProvider()
+		}
 		for i := range cfg.Rigs {
-			running := rigHasRunningAgent(cfg, cfg.Rigs[i].Name)
+			running := rigHasRunningAgent(cfg, cfg.Rigs[i].Name, sp)
 			result.Rigs = append(result.Rigs, RigListItem{
 				Name:               cfg.Rigs[i].Name,
 				Path:               cfg.Rigs[i].Path,
@@ -1301,12 +1311,14 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 	return 0
 }
 
-func rigHasRunningAgent(cfg *config.City, rigName string) bool {
-	if cfg == nil || rigName == "" {
+// rigHasRunningAgent reports whether any agent scoped to rigName has a live
+// session. The caller supplies the session provider so a single provider can
+// be reused across rigs instead of reconstructed per rig (see doRigList).
+func rigHasRunningAgent(cfg *config.City, rigName string, sp runtime.Provider) bool {
+	if cfg == nil || rigName == "" || sp == nil {
 		return false
 	}
 	cityName := cfg.EffectiveCityName()
-	sp := newSessionProvider()
 	for i := range cfg.Agents {
 		a := cfg.Agents[i]
 		if a.Dir != rigName {

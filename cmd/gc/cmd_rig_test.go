@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -1069,6 +1070,43 @@ func TestDoRigListJSONShowsDefaultBranch(t *testing.T) {
 		}
 	}
 	t.Fatalf("rig my-frontend not found in JSON:\n%s", stdout.String())
+}
+
+// TestDoRigListJSONBuildsSessionProviderOnce guards against the rig-list --json
+// N+1: the running-status probe must build a single session provider and reuse
+// it across all rigs, not reconstruct one per rig.
+func TestDoRigListJSONBuildsSessionProviderOnce(t *testing.T) {
+	cityPath := t.TempDir()
+
+	var rigBlocks strings.Builder
+	for _, name := range []string{"rig-a", "rig-b", "rig-c"} {
+		rigPath := filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(rigPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&rigBlocks, "\n[[rigs]]\nname = %q\npath = %q\n", name, rigPath)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n" + rigBlocks.String()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int
+	orig := rigListSessionProvider
+	rigListSessionProvider = func() runtime.Provider {
+		calls++
+		return &fakeAdoptionProvider{}
+	}
+	t.Cleanup(func() { rigListSessionProvider = orig })
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigList(fsys.OSFS{}, cityPath, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
+	}
+
+	if calls != 1 {
+		t.Fatalf("session provider constructed %d times across 3 rigs, want exactly 1", calls)
+	}
 }
 
 func TestDoRigList_Empty(t *testing.T) {
