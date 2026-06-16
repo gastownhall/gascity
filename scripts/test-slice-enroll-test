@@ -27,11 +27,20 @@ if [[ ! -f "$lib" ]]; then
   exit 1
 fi
 
-# The wrapper must stay shellcheck-clean (and so must this suite).
-if command -v shellcheck >/dev/null 2>&1; then
+# The wrapper must stay shellcheck-clean (and so must this suite). But the
+# linter is often a mise shim that refuses to run when the mise config is
+# untrusted in this subprocess (`go test` invokes us with a scratch $HOME,
+# so the shim can't reach its trust store). Probe that the linter can
+# actually execute before treating a non-zero exit as a lint finding;
+# otherwise a tooling failure masquerades as a script defect and blocks
+# commits city-wide. Degrade to a logged warning when the linter is
+# present-but-unrunnable, just as when it is absent.
+if shellcheck --version >/dev/null 2>&1; then
   if ! shellcheck "$lib" "${BASH_SOURCE[0]}"; then
     fail "shellcheck reported issues"
   fi
+elif command -v shellcheck >/dev/null 2>&1; then
+  echo "warning: shellcheck on PATH but not runnable (untrusted mise shim?); skipping shell lint" >&2
 else
   echo "note: shellcheck not installed; skipping lint" >&2
 fi
