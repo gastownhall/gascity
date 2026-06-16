@@ -8,7 +8,7 @@ import (
 )
 
 func TestDoltVersionPins(t *testing.T) {
-	const doltPin = "2.1.4"
+	const doltPin = "2.1.7"
 	const doltFloor = "2.1.0"
 	repoRoot := repoRoot(t)
 
