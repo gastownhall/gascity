@@ -97,6 +97,7 @@ const (
 	FormulaHashMetadataKey               = "gc.formula_hash"
 	FormulaNameMetadataKey               = "gc.formula_name"
 	FormulaSourceMetadataKey             = "gc.formula_source"
+	GCExemptMetadataKey                  = "gc.gc_exempt"
 	Graphv2RootKeyMetadataKey            = "gc.graphv2_root_key"
 	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
 	InputConvoyIDMetadataKey             = "gc.input_convoy_id"
@@ -282,6 +283,7 @@ var KnownMetadataKeys = []string{
 	FormulaHashMetadataKey,
 	FormulaNameMetadataKey,
 	FormulaSourceMetadataKey,
+	GCExemptMetadataKey,
 	Graphv2RootKeyMetadataKey,
 	IdempotencyKeyMetadataKey,
 	InputConvoyIDMetadataKey,

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -685,6 +686,433 @@ func TestWispGC_ListErrorFailsRun(t *testing.T) {
 	}
 }
 
+func TestWispGC_ReapsClosedOrphanWhenRootAbsent(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	// Root "ghost-root" is never inserted: the orphan descendant's root is gone.
+	store := newGCStore([]beads.Bead{
+		makeGCOrphanWisp("orphan-1", now.Add(-2*time.Hour), "ghost-root"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "orphan-1")
+}
+
+func TestWispGC_ReapsClosedOrphanWhenRootClosed(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		// Closed task root (terminal) without gc.kind=wisp so the root-rooted
+		// closure purge does not enumerate it; the orphan path must still reap.
+		makeGCBead("term-root", now.Add(-2*time.Hour), "closed", "task"),
+		makeGCOrphanWisp("orphan-2", now.Add(-2*time.Hour), "term-root"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "orphan-2")
+	// The terminal root itself is out of scope for the orphan path.
+	if _, err := store.Get("term-root"); err != nil {
+		t.Fatalf("term-root should remain: %v", err)
+	}
+}
+
+func TestWispGC_DoesNotReapWhenRootOpen(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("live-root", now.Add(-2*time.Hour), "in_progress", "molecule"),
+		makeGCOrphanWisp("orphan-live", now.Add(-2*time.Hour), "live-root"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; descendant of a live root must never be reaped", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deleted = %v, want none", store.deletedIDs)
+	}
+	if _, err := store.Get("orphan-live"); err != nil {
+		t.Fatalf("orphan-live must still be Get-able while root is open: %v", err)
+	}
+}
+
+func TestWispGC_DryRunDefaultReapsNothing(t *testing.T) {
+	withReapOrphansEnforced(t, false)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCOrphanWisp("orphan-dry", now.Add(-2*time.Hour), "ghost-root"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	var purged int
+	var runErr error
+	logOutput := captureWispGCLog(t, func() {
+		purged, runErr = wg.runGC(store, now)
+	})
+	if runErr != nil {
+		t.Fatalf("runGC: %v", runErr)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 in dry-run", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deleted = %v, want none in dry-run", store.deletedIDs)
+	}
+	if _, err := store.Get("orphan-dry"); err != nil {
+		t.Fatalf("orphan-dry must survive dry-run: %v", err)
+	}
+	if !strings.Contains(logOutput, "would be reaped") {
+		t.Fatalf("log = %q, want dry-run notice containing %q", logOutput, "would be reaped")
+	}
+}
+
+func TestWispGC_ReapHonorsBatchCap(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	withReapOrphanBatchCap(t, 1)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCOrphanWisp("orphan-cap-1", now.Add(-2*time.Hour), "ghost-root"),
+		makeGCOrphanWisp("orphan-cap-2", now.Add(-2*time.Hour), "ghost-root"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 (batch cap)", purged)
+	}
+	if len(store.deletedIDs) != 1 {
+		t.Fatalf("deleted = %v, want exactly 1 per sweep", store.deletedIDs)
+	}
+}
+
+func TestWispGC_ReapSkipsRowsWithoutRootPointer(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	// Closed wisp-tier row with no gc.root_bead_id pointer: out of scope.
+	noRoot := makeGCBeadWithMetadata("no-root", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	noRoot.Ephemeral = true
+	store := newGCStore([]beads.Bead{noRoot})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; rows without a root pointer are out of scope", purged)
+	}
+	if _, err := store.Get("no-root"); err != nil {
+		t.Fatalf("no-root must be preserved: %v", err)
+	}
+}
+
+func TestWispGC_ReapDeleteErrorSurfacedAndContinues(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCOrphanWisp("orphan-err", now.Add(-2*time.Hour), "ghost-root"),
+		makeGCOrphanWisp("orphan-ok", now.Add(-2*time.Hour), "ghost-root"),
+	})
+	store.deleteErrors["orphan-err"] = fmt.Errorf("delete failed")
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err == nil {
+		t.Fatal("expected reap delete error to be surfaced")
+	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err = %v, want delete failure to be included", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 (other orphan still reaped)", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "orphan-ok")
+}
+
+// withCloseAbandonedEnforced runs fn with the abandoned-root closer forced
+// into enforce mode, restoring the prior package state afterward. Tests must
+// not depend on the GC_WISP_GC_CLOSE_ABANDONED env var (which defaults to
+// dry-run).
+func withCloseAbandonedEnforced(t *testing.T, fn func()) {
+	t.Helper()
+	prev := closeAbandonedEnforced
+	closeAbandonedEnforced = func() bool { return true }
+	defer func() { closeAbandonedEnforced = prev }()
+	fn()
+}
+
+// withCloseAbandonedTTL runs fn with the abandoned-root TTL temporarily set to
+// ttl, restoring the prior value afterward.
+func withCloseAbandonedTTL(t *testing.T, ttl time.Duration, fn func()) {
+	t.Helper()
+	prev := wispGCCloseAbandonedTTL
+	wispGCCloseAbandonedTTL = ttl
+	defer func() { wispGCCloseAbandonedTTL = prev }()
+	fn()
+}
+
+func TestWispGC_ClosesAbandonedOpenRootWhenAllDescendantsTerminal(t *testing.T) {
+	now := time.Now()
+	// Root CreatedAt is recent (within the 1h closed-root purge TTL below) but
+	// idle past the close TTL we shrink to 5m, so the sweep closes it without
+	// the same-tick purge then deleting it (letting us assert the close state).
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "mol-root",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata:  map[string]string{"gc.formula_contract": "graph.v2"},
+		},
+		{
+			ID:        "mol-root.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			ParentID:  "mol-root",
+		},
+		{
+			ID:        "mol-root.2",
+			Status:    "tombstone",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			ParentID:  "mol-root",
+		},
+	})
+	if err := store.DepAdd("mol-root.1", "mol-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-root.1->mol-root): %v", err)
+	}
+	if err := store.DepAdd("mol-root.2", "mol-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-root.2->mol-root): %v", err)
+	}
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(store, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("mol-root")
+	if err != nil {
+		t.Fatalf("Get(mol-root): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("mol-root status = %q, want closed", root.Status)
+	}
+	if got := root.Metadata["close_reason"]; got != abandonedRootCloseReason {
+		t.Fatalf("close_reason = %q, want %q", got, abandonedRootCloseReason)
+	}
+}
+
+func TestWispGC_LeavesOpenRootWithLiveDescendant(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithMetadata("mol-root", now.Add(-2*time.Hour), "open", "molecule", map[string]string{"gc.formula_contract": "graph.v2"}),
+		{
+			ID:        "mol-root.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-root",
+		},
+		{
+			ID:        "mol-root.2",
+			Status:    "in_progress",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-root",
+		},
+	})
+	if err := store.DepAdd("mol-root.1", "mol-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-root.1->mol-root): %v", err)
+	}
+	if err := store.DepAdd("mol-root.2", "mol-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-root.2->mol-root): %v", err)
+	}
+
+	withCloseAbandonedEnforced(t, func() {
+		wg := newWispGC(5*time.Minute, time.Hour, 0)
+		if _, err := wg.runGC(store, now); err != nil {
+			t.Fatalf("runGC: %v", err)
+		}
+	})
+
+	root, err := store.Get("mol-root")
+	if err != nil {
+		t.Fatalf("Get(mol-root): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("mol-root status = %q, want open (live descendant)", root.Status)
+	}
+}
+
+func TestWispGC_LeavesSteplessRoot(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithMetadata("mol-root", now.Add(-2*time.Hour), "open", "molecule", map[string]string{"gc.formula_contract": "graph.v2"}),
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		wg := newWispGC(5*time.Minute, time.Hour, 0)
+		if _, err := wg.runGC(store, now); err != nil {
+			t.Fatalf("runGC: %v", err)
+		}
+	})
+
+	root, err := store.Get("mol-root")
+	if err != nil {
+		t.Fatalf("Get(mol-root): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("stepless mol-root status = %q, want open (must not race instantiator)", root.Status)
+	}
+}
+
+func TestWispGC_RespectsTTLCutoff(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		// Root last active 30m ago — younger than the 1h close TTL below.
+		{
+			ID:        "mol-root",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-2 * time.Hour),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata:  map[string]string{"gc.formula_contract": "graph.v2"},
+		},
+		{
+			ID:        "mol-root.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-root",
+		},
+	})
+	if err := store.DepAdd("mol-root.1", "mol-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-root.1->mol-root): %v", err)
+	}
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, time.Hour, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(store, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("mol-root")
+	if err != nil {
+		t.Fatalf("Get(mol-root): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("mol-root status = %q, want open (within TTL)", root.Status)
+	}
+}
+
+func TestWispGC_SkipsZFCExemptRoot(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithMetadata("zfc-root", now.Add(-2*time.Hour), "open", "molecule", map[string]string{
+			"gc.formula_contract": "graph.v2",
+			"gc.gc_exempt":        "true",
+		}),
+		{
+			ID:        "zfc-root.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "zfc-root",
+		},
+	})
+	if err := store.DepAdd("zfc-root.1", "zfc-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(zfc-root.1->zfc-root): %v", err)
+	}
+
+	withCloseAbandonedEnforced(t, func() {
+		wg := newWispGC(5*time.Minute, time.Hour, 0)
+		if _, err := wg.runGC(store, now); err != nil {
+			t.Fatalf("runGC: %v", err)
+		}
+	})
+
+	root, err := store.Get("zfc-root")
+	if err != nil {
+		t.Fatalf("Get(zfc-root): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("ZFC-exempt root status = %q, want open (must never auto-close)", root.Status)
+	}
+}
+
+func TestWispGC_DryRunDefaultDoesNotClose(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithMetadata("mol-root", now.Add(-2*time.Hour), "open", "molecule", map[string]string{"gc.formula_contract": "graph.v2"}),
+		{
+			ID:        "mol-root.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-root",
+		},
+	})
+	if err := store.DepAdd("mol-root.1", "mol-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-root.1->mol-root): %v", err)
+	}
+
+	// Default (no enforce override): closeAbandonedEnforced reads the env var
+	// which is unset under the env-stripped test harness, so the sweep must be
+	// dry-run and mutate nothing — but it should log the would-close candidate.
+	// Shrink the close TTL so the 2h-idle root is eligible (otherwise the TTL
+	// guard would skip it and there would be nothing to dry-run-log).
+	var logOutput string
+	withCloseAbandonedTTL(t, 5*time.Minute, func() {
+		logOutput = captureWispGCLog(t, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(store, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("mol-root")
+	if err != nil {
+		t.Fatalf("Get(mol-root): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("mol-root status = %q, want open (dry-run default must not close)", root.Status)
+	}
+	if !strings.Contains(logOutput, "would be closed (dry-run") {
+		t.Fatalf("log output = %q, want dry-run would-close log", logOutput)
+	}
+}
+
 type gcQueryKey struct {
 	Status   string
 	Type     string
@@ -765,6 +1193,36 @@ func makeGCMessageWisp(id string, createdAt time.Time, metadata map[string]strin
 		Metadata:  metadata,
 		Ephemeral: true,
 	}
+}
+
+// makeGCOrphanWisp builds a closed wisp-tier descendant carrying a
+// gc.root_bead_id pointer. Ephemeral:true places it in the wisp tier so the
+// orphan reaper's TierWisps query sees it. It deliberately omits gc.kind=wisp so
+// the root-rooted closure purge does not enumerate it as a root.
+func makeGCOrphanWisp(id string, createdAt time.Time, rootID string) beads.Bead {
+	bead := makeGCBeadWithMetadata(id, createdAt, "closed", "task", map[string]string{
+		beadmeta.RootBeadIDMetadataKey: rootID,
+	})
+	bead.Ephemeral = true
+	return bead
+}
+
+// withReapOrphansEnforced toggles the orphan-reap enforcement indirection for
+// the duration of a test, restoring the prior value on cleanup.
+func withReapOrphansEnforced(t *testing.T, enforce bool) {
+	t.Helper()
+	prev := reapOrphansEnforced
+	reapOrphansEnforced = func() bool { return enforce }
+	t.Cleanup(func() { reapOrphansEnforced = prev })
+}
+
+// withReapOrphanBatchCap overrides the per-sweep reap cap for the duration of a
+// test, restoring the prior value on cleanup.
+func withReapOrphanBatchCap(t *testing.T, batchCap int) {
+	t.Helper()
+	prev := wispGCReapOrphanBatchCap
+	wispGCReapOrphanBatchCap = batchCap
+	t.Cleanup(func() { wispGCReapOrphanBatchCap = prev })
 }
 
 func captureWispGCLog(t *testing.T, fn func()) string {
