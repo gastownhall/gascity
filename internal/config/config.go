@@ -2288,12 +2288,14 @@ type DaemonConfig struct {
 	// distinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.
 	// Negative values are rejected at config load.
 	DoltStartAddressInUseRetryWindow string `toml:"dolt_start_address_in_use_retry_window,omitempty" jsonschema:"default=30s"`
-	// WispGCInterval is how often wisp GC runs. Duration string (e.g., "5m", "1h").
-	// Wisp GC is disabled unless both WispGCInterval and WispTTL are set.
+	// WispGCInterval is how often the garbage collector for wisps runs. A wisp is
+	// an ephemeral bead produced by a v1 formula run; this knob controls how often
+	// the closed ones are swept. Duration string (e.g., "5m", "1h"). Wisp GC is
+	// disabled unless both WispGCInterval and WispTTL are set.
 	WispGCInterval string `toml:"wisp_gc_interval,omitempty"`
-	// WispTTL is how long a closed molecule survives before being purged.
-	// Duration string (e.g., "24h", "7d"). Wisp GC is disabled unless both
-	// WispGCInterval and WispTTL are set.
+	// WispTTL is how long a closed wisp (an ephemeral v1 formula-run bead) survives
+	// before being purged. Duration string (e.g., "24h", "7d"). Wisp GC is disabled
+	// unless both WispGCInterval and WispTTL are set.
 	WispTTL string `toml:"wisp_ttl,omitempty"`
 	// DriftDrainTimeout is the maximum time to wait for an agent to acknowledge
 	// a drain signal during a config-drift restart. If the agent doesn't ack

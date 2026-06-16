@@ -21,8 +21,7 @@ neither; split it and cross-link.
 
 | Nav group | Directory | Purpose |
 |---|---|---|
-| Start Here | `docs/getting-started/` (+ `docs/index.mdx`) | Installation, quickstart, orientation, migration from Gas Town |
-| Concepts | `docs/concepts/` | Architecture overview and the primitives — mental scaffolding before hands-on work |
+| Getting Started | `docs/getting-started/` (+ `docs/index.mdx`) | Installation, quickstart, how Gas City works (the six-primitive mental model), migration from Gas Town |
 | Tutorials | `docs/tutorials/` | Learn by doing. Numbered, sequential, every command runnable |
 | Guides | `docs/guides/` | How to think about a subsystem (`understanding-*`) and how to accomplish workflows |
 | Troubleshooting | `docs/troubleshooting/` + `docs/runbooks/` | Fix things: diagnosis walkthroughs and operational runbooks |

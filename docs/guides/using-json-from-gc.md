@@ -1,15 +1,15 @@
 ---
-title: "Using JSON from the Gas City CLI (`gc`)"
+title: "Use JSON from the gc CLI"
 description: Use `gc --json` and `gc --json-schema` from scripts, agents, tests, and other software.
 ---
 
-Gas City's CLI is human-readable by default. When software calls `gc`, use
-`--json` on commands that support it so callers do not have to parse tables,
-status text, or progress messages.
+Gas City's CLI is human-readable by default. When software calls `gc` — agents,
+shell scripts, dashboard tools, smoke tests, CI — pass `--json` on commands that
+support it, so callers read JSON fields instead of parsing tables, status text,
+or progress messages. Human-readable output stays the default for interactive
+use.
 
-The JSON surface is intended for automation: agents, shell scripts, dashboard
-tools, smoke tests, and CI checks. Human-readable output is still the default
-for interactive use.
+![Driving gc from software: a gc command with --json prints a JSON result on stdout, and with --json-schema=result prints the command's JSON Schema; a caller validates the result against the schema at the command boundary.](/diagrams/excalidraw-rendered/json-discover-validate.svg)
 
 ## Quick Start
 
@@ -86,16 +86,11 @@ command has exactly the same fields beyond the shared success indicators.
 
 ## Failure Handling
 
-For normal command execution, continue to use the process exit code as the first
-success/failure signal.
-
-Many command failures still write diagnostics to stderr and may not produce a
-command-specific JSON failure record. Automation should:
-
-- use the process exit code for shell success/failure logic.
-- parse stdout as a command result only after a successful exit.
-- capture stderr separately when it needs diagnostic text.
-- avoid assuming every `--json` command emits a structured failure payload.
+Use the process exit code as the first success/failure signal (as in
+[Quick Start](#quick-start)): parse stdout only after a successful exit, and
+capture stderr separately for diagnostics. Many failures write to stderr without
+a command-specific JSON failure record, so don't assume every `--json` command
+emits a structured failure payload.
 
 JSON Schema requests are different: if a requested schema is unavailable, `gc`
 returns a structured failure payload on stdout and exits nonzero:

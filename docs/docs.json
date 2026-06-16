@@ -66,6 +66,18 @@
   },
   "redirects": [
     {
+      "source": "/concepts/primitives",
+      "destination": "/getting-started/how-gas-city-works"
+    },
+    {
+      "source": "/concepts/architecture-overview",
+      "destination": "/getting-started/how-gas-city-works"
+    },
+    {
+      "source": "/getting-started/repository-map",
+      "destination": "/getting-started/how-gas-city-works"
+    },
+    {
       "source": "/packv2/migration",
       "destination": "/guides/shareable-packs"
     },
@@ -133,21 +145,14 @@
   "navigation": {
     "groups": [
       {
-        "group": "Start Here",
+        "group": "Getting Started",
         "pages": [
           "index",
           "getting-started/installation",
           "getting-started/quickstart",
+          "getting-started/how-gas-city-works",
           "getting-started/coming-from-gastown",
-          "getting-started/troubleshooting",
-          "getting-started/repository-map"
-        ]
-      },
-      {
-        "group": "Concepts",
-        "pages": [
-          "concepts/architecture-overview",
-          "concepts/primitives"
+          "getting-started/troubleshooting"
         ]
       },
       {
@@ -167,23 +172,44 @@
         "group": "Guides",
         "pages": [
           "guides/index",
-          "guides/capabilities-for-coding-agent-users",
-          "guides/understanding-packs",
-          "guides/understanding-formulas",
-          "guides/shareable-packs",
-          "guides/registry-showcase",
-          "guides/gastown-config-recipes",
-          "guides/using-json-from-gc",
-          "guides/multi-agent-engineering-environment"
+          {
+            "group": "Understand",
+            "pages": [
+              "guides/capabilities-for-coding-agent-users",
+              "guides/understanding-packs",
+              "guides/understanding-formulas"
+            ]
+          },
+          {
+            "group": "How-to",
+            "pages": [
+              "guides/shareable-packs",
+              "guides/registry-showcase",
+              "guides/gastown-config-recipes",
+              "guides/using-json-from-gc",
+              "guides/multi-agent-engineering-environment"
+            ]
+          }
         ]
       },
       {
         "group": "Troubleshooting",
         "pages": [
-          "troubleshooting/gc-start-walkthrough",
-          "troubleshooting/dolt-bloat-recovery",
-          "troubleshooting/bd-backup-cleanup",
-          "runbooks/managed-city-endpoints"
+          "troubleshooting/index",
+          {
+            "group": "Diagnose",
+            "pages": [
+              "troubleshooting/gc-start-walkthrough",
+              "troubleshooting/dolt-bloat-recovery",
+              "troubleshooting/bd-backup-cleanup"
+            ]
+          },
+          {
+            "group": "Operate",
+            "pages": [
+              "runbooks/managed-city-endpoints"
+            ]
+          }
         ]
       },
       {

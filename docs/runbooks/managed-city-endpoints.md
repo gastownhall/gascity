@@ -1,5 +1,5 @@
 ---
-title: Runbook — Managed-city Dolt endpoints
+title: Operate Managed-City Dolt Endpoints
 description: Mental model, forbidden edits, sanctioned escape hatches, and recovery recipe for the city-level Dolt endpoint architecture.
 ---
 

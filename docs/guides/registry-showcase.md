@@ -1,15 +1,12 @@
 ---
-title: "Public Registry Packs"
+title: "Find and Import Public Packs"
 description: Find and import first-party packs from the public Gas City registry.
 ---
 
-# Public Registry Packs
-
 Gas City publishes first-party reusable packs through the public
-`gascity-packs` registry. A registry is a discovery catalog: checked-in
-`pack.toml` files still record durable GitHub tree URLs plus an optional
-version constraint or pin.
-
+`gascity-packs` registry — a discovery catalog for finding packs to import (the
+model lives in
+[Understanding Packs](/guides/understanding-packs#registries-handles-and-sources)).
 The public `main` registry is configured by default, so there is nothing to
 add. Refresh its catalog before browsing:
 
@@ -43,44 +40,28 @@ When you decide to use a pack, prefer the import command printed by
 
 ## Built-In Packs
 
-Gas City's built-in packs are explicit imports, not implicit loader magic.
-New cities created by `gc init` include pinned imports for the bundled packs
-they need. `gc doctor --fix` can repair missing or stale bundled-pack pins.
-See [System Packs](/reference/system-packs) for the built-in pack contract.
+Built-in packs (`core`, `bd`) are explicit pinned imports `gc init` writes, not
+registry entries — see [System Packs](/reference/system-packs) for that
+contract.
 
 ## Freshness
 
-Registry records are cached locally. `gc pack registry search` and
-`gc pack registry show` warn when a cache is older than the freshness window.
-The default window is 24 hours.
-
-Use `--refresh` when you want the command to fetch the latest catalog before
-reading it:
+Registry records are cached locally, and `gc pack registry search`/`show` warn
+when the cache is older than the freshness window (default 24 hours). Pass
+`--refresh` to fetch the latest catalog first, or set `GC_REGISTRY_FRESHNESS` to
+a Go duration to change the window:
 
 ```bash
 gc pack registry search gascity --refresh
-gc pack registry show main:gascity --refresh
-```
-
-Set `GC_REGISTRY_FRESHNESS` to a positive Go duration string when you want a
-different warning window:
-
-```bash
 GC_REGISTRY_FRESHNESS=1h gc pack registry search gascity
 ```
 
-Invalid, zero, or negative values warn and are ignored for freshness
-calculation.
-
 ## Publishing
-
-Use the registry submission command for pack publish requests:
 
 ```bash
 gc pack registry publish .
 ```
 
-The command submits the pack rooted at the given path to the configured
-registry service. The hosted registry still reviews and lands catalog changes
-before other users see them; after a publish is accepted, refresh local caches
-before searching or showing the new entry.
+`gc pack registry publish <path>` submits a pack to the configured registry
+service. The hosted registry reviews and lands the change before others see it;
+refresh local caches afterward.

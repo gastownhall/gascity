@@ -173,7 +173,7 @@ check.
 | Tool | Min version | macOS | Linux |
 |------|-------------|-------|-------|
 | dolt | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
-| bd | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
+| bd | 1.0.4 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
 ### Optional for GitHub gates
@@ -219,9 +219,10 @@ Upgrade via Homebrew (`brew upgrade dolt`) or download a newer release from
 
 ## `bd` Version Too Old
 
-Gas City requires `bd` 1.0.0 or newer. The bd-backed store relies on wisps
-support, including `bd create --ephemeral` and `bd query ephemeral=true`, so
-older binaries can fail order-tracking and wisp cleanup paths. Check your
+Gas City requires `bd` 1.0.4 or newer. The bd-backed store relies on
+ephemeral-bead support used by order tracking, including `bd create
+--ephemeral` and `bd query ephemeral=true`, so older binaries can fail
+order tracking and the cleanup of those ephemeral beads. Check your
 version:
 
 ```bash
@@ -239,7 +240,7 @@ store when executable `.beads/hooks/on_create`, `.beads/hooks/on_update`, or
 bead events for external `bd` writes; the native in-process store does not run
 shell hooks.
 
-For controller-managed Gas City deployments, confirm that the controller is
+For orchestrator-managed Gas City deployments, confirm that the orchestrator is
 wrapping stores with `CachingStore` and emitting `bead.created`,
 `bead.updated`, `bead.closed`, and `bead.deleted` events to the event bus. After
 that migration is verified, remove the executable hook scripts from the city or
@@ -555,8 +556,8 @@ the escalation marker.
 ### Maintenance escalation and completion routing
 
 Core maintenance scripts route alerts through a generic escalation hook
-instead of mailing a hardcoded role. Orders inherit the controller's
-environment, so set these at controller start to customize routing:
+instead of mailing a hardcoded role. Orders inherit the orchestrator's
+environment, so set these at orchestrator start to customize routing:
 
 - `GC_ESCALATION_RECIPIENT` — mail recipient for escalations (default:
   `human`, the reserved human mailbox).
@@ -568,7 +569,8 @@ environment, so set these at controller start to customize routing:
 - `GC_MAINTENANCE_DONE_TARGET` — session target to nudge with
   `MAINTENANCE_DONE:`/warn summaries when a maintenance run completes
   (default: unset, no completion nudge). Deployments that relied on the
-  old hardcoded deacon nudges should set this to restore that loop.
+  old hardcoded completion nudges to a health-patrol session should set
+  this to restore that loop.
 
 Common root causes, in rough order of frequency:
 
@@ -588,7 +590,7 @@ Common root causes, in rough order of frequency:
 
 If the underlying problem cannot be fixed immediately (e.g., the remote
 host is down for scheduled maintenance), set
-`GC_JSONL_MAX_PUSH_FAILURES=99` in the controller's environment and
+`GC_JSONL_MAX_PUSH_FAILURES=99` in the orchestrator's environment and
 restart the city with `gc restart`. That bumps the escalation threshold
 from 3 to 99, which at the current 15-minute tick rate is ~24 hours of
 silence.
@@ -637,6 +639,9 @@ hatches (`gc rig set-endpoint --inherit`/`--self --force`/`--external`),
 and an end-to-end recovery recipe.
 
 ## Still Stuck?
+
+If a symptom only makes sense once you know how the pieces fit together, see
+[The six primitives](/getting-started/how-gas-city-works) for the underlying model.
 
 Open an issue at
 [gastownhall/gascity/issues](https://github.com/gastownhall/gascity/issues)

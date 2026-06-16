@@ -1239,11 +1239,11 @@
         },
         "wisp_gc_interval": {
           "type": "string",
-          "description": "WispGCInterval is how often wisp GC runs. Duration string (e.g., \"5m\", \"1h\").\nWisp GC is disabled unless both WispGCInterval and WispTTL are set."
+          "description": "WispGCInterval is how often the garbage collector for wisps runs. A wisp is\nan ephemeral bead produced by a v1 formula run; this knob controls how often\nthe closed ones are swept. Duration string (e.g., \"5m\", \"1h\"). Wisp GC is\ndisabled unless both WispGCInterval and WispTTL are set."
         },
         "wisp_ttl": {
           "type": "string",
-          "description": "WispTTL is how long a closed molecule survives before being purged.\nDuration string (e.g., \"24h\", \"7d\"). Wisp GC is disabled unless both\nWispGCInterval and WispTTL are set."
+          "description": "WispTTL is how long a closed wisp (an ephemeral v1 formula-run bead) survives\nbefore being purged. Duration string (e.g., \"24h\", \"7d\"). Wisp GC is disabled\nunless both WispGCInterval and WispTTL are set."
         },
         "drift_drain_timeout": {
           "type": "string",

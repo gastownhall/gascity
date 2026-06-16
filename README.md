@@ -137,7 +137,7 @@ The docs now use a Mintlify structure rooted in [`docs/`](docs/README.md).
 - [Docs Home](docs/index.mdx)
 - [Installation](docs/getting-started/installation.md)
 - [Quickstart](docs/getting-started/quickstart.md)
-- [Repository Map](docs/getting-started/repository-map.md)
+- [How Gas City Works](docs/getting-started/how-gas-city-works.md)
 - [Contributors](engdocs/contributors/index.md)
 - [Reference](docs/reference/index.md)
 - [Architecture](engdocs/architecture/index.md)
@@ -155,16 +155,34 @@ make docs-dev
 
 ## Repository Map
 
-- `cmd/gc/`: CLI commands, controller wiring, and supervisor integration
-- `internal/runtime/`: runtime provider abstraction and implementations
-- `internal/config/`: `city.toml` schema, pack composition, and validation
-- `internal/beads/`: store abstraction and provider implementations
-- `internal/session/`: session bead metadata and wait helpers
-- `internal/orders/`: periodic formula and exec dispatch
-- `internal/convergence/`: bounded iterative refinement loops
-- `examples/`: sample cities, packs, formulas, and configs
-- `contrib/`: helper scripts and deployment assets
-- `test/`: integration and support test packages
+| Path | What it contains |
+|---|---|
+| `cmd/gc/` | CLI entrypoints, controller wiring, runtime assembly, and command handlers |
+| `internal/runtime/` | Runtime provider abstraction plus tmux, subprocess, exec, ACP, K8s, and hybrid implementations |
+| `internal/config/` | `city.toml` schema, validation, composition, packs, patches, and override resolution |
+| `internal/beads/` | Store abstraction and provider implementations for beads (work, mail, convoys) and waits |
+| `internal/session/` | Session bead metadata, wait lifecycle helpers, and session identity utilities |
+| `internal/orders/` | Order parsing and scanning for periodic dispatch |
+| `internal/convergence/` | Bounded iterative refinement loops and gate handling |
+| `internal/api/` | HTTP API handlers and resource views |
+| `docs/` | Mintlify docs site (tutorials, guides, reference) |
+| `engdocs/` | Contributor-facing architecture, design docs, proposals, and archive |
+| `examples/` | Example cities, packs, formulas, and reference topologies |
+| `contrib/` | Helper scripts, Dockerfiles, and integration support assets |
+| `test/` | Integration and support test packages |
+
+### Where to start
+
+- **CLI behavior** — `cmd/gc/`, then the command-specific helper it calls.
+- **Runtime/provider work** — `internal/runtime/runtime.go` and the provider package you're changing.
+- **Config and pack behavior** — `internal/config/config.go`, `compose.go`, and `pack.go`.
+- **Work dispatch (sling)** — `cmd/gc/cmd_sling.go` and `internal/beads/`.
+- **Supervisor, sessions, wake/sleep** — `cmd/gc/`, `internal/session/`, and `internal/runtime/`.
+
+For the concepts these packages implement, see
+[How Gas City Works](docs/getting-started/how-gas-city-works.md). For a deeper
+package walkthrough, see
+[`engdocs/contributors/codebase-map.md`](engdocs/contributors/codebase-map.md).
 
 ## Contributing
 

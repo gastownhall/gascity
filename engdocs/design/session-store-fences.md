@@ -97,8 +97,9 @@ Between the precondition reread and the write, another writer can still
 interleave. With no store CAS this window cannot be closed by the client;
 flock closes it only where both writers honor the same lock.
 
-This residual is accepted deliberately, on the project's own NDI principle:
-reconciliation is idempotent and convergent. Every session-owned write must
+This residual is accepted deliberately, on the project's own principle that
+the system converges because work persists: reconciliation is idempotent and
+convergent. Every session-owned write must
 be safe to lose the race — the next reconciler tick re-derives the decision
 from durable state and converges. Concretely, this means a writer that
 adopts Fence 2 must also satisfy:
@@ -136,4 +137,4 @@ One paragraph in the slice's PR description, not a contract artifact:
   the code is the source of truth.
 - Not treating events as a fence. Events are post-commit facts; safety-
   critical convergence comes from durable state scans (root `AGENTS.md`,
-  NDI).
+  the convergence-because-work-persists principle).

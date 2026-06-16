@@ -36,7 +36,7 @@ agents collectively.
   probe runs at most once per tmux provider instance, for the first
   non-empty value that instance sees; a value changed while gc is running
   is embedded in later wrapper commands without being re-probed. gc
-  constructs provider instances both long-lived (the controller's
+  constructs provider instances both long-lived (the orchestrator's
   reconcile loop) and fresh per operation (template session starts), so a
   changed or repaired slice takes effect on some spawn paths and not
   others. Restart gc to converge every path on one verdict.
@@ -55,7 +55,7 @@ tmux agent slice: GC_AGENT_SLICE="..." set but transient user scopes are unavail
 
 Because operations like template session starts construct fresh provider
 instances, a persistently broken host repeats this warning as new
-instances probe, while long-lived instances (the controller's reconcile
+instances probe, while long-lived instances (the orchestrator's reconcile
 loop) keep their first verdict until restart.
 
 The probe runs in the gc process's environment, while pane commands execute

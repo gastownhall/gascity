@@ -393,7 +393,8 @@ overall testing philosophy.
 - [Glossary](glossary.md) -- authoritative definitions of all Gas City
   terms, including Config, Pack, Rig, and Provider
 - [CLAUDE.md](https://github.com/gastownhall/gascity/blob/main/CLAUDE.md) -- progressive capability model (Levels
-  0-8), design principles (ZFC, Bitter Lesson), and the "Adding agent
+  0-8), design principles (keep judgment out of Go; a primitive must
+  become more useful as models improve), and the "Adding agent
   config fields" convention
 - [TESTING.md](https://github.com/gastownhall/gascity/blob/main/TESTING.md) -- testing philosophy and tier
   boundaries for config tests

@@ -92,7 +92,7 @@ store with **prefix scoping enforced at the `bd` query layer**.
 ### A worked example
 
 Start from an empty city and two empty repos, with the rigs added in suspended
-state so we can poke at the files without the controller running:
+state so we can poke at the files without the orchestrator running:
 
 ```shell
 $ gc init my-city

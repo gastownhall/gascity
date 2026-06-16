@@ -113,7 +113,7 @@ hints or ignore them:
   '<cmd>'` for Docker, or plain `sh -c '<cmd>'` for local providers).
   Non-fatal: warn on stderr if a command fails, but don't abort start.
 
-- **`session_setup_script`** — path to a script on the controller
+- **`session_setup_script`** — path to a script on the orchestrator
   filesystem, run after `session_setup` commands. For remote providers
   (K8s, Docker), read the file locally and pipe its contents into the
   session (e.g. `kubectl exec -i -- sh < script`). For local providers,
@@ -130,7 +130,7 @@ the exec protocol):
 
 The distinction: readiness polling and delay are the *caller's*
 responsibility. Session setup commands are the *script's* responsibility
-— they run on the target filesystem, not the controller.
+— they run on the target filesystem, not the orchestrator.
 
 ### Conventions
 

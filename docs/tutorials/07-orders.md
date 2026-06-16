@@ -1,31 +1,31 @@
 ---
 title: Tutorial 07 - Orders
 sidebarTitle: 07 - Orders
-description: Schedule formulas and scripts to run automatically using trigger conditions — cooldowns, cron schedules, shell checks, and events.
+description: Trigger v2 formulas — and the orchestration the orchestrator drives — on a schedule, a condition, or an event, with no human in the loop.
 ---
 
 Formulas describe _what_ work looks like. Orders describe _when_ it should
-happen. An order pairs a trigger condition with an action — either a formula or a
-shell script — and the controller checks those triggers automatically. When a trigger
-opens, the order fires. No human dispatch needed.
+happen. An order pairs a trigger with an action — a formula or a shell script.
+The _orchestrator_ (`gc start` launches it) wakes every 30 seconds — a _tick_ —
+and evaluates each order's trigger. When a trigger opens, the order fires, no
+human dispatch needed.
 
-When you run `gc start`, you launch a _controller_ — a background process that
-wakes up every 30 seconds (a _tick_), checks the state of the city, and takes
-action. One of the things it does on each tick is evaluate the triggers that
-unblock an order from running. That periodic check is what makes orders work.
+For a v2 formula, firing hands the whole job to the orchestrator: it decomposes
+the formula into a graph of beads, fans the ready steps out across the pool's
+agents, gates each step on its dependencies, retries failures, and drives the
+graph to completion outside any session — now on a schedule or in response to
+events instead of a person typing `gc sling`.
 
-We'll pick up where [Tutorial 06](/tutorials/06-beads) left off. You should
-have `my-city` running with agents and formulas configured.
-
-If you've been dispatching formulas by hand with `gc sling`, orders are the next
-step: they turn that manual dispatch into something the city does on its own, on
-a schedule or in response to events.
+This page assumes `my-city` is running with agents and formulas configured (as
+built up through [Tutorial 06](/tutorials/06-beads)).
 
 ## A simple order
 
 Orders live in an `orders/` directory at the top level of your city, alongside
-`formulas/` and `agents/`. Each order is a flat `*.toml` file in that
-directory.
+`formulas/` and `agents/` — the local (root) pack's own contents, the same
+structure an imported pack provides. An order imported from a shared pack reads
+exactly like a local one. See [primitives](/getting-started/how-gas-city-works) for how packs,
+formulas, agents, and orders relate.
 
 ```
 orders/
@@ -48,54 +48,45 @@ interval = "5m"
 pool = "worker"
 ```
 
-The `pool` field tells the controller where to send the work. A _pool_ is a
-named group of one or more agents that share a work queue — you glimpsed one
-in Tutorial 01, where `gc status` showed the bundled `dolt.dog` pool. A single
-agent's name works as a pool target too; the examples here route to the
-`worker` agent from Tutorial 05. When an order fires, the controller creates a
-wisp from the formula and routes it to the named pool. Any agent in that pool
-can pick it up.
+The `pool` field tells the orchestrator where to send the work. A _pool_ is a
+named group of agents that share a work queue (you saw the bundled `dolt.dog`
+pool in Tutorial 01); a single agent's name works as a pool target too, so the
+examples here route to the `worker` agent from Tutorial 05. When the order
+fires, the orchestrator runs the formula and writes `gc.routed_to=worker` on the
+resulting work beads — the marker that the pool's `bd ready` query and the
+supervisor's `scale_check` both read. Any agent in the pool can then pick the
+work up.
 
-The controller evaluates trigger conditions on every tick. When five minutes have
-passed since the last run, it instantiates the `pancakes` formula as a wisp and
-routes it to the `worker` pool. The order name comes from the file basename
-(`pancakes-check.toml` → `pancakes-check`), not from anything in the TOML.
+The order name comes from the file basename (`pancakes-check.toml` →
+`pancakes-check`), not from anything in the TOML.
 
-(Tutorial 05 taught you that v2 formulas start **workflows** — the order
-machinery still calls any dispatched formula instance a wisp, and that's the
-word `gc order run` prints even for v2 formulas. Same beads either way.)
-
-When the dispatcher stamps the wisp for a pool target it writes
-`gc.routed_to=<pool>` so the worker's `bd ready` query and the supervisor's
-default `scale_check` both see it through the shared routed queue. Formula
-orders that should wake a pool must compile to Ready-visible work. v2
-formulas — anything declaring `[requires] formula_compiler = ">=2.0.0"` (see
+A scaled-from-zero pool only wakes if the order produces work that is
+immediately Ready — beads with no open blockers. v2 formulas (anything
+declaring `[requires] formula_compiler = ">=2.0.0"`, see
 [Choosing a Compiler Contract](/guides/understanding-formulas#choosing-a-compiler-contract))
-— qualify: the dispatcher routes their step beads to the pool, and steps with
-no open blockers are Ready immediately. (Root-only v1 wisps qualify too,
-but that shape is a holdover — use v2 for new formulas.) What doesn't
-qualify is a v1 formula whose root is a molecule container — `bd ready`
-filters those out, and the dispatcher logs a warning telling you to convert
-the formula before routing it to a pool.
+guarantee this: their step beads route to the pool and any step with no open
+blockers is Ready right away. Prefer v2 for new formulas.
 
-After upgrading from older dispatcher versions, close any open v1
-molecule-shaped pool-order wisps with `gc order sweep-tracking --include-wisps
-<order>` or let a min-floor worker drain them before expecting that order to
-fire again from a scale-from-zero pool.
+<Accordion title="v1 formulas don't wake a scaled-from-zero pool">
+A v1 formula whose root materializes as a container bead puts no
+immediately-Ready work on the pool — `bd ready` filters the container out, and
+the dispatcher logs a warning telling you to convert the formula to v2 before
+routing it to a pool. After upgrading from an older dispatcher, drain any
+already-dispatched container work with `gc order sweep-tracking --include-wisps
+<order>`, or let a min-floor worker clear it, before expecting the order to fire
+again from a scale-from-zero pool.
+</Accordion>
 
-Orders are discovered when the city starts, and the controller rescans the
-order set as it ticks — at most once per minute. You don't need to restart
-anything: drop a new order file into `orders/` and it shows up within a
-minute.
+Drop a new order file into `orders/` and it shows up within a minute — the
+orchestrator rescans the order set as it ticks, at most once per minute. No
+restart needed.
 
 ## Inspecting orders
 
-Once you've defined some orders, you'll want to see what the controller sees —
-which orders exist, what their triggers look like, and whether any are due. Three
-commands give you that view.
+Three commands show you what the orchestrator sees: which orders exist, what
+their triggers look like, and whether any are due.
 
-`gc order list` shows every enabled order in your city — whether or not it has
-ever fired:
+`gc order list` shows every enabled order, whether or not it has ever fired:
 
 ```shell
 ~/my-city
@@ -106,14 +97,12 @@ dep-update           formula  cooldown     1h              worker
 release-notes        formula  cooldown     24h             worker
 ```
 
-Your output will also include built-in housekeeping orders that ship
-with the bundled core pack (`beads-health`, `gate-sweep`, `jsonl-export`,
-`reaper`, `orphan-sweep`, `prune-branches`, `spawn-storm-detect`,
-`wisp-compact`, etc.). They're the city's housekeeping orders — you can leave
-them alone.
+Your output will also include built-in housekeeping orders that ship with the
+bundled core pack (`beads-health`, `gate-sweep`, `jsonl-export`, `reaper`,
+etc.). Leave them alone.
 
-The `TARGET` column is the pool the order will route to (the field is still
-`pool` in the TOML).
+The `TARGET` column is the pool the order routes to (the field is still `pool`
+in the TOML).
 
 To see the full definition:
 
@@ -150,149 +139,86 @@ $ gc order run pancakes-check
 Order "pancakes-check" executed: wisp mc-2xz → gc.routed_to=worker
 ```
 
-For exec orders, the output is simpler — `Order "<name>" executed (exec)`.
-
-This is useful for testing a new order or for kicking off work that's almost due
-anyway.
+The bead ID (`mc-2xz`) is the dispatched work, stamped `gc.routed_to=worker` so
+the pool sees it (`wisp` is the CLI's label for that v1 materialization). Exec
+orders print `Order "<name>" executed (exec)`. Use this to test a new order or
+kick off work that's almost due anyway.
 
 ## Trigger types
 
-The trigger is what makes an order tick. It controls _when_ the order fires. There
-are five trigger types.
+The trigger controls _when_ an order fires. Each type reads one extra field
+from `[order]`:
 
-### Cooldown
-
-The most common trigger. The name comes from the idea of a cooldown timer — after
-the order fires, it has to cool down for a set interval before it can fire
-again:
+| Trigger     | Fires when                          | Extra field            | Example                  |
+| ----------- | ----------------------------------- | ---------------------- | ------------------------ |
+| `cooldown`  | `interval` elapsed since last run   | `interval` (Go duration) | `interval = "5m"`      |
+| `cron`      | wall-clock matches the schedule     | `schedule` (5-field cron) | `schedule = "0 3 * * *"` |
+| `condition` | a shell command exits 0             | `check`                | `check = "test -f /tmp/deploy-flag"` |
+| `event`     | a named event hits the event bus    | `on`                   | `on = "bead.closed"`     |
+| `manual`    | never — only `gc order run`         | _(none)_               | —                        |
 
 ```toml
+# orders/stale-branches.toml
 [order]
 description = "Check for stale feature branches"
 formula = "stale-branches"
-trigger = "cooldown"
-interval = "5m"
+trigger = "cooldown"   # swap for cron / condition / event / manual
+interval = "5m"        # ...and the matching extra field above
 pool = "worker"
 ```
 
-If the order has never run, it fires immediately on the first tick. After that,
-it waits until `interval` has elapsed since the last run. The interval is a Go
-duration string — `30s`, `5m`, `1h`, `24h`.
+Notes per trigger:
 
-### Cron
+- **`cooldown`** — fires immediately on the first tick if it has never run, then
+  waits `interval` since the last run. Drifts: a 3:02 run means the next is at
+  3:07.
+- **`cron`** — a 5-field expression (minute, hour, day-of-month, month,
+  day-of-week) supporting `*`, integers, comma lists (`1,15`), and `*/N` steps.
+  Unlike cooldown it hits the same wall-clock times every day. Fires at most
+  once per minute.
+- **`condition`** — the orchestrator runs `sh -c "<check>"` with a 10-second
+  timeout each tick. Use it for external state: check a file, ping an endpoint,
+  query a database. The check runs synchronously, so a slow one delays the rest
+  of the tick — keep it fast.
+- **`event`** — fires whenever the named event appears on the bus. Cursor-based
+  tracking advances a sequence marker per firing, so the same event isn't
+  processed twice.
+- **`manual`** — shows up in `gc order list` and `gc order check` (always DUE
+  `no`, reason `manual trigger — use gc order run`), but auto-fires never.
 
-Fires on an absolute schedule, like a Unix cron job:
+![Cooldown vs cron timing on two timelines: cooldown fires a fixed interval after each run ends, so its wall-clock times drift later as runs take longer; cron fires at fixed clock times no matter how long runs take.](/diagrams/excalidraw-rendered/cooldown-vs-cron.svg)
 
-```toml
-[order]
-description = "Generate release notes from yesterday's merges"
-formula = "release-notes"
-trigger = "cron"
-schedule = "0 3 * * *"
-pool = "worker"
-```
-
-The schedule is a 5-field cron expression: minute, hour, day-of-month, month,
-day-of-week. This example fires at 3:00 AM every day. Fields support `*` (any),
-exact integers, comma-separated values (`1,15` for the 1st and 15th), and
-`*/N` steps (`*/4` matches every value divisible by 4).
-
-The difference from cooldown: a cooldown fires _relative_ to the last run
-("every 5 minutes"), while cron fires at _absolute_ times ("at 3 AM daily").
-Cooldown drifts — if the last run was at 3:02, the next is at 3:07. Cron hits
-the same wall-clock times every day.
-
-Cron triggers fire at most once per minute — if the order already ran during the
-current minute, it waits for the next match. They also catch up: if no
-controller tick landed during a scheduled minute (the controller was busy or
-down), the next tick fires the missed occurrence once — `gc order check` shows
-the reason `cron: caught up missed occurrence`. Orders that have never run
+<Accordion title="Cron catch-up after a missed minute">
+If no orchestrator tick landed during a scheduled minute (the orchestrator was busy
+or down), the next tick fires the missed occurrence once — `gc order check`
+shows the reason `cron: caught up missed occurrence`. Orders that have never run
 don't backfill; they fire only on an exact match.
-
-### Condition
-
-Fires when a shell command exits 0:
-
-```toml
-[order]
-description = "Deploy when the flag file appears"
-formula = "deploy"
-trigger = "condition"
-check = "test -f /tmp/deploy-flag"
-pool = "worker"
-```
-
-The controller runs `sh -c "<check>"` with a 10-second timeout on each tick. If
-the command exits 0, the order fires. Any other exit code, and it doesn't. This
-is the trigger for dynamic, external triggers — check a file, ping an endpoint,
-query a database.
-
-One caveat: the check runs synchronously during trigger evaluation. A slow check
-delays evaluation of subsequent orders on that tick. Keep checks fast.
-
-### Event
-
-Fires in response to system events:
-
-```toml
-[order]
-description = "Check if all PR reviews are done and merge is ready"
-formula = "merge-ready"
-trigger = "event"
-on = "bead.closed"
-pool = "worker"
-```
-
-This fires whenever a `bead.closed` event appears on the event bus. Event triggers
-use cursor-based tracking — each firing advances a sequence marker so the same
-event isn't processed twice.
-
-### Manual
-
-Never auto-fires. Only triggered by `gc order run`:
-
-```toml
-[order]
-description = "Full test suite — expensive, run only when needed"
-formula = "full-test-suite"
-trigger = "manual"
-pool = "worker"
-```
-
-Manual orders show up in `gc order check` like every other enabled order —
-always with DUE `no` and the reason `manual trigger — use gc order run`. They
-appear in `gc order list` too.
+</Accordion>
 
 ## Formula orders vs. exec orders
 
-So far every example has used a formula as the action. But orders can also run
-shell scripts directly:
+An order's action is either a formula or a shell script. An exec order runs the
+script on the orchestrator — no agent, no LLM, no work beads — which is the right
+choice for purely mechanical work: pruning branches, running linters, checking
+disk usage.
 
 ```toml
 [order]
 description = "Delete branches already merged to main"
 trigger = "cooldown"
 interval = "5m"
-exec = "scripts/prune-merged.sh"
+exec = "scripts/prune-merged.sh"   # no pool — runs on the orchestrator
 ```
-
-An exec order runs the script on the controller — no agent, no LLM, no wisp.
-This is the right choice for purely mechanical operations: pruning branches,
-running linters, checking disk usage, anything where involving an agent would be
-wasteful.
 
 The rules:
 
 - Every order has either `formula` or `exec`, never both.
 - Exec orders can't have a `pool` — there's no agent pipeline to route to.
-- The script receives `ORDER_DIR` in its environment, set to the directory
-  containing the order file. Pack-sourced orders also get `PACK_DIR`.
+- The script receives `ORDER_DIR` (the directory containing the order file) in
+  its environment; pack-sourced orders also get `PACK_DIR`.
 - An `[order.env]` table exports extra environment variables into the script —
-  handy for tuning thresholds without editing the script. `env` is only valid
-  on exec orders.
-
-Default timeouts differ: 30 seconds for formula orders, 300 seconds for exec
-orders.
+  handy for tuning thresholds without editing it. `env` is exec-only.
+- Default timeout is 30s for formula orders, 300s for exec orders.
 
 ## Timeouts
 
@@ -308,12 +234,12 @@ pool = "worker"
 timeout = "60s"
 ```
 
-For formula orders, the timeout covers the initial dispatch — compiling the
-formula, creating the wisp, and routing it to the pool. Once the wisp is created
-and handed off, the agent works on it at its own pace; the timeout doesn't kill
-an agent mid-work. For exec orders, the timeout covers the full script execution
-— if the script is still running when time is up, the process is killed. You can
-also set a global cap in `city.toml`:
+For formula orders, the timeout covers only the initial dispatch — compiling
+the formula, materializing its work beads, and routing them to the pool. Once
+dispatched, the orchestrator drives a v2 formula's steps to completion at each
+agent's own pace; the order timeout never kills work mid-flight. For exec
+orders, the timeout covers the full script execution — overrun, and the process
+is killed. A global cap in `city.toml`:
 
 ```toml
 [orders]
@@ -324,10 +250,9 @@ The effective timeout is the lesser of the per-order timeout and the global cap.
 
 ## Order scope
 
-When a pack is imported into more than one rig, its orders are instantiated
-**once per rig** by default — the same way per-rig agents are. That's usually
-what you want for an order that acts on a single rig's work. But some orders are
-city-wide: a sweep or health probe that already iterates over every rig
+When a pack is imported into more than one rig, its orders instantiate **once
+per rig** by default — usually right for an order that acts on a single rig's
+work. But a sweep or health probe that already iterates over every rig
 internally would then run redundantly, once per rig.
 
 Mark such an order city-scoped so it registers exactly once, no matter how many
@@ -339,23 +264,19 @@ description = "Sweep merged convoys across the whole city"
 trigger = "cooldown"
 interval = "5m"
 exec = "scripts/convoy-sweep.sh"
-scope = "city"
+scope = "city"          # "city" or "rig"; default "rig"
 ```
 
-`scope` accepts `"city"` or `"rig"`. The default (when omitted) is `"rig"`, so
-existing orders are unaffected. A `scope = "city"` order appears once in `gc
-order list` with no rig qualifier; rig-scoped orders appear once per importing
-rig. This mirrors the `scope` field on `[[named_session]]`.
-
-Use `scope = "city"` for orders that live in a **shared pack** imported by
-several rigs — that's where the per-rig duplication it collapses comes from. A
-city-scoped order keeps the formula layer of the pack it was scanned from, so
-its formula must resolve from that pack rather than from any one rig's local
-`orders/` directory.
+A `scope = "city"` order appears once in `gc order list` with no rig qualifier;
+rig-scoped orders appear once per importing rig (mirroring `scope` on
+`[[named_session]]`). A city-scoped order keeps the formula layer of the pack it
+was scanned from, so its formula must resolve from that pack rather than from any
+one rig's local `orders/` directory.
 
 ## Disabling and skipping orders
 
-An order can be disabled in its own definition:
+Set `enabled = false` in an order's own definition to drop it from scanning
+entirely — it won't appear in `gc order list` or get evaluated:
 
 ```toml
 [order]
@@ -367,23 +288,18 @@ pool = "worker"
 enabled = false
 ```
 
-Disabled orders are excluded from scanning entirely — they don't appear in `gc
-order list` or get evaluated.
-
-You can also skip orders by name in `city.toml` without editing the order file:
+Or skip orders by name in `city.toml` without editing their files — handy when
+a pack provides orders you don't want running:
 
 ```toml
 [orders]
 skip = ["nightly-bench", "experimental-check"]
 ```
 
-This is useful when a pack provides orders you don't want running in your city.
-
 ## Overrides
 
-Sometimes a pack's order is almost right but you need to tweak the interval or
-change the pool. Rather than copying and modifying the order file, use overrides
-in `city.toml`:
+When a pack's order is almost right, tweak it in `city.toml` instead of copying
+the file:
 
 ```toml
 [[orders.overrides]]
@@ -396,17 +312,16 @@ pool = "mayor"
 schedule = "0 6 * * *"
 ```
 
-Overrides can change `enabled`, `trigger`, `interval`, `schedule`, `check`, `on`,
-`pool`, `timeout`, `idempotent`, and `env`. The override matches by order name. An override that
-targets a nonexistent order produces an error rather than silently no-opping
-— `gc order` CLI commands fail; `gc start` logs the error and continues
-running with the unmatched override skipped.
+Overrides match by order name and can change `enabled`, `trigger`, `interval`,
+`schedule`, `check`, `on`, `pool`, `timeout`, `idempotent`, and `env`. An
+override targeting a nonexistent order is an error, not a silent no-op — `gc
+order` commands fail; `gc start` logs the error and continues with the unmatched
+override skipped.
 
-### Rig scoping
-
-Many orders expand at scan time into one instance per rig (anything in a
-rig's `orders/` directory or a pack imported into a rig). When the same
-order appears city-wide AND per-rig, an override must say which:
+<Accordion title="Disambiguating overrides when an order exists both city-wide and per-rig">
+Many orders expand at scan time into one instance per rig (anything in a rig's
+`orders/` directory or a pack imported into a rig). When the same order appears
+city-wide AND per-rig, the override must say which instance it targets via `rig`:
 
 ```toml
 # Targets ONLY the city-level instance. Per-rig copies are unaffected.
@@ -428,9 +343,9 @@ enabled = false
 ```
 
 A rigless override against a name that exists ONLY as per-rig copies is an
-error; the message names the rigs so you know what to type. The literal
-`"*"` is reserved as the wildcard token and may not be used as a real rig
-name.
+error; the message names the rigs so you know what to type. The literal `"*"`
+is reserved as the wildcard token and may not be a real rig name.
+</Accordion>
 
 ## Order history
 
@@ -455,30 +370,27 @@ pancakes-check  mc-9p8   2026-04-08T07:26:18Z
 ```
 
 The tracking bead is created synchronously _before_ the dispatch goroutine
-launches. This is what prevents the cooldown trigger from re-firing on the very
-next tick — the trigger checks for recent tracking beads when deciding if the order
-is due.
+launches — which is what keeps the cooldown trigger from re-firing on the very
+next tick. The trigger checks for recent tracking beads when deciding if the
+order is due.
 
 ## Duplicate prevention
 
-Before dispatching, the controller checks whether the order already has open
-(non-closed) work. If it does, the order is skipped even if the trigger says it's
-due. This prevents pileup — if an agent is still working through the last
-pancakes run, the controller won't dispatch another one.
+Before dispatching, the orchestrator checks whether the order already has open
+(non-closed) work. If it does, the order is skipped even when the trigger says
+it's due — so a still-running pancakes batch doesn't get a second one piled on
+top.
 
-The open-work check runs against the store with a bounded timeout. If the
-store is so contended that the check itself times out, the order is skipped —
-it fails closed. Orders whose dispatch is safe to repeat (sweeps and feeders
-where a duplicate run is a no-op) can set `idempotent = true` in the order
-file to fail open instead: on a gate timeout they dispatch anyway rather than
-be starved.
+The open-work check runs against the store with a bounded timeout; if the store
+is so contended that the check times out, the order is skipped — it fails
+closed. Orders whose dispatch is safe to repeat (sweeps and feeders where a
+duplicate run is a no-op) can set `idempotent = true` to fail open instead:
+on a gate timeout they dispatch anyway rather than starve.
 
 ## Rig-scoped orders
 
-Orders don't just live at the city level. When a pack is applied to a rig, that
-pack's orders come along and run scoped to that rig.
-
-Say you have a pack called `dev-ops` that includes a `test-suite` order:
+When a pack is applied to a rig, that pack's orders come along and run scoped to
+that rig. Say a `dev-ops` pack includes a `test-suite` order:
 
 ```
 packs/dev-ops/
@@ -526,55 +438,40 @@ test-suite           formula  cooldown     5m              my-api          worke
 test-suite           formula  cooldown     5m              my-frontend     worker
 ```
 
-Two rows with the same name — one per importing rig. As soon as any rig-scoped
-order exists, `gc order list` adds a RIG column showing which rig owns each
-instance (city-level orders show `-` there). TARGET stays the raw pool name
-from the order file; the rig qualification happens at dispatch time, below. To
-act on a specific instance, pass `--rig`:
+Two rows, same name, one per importing rig. As soon as any rig-scoped order
+exists, `gc order list` adds a RIG column (city-level orders show `-`). To act
+on a specific instance, pass `--rig`:
 
 ```shell
 $ gc order show test-suite --rig my-api
 $ gc order run test-suite --rig my-api
 ```
 
-These are two independent orders. The `my-api` copy has its own cooldown
-timer, its own tracking beads, its own history — if the `my-frontend` copy
-fired two minutes ago, that doesn't affect whether the `my-api` copy is due.
-Internally, Gas City distinguishes them by _scoped name_:
-`test-suite:rig:my-api` vs `test-suite:rig:my-frontend`.
-
-Pool targets are auto-qualified at dispatch: `pool = "worker"` in the order
-definition becomes `gc.routed_to=my-api/worker` on the dispatched wisp,
-routing work to the rig's own agents rather than the city-level pool.
+These are two independent orders — each copy has its own cooldown timer,
+tracking beads, and history, distinguished internally by _scoped name_
+(`test-suite:rig:my-api` vs `test-suite:rig:my-frontend`). The pool target is
+auto-qualified at dispatch: `pool = "worker"` becomes
+`gc.routed_to=my-api/worker`, routing work to the rig's own agents rather than
+the city-level pool.
 
 ## Order layering
 
-With orders coming from packs and local `orders/` directories, the same order
-name can exist in more than one place. Within a single scope — the city, or
-one rig — the highest-priority source wins:
+When the same order name exists in both a pack and a local `orders/` directory
+within one scope (the city, or one rig), local wins and replaces the pack
+definition entirely. So a city-level `orders/test-suite.toml` with a 1-minute
+cooldown overrides the `dev-ops` pack's 5-minute `test-suite` — the pack version
+is ignored.
 
-1. **Packs** — orders that ship with a pack that scope has included or
-   imported (e.g., the `dev-ops` pack's `test-suite`)
-2. **Local** — orders in that scope's own `orders/` directory
-
-A higher layer completely replaces a lower layer's definition for the same
-order name within its scope. So if the `dev-ops` pack defines `test-suite`
-with a 5-minute cooldown and you create your own city-level
-`orders/test-suite.toml` with a 1-minute cooldown, yours wins — the pack
-version is ignored entirely.
-
-Replacement never crosses scopes, though. A rig's `test-suite` doesn't replace
-a city order of the same name — as the previous section showed, those coexist
-as independent scoped instances (`test-suite` vs `test-suite:rig:my-api`).
+Replacement never crosses scopes, though: a rig's `test-suite` doesn't replace a
+city order of the same name. As the previous section showed, those coexist as
+independent scoped instances (`test-suite` vs `test-suite:rig:my-api`).
 
 ## Putting it together
 
-Here's a city with two orders: a frequent lint check (exec, no agent needed) and
-weekly release notes (formula, dispatched to an agent).
-
-Assume you've already created a `worker` agent as in
-[Tutorial 05](/tutorials/05-formulas). The remaining pieces are just the order
-files and the formula they dispatch.
+Two orders: a frequent lint check (exec, no agent) and weekly release notes
+(formula, dispatched to the `worker` agent from
+[Tutorial 05](/tutorials/05-formulas)). The pieces are the two order files and
+the formula they dispatch.
 
 ```toml
 # orders/lint-check.toml
@@ -636,13 +533,18 @@ lint-check           cooldown     yes   never run
 release-notes        cron         no    cron: schedule not matched
 ```
 
-The lint check fires immediately (never run + cooldown trigger = due), then every
-30 seconds after that. The release notes fire Monday at 9 AM, dispatching the
-three-step `release-notes` workflow to the `worker` pool. Neither requires
-anyone to type `gc sling`.
+The lint check fires immediately (never run + cooldown = due), then every 30
+seconds. The release notes fire Monday at 9 AM: the orchestrator compiles the
+three-step formula into a graph, makes `gather` Ready, and routes step beads to
+the `worker` pool; `summarize` unblocks only when `gather` closes, `post` only
+after `summarize`. The orchestrator drives the sequence to completion — no one
+types `gc sling`, no single session babysits the run.
 
-Orders are formulas and scripts on autopilot, gated by time, schedule,
-conditions, or events, evaluated by the controller on every tick.
+That's the whole idea. An order binds a trigger to an action. For a v2 formula,
+the action is the full orchestration the orchestrator drives outside any session —
+now gated by time, schedule, condition, or event. For an exec script, it's a
+mechanical task on the same tick. Either way the orchestrator evaluates the
+trigger every tick and does the work for you.
 
 ## What's next
 

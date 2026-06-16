@@ -1,5 +1,5 @@
 ---
-title: Gas City Formula Specification — v2 (formula_compiler 2.0)
+title: Gas City Formula Specification — v2
 description: Authoritative specification for the formulas v2 contract.
 ---
 
@@ -9,12 +9,13 @@ description: Authoritative specification for the formulas v2 contract.
 | Last verified | 2026-06-12 |
 | Contract | `formula_compiler >=2.0.0` (deprecated alias: `contract = "graph.v2"`) |
 | Primary implementation | `internal/formula`, `internal/graphv2`, `internal/dispatch`, `internal/molecule` |
+| Concept model | [How Gas City Works](/getting-started/how-gas-city-works) — where a formula (the HOW) sits among the six primitives |
 | User-facing guide | [Understanding Formulas](/guides/understanding-formulas) |
 | Tutorial | [Formulas tutorial](/tutorials/05-formulas) |
 
 This document specifies the **formulas v2** contract: the file format a
 formula author writes, how the v2 compiler turns it into a graph of beads,
-and what the controller's control dispatcher does with the compiled graph at
+and what the orchestrator's control dispatcher does with the compiled graph at
 runtime. It is self-contained: the authoring surface shared with v1 is
 specified here in full, and graph-only constructs state their declaration
 requirement where they appear.
@@ -32,14 +33,21 @@ requirements unless the paragraph is explicitly marked as non-normative.
 
 ## 0. Concept And Data Model
 
+### 0.1. Concept
+
 A formula is a TOML file specifying *how* work should be carried out — its
 steps, their ordering and dependencies, and the control flow around them. A
 formula is not the work itself (a bead is a unit of work) nor a grouping of
 work (a convoy is a graph of related work); it is the reusable method that
-*produces* work when applied. Compilation produces a
-**recipe**: a flattened, validated list of steps and dependency edges.
-Instantiation (`gc formula cook`, `gc sling --formula`, or the Go API
-`molecule.Cook` / `molecule.CookOn` / `molecule.Attach` in
+*produces* work when applied. The method is defined independently of how its
+work is stored; the data model below is the *current implementation* of that
+storage, not part of the definition of a formula.
+
+### 0.2. Data Model
+
+Compilation produces a **recipe**: a flattened, validated list of steps and
+dependency edges. Instantiation (`gc formula cook`, `gc sling --formula`, or
+the Go API `molecule.Cook` / `molecule.CookOn` / `molecule.Attach` in
 `internal/molecule`) materializes the recipe into the bead store.
 
 Under the v2 contract the materialized shape is a **workflow**:
@@ -49,13 +57,13 @@ formula (TOML)
   → compiled recipe (flat, topologically ordered)
     → workflow root bead          (type "task", gc.kind = "workflow")
     + step beads                  (independently routable work, blocking deps only)
-    + control beads               (controller-owned: check, retry, fanout,
+    + control beads               (orchestrator-owned: check, retry, fanout,
                                    tally, drain, scope-check, workflow-finalize)
 ```
 
 Execution responsibility is split by bead kind:
 
-- **The controller executes every control bead.** The control dispatcher in
+- **The orchestrator executes every control bead.** The control dispatcher in
   `internal/dispatch` evaluates check and retry budgets, expands fan-outs,
   tallies votes, scatters drains, enforces scope failure policy, and
   finalizes the workflow. No agent participates in control execution.
@@ -68,8 +76,8 @@ The execution model is the structural difference from v1:
 | | v1 | Formulas v2 |
 |---|---|---|
 | Compiled shape | Parent-child molecule tree under a `molecule` container root | Flat graph: `task` root plus step beads linked only by blocking dependency edges |
-| Runtime engine | None. Conditions and loops resolve at cook time; afterwards the molecule is inert data | The controller's control dispatcher executes every control bead — check and retry evaluation, fan-out, tally, drain, scope checks, workflow-finalize |
-| Who advances work | Agents working hooked beads, inside their own sessions | The controller drives orchestration outside any agent session; agents only run plain work beads |
+| Runtime engine | None. Conditions and loops resolve at cook time; afterwards the molecule is inert data | The orchestrator's control dispatcher executes every control bead — check and retry evaluation, fan-out, tally, drain, scope checks, workflow-finalize |
+| Who advances work | Agents working hooked beads, inside their own sessions | The orchestrator drives orchestration outside any agent session; agents only run plain work beads |
 | Agent fan-out | The molecule is typically worked by the one agent it is slung to; spreading steps across agents is manual routing | Step beads are independently routable; per-step routing intent resolves at dispatch, and `drain` / `on_complete` fan out across agents or pools at runtime |
 | Root visibility | The container root is the molecule's handle | The root blocks on `workflow-finalize` and only becomes Ready when the workflow completes (section 2) |
 
@@ -176,7 +184,7 @@ declaration as an error.
 | `vars` | table | Template variable declarations (section 1.4) |
 | `steps` | []table | Work items to create (section 1.3) |
 | `type` | string | `workflow` (default), `expansion`, or `aspect` |
-| `phase` | string | v1-era materialization hint: `"liquid"` (pour) or `"vapor"` (wisp). `phase = "vapor"` without `pour` compiles a root-only recipe — steps are not materialized as beads. Kept for compatibility; not a design surface for new formulas |
+| `phase` | string | Legacy v1 materialization mechanics, not a v2 authoring choice: `"liquid"` (pour) or `"vapor"`. `phase = "vapor"` without `pour` compiles a root-only recipe — steps are not materialized as beads. This selects how v1 stores a run's work (see the section 0.1 hedge: the storage shape is implementation, not part of the definition of a formula); it is accepted for compatibility and must not be used to design new formulas |
 | `pour` | bool | Materialize each step as a bead row (checkpoint recovery). Default `false`. Monotonic through `extends`: any ancestor's `pour = true` sticks |
 | `catalog` | table | `{name, description}` opting the formula into workflow-catalog discovery (`gc formula catalog`) |
 | `template` | []table | Expansion template steps for `type = "expansion"` formulas (`{target}` / `{target.description}` placeholders) |
@@ -390,7 +398,7 @@ Steps (2):
 Two caveats. First, the re-run never happens in the current release: the
 `until` label is written but nothing consumes it, so an `until` loop runs
 exactly one iteration (section 4). Prefer `check` (section 3.1) for
-controller-driven re-execution. Second, `until` does not use the
+orchestrator-driven re-execution. Second, `until` does not use the
 `{{var}} == value` step-condition syntax: `until = "{{ready}} == yes"`
 fails with `unrecognized condition format`. The grammar is the runtime
 condition evaluator's: `probe.status == 'complete'`,
@@ -555,7 +563,7 @@ of the `gc.kind` step-metadata key (all hyphenated):
 
 | Group | Values | Author may set |
 |---|---|---|
-| Control kinds (dispatched by the controller) | `retry`, `ralph`, `check`, `retry-eval`, `fanout`, `tally`, `drain`, `scope-check`, `workflow-finalize` | No — compiler/controller-owned; authored values are not validated and produce unspecified dispatcher behavior |
+| Control kinds (dispatched by the orchestrator) | `retry`, `ralph`, `check`, `retry-eval`, `fanout`, `tally`, `drain`, `scope-check`, `workflow-finalize` | No — compiler/orchestrator-owned; authored values are not validated and produce unspecified dispatcher behavior |
 | Structural kinds (compiled into graphs, never dispatched) | `scope`, `cleanup`, `run`, `retry-run` | `scope` and `cleanup` only (section 3.5) |
 | Root kinds | `workflow`, `wisp` | No — stamped by the compiler |
 | Sidecar | `spec` | No — generated step-spec sidecars |
@@ -633,18 +641,18 @@ inject `convoy_id`, resolve the deprecated `issue` alias to the single
 tracked convoy member, and stamp the root as specified in section 2. The
 reserved-variable rules of section 1.4 are enforced at this point.
 
-**Control dispatch.** The controller's control dispatcher processes every
+**Control dispatch.** The orchestrator's control dispatcher processes every
 open control bead by `gc.kind`: `retry`, `ralph`, `check`, `retry-eval`,
 `fanout`, `tally`, `drain`, `scope-check`, and `workflow-finalize`. An
 unknown control kind is a hard dispatcher error. Structural kinds
 (`scope`, `cleanup`, `run`, `retry-run`) are never dispatched. Control
-execution requires only the controller; no user-configured agent role
+execution requires only the orchestrator; no user-configured agent role
 participates.
 
 ### 3.1. Check
 
 `[steps.check]` wraps a step in an inline run/check verification loop:
-after each iteration closes, the controller runs the configured script;
+after each iteration closes, the orchestrator runs the configured script;
 pass closes the step, fail with budget left spawns the next iteration,
 exhaustion closes the step as failed.
 
@@ -701,7 +709,7 @@ The step `timeout` applies as a general bound on the check script; a
 
 `[steps.retry]` wraps a step in a transient-failure retry loop. Where
 `check` verifies output with a script, `retry` re-runs attempts the
-controller classifies as transient failures.
+orchestrator classifies as transient failures.
 
 | Key | Purpose |
 |---|---|
@@ -734,13 +742,13 @@ Steps (4):
 ```
 
 The control bead keeps the original step ID (kind `retry`); attempts are
-`<step>.attempt.N`. The controller classifies each closed attempt:
+`<step>.attempt.N`. The orchestrator classifies each closed attempt:
 
 - **pass** — the control closes `gc.outcome = pass`, copying the attempt's
   `gc.output_json` and non-`gc.*` metadata upward.
 - **hard** — the control closes `gc.outcome = fail` with
   `gc.final_disposition = hard_fail`; no further attempts.
-- **transient** — with budget left, the controller spawns the next
+- **transient** — with budget left, the orchestrator spawns the next
   attempt; at `max_attempts`, exhaustion applies `on_exhausted`:
   `hard_fail` closes the control `gc.outcome = fail` and
   `gc.final_disposition = hard_fail`; `soft_fail` closes it
@@ -895,7 +903,7 @@ metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "
 ```
 
 **Failure policy.** `gc.on_fail = "abort_scope"` is the only specified
-value of `gc.on_fail`. When a scoped member fails, the controller skips
+value of `gc.on_fail`. When a scoped member fails, the orchestrator skips
 all remaining open scope members, propagates non-`gc.*` member metadata
 onto the scope body (so diagnostics survive), and closes the body with
 `gc.outcome = fail`. The worker-result contract for `abort_scope` members
@@ -908,7 +916,7 @@ The compiler writes `gc.on_fail = "abort_scope"` by default on check body
 members and nested retry children.
 
 **Workflow finalize.** When `workflow-finalize` becomes Ready, the
-controller aggregates the outcomes of its blockers into a single
+orchestrator aggregates the outcomes of its blockers into a single
 pass/fail, closes the workflow root with that outcome (root first, so a
 crash retries finalization), closes generated spec sidecars, and — on pass
 only — propagates closure across the `gc.source_bead_id` chain. Failures
@@ -926,7 +934,7 @@ them; they are documented to prevent silent surprise.
   body step (the loop expander in `internal/formula/controlflow.go`), but
   no component — neither the v1 cook path nor the v2 control dispatcher —
   reads that label. An `until` loop therefore runs exactly one iteration.
-  Use `check` (section 3.1) for controller-driven re-execution.
+  Use `check` (section 3.1) for orchestrator-driven re-execution.
 - **Gate `type` vocabulary.** `[steps.gate]` synthesizes a real gate bead
   that blocks its step until the gate bead is closed (manually or by an
   external watcher), but the `type` values `gh:run`, `gh:pr`, `timer`,
@@ -1044,8 +1052,10 @@ yet; neither is a design commitment:
   `needs`.
 
 Conversely, routing a formula to a scale-from-zero pool requires a
-Ready-visible surface, which v1 molecule containers lack; `gc sling`
-rejects them:
+Ready-visible surface, which the v1 container materialization lacks; `gc sling`
+rejects them. The remedy in the error text below is migration to formulas v2;
+the `phase="vapor"`/root-only alternative it names is legacy v1 materialization
+mechanics (section 1.2), not a v2 authoring choice:
 
 ```text
 formula "<name>" root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase="vapor"/root-only or formulas v2 before routing it to a pool

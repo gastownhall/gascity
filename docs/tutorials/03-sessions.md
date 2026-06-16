@@ -1,18 +1,24 @@
 ---
 title: Tutorial 03 - Sessions
 sidebarTitle: 03 - Sessions
-description: See agent output, interact directly with agents, and learn about polecats and crew.
+description: See agent output, interact directly with agents, and learn the difference between on-demand and always-on sessions.
 ---
 
-In [Tutorial 02](/tutorials/02-agents), you worked with agents to produce work,
-which created sessions with agents that we haven't seen yet. In this tutorial,
-you'll see and talk with agents via sessions. You'll also learn the difference
-between "polecats" (agents spun up on demand to handle work) and "crew"
-(persistent agents with named sessions).
+Slinging work to agents creates **sessions** — live agent processes you
+haven't seen yet. This tutorial shows you how to watch and talk to them. A
+session comes in two flavors:
 
-To continue with this tutorial, start from where the last two tutorials left
-off: the city root has `pack.toml` and `city.toml`, and Tutorial 02 added the
-reviewer under `agents/reviewer/`:
+| Flavor | Lifecycle | Declared by |
+| --- | --- | --- |
+| **On-demand** | Spun up to handle slung work, shut down when idle | nothing — the default |
+| **Always-on** | Kept alive so you can chat anytime | `[[named_session]] mode="always"` in the local pack |
+
+A pack might give these flavors its own role names, but those are pack
+configuration, not Gas City concepts. The underlying primitive is the session.
+
+This tutorial continues from the city the last two left off with: `pack.toml`
+and `city.toml` at the root, plus the reviewer Tutorial 02 added under
+`agents/reviewer/`.
 
 ```shell
 ~/my-city
@@ -56,18 +62,16 @@ The reviewer's prompt lives at `agents/reviewer/prompt.template.md`. This is the
 standard city shape: root config files plus per-agent directories under
 `agents/`.
 
-## Looking in on Polecats
+## Looking in on an on-demand session
 
-Every provider — Claude, Codex, Gemini, etc. — has its own way of managing
-conversations. Gas City normalizes all of that behind a single abstraction
-called a **session**. A session is a live process with its own terminal, state,
-and conversation history.
+Every provider — Claude, Codex, Gemini — manages conversations its own way. Gas
+City normalizes all of that behind the **session**: a live process with its own
+terminal, state, and conversation history.
 
-When you sling a bead to an agent that isn't already running, you're creating
-a session. For a transient polecat session, the easiest way to inspect it is
-to look up the live session ID and then pass that to `gc session peek`. (If
-the reviewer already finished Tutorial 02's review and its session was cleaned
-up, sling the same review work again — that gives you a fresh live session to
+Slinging a bead to an agent that isn't running creates a session. To inspect a
+live one, look up its ID with `gc session list`, then pass that to `gc session
+peek`. (If the reviewer already finished Tutorial 02's review and its session
+was cleaned up, sling the same review work again for a fresh live session to
 watch.)
 
 ```shell
@@ -126,27 +130,22 @@ $ gc session peek mc-8sfd
 • Working (43s • esc to interrupt)
 ```
 
-You'll notice the result of `gc prime` for our reviewer agent shows up as the
-first input to the `codex` CLI. That's how GC lets Codex know how to act. Then
-you'll notice Codex acting on those instructions by looking for the beads that are
-ready for it to act on. It finds one, executes it and out comes our `review.md`
-file.
+The peek shows the reviewer's prompt — the output of `gc prime` — landing as
+the first input to the `codex` CLI. That's how GC tells Codex how to act. Codex
+then claims a ready bead, executes it, and produces `review.md`.
 
-When an agent has no work to do, it will go idle. And when it's been idle in a
-session created for it to handle work that was slung to it, that session will be
-cleanly shut down by the GC supervisor process. These transient sessions are
-often used by one-and-done agents known as "polecats". While you could talk to
-one interactively, they're configured to execute beads, go idle and have their
-sessions shut down ASAP.
+When the work runs out, the agent goes idle and the GC supervisor shuts its
+session down. That's the on-demand default: an agent with no always-on
+declaration executes beads, goes idle, and is cleaned up. You could chat with
+one while it's alive, but it won't stick around for you.
 
-If you want an agent to talk to, you'll want one configured for chatting
-called a "crew" member.
+For an agent that's always there to talk to, you want an always-on session,
+declared by the local pack.
 
-## Chatting with Crew
+## Chatting over an always-on session
 
-Recall from our reviewer agent that its prompt was authored to ask it to look
-for and immediately start executing work assigned to it. While that work is
-active, you can see it in the list of sessions:
+`gc session list` shows both flavors side by side — the reviewer mid-work, and
+the mayor up for ten hours:
 
 ```shell
 ~/my-project
@@ -156,11 +155,9 @@ mc-8sfd  my-project/reviewer   creating  create          reviewer-a1b  reviewer 
 mc-5o1   mayor                 active    session,config  mayor         mayor     10h  14m ago
 ```
 
-However, once the work is done, the reviewer will go idle and its session will
-be shut down by GC. On the other hand, you can see from this sample output that
-the mayor has been running for the last ten hours — since our city was started
-— but we haven't talked to it once? Has it been burning tokens all of this
-time? Let's take a look:
+The reviewer will go idle and be shut down once its work is done. The mayor has
+been up since the city started, yet nobody has chatted with it — is it burning
+tokens? Peek says no:
 
 ```shell
 ~/my-project
@@ -170,26 +167,21 @@ City is up and idle. No pending work, no agents running besides me. What would
   you like to do?
 ```
 
-So the mayor is clearly idle, but has not been shut down. Why not? If you look
-again at your `pack.toml` file, you'll see the named session that keeps it
-alive:
+Idle but not shut down. The mayor survives because the local pack — your
+`pack.toml`, the root pack that imports the others — declares an always-on
+named session for it:
 
 ```toml
-...
 [[named_session]]
 template = "mayor"
 mode = "always"
-...
 ```
 
-The mayor has a specially named session called "mayor" that is always running.
-It's kept up by the system so that you can have quick access to it for a chat
-or some planning or whatever you'd like to do. A polecat is designed to be
-transient, but an agent is a member of your "crew" (whether city-wide or
-rig-specific) if it's always around and ready to chat interactively or receive
-work.
+That `mode="always"` keeps the session running so the mayor is always around to
+chat, plan, or receive work. Any agent the local pack (or a pack it imports)
+declares this way gets the same treatment; everything else runs on demand.
 
-To talk to the mayor (or any agent in a running session), you "attach" to it:
+To talk to the mayor — or any agent in a running session — attach to it:
 
 ```shell
 ~/my-project
@@ -208,31 +200,16 @@ coding assistant, but with the full context of its prompt template.
 To detach without killing the session, press `Ctrl-b d` (the standard tmux
 detach). The session keeps running in the background. You can reattach anytime.
 
-You can also interact with running sessions without attaching. You've already
-seen what peeking looks like. You can also "nudge" it, which types a new message
-into the session's terminal:
+You can also reach a running session without attaching. Besides peeking, you
+can **nudge** it — type a new message into its terminal:
 
 ```shell
 ~/my-city
 $ gc session nudge mayor "What's the current city status?"
-Nudged mayor
+Nudged mayor   # or "Queued nudge for mayor" if the session isn't ready yet
 ```
-
-Gas City confirms the nudge with either `Nudged mayor` (delivered to the live
-session) or `Queued nudge for mayor` (queued for delivery when the session is
-ready).
 
 ![mayor nudge screenshot](mayor-nudge.png)
-
-To get a feel for what's happening in your city, you can see all running
-sessions:
-
-```shell
-~/my-city
-$ gc session list
-ID      TEMPLATE  STATE   REASON          TARGET  TITLE  AGE  LAST ACTIVE
-mc-5o1  mayor     active  session,config  mayor   mayor  10h  5s ago
-```
 
 ## Session logs
 
@@ -247,38 +224,33 @@ $ gc session logs mayor --tail 2
 ```
 
 `--tail N` prints the last N transcript entries (same convention as `tail -n`),
-so `--tail 2` above shows the most recent user prompt and the mayor's reply.
-Compact-boundary dividers count as entries if one lands inside that final
-window. Use `--tail 0` to print the whole conversation. Compatibility note:
-before 1.0, `--tail` counted compaction segments; as of 1.0 it counts
-displayed transcript entries instead. The HTTP API's `tail` query parameter
-still counts compaction segments. Follow live output with `-f`:
+so `--tail 2` shows the most recent prompt and reply. Use `--tail 0` for the
+whole conversation. Follow live output with `-f`:
 
 ```shell
 ~/my-city
 $ gc session logs mayor -f
 ```
 
-In another terminal, nudge the mayor and watch the follow stream show the
-conversation as it happens:
+Now nudge the mayor from another terminal and the follow stream prints the
+exchange as it arrives — handy for watching a background agent without
+attaching and risking an interruption.
 
-```shell
-~/my-city
-$ gc session nudge mayor "What's the current city status?"
-```
-
-Again, Gas City confirms the nudge with either `Nudged mayor` or `Queued nudge for mayor`.
-
-Useful for watching what a background agent is doing without attaching and
-potentially interrupting it. Peek shows the terminal; logs show the
-conversation as new user and assistant messages arrive.
+<Accordion title="Edge: how --tail counts entries">
+A compact-boundary divider counts as an entry if one lands inside the final
+window. As of 1.0, `--tail` counts displayed transcript entries; before 1.0 it
+counted compaction segments. The HTTP API's `tail` query parameter still counts
+compaction segments.
+</Accordion>
 
 ## What's next
 
-You've seen how sessions are created on demand for slung work, how named
-sessions keep crew agents alive, and how to peek, attach, nudge, and read logs.
-From here:
+You've created sessions on demand, kept the mayor alive with an always-on
+`[[named_session]]`, and used peek, attach, nudge, and logs to watch and talk to
+agents. From here:
 
+- **[The six primitives](/getting-started/how-gas-city-works)** — the canonical model the
+  session and these mechanisms build on
 - **[Agent-to-Agent Communication](/tutorials/04-communication)** — how agents
   coordinate through mail, slung work, and hooks
 - **[Formulas](/tutorials/05-formulas)** — how multi-step work should be

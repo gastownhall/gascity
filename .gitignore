@@ -20,6 +20,16 @@ cmd/gc/.runtime/
 !examples/gastown/packs/maintenance/overlays/default/.claude/settings.json
 !examples/swarm/packs/swarm/overlays/default/.claude/
 !examples/swarm/packs/swarm/overlays/default/.claude/settings.json
+
+# Commit the shared project skill tree (Claude Code's documented location).
+# The rest of the developer-local root .claude/ stays ignored. Anchored to the
+# repo root so the nested example-pack .claude/ rules above are untouched.
+!/.claude/
+/.claude/*
+!/.claude/skills/
+
+# sync-project-agents writes local migration backups here; don't commit them.
+.agents/migration/
 .gc/
 
 # Dolt database files (added by bd init)

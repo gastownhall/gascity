@@ -1,47 +1,61 @@
 ---
-title: Gas City
-description: Documentation for engineers who want to run the Gas City orchestration SDK.
+title: Overview
+description: Gas City is the platform for building software factories — write down how a job gets done once, and an orchestrator runs it across a fleet of agents, reliably, without you in the loop.
 ---
 
-Gas City is an orchestration-builder SDK for multi-agent systems. This docs
-tree is organized for engineers who want to run Gas City: understand how the
-system fits together, install the toolchain, run a local city, and then find
-the relevant subsystem.
+A single coding agent is remarkable on its own — but it works alone. One session,
+one train of thought, and when it crashes, you have to recover the context. Real
+engineering work is bigger than that: it spans many steps, runs longer than any one
+session, and shouldn't need you hovering over it.
 
-If you are new, start with the
-[Architecture Overview](/concepts/architecture-overview) — it explains what the
-major pieces are (cities, rigs, agents, sessions, the beads store, the event
-bus, and the controller) and how work flows through them, with diagrams.
+There are two ways to put coding agents to work. The first is the **interactive
+session** — you sit with one agent and steer it, watching every move. The second is
+to automate the work itself: turn a fleet of agents into a **software factory**
+that runs without you in the loop. An interactive session gives you a faster pair of
+hands; a software factory is what gets you production quality at machine speed.
 
-## Start Here
+Gas City is that software factory. You write down how a job gets done once — a
+**formula** — and an **orchestrator** runs it across a fleet of agents, *outside your
+session*. It breaks the job into tracked units of work, runs the independent pieces
+in parallel, holds the rest until their dependencies finish, and retries what fails
+until the whole thing is done.
 
-- [Architecture Overview](/concepts/architecture-overview) gives you the mental
-  model for the whole system before you run anything.
-- [Installation](/getting-started/installation) explains the local toolchain
-  and the shortest path to a working `gc` binary.
-- [Quickstart](/getting-started/quickstart) walks through the smallest city
-  you can boot locally.
-- [Coming from Gas Town](/getting-started/coming-from-gastown) maps Town
-  roles, commands, plugins, convoys, and filesystem habits onto Gas City's
-  primitives.
-- [Repository Map](/getting-started/repository-map) explains where the CLI,
-  runtime, config, store, and controller code live.
-## Documentation Types
+In practice: you describe a feature once and come back to a finished branch. The
+factory decomposes the work, implements the pieces in parallel across agents, reviews
+the result, gap-checks it against the plan, and fills what's missing. The review and
+gap-check are how you get *production quality*; the parallel fan-out is the *machine
+speed*.
 
-- [Concepts](/concepts/architecture-overview): the architecture overview and the
-  mental model that ties the system together.
-- [Tutorials](/tutorials/index): end-to-end walkthroughs that teach the user
-  model.
-- [Guides](/guides/index): practical docs for specific workflows like packs
-  and Kubernetes.
-- [Reference](/reference/index): command, config, formula, and provider
-  lookup docs.
+The work is durable, so a crash never loses progress. And because no role is
+hardwired into the binary, the same engine runs your local configuration, the one you
+share with your team, or the ones shared by the community.
 
-For contributor-facing material (architecture, design docs, and archived
-notes), see the `engdocs/` directory in the repository.
+That orchestration is built from six primitives:
 
-## Repository Context
+![The six primitives and how they relate: Packs declare agents, formulas, and orders; a Formula operates over a convoy of Beads, fanning work out to Agents that execute in a Rig; Events are fired as it happens so humans and agents can observe.](diagrams/excalidraw-rendered/primitives.svg)
 
-Gas City is the open-source SDK extracted from Gas Town. The public docs now
-separate guidance for running Gas City from historical planning material so new
-readers can get oriented without reading every audit and roadmap first.
+- **Agent** — *who* does the work
+- **Bead** — *what* the work is: the tracked unit that survives a crash
+- **Formula** — *how* a job gets done: the method the orchestrator runs across many agents
+- **Rig** — *where* it happens: a project registered with the city
+- **Pack** — what *configures* the system; the City is your local pack, and it imports shared ones
+- **Event** — fired as things happen, so you and other agents can *observe* the fleet
+
+[How Gas City Works](/getting-started/how-gas-city-works) walks through all six and how they fit together.
+
+## Get started
+
+- [Installation](/getting-started/installation) — the local toolchain and the shortest path to a working `gc` binary.
+- [Quickstart](/getting-started/quickstart) — boot the smallest city you can run locally.
+- [How Gas City Works](/getting-started/how-gas-city-works) — the mental model: the six primitives and how work flows through them.
+- [Coming from Gas Town](/getting-started/coming-from-gastown) — map Gas Town's roles, commands, plugins, and habits onto Gas City's primitives.
+- [Troubleshooting setup](/getting-started/troubleshooting) — fixes for the snags you hit getting a city running.
+
+## Find your way around
+
+- [Tutorials](/tutorials/index) — the guided, end-to-end path that builds one city up, command by command.
+- [Guides](/guides/index) — go deeper on a subsystem or accomplish a specific workflow.
+- [Troubleshooting](/troubleshooting/index) — diagnosis walkthroughs and operational runbooks for a running city.
+- [Reference](/reference/index) — exact commands, config fields, formula contracts, and provider details.
+
+Contributor-facing material — architecture, design notes, and the archive — lives in the `engdocs/` directory in the repository.

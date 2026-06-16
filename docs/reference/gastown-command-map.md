@@ -9,7 +9,7 @@ Two rules help a lot to find the closest home (`gc` or `bd`) for a command equiv
 - the closest home is `gc` if the `gt` command is about _orchestration, sessions, routing, hooks, or runtime behavior_ 
 - the closest home is `bd` if the `gt` command is really about _bead CRUD or bead content_.
 
-See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https://gastownhall.github.io/beads/cli-reference) for the full CLI surfaces.
+See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https://gastownhall.github.io/beads/cli-reference) for the full CLI surfaces, and [The six primitives](/getting-started/how-gas-city-works) for the canonical model these commands map onto.
 
 ## Workspace And Runtime
 
@@ -43,7 +43,7 @@ See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https:
 |---|---|---|
 | `gt git-init` | `git init` plus `gc rig add` | Git repo setup and city registration are separate concerns in Gas City. |
 | `gt hooks` | config-driven hook install plus `gc doctor` | Gas City does not have Town's hook-management namespace; hook install is primarily config and lifecycle driven. |
-| `gt plugin` | `gc order` | Plugin-like controller automation usually becomes an exec order or formula order. |
+| `gt plugin` | `gc order` | Plugin-like orchestrator automation usually becomes an exec order or formula order. |
 | `gt issue` | no direct equivalent | Usually replaced by bead metadata or session context, depending intent. |
 | `gt account` | no direct equivalent | Provider account management is outside Gas City's core CLI. |
 | `gt shell` | no direct equivalent | Gas City does not ship a Town-style shell integration namespace. |
@@ -60,10 +60,10 @@ See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https:
 | `gt ready` | `bd ready` | This stays bead-centric more than city-centric. |
 | `gt done` | no single direct equivalent | In Gas City this is usually a bead close, metadata transition, convoy action, or formula step. |
 | `gt unsling` | no direct equivalent | Usually replaced by bead edits plus re-routing with `bd` and `gc sling`. |
-| `gt formula` | `gc formula list/show/cook/version-check`, `gc sling --formula`, `gc order` | `gc formula` manages formulas (list, show, cook, version-check — `version-check` detects whether the on-disk formula file changed after a bead was cooked from it). `gc sling --formula` dispatches a v1 formula as a wisp and a v2 formula as a workflow. |
-| `gt mol` | `gc formula cook`, `bd mol ...` | `gc formula cook` creates molecules (v1) or workflows (v2); `bd` handles bead-level operations. |
-| `gt mq` | no direct generic `gc` command | Gastown-style merge queue behavior lives in the pack and formulas, not a generic SDK namespace. |
-| `gt gate` | `gc wait`; formula `[steps.gate]` | Durable waits are the closest SDK concept. Formulas also carry gates natively — a step-level `[steps.gate]` (types such as `gh:run`, `gh:pr`, `timer`, `human`, `mail`) or `[[compose.gate]]` rules — the closer match when migrating molecule workflows. See [Steps](/reference/specs/formula-spec-v2#13-steps). |
+| `gt formula` | `gc formula list/show/cook/version-check`, `gc sling --formula`, `gc order` | `gc formula` manages formulas (list, show, cook, version-check — `version-check` detects whether the on-disk formula file changed after a bead was cooked from it). `gc sling --formula` dispatches a v2 formula as a workflow (a v1 formula materializes as a wisp). |
+| `gt mol` | `gc formula cook`, `bd mol ...` | `gc formula cook` creates workflows (v2) (or molecules under the v1 materialization); `bd` handles bead-level operations. |
+| `gt mq` | no direct generic `gc` command | Gastown-style merge queue behavior lives in the pack and formulas, not a generic platform namespace. |
+| `gt gate` | `gc wait`; formula `[steps.gate]` | Durable waits are the closest platform concept. Formulas also carry gates natively — a step-level `[steps.gate]` (types such as `gh:run`, `gh:pr`, `timer`, `human`, `mail`) or `[[compose.gate]]` rules — the closer match when migrating molecule workflows. See [Steps](/reference/specs/formula-spec-v2#13-steps). |
 | `gt park` | `gc wait` | Same underlying idea: stop and resume around a dependency or gate. |
 | `gt resume` | `gc wait ready`, `gc session wake`, `gc mail check` | Depends on whether the action is a parked wait, sleeping session, or handoff/mail resume. |
 | `gt synthesis` | partial: `gc converge`, formulas, convoys | No one-command parity. |
@@ -76,15 +76,15 @@ See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https:
 |---|---|---|
 | `gt agents` | `gc session` plus `gc status` | Session management is generic in Gas City; not a Town-specific agent switcher. |
 | `gt session` | `gc session` | Same broad idea, but not polecat-specific. |
-| `gt crew` | `city.toml` agents plus `gc session` | Crew is a pack convention, not a first-class SDK command family. |
-| `gt polecat` | Gastown pack `polecat` agent plus `gc status` / `gc session` / `gc sling` | No dedicated top-level SDK namespace. |
-| `gt witness` | Gastown pack `witness` agent plus `gc session` / `gc status` | No dedicated top-level SDK namespace. |
-| `gt refinery` | Gastown pack `refinery` agent plus `gc session` / `gc status` | No dedicated top-level SDK namespace. |
+| `gt crew` | `city.toml` agents plus `gc session` | Crew is a pack convention, not a first-class platform command family. |
+| `gt polecat` | Gastown pack `polecat` agent plus `gc status` / `gc session` / `gc sling` | No dedicated top-level platform namespace. |
+| `gt witness` | Gastown pack `witness` agent plus `gc session` / `gc status` | No dedicated top-level platform namespace. |
+| `gt refinery` | Gastown pack `refinery` agent plus `gc session` / `gc status` | No dedicated top-level platform namespace. |
 | `gt mayor` | Gastown pack `mayor` agent plus `gc session attach mayor` / `gc status` | Managed as a configured agent, not a baked-in command family. |
-| `gt deacon` | Gastown pack `deacon` agent plus `gc session`, `gc status`, controller behavior | In Gas City, much of what deacon does lives in the controller/supervisor. |
+| `gt deacon` | Gastown pack `deacon` agent plus `gc session`, `gc status`, orchestrator behavior | In Gas City, much of what deacon does lives in the orchestrator/supervisor. |
 | `gt boot` | Gastown pack `boot` agent | Same pattern as other role agents. |
 | `gt dog` | usually `gc order`, sometimes a pack-owned `dog` pool | Dog-like helpers are exec orders shipped by the builtin core pack, or a pack-owned dog pool (e.g. the Gastown pack's `dog`). |
-| `gt role` | `gc config explain`, `gc session list`, prompt/config inspection | Role is not a first-class SDK concept. |
+| `gt role` | `gc config explain`, `gc session list`, prompt/config inspection | Role is not a first-class platform concept. |
 | `gt callbacks` | no direct equivalent | Callback behavior is folded into runtime, hooks, waits, and orders. |
 | `gt cycle` | no direct generic command | Closest equivalents are tmux bindings or pack-specific session UX. |
 | `gt namepool` | config-only today | Gas City supports namepool files in config, but does not expose a top-level `gc namepool` command. |
@@ -98,7 +98,7 @@ See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https:
 | `gt nudge` | `gc session nudge` | Use `gc session nudge <target> "msg"` to send messages to a live session. The `gc nudge` subcommand only exposes deferred-delivery controls (`drain`, `status`, `poll`); it does not accept a positional `<target> "msg"` form. |
 | `gt peek` | `gc session peek` | Near-direct mapping. |
 | `gt broadcast` | no single direct equivalent | Usually modeled as `gc mail send` to a group or multiple explicit targets. |
-| `gt notify` | no direct equivalent | Notification policy is not a top-level SDK command family. |
+| `gt notify` | no direct equivalent | Notification policy is not a top-level platform command family. |
 | `gt dnd` | no direct equivalent | Closest behavior usually lives in mail or local workflow policy. |
 | `gt escalate` | no direct equivalent | Model escalations with beads, mail, orders, or pack-specific workflow. |
 | `gt whoami` | no direct equivalent | Identity is explicit in config, session metadata, and `GC_*` env rather than a dedicated CLI. |
@@ -131,4 +131,4 @@ If you are unsure where a `gt` command went, ask this in order:
 
 1. Is it now just `gc` with nearly the same name?
 2. Is it really a bead operation that should stay in `bd`?
-3. Is it no longer a special command because Gas City moved that behavior into config, orders, waits, formulas, or controller logic?
+3. Is it no longer a special command because Gas City moved that behavior into config, orders, waits, formulas, or orchestrator logic?

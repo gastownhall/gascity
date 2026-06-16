@@ -14,9 +14,13 @@ Start with the overview, then dive into the subsystem you need.
 ### Foundation
 
 1. **[Glossary](./glossary.md)** — authoritative definitions of all terms
-2. **[Nine Concepts Overview](./nine-concepts.md)** — the 5 primitives + 4
-   derived mechanisms that compose Gas City
-3. **[Architecture Invariants](./invariants.md)** — the normative
+2. **[Primitives](../../docs/getting-started/how-gas-city-works.md)** — the six-primitive user-facing
+   model (Agent, Bead, Formula, Rig, Pack, Event); start here for the
+   conceptual overview
+3. **[Code-layering View](./nine-concepts.md)** — the deeper
+   implementation-layering reference: how the Go code substrate maps onto
+   the six primitives
+4. **[Architecture Invariants](./invariants.md)** — the normative
    cross-cutting rules: object model at the center, CLI and API as
    projections over it, typed wire end-to-end
 

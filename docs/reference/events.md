@@ -1,5 +1,5 @@
 ---
-title: gc events Formats
+title: gc events Output Formats
 description: Exact output formats emitted by `gc events`.
 ---
 

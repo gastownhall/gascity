@@ -4,54 +4,47 @@ sidebarTitle: 04 - Communication
 description: How agents coordinate through mail, slung work, and hooks — without direct connections.
 ---
 
-In [Tutorial 03](/tutorials/03-sessions), you saw how to peek at agent output in
-polecat sessions, attach to crew sessions, and nudge them with messages. All of
-that was you talking to agents. This tutorial covers how agents talk to _each
-other_.
+Earlier tutorials had _you_ talking to agents — peeking at output, nudging
+sessions. This one covers how agents talk to _each other_. To follow along you
+need `my-city` running with `my-project` rigged and agents for `mayor` and
+`reviewer` (the setup from [Tutorial 03](/tutorials/03-sessions)).
 
-We'll pick up where Tutorial 03 left off. You should have `my-city` running with
-`my-project` rigged, and agents for `mayor` and `reviewer`.
+## Agents coordinate only through the store
 
-## Agents talking to each other
+Agents never reference each other. No function calls, no shared memory, no
+handles — each session is its own process with its own terminal, history, and
+provider. They coordinate through two indirect channels: **mail** (messages) and
+**slung work** — `gc sling` (delegated tasks). In both, the sender names a
+destination and Gas City routes it; the sender never holds a reference to who
+receives it.
 
-Up to this point, you've been managing sessions one at a time — creating them on
-demand for polecats, keeping them alive as crew with named sessions. But a city
-isn't a collection of independent agents working in isolation. It's a system of
-agents that can talk to each other.
+![Three agents — mayor, reviewer, worker — drawn as disconnected boxes, each connected only to a central bead store. No arrow links two agents directly; mail is a bead and an inbox is a query for it.](/diagrams/excalidraw-rendered/coordination-through-store.svg)
 
-The agents in your city don't call each other directly. There are no function
-calls between them, no shared memory, no direct references. Each session is its
-own process with its own terminal, its own conversation history, and its own
-provider. The mayor doesn't have a handle to a polecat or vice versa.
+That indirection is the point. The mayor slings work to `my-project/reviewer`
+without knowing whether one reviewer session exists or five, whether it runs on
+Claude or Codex, or whether it's active or idle. Work and messages persist in the
+store; sessions come and go independently — they can run, idle, restart, and
+scale without breaking anyone's reference, because there are none.
 
-However, they can still coordinate with each other via **mail** and **slung
-work**. Both are indirect — the sender doesn't need to know which session
-receives the message or which instance picks up the task. Gas City handles the
-routing.
+## Mail is a persistent, tracked message
 
-This indirection is deliberate. Because agents don't hold references to each
-other, they can run, go idle, restart, and scale independently. The mayor can
-dispatch work to `my-project/reviewer` without knowing whether there's one
-reviewer session or five for that rig, whether it's on Claude or Codex, or
-whether it's currently active or idle. The work and the messages persist in the
-store. The sessions come and go.
+Mail creates a message the recipient picks up on its next turn. It contrasts
+with nudge from Tutorial 03:
 
-Mail is the primary way agents talk to each other. Slung work — `gc sling` — is
-how they delegate tasks. Let's look at both.
-
-## Mail
-
-Mail creates a persistent, tracked message that the recipient picks up on its
-next turn. Unlike nudge (which is ephemeral terminal input), mail survives
-crashes, has a subject line, and stays unread until the agent processes it.
-Mail itself does not wake the recipient.
+| | Mail | Nudge |
+| --- | --- | --- |
+| Carrier | A bead in the store | Terminal input |
+| Survives a crash | Yes | No |
+| Subject line | Yes | No |
+| Wakes the recipient | No | Yes |
+| State | Stays unread until processed | Fire-and-forget |
 
 Send mail to the mayor:
 
 ```shell
 ~/my-city
 $ gc mail send mayor -s "Review needed" -m "Please look at the auth module changes in my-project"
-Sent message mc-wisp-8t8 to mayor
+Sent message mc-msg-8t8 to mayor
 ```
 
 `gc mail send` takes the recipient as a positional argument and the subject/body
@@ -70,8 +63,8 @@ See the inbox:
 ```shell
 ~/my-city
 $ gc mail inbox mayor
-ID           FROM   SUBJECT        BODY
-mc-wisp-8t8  human  Review needed  Please look at the auth module changes in my-project
+ID          FROM   SUBJECT        BODY
+mc-msg-8t8  human  Review needed  Please look at the auth module changes in my-project
 ```
 
 `gc mail inbox` lists only unread messages, so there's no STATE column —
@@ -89,20 +82,16 @@ Nudged mayor
 (As in Tutorial 03, you may see `Queued nudge for mayor` instead — both
 confirm the nudge is on its way.)
 
-The mayor doesn't have to manually check its inbox. Gas City installs provider
-hooks that surface unread mail automatically — on each turn, a hook runs `gc
-mail check --inject`, and if there's unread mail, it appears as a system
-reminder in the agent's context. The agent sees its mail without doing anything.
+The nudge doesn't deliver the mail — it only starts a new turn. The delivery
+happens via a hook: on each turn, `gc mail check --inject` runs and any unread
+mail appears as a system reminder in the agent's context. So the mayor never
+checks its inbox manually; the hook surfaces mail, and the nudge tells it to act
+on what it finds.
 
-That nudge does not deliver the mail by itself — it just wakes the mayor so a
-new turn starts. When the mayor wakes up or starts a new turn, hooks deliver
-any pending mail, and the nudge tells it to act on what it finds.
+## Slung work delegates a task without naming a session
 
-## Slinging beads to coordinate agents
-
-Here's what coordination looks like in practice. Once the mayor takes a turn, it
-reads the mail message you sent. It decides the reviewer should handle it, so
-it slings the work:
+Once the mayor takes a turn, it reads your mail, decides the reviewer should
+handle it, and slings the work:
 
 ```shell
 ~/my-city
@@ -116,36 +105,30 @@ $ gc session peek mayor --lines 6
 session, so you'll see whatever the agent has rendered, not Gas City–formatted
 lines.)
 
-The mayor didn't talk to the reviewer directly. It slung a bead to the
-`my-project/reviewer` agent template, and Gas City figured out which session
-picks it up. If the reviewer was asleep, Gas City woke it. If there were
-multiple reviewer sessions for that rig, Gas City routed the work to an
-available one. The mayor doesn't know or care about any of that — it describes
-the work and slings it.
+The mayor slung a bead to the rig-scoped `my-project/reviewer` agent and Gas
+City resolved the rest: it woke the reviewer if asleep, or routed to an
+available session if several existed. The mayor describes the work and slings
+it; routing is not its problem.
 
-This is the pattern that scales. A human sends mail to the mayor. The mayor
-reads it, plans the work, and slings tasks to agents. Those agents do the work
-and close their beads. Everyone communicates through the store, not through
-direct connections. Sessions come and go; the work persists.
+This is the pattern that scales: a human mails the mayor, the mayor plans and
+slings tasks to agents, agents do the work and close their beads — every hop
+through the store.
 
-## Hooks
+## Hooks wire a bare provider into Gas City
 
-Hooks are what make all of this work behind the scenes. Without hooks, a session
-is just a bare provider process — Claude running in a terminal, with no
-awareness of Gas City. Hooks wire the provider's event system into Gas City so
-agents can receive mail, pick up slung work, and drain queued nudges
-automatically.
+Without hooks, a session is just a provider process — Claude in a terminal, with
+no awareness of Gas City. Hooks wire the provider's event system in so agents
+receive mail, pick up slung work, and drain queued nudges automatically.
 
-The tutorial template wires hooks up automatically. When you ran `gc init`,
-it wrote a managed `.gc/settings.json` that your provider (Claude by default)
-reads on every session start — you don't need any TOML in `pack.toml` or
-`city.toml` to get the default behavior, and `grep install_agent_hooks` in a
-fresh city will turn up nothing.
+`gc init` wires Claude's hooks for you: it writes a managed `.gc/settings.json`
+that Claude reads on every session start. No TOML in `pack.toml` or `city.toml`
+is needed for the default behavior — `grep install_agent_hooks` in a fresh city
+turns up nothing.
 
-Claude is the only provider whose hooks are wired automatically. If an agent
-runs on a different provider — suppose you moved the mayor to Codex — list
-that provider in `install_agent_hooks` on the agent, and Gas City installs
-its hook files into the agent's working directory:
+Claude is the only provider wired automatically. To run an agent on a different
+provider — say you moved the mayor to Codex — list that provider in
+`install_agent_hooks` on the agent, and Gas City installs its hook files into the
+agent's working directory:
 
 ```toml
 # agents/mayor/agent.toml — install hook files for this agent's provider
@@ -158,21 +141,20 @@ default, but that spelling is deprecated — config load warns and points you
 at the per-agent form — and an agent-level list replaces the workspace one
 rather than adding to it.)
 
-Either way, once a session starts, Gas City installs the hook settings that
-the provider reads. For Claude, this is the `.gc/settings.json` file, which
-fires Gas City commands at key moments — session start, before each turn, and
-right before the provider compacts its context. Those commands surface
-pending work, deliver mail, drain queued nudges, and save a handoff before a
-context cycle.
-
-Without hooks, you'd have to manually tell each agent to run `gc mail check` and
-`gc prime`. With hooks, it happens automatically.
+Either way, once a session starts Gas City installs the hook settings the
+provider reads. For Claude that's `.gc/settings.json`, which fires Gas City
+commands at key moments — session start, before each turn, and right before the
+provider compacts its context. Those commands surface pending work, deliver
+mail, drain queued nudges, and save a handoff before a context cycle. Without
+them you'd run `gc mail check` and `gc prime` by hand on every agent.
 
 ## What's next
 
 You've seen the two coordination mechanisms — mail for messages and slung beads
 for work — and the hook infrastructure that wires it all together. From here:
 
+- **[The six primitives](/getting-started/how-gas-city-works)** — the canonical model mail,
+  slung work, and hooks build on
 - **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
   done: steps, dependencies, and variables
 - **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all

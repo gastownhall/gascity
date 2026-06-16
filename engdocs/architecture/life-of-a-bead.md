@@ -140,16 +140,16 @@ the bd CLI filters by label server-side.
 running the work query and emits no output. Routed discovery belongs in the
 session startup claim protocol or an explicit plain `gc hook` invocation.
 
-### Ready() and GUPP
+### Ready() and the run-what-you-find rule
 
 `Store.Ready()` returns all beads with status `"open"` -- the fundamental
 discovery primitive. For BdStore: `bd ready --json --limit=0`. For
 exec.Store: the script receives `ready` as its operation argument.
 
-Discovery feeds into GUPP: "If you find work on your hook, YOU RUN IT."
-No confirmation, no waiting. This principle lives in prompt templates, not
-Go code. Gas City ensures the work is visible; the prompt tells the agent
-what to do.
+Discovery feeds into the run-what-you-find rule: "If you find work on your
+hook, YOU RUN IT." No confirmation, no waiting. This principle lives in
+prompt templates, not Go code. Gas City ensures the work is visible; the
+prompt tells the agent what to do.
 
 ## Phase 3: Claiming
 
@@ -203,9 +203,9 @@ convoy -- no auto-convoy is created.
 ## Phase 4: Execution
 
 The bead is now `in_progress` with an assignee. The agent works on it.
-Gas City's infrastructure is mostly hands-off during this phase -- ZFC
-(Zero Framework Cognition) means Go code does not make decisions about
-work execution.
+Gas City's infrastructure is mostly hands-off during this phase -- the
+framework moves work but does not reason about it, so Go code does not
+make decisions about work execution.
 
 ### Status updates and metadata
 
@@ -227,10 +227,10 @@ operations.
 While the agent works, the controller's bead-driven session reconciler
 (`reconcileSessionBeads()` in `cmd/gc/session_reconciler.go`) monitors
 session health.
-If an agent crashes mid-execution, the bead persists in its current state
-(NDI -- Nondeterministic Idempotence). When the agent restarts, it
-rediscovers the in-progress bead through its hook and resumes. The bead
-is the durable record; sessions are ephemeral.
+If an agent crashes mid-execution, the bead persists in its current state,
+so the system converges because the work itself survives. When the agent
+restarts, it rediscovers the in-progress bead through its hook and resumes.
+The bead is the durable record; sessions are ephemeral.
 
 ## Phase 5: Completion
 
@@ -397,4 +397,5 @@ also normalized to open.
 - [Messaging architecture](messaging.md) -- how mail composes on top of
   beads (messages are beads with type "message")
 - [Glossary](glossary.md) -- authoritative definitions of bead, molecule,
-  convoy, wisp, GUPP, NDI, and other terms used in this document
+  convoy, wisp, the run-what-you-find rule, convergence through persistent
+  work, and other terms used in this document

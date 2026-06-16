@@ -18,7 +18,7 @@ pages.
 | [CLI Reference](/reference/cli) | Every `gc` command, flag, and example |
 | [Gas City Configuration](/reference/config) | The `city.toml` schema |
 | [Supervisor REST API](/reference/api) | The typed HTTP + SSE control plane |
-| [gc events Formats](/reference/events) | Exact output formats emitted by `gc events` |
+| [gc events Output Formats](/reference/events) | Exact output formats emitted by `gc events` |
 | [Schemas](/reference/schema) | Downloadable machine-readable schema artifacts (OpenAPI, events, city/pack schemas) |
 
 ## Hand-Maintained References

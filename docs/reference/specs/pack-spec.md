@@ -357,7 +357,7 @@ The normative authoring rules are specified here.
 | `dir` | string | Identity prefix. Reusable packs should usually omit this. |
 | `work_dir` | string | Session working directory without changing identity. |
 | `scope` | string | `city`, `rig`, or omitted. |
-| `suspended` | bool | Prevents controller startup for the agent. |
+| `suspended` | bool | Prevents orchestrator startup for the agent. |
 | `pre_start` | array of string | Commands before session creation. |
 | `prompt_template` | string | Prompt template path. Relative paths resolve against the pack directory. |
 | `nudge` | string | Startup nudge text. |
@@ -377,7 +377,7 @@ The normative authoring rules are specified here.
 | `min_active_sessions` | integer | Minimum active sessions for this agent. |
 | `scale_check` | string | Command returning desired session count. |
 | `drain_timeout` | string | Go duration string for scale-down drain. |
-| `on_boot` | string | Command run at controller startup. |
+| `on_boot` | string | Command run at orchestrator startup. |
 | `on_death` | string | Command run when a session dies unexpectedly. |
 | `namepool` | string | Path to newline-separated display aliases. |
 | `work_query` | string | Work discovery command. |
