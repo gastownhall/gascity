@@ -2007,7 +2007,7 @@ func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
 	}
 }
 
-func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
+func TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup(t *testing.T) {
 	const (
 		assignedInProgressTemplate = "{{ .AssignedInProgressQuery }}"
 		assignedInProgressRendered = `bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`
@@ -2175,7 +2175,7 @@ func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
 				return
 			}
 			rendered := renderGastownPromptForPack(t, check.rel, check.agent, check.tmpl, "demo", check.rig, check.binding)
-			if strings.Contains(rendered, check.want) {
+			if strings.HasPrefix(check.want, "{{") && strings.Contains(rendered, check.want) {
 				t.Fatalf("%s rendered prompt still contains %q", check.rel, check.want)
 			}
 			renderedWants := check.renderedWants

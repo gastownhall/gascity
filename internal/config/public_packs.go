@@ -16,7 +16,7 @@ const (
 
 	// PublicGascityPackVersion pins fresh init output to the registry
 	// release content commit from gastownhall/gascity-packs main
-	// (gascity 0.1.4).
+	// (gascity 0.1.6).
 	PublicGascityPackVersion = "sha:3b3b89f2011e06d84459aa7bea1552382f13930a"
 
 	// BundledPackImportVersion pins the [imports.core]/[imports.bd] entries
