@@ -175,6 +175,13 @@
 #   GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS
 #     (default: 300) — wall-clock bound for each dolt backup sync call.
 #                      Invalid (non-numeric or non-positive) values exit 2.
+#   GC_DOLT_COMPACT_MIN_FREE_BYTES
+#     (default: 5368709120) — minimum free bytes required on the
+#                             DOLT_DATA_DIR filesystem before compaction
+#                             runs. When free bytes fall below this floor,
+#                             compact logs a CRITICAL line and exits 0
+#                             (skip, not fail). Set to 0 to disable the
+#                             preflight check entirely.
 set -eu
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
@@ -3777,6 +3784,39 @@ backup_sync_database() {
     return 1
   fi
 }
+
+disk_preflight() {
+  local min_free="${GC_DOLT_COMPACT_MIN_FREE_BYTES:-5368709120}"
+  case "$min_free" in
+    0)
+      return 0
+      ;;
+    ''|*[!0-9]*)
+      printf 'compact: GC_DOLT_COMPACT_MIN_FREE_BYTES=%s is invalid — must be a non-negative integer\n' \
+        "$min_free" >&2
+      exit 2
+      ;;
+  esac
+
+  local df_out available_kb available_bytes
+  if ! df_out=$(df -Pk "$DOLT_DATA_DIR" 2>/dev/null); then
+    printf 'compact: disk pre-flight probe failed: %s\n' "$DOLT_DATA_DIR" >&2
+    return 0
+  fi
+  available_kb=$(printf '%s\n' "$df_out" | awk 'NR==2{print $4}')
+  case "${available_kb:-}" in
+    ''|*[!0-9]*)
+      printf 'compact: disk pre-flight probe failed: %s\n' "$DOLT_DATA_DIR" >&2
+      return 0
+      ;;
+  esac
+  available_bytes=$(( available_kb * 1024 ))
+  if [ "$available_bytes" -lt "$min_free" ]; then
+    printf 'compact: disk CRITICAL: free_bytes=%d floor=%d DOLT_DATA_DIR=%s\n' \
+      "$available_bytes" "$min_free" "$DOLT_DATA_DIR" >&2
+    exit 0
+  fi
+}
 acquire_lock() {
   if command -v flock >/dev/null 2>&1; then
     old_umask=$(umask)
@@ -3841,6 +3881,8 @@ main() {
       "$host" "$GC_DOLT_PORT"
     exit 0
   fi
+
+  disk_preflight
 
   compact_backup_remote="${GC_DOLT_COMPACT_BACKUP_REMOTE:-}"
   if [ -n "$compact_backup_remote" ]; then
