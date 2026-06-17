@@ -192,8 +192,13 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc hook --claim: claiming %s: %v\n", candidate.ID, err) //nolint:errcheck
-			return hookClaimResult{terminal: true, code: 1}
+			// A single unclaimable candidate (e.g. a routed id whose bead was
+			// deleted, or one that no longer resolves in the store this context
+			// can reach) must not wedge the whole hook. Record it and try the
+			// next candidate; if none claim, we fall through to drain and retry
+			// next tick (NDI) instead of halting the agent.
+			fmt.Fprintf(stderr, "gc hook --claim: skipping %s: %v\n", candidate.ID, err) //nolint:errcheck
+			continue
 		}
 		if !ok {
 			reportHookClaimRejected(candidate, claimed, opts, ops)
