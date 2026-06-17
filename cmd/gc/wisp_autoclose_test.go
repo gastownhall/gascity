@@ -168,6 +168,84 @@ func TestAttachedMoleculeIsParkedPreservesOnWalkError(t *testing.T) {
 	}
 }
 
+// walkFailOnceStore fails the subtree-walk ListByMetadata lookup for one root
+// on its FIRST call, then succeeds. It models a *transient* store read failure
+// (the fail-safe's documented trigger), which a persistent walkFailingStore
+// cannot: with a persistent failure the close path's own ListSubtree walk also
+// errors, so the subtree is preserved whether or not the fail-safe fires — the
+// regression hides. Failing exactly once makes the owner-close reap's parked-
+// check walk error while a later close-path walk would succeed, so an
+// end-to-end test can tell the fail-safe preserve apart from a no-op close.
+type walkFailOnceStore struct {
+	beads.Store
+	failID string
+	failed bool
+}
+
+func (s *walkFailOnceStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if !s.failed && filters[beadmeta.RootBeadIDMetadataKey] == s.failID {
+		s.failed = true
+		return nil, fmt.Errorf("subtree walk transiently unavailable for %s", s.failID)
+	}
+	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+func TestWispAutoclosePreservesParkedMoleculeSubtreeOnWalkError(t *testing.T) {
+	// End-to-end fail-safe arm of the #3474 fix, driven through the full
+	// on_close hook (doWispAutocloseWith) rather than the predicate alone.
+	// A molecule parked at an open human-gate plus the finalize step it blocks
+	// is attached to a dispatch/loop bead; when that owner bead closes and the
+	// parked-check subtree walk errors transiently, the whole parked subtree
+	// must be PRESERVED, never force-closed.
+	//
+	// The walk fails exactly once (walkFailOnceStore): the parked-check walk
+	// errors, but the reap's own close-path walk would succeed. So if the
+	// fail-safe regressed to `!terminal && descendants > 0`, the parked-check
+	// would misclassify the (false, 0) walk-error result as not-parked and the
+	// now-succeeding close walk would force-close gc-2..gc-4 — destroying the
+	// gate-close -> finalize handoff #3474 protects. With the fail-safe intact
+	// the close path is never reached and the subtree survives. This is the
+	// end-to-end coverage TestAttachedMoleculeIsParkedPreservesOnWalkError pins
+	// only at the predicate.
+	base := beads.NewMemStore()
+	_, _ = base.Create(beads.Bead{
+		Title:    "dispatch/loop bead",
+		Metadata: map[string]string{"molecule_id": "gc-2"},
+	}) // gc-1
+	_, _ = base.Create(beads.Bead{Title: "molecule root", Type: "molecule"}) // gc-2 (open, parked)
+	_, _ = base.Create(beads.Bead{
+		Title:    "human-gate",
+		Type:     "task",
+		ParentID: "gc-2",
+		Metadata: map[string]string{"gc.step_ref": "mol-adopt-pr.human-gate"},
+	}) // gc-3 (open, parked gate)
+	_, _ = base.Create(beads.Bead{
+		Title:    "finalize",
+		Type:     "task",
+		ParentID: "gc-2",
+		Metadata: map[string]string{"gc.step_ref": "mol-adopt-pr.finalize"},
+	}) // gc-4 (open, blocked by the gate)
+	_ = base.Close("gc-1")
+
+	store := &walkFailOnceStore{Store: base, failID: "gc-2"}
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, "gc-1", &stdout)
+
+	if stdout.String() != "" {
+		t.Fatalf("walk-error fail-safe must not auto-close parked molecule, got %q", stdout.String())
+	}
+	for _, id := range []string{"gc-2", "gc-3", "gc-4"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Status != "open" {
+			t.Fatalf("%s status = %q, want open (parked subtree preserved under walk error)", id, b.Status)
+		}
+	}
+}
+
 func TestWispAutocloseChecksDescendantsWhenAttachedRootAlreadyClosed(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{
