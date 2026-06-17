@@ -55,6 +55,13 @@ type DesiredStateResult struct {
 	// direct assignee demand (Assignee == identity). The reconciler merges this
 	// into poolDesired so that on-demand named sessions remain config-eligible.
 	NamedSessionDemand map[string]bool
+	// ReadyAssignedIDs is the set of AssignedWorkBeads IDs that carry real
+	// wake-demand readiness: in-progress work, assigned molecule roots, and
+	// store-Ready()/deps-gated open work. Beads admitted only by the
+	// open-routed orphan-release pass are absent, so the awake bridge does not
+	// treat a blocked open bead as live wake demand. The reconciler threads
+	// this into buildAwakeInputFromReconciler for the AwakeWorkBead.Ready flag.
+	ReadyAssignedIDs map[string]bool
 	// StoreQueryPartial is true when one or more bead store work queries
 	// failed. When set, the reconciler must NOT drain sessions based on the
 	// incomplete desired state — a transient failure would cause running
@@ -675,6 +682,7 @@ func buildDesiredStateWithSessionBeads(
 	var assignedWorkBeads []beads.Bead
 	var assignedWorkStores []beads.Store
 	var assignedWorkStoreRefs []string
+	var readyAssignedIDs map[string]bool
 	var storePartial bool
 	var scaleCheckCounts map[string]int
 	var scaleCheckDemandByTemplate map[string]scaleCheckDemand
@@ -683,7 +691,7 @@ func buildDesiredStateWithSessionBeads(
 	var scaleCheckPartialTemplates map[string]bool
 	var namedDefaultDemand map[string]bool
 	if store != nil {
-		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads)
+		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssignedIDs, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads)
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
@@ -848,7 +856,18 @@ func buildDesiredStateWithSessionBeads(
 	// metadata is consumed by the agent-side gc hook path.
 	for identity, spec := range namedSpecs {
 		for i, wb := range assignedWorkBeads {
-			if wb.Status != "open" && wb.Status != "in_progress" {
+			// in_progress work is always actionable; open work is direct named
+			// demand only when it passed the store's readiness/deps gate. Without
+			// the readiness check, an open assigned bead that entered the snapshot
+			// via the open-routed orphan-release pass (no deps gate) would keep an
+			// on-demand named session awake forever even while blocked.
+			switch wb.Status {
+			case "in_progress":
+			case "open":
+				if !readyAssignedIDs[wb.ID] {
+					continue
+				}
+			default:
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
@@ -926,6 +945,7 @@ func buildDesiredStateWithSessionBeads(
 		AssignedWorkBeads:               assignedWorkBeads,
 		AssignedWorkStores:              assignedWorkStores,
 		AssignedWorkStoreRefs:           assignedWorkStoreRefs,
+		ReadyAssignedIDs:                readyAssignedIDs,
 		NamedSessionDemand:              namedWorkReady,
 		StoreQueryPartial:               storePartial,
 		BeaconTime:                      beaconTime,
@@ -1071,17 +1091,24 @@ func collectAssignedWorkBeads(
 	cfg *config.City,
 	cityStore beads.Store,
 ) ([]beads.Bead, bool) {
-	result, _, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, nil, nil, nil)
+	result, _, _, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, nil, nil, nil)
 	return result, partial
 }
 
+// collectAssignedWorkBeadsWithStores returns the actionable assigned-work
+// snapshot plus index-aligned stores/storeRefs, the set of bead IDs that
+// carry real wake-demand readiness (readyAssignedIDs), and a partial flag.
+// readyAssignedIDs holds only beads admitted by the in-progress pass, the
+// assigned-molecule pass, and the store Ready()/deps pass — never the
+// open-routed orphan-release pass, whose beads have not passed a readiness
+// gate and must not, by status alone, hold a session awake.
 func collectAssignedWorkBeadsWithStores(
 	cfg *config.City,
 	cityStore beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 	sessionBeads *sessionBeadSnapshot,
-) ([]beads.Bead, []beads.Store, []string, bool) {
+) ([]beads.Bead, []beads.Store, []string, map[string]bool, bool) {
 	// Work arm of the reconciler frame: iterate the work-class candidate fan-out
 	// (city + non-suspended rigs). The city store carries the empty store-ref so
 	// the index-aligned workBeads/workStores slices stay per-bead aligned for the
@@ -1095,6 +1122,7 @@ func collectAssignedWorkBeadsWithStores(
 		beads     []beads.Bead
 		stores    []beads.Store
 		storeRefs []string
+		readyIDs  map[string]bool
 		errs      []error
 	}
 	results := make([]storeAssignedWorkResult, len(stores))
@@ -1108,17 +1136,18 @@ func collectAssignedWorkBeadsWithStores(
 			var resultStores []beads.Store
 			var resultStoreRefs []string
 			var errs []error
+			readyIDs := make(map[string]bool)
 			seen := make(map[string]struct{})
 			// In-progress beads with an assignee (active work), plus stranded
 			// unassigned pool work that needs to be reopened. This pass runs
 			// across every store before any ready handoff probes, so already
 			// active work never waits behind unrelated ready scans.
 			if inProgress, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "in_progress"}); err == nil {
-				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, inProgress, seen, source.store, source.ref)
+				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))
 				if beads.IsPartialResult(err) && len(inProgress) > 0 {
-					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, inProgress, seen, source.store, source.ref)
+					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
 				}
 			}
 			// Open pool-routed beads that still carry an assignee. These are
@@ -1132,16 +1161,16 @@ func collectAssignedWorkBeadsWithStores(
 			// openSessionOwnsWork / liveOpenSessionAssignmentExists, so
 			// live-session step beads in the same range are skipped untouched.
 			if openRouted, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"}); err == nil {
-				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
+				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openRouted, seen, source.store, source.ref)
 				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open): %w", err))
 				if beads.IsPartialResult(err) && len(openRouted) > 0 {
-					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
+					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openRouted, seen, source.store, source.ref)
 					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 				}
 			}
-			results[idx] = storeAssignedWorkResult{beads: result, stores: resultStores, storeRefs: resultStoreRefs, errs: errs}
+			results[idx] = storeAssignedWorkResult{beads: result, stores: resultStores, storeRefs: resultStoreRefs, readyIDs: readyIDs, errs: errs}
 		}()
 	}
 	wg.Wait()
@@ -1149,21 +1178,31 @@ func collectAssignedWorkBeadsWithStores(
 	var result []beads.Bead
 	var resultStores []beads.Store
 	var resultStoreRefs []string
+	readyAssignedIDs := make(map[string]bool)
 	var partial bool
 	for _, r := range results {
 		result = append(result, r.beads...)
 		resultStores = append(resultStores, r.stores...)
 		resultStoreRefs = append(resultStoreRefs, r.storeRefs...)
+		for id := range r.readyIDs {
+			readyAssignedIDs[id] = true
+		}
 		for _, err := range r.errs {
 			log.Printf("collectAssignedWorkBeads: %v", err)
 			partial = true
 		}
 	}
-	skipReadyAssignees := assignedWorkAssigneeSet(result)
+	// Skip the Ready handoff probe only for assignees that already have a
+	// GENUINELY-ready captured bead (in-progress, molecule root, or a prior
+	// Ready() match) — never for an assignee whose only captured bead came
+	// from the open-routed orphan-release pass. Those beads carry no readiness
+	// verdict; skipping their assignee here would leave readyAssignedIDs blind
+	// to a real Ready() match and silently treat blocked work as live demand.
+	skipReadyAssignees := readyCapturedAssigneeSet(result, readyAssignedIDs)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
 	assignees := readyAssignedWorkAssignees(cfg, sessionBeads, skipReadyAssignees)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
-		return result, resultStores, resultStoreRefs, partial
+		return result, resultStores, resultStoreRefs, readyAssignedIDs, partial
 	}
 
 	readyResults := make([]storeAssignedWorkResult, len(stores))
@@ -1192,9 +1231,10 @@ func collectAssignedWorkBeadsWithStores(
 			var readyBeads []beads.Bead
 			var readyStores []beads.Store
 			var readyStoreRefs []string
+			readyIDs := make(map[string]bool)
 			seen := make(map[string]struct{})
-			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, ready, seen, source.store, source.ref)
-			readyResults[idx] = storeAssignedWorkResult{beads: readyBeads, stores: readyStores, storeRefs: readyStoreRefs, errs: errs}
+			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, readyIDs, ready, seen, source.store, source.ref)
+			readyResults[idx] = storeAssignedWorkResult{beads: readyBeads, stores: readyStores, storeRefs: readyStoreRefs, readyIDs: readyIDs, errs: errs}
 		}()
 	}
 	wg.Wait()
@@ -1202,12 +1242,15 @@ func collectAssignedWorkBeadsWithStores(
 		result = append(result, r.beads...)
 		resultStores = append(resultStores, r.stores...)
 		resultStoreRefs = append(resultStoreRefs, r.storeRefs...)
+		for id := range r.readyIDs {
+			readyAssignedIDs[id] = true
+		}
 		for _, err := range r.errs {
 			log.Printf("collectAssignedWorkBeads: %v", err)
 			partial = true
 		}
 	}
-	return result, resultStores, resultStoreRefs, partial
+	return result, resultStores, resultStoreRefs, readyAssignedIDs, partial
 }
 
 func assignedWorkReadyLimit(cfg *config.City) int {
@@ -1217,7 +1260,13 @@ func assignedWorkReadyLimit(cfg *config.City) int {
 	return cfg.Daemon.MaxWakesPerTickOrDefault()
 }
 
-func assignedWorkAssigneeSet(work []beads.Bead) map[string]struct{} {
+// readyCapturedAssigneeSet returns the assignees of work beads that have
+// already been captured WITH a readiness verdict (their ID is in readyIDs):
+// in-progress work, assigned molecule roots, and any prior Ready() match.
+// Beads captured only by the open-routed orphan-release pass are excluded, so
+// their assignee is still probed by the Ready handoff pass rather than assumed
+// ready by virtue of having been collected.
+func readyCapturedAssigneeSet(work []beads.Bead, readyIDs map[string]bool) map[string]struct{} {
 	if len(work) == 0 {
 		return nil
 	}
@@ -1228,6 +1277,9 @@ func assignedWorkAssigneeSet(work []beads.Bead) map[string]struct{} {
 			continue
 		}
 		if bead.Status != "open" && bead.Status != "in_progress" {
+			continue
+		}
+		if !readyIDs[bead.ID] {
 			continue
 		}
 		result[assignee] = struct{}{}
@@ -1815,35 +1867,54 @@ func mergeNamedSessionDemand(poolDesired map[string]int, namedDemand map[string]
 	}
 }
 
-func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" && !isRecoverableUnassignedInProgressPoolWork(cfg, b) {
 			continue
 		}
-		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
+		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
+			markReadyAssigned(readyIDs, b)
+		}
 	}
 }
 
-func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" {
 			continue
 		}
-		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
+		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
+			markReadyAssigned(readyIDs, b)
+		}
 	}
 }
 
 // appendOpenAssignedMoleculeWorkUnique includes root-only molecule wisps that
 // are direct assignments. Ready() intentionally hides molecule roots from
 // generic work queues, but an assigned root-only wisp is the executable turn
-// for on-demand named sessions such as the Gas Town refinery patrol.
-func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+// for on-demand named sessions such as the Gas Town refinery patrol — so these
+// beads contribute to readyIDs (their assigned turn is genuinely actionable),
+// unlike the open-routed orphan-release pass.
+func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
 	for _, b := range beadList {
 		if !isOpenAssignedMoleculeWork(b) {
 			continue
 		}
-		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
+		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
+			markReadyAssigned(readyIDs, b)
+		}
 	}
+}
+
+// markReadyAssigned records a bead ID as wake-demand-ready. It is called only
+// by the assigned-work passes that establish real readiness (in-progress,
+// store-Ready()/deps, and assigned molecule roots) — never by the open-routed
+// orphan-release pass, whose beads have not passed any readiness gate.
+func markReadyAssigned(readyIDs map[string]bool, b beads.Bead) {
+	if readyIDs == nil {
+		return
+	}
+	readyIDs[b.ID] = true
 }
 
 func isOpenAssignedMoleculeWork(b beads.Bead) bool {
@@ -1874,7 +1945,11 @@ func appendOpenRoutedWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeR
 	}
 }
 
-func appendWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, b beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+// appendWorkUnique appends b to the aligned dst/stores/storeRefs slices unless
+// it is a session bead or already seen. It reports whether the bead was
+// actually appended, so ready-pass callers can record readiness only for beads
+// this call admitted (and not for beads a prior pass already claimed via seen).
+func appendWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, b beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) bool {
 	// Invariant: dst, stores, and storeRefs are kept index-aligned by this
 	// shared growth path and the shared seen guard.
 	// Session beads are not actionable work — filter them at the source
@@ -1883,10 +1958,10 @@ func appendWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]str
 	// idle nudge filters messages locally since mail nudging is handled
 	// separately by the mail system.
 	if b.Type == sessionBeadType {
-		return
+		return false
 	}
 	if _, ok := seen[b.ID]; ok {
-		return
+		return false
 	}
 	seen[b.ID] = struct{}{}
 	*dst = append(*dst, b)
@@ -1896,6 +1971,7 @@ func appendWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]str
 	if storeRefs != nil {
 		*storeRefs = append(*storeRefs, storeRef)
 	}
+	return true
 }
 
 func controlDispatcherOnlyConfig(cfg *config.City) *config.City {

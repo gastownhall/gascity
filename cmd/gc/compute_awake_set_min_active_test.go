@@ -155,7 +155,7 @@ func TestBuildAwakeInputPropagatesMinActiveSessions(t *testing.T) {
 	input := buildAwakeInputFromReconciler(
 		&config.City{Agents: []config.Agent{{Name: "pl", MinActiveSessions: &minSess}}},
 		"", // cityPath: empty exercises zero suspension state
-		nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		time.Now().UTC(),
 	)
 	var found bool
@@ -197,7 +197,7 @@ func TestMinActive_LegacyBoundTemplateRevivedThroughBridge(t *testing.T) {
 				"template":     "rig/gc.pl",
 			},
 		}},
-		nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil,
 		time.Now().UTC(),
 	)
 	result := ComputeAwakeSet(input)

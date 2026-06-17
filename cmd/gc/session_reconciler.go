@@ -819,10 +819,12 @@ func reconcileSessionBeads(
 	startupTimeout time.Duration,
 	driftDrainTimeout time.Duration,
 	stdout, stderr io.Writer,
+	startOptions ...startExecutionOption,
 ) int {
 	return reconcileSessionBeadsAtPath(
 		ctx, "", sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, nil, readyWaitSet, dt,
 		poolDesired, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
+		startOptions...,
 	)
 }
 
@@ -858,10 +860,12 @@ func reconcileSessionBeadsAtPath(
 	startupTimeout time.Duration,
 	driftDrainTimeout time.Duration,
 	stdout, stderr io.Writer,
+	startOptions ...startExecutionOption,
 ) int {
 	return reconcileSessionBeadsAtPathWithNamedDemand(
 		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
 		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
+		startOptions...,
 	)
 }
 
@@ -891,10 +895,12 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	startupTimeout time.Duration,
 	driftDrainTimeout time.Duration,
 	stdout, stderr io.Writer,
+	startOptions ...startExecutionOption,
 ) int {
 	return reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
 		poolDesired, namedSessionDemand, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
+		startOptions...,
 	)
 }
 
@@ -2406,7 +2412,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	phaseStart = time.Now()
 	awakeInput := buildAwakeInputFromReconciler(
 		cfg, cityPath, ordered, poolDesired, namedSessionDemand, workSet, readyWaitSet,
-		assignedWorkBeads, wakeTargets, sp, clk.Now(),
+		assignedWorkBeads, reconcileOpts.readyAssignedIDs, wakeTargets, sp, clk.Now(),
 	)
 	awakeDecisions := ComputeAwakeSet(awakeInput)
 	wakeEvals := awakeSetToWakeEvals(awakeDecisions, awakeInput.SessionBeads)

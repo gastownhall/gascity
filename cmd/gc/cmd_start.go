@@ -940,6 +940,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
+		withReadyAssignedIDs(dsResult.ReadyAssignedIDs),
 	)
 
 	// Post-reconcile sync: update bead state to reflect post-start reality.

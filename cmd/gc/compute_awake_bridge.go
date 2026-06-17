@@ -24,6 +24,7 @@ func buildAwakeInputFromReconciler(
 	workSet map[string]bool,
 	readyWaitSet map[string]bool,
 	assignedWorkBeads []beads.Bead,
+	readyAssignedIDs map[string]bool,
 	wakeTargets []wakeTarget,
 	sp runtime.Provider,
 	clk time.Time,
@@ -72,15 +73,18 @@ func buildAwakeInputFromReconciler(
 		})
 	}
 
-	// Work beads
+	// Work beads. Readiness is the store's verdict (readyAssignedIDs), not a
+	// status-only guess: assignedWorkBeads mixes the open-routed orphan-release
+	// pass (which admits any open assigned+routed bead with no deps check) into
+	// the same slice as the genuinely-ready passes. Fabricating Ready from
+	// status alone held a blocked open bead's session awake forever (it never
+	// slept, so the resume-on-ShouldWake path never fired). readyAssignedIDs is
+	// populated only by the ready passes, matching gc hook --claim's deps gate.
 	for _, wb := range assignedWorkBeads {
 		a := strings.TrimSpace(wb.Assignee)
 		if a != "" && (wb.Status == "open" || wb.Status == "in_progress") {
-			// assignedWorkBeads is the reconciler's actionable snapshot:
-			// in-progress work plus open work that has already passed readiness
-			// and blocker filtering.
 			input.WorkBeads = append(input.WorkBeads, AwakeWorkBead{
-				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: wb.Status == "open",
+				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: readyAssignedIDs[wb.ID],
 			})
 		}
 	}
