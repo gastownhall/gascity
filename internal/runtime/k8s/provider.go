@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,12 +17,16 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	execerr "k8s.io/client-go/util/exec"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// Compile-time interface check.
-var _ runtime.Provider = (*Provider)(nil)
+// Compile-time interface checks.
+var (
+	_ runtime.Provider     = (*Provider)(nil)
+	_ runtime.ExecProvider = (*Provider)(nil)
+)
 
 // Provider is a native Kubernetes session provider using client-go.
 // Eliminates subprocess overhead by making direct API calls over reused
@@ -343,13 +348,7 @@ func (p *Provider) Stop(name string) error {
 
 // Interrupt sends Ctrl-C to the tmux session inside the pod.
 func (p *Provider) Interrupt(name string) error {
-	ctx := context.Background()
-	podName, err := p.findRunningPod(ctx, name)
-	if err != nil {
-		return nil // best-effort
-	}
-	_, _ = p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "send-keys", "-t", tmuxSession, "C-c"}, nil)
+	_ = p.carrier().Interrupt(context.Background(), name) // best-effort
 	return nil
 }
 
@@ -440,32 +439,13 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // Uses -l (literal mode) so tmux key names in the message text are not
 // interpreted as keystrokes. Content blocks are flattened to text.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	message := runtime.FlattenText(content)
-	if message == "" {
-		return nil
-	}
-	ctx := context.Background()
-	podName, err := p.findRunningPod(ctx, name)
-	if err != nil {
-		return nil // best-effort
-	}
-	_, _ = p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "send-keys", "-t", tmuxSession, "-l", message}, nil)
-	_, _ = p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "send-keys", "-t", tmuxSession, "Enter"}, nil)
+	_ = p.carrier().Nudge(context.Background(), name, content) // best-effort
 	return nil
 }
 
 // SendKeys sends bare keystrokes to the tmux session.
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	ctx := context.Background()
-	podName, err := p.findRunningPod(ctx, name)
-	if err != nil {
-		return nil // best-effort
-	}
-	args := []string{"tmux", "send-keys", "-t", tmuxSession}
-	args = append(args, keys...)
-	_, _ = p.ops.execInPod(ctx, podName, "agent", args, nil)
+	_ = p.carrier().SendKeys(context.Background(), name, keys...) // best-effort
 	return nil
 }
 
@@ -521,24 +501,10 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return nil
 }
 
-// Peek captures the last N lines of tmux pane output.
+// Peek captures the last N lines of tmux pane output (best-effort: empty on failure).
 func (p *Provider) Peek(name string, lines int) (string, error) {
-	ctx := context.Background()
-	podName, err := p.findRunningPod(ctx, name)
-	if err != nil {
-		return "", nil
-	}
-	var cmd []string
-	if lines > 0 {
-		cmd = []string{"tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-" + strconv.Itoa(lines)}
-	} else {
-		cmd = []string{"tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-"}
-	}
-	output, err := p.ops.execInPod(ctx, podName, "agent", cmd, nil)
-	if err != nil {
-		return "", nil
-	}
-	return output, nil
+	out, _ := p.carrier().Peek(context.Background(), name, lines) // best-effort
+	return out, nil
 }
 
 // ListRunning returns names of all running sessions with the given prefix.
@@ -589,15 +555,9 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	return time.Unix(secs, 0), nil
 }
 
-// ClearScrollback clears the tmux scrollback buffer.
+// ClearScrollback clears the tmux scrollback buffer (best-effort).
 func (p *Provider) ClearScrollback(name string) error {
-	ctx := context.Background()
-	podName, err := p.findRunningPod(ctx, name)
-	if err != nil {
-		return nil // best-effort
-	}
-	_, _ = p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "clear-history", "-t", tmuxSession}, nil)
+	_ = p.carrier().ClearScrollback(context.Background(), name) // best-effort
 	return nil
 }
 
@@ -633,6 +593,37 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 // --- Internal helpers ---
 
 // findRunningPod finds a running pod by session label.
+// carrier returns the tmux carrier that drives this provider's sessions over
+// the pod exec connection ([Provider.Exec]). The in-box tmux session is always
+// tmuxSession ("main").
+func (p *Provider) carrier() runtime.Carrier {
+	return runtime.NewTmuxCarrier(p, tmuxSession)
+}
+
+// Exec implements [runtime.ExecProvider]: it runs argv inside the session
+// pod's "agent" container and returns the command's standard output and exit
+// code (execInPod returns stdout; stderr is folded into err on a transport
+// failure). A command that runs but exits non-zero yields that code with a nil
+// error; only a transport failure (no running pod, stream error) yields err.
+// This is the connection the tmux carrier drives the session through.
+func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte, int, error) {
+	podName, err := p.findRunningPod(ctx, name)
+	if err != nil {
+		return nil, -1, fmt.Errorf("k8s exec %q: %w", name, err)
+	}
+	out, err := p.ops.execInPod(ctx, podName, "agent", argv, nil)
+	if err != nil {
+		var exitErr execerr.ExitError
+		if errors.As(err, &exitErr) && exitErr.Exited() {
+			// Ran and exited non-zero: the command's own result, not a
+			// transport failure (per the ExecProvider contract).
+			return []byte(out), exitErr.ExitStatus(), nil
+		}
+		return []byte(out), -1, err
+	}
+	return []byte(out), 0, nil
+}
+
 func (p *Provider) findRunningPod(ctx context.Context, name string) (string, error) {
 	label := SanitizeLabel(name)
 	pods, err := p.ops.listPods(ctx, "gc-session="+label, "status.phase=Running")
