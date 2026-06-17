@@ -13,16 +13,21 @@ import (
 
 // fakeRunner captures the remote argv it is asked to run and returns a
 // configured result, so tests assert what travels over the connection without
-// a real ssh client.
+// a real ssh client. When respond is set it provides the per-command result;
+// otherwise the fixed out/code/err is returned.
 type fakeRunner struct {
-	calls [][]string
-	out   []byte
-	code  int
-	err   error
+	calls   [][]string
+	out     []byte
+	code    int
+	err     error
+	respond func(remoteArgv []string) ([]byte, int, error)
 }
 
 func (f *fakeRunner) run(_ context.Context, _ Endpoint, remoteArgv []string) ([]byte, int, error) {
 	f.calls = append(f.calls, remoteArgv)
+	if f.respond != nil {
+		return f.respond(remoteArgv)
+	}
 	return f.out, f.code, f.err
 }
 
