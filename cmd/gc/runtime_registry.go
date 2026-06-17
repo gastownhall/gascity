@@ -11,6 +11,7 @@ import (
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	"github.com/gastownhall/gascity/internal/runtime/registry"
+	sessionssh "github.com/gastownhall/gascity/internal/runtime/ssh"
 	sessionsubprocess "github.com/gastownhall/gascity/internal/runtime/subprocess"
 	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
@@ -81,6 +82,17 @@ func buildRuntimeRegistry() *registry.Registry {
 			return sessiont3bridge.NewProvider(), nil
 		}
 		return sessionexec.NewProvider(script), nil
+	}))
+	// "ssh:<[user@]host[:port]>" selects the SSH backend against a fixed
+	// endpoint (the anonymous form; the named, structured form with explicit
+	// key/known_hosts is a [runtimes.<name>] ssh declaration). Key + known_hosts
+	// resolve via ssh's own config (~/.ssh/config).
+	must(r.RegisterPrefix("ssh:", func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		ep, err := sessionssh.ParseEndpoint(strings.TrimPrefix(name, "ssh:"))
+		if err != nil {
+			return nil, err
+		}
+		return sessionssh.NewProvider(ep), nil
 	}))
 	// tmux registers both as an exact name and as the fallback: the exact
 	// registration makes a pack-declared runtime named "tmux" a collision

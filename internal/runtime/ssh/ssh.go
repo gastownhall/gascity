@@ -6,10 +6,12 @@
 // realization of the connection backend; the Stream (ssh -T) and AttachTTY
 // (ssh -t) primitives are deferred.
 //
-// Once wired into runtime selection it is intended to replace the per-op relay
-// shims — daytona's bd-ssh-shim, the in-sandbox Tailscale bootstrap, t3bridge's
-// per-RPC WebSocket — with one connection that carries every op. It is not yet
-// wired in.
+// It is selectable via the "ssh:" runtime prefix (ssh:[user@]host[:port]; key and
+// known_hosts resolve from ~/.ssh/config). The backend serves the direct-ssh
+// topology — gc dials a reachable box — carrying exec today and a future stream
+// (ssh -T) / attach (ssh -t) over one connection. It does NOT subsume daytona's
+// bd-ssh-shim or the in-sandbox Tailscale bootstrap: those are the reverse,
+// sandbox-to-controller env.ledger reach-back, a separate concern.
 //
 // Host-key policy is StrictHostKeyChecking=accept-new (trust-on-first-use): an
 // unknown host key is accepted and pinned on first contact, a changed key is
@@ -45,6 +47,70 @@ func (e Endpoint) target() string {
 		return e.Host
 	}
 	return e.User + "@" + e.Host
+}
+
+// ParseEndpoint parses a "[user@]host[:port]" target into an Endpoint, leaving
+// KeyPath/KnownHostsPath to ssh's own resolution (~/.ssh/config). It backs the
+// anonymous "ssh:" selection prefix; the named, structured form (with explicit
+// key/known_hosts) is a [runtimes.<name>] declaration. An IPv6 host must be
+// bracketed, e.g. "[::1]:22".
+func ParseEndpoint(target string) (Endpoint, error) {
+	s := strings.TrimSpace(target)
+	if s == "" {
+		return Endpoint{}, fmt.Errorf("ssh endpoint: empty target")
+	}
+	var ep Endpoint
+	if at := strings.LastIndex(s, "@"); at >= 0 {
+		if at == 0 {
+			return Endpoint{}, fmt.Errorf("ssh endpoint %q: empty user before @", target)
+		}
+		ep.User, s = s[:at], s[at+1:]
+	}
+	switch {
+	case strings.HasPrefix(s, "["): // bracketed IPv6, optional :port after "]"
+		end := strings.Index(s, "]")
+		if end < 0 {
+			return Endpoint{}, fmt.Errorf("ssh endpoint %q: unterminated IPv6 bracket", target)
+		}
+		ep.Host = s[1:end]
+		if rest := s[end+1:]; strings.HasPrefix(rest, ":") {
+			port, err := parsePort(rest[1:])
+			if err != nil {
+				return Endpoint{}, fmt.Errorf("ssh endpoint %q: %w", target, err)
+			}
+			ep.Port = port
+		} else if rest != "" {
+			return Endpoint{}, fmt.Errorf("ssh endpoint %q: trailing %q after host", target, rest)
+		}
+	case strings.LastIndex(s, ":") >= 0: // host:port (unbracketed)
+		colon := strings.LastIndex(s, ":")
+		host := s[:colon]
+		// A colon remaining in the host means this is an unbracketed IPv6
+		// literal — reject it rather than mis-split it into host + bogus port.
+		if strings.Contains(host, ":") {
+			return Endpoint{}, fmt.Errorf("ssh endpoint %q: unbracketed IPv6 host; use [host]:port", target)
+		}
+		port, err := parsePort(s[colon+1:])
+		if err != nil {
+			return Endpoint{}, fmt.Errorf("ssh endpoint %q: %w", target, err)
+		}
+		ep.Port, ep.Host = port, host
+	default:
+		ep.Host = s
+	}
+	if ep.Host == "" {
+		return Endpoint{}, fmt.Errorf("ssh endpoint %q: missing host", target)
+	}
+	return ep, nil
+}
+
+// parsePort parses a TCP port in the valid range 1-65535.
+func parsePort(s string) (int, error) {
+	p, err := strconv.Atoi(s)
+	if err != nil || p < 1 || p > 65535 {
+		return 0, fmt.Errorf("invalid port %q", s)
+	}
+	return p, nil
 }
 
 // runner runs a remote command over the connection and returns its standard

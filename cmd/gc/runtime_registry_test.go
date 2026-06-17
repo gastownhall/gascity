@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	sessionssh "github.com/gastownhall/gascity/internal/runtime/ssh"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
@@ -63,6 +64,22 @@ func TestNewSessionProviderForCityByName_ExecPrefixUsesExecProvider(t *testing.T
 	}
 	if _, ok := sp.(*sessionexec.Provider); !ok {
 		t.Fatalf("provider type = %T, want *exec.Provider", sp)
+	}
+}
+
+func TestNewSessionProviderForCityByName_SSHPrefixUsesSSHProvider(t *testing.T) {
+	sp, err := newSessionProviderForCityByName(nil, "ssh:gcagent@host:2222", config.SessionConfig{}, "city", t.TempDir())
+	if err != nil {
+		t.Fatalf("newSessionProviderForCityByName(ssh:...): %v", err)
+	}
+	if _, ok := sp.(*sessionssh.Provider); !ok {
+		t.Fatalf("provider type = %T, want *ssh.Provider", sp)
+	}
+}
+
+func TestNewSessionProviderForCityByName_SSHPrefixRejectsBadEndpoint(t *testing.T) {
+	if _, err := newSessionProviderForCityByName(nil, "ssh:", config.SessionConfig{}, "city", t.TempDir()); err == nil {
+		t.Fatal("ssh: with an empty endpoint should error")
 	}
 }
 

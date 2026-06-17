@@ -33,6 +33,47 @@ func (f *fakeRunner) run(_ context.Context, _ Endpoint, remoteArgv []string, std
 	return f.out, f.code, f.err
 }
 
+func TestParseEndpoint(t *testing.T) {
+	tests := []struct {
+		in   string
+		want Endpoint
+		err  bool
+	}{
+		{"gcagent@host", Endpoint{User: "gcagent", Host: "host"}, false},
+		{"gcagent@host:2222", Endpoint{User: "gcagent", Host: "host", Port: 2222}, false},
+		{"host", Endpoint{Host: "host"}, false},
+		{"host:22", Endpoint{Host: "host", Port: 22}, false},
+		{"user@[::1]:22", Endpoint{User: "user", Host: "::1", Port: 22}, false},
+		{"[::1]", Endpoint{Host: "::1"}, false},
+		{"", Endpoint{}, true},
+		{"host:notaport", Endpoint{}, true},
+		{"user@", Endpoint{}, true},
+		{"@host", Endpoint{}, true},       // empty user
+		{"fe80::1", Endpoint{}, true},     // unbracketed IPv6
+		{"::1", Endpoint{}, true},         // unbracketed IPv6
+		{"2001:db8::1", Endpoint{}, true}, // unbracketed IPv6
+		{"host:0", Endpoint{}, true},      // port out of range
+		{"host:-1", Endpoint{}, true},     // negative port
+		{"host:99999", Endpoint{}, true},  // port out of range
+	}
+	for _, tc := range tests {
+		got, err := ParseEndpoint(tc.in)
+		if tc.err {
+			if err == nil {
+				t.Errorf("ParseEndpoint(%q): want error, got %+v", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParseEndpoint(%q): %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("ParseEndpoint(%q) = %+v, want %+v", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestSSHArgs_BuildsClientInvocation(t *testing.T) {
 	ep := Endpoint{User: "gcagent", Host: "100.110.9.92", Port: 2222, KeyPath: "/k/id", KnownHostsPath: "/k/known"}
 	got := sshArgs(ep, []string{"tmux", "send-keys", "-t", "main", "-l", "hi there"})
