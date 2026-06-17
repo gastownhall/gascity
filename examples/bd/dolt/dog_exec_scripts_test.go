@@ -254,6 +254,8 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_FAKE_DOLT_TAG_STATE_FILE",
 		"GC_PACK_STATE_DIR",
 		"GC_CITY_RUNTIME_DIR",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE",
+		"GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS",
 	),
 		"PATH="+f.binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+f.cityPath,
@@ -482,6 +484,18 @@ hash_state_file="${GC_FAKE_DOLT_HASH_STATE_FILE:-}"
 tag_state_file="${GC_FAKE_DOLT_TAG_STATE_FILE:-}"
 query=""
 db=""
+if [ "${1:-} ${2:-}" = "backup sync" ]; then
+  printf 'dolt backup sync %%s\n' "${3:-}" >> "$log"
+  case "$mode" in
+    backup_sync_failure|backup_sync_failure_bare_gc)
+      printf 'dolt backup sync failed\n' >&2
+      exit 1
+      ;;
+    *)
+      exit 0
+      ;;
+  esac
+fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --use-db)
@@ -6275,4 +6289,124 @@ if [ "$#" -ge 2 ] && { [ "$1" = "-vi" ] || [ "$1" = "-i" ]; } && [[ "$2" == *"$b
 fi
 exec %s "$@"
 `, shellQuote(realGrep)))
+}
+
+func TestCompactScriptBackupUnsetProceedsNormally(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success")
+	if err != nil {
+		t.Fatalf("compact without backup remote should succeed: %v\nout=%s", err, out)
+	}
+	doltLog, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(doltLog), "backup sync") {
+		t.Fatalf("unset backup remote must not trigger backup sync:\n%s", doltLog)
+	}
+}
+
+func TestCompactScriptBackupSyncSuccessBeforeFlatten(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")
+	if err != nil {
+		t.Fatalf("compact with successful backup should succeed: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "backup sync to remote=prod-backup -- ok") {
+		t.Fatalf("expected backup ok log:\n%s", out)
+	}
+	doltLog, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if !strings.Contains(string(doltLog), "backup sync prod-backup") {
+		t.Fatalf("expected 'backup sync prod-backup' in dolt log:\n%s", doltLog)
+	}
+}
+
+func TestCompactScriptBackupSyncFailureBeforeFlattenExitsOne(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "backup_sync_failure", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("backup sync failure should exit 1: got err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "backup sync to remote=prod-backup failed; aborting compaction") {
+		t.Fatalf("expected backup failure log:\n%s", out)
+	}
+	doltLog, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(doltLog), "DOLT_RESET") || strings.Contains(string(doltLog), "DOLT_COMMIT") {
+		t.Fatalf("backup failure must abort before flatten:\n%s", doltLog)
+	}
+}
+
+func TestCompactScriptBackupSyncSuccessBeforeBareGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_BARE_GC=1",
+	)
+	if err != nil {
+		t.Fatalf("compact with successful backup (bare GC) should succeed: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "backup sync to remote=prod-backup -- ok") {
+		t.Fatalf("expected backup ok log for bare GC path:\n%s", out)
+	}
+}
+
+func TestCompactScriptBackupSyncFailureBeforeBareGCExitsOne(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "backup_sync_failure_bare_gc",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_BARE_GC=1",
+	)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("backup sync failure (bare GC) should exit 1: got err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "backup sync to remote=prod-backup failed; aborting compaction") {
+		t.Fatalf("expected backup failure log for bare GC path:\n%s", out)
+	}
+}
+
+func TestCompactScriptBackupInvalidRemoteNameExitsTwo(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_BACKUP_REMOTE=has space")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("backup remote with whitespace should exit 2: got err=%v\nout=%s", err, out)
+	}
+}
+
+func TestCompactScriptBackupInvalidTimeoutExitsTwo(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS=notanumber",
+	)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("invalid backup timeout should exit 2: got err=%v\nout=%s", err, out)
+	}
+}
+
+func TestCompactScriptBackupNonDoltDirInDataDirSucceeds(t *testing.T) {
+	// DB discovery filters by .dolt presence; a directory without .dolt is
+	// never discovered and never passed to backup_sync_database. The script
+	// must succeed cleanly with no error output for the non-dolt dir.
+	fixture := newCompactScriptFixture(t)
+	nodoltDB := filepath.Join(fixture.dataDir, "nodolt")
+	if err := os.MkdirAll(nodoltDB, 0o755); err != nil {
+		t.Fatalf("mkdir nodolt db: %v", err)
+	}
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")
+	if err != nil {
+		t.Fatalf("compact should succeed even with non-dolt directory in data dir: %v\nout=%s", err, out)
+	}
+	if strings.Contains(out, "nodolt") {
+		t.Fatalf("non-dolt dir must produce no output — got:\n%s", out)
+	}
 }
