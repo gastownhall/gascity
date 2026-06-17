@@ -77,6 +77,11 @@ type InitializeResult struct {
 }
 
 // SessionNewParams is the params for the "session/new" request.
+//
+// McpServers must always be present in the wire payload, even when empty:
+// ACP servers (e.g. Devin) reject session/new with -32602 "missing field
+// 'mcpServers'" if the field is omitted. The slice is therefore always
+// non-nil; see sessionNewMCPServers and TestSessionNewRequest_*.
 type SessionNewParams struct {
 	Cwd        string                `json:"cwd"`
 	McpServers []SessionNewMCPServer `json:"mcpServers"`

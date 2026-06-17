@@ -305,6 +305,33 @@ func TestSessionNewRequest_IncludesCwdAndMcpServers(t *testing.T) {
 	}
 }
 
+func TestSessionNewRequest_EmptyMCPServersSliceYieldsEmptyArray(t *testing.T) {
+	msg, _ := newSessionNewRequest("/home/user/project", []runtime.MCPServerConfig{})
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var decoded JSONRPCMessage
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	var params SessionNewParams
+	if err := json.Unmarshal(decoded.Params, &params); err != nil {
+		t.Fatalf("Unmarshal params: %v", err)
+	}
+	if params.McpServers == nil {
+		t.Fatal("mcpServers should be non-nil empty array for non-nil empty input")
+	}
+	if len(params.McpServers) != 0 {
+		t.Errorf("mcpServers len = %d, want 0", len(params.McpServers))
+	}
+	if !strings.Contains(string(data), `"mcpServers":[]`) {
+		t.Errorf("raw JSON should contain \"mcpServers\":[], got %s", data)
+	}
+}
+
 func TestSessionNewRequest_SerializesMCPServersByTransport(t *testing.T) {
 	msg, _ := newSessionNewRequest("/home/user/project", []runtime.MCPServerConfig{
 		{
