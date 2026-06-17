@@ -6,6 +6,13 @@
 # No LLM judgment needed — runs inline in the controller.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
+#
+# RPO note: BACKUP_STALE_S (default 43200 = 12h = 2x backup interval) is the
+# threshold at which backup artifact age triggers a [WARN: backup stale] advisory.
+# With 6h backup syncs and fail-closed journal corruption recovery, maximum data
+# loss on journal corruption without manual intervention is one 6h backup interval.
+# If BACKUP_STALE_S exceeds 2x the backup interval, a single missed backup cycle
+# is undetected. Keep BACKUP_STALE_S <= 2x GC_BACKUP_INTERVAL_S.
 set -euo pipefail
 
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
