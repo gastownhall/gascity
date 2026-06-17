@@ -165,6 +165,16 @@
 #                                         NOT write pending-GC /
 #                                         pending-push markers (those are
 #                                         flatten-remediation state).
+#   GC_DOLT_COMPACT_BACKUP_REMOTE
+#     (default: unset) — dolt backup remote name to sync before each
+#                        database is compacted. When set, `dolt backup
+#                        sync <remote>` is run in the DB directory before
+#                        flatten_database and bare_gc_database. Backup
+#                        failure aborts compaction for that DB (exit 1).
+#                        Must be a non-empty name without whitespace.
+#   GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS
+#     (default: 300) — wall-clock bound for each dolt backup sync call.
+#                      Invalid (non-numeric or non-positive) values exit 2.
 set -eu
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
@@ -3740,6 +3750,28 @@ clear_stale_lock_dir() {
   rmdir "$lock_dir" 2>/dev/null
 }
 
+backup_sync_database() {
+  local db="$1"
+  local remote="$compact_backup_remote"
+  [ -n "$remote" ] || return 0
+
+  local db_dir="$DOLT_DATA_DIR/$db"
+  if [ ! -d "$db_dir/.dolt" ]; then
+    printf 'compact: db=%s backup sync skipped — no .dolt directory at %s\n' "$db" "$db_dir" >&2
+    return 0
+  fi
+
+  local sync_out
+  if sync_out=$(cd "$db_dir" && timeout "$compact_backup_timeout" dolt backup sync "$remote" 2>&1); then
+    printf 'compact: db=%s backup sync to remote=%s -- ok\n' "$db" "$remote" >&2
+    return 0
+  else
+    printf 'compact: db=%s backup sync to remote=%s failed; aborting compaction\n' \
+      "$db" "$remote" >&2
+    [ -n "$sync_out" ] && printf '%s\n' "$sync_out" >&2 || true
+    return 1
+  fi
+}
 acquire_lock() {
   if command -v flock >/dev/null 2>&1; then
     old_umask=$(umask)
@@ -3805,6 +3837,29 @@ main() {
     exit 0
   fi
 
+  compact_backup_remote="${GC_DOLT_COMPACT_BACKUP_REMOTE:-}"
+  if [ -n "$compact_backup_remote" ]; then
+    case "$compact_backup_remote" in
+      *[[:space:]]*)
+        printf 'compact: GC_DOLT_COMPACT_BACKUP_REMOTE=%s is invalid — remote name must not contain whitespace\n' \
+          "$compact_backup_remote" >&2
+        exit 2
+        ;;
+    esac
+  fi
+
+  compact_backup_timeout="${GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS:-300}"
+  case "$compact_backup_timeout" in
+    ''|*[!0-9]*)
+      printf 'compact: GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS=%s is invalid — must be a positive integer\n' \
+        "$compact_backup_timeout" >&2
+      exit 2
+      ;;
+    0)
+      printf 'compact: GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS=0 is invalid — must be a positive integer\n' >&2
+      exit 2
+      ;;
+  esac
   _meta_tmp=$(mktemp)
   metadata_files > "$_meta_tmp"
 
@@ -3841,6 +3896,9 @@ main() {
   if [ "$bare_gc" = "1" ]; then
     while IFS= read -r db; do
       [ -n "$db" ] || continue
+      if ! backup_sync_database "$db"; then
+        exit 1
+      fi
       if ! bare_gc_database "$db"; then
         failed_count=$((failed_count + 1))
       fi
@@ -3855,6 +3913,9 @@ main() {
 
   while IFS= read -r db; do
     [ -n "$db" ] || continue
+    if ! backup_sync_database "$db"; then
+      exit 1
+    fi
     if ! flatten_database "$db"; then
       failed_count=$((failed_count + 1))
     fi
