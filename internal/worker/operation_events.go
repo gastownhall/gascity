@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -181,7 +182,7 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 		// id).
 		runBead := bead
 		if payload.BeadID == "" {
-			payload.BeadID = strings.TrimSpace(bead.Metadata["gc.active_work_bead"])
+			payload.BeadID = strings.TrimSpace(bead.Metadata[beadmeta.ActiveWorkBeadMetadataKey])
 		}
 		if payload.BeadID != "" {
 			if _, wb, err := h.manager.GetWithBead(payload.BeadID); err == nil {
@@ -238,7 +239,7 @@ func resolveRunID(bead beads.Bead, sessionID string) string {
 		if v := strings.TrimSpace(bead.Metadata["molecule_id"]); v != "" {
 			return v
 		}
-		if v := strings.TrimSpace(bead.Metadata["gc.root_bead_id"]); v != "" {
+		if v := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey]); v != "" {
 			return v
 		}
 	}
@@ -257,14 +258,14 @@ func resolveRunID(bead beads.Bead, sessionID string) string {
 // message id) populate the payload, model facts flow to the usage sink with no
 // further change. The op id is a safe per-operation dedup fallback; #3442 should
 // switch UpstreamReqID/IdempotencyKey to the provider message id.
-func modelUsageFactFromPayload(p operationEventPayload) (usage.UsageFact, bool) {
+func modelUsageFactFromPayload(p operationEventPayload) (usage.Fact, bool) {
 	if p.PromptTokens == 0 && p.CompletionTokens == 0 && p.CacheReadTokens == 0 && p.CacheCreationTokens == 0 {
-		return usage.UsageFact{}, false
+		return usage.Fact{}, false
 	}
 	unpriced := p.Unpriced != nil && *p.Unpriced
 	reqID := strings.TrimSpace(p.OpID)
 	runID := strings.TrimSpace(p.RunID)
-	return usage.UsageFact{
+	return usage.Fact{
 		RunID:               runID,
 		StepID:              strings.TrimSpace(p.BeadID),
 		Worker:              strings.TrimSpace(p.SessionName),

@@ -44,7 +44,7 @@ func TestModelAndComputeKeysDoNotCollide(t *testing.T) {
 }
 
 func TestUsageFactJSONRoundTrip(t *testing.T) {
-	in := UsageFact{
+	in := Fact{
 		RunID: "run-1", StepID: "bead-9", Worker: "s-bead-9", City: "demo",
 		Kind:     KindModel,
 		Upstream: "manifold", Model: "coder", Backing: "claude-opus-4-8", Provider: "anthropic",
@@ -57,7 +57,7 @@ func TestUsageFactJSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out UsageFact
+	var out Fact
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestUsageFactJSONRoundTrip(t *testing.T) {
 
 func TestUnpricedFactKeepsTokensZeroCost(t *testing.T) {
 	// An unpriced model fact must retain its tokens while reporting no cost.
-	f := UsageFact{Kind: KindModel, InputTokens: 123, Unpriced: true}
+	f := Fact{Kind: KindModel, InputTokens: 123, Unpriced: true}
 	if f.CostUSDEstimate != 0 {
 		t.Fatal("unpriced fact must have zero cost estimate")
 	}
@@ -89,7 +89,7 @@ func TestUnpricedFactKeepsTokensZeroCost(t *testing.T) {
 }
 
 func TestDiscardSink(t *testing.T) {
-	if err := Discard.Record(context.Background(), UsageFact{Kind: KindModel}); err != nil {
+	if err := Discard.Record(context.Background(), Fact{Kind: KindModel}); err != nil {
 		t.Fatalf("Discard.Record must never error: %v", err)
 	}
 }

@@ -48,7 +48,7 @@ type runCost struct {
 }
 
 // aggregateRunCosts groups usage facts by run id. Exposed (unexported) for tests.
-func aggregateRunCosts(facts []usage.UsageFact) []runCost {
+func aggregateRunCosts(facts []usage.Fact) []runCost {
 	byRun := map[string]*runCost{}
 	var order []string
 	for _, f := range facts {

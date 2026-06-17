@@ -5844,11 +5844,19 @@ export type WorkerOperationEventPayload = {
     provider?: string;
     queued?: boolean;
     result: string;
+    /**
+     * Run-root identifier for rolling this operation up to a workflow/molecule/chat run (best-effort).
+     */
+    run_id?: string;
     session_id?: string;
     session_name?: string;
     started_at: string;
     template?: string;
     transport?: string;
+    /**
+     * True when tokens were observed but no price resolved (best-effort tri-state; absent = not evaluated).
+     */
+    unpriced?: boolean;
 };
 
 export type WorkflowAttemptSummary = {

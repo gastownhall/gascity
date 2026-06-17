@@ -5,13 +5,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/usage"
 )
 
 // usageComputeEmittedAtKey marks the awake interval (by its awake_started_at
-// value) whose compute UsageFact has already been recorded, so a later tick does
+// value) whose compute Fact has already been recorded, so a later tick does
 // not re-emit it. A new awake interval has a new awake_started_at, so emission
 // across intervals is allowed.
 const usageComputeEmittedAtKey = "usage_compute_emitted_at"
@@ -30,7 +31,7 @@ func isComputeTerminalState(state string) bool {
 // bead: workflow_id || molecule_id || gc.root_bead_id || bead id.
 func resolveComputeRunID(bead beads.Bead) string {
 	if bead.Metadata != nil {
-		for _, k := range []string{"workflow_id", "molecule_id", "gc.root_bead_id"} {
+		for _, k := range []string{"workflow_id", "molecule_id", beadmeta.RootBeadIDMetadataKey} {
 			if v := strings.TrimSpace(bead.Metadata[k]); v != "" {
 				return v
 			}
@@ -39,7 +40,7 @@ func resolveComputeRunID(bead beads.Bead) string {
 	return strings.TrimSpace(bead.ID)
 }
 
-// emitComputeFactForBead records one compute UsageFact for a session bead's
+// emitComputeFactForBead records one compute Fact for a session bead's
 // completed awake interval, exactly once per awake_started_at epoch. Returns
 // true when a fact was recorded. It is a no-op when the sink is discard/nil,
 // when there is no awake_started_at (the session never confirmed a start), or
@@ -83,9 +84,9 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 	if runID == "" {
 		runID = resolveComputeRunID(bead)
 	}
-	fact := usage.UsageFact{
+	fact := usage.Fact{
 		RunID:          runID,
-		StepID:         strings.TrimSpace(meta["gc.active_work_bead"]),
+		StepID:         strings.TrimSpace(meta[beadmeta.ActiveWorkBeadMetadataKey]),
 		Worker:         strings.TrimSpace(meta["session_name"]),
 		City:           city,
 		Kind:           usage.KindCompute,
@@ -106,7 +107,7 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 }
 
 // emitDueComputeFacts scans the city's session beads and emits a compute
-// UsageFact for any whose awake interval has ended (terminal state) and has not
+// Fact for any whose awake interval has ended (terminal state) and has not
 // yet been recorded. Best-effort: it never blocks or fails the reconcile tick.
 func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context) {
 	if cr.cs == nil {

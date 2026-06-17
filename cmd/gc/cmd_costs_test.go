@@ -7,7 +7,7 @@ import (
 )
 
 func TestAggregateRunCosts(t *testing.T) {
-	facts := []usage.UsageFact{
+	facts := []usage.Fact{
 		{RunID: "run-a", Kind: usage.KindModel, InputTokens: 100, OutputTokens: 50, CacheReadTokens: 5, CostUSDEstimate: 0.01},
 		{RunID: "run-a", Kind: usage.KindModel, InputTokens: 10, Unpriced: true}, // excluded from cost
 		{RunID: "run-a", Kind: usage.KindCompute, WallSeconds: 12.5},

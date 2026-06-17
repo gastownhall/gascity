@@ -43,6 +43,7 @@ const (
 	AttemptMetadataKey                   = "gc.attempt"
 	BondMetadataKey                      = "gc.bond"
 	BondVarsMetadataKey                  = "gc.bond_vars"
+	ActiveWorkBeadMetadataKey            = "gc.active_work_bead"
 	CheckModeMetadataKey                 = "gc.check_mode"
 	CheckPathMetadataKey                 = "gc.check_path"
 	CheckTimeoutMetadataKey              = "gc.check_timeout"
@@ -229,6 +230,7 @@ var KnownMetadataKeys = []string{
 	AttemptMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,
+	ActiveWorkBeadMetadataKey,
 	CheckModeMetadataKey,
 	CheckPathMetadataKey,
 	CheckTimeoutMetadataKey,

@@ -28,6 +28,7 @@ City is the top-level configuration for a Gas City instance.
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
 | `mail` | MailConfig |  |  | Mail configures the mail provider backend. |
 | `events` | EventsConfig |  |  | Events configures the events provider backend. |
+| `usage` | UsageConfig |  |  | Usage configures the usage-fact sink backend. |
 | `dolt` | DoltConfig |  |  | Dolt configures optional dolt server connection overrides. |
 | `formulas` | FormulasConfig |  |  | Formulas is the legacy [formulas] table; authored [formulas].dir is rejected at config load. Formulas live in the well-known formulas/ directory. |
 | `daemon` | DaemonConfig |  |  | Daemon configures controller daemon settings. |
@@ -788,6 +789,14 @@ Tier defines per-token-type rates in USD per 1 million tokens.
 | `completion_usd_per_1m` | number | **yes** |  |  |
 | `cache_read_usd_per_1m` | number | **yes** |  |  |
 | `cache_creation_usd_per_1m` | number | **yes** |  |  |
+
+## UsageConfig
+
+UsageConfig holds usage-fact sink settings.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `provider` | string |  |  | Provider selects the usage sink backend:   - "discard" / "fake" → drop all facts   - "exec:&lt;script&gt;" → user-supplied script (JSON fact per line on stdin)   - "" / "local" → durable file-backed JSONL at .gc/usage.jsonl (default) |
 
 ## Workspace
 

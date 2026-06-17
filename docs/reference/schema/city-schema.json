@@ -1091,6 +1091,10 @@
           "$ref": "#/$defs/EventsConfig",
           "description": "Events configures the events provider backend."
         },
+        "usage": {
+          "$ref": "#/$defs/UsageConfig",
+          "description": "Usage configures the usage-fact sink backend."
+        },
         "dolt": {
           "$ref": "#/$defs/DoltConfig",
           "description": "Dolt configures optional dolt server connection overrides."
@@ -2686,6 +2690,17 @@
         "cache_creation_usd_per_1m"
       ],
       "description": "Tier defines per-token-type rates in USD per 1 million tokens."
+    },
+    "UsageConfig": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider selects the usage sink backend:\n  - \"discard\" / \"fake\" → drop all facts\n  - \"exec:\u003cscript\u003e\" → user-supplied script (JSON fact per line on stdin)\n  - \"\" / \"local\" → durable file-backed JSONL at .gc/usage.jsonl (default)"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "UsageConfig holds usage-fact sink settings."
     },
     "Workspace": {
       "properties": {

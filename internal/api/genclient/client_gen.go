@@ -5119,15 +5119,21 @@ type WorkerOperationEventPayload struct {
 	PromptTokens *int64 `json:"prompt_tokens,omitempty"`
 
 	// PromptVersion Template version frontmatter (best-effort, currently always absent; #1256 follow-up).
-	PromptVersion *string   `json:"prompt_version,omitempty"`
-	Provider      *string   `json:"provider,omitempty"`
-	Queued        *bool     `json:"queued,omitempty"`
-	Result        string    `json:"result"`
-	SessionId     *string   `json:"session_id,omitempty"`
-	SessionName   *string   `json:"session_name,omitempty"`
-	StartedAt     time.Time `json:"started_at"`
-	Template      *string   `json:"template,omitempty"`
-	Transport     *string   `json:"transport,omitempty"`
+	PromptVersion *string `json:"prompt_version,omitempty"`
+	Provider      *string `json:"provider,omitempty"`
+	Queued        *bool   `json:"queued,omitempty"`
+	Result        string  `json:"result"`
+
+	// RunId Run-root identifier for rolling this operation up to a workflow/molecule/chat run (best-effort).
+	RunId       *string   `json:"run_id,omitempty"`
+	SessionId   *string   `json:"session_id,omitempty"`
+	SessionName *string   `json:"session_name,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+	Template    *string   `json:"template,omitempty"`
+	Transport   *string   `json:"transport,omitempty"`
+
+	// Unpriced True when tokens were observed but no price resolved (best-effort tri-state; absent = not evaluated).
+	Unpriced *bool `json:"unpriced,omitempty"`
 }
 
 // WorkflowAttemptSummary defines model for WorkflowAttemptSummary.

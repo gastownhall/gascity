@@ -9,9 +9,9 @@ import (
 	"github.com/gastownhall/gascity/usage"
 )
 
-type captureSink struct{ facts []usage.UsageFact }
+type captureSink struct{ facts []usage.Fact }
 
-func (c *captureSink) Record(_ context.Context, f usage.UsageFact) error {
+func (c *captureSink) Record(_ context.Context, f usage.Fact) error {
 	c.facts = append(c.facts, f)
 	return nil
 }

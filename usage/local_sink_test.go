@@ -13,9 +13,9 @@ func TestLocalSinkAppendAndReadDedup(t *testing.T) {
 	s := NewLocalSink(path)
 	ctx := context.Background()
 
-	f1 := UsageFact{Kind: KindModel, RunID: "r1", IdempotencyKey: "k1", InputTokens: 1}
-	f2 := UsageFact{Kind: KindModel, RunID: "r1", IdempotencyKey: "k2", InputTokens: 2}
-	for _, f := range []UsageFact{f1, f2, f1 /* replay of k1 */} {
+	f1 := Fact{Kind: KindModel, RunID: "r1", IdempotencyKey: "k1", InputTokens: 1}
+	f2 := Fact{Kind: KindModel, RunID: "r1", IdempotencyKey: "k2", InputTokens: 2}
+	for _, f := range []Fact{f1, f2, f1 /* replay of k1 */} {
 		if err := s.Record(ctx, f); err != nil {
 			t.Fatalf("Record: %v", err)
 		}
@@ -49,10 +49,10 @@ func TestReadFactsKeepsEmptyKeyFacts(t *testing.T) {
 	s := NewLocalSink(path)
 	ctx := context.Background()
 	// Two distinct facts with no idempotency key must both survive.
-	if err := s.Record(ctx, UsageFact{Kind: KindCompute, RunID: "r1", WallSeconds: 1}); err != nil {
+	if err := s.Record(ctx, Fact{Kind: KindCompute, RunID: "r1", WallSeconds: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Record(ctx, UsageFact{Kind: KindCompute, RunID: "r2", WallSeconds: 2}); err != nil {
+	if err := s.Record(ctx, Fact{Kind: KindCompute, RunID: "r2", WallSeconds: 2}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := ReadFacts(path)
@@ -66,7 +66,7 @@ func TestReadFactsKeepsEmptyKeyFacts(t *testing.T) {
 
 func TestReadFactsSkipsTornFinalLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.jsonl")
-	if err := NewLocalSink(path).Record(context.Background(), UsageFact{Kind: KindModel, IdempotencyKey: "k1"}); err != nil {
+	if err := NewLocalSink(path).Record(context.Background(), Fact{Kind: KindModel, IdempotencyKey: "k1"}); err != nil {
 		t.Fatal(err)
 	}
 	// Simulate a crash mid-append: a partial, unparseable trailing line.
@@ -77,7 +77,9 @@ func TestReadFactsSkipsTornFinalLine(t *testing.T) {
 	if _, err := f.WriteString(`{"kind":"model","input_tok`); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := ReadFacts(path)
 	if err != nil {
@@ -98,7 +100,7 @@ func TestLocalSinkConcurrentRecord(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			// Distinct keys so none are deduped.
-			_ = s.Record(context.Background(), UsageFact{Kind: KindModel, IdempotencyKey: ModelIdempotencyKey("r", string(rune('A'+i%26))+pad(i))})
+			_ = s.Record(context.Background(), Fact{Kind: KindModel, IdempotencyKey: ModelIdempotencyKey("r", string(rune('A'+i%26))+pad(i))})
 		}(i)
 	}
 	wg.Wait()

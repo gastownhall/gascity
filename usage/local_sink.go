@@ -25,7 +25,7 @@ type LocalSink struct {
 func NewLocalSink(path string) *LocalSink { return &LocalSink{path: path} }
 
 // Record appends f to the underlying file and fsyncs before returning.
-func (s *LocalSink) Record(_ context.Context, f UsageFact) error {
+func (s *LocalSink) Record(_ context.Context, f Fact) error {
 	line, err := json.Marshal(f)
 	if err != nil {
 		return err
@@ -44,11 +44,18 @@ func (s *LocalSink) Record(_ context.Context, f UsageFact) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 	if _, err := file.Write(line); err != nil {
+		_ = file.Close()
 		return err
 	}
-	return file.Sync()
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ReadFacts reads all facts from a LocalSink file, collapsing duplicates by
@@ -56,7 +63,7 @@ func (s *LocalSink) Record(_ context.Context, f UsageFact) error {
 // an empty IdempotencyKey cannot be deduplicated and are all kept. A torn final
 // line (e.g. a crash mid-append) is skipped rather than treated as an error, so
 // the durable log stays readable. Returns nil when the file does not exist.
-func ReadFacts(path string) ([]UsageFact, error) {
+func ReadFacts(path string) ([]Fact, error) {
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -64,9 +71,8 @@ func ReadFacts(path string) ([]UsageFact, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
 
-	var out []UsageFact
+	var out []Fact
 	seen := make(map[string]struct{})
 	sc := bufio.NewScanner(file)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
@@ -75,7 +81,7 @@ func ReadFacts(path string) ([]UsageFact, error) {
 		if len(line) == 0 {
 			continue
 		}
-		var f UsageFact
+		var f Fact
 		if err := json.Unmarshal(line, &f); err != nil {
 			// Best-effort: skip an unparseable (e.g. torn final) line.
 			continue
@@ -88,5 +94,12 @@ func ReadFacts(path string) ([]UsageFact, error) {
 		}
 		out = append(out, f)
 	}
-	return out, sc.Err()
+	if err := sc.Err(); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if err := file.Close(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

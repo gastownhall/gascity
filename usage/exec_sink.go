@@ -25,7 +25,7 @@ type ExecSink struct {
 func NewExecSink(script string) *ExecSink { return &ExecSink{script: script} }
 
 // Record marshals f to JSON and feeds it to the script on stdin.
-func (s *ExecSink) Record(ctx context.Context, f UsageFact) error {
+func (s *ExecSink) Record(ctx context.Context, f Fact) error {
 	line, err := json.Marshal(f)
 	if err != nil {
 		return err

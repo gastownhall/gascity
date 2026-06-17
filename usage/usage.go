@@ -1,7 +1,7 @@
 // Package usage defines usage facts emitted by gascity workers and runtimes,
 // plus a narrow write-only [Sink] for recording them.
 //
-// A [UsageFact] accounts for one unit of resource use — either model tokens for
+// A [Fact] accounts for one unit of resource use - either model tokens for
 // a single invocation or compute wall-seconds for one awake interval — and is
 // keyed by a run id so facts can be grouped per execution for local cost
 // insight (see the gc costs reader). A [Sink] may instead forward facts to an
@@ -19,7 +19,7 @@ import (
 	"encoding/hex"
 )
 
-// Kind distinguishes the resource a [UsageFact] accounts for.
+// Kind distinguishes the resource a [Fact] accounts for.
 type Kind string
 
 const (
@@ -29,7 +29,7 @@ const (
 	KindCompute Kind = "compute"
 )
 
-// UsageFact is the record of one unit of resource use. It is keyed by RunID
+// Fact is the record of one unit of resource use. It is keyed by RunID
 // (one execution of a formula, order, or chat) and carries a stable
 // IdempotencyKey so a [Sink] can collapse replays.
 //
@@ -37,7 +37,7 @@ const (
 // decision-support; it is never an authoritative charge. When pricing for the
 // (Provider, Model) pair is unknown, Unpriced is set and CostUSDEstimate is left
 // zero — consumers must treat that as "not measured", not "free".
-type UsageFact struct {
+type Fact struct {
 	RunID  string `json:"run_id,omitempty"`  // groups facts of one execution
 	StepID string `json:"step_id,omitempty"` // the acting work bead id, if any
 	Worker string `json:"worker,omitempty"`  // session name
@@ -74,7 +74,7 @@ type UsageFact struct {
 // write must be surfaced via the returned error (so the caller can log it),
 // never silently dropped.
 type Sink interface {
-	Record(ctx context.Context, f UsageFact) error
+	Record(ctx context.Context, f Fact) error
 }
 
 // Discard is a [Sink] that drops every fact. It is the safe zero-value default
@@ -83,7 +83,7 @@ var Discard Sink = discardSink{}
 
 type discardSink struct{}
 
-func (discardSink) Record(context.Context, UsageFact) error { return nil }
+func (discardSink) Record(context.Context, Fact) error { return nil }
 
 // ModelIdempotencyKey is the natural per-response key for a model fact: the run
 // plus the provider response id (Anthropic message.id / OpenAI response.id, or a
