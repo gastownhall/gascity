@@ -242,11 +242,12 @@ type IdleWaitProvider interface {
 
 // ExecProvider is an optional extension for runtimes that expose the RPP
 // connection primitive: run a command inside the box and return its standard
-// output and exit code. It is the connection op a carrier drives the legacy
-// driving ops (Nudge / Peek / SendKeys / Interrupt / ClearScrollback) through;
-// the rewrite that routes those over Exec is staged. Callers MUST type-assert
-// and fall back to the driving methods when a provider does not implement
-// ExecProvider, or when Exec returns [ErrExecUnsupported] (the provider type
+// output and exit code. It is the op a [Carrier] drives the session-interaction
+// verbs (Nudge / Peek / SendKeys / Interrupt / ClearScrollback) through. The
+// exec Provider drives over it via the tmux carrier and falls back to the
+// dedicated wire ops when Exec returns [ErrExecUnsupported]. A caller using an
+// ExecProvider directly must likewise handle a provider that does not implement
+// ExecProvider, or an Exec that returns [ErrExecUnsupported] (the provider type
 // supports Exec but the underlying runtime does not implement the wire op).
 //
 // argv is the command and its arguments (no shell interpretation by the

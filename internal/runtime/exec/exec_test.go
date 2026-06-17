@@ -865,6 +865,8 @@ func TestNudge(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "nudge.txt")
 
+	// This pack implements only the dedicated nudge op (no exec), so Nudge falls
+	// back to it after the carrier reports the exec op unsupported.
 	script := writeScript(t, dir, `
 case "$1" in
   nudge) cat > "`+outFile+`" ;;
@@ -883,6 +885,42 @@ esac
 	}
 	if string(data) != "wake up!" {
 		t.Errorf("nudge message = %q, want %q", string(data), "wake up!")
+	}
+}
+
+func TestDrivingOverExecWhenSupported(t *testing.T) {
+	// A pack that implements the exec op (tmux-in-box) is driven over the
+	// carrier: the verbs ship tmux commands through exec, never the dedicated
+	// nudge/peek/... ops (which here fail loudly if mistakenly used).
+	dir := t.TempDir()
+	execLog := filepath.Join(dir, "exec.log")
+	script := writeScript(t, dir, `
+case "$1" in
+  exec) cmd=$(cat); echo "$cmd" >> "`+execLog+`"
+        case "$cmd" in *capture-pane*) echo "PANE" ;; esac ;;
+  nudge|peek|send-keys|interrupt|clear-scrollback) echo "legacy op used" >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	if err := p.Nudge("s", runtime.TextContent("hi")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	out, err := p.Peek("s", 5)
+	if err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	if !strings.Contains(out, "PANE") {
+		t.Errorf("Peek over exec = %q, want capture-pane output", out)
+	}
+	data, _ := os.ReadFile(execLog)
+	logged := string(data)
+	if !strings.Contains(logged, "send-keys") || !strings.Contains(logged, "hi") {
+		t.Errorf("exec log = %q, want a send-keys carrying the message", logged)
+	}
+	if !strings.Contains(logged, "capture-pane") {
+		t.Errorf("exec log = %q, want a capture-pane for Peek", logged)
 	}
 }
 

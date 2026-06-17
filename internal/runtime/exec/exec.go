@@ -380,10 +380,64 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt sends an interrupt to the session: script interrupt <name>
-func (p *Provider) Interrupt(name string) error {
+// execTmuxSession is the in-box tmux session the carrier addresses. An exec-pack
+// runtime runs one agent per box in a tmux session named "main" (the tmux-in-box
+// convention shared with the Kubernetes provider), so the driving verbs are
+// reproduced as tmux commands over the exec op rather than dedicated
+// nudge/peek/send-keys/interrupt/clear-scrollback wire ops.
+const execTmuxSession = "main"
+
+// carrier drives the in-box tmux session over this provider's own exec op.
+func (p *Provider) carrier() runtime.Carrier {
+	return runtime.NewTmuxCarrier(p, execTmuxSession)
+}
+
+// The dedicated-wire-op driving helpers. The public driving methods
+// (Nudge/Peek/SendKeys/Interrupt/ClearScrollback) try the tmux carrier over the
+// exec op first and fall back to these when the runtime does not implement exec
+// (ErrExecUnsupported): a pack that ships exec + tmux-in-box (daytona, etc.) is
+// driven over the carrier, while a pack that only implements the older dedicated
+// driving ops (the gc-session-k8s reference) keeps working unchanged. The
+// startup readiness + dialog-dismissal subsystem calls the same public methods,
+// so it inherits the same carrier-then-fallback behavior. (watch-startup, a
+// streaming op the request/response exec connection cannot carry, remains a
+// direct wire op.)
+func (p *Provider) nudgeOp(name string, content []runtime.ContentBlock) error {
+	message := runtime.FlattenText(content)
+	if message == "" {
+		return nil
+	}
+	_, err := p.run([]byte(message), "nudge", name)
+	return err
+}
+
+func (p *Provider) peekOp(name string, lines int) (string, error) {
+	return p.run(nil, "peek", name, strconv.Itoa(lines))
+}
+
+func (p *Provider) sendKeysOp(name string, keys ...string) error {
+	_, err := p.run(nil, append([]string{"send-keys", name}, keys...)...)
+	return err
+}
+
+func (p *Provider) interruptOp(name string) error {
 	_, err := p.run(nil, "interrupt", name)
 	return err
+}
+
+func (p *Provider) clearScrollbackOp(name string) error {
+	_, err := p.run(nil, "clear-scrollback", name)
+	return err
+}
+
+// Interrupt sends a soft interrupt (Ctrl-C) to the in-box tmux session over the
+// exec connection, falling back to the dedicated interrupt op when the runtime
+// does not implement exec.
+func (p *Provider) Interrupt(name string) error {
+	if err := p.carrier().Interrupt(context.Background(), name); !errors.Is(err, runtime.ErrExecUnsupported) {
+		return err
+	}
+	return p.interruptOp(name)
 }
 
 // IsRunning checks if the session is alive: script is-running <name>
@@ -431,15 +485,14 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	return strings.TrimSpace(out) == "true"
 }
 
-// Nudge sends a message to the session: script nudge <name>
-// The message is sent on stdin. Content blocks are flattened to text.
+// Nudge delivers content as input to the in-box tmux session (typed, then
+// submitted) over the exec connection, falling back to the dedicated nudge op
+// when the runtime does not implement exec. Empty content is a no-op.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	message := runtime.FlattenText(content)
-	if message == "" {
-		return nil
+	if err := p.carrier().Nudge(context.Background(), name, content); !errors.Is(err, runtime.ErrExecUnsupported) {
+		return err
 	}
-	_, err := p.run([]byte(message), "nudge", name)
-	return err
+	return p.nudgeOp(name, content)
 }
 
 // SetMeta stores a key-value pair: script set-meta <name> <key>
@@ -461,9 +514,15 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return err
 }
 
-// Peek captures output from the session: script peek <name> <lines>
+// Peek captures the last `lines` of the in-box tmux pane (all scrollback when
+// lines <= 0) over the exec connection, falling back to the dedicated peek op
+// when the runtime does not implement exec.
 func (p *Provider) Peek(name string, lines int) (string, error) {
-	return p.run(nil, "peek", name, strconv.Itoa(lines))
+	out, err := p.carrier().Peek(context.Background(), name, lines)
+	if errors.Is(err, runtime.ErrExecUnsupported) {
+		return p.peekOp(name, lines)
+	}
+	return out, err
 }
 
 // ListRunning returns sessions matching a prefix: script list-running <prefix>
@@ -479,10 +538,14 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return strings.Split(out, "\n"), nil
 }
 
-// ClearScrollback clears the scrollback: script clear-scrollback <name>
+// ClearScrollback clears the in-box tmux session's scrollback over the exec
+// connection, falling back to the dedicated clear-scrollback op when the runtime
+// does not implement exec.
 func (p *Provider) ClearScrollback(name string) error {
-	_, err := p.run(nil, "clear-scrollback", name)
-	return err
+	if err := p.carrier().ClearScrollback(context.Background(), name); !errors.Is(err, runtime.ErrExecUnsupported) {
+		return err
+	}
+	return p.clearScrollbackOp(name)
 }
 
 // CheckImage verifies that a container image exists locally by invoking:
@@ -501,13 +564,15 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	return err
 }
 
-// SendKeys sends bare tmux-style keystrokes (e.g., "Enter", "Down") to the
-// named session: script send-keys <name> <key1> [key2 ...]
-// Used for dialog dismissal and other non-text input.
+// SendKeys sends bare tmux-style keystrokes (e.g. "Enter", "Down") to the in-box
+// tmux session over the exec connection; used for dialog dismissal and other
+// non-text input. Falls back to the dedicated send-keys op when the runtime does
+// not implement exec.
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	args := append([]string{"send-keys", name}, keys...)
-	_, err := p.run(nil, args...)
-	return err
+	if err := p.carrier().SendKeys(context.Background(), name, keys...); !errors.Is(err, runtime.ErrExecUnsupported) {
+		return err
+	}
+	return p.sendKeysOp(name, keys...)
 }
 
 // RunLive re-applies session_live commands. For exec providers, runs
@@ -561,8 +626,8 @@ var _ runtime.ExecProvider = (*Provider)(nil)
 // v0 wire op carries the command on stdin and the runtime runs it, e.g. via
 // `sh -c "$(cat)"`), and the op's exit code is the command's exit code. A
 // runtime whose script does not implement exec (exit 2) yields
-// [runtime.ErrExecUnsupported] so callers can fall back to the legacy driving
-// ops.
+// [runtime.ErrExecUnsupported]; the driving methods then fall back to the
+// dedicated nudge/peek/send-keys/interrupt/clear-scrollback wire ops.
 //
 // Because the v0 `exec` op uses stdin for the command itself, the command's
 // own stdin is not separately available; the driving ops reproduced over Exec

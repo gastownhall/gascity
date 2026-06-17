@@ -104,12 +104,15 @@ dedicated driving ops, and any runtime that declares an `env.*` capability
 already implements it. It is **optional for now** — conformance verifies it
 only when present (the output reaches the caller and the op exit mirrors the
 command's exit code) — and becomes required as Gas City moves its own input
-delivery and observation onto `exec`. The driving ops (`interrupt`, `nudge`,
-`peek`, `clear-scrollback`, `send-keys`, `watch-startup`) remain how Gas City
-delivers input and reads output **today**, are reproducible over `exec`, and
-are deliberately NOT conformance requirements — but until the migration lands,
-a runtime should still implement the driving ops it wants gc to use (gc does
-not yet drive them over `exec`).
+delivery and observation onto `exec`. The dedicated driving ops (`interrupt`,
+`nudge`, `peek`, `clear-scrollback`, `send-keys`) are reproducible over `exec`
+and are deliberately NOT conformance requirements: gc now drives input and reads
+output **over `exec`** (via the tmux carrier) when a runtime implements it, and
+**falls back** to the dedicated driving ops when `exec` is unsupported
+(`RPP-CONN-001` answered exit 2). So a runtime that ships `exec` + tmux-in-box
+needs none of the driving ops, while one that implements only the driving ops
+keeps working via the fallback. (`watch-startup` is a streaming op the
+request/response `exec` connection cannot carry, so it stays a dedicated op.)
 
 ### Protocol Handshake (`protocol`)
 
