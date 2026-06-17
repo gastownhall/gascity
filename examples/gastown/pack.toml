@@ -30,4 +30,4 @@ version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
 # pin in lockstep with the registry release and the module dependency.
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:4212acb7046c11f6f633df73307006493185233a"
+version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"

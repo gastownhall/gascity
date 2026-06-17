@@ -2095,18 +2095,13 @@ func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
 			want:   "{{ .AssignedInProgressQuery }}",
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
-		{
-			rel:     "packs/gastown/agents/polecat/prompt.template.md",
-			start:   "## Startup Protocol",
-			end:     "## Context Exhaustion",
-			want:    "{{ .AssignedInProgressQuery }}",
-			forbid:  []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
-			render:  true,
-			agent:   "gastown/polecat",
-			tmpl:    "polecat",
-			rig:     "gastown",
-			binding: "gastown.",
-		},
+		// The polecat Startup Protocol deliberately does NOT use the bare
+		// AssignedInProgressQuery template: since gastown 0.1.10 polecat
+		// uses `gc hook --claim --json`, which internally checks for existing
+		// in-progress assigned work via hookClaimExistingOrAssigned before
+		// falling through to unassigned pool work. The assigned-in-progress
+		// check is still present; it is now inside gc hook rather than a
+		// bare bd query rendered into the prompt.
 		{
 			rel:     "packs/gastown/agents/deacon/prompt.template.md",
 			start:   "## Startup Protocol",

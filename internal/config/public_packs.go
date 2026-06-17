@@ -8,7 +8,7 @@ const (
 
 	// PublicGastownPackVersion pins fresh init output to the registry release
 	// content commit from gastownhall/gascity-packs main.
-	PublicGastownPackVersion = "sha:4212acb7046c11f6f633df73307006493185233a"
+	PublicGastownPackVersion = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
 
 	// PublicGascityPackSource is the concrete durable source for the
 	// gascity planning/implementation skills pack.
@@ -17,7 +17,7 @@ const (
 	// PublicGascityPackVersion pins fresh init output to the registry
 	// release content commit from gastownhall/gascity-packs main
 	// (gascity 0.1.4).
-	PublicGascityPackVersion = "sha:99464ed9240b1f6e6b7ab1d351f67016e1a973ff"
+	PublicGascityPackVersion = "sha:3b3b89f2011e06d84459aa7bea1552382f13930a"
 
 	// BundledPackImportVersion pins the [imports.core]/[imports.bd] entries
 	// gc init writes for the gascity.git packs bundled with the binary.
@@ -56,6 +56,7 @@ var SupersededBundledPackImportVersions = []string{
 // When bumping PublicGastownPackVersion, append the old value here
 // (scripts/update-bundled-gastown-pack does this).
 var SupersededPublicGastownPackVersions = []string{
+	"sha:4212acb7046c11f6f633df73307006493185233a",
 	"sha:817f85e155e2b0b0c375835b076103108f8a4724",
 	"sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b",
 	"sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9",
@@ -64,6 +65,7 @@ var SupersededPublicGastownPackVersions = []string{
 // SupersededPublicGascityPackVersions is the gascity-pack counterpart of
 // SupersededPublicGastownPackVersions.
 var SupersededPublicGascityPackVersions = []string{
+	"sha:99464ed9240b1f6e6b7ab1d351f67016e1a973ff",
 	"sha:788b6e8ec224a8951c728ef6da74dab8bc04d474",
 	"sha:5fc675b85d4ae0ebca2f17cb027a24b03f2832f8",
 	"sha:abf24a2a123da29563f0473e6771e3f4769de0ab",
