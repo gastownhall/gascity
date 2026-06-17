@@ -552,3 +552,67 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	}
 	return t, nil
 }
+
+// Provider implements the optional connection primitive.
+var _ runtime.ExecProvider = (*Provider)(nil)
+
+// Exec runs argv inside the session via the RPP `exec` op and implements
+// [runtime.ExecProvider]. argv is POSIX shell-quoted onto the op's stdin (the
+// v0 wire op carries the command on stdin and the runtime runs it, e.g. via
+// `sh -c "$(cat)"`), and the op's exit code is the command's exit code. A
+// runtime whose script does not implement exec (exit 2) yields
+// [runtime.ErrExecUnsupported] so callers can fall back to the legacy driving
+// ops.
+//
+// Because the v0 `exec` op uses stdin for the command itself, the command's
+// own stdin is not separately available; the driving ops reproduced over Exec
+// (tmux send-keys / capture-pane / …) do not need it.
+func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte, int, error) {
+	command := shellQuote(argv)
+	cmdCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
+	cmd.WaitDelay = 2 * time.Second
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.Stdin = strings.NewReader(command)
+
+	err := cmd.Run()
+	if err != nil {
+		// A context timeout/cancellation kills the process, so cmd.Run reports
+		// an *ExitError (signal: killed) with a -1 code. Classify that as a
+		// transport failure BEFORE reading any exit code, so a timed-out op is
+		// never misreported as a clean command result.
+		if cmdCtx.Err() != nil {
+			return nil, -1, fmt.Errorf("exec provider %s exec %s: %w", p.script, name, cmdCtx.Err())
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if exitErr.ExitCode() == 2 {
+				return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
+			}
+			// A non-zero (non-2) exit is the command's own result, not a
+			// transport failure: return the output and the code, no error.
+			return stdout.Bytes(), exitErr.ExitCode(), nil
+		}
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, -1, fmt.Errorf("exec provider %s exec %s: %s", p.script, name, msg)
+	}
+	return stdout.Bytes(), 0, nil
+}
+
+// shellQuote renders argv as a single POSIX shell command string (each
+// argument single-quoted, embedded single quotes escaped as '\”), so a
+// runtime's `exec` handler can run it verbatim via `sh -c`.
+func shellQuote(argv []string) string {
+	quoted := make([]string, len(argv))
+	for i, a := range argv {
+		quoted[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+	}
+	return strings.Join(quoted, " ")
+}

@@ -47,6 +47,9 @@ type Fake struct {
 	// about to consult configured results. Tests use this to coordinate
 	// cancellation without relying on wall-clock sleeps.
 	WaitForIdleStarted map[string]chan struct{}
+	// ExecResults configures Fake.Exec output/code/err per session name; an
+	// absent entry returns empty success.
+	ExecResults map[string]FakeExecResult
 }
 
 var _ ProcessTableScanner = (*Fake)(nil)
@@ -64,6 +67,13 @@ type Call struct {
 	Dst       string         // only set for CopyTo calls
 	RequestID string         // only set for Respond calls
 	Action    string         // only set for Respond calls
+}
+
+// FakeExecResult configures one [Fake.Exec] outcome.
+type FakeExecResult struct {
+	Output string
+	Code   int
+	Err    error
 }
 
 // CountCalls returns the number of recorded calls matching method and name.
@@ -664,6 +674,25 @@ func (f *Fake) SendKeys(name string, keys ...string) error {
 		return fmt.Errorf("session unavailable")
 	}
 	return nil
+}
+
+// Fake implements the optional connection primitive.
+var _ ExecProvider = (*Fake)(nil)
+
+// Exec records the call and returns the configured result for name, or empty
+// success. Implements [ExecProvider]. Tests that need a specific output/exit
+// code set ExecResults[name]; a broken fake returns a transport error.
+func (f *Fake) Exec(_ context.Context, name string, argv []string) ([]byte, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "Exec", Name: name, Message: strings.Join(argv, " ")})
+	if f.broken {
+		return nil, -1, fmt.Errorf("session unavailable")
+	}
+	if res, ok := f.ExecResults[name]; ok {
+		return []byte(res.Output), res.Code, res.Err
+	}
+	return nil, 0, nil
 }
 
 // Capabilities returns the fake provider's capabilities.

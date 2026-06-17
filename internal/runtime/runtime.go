@@ -43,6 +43,11 @@ var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrExecUnsupported reports that a provider implements [ExecProvider] but the
+// underlying runtime does not implement the RPP `exec` wire op (it answered
+// exit 2). Carriers treat this as "fall back to the legacy driving op".
+var ErrExecUnsupported = errors.New("runtime does not implement the exec op")
+
 // IsSessionGone reports whether err represents a "the session is not
 // there" condition — either ErrSessionNotFound or the legacy provider
 // phrasings that predate the sentinel (tmux/subprocess providers may
@@ -233,6 +238,26 @@ type InteractionProvider interface {
 // rely on timeout-bounded completion for cleanup.
 type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
+}
+
+// ExecProvider is an optional extension for runtimes that expose the RPP
+// connection primitive: run a command inside the box and return its standard
+// output and exit code. It is the connection op a carrier drives the legacy
+// driving ops (Nudge / Peek / SendKeys / Interrupt / ClearScrollback) through;
+// the rewrite that routes those over Exec is staged. Callers MUST type-assert
+// and fall back to the driving methods when a provider does not implement
+// ExecProvider, or when Exec returns [ErrExecUnsupported] (the provider type
+// supports Exec but the underlying runtime does not implement the wire op).
+//
+// argv is the command and its arguments (no shell interpretation by the
+// caller). output is the command's standard output, verbatim. code is the
+// command's exit code: 0 on success, non-zero is the command's own result and
+// is NOT an error; providers whose transport cannot observe the numeric code
+// report 1 for any non-zero exit. A non-nil err signals the op could not run
+// at all (transport/spawn failure, including context cancellation/timeout) or
+// [ErrExecUnsupported] — distinct from a non-zero exit code.
+type ExecProvider interface {
+	Exec(ctx context.Context, name string, argv []string) (output []byte, code int, err error)
 }
 
 // DialogProvider is an optional extension for runtimes that can detect and
