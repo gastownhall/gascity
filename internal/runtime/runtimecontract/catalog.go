@@ -15,6 +15,12 @@
 //     suites, and a coverage map fails CI if a contract behavior gains a
 //     RunProviderTests case without a catalog entry.
 //
+// One exception to the RunProviderTests mirror: the connection group (the
+// exec primitive) is wire-only — there is no runtime.Provider method to
+// contract-test yet, so it is validated by the runtimecontract probe and the
+// runtimecapability env runner rather than by RunProviderTests. It re-binds to
+// RunProviderTests when the Go-side connection method (Place.Exec) lands.
+//
 // Unlike rppcheck (the lighter `gc runtime check` smoke test), this suite
 // also proves each requirement is *gated*: a reference script that violates
 // one behavior fails exactly that requirement's check (the negative-gating
@@ -36,8 +42,9 @@ type Group string
 
 // Requirement groups.
 const (
-	GroupProtocol  Group = "protocol"
-	GroupLifecycle Group = "lifecycle"
+	GroupProtocol   Group = "protocol"
+	GroupLifecycle  Group = "lifecycle"
+	GroupConnection Group = "connection"
 )
 
 // Requirement is one behavior an RPP executable must satisfy to be a
@@ -65,6 +72,19 @@ const (
 	ReqLifecycleStopNotRunning    Code = "RPP-LIFECYCLE-003"
 	ReqLifecycleStopIdempotent    Code = "RPP-LIFECYCLE-004"
 	ReqLifecycleUnknownNotRunning Code = "RPP-LIFECYCLE-005"
+
+	// ReqConnectionExec is the slim connection primitive: a carrier drives the
+	// box THROUGH exec instead of via dedicated driving ops. The six legacy
+	// driving ops (nudge / send-keys / interrupt / clear-scrollback / peek /
+	// watch-startup) are deliberately NOT catalog requirements — they are
+	// reproducible carrier-side over exec, so a runtime author is never
+	// contractually forced to implement them. It is Optional for now (absent =
+	// SKIP): gc still delivers input/observation via the driving-op methods, so
+	// requiring exec before that carrier rewrite would let an exec-only runtime
+	// pass conformance while gc silently no-ops its nudge/peek calls. It flips
+	// to required in the slice that moves gc's own driving over exec. See
+	// REQUIREMENTS.md (RUNTIME-RPP-013).
+	ReqConnectionExec Code = "RPP-CONN-001"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -78,6 +98,8 @@ var catalog = []Requirement{
 	{ReqLifecycleStopNotRunning, GroupLifecycle, "stop makes is-running report false", false},
 	{ReqLifecycleStopIdempotent, GroupLifecycle, "stop on a missing session succeeds (idempotent)", false},
 	{ReqLifecycleUnknownNotRunning, GroupLifecycle, "is-running on a never-started session reports false", false},
+
+	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (absent = SKIP; becomes required when gc drives its own input/observation over exec)", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

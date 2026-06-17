@@ -111,6 +111,7 @@ type outcome struct {
 	stdout      string
 	unsupported bool  // exit 2 — op not implemented
 	err         error // any failure other than exit 2 (stderr included)
+	exitCode    int   // the op's process exit code (0 on success; set for non-2 exit errors)
 }
 
 func (o outcome) ok() bool { return o.err == nil && !o.unsupported }
@@ -142,7 +143,8 @@ func (r *runner) opTimeout(ctx context.Context, timeout time.Duration, stdin []b
 	err := cmd.Run()
 	if err != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+		isExit := errors.As(err, &exitErr)
+		if isExit && exitErr.ExitCode() == 2 {
 			return outcome{unsupported: true}
 		}
 		msg := strings.TrimSpace(stderr.String())
@@ -154,7 +156,11 @@ func (r *runner) opTimeout(ctx context.Context, timeout time.Duration, stdin []b
 		case msg == "":
 			msg = err.Error()
 		}
-		return outcome{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg)}
+		res := outcome{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg)}
+		if isExit {
+			res.exitCode = exitErr.ExitCode()
+		}
+		return res
 	}
 	return outcome{stdout: strings.TrimRight(stdout.String(), "\n")}
 }
@@ -176,6 +182,13 @@ func (r *runner) stop(ctx context.Context, name string) outcome {
 // isRunning runs is-running and returns the trimmed stdout plus outcome.
 func (r *runner) isRunning(ctx context.Context, name string) outcome {
 	return r.op(ctx, "is-running", name)
+}
+
+// execOp runs a command in the box via the RPP exec op: the command rides
+// stdin, combined output comes back on stdout, and the op's exit code is the
+// command's exit code (exit 2 = exec unimplemented).
+func (r *runner) execOp(ctx context.Context, name, command string) outcome {
+	return r.opTimeout(ctx, r.opts.OpTimeout, []byte(command), "exec", name)
 }
 
 // handshake runs the protocol op and parses the result. Absent (exit 2) is

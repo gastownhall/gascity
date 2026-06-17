@@ -82,6 +82,7 @@ case "$op" in
   start)      cat >/dev/null; if [ -e "$S/$name" ]; then exit 1; fi; : > "$S/$name" ;;
   stop)       rm -f "$S/$name" ;;
   is-running) if [ -e "$S/$name" ]; then echo true; else echo false; fi ;;
+  exec)       sh -c "$(cat)" ;;
   *) exit 2 ;;
 esac
 `)

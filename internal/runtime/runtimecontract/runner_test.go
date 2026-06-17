@@ -20,6 +20,7 @@ func goldenBodies() map[string]string {
 		"start":      `cat >/dev/null; if [ -e "$S/$name" ]; then exit 1; fi; : > "$S/$name"`,
 		"stop":       `rm -f "$S/$name"`,
 		"is-running": `if [ -e "$S/$name" ]; then echo true; else echo false; fi`,
+		"exec":       `sh -c "$(cat)"`,
 	}
 }
 
@@ -135,6 +136,7 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqLifecycleStopNotRunning, "stop", `:`, "stop does not actually stop"},
 		{ReqLifecycleStopIdempotent, "stop", `if [ -e "$S/$name" ]; then rm -f "$S/$name"; else exit 1; fi`, "stop errors on a missing session"},
 		{ReqLifecycleUnknownNotRunning, "is-running", `echo true`, "unknown session reports running"},
+		{ReqConnectionExec, "exec", `cat >/dev/null; echo wrong`, "exec ignores the command and emits fixed output"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.

@@ -524,6 +524,8 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment),
 		CanReportActivity:   p.handshakeCapability(runtime.ProtocolCapabilityReportActivity),
+		CanStream:           p.handshakeCapability(runtime.ProtocolCapabilityProcStream),
+		CanAttachTTY:        p.handshakeCapability(runtime.ProtocolCapabilityTTYAttach),
 	}
 }
 

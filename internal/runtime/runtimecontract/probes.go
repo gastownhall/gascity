@@ -25,6 +25,7 @@ var probes = map[Code]probe{
 	ReqLifecycleStopNotRunning:    probeStopNotRunning,
 	ReqLifecycleStopIdempotent:    probeStopIdempotent,
 	ReqLifecycleUnknownNotRunning: probeUnknownNotRunning,
+	ReqConnectionExec:             probeExec,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
@@ -104,6 +105,45 @@ func probeStopIdempotent(ctx context.Context, r *runner, _ runtime.ProtocolInfo)
 func probeUnknownNotRunning(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
 	name := r.nextName() // never started
 	return expectRunning(ctx, r, name, false, "for a never-started session")
+}
+
+// probeExec verifies the slim connection primitive: exec runs the piped
+// command inside the box, the command's output reaches stdout, and the
+// command's exit code becomes the op's exit code. This is the wire op a
+// carrier drives the legacy driving ops through. It is Optional for now: gc
+// still delivers input/observation via the driving-op methods, so a runtime
+// that has not implemented exec SKIPs (rather than failing) until the carrier
+// rewrite makes exec the way gc drives every runtime.
+func probeExec(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
+	name := r.nextName()
+	if status, detail := requireStart(ctx, r, name); status != StatusPass {
+		return status, detail
+	}
+	defer r.stop(ctx, name)
+
+	const sentinel = "GC_RPP_CONN_EXEC_OK"
+	out := r.execOp(ctx, name, "echo "+sentinel)
+	switch {
+	case out.unsupported:
+		return StatusSkip, "exec not implemented (exit 2) — optional until gc drives the legacy driving ops over exec"
+	case out.err != nil:
+		return StatusFail, "exec failed: " + out.err.Error()
+	}
+	if got := strings.TrimSpace(out.stdout); got != sentinel {
+		return StatusFail, fmt.Sprintf("exec stdout = %q, want %q (the command's output must reach the caller)", got, sentinel)
+	}
+
+	// The op's exit code must mirror the command's: a command exiting 7 must
+	// surface as op exit 7 — not merely "some error".
+	const wantCode = 7
+	nz := r.execOp(ctx, name, "exit 7")
+	switch {
+	case nz.unsupported:
+		return StatusFail, "exec ran the first command but returned exit 2 on the exit-code check — exec must be implemented consistently"
+	case nz.exitCode != wantCode:
+		return StatusFail, fmt.Sprintf("exec op exit = %d, want %d (op exit must mirror the command's exit code)", nz.exitCode, wantCode)
+	}
+	return StatusPass, "exec runs the command in the box; output and exit code propagate"
 }
 
 // requireStart starts name and returns a non-pass status if start itself is

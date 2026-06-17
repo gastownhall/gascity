@@ -155,8 +155,17 @@ func TestEveryCatalogCodeBacksAContractCase(t *testing.T) {
 		}
 	}
 	for _, req := range catalog {
-		if req.Group == GroupProtocol {
-			continue // wire-only: no runtime.Provider method to contract-test
+		if req.Group == GroupProtocol || req.Group == GroupConnection {
+			// Wire-only groups: no runtime.Provider method to contract-test.
+			// protocol is the handshake; connection (exec) is the slim wire
+			// primitive, validated by the runtimecontract probe and the
+			// runtimecapability env runner. The Go-side connection method
+			// (Place.Exec) and its RunProviderTests case land with the carrier
+			// rewrite that moves the legacy driving ops over exec.
+			// TODO(connection-rewrite): drop the GroupConnection exemption once
+			// Place.Exec has a RunProviderTests case, so the lockstep guarantee
+			// re-binds the connection group too.
+			continue
 		}
 		if !backed[req.Code] {
 			t.Errorf("catalog code %s does not back any RunProviderTests case — the wire suite must not exceed the contract", req.Code)

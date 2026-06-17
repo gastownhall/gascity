@@ -96,6 +96,20 @@ care about.
 | `get-last-activity` | `script get-last-activity <name>` | — | RFC3339 or empty |
 | `protocol` | `script protocol` | — | handshake JSON (see below) |
 | `is-attached` | `script is-attached <name>` | — | `true` or `false` |
+| `exec` | `script exec <name>` | command | combined output (op exit == command exit) |
+
+**The connection primitive (slim RPP).** `exec` is the connection op
+(`RPP-CONN-001`): a carrier drives a box *through* `exec` rather than via
+dedicated driving ops, and any runtime that declares an `env.*` capability
+already implements it. It is **optional for now** — conformance verifies it
+only when present (the output reaches the caller and the op exit mirrors the
+command's exit code) — and becomes required as Gas City moves its own input
+delivery and observation onto `exec`. The driving ops (`interrupt`, `nudge`,
+`peek`, `clear-scrollback`, `send-keys`, `watch-startup`) remain how Gas City
+delivers input and reads output **today**, are reproducible over `exec`, and
+are deliberately NOT conformance requirements — but until the migration lands,
+a runtime should still implement the driving ops it wants gc to use (gc does
+not yet drive them over `exec`).
 
 ### Protocol Handshake (`protocol`)
 
@@ -120,6 +134,8 @@ Capabilities:
 |------------|--------|
 | `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. |
 | `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. |
+| `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
+| `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
 
 The handshake runs once per provider instance and is cached.
 
