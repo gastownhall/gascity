@@ -1,6 +1,8 @@
 [order]
 description = "Flatten Dolt commit history to reduce storage"
 trigger = "cooldown"
-interval = "24h"
+# 2h: bounds journal to ~0.7 GB at observed write rates (incident ga-pqfk8t: 8.3 GB / 24h)
+# Operator-approved change — see bead ga-ox5oz8 for sign-off note.
+interval = "2h"
 exec = "gc dolt compact"
 timeout = "24h"
