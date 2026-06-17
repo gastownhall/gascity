@@ -12,6 +12,9 @@ new chunks have accumulated since the last GC, which means a database that
 bloated once during an agent storm and then went quiet will not auto-GC on
 its own — it sits at its peak size indefinitely.
 
+In production cities, the `mol-dog-compactor` order handles compaction
+automatically — see [Dolt Storage Maintenance](../runbooks/dolt-compact.md).
+
 This runbook walks an operator through recovering such a database: stopping
 writers, taking a safety backup, running a full GC with archive compression,
 and verifying the result.
