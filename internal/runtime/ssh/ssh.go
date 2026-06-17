@@ -48,11 +48,14 @@ func (e Endpoint) target() string {
 }
 
 // runner runs a remote command over the connection and returns its standard
-// output and exit code. It is the transport seam: the default shells the ssh
-// client; a future ControlMaster / x/crypto/ssh backend can replace it, and
-// tests inject a fake.
+// output and exit code. stdin, when non-nil, is fed to the remote command
+// (used to ship a setup script to a remote sh). It is the transport seam: the
+// default shells the ssh client; a future ControlMaster / x/crypto/ssh backend
+// can replace it, and tests inject a fake. Such a backend MUST deliver stdin to
+// the specific remote command invocation (per call), not a shared channel, so
+// the execScript contract holds.
 type runner interface {
-	run(ctx context.Context, ep Endpoint, remoteArgv []string) (stdout []byte, code int, err error)
+	run(ctx context.Context, ep Endpoint, remoteArgv []string, stdin []byte) (stdout []byte, code int, err error)
 }
 
 // Conn is an SSH connection to a box. It implements [runtime.ExecProvider], so
@@ -80,7 +83,13 @@ func (c *Conn) Exec(ctx context.Context, _ string, argv []string) ([]byte, int, 
 	if len(argv) == 0 {
 		return nil, -1, fmt.Errorf("ssh %s: empty argv", c.ep.target())
 	}
-	return c.run.run(ctx, c.ep, argv)
+	return c.run.run(ctx, c.ep, argv, nil)
+}
+
+// execScript runs `sh` on the box with script piped to its stdin, shipping a
+// local setup script to the remote shell (mirroring the k8s exec-stdin path).
+func (c *Conn) execScript(ctx context.Context, script []byte) ([]byte, int, error) {
+	return c.run.run(ctx, c.ep, []string{"sh"}, script)
 }
 
 // shellRunner runs commands by shelling the ssh client. This is the v0
@@ -88,12 +97,15 @@ func (c *Conn) Exec(ctx context.Context, _ string, argv []string) ([]byte, int, 
 // it behind [runner] without changing the carrier-facing contract.
 type shellRunner struct{}
 
-func (shellRunner) run(ctx context.Context, ep Endpoint, remoteArgv []string) ([]byte, int, error) {
+func (shellRunner) run(ctx context.Context, ep Endpoint, remoteArgv []string, stdin []byte) ([]byte, int, error) {
 	cmd := exec.CommandContext(ctx, "ssh", sshArgs(ep, remoteArgv)...)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 
 	if err := cmd.Run(); err != nil {
 		// Context cancellation/timeout is a transport failure, not a command exit.

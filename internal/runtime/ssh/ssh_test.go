@@ -17,14 +17,16 @@ import (
 // otherwise the fixed out/code/err is returned.
 type fakeRunner struct {
 	calls   [][]string
+	stdins  [][]byte // stdin passed alongside each call (nil for most ops)
 	out     []byte
 	code    int
 	err     error
 	respond func(remoteArgv []string) ([]byte, int, error)
 }
 
-func (f *fakeRunner) run(_ context.Context, _ Endpoint, remoteArgv []string) ([]byte, int, error) {
+func (f *fakeRunner) run(_ context.Context, _ Endpoint, remoteArgv []string, stdin []byte) ([]byte, int, error) {
 	f.calls = append(f.calls, remoteArgv)
+	f.stdins = append(f.stdins, stdin)
 	if f.respond != nil {
 		return f.respond(remoteArgv)
 	}

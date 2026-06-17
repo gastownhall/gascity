@@ -21,10 +21,14 @@ import (
 // session named by the session name (which is the carrier's tmux target).
 //
 // v0 scope: lifecycle (start/stop/is-running/list), the driving verbs, meta,
-// activity, and attach. Rich startup orchestration (PreStart, SessionSetup,
-// readiness polling, startup-dialog dismissal) and CopyTo are deferred.
+// activity, attach, and startup orchestration (PreStart / SessionSetup /
+// SessionSetupScript / SessionLive / post-start liveness / initial Nudge). Still
+// deferred: startup-dialog dismissal (EmitsPermissionWarning /
+// AcceptStartupDialogs), live SessionLive re-apply via RunLive (a no-op, like
+// k8s), and CopyTo.
 type Provider struct {
-	conn *Conn
+	conn            *Conn
+	postStartSettle time.Duration // settle before the post-start liveness recheck
 }
 
 var (
@@ -33,8 +37,15 @@ var (
 	_ runtime.SleepCapabilityProvider = (*Provider)(nil)
 )
 
+// defaultPostStartSettle is how long Start waits before re-checking that a
+// managed session survived startup (the box already exists, so a short settle
+// suffices to catch an agent that dies immediately, e.g. a stale --resume key).
+const defaultPostStartSettle = time.Second
+
 // NewProvider returns an ssh Provider for the box at ep.
-func NewProvider(ep Endpoint) *Provider { return &Provider{conn: New(ep)} }
+func NewProvider(ep Endpoint) *Provider {
+	return &Provider{conn: New(ep), postStartSettle: defaultPostStartSettle}
+}
 
 // Exec runs argv on the box — the connection primitive (see [Conn.Exec]).
 func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte, int, error) {
@@ -57,21 +68,54 @@ func (p *Provider) tmux(ctx context.Context, name string, args ...string) (strin
 const defaultRemoteShell = "/bin/sh"
 
 // Start launches the session command in a new tmux session named name on the
-// box. A name that already exists fails with [runtime.ErrSessionExists]
-// (detected with a has-session pre-check, and re-checked if new-session fails,
-// since the connection does not surface tmux's stderr on a non-zero exit). Env
-// is injected via tmux -e (requires remote tmux >= 3.2).
+// box and runs the configured startup orchestration:
 //
-// v0 scope — Start does NOT yet run cfg.PreStart / SessionSetup /
-// SessionSetupScript / SessionLive, does NOT wait for the agent inside the
-// session to become ready, and does NOT send the initial cfg.Nudge. Callers
-// must therefore not deliver input immediately after Start, and these gaps
-// (readiness wait + startup orchestration) MUST be closed before the ssh
-// provider is wired into runtime selection.
+//   - PreStart commands run on the box BEFORE session creation; a failure
+//     aborts (the agent never launches into an unprepared workdir).
+//   - new-session creates the tmux session. A name that already exists fails
+//     with [runtime.ErrSessionExists] (has-session precheck, and re-checked if
+//     new-session fails, since the connection drops tmux's stderr on a non-zero
+//     exit). Env is injected via tmux -e (requires remote tmux >= 3.2).
+//   - SessionSetup, SessionSetupScript (piped to a remote sh), and SessionLive
+//     run on the box after creation, best-effort. Every setup step runs with the
+//     session WorkDir as cwd and the session env (cfg.Env + GC_SESSION) exported,
+//     matching the local tmux adapter and the k8s in-pod environment.
+//   - When the config carries managed startup hints and is not one-shot, a
+//     bounded settle + has-session recheck detects an agent that dies
+//     immediately (e.g. a stale --resume key), returning
+//     [runtime.ErrSessionDiedDuringStartup]; on death the tmux session is killed
+//     (SessionSetup filesystem side effects on the box are not rolled back).
+//   - The initial cfg.Nudge, if any, is delivered last. There is no
+//     ReadyPromptPrefix / ReadyDelayMs ready-prompt wait before it (matching the
+//     k8s provider), so a caller needing a ready gate must not rely on it.
+//
+// Deferred: startup-dialog dismissal (EmitsPermissionWarning /
+// AcceptStartupDialogs), CopyTo, and live SessionLive re-apply on drift (RunLive
+// is a no-op, matching k8s; SessionLive is applied once at startup).
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if p.hasSession(ctx, name) {
 		return fmt.Errorf("%w: ssh session %q", runtime.ErrSessionExists, name)
 	}
+
+	// Setup steps run on the box with the session WorkDir as cwd and the session
+	// env (cfg.Env + GC_SESSION) exported — matching the local tmux adapter's
+	// runSetupCommand and the k8s in-pod environment.
+	prelude := setupPrelude(cfg, name)
+
+	// PreStart prepares the target filesystem; a failure aborts startup.
+	for _, cmd := range cfg.PreStart {
+		if cmd == "" {
+			continue
+		}
+		out, code, err := p.conn.Exec(ctx, name, []string{"sh", "-c", prelude + cmd})
+		if err != nil {
+			return fmt.Errorf("ssh start %q: pre_start: %w", name, err)
+		}
+		if code != 0 {
+			return fmt.Errorf("ssh start %q: pre_start %q exited %d: %s", name, cmd, code, strings.TrimSpace(string(out)))
+		}
+	}
+
 	args := []string{"new-session", "-d", "-s", name}
 	if cfg.WorkDir != "" {
 		args = append(args, "-c", cfg.WorkDir)
@@ -84,12 +128,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		command = defaultRemoteShell
 	}
 	args = append(args, command)
-
-	_, code, err := p.tmux(ctx, name, args...)
-	if err != nil {
+	if _, code, err := p.tmux(ctx, name, args...); err != nil {
 		return fmt.Errorf("ssh start %q: %w", name, err)
-	}
-	if code != 0 {
+	} else if code != 0 {
 		// Tighten the sentinel under the precheck TOCTOU: if the session now
 		// exists, new-session failed because it was a duplicate.
 		if p.hasSession(ctx, name) {
@@ -97,7 +138,52 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 		return fmt.Errorf("ssh start %q: tmux new-session exited %d", name, code)
 	}
+
+	// SessionSetup, SessionSetupScript, and SessionLive run on the box,
+	// best-effort, with the same cwd + env prelude.
+	for _, cmd := range cfg.SessionSetup {
+		if cmd != "" {
+			_, _, _ = p.conn.Exec(ctx, name, []string{"sh", "-c", prelude + cmd})
+		}
+	}
+	if cfg.SessionSetupScript != "" {
+		// k8s/tmux log a warning on a read error; the ssh provider has no stderr
+		// yet, so a missing/unreadable script path is skipped silently (NOTE).
+		if script, err := os.ReadFile(cfg.SessionSetupScript); err == nil {
+			_, _, _ = p.conn.execScript(ctx, []byte(prelude+"\n"+string(script)))
+		}
+	}
+	for _, cmd := range cfg.SessionLive {
+		if cmd != "" {
+			_, _, _ = p.conn.Exec(ctx, name, []string{"sh", "-c", prelude + cmd})
+		}
+	}
+
+	// Post-start liveness: detect an agent that dies immediately after startup.
+	if p.requiresPostStartLiveness(cfg) {
+		if p.postStartSettle > 0 {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("ssh start %q: %w", name, ctx.Err())
+			case <-time.After(p.postStartSettle):
+			}
+		}
+		if !p.hasSession(ctx, name) {
+			_ = p.Stop(name)
+			return fmt.Errorf("%w: ssh session %q died immediately after startup", runtime.ErrSessionDiedDuringStartup, name)
+		}
+	}
+
+	if cfg.Nudge != "" {
+		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
+	}
 	return nil
+}
+
+// requiresPostStartLiveness mirrors the k8s policy: a non-one-shot session that
+// carries managed startup hints gets the settle + has-session liveness recheck.
+func (p *Provider) requiresPostStartLiveness(cfg runtime.Config) bool {
+	return cfg.Lifecycle != runtime.LifecycleOneShot && runtime.HasManagedStartupHints(cfg)
 }
 
 // Stop kills the tmux session; idempotent (kill-session on a missing session
@@ -294,6 +380,25 @@ func attachArgs(ep Endpoint, name string) []string {
 		args = append(args, "-p", strconv.Itoa(ep.Port))
 	}
 	return append(args, "--", ep.target(), shellQuote([]string{"tmux", "attach", "-t", name}))
+}
+
+// setupPrelude builds a sh prefix that cd's into the session WorkDir and
+// exports the session env (cfg.Env plus GC_SESSION), so PreStart / SessionSetup
+// / SessionLive commands and the setup script run with the same cwd and
+// environment the local tmux adapter (runSetupCommand) and the k8s in-pod path
+// provide. The remote command or script body is appended after this prefix; a
+// failed cd aborts with exit 1 (which fails PreStart and is discarded by the
+// best-effort steps).
+func setupPrelude(cfg runtime.Config, name string) string {
+	var b strings.Builder
+	if cfg.WorkDir != "" {
+		b.WriteString("cd " + shellQuote([]string{cfg.WorkDir}) + " || exit 1\n")
+	}
+	for _, k := range sortedKeys(cfg.Env) {
+		b.WriteString("export " + k + "=" + shellQuote([]string{cfg.Env[k]}) + "\n")
+	}
+	b.WriteString("export GC_SESSION=" + shellQuote([]string{name}) + "\n")
+	return b.String()
 }
 
 func sortedKeys(m map[string]string) []string {
