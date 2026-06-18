@@ -1672,8 +1672,8 @@ func TestPhase2BeadAssignNormalizesCurrentSessionAlias(t *testing.T) {
 		t.Fatalf("assign alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.ID {
-		t.Fatalf("assignee = %q, want alias normalized to session bead ID %q", got.Assignee, sessionBead.ID)
+	if got.Assignee != sessionBead.Metadata["session_name"] {
+		t.Fatalf("assignee = %q, want alias normalized to session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
 	}
 
 	listReq := httptest.NewRequest("GET", cityURL(state, "/beads?assignee=worker"), nil)
@@ -1744,8 +1744,8 @@ func TestPhase2BeadAssignNormalizesCurrentSessionName(t *testing.T) {
 		t.Fatalf("assign session_name status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.ID {
-		t.Fatalf("assignee = %q, want session_name normalized to session bead ID %q", got.Assignee, sessionBead.ID)
+	if got.Assignee != sessionBead.Metadata["session_name"] {
+		t.Fatalf("assignee = %q, want session_name preserved as %q", got.Assignee, sessionBead.Metadata["session_name"])
 	}
 }
 
@@ -1766,12 +1766,16 @@ func TestPhase2BeadAssignMaterializesExactConfiguredNamedIdentity(t *testing.T) 
 		t.Fatalf("assign configured named identity status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee == "" || got.Assignee == "myrig/worker" {
-		t.Fatalf("assignee = %q, want materialized concrete session bead ID", got.Assignee)
+	if got.Assignee == "" {
+		t.Fatalf("assignee = %q, want materialized session identity", got.Assignee)
 	}
-	gotSession, err := state.cityBeadStore.Get(got.Assignee)
+	sessionID, err := session.ResolveSessionID(state.cityBeadStore, got.Assignee)
 	if err != nil {
-		t.Fatalf("Get(materialized session %q): %v", got.Assignee, err)
+		t.Fatalf("ResolveSessionID(materialized assignee %q): %v", got.Assignee, err)
+	}
+	gotSession, err := state.cityBeadStore.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get(materialized session %q): %v", sessionID, err)
 	}
 	if gotSession.Metadata[apiNamedSessionMetadataKey] != "true" {
 		t.Fatalf("configured_named_session = %q, want true", gotSession.Metadata[apiNamedSessionMetadataKey])
@@ -1875,8 +1879,8 @@ func TestPhase2BeadAssignAcceptsRepairableSessionBeadID(t *testing.T) {
 		t.Fatalf("assign repairable session status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.ID {
-		t.Fatalf("assignee = %q, want repairable session bead ID %q", got.Assignee, sessionBead.ID)
+	if got.Assignee != sessionBead.Metadata["session_name"] {
+		t.Fatalf("assignee = %q, want repairable session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
 	}
 	gotSession, _ := state.cityBeadStore.Get(sessionBead.ID)
 	if gotSession.Type != session.BeadType {
@@ -1902,8 +1906,8 @@ func TestPhase2BeadUpdateNormalizesRawAssigneeAlias(t *testing.T) {
 		t.Fatalf("update alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.ID {
-		t.Fatalf("assignee = %q, want alias normalized to session bead ID %q", got.Assignee, sessionBead.ID)
+	if got.Assignee != sessionBead.Metadata["session_name"] {
+		t.Fatalf("assignee = %q, want alias normalized to session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
 	}
 }
 
@@ -1928,8 +1932,39 @@ func TestPhase2BeadCreateNormalizesRawAssigneeAlias(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("created %d beads, want 1", len(items))
 	}
-	if items[0].Assignee != sessionBead.ID {
-		t.Fatalf("created assignee = %q, want alias normalized to session bead ID %q", items[0].Assignee, sessionBead.ID)
+	if items[0].Assignee != sessionBead.Metadata["session_name"] {
+		t.Fatalf("created assignee = %q, want alias normalized to session_name %q", items[0].Assignee, sessionBead.Metadata["session_name"])
+	}
+}
+
+func TestPhase2BeadAssignFallsBackToBeadIDWhenSessionHasNoName(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	store := state.stores["myrig"]
+	_, _ = store.Create(beads.Bead{Title: "ID offset"})
+	work, _ := store.Create(beads.Bead{Title: "Task"})
+	// A repairable/crash-migrated session bead can carry no session_name, alias,
+	// or configured_named_identity; the normalized assignee must fall back to the
+	// bead ID so the assignment is never silently cleared.
+	sessionBead, _ := state.cityBeadStore.Create(beads.Bead{
+		Title:    "Nameless session",
+		Type:     session.BeadType,
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{"state": "active"},
+	})
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := newPostRequest(cityURL(state, "/bead/"+work.ID+"/assign"), bytes.NewBufferString(`{"assignee":"`+sessionBead.ID+`"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("assign nameless session status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	got, _ := store.Get(work.ID)
+	if got.Assignee != sessionBead.ID {
+		t.Fatalf("assignee = %q, want bead-ID fallback %q", got.Assignee, sessionBead.ID)
 	}
 }
 
