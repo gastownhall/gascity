@@ -21,6 +21,10 @@ func goldenBodies() map[string]string {
 		"stop":       `rm -f "$S/$name"`,
 		"is-running": `if [ -e "$S/$name" ]; then echo true; else echo false; fi`,
 		"exec":       `sh -c "$(cat)"`,
+		// provision = the box half: consume the config and succeed WITHOUT
+		// creating the agent marker ($S/$name), so is-running stays false; the box
+		// is exec-able (exec runs regardless of the agent marker).
+		"provision": `cat >/dev/null`,
 	}
 }
 
@@ -137,6 +141,7 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqLifecycleStopIdempotent, "stop", `if [ -e "$S/$name" ]; then rm -f "$S/$name"; else exit 1; fi`, "stop errors on a missing session"},
 		{ReqLifecycleUnknownNotRunning, "is-running", `echo true`, "unknown session reports running"},
 		{ReqConnectionExec, "exec", `cat >/dev/null; echo wrong`, "exec ignores the command and emits fixed output"},
+		{ReqProvisionBoxWithoutAgent, "provision", `cat >/dev/null; : > "$S/$name"`, "provision launches the agent (is-running true) instead of just the box"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.

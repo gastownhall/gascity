@@ -26,6 +26,7 @@ var probes = map[Code]probe{
 	ReqLifecycleStopIdempotent:    probeStopIdempotent,
 	ReqLifecycleUnknownNotRunning: probeUnknownNotRunning,
 	ReqConnectionExec:             probeExec,
+	ReqProvisionBoxWithoutAgent:   probeProvision,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
@@ -144,6 +145,55 @@ func probeExec(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, 
 		return StatusFail, fmt.Sprintf("exec op exit = %d, want %d (op exit must mirror the command's exit code)", nz.exitCode, wantCode)
 	}
 	return StatusPass, "exec runs the command in the box; output and exit code propagate"
+}
+
+// probeProvision verifies the runtime/transport un-weld's box-without-agent op:
+// provision must create a reachable box WITHOUT launching the agent. The
+// defining behavior — and what separates provision from start — is that
+// is-running reports false after provision (no agent), while the box is
+// exec-able so the controller can launch the agent over exec. Optional (absent
+// = SKIP): a welded start pack that launches the agent in one shot does not
+// implement provision and is driven through start instead.
+func probeProvision(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
+	name := r.nextName()
+	prov := r.provision(ctx, name)
+	switch {
+	case prov.unsupported:
+		return StatusSkip, "provision not implemented (exit 2) — optional; a welded start pack launches the agent in one shot"
+	case prov.err != nil:
+		return StatusFail, "provision failed: " + prov.err.Error()
+	}
+	defer r.stop(ctx, name)
+
+	// The agent must NOT be launched: provision is the box half. is-running
+	// gates on the agent (e.g. tmux has-session), so it must report false until
+	// the controller launches the agent — this is what makes warm-box relaunch
+	// possible. A pack that launches in provision has not un-welded.
+	switch res := r.isRunning(ctx, name); {
+	case res.unsupported:
+		return StatusFail, "is-running returned exit 2; is-running is a required op"
+	case res.err != nil:
+		return StatusFail, "is-running failed: " + res.err.Error()
+	case strings.TrimSpace(res.stdout) != "false":
+		return StatusFail, fmt.Sprintf("is-running after provision = %q, want \"false\" (provision must NOT launch the agent; the controller launches it over exec)", strings.TrimSpace(res.stdout))
+	}
+
+	// The box must be reachable so the controller can launch the agent over
+	// exec — provision "returns when the box is exec-able". A provision-capable
+	// pack therefore also implements exec (proc.exec); if it cannot, the
+	// controller could never launch into the box it provisioned.
+	const sentinel = "GC_RPP_PROVISION_OK"
+	out := r.execOp(ctx, name, "echo "+sentinel)
+	switch {
+	case out.unsupported:
+		return StatusFail, "provision returned a box but exec is unimplemented (exit 2) — the controller launches the agent over exec, so a provision-capable pack must also implement exec"
+	case out.err != nil:
+		return StatusFail, "exec into the provisioned box failed: " + out.err.Error()
+	}
+	if got := strings.TrimSpace(out.stdout); got != sentinel {
+		return StatusFail, fmt.Sprintf("exec into the provisioned box: stdout = %q, want %q (the box must be reachable)", got, sentinel)
+	}
+	return StatusPass, "provision creates a reachable box without launching the agent"
 }
 
 // requireStart starts name and returns a non-pass status if start itself is

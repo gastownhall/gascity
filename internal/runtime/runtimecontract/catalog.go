@@ -15,11 +15,19 @@
 //     suites, and a coverage map fails CI if a contract behavior gains a
 //     RunProviderTests case without a catalog entry.
 //
-// One exception to the RunProviderTests mirror: the connection group (the
-// exec primitive) is wire-only — there is no runtime.Provider method to
-// contract-test yet, so it is validated by the runtimecontract probe and the
-// runtimecapability env runner rather than by RunProviderTests. It re-binds to
-// RunProviderTests when the Go-side connection method (Place.Exec) lands.
+// Two exceptions to the RunProviderTests mirror are wire-only groups — there
+// is no runtime.Provider method to contract-test yet, so they are validated by
+// the runtimecontract probe (and the runtimecapability env runner) rather than
+// by RunProviderTests, and are exempt from the catalog↔RunProviderTests backing
+// check (TestEveryCatalogCodeBacksAContractCase):
+//
+//   - connection (the exec primitive) — re-binds to RunProviderTests when the
+//     Go-side connection method (Place.Exec) lands.
+//   - provision (the box-without-agent op of the runtime/transport un-weld) —
+//     an optional RPP op that creates a reachable box WITHOUT launching the
+//     agent, so the controller can relaunch the agent in a warm box over exec
+//     instead of re-provisioning. In-repo Provision is still the welded Start,
+//     so there is no distinct RunProviderTests case to mirror yet.
 //
 // Unlike rppcheck (the lighter `gc runtime check` smoke test), this suite
 // also proves each requirement is *gated*: a reference script that violates
@@ -45,6 +53,7 @@ const (
 	GroupProtocol   Group = "protocol"
 	GroupLifecycle  Group = "lifecycle"
 	GroupConnection Group = "connection"
+	GroupProvision  Group = "provision"
 )
 
 // Requirement is one behavior an RPP executable must satisfy to be a
@@ -85,6 +94,17 @@ const (
 	// to required in the slice that moves gc's own driving over exec. See
 	// REQUIREMENTS.md (RUNTIME-RPP-013).
 	ReqConnectionExec Code = "RPP-CONN-001"
+
+	// ReqProvisionBoxWithoutAgent is the runtime/transport un-weld's RPP wire
+	// half: an optional `provision` op (advertised via the proc.provision
+	// capability) that creates a reachable box but does NOT launch the agent, so
+	// the controller can launch — and later relaunch — the agent in a warm box
+	// over exec instead of paying a full re-provision on every config change. The
+	// defining behavior: after `provision`, is-running reports false (no agent),
+	// yet the box is exec-able (the controller's launch transport). Optional
+	// (absent = SKIP): a welded `start` pack that launches the agent in one shot
+	// need not implement it. See REQUIREMENTS.md (RUNTIME-RPP-014).
+	ReqProvisionBoxWithoutAgent Code = "RPP-PROVISION-001"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -100,6 +120,8 @@ var catalog = []Requirement{
 	{ReqLifecycleUnknownNotRunning, GroupLifecycle, "is-running on a never-started session reports false", false},
 
 	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (absent = SKIP; becomes required when gc drives its own input/observation over exec)", true},
+
+	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec (absent = SKIP; a welded start pack launches in one shot)", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

@@ -155,16 +155,21 @@ func TestEveryCatalogCodeBacksAContractCase(t *testing.T) {
 		}
 	}
 	for _, req := range catalog {
-		if req.Group == GroupProtocol || req.Group == GroupConnection {
+		if req.Group == GroupProtocol || req.Group == GroupConnection || req.Group == GroupProvision {
 			// Wire-only groups: no runtime.Provider method to contract-test.
 			// protocol is the handshake; connection (exec) is the slim wire
 			// primitive, validated by the runtimecontract probe and the
 			// runtimecapability env runner. The Go-side connection method
 			// (Place.Exec) and its RunProviderTests case land with the carrier
-			// rewrite that moves the legacy driving ops over exec.
+			// rewrite that moves the legacy driving ops over exec. provision is
+			// the un-weld's box-without-agent op: in-repo Provision is still the
+			// welded Start, so there is no distinct RunProviderTests case to
+			// mirror — it is validated by the runtimecontract probe.
 			// TODO(connection-rewrite): drop the GroupConnection exemption once
 			// Place.Exec has a RunProviderTests case, so the lockstep guarantee
 			// re-binds the connection group too.
+			// TODO(provision-mirror): drop the GroupProvision exemption if/when
+			// Provision becomes a distinct, separately contract-tested method.
 			continue
 		}
 		if !backed[req.Code] {

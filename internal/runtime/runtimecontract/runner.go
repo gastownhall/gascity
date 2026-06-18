@@ -174,6 +174,18 @@ func (r *runner) start(ctx context.Context, name string) outcome {
 	return r.opTimeout(ctx, r.opts.StartTimeout, cfg, "start", name)
 }
 
+// provision sends a provision config for name and returns the raw outcome.
+// provision mirrors start's payload but is the box-without-agent half of the
+// un-weld: it creates a reachable box without launching the agent (exit 2 =
+// the optional op is unimplemented).
+func (r *runner) provision(ctx context.Context, name string) outcome {
+	cfg, _ := json.Marshal(struct {
+		WorkDir string `json:"work_dir,omitempty"`
+		Command string `json:"command,omitempty"`
+	}{WorkDir: r.opts.WorkDir, Command: r.opts.Command})
+	return r.opTimeout(ctx, r.opts.StartTimeout, cfg, "provision", name)
+}
+
 // stop stops name and returns the raw outcome.
 func (r *runner) stop(ctx context.Context, name string) outcome {
 	return r.op(ctx, "stop", name)

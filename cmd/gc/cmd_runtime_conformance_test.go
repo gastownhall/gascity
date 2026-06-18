@@ -83,6 +83,7 @@ case "$op" in
   stop)       rm -f "$S/$name" ;;
   is-running) if [ -e "$S/$name" ]; then echo true; else echo false; fi ;;
   exec)       sh -c "$(cat)" ;;
+  provision)  cat >/dev/null ;;
   *) exit 2 ;;
 esac
 `)
