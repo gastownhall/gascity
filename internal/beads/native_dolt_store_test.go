@@ -824,6 +824,52 @@ func TestNativeDoltStoreListDelegatesAndConvertsIssues(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreListSkipsInvalidMetadataRows(t *testing.T) {
+	corrupt := &beadslib.Issue{
+		ID:        "gc-corrupt",
+		Title:     "corrupt metadata",
+		Status:    beadslib.StatusOpen,
+		IssueType: beadslib.IssueType("convoy"),
+		Priority:  2,
+		Metadata:  json.RawMessage(`metadata is not json`),
+	}
+	storage := &nativeDoltStorageSpy{
+		searchIssues: func(_ context.Context, query string, _ beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+			if query == "gc-corrupt" {
+				return []*beadslib.Issue{corrupt}, nil
+			}
+			return []*beadslib.Issue{
+				corrupt,
+				{
+					ID:        "gc-listed",
+					Title:     "valid convoy",
+					Status:    beadslib.StatusOpen,
+					IssueType: beadslib.IssueType("convoy"),
+					Priority:  2,
+					Metadata:  json.RawMessage(`{"gc.step_ref":"list"}`),
+				},
+			}, nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.List(ListQuery{AllowScan: true, Type: "convoy"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("List len = %d, want only valid rows: %#v", len(got), got)
+	}
+	if got[0].ID != "gc-listed" {
+		t.Fatalf("List[0].ID = %q, want gc-listed", got[0].ID)
+	}
+	if _, err := store.Get("gc-corrupt"); err == nil {
+		t.Fatal("Get error = nil, want invalid metadata error")
+	} else if !strings.Contains(err.Error(), `parsing metadata for bead "gc-corrupt"`) {
+		t.Fatalf("Get error = %v, want bead metadata context", err)
+	}
+}
+
 func TestNativeDoltStoreListDoesNotPushLimitBeforeLocalSort(t *testing.T) {
 	createdAt := time.Date(2026, 5, 17, 11, 0, 0, 0, time.UTC)
 	storage := &nativeDoltStorageSpy{
