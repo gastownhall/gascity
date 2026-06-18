@@ -119,10 +119,19 @@ type tmuxTransport struct{ p *Provider }
 
 var _ runtime.Transport = (*tmuxTransport)(nil)
 
-// Launch is a no-op: Start already launched the agent in the tmux session; this
-// returns the live Attachment over the Place (←Start how-half).
-func (t *tmuxTransport) Launch(_ context.Context, place runtime.Place, _ runtime.LaunchSpec) (runtime.Attachment, error) {
-	return &tmuxAttachment{p: t.p, name: placeName(place)}, nil
+// Launch relaunches the agent inside the (already-provisioned) Place and returns
+// the live Attachment. In the in-repo pragmatic un-weld (B1) box creation
+// (Provision←Start) is welded and already launches the agent on the normal Start
+// path, so this is the SEPARATE relaunch-into-a-warm-box capability the reconciler
+// uses to apply a launch-only config change without a full reprovision — it is NOT
+// a step of a normal Start (see seamProvider.Start). A pure provision/launch split
+// (launch the agent into a never-launched box) lands at the RPP wire (B3).
+func (t *tmuxTransport) Launch(ctx context.Context, place runtime.Place, spec runtime.LaunchSpec) (runtime.Attachment, error) {
+	name := placeName(place)
+	if err := t.p.Relaunch(ctx, name, spec.Config); err != nil {
+		return nil, err
+	}
+	return &tmuxAttachment{p: t.p, name: name}, nil
 }
 
 // Open returns the Attachment for an already-running session (reconnect).

@@ -46,12 +46,15 @@ func NewProviderFromSeams(rt Runtime, tp Transport) Provider {
 	return &seamProvider{rt: rt, tp: tp, meta: meta}
 }
 
+// Start provisions the box for name. The agent launch is WELDED into box creation
+// for every current carrier (tmux/ssh: the agent IS the new-session command; k8s:
+// the pod entrypoint), so Provision alone launches the agent. Transport.Launch is
+// therefore NOT a step of a normal Start — it is the SEPARATE relaunch-into-a-warm-
+// box capability the reconciler uses to apply a launch-only config change without a
+// full reprovision (see the un-weld design, B1); calling it here would launch the
+// agent twice. A pure provision-then-launch split lands at the RPP wire (B3).
 func (s *seamProvider) Start(ctx context.Context, name string, cfg Config) error {
-	place, err := s.rt.Provision(ctx, name, ProvisionRequest{Config: cfg})
-	if err != nil {
-		return err
-	}
-	_, err = s.tp.Launch(ctx, place, LaunchSpec{Config: cfg})
+	_, err := s.rt.Provision(ctx, name, ProvisionRequest{Config: cfg})
 	return err
 }
 
