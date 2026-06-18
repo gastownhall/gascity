@@ -129,11 +129,25 @@ func providerStateDir(providerName, cityPath string) string {
 //   - "<pack runtime>" → exec proxy bound to the pack's declared command
 //   - default → real tmux provider
 func newSessionProviderForCityByName(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	// Selection now flows through the de-conflated WorkerSpec atom and the
+	// Resolver. The Runtime axis is the legacy selection name; the other axes
+	// (Transport/Model/Upstream/Harness) are not yet acted on here — they become
+	// independent once the un-weld (Provision/Launch split) and the Upstream
+	// split land. Behavior is identical to the prior reg.New(name, ...).
+	return resolveWorkerSpec(cfg, runtime.WorkerSpec{Runtime: name}, sc, cityName, cityPath)
+}
+
+// resolveWorkerSpec resolves a [runtime.WorkerSpec] to a session provider. It is
+// the seam where axis-based selection lives: today only the Runtime axis drives
+// selection (mapping to the registry's seam-backed construction), but it is the
+// single place the Transport/Upstream axes will be honored as the de-conflation
+// completes.
+func resolveWorkerSpec(cfg *config.City, spec runtime.WorkerSpec, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 	reg, err := runtimeRegistryForCity(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return reg.New(name, sc, cityName, cityPath)
+	return reg.New(spec.Runtime, sc, cityName, cityPath)
 }
 
 func isLegacyT3BridgeExecScript(script string) bool {

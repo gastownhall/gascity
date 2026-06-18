@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // assertProviderPkg verifies sp is a provider from the given package (e.g.
@@ -19,6 +20,26 @@ func assertProviderPkg(t *testing.T, sp any, pkg string) {
 	t.Helper()
 	if got := fmt.Sprintf("%T", sp); !strings.HasPrefix(got, "*"+pkg+".") {
 		t.Fatalf("provider type = %s, want a *%s.* provider", got, pkg)
+	}
+}
+
+// TestResolveWorkerSpec_RuntimeAxisSelects proves selection flows through the
+// WorkerSpec atom + the Resolver: the Runtime axis picks the (seam-backed)
+// provider, including the prefix forms and the tmux fallback.
+func TestResolveWorkerSpec_RuntimeAxisSelects(t *testing.T) {
+	cases := []struct{ runtimeAxis, pkg string }{
+		{"subprocess", "subprocess"},
+		{"ssh:gcagent@host:2222", "ssh"},
+		{"exec:/usr/local/bin/gc-session-screen", "exec"},
+		{"t3bridge", "t3bridge"},
+		{"definitely-not-a-runtime", "tmux"}, // documented fallback
+	}
+	for _, c := range cases {
+		sp, err := resolveWorkerSpec(nil, runtime.WorkerSpec{Runtime: c.runtimeAxis}, config.SessionConfig{}, "city", t.TempDir())
+		if err != nil {
+			t.Fatalf("resolveWorkerSpec(Runtime=%q): %v", c.runtimeAxis, err)
+		}
+		assertProviderPkg(t, sp, c.pkg)
 	}
 }
 
