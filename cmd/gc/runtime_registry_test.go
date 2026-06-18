@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
-	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
 // assertProviderPkg verifies sp is a provider from the given package (e.g.
@@ -51,9 +50,7 @@ func TestCloudflareIsNoLongerABuiltin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newSessionProviderForCityByName(cloudflare): %v", err)
 	}
-	if _, ok := sp.(*sessiontmux.Provider); !ok {
-		t.Fatalf("provider type = %T, want *tmux.Provider (fallback without the pack)", sp)
-	}
+	assertProviderPkg(t, sp, "tmux")
 }
 
 func TestNewSessionProviderForCityByName_UnknownNameFallsBackToTmux(t *testing.T) {
@@ -61,9 +58,7 @@ func TestNewSessionProviderForCityByName_UnknownNameFallsBackToTmux(t *testing.T
 	if err != nil {
 		t.Fatalf("newSessionProviderForCityByName(unknown): %v", err)
 	}
-	if _, ok := sp.(*sessiontmux.Provider); !ok {
-		t.Fatalf("provider type = %T, want *tmux.Provider (documented fallback)", sp)
-	}
+	assertProviderPkg(t, sp, "tmux")
 }
 
 func TestNewSessionProviderForCityByName_ExecPrefixUsesExecProvider(t *testing.T) {
@@ -95,9 +90,7 @@ func TestNewSessionProviderForCityByName_TmuxExactNameIsTmuxProvider(t *testing.
 	if err != nil {
 		t.Fatalf("newSessionProviderForCityByName(tmux): %v", err)
 	}
-	if _, ok := sp.(*sessiontmux.Provider); !ok {
-		t.Fatalf("provider type = %T, want *tmux.Provider", sp)
-	}
+	assertProviderPkg(t, sp, "tmux")
 }
 
 func TestRuntimeRegistryForCity_PackRuntimeResolvesToDeclaredExecutable(t *testing.T) {

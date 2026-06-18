@@ -101,7 +101,7 @@ func buildRuntimeRegistry() *registry.Registry {
 	// registration makes a pack-declared runtime named "tmux" a collision
 	// error instead of a silent shadow of the default provider.
 	tmuxFactory := func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-		return sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
+		return sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
 	}
 	must(r.Register("tmux", tmuxFactory))
 	r.SetFallback(tmuxFactory)
