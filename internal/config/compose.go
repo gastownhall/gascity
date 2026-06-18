@@ -539,6 +539,26 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// [[patches.agent]] blocks in city.toml can target pack-derived
 	// rig-scope agents (e.g., dir="rig" name="gastown.refinery"), not
 	// just city-scope agents.
+	//
+	// Provider-derived implicit agents are injected AFTER this block (by
+	// InjectImplicitAgents at line 593), so [[patches.agent]] entries that
+	// target a not-yet-present implicit agent are partitioned into
+	// deferredAgentPatches and applied immediately after injection.
+	// Patches that match neither an existing agent nor a future implicit
+	// identity stay in nowPatches so ApplyPatches hard-errors on typos.
+	var deferredAgentPatches []AgentPatch
+	if len(root.Patches.Agents) > 0 {
+		implicitIDs := implicitAgentIdentities(root)
+		var nowPatches []AgentPatch
+		for _, p := range root.Patches.Agents {
+			if !agentPatchMatchesExisting(root, &p) && implicitIDs[agentKey{p.Dir, p.Name}] {
+				deferredAgentPatches = append(deferredAgentPatches, p)
+			} else {
+				nowPatches = append(nowPatches, p)
+			}
+		}
+		root.Patches.Agents = nowPatches
+	}
 	if !root.Patches.IsEmpty() {
 		if err := ApplyPatches(root, root.Patches); err != nil {
 			return nil, nil, fmt.Errorf("applying patches: %w", err)
@@ -591,6 +611,15 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Must happen after all composition (fragments, packs, patches) so
 	// explicit agents always take precedence.
 	InjectImplicitAgents(root)
+
+	// Apply patches that targeted provider-derived implicit agents, now
+	// present after injection. A patch that still cannot be resolved is a
+	// genuine typo — surface it with the same error framing as ApplyPatches.
+	if len(deferredAgentPatches) > 0 {
+		if err := ApplyPatches(root, Patches{Agents: deferredAgentPatches}); err != nil {
+			return nil, nil, fmt.Errorf("applying patches: %w", err)
+		}
+	}
 
 	// Apply [agent_defaults] values to all agents (explicit and implicit)
 	// that don't set their own override. Deprecated [agents] aliases are
@@ -1726,4 +1755,20 @@ func readPackNameFromDir(dir string) string {
 		return ""
 	}
 	return pc.Pack.Name
+}
+
+// agentPatchMatchesExisting reports whether patch targets an agent already
+// present in cfg.Agents, using the same matching logic as applyAgentPatch.
+func agentPatchMatchesExisting(cfg *City, patch *AgentPatch) bool {
+	target := qualifiedNameFromPatch(patch.Dir, patch.Name)
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if AgentMatchesIdentity(a, target) {
+			return true
+		}
+		if a.Dir == patch.Dir && a.Name == patch.Name {
+			return true
+		}
+	}
+	return false
 }
