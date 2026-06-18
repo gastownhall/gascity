@@ -164,9 +164,35 @@ const (
 	TerminalMetadataKey                  = "gc.terminal"
 	TruncatedMetadataKey                 = "gc.truncated"
 	VoteFieldMetadataKey                 = "gc.vote_field"
+	WorkBranchMetadataKey                = "gc.work_branch"
+	WorkCommitMetadataKey                = "gc.work_commit"
 	WorkDirMetadataKey                   = "gc.work_dir"
+	WorkOutcomeMetadataKey               = "gc.work_outcome"
+	WorkVerificationMetadataKey          = "gc.work_verification"
 	WorkflowIDMetadataKey                = "gc.workflow_id"
 )
+
+// Work-record metadata keys (ADR-0009). These bind a work bead to its claim
+// and its outcome so observability/eval can answer "what work was done, by
+// whom, with what artifact, to what end":
+//
+//   - WorkBranchMetadataKey ("gc.work_branch") — the git branch the claiming
+//     worker is on; the durable handle from the bead to its work. Stamped at
+//     claim time alongside WorkDirMetadataKey and read by the close gate.
+//   - WorkOutcomeMetadataKey ("gc.work_outcome") — the typed close disposition,
+//     one of "shipped" | "no-op" | "blocked" | "abandoned". Deliberately NOT
+//     OutcomeMetadataKey ("gc.outcome"): that key is the control-plane step
+//     result ("pass"/"fail"/"skipped") read by internal/dispatch, a disjoint
+//     vocabulary that must not be overloaded.
+//   - WorkCommitMetadataKey ("gc.work_commit") — the commit SHA that satisfied
+//     the bead; required when the outcome is "shipped" and validated reachable
+//     on WorkBranchMetadataKey by the close gate. Named in the gc.work_* family
+//     (not a bare "gc.commit") to avoid collision with future commit concepts.
+//   - WorkVerificationMetadataKey ("gc.work_verification") — the verification
+//     record (gate result, "manual", or a link) backing a shipped outcome.
+//
+// The set of valid WorkOutcomeMetadataKey values and the "shipped requires a
+// commit on the branch" rule live with the close gate in cmd/gc.
 
 // FormulaVarPrefix is the dynamic key prefix under which formula-supplied
 // variables are written as gc.var.<name>. The suffix is open-world (a
@@ -323,7 +349,11 @@ var KnownMetadataKeys = []string{
 	TerminalMetadataKey,
 	TruncatedMetadataKey,
 	VoteFieldMetadataKey,
+	WorkBranchMetadataKey,
+	WorkCommitMetadataKey,
 	WorkDirMetadataKey,
+	WorkOutcomeMetadataKey,
+	WorkVerificationMetadataKey,
 	WorkflowIDMetadataKey,
 }
 

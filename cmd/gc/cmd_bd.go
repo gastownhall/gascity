@@ -277,6 +277,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	// Work-record close gate (ADR-0009): a close routed through the SDK seam
+	// must satisfy the typed work-record contract (gc.work_outcome present;
+	// shipped ⇒ gc.work_commit reachable on gc.work_branch). Warn-only by default;
+	// blocks the close only when GC_WORK_RECORD_ENFORCE is set.
+	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, stderr) {
+		return 1
+	}
+
 	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 

@@ -26,17 +26,23 @@ const (
 	BeadUpdated             = "bead.updated"
 	BeadWorktreeReaped      = "bead.worktree.reaped"
 	BeadWorktreeReapSkipped = "bead.worktree.reap_skipped"
-	MailSent                = "mail.sent"
-	MailRead                = "mail.read"
-	MailArchived            = "mail.archived"
-	MailMarkedRead          = "mail.marked_read"
-	MailMarkedUnread        = "mail.marked_unread"
-	MailReplied             = "mail.replied"
-	MailDeleted             = "mail.deleted"
-	SessionDraining         = "session.draining"
-	SessionUndrained        = "session.undrained"
-	SessionQuarantined      = "session.quarantined"
-	SessionIdleKilled       = "session.idle_killed"
+	// BeadClaimRejected fires when a worker attempts to claim a work bead that
+	// is already live-claimed by a different worker — the claim is rejected as
+	// an idempotent no-op rather than fanning out a second concurrent claim.
+	// Turns the otherwise-silent lost-claim race (RCA gc-typpc: one bead, four
+	// concurrent polecat claims) into an observable signal. ADR-0009.
+	BeadClaimRejected  = "bead.claim_rejected"
+	MailSent           = "mail.sent"
+	MailRead           = "mail.read"
+	MailArchived       = "mail.archived"
+	MailMarkedRead     = "mail.marked_read"
+	MailMarkedUnread   = "mail.marked_unread"
+	MailReplied        = "mail.replied"
+	MailDeleted        = "mail.deleted"
+	SessionDraining    = "session.draining"
+	SessionUndrained   = "session.undrained"
+	SessionQuarantined = "session.quarantined"
+	SessionIdleKilled  = "session.idle_killed"
 	// SessionMaxAgeKilled fires when the controller preemptively restarts a
 	// long-running session because its wall-clock age exceeded the agent's
 	// max_session_age threshold. Motivating case: provider SDKs that cache
@@ -193,6 +199,7 @@ var KnownEventTypes = []string{
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
+	BeadClaimRejected,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,

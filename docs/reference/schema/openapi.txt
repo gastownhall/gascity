@@ -925,6 +925,26 @@
         },
         "type": "object"
       },
+      "BeadClaimRejectedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attempted_claimant": {
+            "type": "string"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "existing_claimant": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "existing_claimant",
+          "attempted_claimant"
+        ],
+        "type": "object"
+      },
       "BeadCreateInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -2158,6 +2178,9 @@
         "oneOf": [
           {
             "$ref": "#/components/schemas/AdapterEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/BeadClaimRejectedPayload"
           },
           {
             "$ref": "#/components/schemas/BeadEventPayload"
@@ -7938,6 +7961,7 @@
         "description": "Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.",
         "discriminator": {
           "mapping": {
+            "bead.claim_rejected": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected",
             "bead.closed": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
             "bead.deleted": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted",
@@ -8010,6 +8034,9 @@
           "propertyName": "type"
         },
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected"
+          },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed"
           },
@@ -8219,6 +8246,48 @@
           }
         ],
         "title": "Typed city event stream envelope"
+      },
+      "TypedEventStreamEnvelopeBeadClaimRejected": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadClaimRejectedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.claim_rejected",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope bead.claim_rejected",
+        "type": "object"
       },
       "TypedEventStreamEnvelopeBeadClosed": {
         "additionalProperties": false,
@@ -8854,6 +8923,7 @@
                 "bead.updated",
                 "bead.worktree.reaped",
                 "bead.worktree.reap_skipped",
+                "bead.claim_rejected",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -11191,6 +11261,7 @@
         "description": "Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.",
         "discriminator": {
           "mapping": {
+            "bead.claim_rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected",
             "bead.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
             "bead.deleted": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted",
@@ -11263,6 +11334,9 @@
           "propertyName": "type"
         },
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected"
+          },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed"
           },
@@ -11472,6 +11546,52 @@
           }
         ],
         "title": "Typed supervisor event stream envelope"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadClaimRejected": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadClaimRejectedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.claim_rejected",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope bead.claim_rejected",
+        "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadClosed": {
         "additionalProperties": false,
@@ -12166,6 +12286,7 @@
                 "bead.updated",
                 "bead.worktree.reaped",
                 "bead.worktree.reap_skipped",
+                "bead.claim_rejected",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",

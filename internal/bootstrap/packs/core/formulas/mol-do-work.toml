@@ -74,10 +74,44 @@ only remaining dirty files are unrelated runtime/bead metadata, leave them
 uncommitted and mention that in your close notes.
 
 **3. Close the target bead when done:**
+
+Record the typed work-record outcome (ADR-0009) on the work bead so eval and
+audit can trace work → artifact → outcome. Choose `gc.work_outcome` from what
+actually happened:
+- `shipped` — you committed a change that satisfies the bead. Supply `gc.work_commit`
+  (the SHA) and `gc.work_branch` (the branch it is on).
+- `no-op` — the bead needed no change (already satisfied / duplicate); omit
+  `gc.work_commit` and `gc.work_branch`.
+- `blocked` / `abandoned` — you could not complete it (also mail Witness).
+
+`gc.outcome=pass` stays — it is the control-plane step result and is disjoint
+from `gc.work_outcome`.
+
+**Shipped** (you committed a change):
 ```bash
-COMMIT=$(git rev-parse --short HEAD 2>/dev/null || true)
-bd update "$WORK_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Done: <brief summary of what you did>. Verification: <commands run>. Commit: ${COMMIT:-none}."
+COMMIT=$(git rev-parse HEAD 2>/dev/null || true)
+WORK_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+[ "$WORK_BRANCH" = "HEAD" ] && WORK_BRANCH=""   # detached HEAD — no stable branch
+bd update "$WORK_BEAD_ID" \
+  --set-metadata gc.outcome=pass \
+  --set-metadata gc.work_outcome=shipped \
+  --set-metadata gc.work_commit="$COMMIT" \
+  --set-metadata gc.work_branch="$WORK_BRANCH" \
+  --set-metadata gc.work_verification="<commands you ran>" \
+  --status=closed \
+  --notes "Done: <brief summary of what you did>. Verification: <commands run>. Commit: ${COMMIT:-none}."
 ```
+
+**No-op** (the bead needed no change — already satisfied / duplicate):
+```bash
+bd update "$WORK_BEAD_ID" \
+  --set-metadata gc.outcome=pass \
+  --set-metadata gc.work_outcome=no-op \
+  --status=closed \
+  --notes "No-op: <why no change was needed>."
+```
+For `blocked` / `abandoned`, use that value for `gc.work_outcome` and also mail
+Witness.
 
 **4. Close this formula step:**
 

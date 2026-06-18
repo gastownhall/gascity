@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 const hookClaimCommandName = "hook"
@@ -32,7 +34,16 @@ type hookClaimOps struct {
 	ListContinuation   hookListContinuationFunc
 	AssignContinuation hookAssignContinuationFunc
 	DrainAck           hookDrainAckFunc
-	Now                func() time.Time
+	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
+	// lost to a different live claimant (ADR-0009). Best-effort.
+	EmitClaimRejected hookEmitClaimRejectedFunc
+	// ResolveWorkBranch returns the git branch of the worker's worktree (dir),
+	// stamped onto the bead as gc.work_branch at claim time. Empty result (no
+	// repo / detached HEAD) skips the stamp.
+	ResolveWorkBranch hookResolveWorkBranchFunc
+	// StampWorkBranch writes gc.work_branch onto the claimed bead. Best-effort.
+	StampWorkBranch hookStampWorkBranchFunc
+	Now             func() time.Time
 }
 
 type (
@@ -40,6 +51,9 @@ type (
 	hookListContinuationFunc   func(context.Context, string, []string, string, string) ([]beads.Bead, error)
 	hookAssignContinuationFunc func(context.Context, string, []string, string, string) error
 	hookDrainAckFunc           func(io.Writer) error
+	hookEmitClaimRejectedFunc  func(beadID, existingClaimant, attemptedClaimant string)
+	hookResolveWorkBranchFunc  func(dir string) string
+	hookStampWorkBranchFunc    func(ctx context.Context, dir string, env []string, beadID, assignee, branch string) error
 )
 
 type hookClaimJSONResult struct {
@@ -78,6 +92,15 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 	}
 	if ops.DrainAck == nil {
 		ops.DrainAck = hookRuntimeDrainAck
+	}
+	if ops.EmitClaimRejected == nil {
+		ops.EmitClaimRejected = hookEmitClaimRejected
+	}
+	if ops.ResolveWorkBranch == nil {
+		ops.ResolveWorkBranch = hookResolveWorkBranch
+	}
+	if ops.StampWorkBranch == nil {
+		ops.StampWorkBranch = hookStampWorkBranchWithBdStore
 	}
 	now := time.Now
 	if ops.Now != nil {
@@ -122,6 +145,16 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 			return 1
 		}
 		if !ok {
+			// Lost the claim to a concurrent worker. When the conflicting
+			// claimant is known (Claim re-read the bead and it is owned by
+			// someone other than us), surface the race as an observable
+			// bead.claim_rejected event rather than silently re-trying the next
+			// candidate (ADR-0009). An empty/own assignee means the winner is
+			// unknown or it is us — no rejection to report.
+			if existing := strings.TrimSpace(claimed.Assignee); existing != "" &&
+				!hookClaimHasIdentity(claimed.Assignee, opts.IdentityCandidates) {
+				ops.EmitClaimRejected(candidate.ID, existing, opts.Assignee)
+			}
 			continue
 		}
 		if claimed.Metadata == nil {
@@ -186,6 +219,7 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 }
 
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
+	stampHookWorkBranch(bead, opts, ops, dir, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: preassigning continuation group for %s: %v\n", bead.ID, err) //nolint:errcheck
@@ -266,12 +300,87 @@ func hookClaimWithBdStore(_ context.Context, dir string, env []string, beadID, a
 		return beads.Bead{}, false, err
 	}
 	if !ok {
-		return beads.Bead{}, false, nil
+		// Claim conflict: re-read the bead so the caller can surface who won
+		// the race in the bead.claim_rejected event (ADR-0009). Best-effort —
+		// a read error degrades to a silent no-op (empty bead, no event).
+		current, getErr := store.Get(beadID)
+		if getErr != nil {
+			return beads.Bead{}, false, nil
+		}
+		return current, false, nil
 	}
 	if !hookClaimHasIdentity(claimed.Assignee, []string{assignee}) {
-		return beads.Bead{}, false, nil
+		// bd reported a successful mutation but the bead is owned by another
+		// claimant (stale projection / lost race). Return it as a non-claim so
+		// the caller can report the rejection rather than treat it as ours.
+		return claimed, false, nil
 	}
 	return claimed, true, nil
+}
+
+// stampHookWorkBranch records the claiming worker's git branch on the bead as
+// gc.work_branch — the durable handle from the bead to its work that the close
+// gate later reads (ADR-0009). Idempotent (skips when already current) and
+// best-effort: a missing repo, detached HEAD, or write error never blocks the
+// claim.
+func stampHookWorkBranch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) {
+	branch := strings.TrimSpace(ops.ResolveWorkBranch(dir))
+	if branch == "" {
+		return
+	}
+	if strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) == branch {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	if err := ops.StampWorkBranch(ctx, dir, opts.Env, bead.ID, opts.Assignee, branch); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: stamping work_branch on %s: %v\n", bead.ID, err) //nolint:errcheck
+	}
+}
+
+func hookStampWorkBranchWithBdStore(_ context.Context, dir string, env []string, beadID, assignee, branch string) error {
+	store := hookClaimBdStore(dir, env, assignee)
+	return store.Update(beadID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.WorkBranchMetadataKey: branch}})
+}
+
+// hookResolveWorkBranch returns the current git branch of dir, or "" when dir
+// is not a worktree or HEAD is detached (no meaningful branch to stamp).
+func hookResolveWorkBranch(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "HEAD" { // detached HEAD
+		return ""
+	}
+	return branch
+}
+
+// hookEmitClaimRejected publishes a best-effort bead.claim_rejected event to the
+// city event log so a lost-claim race is observable for eval/audit (ADR-0009).
+func hookEmitClaimRejected(beadID, existingClaimant, attemptedClaimant string) {
+	payload, err := json.Marshal(events.BeadClaimRejectedPayload{
+		BeadID:            beadID,
+		ExistingClaimant:  existingClaimant,
+		AttemptedClaimant: attemptedClaimant,
+	})
+	if err != nil {
+		return
+	}
+	rec := openCityRecorder(io.Discard)
+	rec.Record(events.Event{
+		Type:    events.BeadClaimRejected,
+		Actor:   attemptedClaimant,
+		Subject: beadID,
+		Payload: payload,
+	})
+	if closer, ok := rec.(io.Closer); ok {
+		_ = closer.Close()
+	}
 }
 
 func hookListContinuationWithBdStore(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {

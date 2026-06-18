@@ -286,6 +286,12 @@ export type BeadAssignInputBody = {
     assignee?: string;
 };
 
+export type BeadClaimRejectedPayload = {
+    attempted_claimant: string;
+    bead_id: string;
+    existing_claimant: string;
+};
+
 export type BeadCreateInputBody = {
     /**
      * Assigned agent.
@@ -802,7 +808,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -3449,6 +3455,8 @@ export type TranscriptProvenance = 'live' | 'hydrated';
  * Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
  */
 export type TypedEventStreamEnvelope = ({
+    type: 'bead.claim_rejected';
+} & TypedEventStreamEnvelopeBeadClaimRejected) | ({
     type: 'bead.closed';
 } & TypedEventStreamEnvelopeBeadClosed) | ({
     type: 'bead.created';
@@ -3587,6 +3595,20 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
 } & TypedEventStreamEnvelopeCustom);
+
+/**
+ * TypedEventStreamEnvelope bead.claim_rejected
+ */
+export type TypedEventStreamEnvelopeBeadClaimRejected = {
+    actor: string;
+    message?: string;
+    payload: BeadClaimRejectedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_rejected';
+    workflow?: WorkflowEventProjection;
+};
 
 /**
  * TypedEventStreamEnvelope bead.closed
@@ -4560,6 +4582,8 @@ export type TypedEventStreamEnvelopeWorkerOperation = {
  * Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
  */
 export type TypedTaggedEventStreamEnvelope = ({
+    type: 'bead.claim_rejected';
+} & TypedTaggedEventStreamEnvelopeBeadClaimRejected) | ({
     type: 'bead.closed';
 } & TypedTaggedEventStreamEnvelopeBeadClosed) | ({
     type: 'bead.created';
@@ -4698,6 +4722,21 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
 } & TypedTaggedEventStreamEnvelopeCustom);
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.claim_rejected
+ */
+export type TypedTaggedEventStreamEnvelopeBeadClaimRejected = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: BeadClaimRejectedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_rejected';
+    workflow?: WorkflowEventProjection;
+};
 
 /**
  * TypedTaggedEventStreamEnvelope bead.closed

@@ -611,6 +611,13 @@ type BeadAssignInputBody struct {
 	Assignee *string `json:"assignee,omitempty"`
 }
 
+// BeadClaimRejectedPayload defines model for BeadClaimRejectedPayload.
+type BeadClaimRejectedPayload struct {
+	AttemptedClaimant string `json:"attempted_claimant"`
+	BeadId            string `json:"bead_id"`
+	ExistingClaimant  string `json:"existing_claimant"`
+}
+
 // BeadCreateInputBody defines model for BeadCreateInputBody.
 type BeadCreateInputBody struct {
 	// Assignee Assigned agent.
@@ -3304,6 +3311,18 @@ type TypedEventStreamEnvelope struct {
 	union json.RawMessage
 }
 
+// TypedEventStreamEnvelopeBeadClaimRejected defines model for TypedEventStreamEnvelopeBeadClaimRejected.
+type TypedEventStreamEnvelopeBeadClaimRejected struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadClaimRejectedPayload `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeBeadClosed defines model for TypedEventStreamEnvelopeBeadClosed.
 type TypedEventStreamEnvelopeBeadClosed struct {
 	Actor    string                   `json:"actor"`
@@ -4135,6 +4154,19 @@ type TypedEventStreamEnvelopeWorkerOperation struct {
 // TypedTaggedEventStreamEnvelope Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
 type TypedTaggedEventStreamEnvelope struct {
 	union json.RawMessage
+}
+
+// TypedTaggedEventStreamEnvelopeBeadClaimRejected defines model for TypedTaggedEventStreamEnvelopeBeadClaimRejected.
+type TypedTaggedEventStreamEnvelopeBeadClaimRejected struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadClaimRejectedPayload `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadClosed defines model for TypedTaggedEventStreamEnvelopeBeadClosed.
@@ -6293,6 +6325,32 @@ func (t *EventPayload) MergeAdapterEventPayload(v AdapterEventPayload) error {
 	return err
 }
 
+// AsBeadClaimRejectedPayload returns the union data inside the EventPayload as a BeadClaimRejectedPayload
+func (t EventPayload) AsBeadClaimRejectedPayload() (BeadClaimRejectedPayload, error) {
+	var body BeadClaimRejectedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBeadClaimRejectedPayload overwrites any union data inside the EventPayload as the provided BeadClaimRejectedPayload
+func (t *EventPayload) FromBeadClaimRejectedPayload(v BeadClaimRejectedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBeadClaimRejectedPayload performs a merge with any union data inside the EventPayload, using the provided BeadClaimRejectedPayload
+func (t *EventPayload) MergeBeadClaimRejectedPayload(v BeadClaimRejectedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsBeadEventPayload returns the union data inside the EventPayload as a BeadEventPayload
 func (t EventPayload) AsBeadEventPayload() (BeadEventPayload, error) {
 	var body BeadEventPayload
@@ -7298,6 +7356,34 @@ func (t SessionStreamCommonEvent) MarshalJSON() ([]byte, error) {
 
 func (t *SessionStreamCommonEvent) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsTypedEventStreamEnvelopeBeadClaimRejected returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadClaimRejected
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadClaimRejected() (TypedEventStreamEnvelopeBeadClaimRejected, error) {
+	var body TypedEventStreamEnvelopeBeadClaimRejected
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadClaimRejected overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadClaimRejected
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadClaimRejected(v TypedEventStreamEnvelopeBeadClaimRejected) error {
+	v.Type = "bead.claim_rejected"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadClaimRejected performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadClaimRejected
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadClaimRejected(v TypedEventStreamEnvelopeBeadClaimRejected) error {
+	v.Type = "bead.claim_rejected"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
 	return err
 }
 
@@ -9249,6 +9335,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 	switch discriminator {
 	case "TypedEventStreamEnvelopeCustom":
 		return t.AsTypedEventStreamEnvelopeCustom()
+	case "bead.claim_rejected":
+		return t.AsTypedEventStreamEnvelopeBeadClaimRejected()
 	case "bead.closed":
 		return t.AsTypedEventStreamEnvelopeBeadClosed()
 	case "bead.created":
@@ -9397,6 +9485,34 @@ func (t TypedEventStreamEnvelope) MarshalJSON() ([]byte, error) {
 
 func (t *TypedEventStreamEnvelope) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadClaimRejected returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadClaimRejected
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadClaimRejected() (TypedTaggedEventStreamEnvelopeBeadClaimRejected, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadClaimRejected
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadClaimRejected overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadClaimRejected
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadClaimRejected(v TypedTaggedEventStreamEnvelopeBeadClaimRejected) error {
+	v.Type = "bead.claim_rejected"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadClaimRejected performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadClaimRejected
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadClaimRejected(v TypedTaggedEventStreamEnvelopeBeadClaimRejected) error {
+	v.Type = "bead.claim_rejected"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
 	return err
 }
 
@@ -11348,6 +11464,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 	switch discriminator {
 	case "TypedTaggedEventStreamEnvelopeCustom":
 		return t.AsTypedTaggedEventStreamEnvelopeCustom()
+	case "bead.claim_rejected":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadClaimRejected()
 	case "bead.closed":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadClosed()
 	case "bead.created":

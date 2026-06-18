@@ -397,6 +397,128 @@ func TestDoHookClaimRetriesAfterClaimConflict(t *testing.T) {
 	}
 }
 
+// TestDoHookClaimEmitsRejectedOnLostClaim covers ADR-0009 acceptance (a): a
+// second claim on a bead already live-claimed by another worker is rejected as
+// a no-op and surfaces a bead.claim_rejected event naming the winner.
+func TestDoHookClaimEmitsRejectedOnLostClaim(t *testing.T) {
+	type rejection struct{ bead, existing, attempted string }
+	var rejected []rejection
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"hw-lost","status":"open","metadata":{"gc.routed_to":"worker"}},
+			{"id":"hw-won","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			if beadID == "hw-lost" {
+				// Lost the race: the re-read shows the bead owned by worker-2.
+				return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2", Metadata: map[string]string{"gc.routed_to": "worker"}}, false, nil
+			}
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		EmitClaimRejected: func(beadID, existing, attempted string) {
+			rejected = append(rejected, rejection{beadID, existing, attempted})
+		},
+		ResolveWorkBranch: func(string) string { return "" }, // suppress stamp noise
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(lost claim) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if len(rejected) != 1 {
+		t.Fatalf("expected exactly one rejection, got %+v", rejected)
+	}
+	if got := rejected[0]; got.bead != "hw-lost" || got.existing != "worker-2" || got.attempted != "worker-1" {
+		t.Fatalf("rejection = %+v, want {hw-lost worker-2 worker-1}", got)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.BeadID != "hw-won" || result.Reason != "claimed" {
+		t.Fatalf("unexpected claim result: %+v", result)
+	}
+}
+
+// TestDoHookClaimStampsWorkBranch covers ADR-0009 acceptance (d): the worker's
+// branch is stamped onto the bead as gc.work_branch at claim time.
+func TestDoHookClaimStampsWorkBranch(t *testing.T) {
+	var stampedBead, stampedBranch, stampedAssignee string
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-stamp","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		ResolveWorkBranch: func(string) string { return "bd-hw-stamp" },
+		StampWorkBranch: func(_ context.Context, _ string, _ []string, beadID, assignee, branch string) error {
+			stampedBead, stampedAssignee, stampedBranch = beadID, assignee, branch
+			return nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(stamp) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stampedBead != "hw-stamp" || stampedBranch != "bd-hw-stamp" || stampedAssignee != "worker-1" {
+		t.Fatalf("stamp = bead %q branch %q assignee %q, want hw-stamp/bd-hw-stamp/worker-1", stampedBead, stampedBranch, stampedAssignee)
+	}
+}
+
+// TestDoHookClaimSkipsStampWhenBranchUnchanged guards the idempotent path: a
+// claim whose bead already carries the resolved branch performs no stamp write.
+func TestDoHookClaimSkipsStampWhenBranchUnchanged(t *testing.T) {
+	var stampCalls int
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-idem","status":"open","metadata":{"gc.routed_to":"worker","gc.work_branch":"bd-hw-idem"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker", "gc.work_branch": "bd-hw-idem"}}, true, nil
+		},
+		ResolveWorkBranch: func(string) string { return "bd-hw-idem" },
+		StampWorkBranch: func(_ context.Context, _ string, _ []string, _, _, _ string) error {
+			stampCalls++
+			return nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim(idempotent stamp) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stampCalls != 0 {
+		t.Fatalf("stamp write count = %d, want 0 (branch already current)", stampCalls)
+	}
+}
+
 func TestDoHookClaimClaimsLegacyRunTargetWorkflowRoot(t *testing.T) {
 	var claimedID string
 	runner := func(string, string) (string, error) {
