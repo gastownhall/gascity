@@ -156,6 +156,21 @@ type TTYPlace interface {
 	AttachTTY(ctx context.Context, req AttachRequest) (TTY, error)
 }
 
+// MetaStore is the per-session key-value store today's [Provider] carries via
+// SetMeta/GetMeta/RemoveMeta: session identity (GC_SESSION_ID, GC_PROVIDER),
+// lifecycle flags (suspended, drained, GC_ALIAS, GC_INSTANCE_TOKEN), and the
+// config fingerprint. It has no natural home among Runtime/Place/Transport/
+// Attachment — the values are box ground-truth, read back to reconcile against
+// controller belief — so during the migration it stays a DISTINCT optional seam,
+// implemented alongside Runtime by providers that own box-side meta. This may be
+// retired later if its consumers move to the controller's state seam; until then
+// the compat layer delegates SetMeta/GetMeta/RemoveMeta straight to it.
+type MetaStore interface {
+	SetMeta(name, key, value string) error
+	GetMeta(name, key string) (string, error)
+	RemoveMeta(name, key string) error
+}
+
 // Transport is the HOW axis: it launches the agent over a Place and yields an
 // Attachment. The tmux Transport's body is the [Carrier] over Place.Exec; acp is
 // a stream Transport (NeedsStream). (§11: Start's how-half; auto.Provider becomes
