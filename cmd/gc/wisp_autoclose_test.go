@@ -556,6 +556,135 @@ func TestWispAutocloseMultipleMolecules(t *testing.T) {
 	}
 }
 
+func TestWispAutocloseClosesRootOnlyWispViaInputConvoy(t *testing.T) {
+	// Regression for the graph.v2 workflow-root finalize-gap (gastownhall/gascity
+	// review-pool spawn-churn): a root-only graph.v2 workflow wisp -- e.g.
+	// mol-focus-review routed to a pool -- runs every step in one worker session,
+	// so it materializes no step beads and no workflow-finalize control bead to
+	// close its root. sling clears gc.source_bead_id for graph workflows
+	// (sling.go), so the wisp carries NO source-bead attachment for
+	// collectAttachedBeads to follow. Its only durable link to the work issue is
+	// gc.input_convoy_id -> the synthetic tracking convoy whose member is the
+	// issue. When the formula's finalize step closes the issue, the on_close hook
+	// must reap the orphaned root via that input-convoy link; otherwise the open
+	// root re-routes to the pool and churns a fresh worker.
+	store := beads.NewMemStore()
+	issue, _ := store.Create(beads.Bead{Title: "work issue", Type: "task"}) // gc-1
+	convoy, _ := store.Create(beads.Bead{
+		Title:    "synthetic input convoy",
+		Type:     "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	}) // gc-2
+	if err := store.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+	root, _ := store.Create(beads.Bead{
+		Title: "mol-focus-review",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            "workflow",
+			beadmeta.FormulaContractMetadataKey: "graph.v2",
+			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+			beadmeta.RoutedToMetadataKey:        "/home/ds/gascity/polecat",
+			"gc.var.issue":                      issue.ID,
+		},
+	}) // gc-3
+
+	_ = store.Close(issue.ID)
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, issue.ID, &stdout)
+
+	rootAfter, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if rootAfter.Status != "closed" {
+		t.Fatalf("root-only wisp status = %q, want closed (reaped via input convoy)", rootAfter.Status)
+	}
+	if !strings.Contains(stdout.String(), "Auto-closed workflow "+root.ID+" on "+issue.ID) {
+		t.Fatalf("stdout = %q, want workflow auto-close message", stdout.String())
+	}
+}
+
+func TestWispAutoclosePreservesOrchestratedWorkflowViaInputConvoyWhenStepsOpen(t *testing.T) {
+	// The input-convoy reap must not steamroll an orchestrated graph.v2 workflow
+	// whose step beads are still in flight: those roots close via their
+	// workflow-finalize control bead, not the on_close hook. The shared parked
+	// guard (subtreeTerminalExcludingRoot) keeps a root with a non-terminal
+	// descendant alive even when an input-convoy member closes early, so only the
+	// genuinely stepless root-only wisp reaps here.
+	store := beads.NewMemStore()
+	issue, _ := store.Create(beads.Bead{Title: "convoy member", Type: "task"})
+	convoy, _ := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err := store.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+	root, _ := store.Create(beads.Bead{
+		Title: "orchestrated workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            "workflow",
+			beadmeta.FormulaContractMetadataKey: "graph.v2",
+			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+		},
+	})
+	// An open step bead keeps the subtree non-terminal -> root stays parked.
+	_, _ = store.Create(beads.Bead{
+		Title:    "in-flight step",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+
+	_ = store.Close(issue.ID)
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, issue.ID, &stdout)
+
+	rootAfter, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if rootAfter.Status != "open" {
+		t.Fatalf("orchestrated workflow root status = %q, want open (left for workflow-finalize)", rootAfter.Status)
+	}
+}
+
+func TestWispAutocloseLeavesLegacyWorkflowRootViaInputConvoy(t *testing.T) {
+	// The input-convoy reap is graph.v2-only by contract: a legacy
+	// gc.kind=workflow root keeps its gc.source_bead_id attachment and is reaped
+	// via collectAttachedBeads, so it must not be force-closed through the
+	// input-convoy path. A root carrying only the legacy label (no
+	// gc.formula_contract=graph.v2) and an input-convoy link stays open here.
+	store := beads.NewMemStore()
+	issue, _ := store.Create(beads.Bead{Title: "work issue", Type: "task"})
+	convoy, _ := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err := store.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+	root, _ := store.Create(beads.Bead{
+		Title: "legacy workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:          "workflow",
+			beadmeta.InputConvoyIDMetadataKey: convoy.ID,
+		},
+	})
+
+	_ = store.Close(issue.ID)
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, issue.ID, &stdout)
+
+	rootAfter, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if rootAfter.Status != "open" {
+		t.Fatalf("legacy workflow root status = %q, want open (not reaped via input convoy)", rootAfter.Status)
+	}
+}
+
 func TestWispAutocloseBeadNotFound(t *testing.T) {
 	store := beads.NewMemStore()
 

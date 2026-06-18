@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/sling"
@@ -67,6 +68,11 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
 		return
 	}
 	attachments, err := collectAttachedBeads(parent, store, beads.HandlesFor(store).Live)
+	seen := make(map[string]bool, len(attachments))
+	for _, attached := range attachments {
+		seen[attached.ID] = true
+	}
+	attachments = append(attachments, collectInputConvoyWorkflowRoots(store, parent, seen)...)
 	if err == nil || len(attachments) > 0 {
 		for _, attached := range attachments {
 			if attachedMoleculeIsParked(store, attached) {
@@ -116,6 +122,58 @@ func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) bool {
 	}
 	terminal, _ := subtreeTerminalExcludingRoot(store, attached.ID)
 	return !terminal
+}
+
+// collectInputConvoyWorkflowRoots finds open graph.v2 workflow roots that were
+// dispatched over a synthetic input convoy tracking the just-closed bead. A
+// root-only in-session wisp -- mol-focus-review and peers routed to a pool --
+// runs every formula step in one worker session, so it materializes no step
+// beads and no workflow-finalize control bead to close its root. sling also
+// clears gc.source_bead_id for graph workflows (internal/sling/sling.go), so
+// such a wisp carries no source-bead attachment for collectAttachedBeads to
+// follow. Its only durable link back to the work issue is gc.input_convoy_id ->
+// the tracking convoy whose member is the issue. Without reaping the root here,
+// it outlives its closed issue, re-routes to the pool, and churns a fresh worker
+// (the gastownhall/gascity review-pool spawn-churn finalize-gap).
+//
+// This is discovery only: the caller runs each root through the shared
+// attachedMoleculeIsParked guard, so an orchestrated workflow whose step beads
+// are still in flight stays open and closes later via its workflow-finalize
+// control instead.
+func collectInputConvoyWorkflowRoots(store beads.Store, parent beads.Bead, seen map[string]bool) []beads.Bead {
+	convoys, err := convoycore.TrackingConvoysForItem(store, parent.ID)
+	if err != nil {
+		return nil
+	}
+	var roots []beads.Bead
+	for _, convoy := range convoys {
+		matches, err := store.ListByMetadata(
+			map[string]string{beadmeta.InputConvoyIDMetadataKey: convoy.ID},
+			0, beads.WithBothTiers,
+		)
+		if err != nil {
+			continue
+		}
+		for _, root := range matches {
+			if seen[root.ID] {
+				continue
+			}
+			if convoycore.IsTerminalStatus(root.Status) || !sourceworkflow.IsWorkflowRoot(root) {
+				continue
+			}
+			// Restrict to graph.v2 roots, matching the documented intent and
+			// formulaCookLiveInputConvoyGraphRoots: only graph workflows clear
+			// gc.source_bead_id and link back solely through gc.input_convoy_id,
+			// so a legacy gc.kind=workflow root is reaped via its source-bead
+			// attachment instead and must not be force-closed here.
+			if root.Metadata[beadmeta.FormulaContractMetadataKey] != "graph.v2" {
+				continue
+			}
+			seen[root.ID] = true
+			roots = append(roots, root)
+		}
+	}
+	return roots
 }
 
 func closeAttachedWispSubtree(store beads.Store, attached beads.Bead) (int, error) {
