@@ -46,10 +46,13 @@ func buildRuntimeRegistry() *registry.Registry {
 		return runtime.NewFailFake(), nil
 	}))
 	must(r.Register("subprocess", func(_ string, _ config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
+		// Cut-over: the subprocess provider is served through the de-conflated
+		// seams (runtime.NewProviderFromSeams), validated by the full Provider
+		// conformance suite in TestSubprocessSeamConformance.
 		if cityPath != "" {
-			return sessionsubprocess.NewProviderWithDir(providerStateDir("subprocess", cityPath)), nil
+			return sessionsubprocess.NewSeamBackedWithDir(providerStateDir("subprocess", cityPath)), nil
 		}
-		return sessionsubprocess.NewProvider(), nil
+		return sessionsubprocess.NewSeamBacked(), nil
 	}))
 	must(r.Register("acp", func(_ string, sc config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
 		cfg := sessionacp.Config{
