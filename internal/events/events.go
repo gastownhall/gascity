@@ -131,6 +131,12 @@ const (
 	ExtMsgInbound        = "extmsg.inbound"
 	ExtMsgOutbound       = "extmsg.outbound"
 
+	// ExtMsgOutboundChannelMismatch fires when a session attempts to publish
+	// to a conversation that is bound to a different session. The publish is
+	// rejected; this event turns that otherwise-silent cross-wire into an
+	// observable signal (RCA gc-5aie6: per-PL Slack channel cross-wiring).
+	ExtMsgOutboundChannelMismatch = "extmsg.outbound_channel_mismatch"
+
 	// EventsRotated is the forensic anchor written as the first event in
 	// a freshly-rotated active log. Its payload carries the prior
 	// archive's filename and seq range so log readers can stitch back
@@ -202,6 +208,7 @@ var KnownEventTypes = []string{
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
+	ExtMsgOutboundChannelMismatch,
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	StoreDiskWarn, StoreDiskCritical,

@@ -2193,6 +2193,9 @@
             "$ref": "#/components/schemas/NoPayload"
           },
           {
+            "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
+          },
+          {
             "$ref": "#/components/schemas/OutboundEventPayload"
           },
           {
@@ -4735,6 +4738,30 @@
         "required": [
           "items",
           "partial"
+        ],
+        "type": "object"
+      },
+      "OutboundChannelMismatchPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation_id": {
+            "type": "string"
+          },
+          "owner_session": {
+            "type": "string"
+          },
+          "posting_session": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "conversation_id",
+          "posting_session",
+          "owner_session"
         ],
         "type": "object"
       },
@@ -7934,6 +7961,7 @@
             "extmsg.group_created": "#/components/schemas/TypedEventStreamEnvelopeExtmsgGroupCreated",
             "extmsg.inbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound",
+            "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
             "extmsg.unbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound",
             "gc.store.disk_critical": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskCritical",
             "gc.store.disk_warn": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskWarn",
@@ -8050,6 +8078,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound"
@@ -8861,6 +8892,7 @@
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
                 "extmsg.outbound",
+                "extmsg.outbound_channel_mismatch",
                 "events.rotated",
                 "gc.store.maintenance.done",
                 "gc.store.maintenance.failed",
@@ -9263,6 +9295,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope extmsg.outbound",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "extmsg.outbound_channel_mismatch",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope extmsg.outbound_channel_mismatch",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExtmsgUnbound": {
@@ -11140,6 +11214,7 @@
             "extmsg.group_created": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgGroupCreated",
             "extmsg.inbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound",
+            "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
             "extmsg.unbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound",
             "gc.store.disk_critical": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskCritical",
             "gc.store.disk_warn": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskWarn",
@@ -11256,6 +11331,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound"
@@ -12126,6 +12204,7 @@
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
                 "extmsg.outbound",
+                "extmsg.outbound_channel_mismatch",
                 "events.rotated",
                 "gc.store.maintenance.done",
                 "gc.store.maintenance.failed",
@@ -12565,6 +12644,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope extmsg.outbound",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "extmsg.outbound_channel_mismatch",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope extmsg.outbound_channel_mismatch",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExtmsgUnbound": {

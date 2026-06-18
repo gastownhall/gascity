@@ -802,7 +802,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1934,6 +1934,13 @@ export type OrdersFeedBody = {
     items: Array<MonitorFeedItemResponse> | null;
     partial: boolean;
     partial_errors?: Array<string> | null;
+};
+
+export type OutboundChannelMismatchPayload = {
+    conversation_id: string;
+    owner_session: string;
+    posting_session: string;
+    provider: string;
 };
 
 export type OutboundEventPayload = {
@@ -3488,6 +3495,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgInbound) | ({
     type: 'extmsg.outbound';
 } & TypedEventStreamEnvelopeExtmsgOutbound) | ({
+    type: 'extmsg.outbound_channel_mismatch';
+} & TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
     type: 'gc.store.disk_critical';
@@ -3912,6 +3921,20 @@ export type TypedEventStreamEnvelopeExtmsgOutbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.outbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope extmsg.outbound_channel_mismatch
+ */
+export type TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
+    actor: string;
+    message?: string;
+    payload: OutboundChannelMismatchPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'extmsg.outbound_channel_mismatch';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4583,6 +4606,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgInbound) | ({
     type: 'extmsg.outbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgOutbound) | ({
+    type: 'extmsg.outbound_channel_mismatch';
+} & TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
     type: 'gc.store.disk_critical';
@@ -5031,6 +5056,21 @@ export type TypedTaggedEventStreamEnvelopeExtmsgOutbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.outbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope extmsg.outbound_channel_mismatch
+ */
+export type TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: OutboundChannelMismatchPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'extmsg.outbound_channel_mismatch';
     workflow?: WorkflowEventProjection;
 };
 

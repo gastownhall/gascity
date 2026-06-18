@@ -82,6 +82,18 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 	switch {
 	case binding != nil:
 		if req.SessionID != "" && binding.SessionID != req.SessionID {
+			// Cross-wire: the caller is trying to post into a channel owned
+			// by another session. Surface it as a structured warning before
+			// rejecting, so the otherwise-silent misroute is observable
+			// (RCA gc-5aie6). The error contract below is unchanged.
+			if deps.EmitEvent != nil {
+				deps.EmitEvent(events.ExtMsgOutboundChannelMismatch, req.SessionID, OutboundChannelMismatchPayload{
+					Provider:       req.Conversation.Provider,
+					ConversationID: req.Conversation.ConversationID,
+					PostingSession: req.SessionID,
+					OwnerSession:   binding.SessionID,
+				})
+			}
 			return nil, fmt.Errorf("session %q does not own binding for conversation %s/%s (bound to %s)",
 				req.SessionID, req.Conversation.Provider, req.Conversation.ConversationID, binding.SessionID)
 		}

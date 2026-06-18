@@ -2028,6 +2028,14 @@ type OrdersFeedBody struct {
 	PartialErrors *[]string                  `json:"partial_errors,omitempty"`
 }
 
+// OutboundChannelMismatchPayload defines model for OutboundChannelMismatchPayload.
+type OutboundChannelMismatchPayload struct {
+	ConversationId string `json:"conversation_id"`
+	OwnerSession   string `json:"owner_session"`
+	PostingSession string `json:"posting_session"`
+	Provider       string `json:"provider"`
+}
+
 // OutboundEventPayload defines model for OutboundEventPayload.
 type OutboundEventPayload struct {
 	ConversationId string `json:"conversation_id"`
@@ -3584,6 +3592,18 @@ type TypedEventStreamEnvelopeExtmsgOutbound struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch defines model for TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch.
+type TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch struct {
+	Actor    string                         `json:"actor"`
+	Message  *string                        `json:"message,omitempty"`
+	Payload  OutboundChannelMismatchPayload `json:"payload"`
+	Seq      int64                          `json:"seq"`
+	Subject  *string                        `json:"subject,omitempty"`
+	Ts       time.Time                      `json:"ts"`
+	Type     string                         `json:"type"`
+	Workflow *WorkflowEventProjection       `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeExtmsgUnbound defines model for TypedEventStreamEnvelopeExtmsgUnbound.
 type TypedEventStreamEnvelopeExtmsgUnbound struct {
 	Actor    string                   `json:"actor"`
@@ -4427,6 +4447,19 @@ type TypedTaggedEventStreamEnvelopeExtmsgOutbound struct {
 	Ts       time.Time                `json:"ts"`
 	Type     string                   `json:"type"`
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch defines model for TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch.
+type TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch struct {
+	Actor    string                         `json:"actor"`
+	City     string                         `json:"city"`
+	Message  *string                        `json:"message,omitempty"`
+	Payload  OutboundChannelMismatchPayload `json:"payload"`
+	Seq      int64                          `json:"seq"`
+	Subject  *string                        `json:"subject,omitempty"`
+	Ts       time.Time                      `json:"ts"`
+	Type     string                         `json:"type"`
+	Workflow *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgUnbound defines model for TypedTaggedEventStreamEnvelopeExtmsgUnbound.
@@ -6546,6 +6579,32 @@ func (t *EventPayload) MergeNoPayload(v NoPayload) error {
 	return err
 }
 
+// AsOutboundChannelMismatchPayload returns the union data inside the EventPayload as a OutboundChannelMismatchPayload
+func (t EventPayload) AsOutboundChannelMismatchPayload() (OutboundChannelMismatchPayload, error) {
+	var body OutboundChannelMismatchPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOutboundChannelMismatchPayload overwrites any union data inside the EventPayload as the provided OutboundChannelMismatchPayload
+func (t *EventPayload) FromOutboundChannelMismatchPayload(v OutboundChannelMismatchPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOutboundChannelMismatchPayload performs a merge with any union data inside the EventPayload, using the provided OutboundChannelMismatchPayload
+func (t *EventPayload) MergeOutboundChannelMismatchPayload(v OutboundChannelMismatchPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsOutboundEventPayload returns the union data inside the EventPayload as a OutboundEventPayload
 func (t EventPayload) AsOutboundEventPayload() (OutboundEventPayload, error) {
 	var body OutboundEventPayload
@@ -7886,6 +7945,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgOutbound(v
 	return err
 }
 
+// AsTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch() (TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch, error) {
+	var body TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch(v TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch) error {
+	v.Type = "extmsg.outbound_channel_mismatch"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch(v TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch) error {
+	v.Type = "extmsg.outbound_channel_mismatch"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeExtmsgUnbound returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgUnbound
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgUnbound() (TypedEventStreamEnvelopeExtmsgUnbound, error) {
 	var body TypedEventStreamEnvelopeExtmsgUnbound
@@ -9208,6 +9295,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgInbound()
 	case "extmsg.outbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgOutbound()
+	case "extmsg.outbound_channel_mismatch":
+		return t.AsTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
 	case "extmsg.unbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgUnbound()
 	case "gc.store.disk_critical":
@@ -9945,6 +10034,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtms
 // MergeTypedTaggedEventStreamEnvelopeExtmsgOutbound performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgOutbound
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgOutbound(v TypedTaggedEventStreamEnvelopeExtmsgOutbound) error {
 	v.Type = "extmsg.outbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch() (TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch(v TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) error {
+	v.Type = "extmsg.outbound_channel_mismatch"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch(v TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) error {
+	v.Type = "extmsg.outbound_channel_mismatch"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -11277,6 +11394,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgInbound()
 	case "extmsg.outbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutbound()
+	case "extmsg.outbound_channel_mismatch":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
 	case "extmsg.unbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgUnbound()
 	case "gc.store.disk_critical":

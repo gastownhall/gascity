@@ -32,6 +32,22 @@ type OutboundEventPayload struct {
 // IsEventPayload marks OutboundEventPayload as an events.Payload variant.
 func (OutboundEventPayload) IsEventPayload() {}
 
+// OutboundChannelMismatchPayload is emitted on
+// events.ExtMsgOutboundChannelMismatch when a session tries to publish to a
+// conversation owned by a different session. PostingSession is the caller
+// that attempted the publish; OwnerSession is the session that actually owns
+// the target conversation's binding. The publish is rejected — this payload
+// makes the cross-wire observable rather than silent (RCA gc-5aie6).
+type OutboundChannelMismatchPayload struct {
+	Provider       string `json:"provider"`
+	ConversationID string `json:"conversation_id"`
+	PostingSession string `json:"posting_session"`
+	OwnerSession   string `json:"owner_session"`
+}
+
+// IsEventPayload marks OutboundChannelMismatchPayload as an events.Payload variant.
+func (OutboundChannelMismatchPayload) IsEventPayload() {}
+
 // BoundEventPayload is emitted on events.ExtMsgBound (binding a
 // conversation to a session).
 type BoundEventPayload struct {
@@ -81,4 +97,5 @@ func init() {
 	events.RegisterPayload(events.ExtMsgAdapterRemoved, AdapterEventPayload{})
 	events.RegisterPayload(events.ExtMsgInbound, InboundEventPayload{})
 	events.RegisterPayload(events.ExtMsgOutbound, OutboundEventPayload{})
+	events.RegisterPayload(events.ExtMsgOutboundChannelMismatch, OutboundChannelMismatchPayload{})
 }
