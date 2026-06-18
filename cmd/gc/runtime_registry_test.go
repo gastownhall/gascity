@@ -9,10 +9,19 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
-	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
-	sessionssh "github.com/gastownhall/gascity/internal/runtime/ssh"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 )
+
+// assertProviderPkg verifies sp is a provider from the given package (e.g.
+// "ssh", "exec", "t3bridge"), robust to the seam-backed cut-over wrapper, which
+// shares the package but changes the concrete type from *Provider to
+// *seamBackedProvider.
+func assertProviderPkg(t *testing.T, sp any, pkg string) {
+	t.Helper()
+	if got := fmt.Sprintf("%T", sp); !strings.HasPrefix(got, "*"+pkg+".") {
+		t.Fatalf("provider type = %s, want a *%s.* provider", got, pkg)
+	}
+}
 
 // builtinRuntimeNames is the selection-name contract documented in
 // internal/runtime/REQUIREMENTS.md (RUNTIME-SEL-002). Removing a name is
@@ -62,9 +71,7 @@ func TestNewSessionProviderForCityByName_ExecPrefixUsesExecProvider(t *testing.T
 	if err != nil {
 		t.Fatalf("newSessionProviderForCityByName(exec:...): %v", err)
 	}
-	if _, ok := sp.(*sessionexec.Provider); !ok {
-		t.Fatalf("provider type = %T, want *exec.Provider", sp)
-	}
+	assertProviderPkg(t, sp, "exec")
 }
 
 func TestNewSessionProviderForCityByName_SSHPrefixUsesSSHProvider(t *testing.T) {
@@ -72,9 +79,7 @@ func TestNewSessionProviderForCityByName_SSHPrefixUsesSSHProvider(t *testing.T) 
 	if err != nil {
 		t.Fatalf("newSessionProviderForCityByName(ssh:...): %v", err)
 	}
-	if _, ok := sp.(*sessionssh.Provider); !ok {
-		t.Fatalf("provider type = %T, want *ssh.Provider", sp)
-	}
+	assertProviderPkg(t, sp, "ssh")
 }
 
 func TestNewSessionProviderForCityByName_SSHPrefixRejectsBadEndpoint(t *testing.T) {
@@ -112,9 +117,7 @@ case "$1" in is-running) echo false ;; *) exit 2 ;; esac
 	if err != nil {
 		t.Fatalf("New(cloudpack): %v", err)
 	}
-	if _, ok := sp.(*sessionexec.Provider); !ok {
-		t.Fatalf("provider type = %T, want *exec.Provider (the RPP proxy)", sp)
-	}
+	assertProviderPkg(t, sp, "exec")
 	sp.IsRunning("conformance-probe")
 	data, err := os.ReadFile(marker)
 	if err != nil {

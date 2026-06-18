@@ -13,8 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
-	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -636,9 +634,7 @@ func TestNewSessionProviderForCityByName_UsesFirstClassT3Bridge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newSessionProviderForCityByName(t3bridge): %v", err)
 	}
-	if _, ok := sp.(*sessiont3bridge.Provider); !ok {
-		t.Fatalf("provider type = %T, want *t3bridge.Provider", sp)
-	}
+	assertProviderPkg(t, sp, "t3bridge")
 }
 
 func TestNewSessionProviderForCityByName_LegacyExecT3BridgeStillMapsNative(t *testing.T) {
@@ -646,9 +642,7 @@ func TestNewSessionProviderForCityByName_LegacyExecT3BridgeStillMapsNative(t *te
 	if err != nil {
 		t.Fatalf("newSessionProviderForCityByName(exec gc-session-t3): %v", err)
 	}
-	if _, ok := sp.(*sessiont3bridge.Provider); !ok {
-		t.Fatalf("provider type = %T, want *t3bridge.Provider", sp)
-	}
+	assertProviderPkg(t, sp, "t3bridge")
 }
 
 func TestNewSessionProvider_PreregistersACPNamedSessionRuntimeName(t *testing.T) {
@@ -1144,9 +1138,7 @@ func TestNewSessionProviderFromContext_PackRuntimeSelected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newSessionProviderFromContextWithError: %v", err)
 	}
-	if _, ok := sp.(*sessionexec.Provider); !ok {
-		t.Fatalf("provider type = %T, want *exec.Provider (pack runtime proxy)", sp)
-	}
+	assertProviderPkg(t, sp, "exec")
 }
 
 func TestNewSessionProviderFromContext_PackRuntimeCollisionSurfaces(t *testing.T) {

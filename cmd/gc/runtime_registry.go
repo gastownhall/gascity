@@ -66,7 +66,7 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionacp.NewProvider(cfg), nil
 	}))
 	must(r.Register("t3bridge", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-		return sessiont3bridge.NewProvider(), nil
+		return sessiont3bridge.NewSeamBacked(), nil
 	}))
 	// "cloudflare" is no longer a builtin: it ships as the runtime-cloudflare
 	// pack ([runtimes.cloudflare] → gc-runtime-cloudflare, RPP v0) and
@@ -74,7 +74,7 @@ func buildRuntimeRegistry() *registry.Registry {
 	// that selects session = "cloudflare" falls through to the tmux fallback
 	// (RUNTIME-SEL-006) — the delivery-independence boundary (RUNTIME-PLAN-004).
 	must(r.Register("k8s", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-		return sessionk8s.NewProvider()
+		return sessionk8s.NewSeamBacked()
 	}))
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		return newHybridProvider(sc, cityName, cityPath)
@@ -82,9 +82,9 @@ func buildRuntimeRegistry() *registry.Registry {
 	must(r.RegisterPrefix("exec:", func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
 		script := strings.TrimPrefix(name, "exec:")
 		if isLegacyT3BridgeExecScript(script) {
-			return sessiont3bridge.NewProvider(), nil
+			return sessiont3bridge.NewSeamBacked(), nil
 		}
-		return sessionexec.NewProvider(script), nil
+		return sessionexec.NewSeamBacked(script), nil
 	}))
 	// "ssh:<[user@]host[:port]>" selects the SSH backend against a fixed
 	// endpoint (the anonymous form; the named, structured form with explicit
@@ -95,7 +95,7 @@ func buildRuntimeRegistry() *registry.Registry {
 		if err != nil {
 			return nil, err
 		}
-		return sessionssh.NewProvider(ep), nil
+		return sessionssh.NewSeamBacked(ep), nil
 	}))
 	// tmux registers both as an exact name and as the fallback: the exact
 	// registration makes a pack-declared runtime named "tmux" a collision
@@ -139,7 +139,7 @@ func runtimeRegistryForCity(cfg *config.City) (*registry.Registry, error) {
 	for _, name := range names {
 		rt := cfg.Runtimes[name]
 		if err := r.Register(name, func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-			return sessionexec.NewProvider(rt.Command), nil
+			return sessionexec.NewSeamBacked(rt.Command), nil
 		}); err != nil {
 			return nil, fmt.Errorf("pack %q: %w", rt.PackName, err)
 		}
