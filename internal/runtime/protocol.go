@@ -23,6 +23,14 @@ const (
 	// `get-last-activity <name>` returns meaningful results, enabling
 	// ProviderCapabilities.CanReportActivity.
 	ProtocolCapabilityReportActivity = "report-activity"
+	// ProtocolCapabilityConnectionExec declares that the executable implements
+	// the `exec` connection op (RPP-CONN-001) with the op's process exit code
+	// carrying the in-box command's exit code. The controller uses this to read
+	// an exec-op exit of 2 as the command's own exit code rather than the RPP
+	// "unknown op" sentinel (ErrExecUnsupported) — disambiguating the overloaded
+	// exit 2 at the exec-connection seam. exec stays optional; an executable that
+	// omits this capability is driven via the dedicated ops (the fallback path).
+	ProtocolCapabilityConnectionExec = "proc.exec"
 	// The proc.* / tty.* tokens below form the connection-plane capability
 	// family — a dotted namespace parallel to the env.* family, distinct from
 	// the flat session-control tokens above. They are reserved now and gain

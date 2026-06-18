@@ -148,11 +148,27 @@ func TestProvider_ProcessAliveEmptyIsTrue(t *testing.T) {
 	}
 }
 
+func TestProvider_StartRejectsUnsafeName(t *testing.T) {
+	// A name with tmux target metacharacters (".", ":") or empty must be rejected
+	// before any tmux op, since the carrier addresses the session by name.
+	f := &fakeRunner{}
+	p := providerWith(f)
+	for _, bad := range []string{"a.b", "a:b", ""} {
+		if err := p.Start(context.Background(), bad, runtime.Config{Command: "x"}); !errors.Is(err, ErrInvalidSessionName) {
+			t.Errorf("Start(%q) err = %v, want ErrInvalidSessionName", bad, err)
+		}
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("no tmux ops should run for a rejected name; got %v", f.calls)
+	}
+}
+
 func TestProvider_StartQuotesNameWorkdirEnvCommand(t *testing.T) {
-	// A command and env values with spaces/quotes, and a session name with a
-	// space, must each be a single argv element (tmux -e takes K=V natively; the
-	// command is one shell string tmux runs). ssh.shellQuote then quotes each
-	// element for the remote shell, so nothing here is re-split.
+	// Command and env values with spaces/quotes must each be a single argv element
+	// (tmux -e takes K=V natively; the command is one shell string tmux runs).
+	// ssh.shellQuote then quotes each element for the remote shell, so nothing
+	// here is re-split. (The session name itself is restricted to a safe tmux
+	// target, so it carries no spaces — see TestProvider_StartRejectsUnsafeName.)
 	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
 		if isTmux("has-session")(argv) {
 			return nil, 1, nil // not running
@@ -164,12 +180,12 @@ func TestProvider_StartQuotesNameWorkdirEnvCommand(t *testing.T) {
 		WorkDir: "/path with space",
 		Env:     map[string]string{"MSG": "hello world", "Q": `a'b"c`},
 	}
-	if err := providerWith(f).Start(context.Background(), "sess one", cfg); err != nil {
+	if err := providerWith(f).Start(context.Background(), "sess-one", cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	got := firstCall(f, isTmux("new-session"))
 	want := []string{
-		"tmux", "new-session", "-d", "-s", "sess one",
+		"tmux", "new-session", "-d", "-s", "sess-one",
 		"-c", "/path with space",
 		"-e", "MSG=hello world",
 		"-e", `Q=a'b"c`,

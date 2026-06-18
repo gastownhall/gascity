@@ -482,7 +482,13 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(out) == "true"
+	// A runtime that does not implement process-alive answers exit 2, which run
+	// maps to empty output. Treat unimplemented/unknown as ALIVE (liveness for
+	// such runtimes is gated by IsRunning) — never as a spurious "dead" that
+	// would make ObserveLiveness reap a live session. Only an explicit "false"
+	// reports a dead agent.
+	s := strings.TrimSpace(out)
+	return s == "" || s == "true"
 }
 
 // Nudge delivers content as input to the in-box tmux session (typed, then
@@ -656,6 +662,15 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			if exitErr.ExitCode() == 2 {
+				// Exit 2 is overloaded: the RPP "unknown op" sentinel AND a
+				// possible in-box command exit (the exec op forwards the command's
+				// exit code). A runtime that DECLARES the exec connection in its
+				// handshake implements the op, so exit 2 is the command's own exit
+				// code; only an UNDECLARED runtime means "op unimplemented" — fall
+				// back to the dedicated driving ops.
+				if p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec) {
+					return stdout.Bytes(), 2, nil
+				}
 				return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
 			}
 			// A non-zero (non-2) exit is the command's own result, not a

@@ -2,9 +2,11 @@ package ssh
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,6 +14,15 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+// validTmuxName mirrors the local tmux provider's guard: a session name must be
+// a safe tmux target. tmux treats "." as a pane and ":" as a window separator,
+// so a session created with -s "a.b" cannot be addressed with -t "a.b" — and
+// the carrier addresses this session by its name, so reject such names up front.
+var validTmuxName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// ErrInvalidSessionName reports a session name that is not a safe tmux target.
+var ErrInvalidSessionName = errors.New("invalid session name")
 
 // Provider is a [runtime.Provider] that runs each session as a tmux session on
 // an existing remote host reached over SSH. It does NOT provision the box (the
@@ -93,6 +104,9 @@ const defaultRemoteShell = "/bin/sh"
 // AcceptStartupDialogs), CopyTo, and live SessionLive re-apply on drift (RunLive
 // is a no-op, matching k8s; SessionLive is applied once at startup).
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if !validTmuxName.MatchString(name) {
+		return fmt.Errorf("%w %q: must match %s", ErrInvalidSessionName, name, validTmuxName.String())
+	}
 	if p.hasSession(ctx, name) {
 		return fmt.Errorf("%w: ssh session %q", runtime.ErrSessionExists, name)
 	}

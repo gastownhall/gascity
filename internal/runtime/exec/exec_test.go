@@ -1282,6 +1282,49 @@ func TestExecConformance(t *testing.T) {
 	})
 }
 
+func TestProcessAlive_unimplemented(t *testing.T) {
+	dir := t.TempDir()
+	// A pack that does not implement process-alive (exit 2) must read as ALIVE,
+	// not dead — liveness for such packs is gated by IsRunning, and a false
+	// "dead" would make ObserveLiveness reap a live session.
+	script := writeScript(t, dir, `exit 2`)
+	p := NewProvider(script)
+	if !p.ProcessAlive("test-sess", []string{"claude", "node"}) {
+		t.Error("ProcessAlive on a pack without process-alive should be true")
+	}
+}
+
+func TestExec_ExitTwoIsCommandCodeWhenExecDeclared(t *testing.T) {
+	dir := t.TempDir()
+	// protocol declares proc.exec, so an exec-op exit of 2 is the in-box
+	// command's own exit code (2), NOT ErrExecUnsupported.
+	script := writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  exec) echo "out"; exit 2 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+	_, code, err := p.Exec(context.Background(), "s", []string{"cmd"})
+	if err != nil {
+		t.Fatalf("Exec with exec declared + command exit 2 should not error, got %v", err)
+	}
+	if code != 2 {
+		t.Errorf("code = %d, want 2 (the in-box command's exit code)", code)
+	}
+}
+
+func TestExec_ExitTwoIsUnsupportedWhenExecNotDeclared(t *testing.T) {
+	dir := t.TempDir()
+	// No protocol/exec op: exit 2 means the op is unimplemented -> fall back.
+	script := writeScript(t, dir, `exit 2`)
+	p := NewProvider(script)
+	if _, _, err := p.Exec(context.Background(), "s", []string{"cmd"}); !errors.Is(err, runtime.ErrExecUnsupported) {
+		t.Errorf("err = %v, want ErrExecUnsupported when exec is not declared", err)
+	}
+}
+
 // --- Compile-time interface check ---
 
 var _ runtime.Provider = (*Provider)(nil)
