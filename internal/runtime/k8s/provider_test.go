@@ -1979,6 +1979,100 @@ func TestStartSkipsNudgeWhenEmpty(t *testing.T) {
 	}
 }
 
+// --- Relaunch (un-weld B3a) ---
+
+// findExecCmd returns the cmd of the first execInPod call whose joined cmd
+// contains substr (nil if none).
+func findExecCmd(fake *fakeK8sOps, substr string) []string { //nolint:unparam // substr varies in future tests
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && strings.Contains(strings.Join(c.cmd, " "), substr) {
+			return c.cmd
+		}
+	}
+	return nil
+}
+
+func TestProvider_RelaunchRespawnsAgentInWarmPod(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	hasSessionAlive(fake, "s") // guard + liveness recheck both succeed
+
+	if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent --resume"}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+
+	respawn := findExecCmd(fake, "respawn-pane")
+	if respawn == nil {
+		t.Fatal("Relaunch did not issue tmux respawn-pane over execInPod")
+	}
+	body := respawn[len(respawn)-1] // sh -c <body>
+	if !strings.Contains(body, "tmux respawn-pane -k -t main") {
+		t.Errorf("respawn body = %q, want it to respawn the 'main' session in place", body)
+	}
+	// The command is base64-shipped, not inlined verbatim.
+	wantB64 := base64.StdEncoding.EncodeToString([]byte("agent --resume"))
+	if !strings.Contains(body, wantB64) {
+		t.Errorf("respawn body = %q, want base64 %q of the agent command", body, wantB64)
+	}
+	if strings.Contains(body, "agent --resume") {
+		t.Errorf("respawn body = %q leaked the raw command; it must be base64-shipped", body)
+	}
+	// Warm reuse: no pod was created or deleted.
+	for _, c := range fake.calls {
+		if c.method == "createPod" || c.method == "deletePod" {
+			t.Errorf("Relaunch must reuse the warm pod, but called %s", c.method)
+		}
+	}
+}
+
+func TestProvider_RelaunchMissingPodIsErrSessionNotFound(t *testing.T) {
+	fake := newFakeK8sOps() // no pods
+	p := newProviderWithOps(fake)
+	err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent"})
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Relaunch err = %v, want ErrSessionNotFound", err)
+	}
+	if findExecCmd(fake, "respawn-pane") != nil {
+		t.Error("respawn-pane must not be issued when there is no running pod")
+	}
+}
+
+func TestProvider_RelaunchDeadTmuxIsErrSessionNotFound(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	// Pod runs but tmux "main" is gone: relaunch must NOT recreate the pod.
+	fake.setExecResult("s", []string{"tmux", "has-session", "-t", tmuxSession}, "", errors.New("no session"))
+	err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent"})
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Relaunch err = %v, want ErrSessionNotFound", err)
+	}
+	if findExecCmd(fake, "respawn-pane") != nil {
+		t.Error("respawn-pane must not be issued when the tmux session is dead")
+	}
+}
+
+func TestProvider_RelaunchSuWrapsForLinuxUsername(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	hasSessionAlive(fake, "s")
+
+	cfg := runtime.Config{Command: "agent", Env: map[string]string{"LINUX_USERNAME": "dev"}}
+	if err := p.Relaunch(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	body := findExecCmd(fake, "respawn-pane")
+	if body == nil {
+		t.Fatal("no respawn-pane call")
+	}
+	last := body[len(body)-1]
+	if !strings.Contains(last, `su - dev -c`) {
+		t.Errorf("respawn body = %q, want it su-wrapped for the LINUX_USERNAME tmux socket", last)
+	}
+}
+
 // --- Test helpers ---
 
 func addRunningPod(fake *fakeK8sOps, name, sessionLabel string) { //nolint:unparam // name varies in future tests

@@ -260,29 +260,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("waiting for tmux in pod %q: %w", podName, err)
 	}
 
-	// Enable pane logging for diagnostics.
-	_, _ = p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "pipe-pane", "-t", tmuxSession, "-o", "cat >> /tmp/agent-output.log"}, nil)
-
-	// Run session_setup commands inside the pod.
-	for _, cmd := range cfg.SessionSetup {
-		if cmd == "" {
-			continue
-		}
-		_, _ = p.ops.execInPod(ctx, podName, "agent",
-			[]string{"sh", "-c", cmd}, nil)
-	}
-
-	// Run session_setup_script.
-	if cfg.SessionSetupScript != "" {
-		script, err := os.ReadFile(cfg.SessionSetupScript)
-		if err != nil {
-			fmt.Fprintf(p.stderr, "gc: warning: reading session_setup_script %q for %s: %v\n", cfg.SessionSetupScript, podName, err) //nolint:errcheck
-		} else {
-			_, _ = p.ops.execInPod(ctx, podName, "agent",
-				[]string{"sh"}, strings.NewReader(string(script)))
-		}
-	}
+	// Enable pane logging + run session setup (shared with the relaunch tail).
+	p.runPodPostLaunchSetup(ctx, podName, cfg)
 
 	requiresPostStartLiveness := k8sRequiresPostStartLiveness(cfg)
 
@@ -321,6 +300,102 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
 	}
 
+	return nil
+}
+
+// runPodPostLaunchSetup enables pane logging and runs session_setup and
+// session_setup_script inside the pod, best-effort. Shared by Start (after the
+// entrypoint launches the agent) and Relaunch (after the respawn). k8s does not
+// run SessionLive (RunLive is a no-op), matching the pre-un-weld behavior.
+func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cfg runtime.Config) {
+	// Enable pane logging for diagnostics.
+	_, _ = p.ops.execInPod(ctx, podName, "agent",
+		[]string{"tmux", "pipe-pane", "-t", tmuxSession, "-o", "cat >> /tmp/agent-output.log"}, nil)
+
+	// Run session_setup commands inside the pod.
+	for _, cmd := range cfg.SessionSetup {
+		if cmd == "" {
+			continue
+		}
+		_, _ = p.ops.execInPod(ctx, podName, "agent",
+			[]string{"sh", "-c", cmd}, nil)
+	}
+
+	// Run session_setup_script.
+	if cfg.SessionSetupScript != "" {
+		script, err := os.ReadFile(cfg.SessionSetupScript)
+		if err != nil {
+			fmt.Fprintf(p.stderr, "gc: warning: reading session_setup_script %q for %s: %v\n", cfg.SessionSetupScript, podName, err) //nolint:errcheck
+		} else {
+			_, _ = p.ops.execInPod(ctx, podName, "agent",
+				[]string{"sh"}, strings.NewReader(string(script)))
+		}
+	}
+}
+
+// Relaunch re-launches the agent inside the already-running (warm) pod without
+// recreating it: it respawns the in-pod tmux "main" pane (respawn-pane -k) with
+// the (possibly changed) command over execInPod, then re-runs the post-launch
+// setup tail. The pod stays warm via the entrypoint's `sleep infinity`, so a
+// launch-only config change reaches the live pod without a full reprovision —
+// the k8s half of the runtime/transport un-weld (B3a, mirroring tmux B1 / ssh).
+//
+// The pod must be Running with a live tmux "main" session, else
+// [runtime.ErrSessionNotFound] (the reconciler decides whether to Start fresh —
+// it does NOT recreate the pod here). Staging, city/beads init, and PreStart are
+// NOT re-run (provision-half); env is provision-half too (set in the pod spec at
+// create time, not re-injected — respawn-pane carries no env), matching tmux/ssh.
+//
+// CAVEAT (unverified on a real cluster — see the B3 design doc): for
+// LINUX_USERNAME pods the entrypoint runs tmux under `su - <user>`, so the
+// respawn is su-wrapped to reach that user's tmux socket; and if the in-pod tmux
+// server itself died (not just the agent), respawn-pane fails and Relaunch
+// returns ErrSessionNotFound so the reconciler reprovisions.
+func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	podName, err := p.findRunningPod(ctx, name)
+	if err != nil {
+		return fmt.Errorf("%w: session %q (no running pod to relaunch into)", runtime.ErrSessionNotFound, name)
+	}
+	// The tmux server + "main" session must be alive to respawn into; a dead
+	// session means the box is not warm enough — reprovision, don't respawn.
+	if _, err := p.ops.execInPod(ctx, podName, "agent",
+		[]string{"tmux", "has-session", "-t", tmuxSession}, nil); err != nil {
+		return fmt.Errorf("%w: session %q (pod %s has no live tmux session)", runtime.ErrSessionNotFound, name, podName)
+	}
+
+	// Respawn the agent in the warm "main" session.
+	if _, err := p.ops.execInPod(ctx, podName, "agent",
+		[]string{"sh", "-c", buildRespawnCommand(cfg)}, nil); err != nil {
+		return fmt.Errorf("k8s relaunch %q: respawn-pane: %w", name, err)
+	}
+
+	// Re-run the post-launch setup tail (pipe-pane logging + session_setup[/script]).
+	p.runPodPostLaunchSetup(ctx, podName, cfg)
+
+	// Post-relaunch liveness: detect an agent that dies immediately.
+	if k8sRequiresPostStartLiveness(cfg) {
+		if p.postStartSettle > 0 {
+			timer := time.NewTimer(p.postStartSettle)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("k8s relaunch %q: %w", name, ctx.Err())
+			case <-timer.C:
+			}
+		}
+		if _, err := p.ops.execInPod(ctx, podName, "agent",
+			[]string{"tmux", "has-session", "-t", tmuxSession}, nil); err != nil {
+			return fmt.Errorf("%w: session %q died immediately after relaunch: %w",
+				runtime.ErrSessionDiedDuringStartup, name, err)
+		}
+	}
+
+	if cfg.Nudge != "" {
+		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
+	}
 	return nil
 }
 

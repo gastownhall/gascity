@@ -132,10 +132,19 @@ type k8sTransport struct{ p *Provider }
 
 var _ runtime.Transport = (*k8sTransport)(nil)
 
-// Launch is a no-op: Start already launched the agent in the pod's tmux session;
-// this returns the live Attachment over the Place (←Start how-half).
-func (t *k8sTransport) Launch(_ context.Context, place runtime.Place, _ runtime.LaunchSpec) (runtime.Attachment, error) {
-	return &k8sAttachment{p: t.p, name: placeName(place)}, nil
+// Launch relaunches the agent inside the (already-provisioned) pod and returns
+// the live Attachment. In the pragmatic un-weld, Provision (←Start) is welded and
+// already launches the agent on the normal Start path, so this is the SEPARATE
+// relaunch-into-a-warm-pod capability the reconciler uses to apply a launch-only
+// config change without recreating the pod — it is NOT a step of a normal Start
+// (see seamProvider.Start). A pod with no live tmux "main" session is a
+// runtime.ErrSessionNotFound (B3a, mirroring tmux B1 / ssh).
+func (t *k8sTransport) Launch(ctx context.Context, place runtime.Place, spec runtime.LaunchSpec) (runtime.Attachment, error) {
+	name := placeName(place)
+	if err := t.p.Relaunch(ctx, name, spec.Config); err != nil {
+		return nil, err
+	}
+	return &k8sAttachment{p: t.p, name: name}, nil
 }
 
 // Open returns the Attachment for an already-running pod (reconnect). Process
