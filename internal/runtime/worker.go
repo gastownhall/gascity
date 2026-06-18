@@ -145,11 +145,11 @@ type Transport interface {
 // Attachment is the live driving surface: the first five verbs ARE the [Carrier]
 // verbatim; Observe folds the liveness reads; Close is Stop's how-half.
 type Attachment interface {
-	Peek(ctx context.Context, lines int) (string, error)     // ←Carrier.Peek
-	Nudge(ctx context.Context, content []ContentBlock) error // ←Carrier.Nudge
-	SendKeys(ctx context.Context, keys ...string) error      // ←Carrier.SendKeys
-	Interrupt(ctx context.Context) error                     // ←Carrier.Interrupt
-	ClearScrollback(ctx context.Context) error               // ←Carrier.ClearScrollback
-	Observe(ctx context.Context) (LiveObservation, error)    // ←ProcessAlive+IsAttached+GetLastActivity
-	Close(ctx context.Context) error                         // ←Stop (how-half)
+	Peek(ctx context.Context, lines int) (string, error)                         // ←Carrier.Peek
+	Nudge(ctx context.Context, content []ContentBlock) error                     // ←Carrier.Nudge
+	SendKeys(ctx context.Context, keys ...string) error                          // ←Carrier.SendKeys
+	Interrupt(ctx context.Context) error                                         // ←Carrier.Interrupt
+	ClearScrollback(ctx context.Context) error                                   // ←Carrier.ClearScrollback
+	Observe(ctx context.Context, processNames []string) (LiveObservation, error) // ←ProcessAlive(names)+IsAttached+GetLastActivity
+	Close(ctx context.Context) error                                             // ←Stop (how-half)
 }

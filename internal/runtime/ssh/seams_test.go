@@ -190,7 +190,7 @@ func TestSeamsSshObserve(t *testing.T) {
 
 	// Observe folds all three reads: ProcessAlive from pgrep, Attached parsed
 	// from #{session_attached}=1, LastActivity parsed from #{session_activity}.
-	obs, err := att.Observe(ctx)
+	obs, err := att.Observe(ctx, []string{"claude"})
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestSeamsSshTransportOpen(t *testing.T) {
 	}
 	// A reconnect carries no processNames, so Observe falls back to box liveness
 	// (ProcessAlive true via the empty-names contract).
-	if obs, oerr := att.Observe(ctx); oerr != nil || !obs.ProcessAlive {
+	if obs, oerr := att.Observe(ctx, nil); oerr != nil || !obs.ProcessAlive {
 		t.Fatalf("Observe(reconnect) = %+v, %v; want ProcessAlive true", obs, oerr)
 	}
 

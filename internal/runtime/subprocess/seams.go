@@ -180,8 +180,9 @@ func (a *detachedAttachment) Interrupt(context.Context) error {
 
 func (a *detachedAttachment) ClearScrollback(context.Context) error { return nil }
 
-// Observe reports process liveness; subprocess cannot detect attach or activity.
-func (a *detachedAttachment) Observe(ctx context.Context) (runtime.LiveObservation, error) {
+// Observe reports process liveness via IsRunning; subprocess cannot detect
+// attach or activity, nor inspect the process tree, so processNames is ignored.
+func (a *detachedAttachment) Observe(ctx context.Context, _ []string) (runtime.LiveObservation, error) {
 	if a.place == nil {
 		return runtime.LiveObservation{}, nil
 	}

@@ -18,22 +18,19 @@ import (
 // live attachment via Transport.Open, matching how the stateless providers
 // (exec/ssh/k8s) already behave.
 //
-// KNOWN GAPS — the seam contract does not yet cover these, so this adapter is
-// faithful only for providers where they are no-ops/ignored (e.g. subprocess),
-// NOT for the carrier providers. Surfacing them is the point of the early
-// cut-over; they are decisions to resolve before a general cut-over:
-//
-//   - ProcessAlive(name, processNames): Attachment.Observe takes no per-call
-//     process names, so the names are DROPPED here, and Observe reports liveness
-//     however the provider's attachment computes it. Correct for subprocess
-//     (whose ProcessAlive ignores names and reports IsRunning), but lossy for
-//     exec/k8s/ssh (which pgrep on the names) and it does not reproduce the
-//     legacy "empty names => true" contract.
+// KNOWN GAPS — the seam contract does not yet cover these:
 //   - RunLive: no seam exists, so this is a no-op — correct only for providers
-//     whose RunLive is already a no-op (subprocess/exec/k8s/ssh).
+//     whose RunLive is already a no-op (subprocess/exec/k8s/ssh/t3bridge).
 //   - The optional extensions (ProcessTableScanner, SleepCapability,
-//     InteractionProvider, …) live outside the seams; a provider needing them
-//     must compose them alongside this adapter.
+//     InteractionProvider, ExecProvider, …) live outside the seams; a provider
+//     needing them composes them alongside this adapter (see each provider's
+//     cutover.go).
+//
+// ProcessAlive's per-call processNames ARE threaded through Attachment.Observe.
+// A provider whose Observe ignores them (subprocess, which can only report
+// IsRunning) does not reproduce the legacy "empty names => true" result, but
+// that path is unreachable in production (both ProcessAlive callers gate on
+// non-empty names).
 type seamProvider struct {
 	rt   Runtime
 	tp   Transport
@@ -102,7 +99,7 @@ func (s *seamProvider) IsAttached(name string) bool {
 	if !ok {
 		return false
 	}
-	obs, err := att.Observe(context.Background())
+	obs, err := att.Observe(context.Background(), nil)
 	return err == nil && obs.Attached
 }
 
@@ -118,14 +115,13 @@ func (s *seamProvider) Attach(name string) error {
 	return s.tp.Attach(ctx, place, name)
 }
 
-// ProcessAlive drops processNames (see KNOWN GAPS) and reports the attachment's
-// liveness.
-func (s *seamProvider) ProcessAlive(name string, _ []string) bool {
+// ProcessAlive threads the per-call process names through Attachment.Observe.
+func (s *seamProvider) ProcessAlive(name string, processNames []string) bool {
 	att, ok := s.attach(name)
 	if !ok {
 		return false
 	}
-	obs, err := att.Observe(context.Background())
+	obs, err := att.Observe(context.Background(), processNames)
 	return err == nil && obs.ProcessAlive
 }
 
@@ -173,7 +169,7 @@ func (s *seamProvider) GetLastActivity(name string) (time.Time, error) {
 	if !ok {
 		return time.Time{}, nil
 	}
-	obs, err := att.Observe(context.Background())
+	obs, err := att.Observe(context.Background(), nil)
 	if err != nil {
 		return time.Time{}, err
 	}

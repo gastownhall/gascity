@@ -198,12 +198,12 @@ func (a *t3Attachment) ClearScrollback(_ context.Context) error {
 }
 
 // Observe folds the liveness reads. t3bridge's ProcessAlive checks the T3 thread
-// status and ignores process names, so none are passed; IsAttached is always
-// false (headless); LastActivity is the thread's updated-at (best-effort zero).
-func (a *t3Attachment) Observe(_ context.Context) (runtime.LiveObservation, error) {
+// status and ignores process names; IsAttached is always false (headless);
+// LastActivity is the thread's updated-at (best-effort zero).
+func (a *t3Attachment) Observe(_ context.Context, processNames []string) (runtime.LiveObservation, error) {
 	lastActivity, _ := a.p.GetLastActivity(a.name)
 	return runtime.LiveObservation{
-		ProcessAlive: a.p.ProcessAlive(a.name, nil),
+		ProcessAlive: a.p.ProcessAlive(a.name, processNames),
 		Attached:     a.p.IsAttached(a.name),
 		LastActivity: lastActivity,
 	}, nil

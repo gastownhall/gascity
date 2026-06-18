@@ -105,7 +105,7 @@ func TestSeamsT3Observe(t *testing.T) {
 		t.Fatalf("launch: %v", err)
 	}
 
-	obs, err := att.Observe(ctx)
+	obs, err := att.Observe(ctx, nil)
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}

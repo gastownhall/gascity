@@ -60,7 +60,7 @@ func TestSeamsLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch: %v", err)
 	}
-	if obs, err := att.Observe(ctx); err != nil || !obs.ProcessAlive {
+	if obs, err := att.Observe(ctx, nil); err != nil || !obs.ProcessAlive {
 		t.Fatalf("Observe = %+v, %v; want ProcessAlive true", obs, err)
 	}
 
@@ -88,7 +88,7 @@ func TestSeamsLifecycle(t *testing.T) {
 		t.Fatalf("session still running after teardown")
 	}
 	// Observe and Open both reflect the torn-down box.
-	if obs, err := att.Observe(ctx); err != nil || obs.ProcessAlive {
+	if obs, err := att.Observe(ctx, nil); err != nil || obs.ProcessAlive {
 		t.Fatalf("Observe after teardown = %+v, %v; want ProcessAlive false", obs, err)
 	}
 	if _, ok, err := rt.Open(ctx, "seam"); ok || err != nil {
@@ -130,7 +130,7 @@ func TestSeamsInterrupt(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if obs, err := att.Observe(ctx); err != nil || obs.ProcessAlive {
+	if obs, err := att.Observe(ctx, nil); err != nil || obs.ProcessAlive {
 		t.Fatalf("Observe after Interrupt = %+v, %v; want ProcessAlive false", obs, err)
 	}
 }

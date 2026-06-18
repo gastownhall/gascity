@@ -142,7 +142,7 @@ func TestSeamsExecUnsupportedFallsBack(t *testing.T) {
 	// Observe folds the three liveness reads: process-alive=true (script),
 	// attach=false (no report-attachment cap, so the op is never called),
 	// activity parsed from get-last-activity.
-	obs, err := att.Observe(ctx)
+	obs, err := att.Observe(ctx, []string{"agent"})
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}

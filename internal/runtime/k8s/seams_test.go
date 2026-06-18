@@ -127,7 +127,7 @@ func TestSeamsK8sObserve(t *testing.T) {
 	attachedCmd := []string{"tmux", "display-message", "-t", tmuxSession, "-p", "#{session_attached}"}
 	fake.setExecResult("s", attachedCmd, "0\n", nil)
 
-	obs, err := att.Observe(ctx)
+	obs, err := att.Observe(ctx, []string{"claude"})
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestSeamsK8sObserve(t *testing.T) {
 
 	// And the positive case proves the parse, not just the empty default.
 	fake.setExecResult("s", attachedCmd, "1\n", nil)
-	if obs, err := att.Observe(ctx); err != nil || !obs.Attached {
+	if obs, err := att.Observe(ctx, nil); err != nil || !obs.Attached {
 		t.Fatalf("Observe after attach = %+v, %v; want Attached true", obs, err)
 	}
 }

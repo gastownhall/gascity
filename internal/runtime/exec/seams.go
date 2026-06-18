@@ -135,10 +135,9 @@ type execTransport struct{ p *Provider }
 var _ runtime.Transport = (*execTransport)(nil)
 
 // Launch is a no-op: the pack's `start` op already launched the agent in the box;
-// this returns the live Attachment over the Place (←Start how-half). The expected
-// process names are captured from the config so Observe can report ProcessAlive.
-func (t *execTransport) Launch(_ context.Context, place runtime.Place, spec runtime.LaunchSpec) (runtime.Attachment, error) {
-	return &execAttachment{p: t.p, name: placeName(place), processNames: spec.Config.ProcessNames}, nil
+// this returns the live Attachment over the Place (←Start how-half).
+func (t *execTransport) Launch(_ context.Context, place runtime.Place, _ runtime.LaunchSpec) (runtime.Attachment, error) {
+	return &execAttachment{p: t.p, name: placeName(place)}, nil
 }
 
 // Open returns the Attachment for an already-running box (reconnect). Process
@@ -175,9 +174,8 @@ func placeName(place runtime.Place) string {
 // --- HOW: Attachment (the carrier verbs, reused from the provider) ---
 
 type execAttachment struct {
-	p            *Provider
-	name         string
-	processNames []string
+	p    *Provider
+	name string
 }
 
 var _ runtime.Attachment = (*execAttachment)(nil)
@@ -206,13 +204,13 @@ func (a *execAttachment) ClearScrollback(_ context.Context) error {
 	return a.p.ClearScrollback(a.name)
 }
 
-// Observe folds the three liveness reads. ProcessAlive uses the names captured at
-// Launch (empty on reconnect → box-liveness proxy per the ProcessAlive contract);
-// LastActivity is best-effort (zero when unsupported or on error).
-func (a *execAttachment) Observe(_ context.Context) (runtime.LiveObservation, error) {
+// Observe folds the three liveness reads. ProcessAlive uses the per-call process
+// names (empty → box-liveness proxy per the ProcessAlive contract); LastActivity
+// is best-effort (zero when unsupported or on error).
+func (a *execAttachment) Observe(_ context.Context, processNames []string) (runtime.LiveObservation, error) {
 	lastActivity, _ := a.p.GetLastActivity(a.name)
 	return runtime.LiveObservation{
-		ProcessAlive: a.p.ProcessAlive(a.name, a.processNames),
+		ProcessAlive: a.p.ProcessAlive(a.name, processNames),
 		Attached:     a.p.IsAttached(a.name),
 		LastActivity: lastActivity,
 	}, nil
