@@ -22,6 +22,8 @@ type statusProvider struct {
 	warnOnce sync.Once
 }
 
+var _ runtime.RelaunchProvider = (*statusProvider)(nil)
+
 func newBoundedStatusProvider(base runtime.Provider) runtime.Provider {
 	if sp, ok := base.(*statusProvider); ok {
 		return sp
@@ -186,6 +188,16 @@ func (p *statusProvider) SendKeys(name string, keys ...string) error {
 
 func (p *statusProvider) RunLive(name string, cfg runtime.Config) error {
 	return p.base.RunLive(name, cfg)
+}
+
+// Relaunch forwards a warm-box agent relaunch to the wrapped provider when it
+// supports one, so the reconciler's RelaunchProvider type-assert is not masked
+// by the status wrapper. Not bounded — it is a mutation, not a status probe.
+func (p *statusProvider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if rp, ok := p.base.(runtime.RelaunchProvider); ok {
+		return rp.Relaunch(ctx, name, cfg)
+	}
+	return runtime.ErrRelaunchUnsupported
 }
 
 func (p *statusProvider) Capabilities() runtime.ProviderCapabilities {

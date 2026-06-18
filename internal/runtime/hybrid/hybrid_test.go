@@ -12,6 +12,33 @@ import (
 
 func isRemote(name string) bool { return strings.Contains(name, "polecat") }
 
+// Relaunch must reach the routed backend (local vs remote), or the reconciler's
+// RelaunchProvider type-assert would be masked by the hybrid router and fall
+// back to Stop+Start.
+func TestProvider_ForwardsRelaunchToRoutedBackend(t *testing.T) {
+	local, remote := runtime.NewFake(), runtime.NewFake()
+	h := New(local, remote, isRemote)
+	if err := local.Start(context.Background(), "refinery", runtime.Config{Command: "c"}); err != nil {
+		t.Fatalf("Start(local): %v", err)
+	}
+	if err := remote.Start(context.Background(), "polecat-1", runtime.Config{Command: "c"}); err != nil {
+		t.Fatalf("Start(remote): %v", err)
+	}
+
+	if err := h.Relaunch(context.Background(), "refinery", runtime.Config{Command: "c2"}); err != nil {
+		t.Fatalf("Relaunch(local): %v", err)
+	}
+	if got := local.CountCalls("Relaunch", "refinery"); got != 1 {
+		t.Errorf("local backend Relaunch calls = %d, want 1", got)
+	}
+	if err := h.Relaunch(context.Background(), "polecat-1", runtime.Config{Command: "c2"}); err != nil {
+		t.Fatalf("Relaunch(remote): %v", err)
+	}
+	if got := remote.CountCalls("Relaunch", "polecat-1"); got != 1 {
+		t.Errorf("remote backend Relaunch calls = %d, want 1", got)
+	}
+}
+
 func TestStart_RoutesToLocal(t *testing.T) {
 	local, remote := runtime.NewFake(), runtime.NewFake()
 	h := New(local, remote, isRemote)

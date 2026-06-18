@@ -1854,6 +1854,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// Diagnostic: log per-field breakdown to identify the drifting field.
 						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(session.Metadata["core_hash_breakdown"], agentCfg)
 						runtime.LogCoreFingerprintDrift(stderr, name, session.Metadata["core_hash_breakdown"], agentCfg)
+						// Launch-only drift (B2.3): the box (provision half) is
+						// unchanged but the agent (launch half) moved. When the
+						// provider can relaunch the agent in the existing warm box,
+						// the named/ordinary branches below relaunch instead of a
+						// full re-provision restart — but only AFTER the same
+						// attached/active/pending/open-work deferral guards, because
+						// a respawn is just as disruptive mid-turn. Empty sub-hashes
+						// (a session started before B2.2) are treated as "not
+						// launch-only" → full restart, which re-stamps the sub-hashes
+						// and self-heals.
+						storedProvision := session.Metadata["started_provision_hash"]
+						storedLaunch := session.Metadata["started_launch_hash"]
+						launchOnlyDrift := storedProvision != "" && storedLaunch != "" &&
+							storedProvision == runtime.ProvisionFingerprint(agentCfg) &&
+							storedLaunch != runtime.LaunchFingerprint(agentCfg)
 						restartedInPlace := false
 						// Attached sessions never get config-drift restarts.
 						// The human will restart when ready; drift applies
@@ -1904,6 +1919,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 										"active_reason": activeReason,
 									}), nil, "")
 								}
+								continue
+							}
+							if launchOnlyDrift && relaunchAgentForLaunchDrift(ctx, sp, store, session, name, agentCfg, tp, storedHash, currentHash, driftedFields, rec, trace, stdout, stderr) {
 								continue
 							}
 							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, string(sessionpkg.StateStartPending), clk.Now().UTC(), stderr)
@@ -1960,6 +1978,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									}), nil, "")
 								}
 								fmt.Fprintf(stdout, "Skipping config-drift drain for '%s': live assigned work found\n", name) //nolint:errcheck
+								continue
+							}
+							if launchOnlyDrift && relaunchAgentForLaunchDrift(ctx, sp, store, session, name, agentCfg, tp, storedHash, currentHash, driftedFields, rec, trace, stdout, stderr) {
 								continue
 							}
 							ddt := driftDrainTimeout
@@ -3928,6 +3949,109 @@ func silentRebaselineSessionHashes(session *beads.Bead, store beads.Store, agent
 	}
 	if err := store.SetMetadataBatch(session.ID, patch); err != nil {
 		return fmt.Errorf("rebaselining hashes: %w", err)
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, len(patch))
+	}
+	for k, v := range patch {
+		session.Metadata[k] = v
+	}
+	return nil
+}
+
+// relaunchAgentForLaunchDrift handles a launch-only config-drift (B2.3): the
+// LaunchFingerprint moved while the ProvisionFingerprint held, so the agent can
+// be re-launched in the existing warm box instead of a full re-provision
+// restart. It mirrors the live-drift→RunLive clause: act, and on success
+// rebaseline the Core/provision/launch baselines so the next tick sees no drift.
+//
+// Returns true iff the agent was relaunched (the caller should `continue` and
+// skip the full-restart path); false means the provider cannot relaunch (the
+// type-assert failed, or it answered ErrRelaunchUnsupported) or the relaunch
+// failed — in either case the caller falls through to the existing full restart
+// (drain / reset-in-place → Stop+Start), so the change still lands.
+//
+// The deferral guards (attached / named-active / pending-interaction / open
+// assigned work) are honored by the CALLER: this is invoked only after those
+// guards have passed at each restart site, exactly where the full restart would
+// otherwise fire — a respawn is as disruptive as a restart, so it earns the same
+// protection.
+func relaunchAgentForLaunchDrift(
+	ctx context.Context,
+	sp runtime.Provider,
+	store beads.Store,
+	session *beads.Bead,
+	name string,
+	agentCfg runtime.Config,
+	tp TemplateParams,
+	storedHash, currentHash string,
+	driftedFields []string,
+	rec events.Recorder,
+	trace *sessionReconcilerTraceCycle,
+	stdout, stderr io.Writer,
+) bool {
+	r, ok := sp.(runtime.RelaunchProvider)
+	if !ok {
+		// Conjoined runtimes (subprocess/acp/t3bridge) do not implement
+		// RelaunchProvider; fall through to the full restart.
+		return false
+	}
+	if err := r.Relaunch(ctx, name, agentCfg); err != nil {
+		// ErrRelaunchUnsupported (a wrapper whose backend cannot relaunch) or a
+		// genuine failure (e.g. the warm box vanished → ErrSessionNotFound). Fall
+		// back to the full restart so the launch change is still applied.
+		if !errors.Is(err, runtime.ErrRelaunchUnsupported) {
+			fmt.Fprintf(stderr, "session reconciler: relaunch %s: %v; falling back to full restart\n", name, err) //nolint:errcheck
+		}
+		return false
+	}
+	fmt.Fprintf(stdout, "Launch-only config change for '%s', relaunched agent in warm box\n", tp.DisplayName()) //nolint:errcheck
+	// Rebaseline the Core baseline (started_config_hash) and the partition
+	// sub-hashes so the next tick sees no Core drift. started_live_hash is
+	// DELIBERATELY left untouched: a relaunch does not re-run SessionLive, so any
+	// concurrent live drift must still be re-applied by the live-drift clause on
+	// the next tick (the relaunch does not silently swallow it).
+	if err := rebaselineLaunchDriftHashes(session, store, agentCfg); err != nil {
+		// The agent is already relaunched; do not trigger a second restart. The
+		// stale Core baseline self-corrects on a later rebaseline tick.
+		fmt.Fprintf(stderr, "session reconciler: rebaselining launch-drift hashes for %s: %v\n", name, err) //nolint:errcheck
+	}
+	if trace != nil {
+		trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "relaunch", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
+	}
+	rec.Record(events.Event{
+		Type:    events.SessionUpdated,
+		Actor:   "gc",
+		Subject: tp.DisplayName(),
+		Message: "agent relaunched (launch-only config change)",
+	})
+	return true
+}
+
+// rebaselineLaunchDriftHashes moves a session's Core drift baseline to agentCfg
+// after a successful warm-box relaunch — started_config_hash + the provision/
+// launch sub-hashes + core_hash_breakdown — WITHOUT touching started_live_hash/
+// live_hash. The relaunch re-applied the launch half (the agent now runs
+// agentCfg); the provision half was unchanged by definition. The live half is
+// left alone so a concurrent SessionLive change is still re-applied by the
+// live-drift clause on the next tick. Contrast sessionHashRebaselineMetadata,
+// which rebaselines every field (used when the config did not actually change).
+func rebaselineLaunchDriftHashes(session *beads.Bead, store beads.Store, agentCfg runtime.Config) error {
+	if session == nil || store == nil {
+		return nil
+	}
+	breakdownJSON, err := json.Marshal(runtime.CoreFingerprintBreakdown(agentCfg))
+	if err != nil {
+		return fmt.Errorf("marshaling core_hash_breakdown: %w", err)
+	}
+	patch := map[string]string{
+		"started_config_hash":    runtime.CoreFingerprint(agentCfg),
+		"started_provision_hash": runtime.ProvisionFingerprint(agentCfg),
+		"started_launch_hash":    runtime.LaunchFingerprint(agentCfg),
+		"core_hash_breakdown":    string(breakdownJSON),
+	}
+	if err := store.SetMetadataBatch(session.ID, patch); err != nil {
+		return fmt.Errorf("rebaselining launch-drift hashes: %w", err)
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(patch))

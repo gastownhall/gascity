@@ -48,6 +48,13 @@ var ErrSessionNotFound = errors.New("session not found")
 // exit 2). Carriers treat this as "fall back to the legacy driving op".
 var ErrExecUnsupported = errors.New("runtime does not implement the exec op")
 
+// ErrRelaunchUnsupported reports that the underlying runtime cannot relaunch the
+// agent in a warm box (it is not a [RelaunchProvider], or is conjoined like
+// subprocess/acp/t3bridge). Composite/wrapping providers return it from their
+// own [RelaunchProvider.Relaunch] when the routed/wrapped backend does not
+// support relaunch; the reconciler treats it as "fall back to full Stop+Start".
+var ErrRelaunchUnsupported = errors.New("runtime does not support warm-box relaunch")
+
 // IsSessionGone reports whether err represents a "the session is not
 // there" condition — either ErrSessionNotFound or the legacy provider
 // phrasings that predate the sentinel (tmux/subprocess providers may
