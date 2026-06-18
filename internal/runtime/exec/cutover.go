@@ -26,6 +26,7 @@ var (
 	_ runtime.Provider                = (*seamBackedProvider)(nil)
 	_ runtime.DialogProvider          = (*seamBackedProvider)(nil)
 	_ runtime.SleepCapabilityProvider = (*seamBackedProvider)(nil)
+	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
@@ -49,4 +50,11 @@ func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCa
 // CheckImage passes through (non-seam; cmd/gc start asserts an image-checker).
 func (s *seamBackedProvider) CheckImage(image string) error {
 	return s.raw.CheckImage(image)
+}
+
+// Relaunch passes through to the underlying provider's warm-box relaunch (B2,
+// RelaunchProvider): for a separable pack it respawns the agent over the exec op;
+// for a welded pack it degrades to a reprovision.
+func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	return s.raw.Relaunch(ctx, name, cfg)
 }

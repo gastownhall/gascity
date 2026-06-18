@@ -28,7 +28,12 @@ type seamBackedProvider struct {
 	seams     runtime.Provider // the seam adapter, for the 18 routed methods
 }
 
-var _ runtime.Provider = (*seamBackedProvider)(nil)
+var (
+	_ runtime.Provider = (*seamBackedProvider)(nil)
+	// Relaunch (B2) rides the embedded raw *Provider — it is NOT one of the 18
+	// seam-routed methods, so the warm-box relaunch stays on the real provider.
+	_ runtime.RelaunchProvider = (*seamBackedProvider)(nil)
+)
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.
 func NewSeamBackedWithConfig(cfg Config) runtime.Provider {

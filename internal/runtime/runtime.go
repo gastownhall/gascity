@@ -305,6 +305,22 @@ type InterruptBoundaryWaitProvider interface {
 	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
 }
 
+// RelaunchProvider is an optional extension for runtimes that can re-launch the
+// agent inside an already-provisioned (warm) box WITHOUT re-provisioning it — the
+// runtime/transport un-weld payoff. The reconciler calls Relaunch on a launch-only
+// config change (LaunchFingerprint moved, ProvisionFingerprint unchanged) instead
+// of a full Stop+Start. A missing box yields ErrSessionNotFound; the box, its env,
+// and any staged files are reused. Runtimes whose agent IS the box (subprocess /
+// acp / t3bridge) do NOT implement this — the reconciler falls back to Stop+Start
+// for them.
+//
+// tmux / ssh / k8s implement it directly (respawn-pane in the warm box); the exec
+// provider relaunches the agent over the exec op for a separable pack and falls
+// back to Stop+Start for a welded pack. See worker-runtime-transport-unweld-v0.md.
+type RelaunchProvider interface {
+	Relaunch(ctx context.Context, name string, cfg Config) error
+}
+
 // LiveRuntime identifies a single agent runtime process discovered via
 // process-table scan, independent of provider-visible artifacts.
 type LiveRuntime struct {

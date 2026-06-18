@@ -1,6 +1,10 @@
 package ssh
 
-import "github.com/gastownhall/gascity/internal/runtime"
+import (
+	"context"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
 
 // seamBackedProvider serves the legacy [runtime.Provider] through the
 // de-conflated seams (via [runtime.NewProviderFromSeams]), passing SleepCapability
@@ -16,6 +20,7 @@ type seamBackedProvider struct {
 var (
 	_ runtime.Provider                = (*seamBackedProvider)(nil)
 	_ runtime.SleepCapabilityProvider = (*seamBackedProvider)(nil)
+	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs an ssh provider for ep served through the seams.
@@ -28,4 +33,10 @@ func NewSeamBacked(ep Endpoint) runtime.Provider {
 // SleepCapability passes through to the underlying provider (non-seam).
 func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return s.raw.SleepCapability(name)
+}
+
+// Relaunch passes through to the underlying provider's warm-box relaunch
+// (respawn-pane over the ssh Conn; B2, RelaunchProvider).
+func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	return s.raw.Relaunch(ctx, name, cfg)
 }

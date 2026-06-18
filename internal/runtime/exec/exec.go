@@ -207,6 +207,21 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	return p.dismissStartupDialogs(ctx, name, cfg)
 }
 
+// Relaunch re-launches the agent for the reconciler's launch-only-drift path
+// ([runtime.RelaunchProvider]). For a separable pack (proc.provision) it respawns
+// the agent in the warm box over the exec op (launchAgent) — no reprovision. A
+// welded pack has no in-place relaunch (the agent is welded into `start`), so it
+// degrades to a full reprovision (Stop+Start), which is still correct.
+func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.supportsSeparableLaunch() {
+		return p.launchAgent(ctx, name, cfg)
+	}
+	if err := p.Stop(name); err != nil {
+		return err
+	}
+	return p.Start(ctx, name, cfg)
+}
+
 func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg runtime.Config) error {
 	if cfg.AcceptStartupDialogs != nil && !*cfg.AcceptStartupDialogs {
 		return nil
@@ -685,7 +700,10 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 }
 
 // Provider implements the optional connection primitive.
-var _ runtime.ExecProvider = (*Provider)(nil)
+var (
+	_ runtime.ExecProvider     = (*Provider)(nil)
+	_ runtime.RelaunchProvider = (*Provider)(nil)
+)
 
 // Exec runs argv inside the session via the RPP `exec` op and implements
 // [runtime.ExecProvider]. argv is POSIX shell-quoted onto the op's stdin (the

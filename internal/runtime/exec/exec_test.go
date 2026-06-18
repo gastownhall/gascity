@@ -166,6 +166,25 @@ func TestSeparableLaunch_WeldedPackUsesStartOnly(t *testing.T) {
 	}
 }
 
+// Relaunch on a separable pack respawns/launches the agent over the exec op
+// (warm-box relaunch) — it does NOT reprovision the box (no provision/start op).
+func TestRelaunch_SeparablePackLaunchesOverExec(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableScript(logf)))
+
+	if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent --resume"}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	log := readLog(t, logf)
+	if !strings.Contains(log, "new-session") || !strings.Contains(log, "agent --resume") {
+		t.Errorf("Relaunch should launch the agent over exec:\n%s", log)
+	}
+	if strings.Contains(log, "provision s") || strings.Contains(log, "start s") {
+		t.Errorf("separable Relaunch must not reprovision the box:\n%s", log)
+	}
+}
+
 func TestStart(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, allOpsScript())
