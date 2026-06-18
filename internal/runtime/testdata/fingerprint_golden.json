@@ -2,21 +2,29 @@
   "comprehensive": {
     "config": "v4:d908ebcee2e12c685be4bd7d9df60d18484d9f1464b42c6820036390e0f617d2",
     "core": "v4:f282f051d46550bd925a70c36ec8d63600b3b7d0a5b3ccd84fad930bfcb9b997",
-    "live": "v4:9314b059fe3c684ea3ac09f5c971b2690072b72c3f86b901976c5e9a9f4e2d17"
+    "live": "v4:9314b059fe3c684ea3ac09f5c971b2690072b72c3f86b901976c5e9a9f4e2d17",
+    "provision": "v4:f9c14124902fc7fa3f6e9f9a2894f53afa2b2f5a34bb21badbd1aff70a6ce018",
+    "launch": "v4:27e683cc92406d3ab9c4aa6ef4a0e6e2e6d9d16d4634ab15527aef2659639a25"
   },
   "empty": {
     "config": "v4:31efcbabd11c5b7dbc226051784ef9d36debb00f5fa9d07be2efe0bd8fa0b42e",
     "core": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34",
-    "live": "v4:4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"
+    "live": "v4:4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
+    "provision": "v4:a0454a24dd4bc418448ca19320519ea3fe544fa1a910868b62ca210614f119f8",
+    "launch": "v4:6a8fa5d29bb6a755e4b0ad8a83a5a6be8529527bf780c0b033669129cc3bed55"
   },
   "env-empty": {
     "config": "v4:31efcbabd11c5b7dbc226051784ef9d36debb00f5fa9d07be2efe0bd8fa0b42e",
     "core": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34",
-    "live": "v4:4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"
+    "live": "v4:4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
+    "provision": "v4:a0454a24dd4bc418448ca19320519ea3fe544fa1a910868b62ca210614f119f8",
+    "launch": "v4:6a8fa5d29bb6a755e4b0ad8a83a5a6be8529527bf780c0b033669129cc3bed55"
   },
   "env-nil": {
     "config": "v4:31efcbabd11c5b7dbc226051784ef9d36debb00f5fa9d07be2efe0bd8fa0b42e",
     "core": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34",
-    "live": "v4:4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"
+    "live": "v4:4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
+    "provision": "v4:a0454a24dd4bc418448ca19320519ea3fe544fa1a910868b62ca210614f119f8",
+    "launch": "v4:6a8fa5d29bb6a755e4b0ad8a83a5a6be8529527bf780c0b033669129cc3bed55"
   }
 }

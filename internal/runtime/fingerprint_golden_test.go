@@ -67,9 +67,11 @@ func goldenFixtures() map[string]Config {
 }
 
 type goldenHashes struct {
-	Config string `json:"config"`
-	Core   string `json:"core"`
-	Live   string `json:"live"`
+	Config    string `json:"config"`
+	Core      string `json:"core"`
+	Live      string `json:"live"`
+	Provision string `json:"provision"`
+	Launch    string `json:"launch"`
 }
 
 const goldenPath = "testdata/fingerprint_golden.json"
@@ -78,9 +80,11 @@ func TestFingerprintGolden(t *testing.T) {
 	got := map[string]goldenHashes{}
 	for name, cfg := range goldenFixtures() {
 		got[name] = goldenHashes{
-			Config: ConfigFingerprint(cfg),
-			Core:   CoreFingerprint(cfg),
-			Live:   LiveFingerprint(cfg),
+			Config:    ConfigFingerprint(cfg),
+			Core:      CoreFingerprint(cfg),
+			Live:      LiveFingerprint(cfg),
+			Provision: ProvisionFingerprint(cfg),
+			Launch:    LaunchFingerprint(cfg),
 		}
 	}
 
