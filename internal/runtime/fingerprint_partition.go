@@ -27,15 +27,17 @@ import (
 // docs/architecture/worker-runtime-transport-unweld-v0.md §6):
 //
 //	PROVISION (box):  Env (allow-listed), FingerprintExtra, PreStart,
-//	                  SessionSetup, SessionSetupScript, OverlayDir,
-//	                  OverlayProviders, CopyFiles.
+//	                  OverlayDir, OverlayProviders, CopyFiles.
 //	LAUNCH (agent):   Command, Lifecycle, MCPServers, AcceptStartupDialogs,
-//	                  MouseOn.
+//	                  MouseOn, SessionSetup, SessionSetupScript.
 //
-// Two carry a caveat to revisit when Phase B2 wires the warm-box relaunch:
-// MCPServers is LAUNCH unless MCP config is materialized as staged on-disk box
-// content; SessionSetup/SessionSetupScript are PROVISION unless Launch is made to
-// replay them idempotently into the warm box.
+// SessionSetup/SessionSetupScript are LAUNCH-half as of B2: the carriers now
+// replay them idempotently on relaunch (tmux launchOrchestration; ssh/k8s
+// runPostLaunchSetup), so a change to them is covered by a warm-box relaunch and
+// must NOT force a reprovision. (They were PROVISION in B0, before relaunch
+// existed.) Remaining caveat: MCPServers stays LAUNCH unless a future change
+// materializes MCP config as staged on-disk box content (then it becomes
+// PROVISION).
 
 // ProvisionFingerprint returns a hash of only the box-affecting core fields. A
 // change here means the box must be re-provisioned. Version-prefixed.
@@ -70,15 +72,6 @@ func hashProvisionFields(h hash.Hash, cfg Config) {
 		h.Write([]byte{0})  //nolint:errcheck // hash.Write never errors
 	}
 	h.Write([]byte{1}) //nolint:errcheck // sentinel between slices
-
-	for _, ss := range cfg.SessionSetup {
-		h.Write([]byte(ss)) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})  //nolint:errcheck // hash.Write never errors
-	}
-	h.Write([]byte{1}) //nolint:errcheck // sentinel between slices
-
-	h.Write([]byte(cfg.SessionSetupScript)) //nolint:errcheck // hash.Write never errors
-	h.Write([]byte{0})                      //nolint:errcheck // hash.Write never errors
 
 	h.Write([]byte(cfg.OverlayDir)) //nolint:errcheck // hash.Write never errors
 	h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
@@ -116,4 +109,16 @@ func hashLaunchFields(h hash.Hash, cfg Config) {
 	hashMCPServers(h, cfg.MCPServers)
 	hashOptionalBool(h, "accept_startup_dialogs", cfg.AcceptStartupDialogs)
 	hashBool(h, "mouse_on", cfg.MouseOn)
+
+	// SessionSetup + SessionSetupScript are LAUNCH-half (B2): the carriers replay
+	// them idempotently on relaunch, so a change is covered by a warm-box relaunch
+	// (no reprovision). Same per-field framing as the box half.
+	for _, ss := range cfg.SessionSetup {
+		h.Write([]byte(ss)) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})  //nolint:errcheck // hash.Write never errors
+	}
+	h.Write([]byte{1}) //nolint:errcheck // sentinel between slices
+
+	h.Write([]byte(cfg.SessionSetupScript)) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})                      //nolint:errcheck // hash.Write never errors
 }

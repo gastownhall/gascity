@@ -27,13 +27,15 @@ func TestFingerprintPartitionCoversCoreDisjointly(t *testing.T) {
 		}},
 		{"AcceptStartupDialogs", "launch", func(c *Config) { c.AcceptStartupDialogs = &falsePtr }},
 		{"MouseOn", "launch", func(c *Config) { c.MouseOn = !c.MouseOn }},
+		// SessionSetup/SessionSetupScript are LAUNCH-half (B2): the carriers replay
+		// them on relaunch, so a change relaunches rather than reprovisions.
+		{"SessionSetup", "launch", func(c *Config) { c.SessionSetup = []string{"echo different-setup"} }},
+		{"SessionSetupScript", "launch", func(c *Config) { c.SessionSetupScript = "/different-setup.sh" }},
 
 		// PROVISION (box) half.
 		{"Env", "provision", func(c *Config) { c.Env = envWith(base.Env, "GC_CITY", "different-city") }},
 		{"FingerprintExtra", "provision", func(c *Config) { c.FingerprintExtra = map[string]string{"pool": "different"} }},
 		{"PreStart", "provision", func(c *Config) { c.PreStart = []string{"echo different-prestart"} }},
-		{"SessionSetup", "provision", func(c *Config) { c.SessionSetup = []string{"echo different-setup"} }},
-		{"SessionSetupScript", "provision", func(c *Config) { c.SessionSetupScript = "/different-setup.sh" }},
 		{"OverlayDir", "provision", func(c *Config) { c.OverlayDir = "/different-overlay" }},
 		{"OverlayProviders", "provision", func(c *Config) { c.ProviderOverlayName = "different-overlay-provider" }},
 		{"CopyFiles", "provision", func(c *Config) { c.CopyFiles = []CopyEntry{{Src: "/different", RelDst: "z"}} }},
