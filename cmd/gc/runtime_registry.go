@@ -61,9 +61,9 @@ func buildRuntimeRegistry() *registry.Registry {
 			OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
 		}
 		if cityPath != "" {
-			return sessionacp.NewProviderWithDir(providerStateDir("acp", cityPath), cfg), nil
+			return sessionacp.NewSeamBackedWithDir(providerStateDir("acp", cityPath), cfg), nil
 		}
-		return sessionacp.NewProvider(cfg), nil
+		return sessionacp.NewSeamBacked(cfg), nil
 	}))
 	must(r.Register("t3bridge", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
 		return sessiont3bridge.NewSeamBacked(), nil
