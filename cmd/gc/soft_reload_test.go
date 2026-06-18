@@ -15,6 +15,53 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// Every writer of started_config_hash must stamp the partition sub-hashes
+// (started_provision_hash/started_launch_hash) from the SAME config, or a later
+// launch-only drift check (B2.3) would compare against a stale baseline and
+// mis-route a restart. This pins both rebaseline writers to that invariant.
+func TestStartedHashWriters_StampPartitionSubHashes(t *testing.T) {
+	cfg := runtime.Config{
+		Command:      "claude --model opus",
+		PreStart:     []string{"echo provisioning"},
+		SessionSetup: []string{"echo launching"},
+	}
+	wantProvision := runtime.ProvisionFingerprint(cfg)
+	wantLaunch := runtime.LaunchFingerprint(cfg)
+	wantCore := runtime.CoreFingerprint(cfg)
+
+	t.Run("softReloadAcceptedHashMetadata", func(t *testing.T) {
+		meta, err := softReloadAcceptedHashMetadata(cfg, wantCore)
+		if err != nil {
+			t.Fatalf("softReloadAcceptedHashMetadata: %v", err)
+		}
+		if meta["started_config_hash"] != wantCore {
+			t.Errorf("started_config_hash = %q, want %q", meta["started_config_hash"], wantCore)
+		}
+		if meta["started_provision_hash"] != wantProvision {
+			t.Errorf("started_provision_hash = %q, want %q", meta["started_provision_hash"], wantProvision)
+		}
+		if meta["started_launch_hash"] != wantLaunch {
+			t.Errorf("started_launch_hash = %q, want %q", meta["started_launch_hash"], wantLaunch)
+		}
+	})
+
+	t.Run("sessionHashRebaselineMetadata", func(t *testing.T) {
+		meta, err := sessionHashRebaselineMetadata(cfg)
+		if err != nil {
+			t.Fatalf("sessionHashRebaselineMetadata: %v", err)
+		}
+		if meta["started_config_hash"] != wantCore {
+			t.Errorf("started_config_hash = %q, want %q", meta["started_config_hash"], wantCore)
+		}
+		if meta["started_provision_hash"] != wantProvision {
+			t.Errorf("started_provision_hash = %q, want %q", meta["started_provision_hash"], wantProvision)
+		}
+		if meta["started_launch_hash"] != wantLaunch {
+			t.Errorf("started_launch_hash = %q, want %q", meta["started_launch_hash"], wantLaunch)
+		}
+	})
+}
+
 func TestAcceptConfigDriftAcrossSessions_UpdatesStaleHash(t *testing.T) {
 	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{

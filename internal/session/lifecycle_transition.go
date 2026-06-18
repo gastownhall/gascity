@@ -215,6 +215,8 @@ func ConfirmStartedPatch(now time.Time) MetadataPatch {
 type CommitStartedPatchInput struct {
 	CoreHash                string
 	LiveHash                string
+	ProvisionHash           string
+	LaunchHash              string
 	CoreBreakdown           string
 	ConfirmState            bool
 	ClearSleepReason        bool
@@ -229,6 +231,8 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 		"started_config_hash":        input.CoreHash,
 		"live_hash":                  input.LiveHash,
 		"started_live_hash":          input.LiveHash,
+		"started_provision_hash":     input.ProvisionHash,
+		"started_launch_hash":        input.LaunchHash,
 		"continuation_reset_pending": "",
 	}
 	if input.CoreBreakdown != "" {

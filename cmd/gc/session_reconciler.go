@@ -3888,10 +3888,13 @@ func rebaselineLegacyHashOutcome(stored string) TraceOutcomeCode {
 	return TraceOutcomeRebaselinedUnversioned
 }
 
-// sessionHashRebaselineMetadata builds the four fingerprint metadata fields
-// — started_config_hash, started_live_hash, live_hash, core_hash_breakdown —
-// from a resolved agent config. Callers merge the result into a session
-// bead's metadata batch to move its config-drift baseline to agentCfg.
+// sessionHashRebaselineMetadata builds the fingerprint metadata fields
+// — started_config_hash, started_live_hash, live_hash, started_provision_hash,
+// started_launch_hash, core_hash_breakdown — from a resolved agent config.
+// Callers merge the result into a session bead's metadata batch to move its
+// config-drift baseline to agentCfg. This is the full-rebaseline form (legacy/
+// version-artifact rebaseline): the config did not actually change, so every
+// baseline — including the live half — moves to the current binary's hashes.
 func sessionHashRebaselineMetadata(agentCfg runtime.Config) (map[string]string, error) {
 	breakdownJSON, err := json.Marshal(runtime.CoreFingerprintBreakdown(agentCfg))
 	if err != nil {
@@ -3899,10 +3902,12 @@ func sessionHashRebaselineMetadata(agentCfg runtime.Config) (map[string]string, 
 	}
 	liveHash := runtime.LiveFingerprint(agentCfg)
 	return map[string]string{
-		"started_config_hash": runtime.CoreFingerprint(agentCfg),
-		"started_live_hash":   liveHash,
-		"live_hash":           liveHash,
-		"core_hash_breakdown": string(breakdownJSON),
+		"started_config_hash":    runtime.CoreFingerprint(agentCfg),
+		"started_live_hash":      liveHash,
+		"live_hash":              liveHash,
+		"started_provision_hash": runtime.ProvisionFingerprint(agentCfg),
+		"started_launch_hash":    runtime.LaunchFingerprint(agentCfg),
+		"core_hash_breakdown":    string(breakdownJSON),
 	}, nil
 }
 

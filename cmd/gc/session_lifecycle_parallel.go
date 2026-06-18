@@ -189,6 +189,8 @@ type preparedStart struct {
 	coreHash      string
 	coreBreakdown runtime.BreakdownV1
 	liveHash      string
+	provisionHash string
+	launchHash    string
 }
 
 type startResult struct {
@@ -801,6 +803,12 @@ func buildPreparedStartWithWorkDirResolver(
 	coreHash := runtime.CoreFingerprint(agentCfg)
 	coreBreakdown := runtime.CoreFingerprintBreakdown(agentCfg)
 	liveHash := runtime.LiveFingerprint(agentCfg)
+	// Partition sub-hashes (B2): a launch-only change relaunches the agent in
+	// the warm box instead of re-provisioning. Computed over the same durable
+	// agentCfg as coreHash — BEFORE the one-shot dispatch overrides below — so
+	// they stay consistent with the started_config_hash the reconciler compares.
+	provisionHash := runtime.ProvisionFingerprint(agentCfg)
+	launchHash := runtime.LaunchFingerprint(agentCfg)
 
 	// Work beads may carry one-shot provider option overrides as opt_<key>
 	// metadata, where <key> is an OptionsSchema key such as "model" or
@@ -948,6 +956,8 @@ func buildPreparedStartWithWorkDirResolver(
 		coreHash:      coreHash,
 		coreBreakdown: coreBreakdown,
 		liveHash:      liveHash,
+		provisionHash: provisionHash,
+		launchHash:    launchHash,
 	}, nil
 }
 
@@ -1803,6 +1813,8 @@ func commitStartResultTraced(
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
 		CoreHash:                result.prepared.coreHash,
 		LiveHash:                result.prepared.liveHash,
+		ProvisionHash:           result.prepared.provisionHash,
+		LaunchHash:              result.prepared.launchHash,
 		CoreBreakdown:           coreBreakdown,
 		ConfirmState:            confirmPendingStart(session.Metadata["state"]),
 		ClearSleepReason:        session.Metadata["sleep_reason"] != "",
@@ -1914,6 +1926,8 @@ func recoverRunningPendingCreate(
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
 		CoreHash:      prepared.coreHash,
 		LiveHash:      prepared.liveHash,
+		ProvisionHash: prepared.provisionHash,
+		LaunchHash:    prepared.launchHash,
 		CoreBreakdown: coreBreakdown,
 		ConfirmState: confirmPendingStart(session.Metadata["state"]) ||
 			sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) == sessionpkg.StateAwake,
