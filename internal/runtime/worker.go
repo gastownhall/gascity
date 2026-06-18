@@ -82,6 +82,14 @@ type PlaceCapabilities struct {
 // [Transport.Capabilities].
 type TransportCapabilities struct {
 	ReportAttachment bool // is-attached is meaningful
+	// SeparableLaunch reports whether Provision creates the box WITHOUT launching
+	// the agent, so the agent is launched separately by Transport.Launch. When
+	// false (the default, and every welded provider — tmux/ssh/k8s and welded exec
+	// packs), Provision already launches the agent and Launch is the relaunch-only
+	// capability, so a normal Start must NOT call Launch. When true (an exec pack
+	// that declares proc.provision), a normal Start must call Provision THEN
+	// Launch. See seamProvider.Start and the un-weld design (B3b).
+	SeparableLaunch bool
 }
 
 // LiveObservation folds the three liveness reads — ProcessAlive, IsAttached,

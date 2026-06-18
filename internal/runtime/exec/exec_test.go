@@ -56,6 +56,116 @@ esac
 `
 }
 
+// separableScript declares proc.exec + proc.provision and logs each op (and the
+// exec command from stdin) to logFile. The `exec` op simulates the in-box tmux:
+// has-session exits 1 (no session yet) so launch picks new-session.
+func separableScript(logFile string) string {
+	return `
+op="$1"; name="$2"
+case "$op" in
+  protocol)  echo '{"version":0,"capabilities":["proc.exec","proc.provision"]}' ;;
+  provision) cat >/dev/null; echo "provision $name" >> "` + logFile + `" ;;
+  start)     cat >/dev/null; echo "start $name"     >> "` + logFile + `" ;;
+  exec)      cmd="$(cat)"; echo "exec: $cmd" >> "` + logFile + `"
+             case "$cmd" in *has-session*) exit 1 ;; *) exit 0 ;; esac ;;
+  is-running) echo true ;;
+  stop)      ;;
+  *) exit 2 ;;
+esac
+`
+}
+
+// weldedScript declares proc.exec only (NOT proc.provision): the welded `start`
+// op provisions and launches, so the controller must not provision/launch.
+func weldedScript(logFile string) string {
+	return `
+op="$1"; name="$2"
+case "$op" in
+  protocol)  echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  provision) cat >/dev/null; echo "provision $name" >> "` + logFile + `" ;;
+  start)     cat >/dev/null; echo "start $name"     >> "` + logFile + `" ;;
+  exec)      cmd="$(cat)"; echo "exec: $cmd" >> "` + logFile + `"; exit 0 ;;
+  is-running) echo true ;;
+  stop)      ;;
+  *) exit 2 ;;
+esac
+`
+}
+
+func readLog(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "" // not yet written
+	}
+	return string(b)
+}
+
+// A pack that declares proc.provision un-welds: a full Start through the seam
+// adapter provisions the box (the `provision` op, NOT welded `start`) and then
+// launches the agent via `tmux new-session` over the `exec` op.
+func TestSeparableLaunch_ProvisionsThenLaunchesAgent(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableScript(logf)))
+
+	_, tp := p.Seams()
+	if !tp.Capabilities().SeparableLaunch {
+		t.Fatal("SeparableLaunch = false; want true for a proc.provision pack")
+	}
+
+	prov := runtime.NewProviderFromSeams(p.Seams())
+	if err := prov.Start(context.Background(), "s", runtime.Config{Command: "agent --serve"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	log := readLog(t, logf)
+	if !strings.Contains(log, "provision s") {
+		t.Errorf("missing box-only provision op:\n%s", log)
+	}
+	if strings.Contains(log, "start s") {
+		t.Errorf("welded start op must NOT be used for a separable pack:\n%s", log)
+	}
+	if !strings.Contains(log, "has-session") {
+		t.Errorf("launch should probe has-session first:\n%s", log)
+	}
+	if !strings.Contains(log, "new-session") || !strings.Contains(log, "agent --serve") {
+		t.Errorf("launch should new-session the agent command:\n%s", log)
+	}
+	if pi, ni := strings.Index(log, "provision s"), strings.Index(log, "new-session"); pi < 0 || ni < 0 || pi > ni {
+		t.Errorf("Provision must precede Launch:\n%s", log)
+	}
+}
+
+// A welded pack (no proc.provision) keeps the old behavior: the `start` op
+// provisions+launches, and the controller issues no provision/launch.
+func TestSeparableLaunch_WeldedPackUsesStartOnly(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, weldedScript(logf)))
+
+	_, tp := p.Seams()
+	if tp.Capabilities().SeparableLaunch {
+		t.Fatal("SeparableLaunch = true; want false for a welded pack")
+	}
+
+	prov := runtime.NewProviderFromSeams(p.Seams())
+	if err := prov.Start(context.Background(), "s", runtime.Config{Command: "agent"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	log := readLog(t, logf)
+	if !strings.Contains(log, "start s") {
+		t.Errorf("welded pack must use the start op:\n%s", log)
+	}
+	if strings.Contains(log, "provision s") {
+		t.Errorf("welded pack must not use the provision op:\n%s", log)
+	}
+	if strings.Contains(log, "new-session") {
+		t.Errorf("welded pack: controller must not launch the agent:\n%s", log)
+	}
+}
+
 func TestStart(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, allOpsScript())

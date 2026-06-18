@@ -45,6 +45,14 @@ const (
 	// interactive PTY `attach` connection op, enabling
 	// ProviderCapabilities.CanAttachTTY.
 	ProtocolCapabilityTTYAttach = "tty.attach"
+	// ProtocolCapabilityProvision declares that the executable implements the
+	// `provision` op — a box-without-agent `start` that creates+stages the box
+	// and runs pre_start but does NOT launch the agent (un-weld B3b). With it
+	// declared, the controller provisions via `provision` and then launches the
+	// agent itself by exec-ing `tmux new-session` over the `exec` op (so it also
+	// requires proc.exec); without it, the controller uses the welded `start` op
+	// (compat). It gates TransportCapabilities.SeparableLaunch.
+	ProtocolCapabilityProvision = "proc.provision"
 )
 
 // ProtocolInfo is the parsed `protocol` handshake response. The zero

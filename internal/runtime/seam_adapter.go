@@ -46,15 +46,26 @@ func NewProviderFromSeams(rt Runtime, tp Transport) Provider {
 	return &seamProvider{rt: rt, tp: tp, meta: meta}
 }
 
-// Start provisions the box for name. The agent launch is WELDED into box creation
-// for every current carrier (tmux/ssh: the agent IS the new-session command; k8s:
-// the pod entrypoint), so Provision alone launches the agent. Transport.Launch is
-// therefore NOT a step of a normal Start — it is the SEPARATE relaunch-into-a-warm-
-// box capability the reconciler uses to apply a launch-only config change without a
-// full reprovision (see the un-weld design, B1); calling it here would launch the
-// agent twice. A pure provision-then-launch split lands at the RPP wire (B3).
+// Start provisions the box for name, then launches the agent IFF the transport
+// reports a separable launch.
+//
+// For the welded carriers (tmux/ssh: the agent IS the new-session command; k8s:
+// the pod entrypoint; welded exec packs: the `start` op launches), Provision
+// alone launches the agent and SeparableLaunch is false, so Start does NOT call
+// Launch — Transport.Launch is the SEPARATE relaunch-into-a-warm-box capability
+// the reconciler uses for a launch-only change, and calling it here would launch
+// the agent twice (see the un-weld design, B1/B3a).
+//
+// For an exec pack that declares proc.provision (B3b), Provision creates the box
+// WITHOUT the agent (SeparableLaunch true), so Start must Provision THEN Launch.
 func (s *seamProvider) Start(ctx context.Context, name string, cfg Config) error {
-	_, err := s.rt.Provision(ctx, name, ProvisionRequest{Config: cfg})
+	place, err := s.rt.Provision(ctx, name, ProvisionRequest{Config: cfg})
+	if err != nil {
+		return err
+	}
+	if s.tp.Capabilities().SeparableLaunch {
+		_, err = s.tp.Launch(ctx, place, LaunchSpec{Config: cfg})
+	}
 	return err
 }
 

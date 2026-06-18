@@ -42,11 +42,12 @@ var (
 	_ runtime.MetaStore = (*execRuntime)(nil)
 )
 
-// Provision runs the pack's `start` op for name (←Start); for an exec-pack this
-// also launches the agent in tmux "main", so Transport.Launch over the returned
-// Place is a no-op.
+// Provision creates the box for name. For a pack that declares proc.provision it
+// runs the box-only `provision` op (the agent is launched by Transport.Launch);
+// otherwise it runs the welded `start` op, which also launches the agent in tmux
+// "main" (so Launch is then a no-op). See provisionBox / SeparableLaunch (B3b).
 func (r *execRuntime) Provision(ctx context.Context, name string, req runtime.ProvisionRequest) (runtime.Place, error) {
-	if err := r.p.Start(ctx, name, req.Config); err != nil {
+	if err := r.p.provisionBox(ctx, name, req.Config); err != nil {
 		return nil, err
 	}
 	return &execPlace{p: r.p, name: name}, nil
@@ -134,10 +135,18 @@ type execTransport struct{ p *Provider }
 
 var _ runtime.Transport = (*execTransport)(nil)
 
-// Launch is a no-op: the pack's `start` op already launched the agent in the box;
-// this returns the live Attachment over the Place (←Start how-half).
-func (t *execTransport) Launch(_ context.Context, place runtime.Place, _ runtime.LaunchSpec) (runtime.Attachment, error) {
-	return &execAttachment{p: t.p, name: placeName(place)}, nil
+// Launch launches the agent in the box and returns the live Attachment. For a
+// pack that declares proc.provision (SeparableLaunch), it execs `tmux new-session`
+// (or respawn-pane on a warm box) over the `exec` op — this is the controller-side
+// half of the un-weld (B3b), called after Provision by seamProvider.Start and by
+// the reconciler for a launch-only change. For a welded pack the agent is already
+// running (the `start` op launched it), so launchAgent is a no-op here.
+func (t *execTransport) Launch(ctx context.Context, place runtime.Place, spec runtime.LaunchSpec) (runtime.Attachment, error) {
+	name := placeName(place)
+	if err := t.p.launchAgent(ctx, name, spec.Config); err != nil {
+		return nil, err
+	}
+	return &execAttachment{p: t.p, name: name}, nil
 }
 
 // Open returns the Attachment for an already-running box (reconnect). Process
@@ -158,7 +167,10 @@ func (t *execTransport) Attach(_ context.Context, _ runtime.Place, name string) 
 func (t *execTransport) Name() string { return "tmux" }
 
 func (t *execTransport) Capabilities() runtime.TransportCapabilities {
-	return runtime.TransportCapabilities{ReportAttachment: t.p.Capabilities().CanReportAttachment}
+	return runtime.TransportCapabilities{
+		ReportAttachment: t.p.Capabilities().CanReportAttachment,
+		SeparableLaunch:  t.p.supportsSeparableLaunch(),
+	}
 }
 
 // placeName extracts the box/session name from a Place. Only *execPlace is ever

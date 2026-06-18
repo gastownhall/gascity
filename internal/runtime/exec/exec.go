@@ -151,6 +151,62 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	return nil
 }
 
+// supportsSeparableLaunch reports whether the pack un-welds provisioning from the
+// agent launch: it must implement the box-without-agent `provision` op
+// (proc.provision) AND the `exec` op (proc.exec) the controller drives the launch
+// over. Otherwise the welded `start` op provisions and launches in one shot
+// (compat). Gates [runtime.TransportCapabilities.SeparableLaunch]. (Un-weld B3b.)
+func (p *Provider) supportsSeparableLaunch() bool {
+	return p.handshakeCapability(runtime.ProtocolCapabilityProvision) &&
+		p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec)
+}
+
+// provisionBox creates the box for name. When the pack supports a separable
+// launch it runs the `provision` op (box + staging + pre_start, NO agent); the
+// agent is launched separately by launchAgent. Otherwise it falls back to the
+// welded Start (which both provisions and launches). (Un-weld B3b.)
+func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
+	if !p.supportsSeparableLaunch() {
+		return p.Start(ctx, name, cfg)
+	}
+	data, err := marshalStartConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("exec provider: marshaling provision config: %w", err)
+	}
+	_, err = p.runWithContext(ctx, p.startTimeout, data, "provision", name)
+	return err
+}
+
+// launchAgent starts the agent in the in-box tmux session over the `exec` op, for
+// a pack with a separable launch; for a welded pack it is a no-op (provisionBox /
+// Start already launched). The launch is idempotent: it respawns the pane if the
+// session already exists (relaunch into a warm box) and otherwise creates it
+// (first launch after provision), then dismisses startup dialogs — the same
+// Go-side orchestration the welded Start runs. The `exec` op runs in the box's
+// working directory and the box env is set at provision time, so neither an
+// explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
+func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
+	if !p.supportsSeparableLaunch() {
+		return nil
+	}
+	command := cfg.Command
+	if command == "" {
+		command = defaultLaunchShell
+	}
+	var argv []string
+	if _, code, _ := p.Exec(ctx, name, []string{"tmux", "has-session", "-t", execTmuxSession}); code == 0 {
+		argv = []string{"tmux", "respawn-pane", "-k", "-t", execTmuxSession, command}
+	} else {
+		argv = []string{"tmux", "new-session", "-d", "-s", execTmuxSession, command}
+	}
+	if _, code, err := p.Exec(ctx, name, argv); err != nil {
+		return fmt.Errorf("exec provider: launching agent in %q: %w", name, err)
+	} else if code != 0 {
+		return fmt.Errorf("exec provider: launching agent in %q: tmux exited %d", name, code)
+	}
+	return p.dismissStartupDialogs(ctx, name, cfg)
+}
+
 func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg runtime.Config) error {
 	if cfg.AcceptStartupDialogs != nil && !*cfg.AcceptStartupDialogs {
 		return nil
@@ -386,6 +442,10 @@ func (p *Provider) Stop(name string) error {
 // reproduced as tmux commands over the exec op rather than dedicated
 // nudge/peek/send-keys/interrupt/clear-scrollback wire ops.
 const execTmuxSession = "main"
+
+// defaultLaunchShell is the in-box command launchAgent runs when the config
+// carries no Command (a holding shell, matching the welded packs' default).
+const defaultLaunchShell = "/bin/sh"
 
 // carrier drives the in-box tmux session over this provider's own exec op.
 func (p *Provider) carrier() runtime.Carrier {
