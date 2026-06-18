@@ -68,7 +68,7 @@ func TestSeamsLifecycle(t *testing.T) {
 	if _, err := att.Peek(ctx, 10); err != nil {
 		t.Fatalf("Peek: %v", err)
 	}
-	if err := att.Nudge(ctx, runtime.TextContent("x"), runtime.NudgeDelivery{}); err != nil {
+	if err := att.Nudge(ctx, runtime.TextContent("x")); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
 	if err := att.SendKeys(ctx, "Enter"); err != nil {
@@ -190,9 +190,6 @@ func TestSeamsTransportShape(t *testing.T) {
 	_, tp := NewProviderWithDir(t.TempDir()).Seams()
 	if tp.Name() != "detached" {
 		t.Fatalf("Name = %q; want detached", tp.Name())
-	}
-	if tp.NeedsStream() {
-		t.Fatal("detached transport NeedsStream should be false")
 	}
 	if err := tp.Attach(context.Background(), nil, "x"); err == nil {
 		t.Fatal("Attach should be unsupported for subprocess")

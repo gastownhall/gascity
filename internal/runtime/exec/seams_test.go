@@ -83,8 +83,8 @@ func TestSeamsExecSupported(t *testing.T) {
 
 	// Capabilities are split from the handshake: box props on the Runtime,
 	// attach-reporting on the Transport.
-	if caps := rt.Capabilities(); !caps.ReportActivity || !caps.Stream || !caps.AttachTTY {
-		t.Fatalf("PlaceCapabilities = %+v; want all true", caps)
+	if caps := rt.Capabilities(); !caps.ReportActivity {
+		t.Fatalf("PlaceCapabilities = %+v; want ReportActivity true", caps)
 	}
 	if !tp.Capabilities().ReportAttachment {
 		t.Fatal("TransportCapabilities.ReportAttachment = false; want true")
@@ -123,7 +123,7 @@ func TestSeamsExecUnsupportedFallsBack(t *testing.T) {
 	if !strings.Contains(got, "line 1") {
 		t.Fatalf("Peek = %q; want it to contain 'line 1'", got)
 	}
-	if err := att.Nudge(ctx, runtime.TextContent("hello"), runtime.NudgeDelivery{}); err != nil {
+	if err := att.Nudge(ctx, runtime.TextContent("hello")); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
 	if err := att.SendKeys(ctx, "Enter"); err != nil {
@@ -279,9 +279,6 @@ func TestSeamsExecTransportShape(t *testing.T) {
 	_, tp := NewProvider(script).Seams()
 	if tp.Name() != "tmux" {
 		t.Fatalf("Name = %q; want tmux", tp.Name())
-	}
-	if tp.NeedsStream() {
-		t.Fatal("NeedsStream should be false")
 	}
 	if err := tp.Attach(context.Background(), nil, "sess"); err != nil {
 		t.Fatalf("Attach: %v", err)

@@ -62,17 +62,14 @@ func TestSeamsK8sExecAndOpen(t *testing.T) {
 func TestSeamsK8sCapabilitiesAndTransport(t *testing.T) {
 	rt, tp := newProviderWithOps(newFakeK8sOps()).Seams()
 
-	if caps := rt.Capabilities(); !caps.ReportActivity || caps.Stream || caps.AttachTTY {
-		t.Fatalf("PlaceCapabilities = %+v; want ReportActivity only", caps)
+	if caps := rt.Capabilities(); !caps.ReportActivity {
+		t.Fatalf("PlaceCapabilities = %+v; want ReportActivity true", caps)
 	}
 	if tp.Capabilities().ReportAttachment {
 		t.Fatal("TransportCapabilities.ReportAttachment should be false for k8s")
 	}
 	if tp.Name() != "tmux" {
 		t.Fatalf("Name = %q; want tmux", tp.Name())
-	}
-	if tp.NeedsStream() {
-		t.Fatal("NeedsStream should be false")
 	}
 }
 

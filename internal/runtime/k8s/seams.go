@@ -64,14 +64,9 @@ func (r *k8sRuntime) List(_ context.Context, prefix string) ([]string, error) {
 }
 
 // Capabilities maps the provider capabilities to the box/Place half (k8s reports
-// activity; it cannot observe stream/PTY/attachment from the controller host).
+// activity).
 func (r *k8sRuntime) Capabilities() runtime.PlaceCapabilities {
-	caps := r.p.Capabilities()
-	return runtime.PlaceCapabilities{
-		ReportActivity: caps.CanReportActivity,
-		Stream:         caps.CanStream,
-		AttachTTY:      caps.CanAttachTTY,
-	}
+	return runtime.PlaceCapabilities{ReportActivity: r.p.Capabilities().CanReportActivity}
 }
 
 // SetMeta/GetMeta/RemoveMeta delegate to the tmux-session-environment meta, which
@@ -131,9 +126,6 @@ func (pl *k8sPlace) Teardown(_ context.Context) error {
 	return pl.p.Stop(pl.name)
 }
 
-// Env: k8s does not surface per-place env identity here. Returns nil.
-func (pl *k8sPlace) Env() map[string]string { return nil }
-
 // --- HOW: tmux Transport (carrier over execInPod) ---
 
 type k8sTransport struct{ p *Provider }
@@ -162,8 +154,7 @@ func (t *k8sTransport) Attach(_ context.Context, _ runtime.Place, name string) e
 	return t.p.Attach(name)
 }
 
-func (t *k8sTransport) Name() string      { return "tmux" }
-func (t *k8sTransport) NeedsStream() bool { return false }
+func (t *k8sTransport) Name() string { return "tmux" }
 
 func (t *k8sTransport) Capabilities() runtime.TransportCapabilities {
 	return runtime.TransportCapabilities{ReportAttachment: t.p.Capabilities().CanReportAttachment}
@@ -195,8 +186,8 @@ func (a *k8sAttachment) Peek(_ context.Context, lines int) (string, error) {
 	return a.p.Peek(a.name, lines)
 }
 
-// Nudge delivers content; NudgeDelivery is moot for k8s (no idle-wait heuristic).
-func (a *k8sAttachment) Nudge(_ context.Context, content []runtime.ContentBlock, _ runtime.NudgeDelivery) error {
+// Nudge delivers content as input to the in-box tmux session.
+func (a *k8sAttachment) Nudge(_ context.Context, content []runtime.ContentBlock) error {
 	return a.p.Nudge(a.name, content)
 }
 
@@ -222,11 +213,6 @@ func (a *k8sAttachment) Observe(_ context.Context) (runtime.LiveObservation, err
 		Attached:     a.p.IsAttached(a.name),
 		LastActivity: lastActivity,
 	}, nil
-}
-
-// History: k8s exposes no transcript op today (net-new).
-func (a *k8sAttachment) History(_ context.Context) (runtime.TranscriptRef, error) {
-	return runtime.TranscriptRef{}, nil
 }
 
 // Close is a no-op: the pod and its agent are torn down together in

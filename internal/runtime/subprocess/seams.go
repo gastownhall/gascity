@@ -115,10 +115,6 @@ func (pl *subprocessPlace) Teardown(context.Context) error {
 	return pl.p.Stop(pl.name)
 }
 
-// Env: subprocess does not surface per-place env identity (the start env is
-// written to sidecar meta, not tracked here). Returns nil.
-func (pl *subprocessPlace) Env() map[string]string { return nil }
-
 // --- HOW: detached Transport + Attachment (null driving) ---
 
 type detachedTransport struct{}
@@ -145,8 +141,8 @@ func (detachedTransport) Attach(context.Context, runtime.Place, string) error {
 	return fmt.Errorf("subprocess transport does not support attach")
 }
 
-func (detachedTransport) Name() string      { return "detached" }
-func (detachedTransport) NeedsStream() bool { return false }
+func (detachedTransport) Name() string { return "detached" }
+
 func (detachedTransport) Capabilities() runtime.TransportCapabilities {
 	return runtime.TransportCapabilities{}
 }
@@ -168,7 +164,7 @@ var _ runtime.Attachment = (*detachedAttachment)(nil)
 // (matching the legacy Provider's no-op Peek/Nudge/SendKeys/ClearScrollback).
 func (a *detachedAttachment) Peek(context.Context, int) (string, error) { return "", nil }
 
-func (a *detachedAttachment) Nudge(context.Context, []runtime.ContentBlock, runtime.NudgeDelivery) error {
+func (a *detachedAttachment) Nudge(context.Context, []runtime.ContentBlock) error {
 	return nil
 }
 
@@ -194,11 +190,6 @@ func (a *detachedAttachment) Observe(ctx context.Context) (runtime.LiveObservati
 		return runtime.LiveObservation{}, err
 	}
 	return runtime.LiveObservation{ProcessAlive: alive}, nil
-}
-
-// History: no transcript for a headless subprocess session.
-func (a *detachedAttachment) History(context.Context) (runtime.TranscriptRef, error) {
-	return runtime.TranscriptRef{}, nil
 }
 
 // Close is a no-op: for subprocess the agent and the box are one process, so

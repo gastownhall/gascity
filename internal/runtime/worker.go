@@ -2,28 +2,33 @@ package runtime
 
 import (
 	"context"
-	"io"
 	"time"
 )
 
-// This file is the de-conflation facade (PR1): the typed seams the design
+// This file is the de-conflation facade: the typed seams the design
 // (worker-runtime-transport-v0.md) splits today's monolithic Provider into —
-// WHERE (Runtime + Place), HOW (Transport + Attachment), and the WorkerSpec atom
-// that ties the five axes together. It is interface-only: the existing
-// [Provider] interface and all ~105 call sites are untouched; providers grow
-// these implementations one at a time in later phases, each gated on zero
-// CoreFingerprint drift. The §-references below cite the design's migration map.
+// WHERE (Runtime + Place), HOW (Transport + Attachment) — plus the MetaStore
+// seam and the WorkerSpec atom. It is interface-only: the existing [Provider]
+// interface and all ~105 call sites are untouched; providers implement these via
+// thin delegation in their seams.go, and the cut-over (routing call sites through
+// the seams) is a later phase.
+//
+// The contract is deliberately limited to LOAD-BEARING surface — every method
+// here has a real, distinct implementation in some provider. Speculative surface
+// with no implementation (a stream/PTY Place extension, a transcript-history
+// read, a per-place env accessor) is intentionally NOT declared here; it will be
+// added alongside the implementation that needs it, not before.
 //
 // What the rpp-slim carrier work already pre-paid (REUSED, not net-new):
-//   - [ExecProvider].Exec      → Place.Exec
-//   - [Carrier] (5 verbs)      → Attachment.{Peek,Nudge,SendKeys,Interrupt,ClearScrollback}
-//   - [ProviderCapabilities].{CanStream,CanAttachTTY,CanReportActivity,CanReportAttachment}
+//   - [ExecProvider].Exec → Place.Exec
+//   - [Carrier] (5 verbs) → Attachment.{Peek,Nudge,SendKeys,Interrupt,ClearScrollback}
+//   - [ProviderCapabilities].{CanReportActivity,CanReportAttachment}
 //     → PlaceCapabilities / TransportCapabilities
-//   - proc.exec / proc.stream / tty.attach handshake tokens → the gating below
 
 // WorkerSpec is the de-conflated worker definition: the five independent axes
 // plus the run payload (§4). It is the shared atom the whole stack resolves to —
-// a controller plan step resolves to a WorkerSpec (§12).
+// a controller plan step resolves to a WorkerSpec (§12). It is forward-declared:
+// nothing consumes it yet (the Resolver tail will), but it is the design's atom.
 type WorkerSpec struct {
 	Harness   string // the agent CLI / harness ("claude-code", "codex", ...)
 	Model     string // the single model request label ("opus-4.8")
@@ -66,13 +71,10 @@ type LaunchSpec struct {
 }
 
 // PlaceCapabilities is the runtime/box half of today's [ProviderCapabilities]
-// (§11): Stream/AttachTTY are WHERE-properties of the box (a Place can carry a
-// stream / a PTY) and ReportActivity says get-last-activity is meaningful. It is
-// reported by [Runtime.Capabilities].
+// (§11): ReportActivity says get-last-activity is meaningful. Reported by
+// [Runtime.Capabilities].
 type PlaceCapabilities struct {
 	ReportActivity bool // get-last-activity is meaningful
-	Stream         bool // the box supports proc.stream (a Dial-able Place)
-	AttachTTY      bool // the box supports tty.attach (an AttachTTY-able Place)
 }
 
 // TransportCapabilities is the HOW half of today's [ProviderCapabilities] (§11):
@@ -88,34 +90,6 @@ type LiveObservation struct {
 	ProcessAlive bool
 	Attached     bool
 	LastActivity time.Time
-}
-
-// NudgeDelivery controls how Attachment.Nudge delivers (e.g. no-wait vs
-// wait-for-idle), folding today's ImmediateNudgeProvider / IdleWaitProvider.
-type NudgeDelivery struct {
-	NoWait bool
-}
-
-// DialRequest is the input to [StreamPlace.Dial]: the argv of the in-box process
-// to open a persistent stream to.
-type DialRequest struct{ Argv []string }
-
-// AttachRequest is the input to [TTYPlace.AttachTTY]: the in-box target to attach
-// an interactive PTY to.
-type AttachRequest struct{ Target string }
-
-// Stream is a persistent bidirectional byte channel to an in-box process (acp /
-// proc.stream, ssh -T). Net-new (no implementation exists yet).
-type Stream interface{ io.ReadWriteCloser }
-
-// TTY is an interactive pseudo-terminal attachment (tty.attach, ssh -t). Net-new
-// (no implementation exists yet).
-type TTY interface{ io.ReadWriteCloser }
-
-// TranscriptRef points at a session's delivered transcript; the target of
-// Attachment.History. Net-new.
-type TranscriptRef struct {
-	URI string
 }
 
 // Runtime is the WHERE axis: it provisions and lists boxes. Its bodies reuse the
@@ -139,21 +113,6 @@ type Place interface {
 	Stage(ctx context.Context, files []CopyEntry) error            // ←CopyTo + overlay staging
 	IsRunning(ctx context.Context) (bool, error)                   // ←IsRunning
 	Teardown(ctx context.Context) error                            // ←Stop (where-half)
-	Env() map[string]string                                        // net-new accessor (env.identity)
-}
-
-// StreamPlace is an OPTIONAL Place extension (§6/§13) for boxes that can open a
-// persistent bidirectional stream, gated by PlaceCapabilities.Stream (and the
-// proc.stream handshake token). A tmux-only box does not implement it; acp does.
-type StreamPlace interface {
-	Dial(ctx context.Context, req DialRequest) (Stream, error)
-}
-
-// TTYPlace is an OPTIONAL Place extension (§6/§13) for boxes that can attach an
-// interactive PTY, gated by PlaceCapabilities.AttachTTY (and the tty.attach
-// handshake token). A tmux-only box does not implement it.
-type TTYPlace interface {
-	AttachTTY(ctx context.Context, req AttachRequest) (TTY, error)
 }
 
 // MetaStore is the per-session key-value store today's [Provider] carries via
@@ -172,28 +131,25 @@ type MetaStore interface {
 }
 
 // Transport is the HOW axis: it launches the agent over a Place and yields an
-// Attachment. The tmux Transport's body is the [Carrier] over Place.Exec; acp is
-// a stream Transport (NeedsStream). (§11: Start's how-half; auto.Provider becomes
-// a Transport selector.)
+// Attachment. The tmux Transport's body is the [Carrier] over Place.Exec; the
+// t3/acp Transports drive their own protocol connections. (§11: Start's how-half;
+// auto.Provider becomes a Transport selector.)
 type Transport interface {
 	Launch(ctx context.Context, place Place, spec LaunchSpec) (Attachment, error) // ←Start (how-half)
 	Open(ctx context.Context, place Place, name string) (Attachment, bool, error) // net-new (reconnect)
-	Attach(ctx context.Context, place Place, name string) error                   // ←Attach (needs TTYPlace when remote)
-	Name() string
-	NeedsStream() bool // tmux:false, acp:true — gated vs PlaceCapabilities.Stream
+	Attach(ctx context.Context, place Place, name string) error                   // ←Attach
+	Name() string                                                                 // transport identity: "tmux", "t3", "acp", "detached"
 	Capabilities() TransportCapabilities
 }
 
 // Attachment is the live driving surface: the first five verbs ARE the [Carrier]
-// verbatim; Observe folds the liveness reads; History is the transcript seam;
-// Close is Stop's how-half.
+// verbatim; Observe folds the liveness reads; Close is Stop's how-half.
 type Attachment interface {
-	Peek(ctx context.Context, lines int) (string, error)                      // ←Carrier.Peek
-	Nudge(ctx context.Context, content []ContentBlock, d NudgeDelivery) error // ←Carrier.Nudge
-	SendKeys(ctx context.Context, keys ...string) error                       // ←Carrier.SendKeys
-	Interrupt(ctx context.Context) error                                      // ←Carrier.Interrupt
-	ClearScrollback(ctx context.Context) error                                // ←Carrier.ClearScrollback
-	Observe(ctx context.Context) (LiveObservation, error)                     // ←ProcessAlive+IsAttached+GetLastActivity
-	History(ctx context.Context) (TranscriptRef, error)                       // net-new (transcript history)
-	Close(ctx context.Context) error                                          // ←Stop (how-half)
+	Peek(ctx context.Context, lines int) (string, error)     // ←Carrier.Peek
+	Nudge(ctx context.Context, content []ContentBlock) error // ←Carrier.Nudge
+	SendKeys(ctx context.Context, keys ...string) error      // ←Carrier.SendKeys
+	Interrupt(ctx context.Context) error                     // ←Carrier.Interrupt
+	ClearScrollback(ctx context.Context) error               // ←Carrier.ClearScrollback
+	Observe(ctx context.Context) (LiveObservation, error)    // ←ProcessAlive+IsAttached+GetLastActivity
+	Close(ctx context.Context) error                         // ←Stop (how-half)
 }

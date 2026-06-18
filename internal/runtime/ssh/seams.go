@@ -65,14 +65,9 @@ func (r *sshRuntime) List(_ context.Context, prefix string) ([]string, error) {
 }
 
 // Capabilities maps the provider capabilities to the box/Place half (ssh reports
-// activity via tmux #{session_activity}; stream/PTY/attachment stay undeclared).
+// activity via tmux #{session_activity}).
 func (r *sshRuntime) Capabilities() runtime.PlaceCapabilities {
-	caps := r.p.Capabilities()
-	return runtime.PlaceCapabilities{
-		ReportActivity: caps.CanReportActivity,
-		Stream:         caps.CanStream,
-		AttachTTY:      caps.CanAttachTTY,
-	}
+	return runtime.PlaceCapabilities{ReportActivity: r.p.Capabilities().CanReportActivity}
 }
 
 // SetMeta/GetMeta/RemoveMeta delegate to the tmux-session-environment meta, which
@@ -131,9 +126,6 @@ func (pl *sshPlace) Teardown(_ context.Context) error {
 	return pl.p.Stop(pl.name)
 }
 
-// Env: ssh does not surface per-place env identity here. Returns nil.
-func (pl *sshPlace) Env() map[string]string { return nil }
-
 // --- HOW: tmux Transport (carrier over the ssh connection) ---
 
 type sshTransport struct{ p *Provider }
@@ -163,8 +155,7 @@ func (t *sshTransport) Attach(_ context.Context, _ runtime.Place, name string) e
 	return t.p.Attach(name)
 }
 
-func (t *sshTransport) Name() string      { return "tmux" }
-func (t *sshTransport) NeedsStream() bool { return false }
+func (t *sshTransport) Name() string { return "tmux" }
 
 func (t *sshTransport) Capabilities() runtime.TransportCapabilities {
 	return runtime.TransportCapabilities{ReportAttachment: t.p.Capabilities().CanReportAttachment}
@@ -197,8 +188,8 @@ func (a *sshAttachment) Peek(_ context.Context, lines int) (string, error) {
 	return a.p.Peek(a.name, lines)
 }
 
-// Nudge delivers content; NudgeDelivery is moot for ssh (no idle-wait heuristic).
-func (a *sshAttachment) Nudge(_ context.Context, content []runtime.ContentBlock, _ runtime.NudgeDelivery) error {
+// Nudge delivers content to the remote tmux session.
+func (a *sshAttachment) Nudge(_ context.Context, content []runtime.ContentBlock) error {
 	return a.p.Nudge(a.name, content)
 }
 
@@ -224,11 +215,6 @@ func (a *sshAttachment) Observe(_ context.Context) (runtime.LiveObservation, err
 		Attached:     a.p.IsAttached(a.name),
 		LastActivity: lastActivity,
 	}, nil
-}
-
-// History: the ssh provider exposes no transcript op today (net-new).
-func (a *sshAttachment) History(_ context.Context) (runtime.TranscriptRef, error) {
-	return runtime.TranscriptRef{}, nil
 }
 
 // Close is a no-op: the remote tmux session is killed in Place.Teardown→Stop,

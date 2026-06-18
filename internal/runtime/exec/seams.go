@@ -67,14 +67,9 @@ func (r *execRuntime) List(_ context.Context, prefix string) ([]string, error) {
 }
 
 // Capabilities maps the handshake-derived ProviderCapabilities to the box/Place
-// half (Stream/AttachTTY are box properties gated by proc.stream / tty.attach).
+// half (exec reports activity when the pack declares it).
 func (r *execRuntime) Capabilities() runtime.PlaceCapabilities {
-	caps := r.p.Capabilities()
-	return runtime.PlaceCapabilities{
-		ReportActivity: caps.CanReportActivity,
-		Stream:         caps.CanStream,
-		AttachTTY:      caps.CanAttachTTY,
-	}
+	return runtime.PlaceCapabilities{ReportActivity: r.p.Capabilities().CanReportActivity}
 }
 
 // SetMeta/GetMeta/RemoveMeta delegate to the pack's set-meta/get-meta/remove-meta
@@ -133,9 +128,6 @@ func (pl *execPlace) Teardown(_ context.Context) error {
 	return pl.p.Stop(pl.name)
 }
 
-// Env: exec-packs do not surface per-place env identity here. Returns nil.
-func (pl *execPlace) Env() map[string]string { return nil }
-
 // --- HOW: tmux Transport (carrier-over-exec, with wire-op fallback) ---
 
 type execTransport struct{ p *Provider }
@@ -164,8 +156,7 @@ func (t *execTransport) Attach(_ context.Context, _ runtime.Place, name string) 
 	return t.p.Attach(name)
 }
 
-func (t *execTransport) Name() string      { return "tmux" }
-func (t *execTransport) NeedsStream() bool { return false }
+func (t *execTransport) Name() string { return "tmux" }
 
 func (t *execTransport) Capabilities() runtime.TransportCapabilities {
 	return runtime.TransportCapabilities{ReportAttachment: t.p.Capabilities().CanReportAttachment}
@@ -198,8 +189,8 @@ func (a *execAttachment) Peek(_ context.Context, lines int) (string, error) {
 	return a.p.Peek(a.name, lines)
 }
 
-// Nudge delivers content; NudgeDelivery is moot for exec (no idle-wait heuristic).
-func (a *execAttachment) Nudge(_ context.Context, content []runtime.ContentBlock, _ runtime.NudgeDelivery) error {
+// Nudge delivers content as input to the in-box tmux session.
+func (a *execAttachment) Nudge(_ context.Context, content []runtime.ContentBlock) error {
 	return a.p.Nudge(a.name, content)
 }
 
@@ -225,11 +216,6 @@ func (a *execAttachment) Observe(_ context.Context) (runtime.LiveObservation, er
 		Attached:     a.p.IsAttached(a.name),
 		LastActivity: lastActivity,
 	}, nil
-}
-
-// History: exec-packs expose no transcript op today (net-new).
-func (a *execAttachment) History(_ context.Context) (runtime.TranscriptRef, error) {
-	return runtime.TranscriptRef{}, nil
 }
 
 // Close is a no-op: the agent and the box are torn down together in
