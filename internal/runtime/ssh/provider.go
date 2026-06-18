@@ -137,11 +137,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	for _, k := range sortedKeys(cfg.Env) {
 		args = append(args, "-e", k+"="+cfg.Env[k])
 	}
-	command := cfg.Command
-	if command == "" {
-		command = defaultRemoteShell
-	}
-	args = append(args, command)
+	args = append(args, resolveCommand(cfg))
 	if _, code, err := p.tmux(ctx, name, args...); err != nil {
 		return fmt.Errorf("ssh start %q: %w", name, err)
 	} else if code != 0 {
@@ -155,6 +151,44 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	// SessionSetup, SessionSetupScript, and SessionLive run on the box,
 	// best-effort, with the same cwd + env prelude.
+	p.runPostLaunchSetup(ctx, name, cfg, prelude)
+
+	// Post-start liveness: detect an agent that dies immediately after startup.
+	if p.requiresPostStartLiveness(cfg) {
+		if p.postStartSettle > 0 {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("ssh start %q: %w", name, ctx.Err())
+			case <-time.After(p.postStartSettle):
+			}
+		}
+		if !p.hasSession(ctx, name) {
+			_ = p.Stop(name)
+			return fmt.Errorf("%w: ssh session %q died immediately after startup", runtime.ErrSessionDiedDuringStartup, name)
+		}
+	}
+
+	if cfg.Nudge != "" {
+		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
+	}
+	return nil
+}
+
+// resolveCommand returns the agent command for new-session/respawn-pane,
+// defaulting to a login shell when none is configured. Shared by Start and
+// Relaunch so both launch an identical command line.
+func resolveCommand(cfg runtime.Config) string {
+	if cfg.Command == "" {
+		return defaultRemoteShell
+	}
+	return cfg.Command
+}
+
+// runPostLaunchSetup runs SessionSetup, SessionSetupScript, and SessionLive on
+// the box, best-effort, with the session WorkDir as cwd and the session env
+// exported (the prelude). Shared by Start and Relaunch — these steps re-apply
+// idempotently after the agent (re)launches, matching the local tmux adapter.
+func (p *Provider) runPostLaunchSetup(ctx context.Context, name string, cfg runtime.Config, prelude string) {
 	for _, cmd := range cfg.SessionSetup {
 		if cmd != "" {
 			_, _, _ = p.conn.Exec(ctx, name, []string{"sh", "-c", prelude + cmd})
@@ -172,19 +206,56 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			_, _, _ = p.conn.Exec(ctx, name, []string{"sh", "-c", prelude + cmd})
 		}
 	}
+}
 
-	// Post-start liveness: detect an agent that dies immediately after startup.
+// Relaunch re-launches the agent inside the existing remote tmux session without
+// re-provisioning: it respawns the session's pane (respawn-pane -k) with the
+// (possibly changed) command, then re-runs the post-launch setup tail and the
+// liveness recheck. The box (remote host) and its tmux session must already
+// exist — a missing session is a [runtime.ErrSessionNotFound], NOT a silent
+// new-session (the reconciler decides whether to Start fresh). This is the ssh
+// half of the runtime/transport un-weld (B3a), mirroring tmux's Relaunch (B1).
+//
+// PreStart is NOT re-run (it is provision-half — it prepares the box). Env is
+// also provision-half: respawn-pane has no -e, so the session keeps the env set
+// by the original new-session; a launch-only env change is not re-applied
+// (matching tmux B1's "does not re-inject env hints").
+func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !validTmuxName.MatchString(name) {
+		return fmt.Errorf("%w %q: must match %s", ErrInvalidSessionName, name, validTmuxName.String())
+	}
+	if !p.hasSession(ctx, name) {
+		return fmt.Errorf("%w: ssh session %q (box must be provisioned first)", runtime.ErrSessionNotFound, name)
+	}
+
+	prelude := setupPrelude(cfg, name)
+
+	args := []string{"respawn-pane", "-k", "-t", name}
+	if cfg.WorkDir != "" {
+		args = append(args, "-c", cfg.WorkDir)
+	}
+	args = append(args, resolveCommand(cfg))
+	if _, code, err := p.tmux(ctx, name, args...); err != nil {
+		return fmt.Errorf("ssh relaunch %q: %w", name, err)
+	} else if code != 0 {
+		return fmt.Errorf("ssh relaunch %q: tmux respawn-pane exited %d", name, code)
+	}
+
+	p.runPostLaunchSetup(ctx, name, cfg, prelude)
+
 	if p.requiresPostStartLiveness(cfg) {
 		if p.postStartSettle > 0 {
 			select {
 			case <-ctx.Done():
-				return fmt.Errorf("ssh start %q: %w", name, ctx.Err())
+				return fmt.Errorf("ssh relaunch %q: %w", name, ctx.Err())
 			case <-time.After(p.postStartSettle):
 			}
 		}
 		if !p.hasSession(ctx, name) {
-			_ = p.Stop(name)
-			return fmt.Errorf("%w: ssh session %q died immediately after startup", runtime.ErrSessionDiedDuringStartup, name)
+			return fmt.Errorf("%w: ssh session %q died immediately after relaunch", runtime.ErrSessionDiedDuringStartup, name)
 		}
 	}
 

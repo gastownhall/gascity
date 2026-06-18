@@ -66,6 +66,59 @@ func TestProvider_StartDuplicateIsErrSessionExists(t *testing.T) {
 	}
 }
 
+func TestProvider_RelaunchRespawnsAgentInWarmSession(t *testing.T) {
+	// Session exists (has-session → 0) and respawn-pane succeeds (default 0).
+	f := &fakeRunner{}
+	p := providerWith(f)
+	cfg := runtime.Config{Command: "agent --resumed", WorkDir: "/w", Env: map[string]string{"A": "1"}}
+	if err := p.Relaunch(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	got := firstCall(f, isTmux("respawn-pane"))
+	// respawn-pane has no -e, so env is NOT re-applied (provision-half).
+	want := []string{"tmux", "respawn-pane", "-k", "-t", "s", "-c", "/w", "agent --resumed"}
+	if !slices.Equal(got, want) {
+		t.Errorf("respawn-pane argv =\n  %v\nwant\n  %v", got, want)
+	}
+	if firstCall(f, isTmux("new-session")) != nil {
+		t.Error("Relaunch must reuse the warm session, not new-session")
+	}
+}
+
+func TestProvider_RelaunchMissingSessionIsErrSessionNotFound(t *testing.T) {
+	// has-session → 1 (no session): relaunch must error, not silently new-session.
+	f := &fakeRunner{code: 1}
+	p := providerWith(f)
+	err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent"})
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Relaunch err = %v, want ErrSessionNotFound", err)
+	}
+	if firstCall(f, isTmux("respawn-pane")) != nil {
+		t.Error("respawn-pane must not be issued when the session is absent")
+	}
+}
+
+func TestProvider_RelaunchDeadAfterRespawnIsErrSessionDied(t *testing.T) {
+	// Guard has-session → alive; after respawn the liveness recheck finds it dead.
+	hasSessionCalls := 0
+	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		if isTmux("has-session")(argv) {
+			hasSessionCalls++
+			if hasSessionCalls == 1 {
+				return nil, 0, nil // guard: warm session exists
+			}
+			return nil, 1, nil // liveness recheck: agent died immediately
+		}
+		return nil, 0, nil
+	}}
+	p := providerWith(f)
+	cfg := runtime.Config{Command: "agent", ProcessNames: []string{"agent"}} // managed hints → liveness recheck
+	err := p.Relaunch(context.Background(), "s", cfg)
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("Relaunch err = %v, want ErrSessionDiedDuringStartup", err)
+	}
+}
+
 func TestProvider_StopIsIdempotent(t *testing.T) {
 	// kill-session on a missing session exits non-zero; Stop must still return nil.
 	f := &fakeRunner{code: 1}

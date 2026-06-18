@@ -132,10 +132,19 @@ type sshTransport struct{ p *Provider }
 
 var _ runtime.Transport = (*sshTransport)(nil)
 
-// Launch is a no-op: Start already launched the agent in the remote tmux session;
-// this returns the live Attachment over the Place (←Start how-half).
-func (t *sshTransport) Launch(_ context.Context, place runtime.Place, _ runtime.LaunchSpec) (runtime.Attachment, error) {
-	return &sshAttachment{p: t.p, name: placeName(place)}, nil
+// Launch relaunches the agent inside the (already-provisioned) remote tmux
+// session and returns the live Attachment. In the pragmatic un-weld, Provision
+// (←Start) is welded and already launches the agent on the normal Start path, so
+// this is the SEPARATE relaunch-into-a-warm-box capability the reconciler uses to
+// apply a launch-only config change without re-provisioning — it is NOT a step of
+// a normal Start (see seamProvider.Start). The box (remote host) pre-exists, so a
+// missing session is a runtime.ErrSessionNotFound (B3a, mirroring tmux B1).
+func (t *sshTransport) Launch(ctx context.Context, place runtime.Place, spec runtime.LaunchSpec) (runtime.Attachment, error) {
+	name := placeName(place)
+	if err := t.p.Relaunch(ctx, name, spec.Config); err != nil {
+		return nil, err
+	}
+	return &sshAttachment{p: t.p, name: name}, nil
 }
 
 // Open returns the Attachment for an already-running session (reconnect). Process
