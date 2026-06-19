@@ -108,7 +108,16 @@ type Runtime interface {
 	Provision(ctx context.Context, name string, req ProvisionRequest) (Place, error)
 	// Open re-resolves an existing box by name without creating it. Net-new;
 	// ssh/exec packs are already stateless-by-name so this is cheap there.
+	// Open is LIVENESS-GATED: it returns ok=false for a box that exists but is
+	// not running (a Pending/crash-looped pod, a dead-tmux session, a corpse
+	// pane), because there is nothing live to attach to.
 	Open(ctx context.Context, name string) (Place, bool, error)
+	// Teardown destroys the box for name UNCONDITIONALLY — the destroy-by-name
+	// counterpart to Provision, and the where-half of Stop. Unlike Open it does
+	// NOT gate on liveness, so a box that exists but is not running is still
+	// torn down (otherwise it leaks: a non-Running pod + its PVC, a t3 event
+	// watcher, a tmux corpse). Idempotent: returns nil when nothing exists.
+	Teardown(ctx context.Context, name string) error
 	// List returns the names of running boxes with the given prefix. (←ListRunning)
 	List(ctx context.Context, prefix string) ([]string, error)
 	Capabilities() PlaceCapabilities

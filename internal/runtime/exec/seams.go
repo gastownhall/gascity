@@ -62,6 +62,13 @@ func (r *execRuntime) Open(_ context.Context, name string) (runtime.Place, bool,
 	return &execPlace{p: r.p, name: name}, true, nil
 }
 
+// Teardown destroys the box for name UNCONDITIONALLY (←Stop where-half). Unlike
+// Open it does not gate on liveness, so a non-running box is still torn down
+// instead of leaked (SEAM-1/2/3).
+func (r *execRuntime) Teardown(_ context.Context, name string) error {
+	return r.p.Stop(name)
+}
+
 // List returns running session names with the prefix (←ListRunning).
 func (r *execRuntime) List(_ context.Context, prefix string) ([]string, error) {
 	return r.p.ListRunning(prefix)

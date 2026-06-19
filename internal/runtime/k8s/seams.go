@@ -58,6 +58,14 @@ func (r *k8sRuntime) Open(_ context.Context, name string) (runtime.Place, bool, 
 	return &k8sPlace{p: r.p, name: name}, true, nil
 }
 
+// Teardown destroys the pod for name UNCONDITIONALLY (←Stop where-half). Unlike
+// Open it does not gate on liveness, so a Pending/Failed/CrashLoopBackOff or
+// Running-but-tmux-dead pod is still deleted (by label) instead of leaking the
+// pod + its PVC (SEAM-1).
+func (r *k8sRuntime) Teardown(_ context.Context, name string) error {
+	return r.p.Stop(name)
+}
+
 // List returns running session names with the prefix (←ListRunning).
 func (r *k8sRuntime) List(_ context.Context, prefix string) ([]string, error) {
 	return r.p.ListRunning(prefix)

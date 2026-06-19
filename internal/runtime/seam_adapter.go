@@ -86,14 +86,19 @@ func (s *seamProvider) attach(name string) (Attachment, bool) {
 
 func (s *seamProvider) Stop(name string) error {
 	ctx := context.Background()
-	place, ok, err := s.rt.Open(ctx, name)
-	if err != nil || !ok {
-		return nil // idempotent: already gone
+	// Best-effort detach the live attachment first (how-half). This is a no-op
+	// for the carriers (their Attachment.Close is empty), but harmless and
+	// correct for any stateful transport. We do NOT gate teardown on this: a box
+	// that exists but is not running has no live attachment yet still must be
+	// destroyed.
+	if place, ok, err := s.rt.Open(ctx, name); err == nil && ok {
+		if att, ok, _ := s.tp.Open(ctx, place, name); ok {
+			_ = att.Close(ctx)
+		}
 	}
-	if att, ok, _ := s.tp.Open(ctx, place, name); ok {
-		_ = att.Close(ctx) // how-half
-	}
-	return place.Teardown(ctx) // where-half
+	// Teardown is UNCONDITIONAL (does not gate on liveness), so a non-Running
+	// box is still torn down instead of leaking. (←Stop where-half; SEAM-1/2/3.)
+	return s.rt.Teardown(ctx, name)
 }
 
 func (s *seamProvider) Interrupt(name string) error {

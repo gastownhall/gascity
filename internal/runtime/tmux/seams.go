@@ -55,6 +55,14 @@ func (r *tmuxRuntime) Open(_ context.Context, name string) (runtime.Place, bool,
 	return &tmuxPlace{p: r.p, name: name}, true, nil
 }
 
+// Teardown kills the tmux session for name UNCONDITIONALLY (←Stop where-half).
+// Unlike Open it does not gate on liveness, so a dead/corpse (pane_dead) session
+// is still killed instead of surviving while the reaper frees the slot
+// (SEAM-3 / the #2437 ghost-accumulation leak).
+func (r *tmuxRuntime) Teardown(_ context.Context, name string) error {
+	return r.p.Stop(name)
+}
+
 // List returns running session names with the prefix (←ListRunning).
 func (r *tmuxRuntime) List(_ context.Context, prefix string) ([]string, error) {
 	return r.p.ListRunning(prefix)

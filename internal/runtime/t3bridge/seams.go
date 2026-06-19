@@ -60,6 +60,14 @@ func (r *t3Runtime) Open(_ context.Context, name string) (runtime.Place, bool, e
 	return &t3Place{p: r.p, name: name}, true, nil
 }
 
+// Teardown tears down the thread/session for name UNCONDITIONALLY (←Stop
+// where-half). Unlike Open it does not gate on liveness, so a stopped/idle/error
+// thread is still cleaned up — stopping the event watcher goroutine, clearing
+// bridge meta, and dispatching session-stop — instead of leaking it (SEAM-2).
+func (r *t3Runtime) Teardown(_ context.Context, name string) error {
+	return r.p.Stop(name)
+}
+
 // List returns running session names with the prefix (←ListRunning).
 func (r *t3Runtime) List(_ context.Context, prefix string) ([]string, error) {
 	return r.p.ListRunning(prefix)
