@@ -41,6 +41,10 @@ func TestNoBdExecOutsideBeads(t *testing.T) {
 		filepath.Join("internal", "deps") + string(filepath.Separator),   // version checks only (bd version)
 		filepath.Join("internal", "doctor") + string(filepath.Separator), // health checks query bd config directly
 		filepath.Join("internal", "dolt") + string(filepath.Separator),   // upstream-synced from gastown
+		// env.ledger conformance probe execs `bd ready` INSIDE the provisioned
+		// box (via the runtime exec op), to verify the session's bd can reach the
+		// work ledger — a box-side capability probe, not a gc-side bd subprocess.
+		filepath.Join("internal", "runtime", "runtimecapability") + string(filepath.Separator),
 		filepath.Join("test", "integration") + string(filepath.Separator),
 		filepath.Join("cmd", "gc", "dashboard") + string(filepath.Separator), // dashboard server uses bd directly
 	}
