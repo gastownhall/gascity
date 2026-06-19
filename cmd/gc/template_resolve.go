@@ -458,18 +458,24 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			if resolved != nil {
 				binding = resolved.UpstreamEnv
 			}
-			for _, r := range []struct{ value, envName, field string }{
-				{spec.BaseURL, binding.BaseURL, "base_url"},
-				{spec.APIKey, binding.APIKey, "api_key"},
-				{spec.AuthToken, binding.AuthToken, "auth_token"},
+			// Per field, the target env-var name is the upstream's override if set
+			// (for gateway harnesses), else the harness binding, else a hard error.
+			for _, r := range []struct{ value, override, bound, field string }{
+				{spec.BaseURL, spec.BaseURLEnv, binding.BaseURL, "base_url"},
+				{spec.APIKey, spec.APIKeyEnv, binding.APIKey, "api_key"},
+				{spec.AuthToken, spec.AuthTokenEnv, binding.AuthToken, "auth_token"},
 			} {
 				if r.value == "" {
 					continue
 				}
-				if r.envName == "" {
-					return TemplateParams{}, fmt.Errorf("agent %q upstream %q sets %s, but its harness %q declares no upstream_env.%s binding", qualifiedName, upstreamName, r.field, resolvedProviderName(resolved), r.field)
+				envName := r.override
+				if envName == "" {
+					envName = r.bound
 				}
-				env[r.envName] = os.ExpandEnv(r.value)
+				if envName == "" {
+					return TemplateParams{}, fmt.Errorf("agent %q upstream %q sets %s, but its harness %q declares no upstream_env.%s binding (set %s_env on the upstream, or upstream_env.%s on the harness)", qualifiedName, upstreamName, r.field, resolvedProviderName(resolved), r.field, r.field, r.field)
+				}
+				env[envName] = os.ExpandEnv(r.value)
 			}
 		}
 		// Raw env is the harness-specific escape hatch, merged LAST (wins over the

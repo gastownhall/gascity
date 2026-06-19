@@ -110,6 +110,26 @@ func TestResolveTemplateRendersAbstractUpstreamPerHarness(t *testing.T) {
 	}
 }
 
+// A GATEWAY harness (no single binding) works when the upstream names its own
+// target env var (*_env override). Precedence: upstream override > harness
+// binding. This handles opencode fronting groq/cerebras where the credential env
+// is upstream-dependent.
+func TestResolveTemplateUpstreamEnvNameOverride(t *testing.T) {
+	t.Setenv("GROQ_KEY", "gsk-secret")
+	city := &config.City{Upstreams: map[string]config.UpstreamSpec{
+		"groq": {APIKey: "$GROQ_KEY", APIKeyEnv: "GROQ_API_KEY"},
+	}}
+	params := upstreamTestParams(t, city) // provider "test" declares NO harness binding
+	agent := &config.Agent{Name: "runner", Upstream: "groq"}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got := tp.Env["GROQ_API_KEY"]; got != "gsk-secret" {
+		t.Errorf("GROQ_API_KEY = %q, want the $VAR-resolved key (upstream override)", got)
+	}
+}
+
 // An abstract upstream field with no matching harness binding is a hard error
 // (config-surface §4: never a silent no-op).
 func TestResolveTemplateAbstractUpstreamNoBindingErrors(t *testing.T) {

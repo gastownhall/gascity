@@ -37,6 +37,15 @@ type UpstreamSpec struct {
 	// for harnesses/upstreams that use a token), rendered onto the harness's
 	// auth_token env var name.
 	AuthToken string `toml:"auth_token,omitempty"`
+	// BaseURLEnv/APIKeyEnv/AuthTokenEnv override the HARNESS binding's env-var
+	// name for the corresponding abstract field. Needed for GATEWAY harnesses —
+	// one CLI (e.g. opencode) fronting many upstreams where the credential env
+	// var is upstream-dependent (GROQ_API_KEY, CEREBRAS_API_KEY, …), so the
+	// HARNESS has no single binding and the UPSTREAM names its own target.
+	// Precedence per field: this override > the harness binding > error.
+	BaseURLEnv   string `toml:"base_url_env,omitempty"`
+	APIKeyEnv    string `toml:"api_key_env,omitempty"`
+	AuthTokenEnv string `toml:"auth_token_env,omitempty"`
 	// Env is a harness-specific escape hatch: raw env keys merged AFTER the
 	// abstract fields render. Values may use $VAR refs.
 	Env map[string]string `toml:"env,omitempty"`
