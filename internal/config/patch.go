@@ -51,6 +51,8 @@ type AgentPatch struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Upstream overrides the model-serving endpoint selection (Phase C).
+	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
 	// the pack-defined args; set to an empty list to clear them; set to a
 	// populated list to replace them entirely (full replace, not append).
@@ -452,6 +454,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.Provider != nil {
 		a.Provider = *p.Provider
+	}
+	if p.Upstream != nil {
+		a.Upstream = *p.Upstream
 	}
 	if p.Args != nil {
 		a.Args = append([]string(nil), (*p.Args)...)

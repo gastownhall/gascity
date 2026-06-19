@@ -2617,6 +2617,9 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.Provider != nil {
 		a.Provider = *ov.Provider
 	}
+	if ov.Upstream != nil {
+		a.Upstream = *ov.Upstream
+	}
 	if ov.Args != nil {
 		a.Args = append([]string(nil), (*ov.Args)...)
 	}

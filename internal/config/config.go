@@ -170,6 +170,10 @@ type City struct {
 	Workspace Workspace `toml:"workspace"`
 	// Providers defines named provider presets for agent startup.
 	Providers map[string]ProviderSpec `toml:"providers,omitempty"`
+	// Upstreams defines named model-serving endpoint presets selectable per
+	// agent via the Upstream axis (Phase C). Each maps a name → serving env
+	// (base URL + credential refs); see UpstreamSpec.
+	Upstreams map[string]UpstreamSpec `toml:"upstreams,omitempty"`
 	// Packs defines named remote pack sources fetched via git (V1 mechanism).
 	//
 	// Legacy pack source map, accepted for migration and fetch/list
@@ -612,6 +616,8 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Upstream overrides the model-serving endpoint selection (Phase C).
+	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
 	// the pack-defined args; set to an empty list to clear them; set to a
 	// populated list to replace them entirely (full replace, not append).
@@ -2805,6 +2811,10 @@ type AgentDefaults struct {
 	// (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at
 	// runtime. Agents with their own model override would take precedence.
 	Model string `toml:"model,omitempty"`
+	// Upstream is the default model-serving endpoint (a key in [upstreams])
+	// for agents that do not set their own upstream (Phase C — the Upstream
+	// axis). Applied to agents with an empty Upstream by ApplyAgentDefaults.
+	Upstream string `toml:"upstream,omitempty"`
 	// WakeMode is the parsed/composed default wake mode ("resume" or
 	// "fresh"), but it is not yet auto-applied at runtime.
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
@@ -2951,6 +2961,11 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// Upstream selects the model-serving endpoint (a key in [upstreams]) for
+	// this agent — WHO serves the model. "" (default) falls back to
+	// agent_defaults.upstream; if still empty, no upstream env is injected
+	// (ambient behavior). Switching it relaunches the agent in the warm box.
+	Upstream string `toml:"upstream,omitempty"`
 	// InheritedProvider records the pack-scoped default provider for agents
 	// loaded from imported packs. Runtime-only.
 	InheritedProvider string `toml:"-" json:"-"`
@@ -4195,6 +4210,19 @@ func ApplyAgentDefaults(cfg *City) {
 			}
 			if cfg.Agents[i].DefaultSlingFormula == nil && cfg.Agents[i].InheritedDefaultSlingFormula == nil {
 				cfg.Agents[i].DefaultSlingFormula = &formula
+			}
+		}
+	}
+
+	// Upstream axis (Phase C): agents with no explicit upstream inherit the
+	// city-level default so model-serving selection can be set once city-wide.
+	if upstream := cfg.AgentDefaults.Upstream; upstream != "" {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].Upstream == "" {
+				cfg.Agents[i].Upstream = upstream
 			}
 		}
 	}
