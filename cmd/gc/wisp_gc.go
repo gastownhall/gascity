@@ -153,9 +153,10 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 		}
 
 		// Close abandoned OPEN roots BEFORE the closed-root purge below so a
-		// root closed this tick becomes eligible for purging on a later tick
-		// (once it has aged past m.ttl as a closed bead). Best-effort: never
-		// fails the GC tick.
+		// root the sweep closes this tick can be collected by the purge in the
+		// same tick when it has already aged past m.ttl (the purge gates on
+		// CreatedAt, not close time), or on a later tick otherwise. Best-effort:
+		// never fails the GC tick.
 		if abandonedErr := closeAbandonedRoots(store, now); abandonedErr != nil {
 			deleteErr = errors.Join(deleteErr, abandonedErr)
 		}
@@ -198,32 +199,74 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 	return purged, deleteErr
 }
 
-func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
+// wispGCRootSelector pairs a List selector with a short label used for error
+// context. The selectors returned by wispGCRootSelectors, unioned, cover every
+// root class the wisp GC can close or collect.
+type wispGCRootSelector struct {
+	label string
+	query beads.ListQuery
+}
+
+// wispGCRootSelectors returns the conjunctive List selectors whose union is the
+// full root universe the wisp GC reaps:
+//   - v1 poured molecule roots (type=molecule)
+//   - wisp-kinded roots (gc.kind=wisp)
+//   - graph.v2 workflow roots, which compile as type=task carrying
+//     gc.formula_contract=graph.v2 AND gc.kind=workflow (see
+//     internal/formula/compile.go) — NOT type=molecule, so the molecule
+//     selector alone never matches them.
+//
+// closedWispGCEntries and openWispGCRootCandidates MUST enumerate this same
+// universe, differing only in the statuses they pass, so that every root the
+// abandoned-root closer can close (openWispGCRootCandidates) is later
+// collectible by the closed-root purge (closedWispGCEntries).
+func wispGCRootSelectors() []wispGCRootSelector {
+	return []wispGCRootSelector{
+		{"molecule", beads.ListQuery{Type: "molecule", TierMode: beads.TierBoth}},
+		{"wisp", beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: "wisp"}, TierMode: beads.TierBoth}},
+		{"graph.v2", beads.ListQuery{Metadata: map[string]string{beadmeta.FormulaContractMetadataKey: "graph.v2"}, TierMode: beads.TierBoth}},
+		{"workflow", beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: "workflow"}, TierMode: beads.TierBoth}},
+	}
+}
+
+// enumerateWispGCRoots unions wispGCRootSelectors across the given statuses,
+// deduping by bead ID so a root matching more than one selector (for example a
+// graph.v2 root that also carries gc.kind=workflow) appears once.
+func enumerateWispGCRoots(store beads.Store, statuses ...string) ([]beads.Bead, error) {
 	entries := make([]beads.Bead, 0)
 	seen := make(map[string]struct{})
-	appendUnique := func(items []beads.Bead) {
-		for _, item := range items {
-			if item.ID == "" {
-				continue
+	selectors := wispGCRootSelectors()
+	for _, status := range statuses {
+		for _, sel := range selectors {
+			q := sel.query
+			q.Status = status
+			items, err := store.List(q)
+			if err != nil {
+				return nil, fmt.Errorf("listing %s %s roots: %w", status, sel.label, err)
 			}
-			if _, ok := seen[item.ID]; ok {
-				continue
+			for _, item := range items {
+				if item.ID == "" {
+					continue
+				}
+				if _, ok := seen[item.ID]; ok {
+					continue
+				}
+				seen[item.ID] = struct{}{}
+				entries = append(entries, item)
 			}
-			seen[item.ID] = struct{}{}
-			entries = append(entries, item)
 		}
 	}
-	molecules, err := store.List(beads.ListQuery{Status: "closed", Type: "molecule", TierMode: beads.TierBoth})
-	if err != nil {
-		return nil, fmt.Errorf("listing closed molecule roots: %w", err)
-	}
-	appendUnique(molecules)
-	wisps, err := store.List(beads.ListQuery{Status: "closed", Metadata: map[string]string{beadmeta.KindMetadataKey: "wisp"}, TierMode: beads.TierBoth})
-	if err != nil {
-		return nil, fmt.Errorf("listing closed wisp roots: %w", err)
-	}
-	appendUnique(wisps)
 	return entries, nil
+}
+
+// closedWispGCEntries lists every CLOSED root across the full wisp GC root
+// universe (see wispGCRootSelectors). The closed-root purge deletes each whose
+// ownership closure has aged past the TTL. Enumerating graph.v2/workflow roots
+// here — not just molecule/wisp — is what lets a graph workflow root the
+// abandoned-root sweep closes (type=task) actually be collected rather than
+// linger as permanent closed residue.
+func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
+	return enumerateWispGCRoots(store, "closed")
 }
 
 // reapOrphanedClosedWisps reaps closed wisp-tier descendants whose owning root
@@ -249,9 +292,8 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	}
 
 	candidates, err := store.List(beads.ListQuery{
-		Status:    "closed",
-		TierMode:  beads.TierWisps,
-		AllowScan: true,
+		Status:   "closed",
+		TierMode: beads.TierWisps,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("listing closed wisp-tier rows: %w", err)
@@ -267,7 +309,11 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	reaped := 0
 	var deleteErr error
 	for _, c := range candidates {
-		if batchCap > 0 && reaped >= batchCap {
+		// The batch cap bounds DELETION work per sweep. In dry-run keep counting
+		// past the cap so the logged estimate reflects the true eligible backlog
+		// an operator needs before enabling enforcement, not just the cap-sized
+		// prefix the enforced sweep would reap this tick.
+		if enforce && batchCap > 0 && reaped >= batchCap {
 			break
 		}
 
@@ -317,9 +363,12 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	}
 
 	if reaped > 0 {
-		if enforce {
+		switch {
+		case enforce:
 			log.Printf("wisp gc: reaped %d orphaned closed wisp(s)", reaped)
-		} else {
+		case batchCap > 0:
+			log.Printf("wisp gc: %d orphaned closed wisp(s) would be reaped (dry-run; set %s=1 to enforce; enforced sweeps reap up to %d per tick)", reaped, reapOrphansEnv, batchCap)
+		default:
 			log.Printf("wisp gc: %d orphaned closed wisp(s) would be reaped (dry-run; set %s=1 to enforce)", reaped, reapOrphansEnv)
 		}
 	}
@@ -333,15 +382,16 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	return reaped, errors.Join(collectErr, deleteErr)
 }
 
-// closeAbandonedRoots closes OPEN workflow roots whose entire descendant
-// subtree is terminal and whose own last activity is older than the
+// closeAbandonedRoots closes OPEN workflow and v1 molecule roots whose entire
+// descendant subtree is terminal and whose own last activity is older than the
 // conservative TTL. This is the periodic counterpart to the edge-triggered
 // reactive autoclose (molecule_autoclose.go): the reactive path only re-checks
 // a root when a child-close event names it, and the closed-root purge only
 // DELETES already-closed roots — so an open root whose descendants all went
 // terminal without a final child-close event (or whose final event was lost)
 // stays open forever and fuels the wisp backlog. This sweep is the only path
-// that CLOSES such abandoned roots.
+// that CLOSES such abandoned roots. Its candidate scope (isAbandonedRootCandidate)
+// mirrors the reactive path so v1 type=molecule roots are not silently excluded.
 //
 // Guards (each is load-bearing — see BUG 4):
 //  1. TTL: skip roots with activity newer than now-wispGCCloseAbandonedTTL so
@@ -349,8 +399,11 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 //     raced.
 //  2. descendants > 0: never close a stepless root — that would race the
 //     instantiator (mirrors autocloseMoleculeIfComplete).
-//  3. ZFC-exempt: skip roots carrying the gc.gc_exempt marker (the ZFC-exempt
-//     compactor-loop root must NOT be auto-closed).
+//  3. Exempt: skip roots carrying the gc.gc_exempt marker. This is a generic,
+//     operator-supplied opt-out — the SDK never stamps it (stamping a specific
+//     named root would hardcode a deployment role). A deployment marks any
+//     long-lived root it never wants auto-closed; the guard is a no-op until it
+//     does, which is safe under the dry-run default.
 //  4. Best-effort: per-root errors are joined and logged; this never fails the
 //     GC tick.
 //  5. Dry-run default: unless closeAbandonedEnforced() returns true the sweep
@@ -372,12 +425,13 @@ func closeAbandonedRoots(store beads.Store, now time.Time) error {
 	closed := 0
 	wouldClose := 0
 	for _, root := range candidates {
-		if !sourceworkflow.IsWorkflowRoot(root) {
+		if !isAbandonedRootCandidate(root) {
 			continue
 		}
 		if convoycore.IsTerminalStatus(root.Status) {
-			// Defensive: the query already filters to open, but a status the
-			// store reports as terminal is not abandoned.
+			// Defensive: the candidate query already filters to nonterminal
+			// (open/in_progress) roots, but a status the store reports as
+			// terminal is not abandoned.
 			continue
 		}
 		// Guard 3: never close a ZFC-exempt root.
@@ -421,9 +475,30 @@ func closeAbandonedRoots(store beads.Store, now time.Time) error {
 	return closeErr
 }
 
-// isGCExempt reports whether a root is marked exempt from garbage-collection
-// auto-close via the gc.gc_exempt metadata marker. The known ZFC-exempt
-// compactor-loop root carries this marker and must never be auto-closed.
+// isAbandonedRootCandidate reports whether a root is in scope for the periodic
+// abandoned-root closer. It accepts the same root universe the reactive
+// autoclose path covers: source-workflow roots (gc.kind=workflow or
+// gc.formula_contract=graph.v2, via sourceworkflow.IsWorkflowRoot) PLUS v1
+// poured molecule roots (type=molecule, which carry neither kind nor contract
+// metadata — see internal/formula/compile.go). The reactive
+// autocloseMoleculeIfComplete closes type=molecule roots when a child-close
+// event names them; this periodic sweep is the backstop for when that event was
+// lost, so it must consider the same molecule roots — otherwise a v1 molecule
+// whose final child-close event was dropped would stay open forever and keep
+// fueling the wisp backlog the PR targets.
+func isAbandonedRootCandidate(b beads.Bead) bool {
+	return sourceworkflow.IsWorkflowRoot(b) || b.Type == "molecule"
+}
+
+// isGCExempt reports whether a root carries the gc.gc_exempt opt-out marker.
+// The marker is operator/deployment-supplied: a deployment stamps
+// gc.gc_exempt=true on any long-lived root it never wants the abandoned-root
+// sweep to close (for example a perpetual compaction-loop root). The SDK
+// deliberately does NOT stamp it for any specific root — hardcoding a named
+// deployment root here would violate the zero-hardcoded-roles invariant — so
+// this guard protects exactly the roots a deployment has explicitly marked, and
+// nothing more. Until a deployment marks its protected roots the guard is a
+// no-op, which is safe because the closer stays dry-run by default.
 func isGCExempt(b beads.Bead) bool {
 	return parseBoolEnv(strings.TrimSpace(b.Metadata[beadmeta.GCExemptMetadataKey]))
 }
@@ -438,49 +513,16 @@ func beadLastActivity(b beads.Bead) time.Time {
 	return b.CreatedAt
 }
 
-// openWispGCRootCandidates mirrors closedWispGCEntries but lists OPEN
-// molecule roots and OPEN wisp-kinded roots, the universe the abandoned-root
-// sweep considers. Caller applies the IsWorkflowRoot / TTL / terminal / exempt
-// filters.
+// openWispGCRootCandidates lists every NONTERMINAL root across the full wisp GC
+// root universe (see wispGCRootSelectors), the candidates the abandoned-root
+// sweep considers. It enumerates BOTH open and in_progress: graph.v2 workflow
+// roots are promoted to in_progress at launch (sling.PromoteWorkflowLaunchBead),
+// so an open-only query would make a stale in_progress graph root with terminal
+// descendants invisible to the sweep — the exact lost-finalize leak this sweep
+// exists to close. The caller applies the IsWorkflowRoot / TTL / terminal /
+// exempt filters.
 func openWispGCRootCandidates(store beads.Store) ([]beads.Bead, error) {
-	entries := make([]beads.Bead, 0)
-	seen := make(map[string]struct{})
-	appendUnique := func(items []beads.Bead) {
-		for _, item := range items {
-			if item.ID == "" {
-				continue
-			}
-			if _, ok := seen[item.ID]; ok {
-				continue
-			}
-			seen[item.ID] = struct{}{}
-			entries = append(entries, item)
-		}
-	}
-	molecules, err := store.List(beads.ListQuery{Status: "open", Type: "molecule", TierMode: beads.TierBoth})
-	if err != nil {
-		return nil, fmt.Errorf("listing open molecule roots: %w", err)
-	}
-	appendUnique(molecules)
-	wisps, err := store.List(beads.ListQuery{Status: "open", Metadata: map[string]string{beadmeta.KindMetadataKey: "wisp"}, TierMode: beads.TierBoth})
-	if err != nil {
-		return nil, fmt.Errorf("listing open wisp roots: %w", err)
-	}
-	appendUnique(wisps)
-	graphRoots, err := store.List(beads.ListQuery{Status: "open", Metadata: map[string]string{beadmeta.FormulaContractMetadataKey: "graph.v2"}, TierMode: beads.TierBoth})
-	if err != nil {
-		return nil, fmt.Errorf("listing open graph.v2 roots: %w", err)
-	}
-	appendUnique(graphRoots)
-	// IsWorkflowRoot also accepts the legacy gc.kind=workflow label, so include
-	// those roots even when they carry neither the wisp kind nor the graph.v2
-	// contract (the caller still re-checks IsWorkflowRoot).
-	workflowRoots, err := store.List(beads.ListQuery{Status: "open", Metadata: map[string]string{beadmeta.KindMetadataKey: "workflow"}, TierMode: beads.TierBoth})
-	if err != nil {
-		return nil, fmt.Errorf("listing open workflow roots: %w", err)
-	}
-	appendUnique(workflowRoots)
-	return entries, nil
+	return enumerateWispGCRoots(store, "open", "in_progress")
 }
 
 func readMessageWispGCEntries(store beads.Store) ([]beads.Bead, error) {
