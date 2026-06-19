@@ -518,33 +518,6 @@ jobs:
       - name: Run integration shard
         run: ${{ matrix.command }}
 
-  integration-sqlite-coordstore:
-    name: Integration / SQLite coordination store
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.integration == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 30
-    env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.5"
-      GC_BEADS: sqlite
-      GC_ACCEPTANCE_BEADS_PROVIDER: sqlite
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "true"
-      - name: Install tools
-        run: make install-tools
-      - name: Integration tests (SQLite coordination store)
-        run: make test-integration-bdstore
-      - name: Acceptance tests (SQLite coordination store, Tier A)
-        run: make test-acceptance
-
   worker-core-claude:
     name: Worker core (Claude)
     needs:

@@ -79,6 +79,29 @@ jobs:
           go test -tags acceptance_c -timeout 45m -v ./test/acceptance/tier_c/...
           -run 'Test(BdCmdSeparatesStdoutAndStderrOnError|BdCmdReturnsPureStdoutOnSuccessfulJSONCommand|Swarm_SlingWorkCoderCommits|Gastown_PolecatLifecycle|Gastown_MayorDispatchPipeline|TierCEnvAuthDoesNotMirrorAuthTokenIntoAPIKey)$'
 
+  integration-sqlite-coordstore:
+    name: Integration / SQLite coordination store
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DOLT_VERSION: "2.1.7"
+      BD_VERSION: "v1.0.5"
+      GC_BEADS: sqlite
+      GC_ACCEPTANCE_BEADS_PROVIDER: sqlite
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Install tools
+        run: make install-tools
+      - name: Integration tests (SQLite coordination store)
+        run: make test-integration-bdstore
+      - name: Acceptance tests (SQLite coordination store, Tier A)
+        run: make test-acceptance
+
   # Catches registry-side drift: a new gastown release published to
   # gascity-packs makes the local pins stale without any PR to trigger
   # the pack-gate pin check in ci.yml.
