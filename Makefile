@@ -578,7 +578,7 @@ test-cover-mac: test-fsys-darwin-compile
 	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.txt $(UNIT_COVER_PKGS_NONCMDGC)
 
 ## test-cover-noncmdgc: run unit coverage for all packages except cmd/gc (CI parallel half).
-test-cover-noncmdgc:
+test-cover-noncmdgc: test-fsys-darwin-compile
 	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.noncmdgc.txt $(UNIT_COVER_PKGS_NONCMDGC)
 
 ## test-cover-cmdgc-shard: run unit coverage for one cmd/gc shard (CMD_GC_COVER_SHARD of CMD_GC_COVER_TOTAL).
