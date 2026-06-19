@@ -479,6 +479,12 @@
               "null"
             ]
           },
+          "Upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "WakeMode": {
             "type": [
               "string",
@@ -506,6 +512,7 @@
           "PromptTemplate",
           "Session",
           "Provider",
+          "Upstream",
           "Args",
           "StartCommand",
           "Lifecycle",

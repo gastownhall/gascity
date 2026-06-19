@@ -813,6 +813,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Nudge:                        "nudge text",
 		Session:                      "acp",
 		Provider:                     "claude",
+		Upstream:                     "anthropic",
 		InheritedProvider:            "codex",
 		StartCommand:                 "claude --dangerously",
 		Lifecycle:                    config.AgentLifecycleOneShot,

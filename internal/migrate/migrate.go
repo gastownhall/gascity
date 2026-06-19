@@ -65,6 +65,7 @@ type agentFile struct {
 	Nudge                  string            `toml:"nudge,omitempty"`
 	Session                string            `toml:"session,omitempty"`
 	Provider               string            `toml:"provider,omitempty"`
+	Upstream               string            `toml:"upstream,omitempty"`
 	StartCommand           string            `toml:"start_command,omitempty"`
 	Lifecycle              string            `toml:"lifecycle,omitempty"`
 	Args                   []string          `toml:"args,omitempty"`
@@ -895,6 +896,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		Nudge:                  agent.Nudge,
 		Session:                agent.Session,
 		Provider:               agent.Provider,
+		Upstream:               agent.Upstream,
 		StartCommand:           agent.StartCommand,
 		Lifecycle:              agent.Lifecycle,
 		Args:                   agent.Args,
