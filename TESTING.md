@@ -404,6 +404,17 @@ test coverage. This table is the checklist for new provider implementations.
    sequencing), add a coordination test using the `exec:<spy>` pattern
 3. Update this table
 
+## Test deadline rule
+
+Any test timer that races a goroutine, exec, or socket start must be ≥ 10s.
+Use `testutil.GoroutineRaceTimeout` or `testutil.ExecRaceTimeout` from
+`internal/testutil/timeout.go`.
+
+A sub-second constant for such a timer is a CI reliability defect: the
+operation completes in < 1s on an idle machine but fails under CI CPU
+saturation. The only exception is a timer that is itself the subject under
+test (e.g., testing that a function honours a 100ms deadline).
+
 ## Decision guide
 
 | Question you're testing | Tier |
