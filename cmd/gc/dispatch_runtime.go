@@ -63,27 +63,10 @@ func controlDispatcherSessionRuntimeMissing(cityPath, qualifiedName string) bool
 
 // sessionRuntimeMissingInStore reports whether any open session bead for the
 // agent (selected by its agent:<qualified> label) projects the runtime-missing
-// lifecycle reason in the given store.
+// lifecycle reason in the given store. The projection lives in internal/session
+// so the API sling path can share it without importing package main.
 func sessionRuntimeMissingInStore(store beads.Store, qualifiedName string) bool {
-	qualifiedName = strings.TrimSpace(qualifiedName)
-	if store == nil || qualifiedName == "" {
-		return false
-	}
-	sessions, err := store.List(beads.ListQuery{
-		Type:   sessionpkg.BeadType,
-		Label:  "agent:" + qualifiedName,
-		Status: "open",
-	})
-	if err != nil {
-		return false
-	}
-	now := time.Now().UTC()
-	for _, b := range sessions {
-		if sessionpkg.LifecycleDisplayReason(b.Status, b.Metadata, now) == sessionpkg.LifecycleReasonRuntimeMissing {
-			return true
-		}
-	}
-	return false
+	return sessionpkg.RuntimeMissingInStore(store, qualifiedName)
 }
 
 // applyGraphRouting delegates to graphroute.ApplyGraphRouting with CLI

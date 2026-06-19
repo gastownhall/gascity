@@ -564,6 +564,13 @@ func populateSlingDepsCallbacks(deps *slingDeps) {
 	deps.Notify = &cliNotifier{}
 	deps.DirectSessionResolver = cliDirectSessionResolver
 	deps.Router = cliBeadRouter{deps: deps}
+	// Wire the rig→city control-dispatcher fallback (#3454) into the sling
+	// graph-routing path. deps.CityPath is read lazily at routing time, and the
+	// closure short-circuits before opening a store when no city.toml exists, so
+	// it never spins up a managed Dolt backend on a bare working dir.
+	deps.ControlDispatcherRuntimeMissing = func(qualifiedName string) bool {
+		return controlDispatcherSessionRuntimeMissing(deps.CityPath, qualifiedName)
+	}
 }
 
 func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {

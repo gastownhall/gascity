@@ -83,3 +83,19 @@ func TestControlDispatcherSessionRuntimeMissing_NoCityTomlSkips(t *testing.T) {
 		t.Fatal("expected false for empty cityPath")
 	}
 }
+
+// TestPopulateSlingDepsCallbacksWiresControlDispatcherRuntimeMissing guards the
+// CLI sling path's wiring of the rig→city control-dispatcher fallback (#3454).
+// CityPath points at a dir without city.toml so the wired closure short-circuits
+// before opening any store — the package-wide Dolt leak-guard would otherwise
+// trip when the sling hot path spins up a managed backend.
+func TestPopulateSlingDepsCallbacksWiresControlDispatcherRuntimeMissing(t *testing.T) {
+	deps := slingDeps{CityPath: t.TempDir()}
+	populateSlingDepsCallbacks(&deps)
+	if deps.ControlDispatcherRuntimeMissing == nil {
+		t.Fatal("populateSlingDepsCallbacks did not wire ControlDispatcherRuntimeMissing")
+	}
+	if deps.ControlDispatcherRuntimeMissing("gc-contrib/control-dispatcher") {
+		t.Fatal("expected false for a city dir without city.toml (no store opened)")
+	}
+}
