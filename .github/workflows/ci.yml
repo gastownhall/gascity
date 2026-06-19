@@ -200,13 +200,15 @@ jobs:
       - name: Docs
         run: make check-docs
 
-  preflight-unit-cover:
-    name: Preflight / unit cover
+  # Coverage reporting only matters on the main branch — codecov regression
+  # info doesn't need to gate every PR, and the full ./... unit suite is
+  # already covered by integration-shards, cmd-gc-process, and acceptance A.
+  # Split into two parallel push-only jobs to take the serial cmd/gc loop off
+  # the critical path (ga-29jlpr); Codecov merges uploads server-side.
+  preflight-unit-cover-noncmdgc:
+    name: Preflight / unit cover (noncmdgc)
     needs:
       - runner-policy
-    # Coverage reporting only matters on the main branch — codecov regression
-    # info doesn't need to gate every PR, and the full ./... unit suite is
-    # already covered by integration-shards, cmd-gc-process, and acceptance A.
     if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
@@ -221,12 +223,47 @@ jobs:
           install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
-      - name: Test
-        run: make test-cover
+      - name: Unit cover (non-cmd/gc)
+        run: make test-cover-noncmdgc
       - name: Upload coverage to Codecov
+        if: hashFiles('coverage.noncmdgc.txt') != ''
         uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
-          files: coverage.txt
+          files: coverage.noncmdgc.txt
+          flags: unit-cover-noncmdgc
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true
+
+  preflight-unit-cover-cmdgc:
+    name: Preflight / unit cover (cmd/gc ${{ matrix.shard }} of 6)
+    needs:
+      - runner-policy
+    if: github.event_name == 'push'
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    env:
+      DOLT_VERSION: "2.1.7"
+      BD_VERSION: "v1.0.5"
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Install tools
+        run: make install-tools
+      - name: Unit cover (cmd/gc shard ${{ matrix.shard }} of 6)
+        run: make test-cover-cmdgc-shard CMD_GC_COVER_SHARD=${{ matrix.shard }} CMD_GC_COVER_TOTAL=6
+      - name: Upload coverage to Codecov
+        if: hashFiles(format('coverage.cmdgc.{0}.txt', matrix.shard)) != ''
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
+        with:
+          files: coverage.cmdgc.${{ matrix.shard }}.txt
+          flags: unit-cover-cmdgc
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
 
