@@ -97,6 +97,18 @@ care about.
 | `protocol` | `script protocol` | — | handshake JSON (see below) |
 | `is-attached` | `script is-attached <name>` | — | `true` or `false` |
 | `exec` | `script exec <name>` | command | combined output (op exit == command exit) |
+| `provision` | `script provision <name>` | JSON config | — |
+
+**Box without agent (the un-weld).** `provision` is `start` MINUS the agent
+launch: it creates/prepares the box (PreStart, SessionSetup, SessionSetupScript,
+SessionLive — every box step `start` runs EXCEPT spawning the agent in tmux) and
+returns. The controller then launches the agent itself by exec-ing `tmux
+new-session` / `respawn-pane -k` over the `exec` op, so a launch-only config
+change relaunches the agent in the warm box instead of reprovisioning (B2.3). A
+pack opts in by declaring `proc.provision` (and `proc.exec`, since the controller
+drives the launch over `exec`); without it, the welded `start` op provisions and
+launches as before, and the controller issues no `provision`/launch. The op is
+gated by the `RPP-PROVISION-001` conformance requirement.
 
 **The connection primitive (slim RPP).** `exec` is the connection op
 (`RPP-CONN-001`): a carrier drives a box *through* `exec` rather than via
@@ -137,6 +149,8 @@ Capabilities:
 |------------|--------|
 | `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. |
 | `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. |
+| `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). |
+| `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
 
