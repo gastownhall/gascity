@@ -2085,6 +2085,18 @@ func addRunningPod(fake *fakeK8sOps, name, sessionLabel string) { //nolint:unpar
 	}
 }
 
+// addFailedPod adds a pod that exists by session label but is NOT Running, so
+// IsRunning(name) is false while Stop (list-by-label, any phase) still finds it.
+func addFailedPod(fake *fakeK8sOps, name, sessionLabel string) { //nolint:unparam // name varies in future tests
+	fake.pods[name] = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{"app": "gc-agent", "gc-session": sessionLabel},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodFailed},
+	}
+}
+
 func addRunningPodWithAnnotation(fake *fakeK8sOps, name, sessionLabel, sessionName string) {
 	fake.pods[name] = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{

@@ -11,7 +11,7 @@ import (
 )
 
 // hasSessionAlive marks the in-box tmux session as present so IsRunning is true.
-func hasSessionAlive(fake *fakeK8sOps, pod string) {
+func hasSessionAlive(fake *fakeK8sOps, pod string) { //nolint:unparam // pod varies in future tests
 	fake.setExecResult(pod, []string{"tmux", "has-session", "-t", tmuxSession}, "", nil)
 }
 
@@ -197,5 +197,38 @@ func TestSeamsK8sStageAndTeardown(t *testing.T) {
 	}
 	if !deleted {
 		t.Fatal("Teardown should call deletePod for the session pod")
+	}
+}
+
+// TestSeamsK8sStopDeletesNonRunningPod is the SEAM-1 carrier guard: Stop through
+// the full seam path (adapter + k8s Runtime.Teardown) must delete a pod that
+// EXISTS by label but is not Running (Pending/Failed/CrashLoopBackOff). The
+// pre-fix gated Stop no-opped here because Open reports not-running, leaking the
+// pod + its PVC.
+func TestSeamsK8sStopDeletesNonRunningPod(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addFailedPod(fake, "s", "s") // exists by label, but not Running
+	if p.IsRunning("s") {
+		t.Fatal("precondition: IsRunning must be false for a Failed pod")
+	}
+
+	// Drive Stop through the seams exactly as production does (NewSeamBacked).
+	seam := runtime.NewProviderFromSeams(p.Seams())
+	if err := seam.Stop("s"); err != nil {
+		t.Fatalf("seam Stop: %v", err)
+	}
+
+	if _, exists := fake.pods["s"]; exists {
+		t.Fatal("non-running pod still present after seam Stop (SEAM-1 leak)")
+	}
+	deleted := false
+	for _, c := range fake.calls {
+		if c.method == "deletePod" && c.pod == "s" {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Fatal("seam Stop should call deletePod for the non-running pod")
 	}
 }
