@@ -136,11 +136,9 @@ var (
 var (
 	initDirIfReadyEnsureBeadsProvider = ensureBeadsProvider
 	initDirIfReadyInitAndHookDir      = initAndHookDir
-	initDirIfReadyRetryDelay          = time.Second
+	initDirIfReadyWaitForManagedDolt  = waitForManagedDoltInitReady
 	initAndHookDirWaitForScopeReady   = waitForBeadsScopeReadyAfterRecovery
 )
-
-const initDirIfReadyRetryLimit = 2
 
 func isRetryableManagedDoltLifecycleError(err error) bool {
 	if err == nil {
@@ -292,31 +290,14 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 	return false, nil
 }
 
-func initDirIfReadyManagedDolt(cityPath, dir, prefix, provider string) error {
-	var err error
-	for attempt := 1; attempt <= initDirIfReadyRetryLimit; attempt++ {
-		if err = initDirIfReadyEnsureBeadsProvider(cityPath); err != nil {
-			err = fmt.Errorf("bead store: %w", err)
-		} else if err = initDirIfReadyInitAndHookDir(cityPath, dir, prefix); err == nil {
-			return nil
-		}
-		if attempt == initDirIfReadyRetryLimit || !shouldRetryInitDirIfReady(cityPath, provider, err) {
-			return err
-		}
-		time.Sleep(initDirIfReadyRetryDelay)
+func initDirIfReadyManagedDolt(cityPath, dir, prefix, _ string) error {
+	if err := initDirIfReadyEnsureBeadsProvider(cityPath); err != nil {
+		return fmt.Errorf("bead store: %w", err)
 	}
-	return err
-}
-
-func shouldRetryInitDirIfReady(cityPath, provider string, err error) bool {
-	if !providerUsesBdStoreContract(provider) || !cityUsesManagedDoltBeadsLifecycle(cityPath) {
-		return false
+	if err := initDirIfReadyWaitForManagedDolt(cityPath, managedDoltInitReadyTimeout); err != nil {
+		return err
 	}
-	owned, ownershipErr := managedDoltLifecycleOwned(cityPath)
-	if ownershipErr != nil || !owned {
-		return false
-	}
-	return isRetryableManagedDoltLifecycleError(err)
+	return initDirIfReadyInitAndHookDir(cityPath, dir, prefix)
 }
 
 func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.ConfigState, bool, error) {
