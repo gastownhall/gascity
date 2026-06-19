@@ -775,6 +775,15 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 	if err := query.Validate(); err != nil {
 		return nil, err
 	}
+	// A custom orderBy is applied per table in SQL, and the cross-table Go
+	// re-sort below runs only for the empty-orderBy default order, so a custom
+	// orderBy across more than one table set would concatenate independently
+	// ordered tables. Reject that shape explicitly rather than silently
+	// returning cross-table-unsorted results; the only custom-orderBy caller
+	// (Ready) correctly passes a single issues-only table set (#3449 review).
+	if orderBy != "" && len(sets) > 1 {
+		return nil, fmt.Errorf("doltlite: custom orderBy requires a single table set, got %d", len(sets))
+	}
 	// A bounded multi-table read can resolve its exact global top-N by
 	// selecting ids in one SQL statement and hydrating only those ids, instead
 	// of reading every matching row from both tables and cutting in Go. This
@@ -940,31 +949,54 @@ func (s *DoltliteReadStore) selectBoundedTopNIDs(query ListQuery, sets []doltlit
 	return ids, rows.Err()
 }
 
+// doltliteMaxHydrateIDsPerChunk bounds how many id placeholders a single
+// hydrateBeadsByID query may bind. The native DoltLite driver
+// (modernc.org/sqlite) caps a statement at SQLITE_MAX_VARIABLE_NUMBER = 32766
+// bound parameters. A bounded read's id selection is limited only by the query
+// limit, and the API derives that limit from an uncapped cursor offset
+// (internal/api/pagination.go), so a deep page can select tens of thousands of
+// ids. Hydrate the IN (...) clause in chunks well under the driver cap, leaving
+// headroom for the query's own tier/status/label/assignee predicate parameters,
+// so a deep cursor walk over a large rig cannot overflow the statement variable
+// limit (#3449 review).
+const doltliteMaxHydrateIDsPerChunk = 16000
+
 // hydrateBeadsByID fetches full bead rows for ids from each table set, applying
 // query's filters and deduping by id (issues-table rows win), exactly as the
-// full-read merge does.
+// full-read merge does. The id set is hydrated in chunks bounded by
+// doltliteMaxHydrateIDsPerChunk so a large bounded selection cannot exceed the
+// SQLite bound-parameter limit. The dedupe spans every chunk and table set, so
+// an issues-table row still wins over its wisp twin regardless of where the
+// chunk boundaries fall.
 func (s *DoltliteReadStore) hydrateBeadsByID(query ListQuery, sets []doltliteTableSet, ids []string) ([]Bead, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
 	merged := make([]Bead, 0, len(ids))
 	seen := make(map[string]struct{}, len(ids))
 	for _, tables := range sets {
-		rows, err := s.queryIssueTable(query, tables, "i.id IN ("+placeholders+")", args, 0, "")
-		if err != nil {
-			return nil, err
-		}
-		for _, row := range rows {
-			if _, ok := seen[row.ID]; ok {
-				continue
+		for start := 0; start < len(ids); start += doltliteMaxHydrateIDsPerChunk {
+			end := start + doltliteMaxHydrateIDsPerChunk
+			if end > len(ids) {
+				end = len(ids)
 			}
-			seen[row.ID] = struct{}{}
-			merged = append(merged, row)
+			chunk := ids[start:end]
+			placeholders := strings.TrimRight(strings.Repeat("?,", len(chunk)), ",")
+			args := make([]any, len(chunk))
+			for i, id := range chunk {
+				args[i] = id
+			}
+			rows, err := s.queryIssueTable(query, tables, "i.id IN ("+placeholders+")", args, 0, "")
+			if err != nil {
+				return nil, err
+			}
+			for _, row := range rows {
+				if _, ok := seen[row.ID]; ok {
+					continue
+				}
+				seen[row.ID] = struct{}{}
+				merged = append(merged, row)
+			}
 		}
 	}
 	return merged, nil

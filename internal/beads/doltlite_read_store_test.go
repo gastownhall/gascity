@@ -1062,6 +1062,138 @@ func TestDoltliteReadStoreBoundedSameSecondPrefixMatchesUnbounded(t *testing.T) 
 	})
 }
 
+// TestDoltliteReadStoreBoundedHydrationChunksLargeIDSet pins the deep-pagination
+// fix for the bounded multi-table read (#3449 review). The bounded path selects
+// up to `limit` ids in one SQL statement and hydrates them with an
+// `i.id IN (?,...)` clause. The native DoltLite driver (modernc.org/sqlite) caps
+// a statement at SQLITE_MAX_VARIABLE_NUMBER = 32766 bound parameters, and the
+// API sets query.Limit to the cursor Offset+Limit with the offset uncapped
+// (internal/api/pagination.go), so a deep cursor walk over a large rig can select
+// more ids than the cap. An unchunked IN clause then overflows with
+// "too many SQL variables" and the read 500s on its last page(s) — a
+// success→error regression on exactly the large-rig hot path this PR optimizes,
+// invisible to first-page reads. Seed more than the cap worth of matching rows
+// and assert a large-limit List succeeds and returns the exact global order.
+func TestDoltliteReadStoreBoundedHydrationChunksLargeIDSet(t *testing.T) {
+	// 32766 is modernc.org/sqlite's SQLITE_MAX_VARIABLE_NUMBER; seed above it so
+	// an unchunked hydrate IN clause would overflow.
+	const rowCount = 33000
+	store := newDoltliteStoreWithBulkIssues(t, rowCount)
+
+	// limit > rowCount so the bounded selection returns every matching id: the
+	// hydrate clause therefore carries all rowCount ids, exceeding the variable
+	// cap unless hydrateBeadsByID chunks it.
+	got, err := store.List(ListQuery{AllowScan: true, Sort: SortCreatedAsc, Limit: rowCount + 1000})
+	if err != nil {
+		t.Fatalf("large-limit bounded List failed (deep-pagination IN overflow regression): %v", err)
+	}
+	if len(got) != rowCount {
+		t.Fatalf("List returned %d rows, want %d", len(got), rowCount)
+	}
+	// Chunked hydration must not change which ids survive the cut or their order:
+	// the rows are id-ordered with strictly increasing created_at, so the asc
+	// result is the seed order from first to last id.
+	if got[0].ID != "gc-bulk-000000" {
+		t.Fatalf("first row = %q, want gc-bulk-000000", got[0].ID)
+	}
+	if last, want := got[len(got)-1].ID, fmt.Sprintf("gc-bulk-%06d", rowCount-1); last != want {
+		t.Fatalf("last row = %q, want %q", last, want)
+	}
+}
+
+// newDoltliteStoreWithBulkIssues seeds a fresh DoltLite snapshot with n minimal
+// durable task issues inside one transaction (autocommit would fsync per row,
+// which is far too slow for the tens of thousands of rows the variable-cap
+// regression needs) and returns a read store over it. Rows are id-ordered
+// gc-bulk-NNNNNN with strictly increasing created_at so the bounded read order
+// is deterministic.
+func newDoltliteStoreWithBulkIssues(t testing.TB, n int) *DoltliteReadStore {
+	t.Helper()
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "doltlite"), 0o755); err != nil {
+		t.Fatalf("mkdir doltlite dir: %v", err)
+	}
+	meta := []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	dbPath := filepath.Join(beadsDir, "doltlite", "hq.db")
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("open doltlite fixture db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck // test cleanup
+	createTestDoltliteSchema(t, db)
+
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin bulk insert: %v", err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO issues (
+		id, title, status, issue_type, priority, created_at, updated_at,
+		assignee, description, design, acceptance_criteria, notes, metadata,
+		ephemeral, no_history
+	) VALUES (?, ?, 'open', 'task', 2, ?, ?, '', '', '', '', '', '{}', 0, 0)`)
+	if err != nil {
+		t.Fatalf("prepare bulk insert: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		ts := base.Add(time.Duration(i) * time.Second).Format(time.RFC3339Nano)
+		id := fmt.Sprintf("gc-bulk-%06d", i)
+		if _, err := stmt.Exec(id, id, ts, ts); err != nil {
+			t.Fatalf("bulk insert row %d: %v", i, err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		t.Fatalf("close bulk insert stmt: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit bulk insert: %v", err)
+	}
+
+	backing := NewBdStore(dir, func(string, string, ...string) ([]byte, error) {
+		t.Fatal("backing bd runner should not be called by doltlite read tests")
+		return nil, nil
+	})
+	store, err := NewDoltliteReadStore(dir, backing)
+	if err != nil {
+		t.Fatalf("NewDoltliteReadStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.CloseStore() })
+	return store
+}
+
+// TestDoltliteReadStoreCustomOrderByRejectsMultiTableSet pins the invariant that
+// a custom orderBy must target a single table set (#3449 review). The merged
+// read path applies a custom orderBy per table in SQL and skips the cross-table
+// Go re-sort, so a multi-table set would silently concatenate independently
+// ordered tables. The public List path always passes the default (empty)
+// orderBy and Ready passes a single issues-only set, so this guard never fires
+// in production; it converts a latent silent-misordering into an explicit error
+// for any future caller.
+func TestDoltliteReadStoreCustomOrderByRejectsMultiTableSet(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	sets := doltliteTableSetsForMode(TierIssues)
+	if len(sets) < 2 {
+		t.Fatalf("TierIssues table sets = %d, want >= 2 to exercise the guard", len(sets))
+	}
+	const customOrder = "ORDER BY i.created_at ASC, i.id ASC"
+	if _, err := store.queryIssuesOrderedInTables(ListQuery{AllowScan: true}, sets, "", nil, 0, customOrder); err == nil {
+		t.Fatal("custom orderBy with multiple table sets should error, got nil")
+	} else if !strings.Contains(err.Error(), "single table set") {
+		t.Fatalf("error = %q, want it to mention the single-table-set invariant", err)
+	}
+
+	// The same custom orderBy against a single table set is allowed.
+	if _, err := store.queryIssuesOrderedInTables(ListQuery{AllowScan: true}, []doltliteTableSet{doltliteIssueTables}, "", nil, 0, customOrder); err != nil {
+		t.Fatalf("custom orderBy with a single table set should succeed, got %v", err)
+	}
+}
+
 // TestDoltliteReadStoreReadyLimitCutsDeterministicPrefixOnTies pins the same
 // (#3208) tie-cut contract for the Ready path, whose custom ORDER BY
 // (priority, created_at) also needs the id tiebreaker for a deterministic
