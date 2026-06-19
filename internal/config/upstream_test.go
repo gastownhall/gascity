@@ -10,12 +10,20 @@ func TestBuiltinHarnessUpstreamBindings(t *testing.T) {
 	if got := BuiltinProviders()["claude"].UpstreamEnv; got.BaseURL != "ANTHROPIC_BASE_URL" || got.APIKey != "ANTHROPIC_API_KEY" || got.AuthToken != "ANTHROPIC_AUTH_TOKEN" {
 		t.Errorf("builtin claude binding = %+v, want ANTHROPIC_*", got)
 	}
-	// Resolved-through-alias: the binding survives chain resolution.
+	// Resolved-through-alias: the binding survives chain resolution. Env-var
+	// names are from each CLI's current official docs (see the seeding commit).
 	for _, tc := range []struct {
 		name, baseURL, apiKey, authToken string
 	}{
 		{"claude", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"},
 		{"codex", "OPENAI_BASE_URL", "OPENAI_API_KEY", ""},
+		{"gemini", "GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY", ""},
+		{"grok", "", "XAI_API_KEY", ""},
+		{"kimi", "KIMI_BASE_URL", "KIMI_API_KEY", ""},
+		{"kiro", "", "KIRO_API_KEY", ""},
+		{"cursor", "", "CURSOR_API_KEY", ""},
+		{"copilot", "COPILOT_PROVIDER_BASE_URL", "COPILOT_PROVIDER_API_KEY", "COPILOT_GITHUB_TOKEN"},
+		{"amp", "AMP_URL", "AMP_API_KEY", ""},
 	} {
 		resolved, err := ResolveProviderChain(tc.name, BuiltinProviderAlias(tc.name), nil)
 		if err != nil {
@@ -24,6 +32,16 @@ func TestBuiltinHarnessUpstreamBindings(t *testing.T) {
 		got := resolved.UpstreamEnv
 		if got.BaseURL != tc.baseURL || got.APIKey != tc.apiKey || got.AuthToken != tc.authToken {
 			t.Errorf("%s resolved binding = %+v, want base=%q key=%q auth=%q", tc.name, got, tc.baseURL, tc.apiKey, tc.authToken)
+		}
+	}
+
+	// Gateway harnesses (opencode fronting many upstreams) and login-only /
+	// session-blob harnesses MUST stay unbound — the credential env is upstream-
+	// dependent (gateway) or the credential doesn't fit the abstract model. They
+	// rely on the upstream *_env override or the raw Env escape hatch.
+	for _, name := range []string{"opencode", "groq", "cerebras", "pi", "omp", "auggie", "antigravity"} {
+		if got := BuiltinProviders()[name].UpstreamEnv; !got.IsZero() {
+			t.Errorf("%s should have NO harness binding (gateway/login-only), got %+v", name, got)
 		}
 	}
 }
