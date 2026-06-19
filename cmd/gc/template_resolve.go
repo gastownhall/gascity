@@ -38,6 +38,15 @@ const (
 	managedSessionHookEnv     = "GC_MANAGED_SESSION_HOOK"
 )
 
+// resolvedProviderName returns the resolved harness/provider name, nil-safe (for
+// diagnostics on the upstream-binding render path).
+func resolvedProviderName(r *config.ResolvedProvider) string {
+	if r == nil {
+		return ""
+	}
+	return r.Name
+}
+
 // TemplateParams holds all resolved values needed to start a session.
 // This is a pure data type — no side effects, no provider references.
 type TemplateParams struct {
@@ -439,6 +448,32 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		if !ok {
 			return TemplateParams{}, fmt.Errorf("agent %q selects upstream %q which is not declared in [upstreams]", qualifiedName, upstreamName)
 		}
+		// Render the abstract serving fields onto the agent's HARNESS env-var
+		// names (the resolved provider's upstream_env binding), so one upstream is
+		// portable across harnesses. An abstract field with no matching binding is
+		// a hard error — never a silent no-op (config-surface §4). $VAR refs in the
+		// values resolve from the controller environment.
+		if spec.HasAbstractServing() {
+			var binding config.UpstreamEnvBinding
+			if resolved != nil {
+				binding = resolved.UpstreamEnv
+			}
+			for _, r := range []struct{ value, envName, field string }{
+				{spec.BaseURL, binding.BaseURL, "base_url"},
+				{spec.APIKey, binding.APIKey, "api_key"},
+				{spec.AuthToken, binding.AuthToken, "auth_token"},
+			} {
+				if r.value == "" {
+					continue
+				}
+				if r.envName == "" {
+					return TemplateParams{}, fmt.Errorf("agent %q upstream %q sets %s, but its harness %q declares no upstream_env.%s binding", qualifiedName, upstreamName, r.field, resolvedProviderName(resolved), r.field)
+				}
+				env[r.envName] = os.ExpandEnv(r.value)
+			}
+		}
+		// Raw env is the harness-specific escape hatch, merged LAST (wins over the
+		// abstract render and ambient/agent env for the keys it sets).
 		for k, v := range expandEnvMap(spec.Env) {
 			env[k] = v
 		}

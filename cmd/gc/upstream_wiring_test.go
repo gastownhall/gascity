@@ -73,6 +73,56 @@ func TestResolveTemplateInjectsUpstreamServingEnv(t *testing.T) {
 	}
 }
 
+// The same ABSTRACT upstream renders onto different env-var names per harness
+// (claude → ANTHROPIC_*, codex → OPENAI_*) via the provider's upstream_env
+// binding — the harness-portability payoff.
+func TestResolveTemplateRendersAbstractUpstreamPerHarness(t *testing.T) {
+	t.Setenv("BEDROCK_KEY", "sk-bedrock")
+	city := &config.City{Upstreams: map[string]config.UpstreamSpec{
+		"bedrock": {BaseURL: "https://bedrock.example/anthropic", APIKey: "$BEDROCK_KEY"},
+	}}
+	for _, tc := range []struct {
+		harness                   string
+		binding                   config.UpstreamEnvBinding
+		baseKey, keyKey, otherKey string
+	}{
+		{"claude", config.UpstreamEnvBinding{BaseURL: "ANTHROPIC_BASE_URL", APIKey: "ANTHROPIC_API_KEY"}, "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"},
+		{"codex", config.UpstreamEnvBinding{BaseURL: "OPENAI_BASE_URL", APIKey: "OPENAI_API_KEY"}, "OPENAI_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"},
+	} {
+		t.Run(tc.harness, func(t *testing.T) {
+			params := upstreamTestParams(t, city)
+			params.providers = map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none", UpstreamEnv: tc.binding}}
+			agent := &config.Agent{Name: "runner", Upstream: "bedrock"}
+			tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+			if err != nil {
+				t.Fatalf("resolveTemplate: %v", err)
+			}
+			if got := tp.Env[tc.baseKey]; got != "https://bedrock.example/anthropic" {
+				t.Errorf("%s = %q, want the bedrock base url", tc.baseKey, got)
+			}
+			if got := tp.Env[tc.keyKey]; got != "sk-bedrock" {
+				t.Errorf("%s = %q, want the $VAR-resolved key", tc.keyKey, got)
+			}
+			if _, ok := tp.Env[tc.otherKey]; ok {
+				t.Errorf("%s should not be set (renders only to this harness's binding)", tc.otherKey)
+			}
+		})
+	}
+}
+
+// An abstract upstream field with no matching harness binding is a hard error
+// (config-surface §4: never a silent no-op).
+func TestResolveTemplateAbstractUpstreamNoBindingErrors(t *testing.T) {
+	city := &config.City{Upstreams: map[string]config.UpstreamSpec{
+		"bedrock": {BaseURL: "https://bedrock.example/anthropic"},
+	}}
+	params := upstreamTestParams(t, city) // provider "test" declares no upstream_env binding
+	agent := &config.Agent{Name: "runner", Upstream: "bedrock"}
+	if _, err := resolveTemplate(params, agent, agent.QualifiedName(), nil); err == nil {
+		t.Fatal("expected an error: abstract upstream field with no harness binding")
+	}
+}
+
 func TestResolveTemplateRejectsUnknownUpstream(t *testing.T) {
 	params := upstreamTestParams(t, &config.City{})
 	agent := &config.Agent{Name: "runner", Upstream: "nope"}
