@@ -65,6 +65,7 @@ type fakeStartOps struct {
 	sendKeysErr                error
 	capturePaneText            string
 	capturePaneErr             error
+	recordStartCrashPath       string
 }
 
 type errReader struct{}
@@ -176,6 +177,11 @@ func (f *fakeStartOps) disableMouseAndActivity(name string) error {
 func (f *fakeStartOps) capturePane(name string, _ int) (string, error) {
 	f.calls = append(f.calls, startCall{method: "capturePane", name: name})
 	return f.capturePaneText, f.capturePaneErr
+}
+
+func (f *fakeStartOps) recordStartCrash(name, _ string) string {
+	f.calls = append(f.calls, startCall{method: "recordStartCrash", name: name})
+	return f.recordStartCrashPath
 }
 
 func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration) error {
@@ -680,6 +686,7 @@ func TestDoStartSession_ReadyDeadlineWithDeadPaneReportsProviderCrash(t *testing
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"recordStartCrash",
 	})
 }
 
@@ -718,6 +725,7 @@ func TestDoStartSession_FinalDeadPaneReportsProviderCrash(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"recordStartCrash",
 	})
 }
 
@@ -757,6 +765,47 @@ func TestDoStartSession_FinalDeadPaneCaptureErrorFallsBack(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"recordStartCrash",
+	})
+}
+
+func TestDoStartSession_DeadPaneRecordsDurableDiagnostic(t *testing.T) {
+	running := false
+	ops := &fakeStartOps{
+		hasSessionResult:       true,
+		isSessionRunningResult: &running,
+		capturePaneText:        "panic: startup failed\nPane is dead",
+		recordStartCrashPath:   "/city/.gc/runtime/sessions/mayor/start-stderr.log",
+	}
+
+	cfg := runtime.Config{
+		Command:      "codex",
+		ProcessNames: []string{"codex"},
+	}
+
+	err := doStartSession(context.Background(), ops, "mayor", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	for _, want := range []string{"diagnostic written to", "start-stderr.log", "startup failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
+	}
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"disableMouseAndActivity",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"acceptStartupDialogs",
+		"hasSession",
+		"isSessionRunning",
+		"capturePane",
+		"recordStartCrash",
 	})
 }
 
@@ -2445,5 +2494,62 @@ func TestTmuxStartOpsRunSetupCommandUsesGC_DIRAsWorkingDirectory(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(tmpDir, "prestart-marker")); err != nil {
 		t.Fatalf("prestart-marker not created in GC_DIR: %v", err)
+	}
+}
+
+func TestPaneDeadInfoParsesStatusAndSignal(t *testing.T) {
+	tm := NewTmux()
+	exec := &fakeExecutor{out: "139|SIGSEGV\n"}
+	tm.exec = exec
+
+	status, signal := tm.PaneDeadInfo("mayor")
+	if status != "139" || signal != "SIGSEGV" {
+		t.Fatalf("PaneDeadInfo = (%q, %q), want (139, SIGSEGV)", status, signal)
+	}
+	if len(exec.calls) == 0 {
+		t.Fatal("no tmux call recorded")
+	}
+	last := exec.calls[len(exec.calls)-1]
+	if joined := strings.Join(last, " "); !strings.Contains(joined, "#{pane_dead_status}|#{pane_dead_signal}") {
+		t.Fatalf("display-message args = %v, want pane_dead format", last)
+	}
+}
+
+func TestPaneDeadInfoErrorReturnsEmpty(t *testing.T) {
+	tm := NewTmux()
+	tm.exec = &fakeExecutor{err: errors.New("no such pane")}
+	if status, signal := tm.PaneDeadInfo("mayor"); status != "" || signal != "" {
+		t.Fatalf("PaneDeadInfo = (%q, %q), want empty on error", status, signal)
+	}
+}
+
+func TestRecordStartCrashWritesDurableArtifact(t *testing.T) {
+	dir := t.TempDir()
+	tm := NewTmux()
+	tm.exec = &fakeExecutor{out: "139|SIGSEGV\n"}
+	o := &tmuxStartOps{tm: tm, runtimeDir: dir}
+
+	path := o.recordStartCrash("mayor", "panic: startup failed\nPane is dead")
+	want := filepath.Join(dir, "sessions", "mayor", "start-stderr.log")
+	if path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading artifact: %v", err)
+	}
+	for _, sub := range []string{"session: mayor", "exit-status: 139", "signal: SIGSEGV", "panic: startup failed", "Pane is dead"} {
+		if !strings.Contains(string(data), sub) {
+			t.Fatalf("artifact = %q, want substring %q", data, sub)
+		}
+	}
+}
+
+func TestRecordStartCrashDisabledWhenNoRuntimeDir(t *testing.T) {
+	tm := NewTmux()
+	tm.exec = &fakeExecutor{out: "139|SIGSEGV\n"}
+	o := &tmuxStartOps{tm: tm, runtimeDir: ""}
+	if path := o.recordStartCrash("mayor", "x"); path != "" {
+		t.Fatalf("path = %q, want empty when runtimeDir unset", path)
 	}
 }
