@@ -17,12 +17,12 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-func TestTmuxConfigFromSessionDefaultsSocketToCityName(t *testing.T) {
+func TestTmuxConfigFromSessionDefaultsSocketToDeterministicPerCityValue(t *testing.T) {
 	sc := config.SessionConfig{}
 
 	cfg := tmuxConfigFromSession(sc, "city", "/tmp/city-a")
-	if cfg.SocketName != "city" {
-		t.Fatalf("SocketName = %q, want %q", cfg.SocketName, "city")
+	if cfg.SocketName != "city-310b37bd" {
+		t.Fatalf("SocketName = %q, want %q", cfg.SocketName, "city-310b37bd")
 	}
 }
 
@@ -32,6 +32,25 @@ func TestTmuxConfigFromSessionPreservesExplicitSocket(t *testing.T) {
 	cfg := tmuxConfigFromSession(sc, "city", "/tmp/city-a")
 	if cfg.SocketName != "custom-socket" {
 		t.Fatalf("SocketName = %q, want %q", cfg.SocketName, "custom-socket")
+	}
+}
+
+func TestTmuxConfigFromSessionUsesCityNameWhenCityPathUnavailable(t *testing.T) {
+	sc := config.SessionConfig{}
+
+	cfg := tmuxConfigFromSession(sc, "city", "")
+	if cfg.SocketName != "city" {
+		t.Fatalf("SocketName = %q, want %q", cfg.SocketName, "city")
+	}
+}
+
+func TestTmuxConfigFromSessionSeparatesSameNamedCitiesByPath(t *testing.T) {
+	sc := config.SessionConfig{}
+
+	a := tmuxConfigFromSession(sc, "gascity", "/tmp/city-a")
+	b := tmuxConfigFromSession(sc, "gascity", "/tmp/city-b")
+	if a.SocketName == b.SocketName {
+		t.Fatalf("SocketName collision: %q", a.SocketName)
 	}
 }
 

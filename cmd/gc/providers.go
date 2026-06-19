@@ -83,11 +83,12 @@ var (
 
 // tmuxConfigFromSession converts a config.SessionConfig into a
 // sessiontmux.Config with resolved durations and defaults. If the
-// config has no explicit socket name, cityName is used.
-func tmuxConfigFromSession(sc config.SessionConfig, cityName, _ string) sessiontmux.Config {
+// config has no explicit socket name, a deterministic per-city socket
+// name is derived from cityName + cityPath.
+func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) sessiontmux.Config {
 	socketName := sc.Socket
 	if socketName == "" {
-		socketName = cityName
+		socketName = defaultTmuxSocketName(cityName, cityPath)
 	}
 	return sessiontmux.Config{
 		SetupTimeout:       sc.SetupTimeoutDuration(),
@@ -98,6 +99,19 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, _ string) sessiont
 		DisplayMs:          sc.DisplayMsOrDefault(),
 		SocketName:         socketName,
 	}
+}
+
+func defaultTmuxSocketName(cityName, cityPath string) string {
+	base := strings.TrimSpace(cityName)
+	if base == "" {
+		base = "gc"
+	}
+	cleanPath := strings.TrimSpace(cityPath)
+	if cleanPath == "" {
+		return base
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(cleanPath)))
+	return fmt.Sprintf("%s-%s", base, hex.EncodeToString(sum[:4]))
 }
 
 func providerStateDir(providerName, cityPath string) string {

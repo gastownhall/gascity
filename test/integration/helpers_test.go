@@ -4,6 +4,7 @@ package integration
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -165,14 +166,16 @@ func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Dura
 	)
 	for time.Now().Before(deadline) {
 		if port, ok := currentManagedDoltPortForTest(cityDir); ok {
-			probeEnv := filterEnvMany(env,
+			probeEnv := filterEnvMany(
+				env,
 				"GC_CITY",
 				"GC_CITY_PATH",
 				"GC_CITY_ROOT",
 				"GC_CITY_RUNTIME_DIR",
 				"GC_DOLT_PORT",
 			)
-			probeEnv = append(probeEnv,
+			probeEnv = append(
+				probeEnv,
 				"GC_CITY="+cityDir,
 				"GC_CITY_PATH="+cityDir,
 				"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
@@ -224,7 +227,7 @@ func waitForExpectedTmuxSessions(t *testing.T, cityDir string, expectedAgents []
 		return
 	}
 
-	socketName := filepath.Base(cityDir)
+	socketName := integrationTmuxSocketName(cityDir)
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		cmd := exec.Command("tmux", "-L", socketName, "list-sessions", "-F", "#{session_name}")
@@ -250,6 +253,15 @@ func waitForExpectedTmuxSessions(t *testing.T, cityDir string, expectedAgents []
 	listOut, _ := cmd.CombinedOutput()
 	sessionOut, _ := gc(cityDir, "session", "list", "--state", "all")
 	t.Fatalf("expected tmux sessions never appeared on socket %q\nsessions:\n%s\ntmux:\n%s", socketName, sessionOut, listOut)
+}
+
+func integrationTmuxSocketName(cityDir string) string {
+	cityName := strings.TrimSpace(filepath.Base(cityDir))
+	if cityName == "" {
+		return filepath.Base(cityDir)
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(cityDir)))
+	return fmt.Sprintf("%s-%x", cityName, sum[:4])
 }
 
 // writeAgentsToml writes a city.toml with the given agents.

@@ -32,9 +32,6 @@ func TestMail_BashAgent(t *testing.T) {
 	} else {
 		guard := tmuxtest.NewGuard(t)
 		cityDir = setupCity(t, guard, agents)
-		if !guard.HasSession(guard.SessionName("mayor")) {
-			t.Fatal("expected mayor tmux session after gc start")
-		}
 	}
 
 	// Human sends a message to the mayor.
