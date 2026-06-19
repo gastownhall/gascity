@@ -28,8 +28,9 @@ import (
 //
 //	PROVISION (box):  Env (allow-listed), FingerprintExtra, PreStart,
 //	                  OverlayDir, OverlayProviders, CopyFiles.
-//	LAUNCH (agent):   Command, Lifecycle, MCPServers, AcceptStartupDialogs,
-//	                  MouseOn, SessionSetup, SessionSetupScript.
+//	LAUNCH (agent):   Command, Lifecycle, Upstream, MCPServers,
+//	                  AcceptStartupDialogs, MouseOn, SessionSetup,
+//	                  SessionSetupScript.
 //
 // SessionSetup/SessionSetupScript are LAUNCH-half as of B2: the carriers now
 // replay them idempotently on relaunch (tmux launchOrchestration; ssh/k8s
@@ -121,4 +122,11 @@ func hashLaunchFields(h hash.Hash, cfg Config) {
 
 	h.Write([]byte(cfg.SessionSetupScript)) //nolint:errcheck // hash.Write never errors
 	h.Write([]byte{0})                      //nolint:errcheck // hash.Write never errors
+
+	// Upstream (Phase C — model-serving selection identity) is LAUNCH-half: the
+	// serving env is consumed by the agent at launch, so switching upstream
+	// relaunches the agent in the warm box (B2.3) without reprovisioning. Same
+	// conditional framing as hashCoreFields, so an unset Upstream contributes
+	// nothing. The resolved credentials in Env are NOT hashed (allow-list).
+	hashOptionalString(h, "upstream", cfg.Upstream)
 }

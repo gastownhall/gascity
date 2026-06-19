@@ -22,6 +22,7 @@ func TestFingerprintPartitionCoversCoreDisjointly(t *testing.T) {
 		// LAUNCH (agent) half.
 		{"Command", "launch", func(c *Config) { c.Command += " --changed" }},
 		{"Lifecycle", "launch", func(c *Config) { c.Lifecycle = Lifecycle("persistent") }},
+		{"Upstream", "launch", func(c *Config) { c.Upstream = "bedrock" }},
 		{"MCPServers", "launch", func(c *Config) {
 			c.MCPServers = []MCPServerConfig{{Name: "mail", Transport: MCPTransport("stdio"), Command: "different-mcp"}}
 		}},

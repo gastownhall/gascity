@@ -518,6 +518,15 @@ type Config struct {
 	// exit after one turn. Empty means the default long-lived session lifecycle.
 	Lifecycle Lifecycle
 
+	// Upstream is the model-serving selection identity ("anthropic", "bedrock",
+	// "byok:<name>") — WHO serves+resolves the model. It is hashed into the
+	// LAUNCH half of the fingerprint (Phase C), so switching upstream relaunches
+	// the agent in the warm box (B2.3) rather than reprovisioning; the resolved
+	// serving env (ANTHROPIC_BASE_URL/_API_KEY, injected into Env) is deliberately
+	// NOT hashed, so a credential rotation never moves a fingerprint. Empty = no
+	// upstream selected (behavior-identical; contributes nothing to the hash).
+	Upstream string
+
 	// Env is additional environment variables set in the session.
 	Env map[string]string
 
