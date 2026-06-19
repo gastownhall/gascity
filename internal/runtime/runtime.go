@@ -519,7 +519,7 @@ type Config struct {
 	Lifecycle Lifecycle
 
 	// Upstream is the model-serving selection identity ("anthropic", "bedrock",
-	// "byok:<name>") — WHO serves+resolves the model. It is hashed into the
+	// "proxy:<name>") — WHO serves+resolves the model. It is hashed into the
 	// LAUNCH half of the fingerprint (Phase C), so switching upstream relaunches
 	// the agent in the warm box (B2.3) rather than reprovisioning; the resolved
 	// serving env (ANTHROPIC_BASE_URL/_API_KEY, injected into Env) is deliberately

@@ -454,7 +454,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"copilot": {
 		DisplayName: "GitHub Copilot",
 		Command:     "copilot",
-		// BYOK model serving (COPILOT_PROVIDER_BASE_URL/_API_KEY; a custom
+		// Custom model serving (COPILOT_PROVIDER_BASE_URL/_API_KEY; a custom
 		// upstream may also need COPILOT_PROVIDER_TYPE/COPILOT_MODEL via raw env).
 		// auth_token = the GitHub-account bearer for the default GitHub-hosted path.
 		UpstreamBaseURLEnv:   "COPILOT_PROVIDER_BASE_URL",
