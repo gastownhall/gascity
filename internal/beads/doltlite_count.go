@@ -44,11 +44,11 @@ func (s *DoltliteReadStore) Count(ctx context.Context, query ListQuery, excludeT
 	if !doltliteCountSupported(query) {
 		return 0, fmt.Errorf("bd count: %w", ErrCountUnsupported)
 	}
-	total, issuesWhere, issuesArgs, err := s.countIssuesTier(ctx, query, excludeTypes)
+	total, dedupeWhere, dedupeArgs, err := s.countIssuesTier(ctx, query, excludeTypes)
 	if err != nil {
 		return 0, err
 	}
-	wisps, err := s.countDurableWisps(ctx, query, excludeTypes, issuesWhere, issuesArgs)
+	wisps, err := s.countDurableWisps(ctx, query, excludeTypes, dedupeWhere, dedupeArgs)
 	if err != nil {
 		return 0, err
 	}
@@ -56,50 +56,76 @@ func (s *DoltliteReadStore) Count(ctx context.Context, query ListQuery, excludeT
 }
 
 // countIssuesTier counts the durable issues-table component of a TierIssues
-// query and returns the predicates it used so the wisps component can dedupe
-// against exactly the rows List's issues-table pass returns.
+// query and returns the dedupe predicates so the wisps component can suppress
+// exactly the rows List's issues-table pass returns. The returned predicates
+// omit excludeTypes: List builds its "issues win" cross-table dedupe set before
+// the post-List type exclusion runs, so a wisp whose durable twin is excluded
+// must still be deduped behind it, not counted (#3449 review).
 func (s *DoltliteReadStore) countIssuesTier(ctx context.Context, query ListQuery, excludeTypes []string) (int, []string, []any, error) {
 	tables := doltliteIssueTables
-	where, args := doltliteCountWhere(query, tables, excludeTypes)
-	if flags := s.storageFlagExprsFor(tables); flags.ephemeral != "0" {
-		where = append(where, flags.ephemeral+" = 0")
-	}
-	sqlText := "SELECT COUNT(*) FROM " + tables.issues + " i"
-	if len(where) > 0 {
-		sqlText += " WHERE " + strings.Join(where, " AND ")
-	}
-	var n int
-	if err := s.db.QueryRowContext(ctx, sqlText, args...).Scan(&n); err != nil {
+	dedupeWhere, dedupeArgs := doltliteCountWhere(query, tables)
+	// Apply the TierIssues row filter through the same shared helper List and
+	// countDurableWisps use, so the issues-table predicate has one source of
+	// truth and cannot drift from List's tier semantics (#3444). The issues
+	// table set never reports skipTable, so the durable count always runs.
+	flags, err := s.storageFlagExprsFor(tables)
+	if err != nil {
 		return 0, nil, nil, fmt.Errorf("bd count: %w", err)
 	}
-	return n, where, args, nil
+	if tierWhere, _ := doltliteTierPredicate(TierIssues, tables, flags); tierWhere != "" {
+		dedupeWhere = append(dedupeWhere, tierWhere)
+	}
+	// The durable count itself layers excludeTypes on top of the dedupe
+	// predicates, matching List(query) minus excludeTypes. The dedupe set the
+	// wisp anti-join reuses stays excludeTypes-free.
+	countWhere, countArgs := dedupeWhere, dedupeArgs
+	if exclWhere, exclArgs := doltliteExcludeTypesPredicate(excludeTypes); exclWhere != "" {
+		countWhere = append(append([]string{}, dedupeWhere...), exclWhere)
+		countArgs = append(append([]any{}, dedupeArgs...), exclArgs...)
+	}
+	sqlText := "SELECT COUNT(*) FROM " + tables.issues + " i"
+	if len(countWhere) > 0 {
+		sqlText += " WHERE " + strings.Join(countWhere, " AND ")
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, sqlText, countArgs...).Scan(&n); err != nil {
+		return 0, nil, nil, fmt.Errorf("bd count: %w", err)
+	}
+	return n, dedupeWhere, dedupeArgs, nil
 }
 
 // countDurableWisps counts the non-ephemeral (no_history) wisps rows the
 // aligned TierIssues List merges in (#3444). Legacy snapshots without the
 // wisps storage-flag columns contribute nothing: every row there is
-// ephemeral. Rows whose id the issues-table pass already counted are
-// excluded, mirroring List's cross-table seen-map dedupe.
-func (s *DoltliteReadStore) countDurableWisps(ctx context.Context, query ListQuery, excludeTypes []string, issuesWhere []string, issuesArgs []any) (int, error) {
+// ephemeral. dedupeWhere/dedupeArgs are the issues-table pass predicates
+// before excludeTypes, so a wisp whose durable twin List already returned is
+// suppressed by the shared anti-join even when that twin's type is excluded;
+// excludeTypes filters only the wisp row's own type, matching the post-List
+// exclusion (#3449 review).
+func (s *DoltliteReadStore) countDurableWisps(ctx context.Context, query ListQuery, excludeTypes []string, dedupeWhere []string, dedupeArgs []any) (int, error) {
 	tables := doltliteWispTables
 	if !s.tableExists(tables.issues) {
 		return 0, nil
 	}
-	flags := s.storageFlagExprsFor(tables)
+	flags, err := s.storageFlagExprsFor(tables)
+	if err != nil {
+		return 0, fmt.Errorf("bd count (wisps): %w", err)
+	}
 	tierWhere, skipTable := doltliteTierPredicate(TierIssues, tables, flags)
 	if skipTable {
 		return 0, nil
 	}
-	where, args := doltliteCountWhere(query, tables, excludeTypes)
+	where, args := doltliteCountWhere(query, tables)
+	if exclWhere, exclArgs := doltliteExcludeTypesPredicate(excludeTypes); exclWhere != "" {
+		where = append(where, exclWhere)
+		args = append(args, exclArgs...)
+	}
 	if tierWhere != "" {
 		where = append(where, tierWhere)
 	}
-	dedupe := "SELECT i.id FROM " + doltliteIssueTables.issues + " i"
-	if len(issuesWhere) > 0 {
-		dedupe += " WHERE " + strings.Join(issuesWhere, " AND ")
-	}
-	where = append(where, "i.id NOT IN ("+dedupe+")")
-	args = append(args, issuesArgs...)
+	antiJoin, antiArgs := doltliteMatchingIssuesAntiJoin(dedupeWhere, dedupeArgs)
+	where = append(where, antiJoin)
+	args = append(args, antiArgs...)
 	sqlText := "SELECT COUNT(*) FROM " + tables.issues + " i WHERE " + strings.Join(where, " AND ")
 	var n int
 	if err := s.db.QueryRowContext(ctx, sqlText, args...).Scan(&n); err != nil {
@@ -128,11 +154,14 @@ func doltliteCountSupported(query ListQuery) bool {
 	return true
 }
 
-// doltliteCountWhere builds the SELECT COUNT(*) predicates for the supported
-// query shapes. It mirrors queryIssueTable's column predicates exactly for the
-// fields it covers; doltliteCountSupported gates out everything else, and
-// TestDoltliteCountMatchesList asserts the two paths agree across shapes.
-func doltliteCountWhere(query ListQuery, tables doltliteTableSet, excludeTypes []string) ([]string, []any) {
+// doltliteCountWhere builds the SELECT COUNT(*) base column predicates for the
+// supported query shapes. It mirrors queryIssueTable's column predicates exactly
+// for the fields it covers; excludeTypes is layered on separately by the callers
+// via doltliteExcludeTypesPredicate, because List dedupes cross-table twins
+// before the post-List type exclusion runs (#3449 review). doltliteCountSupported
+// gates out everything else, and TestDoltliteCountMatchesList asserts the two
+// paths agree across shapes.
+func doltliteCountWhere(query ListQuery, tables doltliteTableSet) ([]string, []any) {
 	where := make([]string, 0, 6)
 	args := make([]any, 0, 6)
 	if !query.IncludeClosed && query.Status != "closed" {
@@ -145,13 +174,6 @@ func doltliteCountWhere(query ListQuery, tables doltliteTableSet, excludeTypes [
 	if query.Type != "" {
 		where = append(where, "i.issue_type = ?")
 		args = append(args, query.Type)
-	}
-	if len(excludeTypes) > 0 {
-		placeholders := strings.TrimRight(strings.Repeat("?,", len(excludeTypes)), ",")
-		where = append(where, "COALESCE(i.issue_type, '') NOT IN ("+placeholders+")")
-		for _, t := range excludeTypes {
-			args = append(args, t)
-		}
 	}
 	if query.Assignee != "" {
 		where = append(where, "i.assignee = ?")
@@ -176,4 +198,22 @@ func doltliteCountWhere(query ListQuery, tables doltliteTableSet, excludeTypes [
 		args = append(args, query.Label)
 	}
 	return where, args
+}
+
+// doltliteExcludeTypesPredicate builds the "issue_type NOT IN (...)" filter that
+// drops excludeTypes from a count pass, matching the post-List type exclusion
+// the cache count fallback applies (caching_store_reads.go). It returns an empty
+// predicate when excludeTypes is empty. Callers apply it to the issues and wisps
+// count predicates themselves, never to the cross-table dedupe set, so an
+// excluded durable twin still suppresses its no-history wisp twin (#3449 review).
+func doltliteExcludeTypesPredicate(excludeTypes []string) (string, []any) {
+	if len(excludeTypes) == 0 {
+		return "", nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(excludeTypes)), ",")
+	args := make([]any, len(excludeTypes))
+	for i, t := range excludeTypes {
+		args[i] = t
+	}
+	return "COALESCE(i.issue_type, '') NOT IN (" + placeholders + ")", args
 }

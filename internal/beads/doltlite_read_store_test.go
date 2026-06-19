@@ -868,6 +868,200 @@ func TestDoltliteReadStoreLimitCutsDeterministicPrefixOnCreatedAtTies(t *testing
 	}
 }
 
+// TestDoltliteReadStoreBoundedMultiTableMergeKeepsGlobalTopN pins the
+// cross-table merge contract for bounded TierIssues reads (#3444). TierIssues
+// now spans both the issues and wisps tables, and the merge dedupes by id
+// before the global sort+limit. A per-table SQL LIMIT must therefore not be
+// pushed for multi-table reads: if it were, a table whose limited prefix is
+// entirely cross-table duplicates would never surface a later unique row that
+// belongs in the global top-N. Here gc-dup-a and gc-dup-b are durable issues
+// that outrank their no-history wisp twins, so a pushed per-table LIMIT 2
+// would fetch only the duplicated wisps prefix (a@99, b@98) and never see the
+// unique durable wisp gc-dup-c@97 that sorts into the true top-2.
+func TestDoltliteReadStoreBoundedMultiTableMergeKeepsGlobalTopN(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	for _, issue := range []testDoltliteIssue{
+		{ID: "gc-dup-a", Title: "dup a issue", CreatedAt: base.Add(100 * time.Second), Labels: []string{"dup-prefix"}},
+		{ID: "gc-dup-b", Title: "dup b issue", CreatedAt: base.Add(1 * time.Second), Labels: []string{"dup-prefix"}},
+	} {
+		insertTestDoltliteIssue(t, writer, "issues", "labels", "dependencies", issue)
+	}
+	for _, wisp := range []testDoltliteIssue{
+		{ID: "gc-dup-a", Title: "dup a wisp", CreatedAt: base.Add(99 * time.Second), Labels: []string{"dup-prefix"}, NoHistory: true},
+		{ID: "gc-dup-b", Title: "dup b wisp", CreatedAt: base.Add(98 * time.Second), Labels: []string{"dup-prefix"}, NoHistory: true},
+		{ID: "gc-dup-c", Title: "dup c wisp", CreatedAt: base.Add(97 * time.Second), Labels: []string{"dup-prefix"}, NoHistory: true},
+	} {
+		insertTestDoltliteIssue(t, writer, "wisps", "wisp_labels", "wisp_dependencies", wisp)
+	}
+
+	// Unbounded TierIssues read is the ground truth: the durable issue rows
+	// plus the deduped unique no-history wisp (the a/b wisp twins fold into
+	// their issue rows), sorted created-desc.
+	all, err := store.List(ListQuery{Label: "dup-prefix", Sort: SortCreatedDesc, SkipLabels: true})
+	if err != nil {
+		t.Fatalf("List unbounded: %v", err)
+	}
+	if got := testBeadIDs(all); !slices.Equal(got, []string{"gc-dup-a", "gc-dup-c", "gc-dup-b"}) {
+		t.Fatalf("unbounded ids = %v, want [gc-dup-a gc-dup-c gc-dup-b]", got)
+	}
+
+	// The bounded read must equal the unbounded top-2, not the per-table
+	// limited prefix [gc-dup-a gc-dup-b].
+	top2, err := store.List(ListQuery{Label: "dup-prefix", Sort: SortCreatedDesc, Limit: 2, SkipLabels: true})
+	if err != nil {
+		t.Fatalf("List limit 2: %v", err)
+	}
+	if got := testBeadIDs(top2); !slices.Equal(got, []string{"gc-dup-a", "gc-dup-c"}) {
+		t.Fatalf("bounded top-2 ids = %v, want [gc-dup-a gc-dup-c]", got)
+	}
+}
+
+// TestDoltliteReadStoreBoundedTopNAvoidsFullHistoryHydration pins the bounded
+// multi-table read fix (#3449 review). A limited default-tier read now selects
+// the exact global top-N ids in one SQL statement and hydrates only those ids,
+// instead of reading every matching row from both tables and cutting in Go.
+// The dataset's highest-sorted row is an ephemeral wisp that must stay out of
+// TierIssues, and a no-history wisp twin folds into its durable issue, so the
+// bounded result must equal the unbounded top-N across the issues/wisps
+// boundary while the id selection itself stays O(limit).
+func TestDoltliteReadStoreBoundedTopNAvoidsFullHistoryHydration(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	for _, issue := range []testDoltliteIssue{
+		{ID: "gc-bt-i1", Title: "i1", CreatedAt: base.Add(10 * time.Second), Labels: []string{"bt"}},
+		{ID: "gc-bt-i2", Title: "i2", CreatedAt: base.Add(8 * time.Second), Labels: []string{"bt"}},
+		{ID: "gc-bt-i3", Title: "i3", CreatedAt: base.Add(2 * time.Second), Labels: []string{"bt"}},
+	} {
+		insertTestDoltliteIssue(t, writer, "issues", "labels", "dependencies", issue)
+	}
+	for _, wisp := range []testDoltliteIssue{
+		{ID: "gc-bt-w1", Title: "w1", CreatedAt: base.Add(9 * time.Second), Labels: []string{"bt"}, NoHistory: true},
+		{ID: "gc-bt-i2", Title: "i2 wisp twin", CreatedAt: base.Add(7 * time.Second), Labels: []string{"bt"}, NoHistory: true},
+		{ID: "gc-bt-w2", Title: "w2", CreatedAt: base.Add(5 * time.Second), Labels: []string{"bt"}, NoHistory: true},
+		{ID: "gc-bt-eph", Title: "ephemeral", CreatedAt: base.Add(100 * time.Second), Labels: []string{"bt"}, Ephemeral: true},
+	} {
+		insertTestDoltliteIssue(t, writer, "wisps", "wisp_labels", "wisp_dependencies", wisp)
+	}
+
+	// Ground truth: the ephemeral wisp is excluded from TierIssues, the i2 wisp
+	// twin folds into its durable issue, sorted created-desc.
+	wantUnbounded := []string{"gc-bt-i1", "gc-bt-w1", "gc-bt-i2", "gc-bt-w2", "gc-bt-i3"}
+	all, err := store.List(ListQuery{Label: "bt", Sort: SortCreatedDesc})
+	if err != nil {
+		t.Fatalf("List unbounded: %v", err)
+	}
+	if got := testBeadIDs(all); !slices.Equal(got, wantUnbounded) {
+		t.Fatalf("unbounded ids = %v, want %v", got, wantUnbounded)
+	}
+
+	// The id selection is bounded and exact: it returns exactly the top-3 ids
+	// (not all five matches), proving the SQL LIMIT is applied during selection
+	// rather than after hydrating full matching history.
+	sets := doltliteTableSetsForMode(TierIssues)
+	ids, err := store.selectBoundedTopNIDs(ListQuery{Label: "bt", Sort: SortCreatedDesc}, sets, 3)
+	if err != nil {
+		t.Fatalf("selectBoundedTopNIDs: %v", err)
+	}
+	if !slices.Equal(ids, []string{"gc-bt-i1", "gc-bt-w1", "gc-bt-i2"}) {
+		t.Fatalf("selected top-3 ids = %v, want [gc-bt-i1 gc-bt-w1 gc-bt-i2]", ids)
+	}
+
+	// End to end the bounded List equals the unbounded top-3, and the hydrated
+	// rows carry their labels and storage flags across both tables.
+	top3, err := store.List(ListQuery{Label: "bt", Sort: SortCreatedDesc, Limit: 3})
+	if err != nil {
+		t.Fatalf("List limit 3: %v", err)
+	}
+	if got := testBeadIDs(top3); !slices.Equal(got, []string{"gc-bt-i1", "gc-bt-w1", "gc-bt-i2"}) {
+		t.Fatalf("bounded top-3 ids = %v, want [gc-bt-i1 gc-bt-w1 gc-bt-i2]", got)
+	}
+	w1 := findTestBead(t, top3, "gc-bt-w1")
+	if !slices.Contains(w1.Labels, "bt") {
+		t.Fatalf("hydrated wisp gc-bt-w1 missing label bt: %#v", w1.Labels)
+	}
+	if !w1.NoHistory {
+		t.Fatalf("hydrated wisp gc-bt-w1 should be NoHistory: %#v", w1)
+	}
+
+	// TierBoth takes the same bounded fast path but applies no tier filter, so
+	// the ephemeral wisp (highest created_at) is the bounded top-1 — the
+	// opposite of the TierIssues result above.
+	bothTop1, err := store.List(ListQuery{Label: "bt", Sort: SortCreatedDesc, Limit: 1, TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List TierBoth limit 1: %v", err)
+	}
+	if got := testBeadIDs(bothTop1); !slices.Equal(got, []string{"gc-bt-eph"}) {
+		t.Fatalf("TierBoth bounded top-1 ids = %v, want [gc-bt-eph]", got)
+	}
+}
+
+// TestDoltliteReadStoreBoundedSameSecondPrefixMatchesUnbounded pins the #3449
+// review fix for sub-second precision: scanBead truncates CreatedAt to whole
+// seconds, so the Go merge orders same-second rows by id. A bounded read's SQL
+// LIMIT must cut on that same second-granular key, not the raw sub-second
+// created_at text, or it selects a different prefix than the unbounded merge.
+// The sub-second offsets below are the exact reverse of the id order, so a raw
+// ordering would invert the canonical prefix at every limit boundary. Covers
+// both the multi-table bounded path (selectBoundedTopNIDs) and the single-table
+// limited path (queryIssueTable).
+func TestDoltliteReadStoreBoundedSameSecondPrefixMatchesUnbounded(t *testing.T) {
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+
+	assertPrefixParity := func(t *testing.T, store *DoltliteReadStore, tier TierMode) {
+		t.Helper()
+		for _, sort := range []SortOrder{SortCreatedDesc, SortCreatedAsc} {
+			unbounded, err := store.List(ListQuery{Label: "ss", Sort: sort, TierMode: tier})
+			if err != nil {
+				t.Fatalf("List unbounded (tier=%v sort=%v): %v", tier, sort, err)
+			}
+			if len(unbounded) != 4 {
+				t.Fatalf("unbounded len = %d, want 4 (ids %v)", len(unbounded), testBeadIDs(unbounded))
+			}
+			for k := 1; k <= 4; k++ {
+				bounded, err := store.List(ListQuery{Label: "ss", Sort: sort, TierMode: tier, Limit: k})
+				if err != nil {
+					t.Fatalf("List(tier=%v sort=%v limit=%d): %v", tier, sort, k, err)
+				}
+				got, want := testBeadIDs(bounded), testBeadIDs(unbounded[:k])
+				if !slices.Equal(got, want) {
+					t.Fatalf("bounded prefix (tier=%v sort=%v limit=%d) = %v, want unbounded prefix %v", tier, sort, k, got, want)
+				}
+			}
+		}
+	}
+
+	t.Run("tier_issues_multi_table", func(t *testing.T) {
+		issues := []testDoltliteIssue{
+			{ID: "gc-ss-a", Title: "a", CreatedAt: base.Add(800 * time.Millisecond), Labels: []string{"ss"}},
+			{ID: "gc-ss-c", Title: "c", CreatedAt: base.Add(400 * time.Millisecond), Labels: []string{"ss"}},
+		}
+		wisps := []testDoltliteIssue{
+			{ID: "gc-ss-b", Title: "b", CreatedAt: base.Add(600 * time.Millisecond), Labels: []string{"ss"}, NoHistory: true},
+			{ID: "gc-ss-d", Title: "d", CreatedAt: base.Add(200 * time.Millisecond), Labels: []string{"ss"}, NoHistory: true},
+		}
+		assertPrefixParity(t, newDoltliteStoreWithRows(t, issues, wisps), TierIssues)
+	})
+
+	t.Run("tier_wisps_single_table", func(t *testing.T) {
+		wisps := []testDoltliteIssue{
+			{ID: "gc-ss-a", Title: "a", CreatedAt: base.Add(800 * time.Millisecond), Labels: []string{"ss"}, NoHistory: true},
+			{ID: "gc-ss-b", Title: "b", CreatedAt: base.Add(600 * time.Millisecond), Labels: []string{"ss"}, NoHistory: true},
+			{ID: "gc-ss-c", Title: "c", CreatedAt: base.Add(400 * time.Millisecond), Labels: []string{"ss"}, NoHistory: true},
+			{ID: "gc-ss-d", Title: "d", CreatedAt: base.Add(200 * time.Millisecond), Labels: []string{"ss"}, NoHistory: true},
+		}
+		assertPrefixParity(t, newDoltliteStoreWithRows(t, nil, wisps), TierWisps)
+	})
+}
+
 // TestDoltliteReadStoreReadyLimitCutsDeterministicPrefixOnTies pins the same
 // (#3208) tie-cut contract for the Ready path, whose custom ORDER BY
 // (priority, created_at) also needs the id tiebreaker for a deterministic
