@@ -83,11 +83,16 @@ var (
 
 // tmuxConfigFromSession converts a config.SessionConfig into a
 // sessiontmux.Config with resolved durations and defaults. If the
-// config has no explicit socket name, cityName is used.
-func tmuxConfigFromSession(sc config.SessionConfig, cityName, _ string) sessiontmux.Config {
+// config has no explicit socket name, cityName is used. cityPath, when set,
+// supplies the runtime root for per-session start-crash diagnostics.
+func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) sessiontmux.Config {
 	socketName := sc.Socket
 	if socketName == "" {
 		socketName = cityName
+	}
+	var runtimeDir string
+	if cityPath != "" {
+		runtimeDir = citylayout.RuntimePath(cityPath)
 	}
 	return sessiontmux.Config{
 		SetupTimeout:       sc.SetupTimeoutDuration(),
@@ -97,6 +102,7 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, _ string) sessiont
 		DebounceMs:         sc.DebounceMsOrDefault(),
 		DisplayMs:          sc.DisplayMsOrDefault(),
 		SocketName:         socketName,
+		RuntimeDir:         runtimeDir,
 	}
 }
 

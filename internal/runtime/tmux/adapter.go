@@ -85,7 +85,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return err
 	}
 
-	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm}, name, cfg, p.cfg.SetupTimeout)
+	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm, runtimeDir: p.cfg.RuntimeDir}, name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
 		return nil
@@ -738,14 +738,20 @@ type startOps interface {
 	waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error
 	hasSession(name string) (bool, error)
 	capturePane(name string, lines int) (string, error)
+	recordStartCrash(name, paneContent string) string
 	sendKeys(name, text string) error
 	setRemainOnExit(name string) error
 	disableMouseAndActivity(name string) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
 }
 
-// tmuxStartOps adapts [*Tmux] to the [startOps] interface.
-type tmuxStartOps struct{ tm *Tmux }
+// tmuxStartOps adapts [*Tmux] to the [startOps] interface. runtimeDir is the
+// city runtime root under which start-crash diagnostics are persisted; empty
+// disables the durable capture.
+type tmuxStartOps struct {
+	tm         *Tmux
+	runtimeDir string
+}
 
 const (
 	defaultReadyProbeTimeout = 15 * time.Second
@@ -804,6 +810,43 @@ func (o *tmuxStartOps) hasSession(name string) (bool, error) {
 
 func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 	return o.tm.CapturePane(name, lines)
+}
+
+// recordStartCrash persists a per-session start-crash diagnostic so an
+// immediate start-crash leaves a durable on-disk artifact (the transient
+// start error is otherwise lost). It records the dead pane's exit status and
+// terminating signal alongside the captured pane output. Best-effort: a
+// disabled capture (empty runtimeDir) or any I/O error returns "" without
+// affecting startup. Returns the artifact path when written.
+func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
+	if o.runtimeDir == "" {
+		return ""
+	}
+	status, signal := o.tm.PaneDeadInfo(name)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "session: %s\n", name)
+	if status != "" {
+		fmt.Fprintf(&b, "exit-status: %s\n", status)
+	}
+	if signal != "" {
+		fmt.Fprintf(&b, "signal: %s\n", signal)
+	}
+	b.WriteString("--- last pane output ---\n")
+	b.WriteString(paneContent)
+	if paneContent != "" && !strings.HasSuffix(paneContent, "\n") {
+		b.WriteByte('\n')
+	}
+
+	dir := filepath.Join(o.runtimeDir, "sessions", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	path := filepath.Join(dir, "start-stderr.log")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		return ""
+	}
+	return path
 }
 
 func (o *tmuxStartOps) sendKeys(name, text string) error {
@@ -949,13 +992,28 @@ func ignoreDeadlineIfSessionAlive(ops startOps, name string, err error) error {
 func startupDeadSessionError(ops startOps, name string) error {
 	pane, err := ops.capturePane(name, startupPaneCaptureLines)
 	if err != nil {
+		pane = ""
+	} else {
+		pane = strings.TrimSpace(pane)
+	}
+	// Persist a durable crash diagnostic (exit status + signal + pane output)
+	// so the immediate-exit reason survives the transient start error. Recorded
+	// even when the pane is empty, so an exit-before-render crash still leaves
+	// the exit status/signal on disk. Best-effort: "" when capture is disabled.
+	diagPath := ops.recordStartCrash(name, pane)
+	switch {
+	case pane != "" && diagPath != "":
+		return fmt.Errorf("%w: session %q; diagnostic written to %s; last pane output:\n%s",
+			runtime.ErrSessionDiedDuringStartup, name, diagPath, pane)
+	case pane != "":
+		return fmt.Errorf("%w: session %q; last pane output:\n%s",
+			runtime.ErrSessionDiedDuringStartup, name, pane)
+	case diagPath != "":
+		return fmt.Errorf("%w: session %q; diagnostic written to %s",
+			runtime.ErrSessionDiedDuringStartup, name, diagPath)
+	default:
 		return startupSessionDiedError(name)
 	}
-	pane = strings.TrimSpace(pane)
-	if pane == "" {
-		return startupSessionDiedError(name)
-	}
-	return fmt.Errorf("%w: session %q; last pane output:\n%s", runtime.ErrSessionDiedDuringStartup, name, pane)
 }
 
 func startupSessionDiedError(name string) error {

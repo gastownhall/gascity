@@ -67,6 +67,10 @@ type Config struct {
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. Empty means use the default tmux server.
 	SocketName string
+	// RuntimeDir is the city runtime root (".gc/runtime") under which a
+	// per-session start-crash diagnostic is persisted. Empty disables the
+	// durable capture (e.g. ad-hoc invocations and tests run unchanged).
+	RuntimeDir string
 }
 
 // DefaultConfig returns a Config with the original hardcoded values.
@@ -1957,6 +1961,29 @@ func (t *Tmux) IsPaneDead(target string) (bool, error) {
 	default:
 		return false, fmt.Errorf("unexpected pane_dead value %q for target %s", out, target)
 	}
+}
+
+// PaneDeadInfo returns the exit status and terminating signal of a dead pane
+// (a remain-on-exit corpse) for the target session's primary pane. tmux
+// reports these via #{pane_dead_status} (exit code) and #{pane_dead_signal}
+// (signal name/number). Both are best-effort: empty strings when the pane is
+// not dead or tmux cannot report them, so callers can record whatever is
+// available without failing.
+func (t *Tmux) PaneDeadInfo(session string) (status, signal string) {
+	target := session
+	if !strings.HasPrefix(session, "%") {
+		target = session + ":^.0"
+	}
+	out, err := t.run("display-message", "-t", target, "-p", "#{pane_dead_status}|#{pane_dead_signal}")
+	if err != nil {
+		return "", ""
+	}
+	parts := strings.SplitN(strings.TrimSpace(out), "|", 2)
+	status = strings.TrimSpace(parts[0])
+	if len(parts) == 2 {
+		signal = strings.TrimSpace(parts[1])
+	}
+	return status, signal
 }
 
 func (t *Tmux) sessionPanesDead(session string) (bool, error) {
