@@ -465,6 +465,7 @@ func TestProviderFieldSync(t *testing.T) {
 		"ProcessNames":           "reference list, not currently patched",
 		"EmitsPermissionWarning": "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"SupportsACP":            "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
+		"UpstreamEnv":            "harness serving-env binding; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"SupportsHooks":          "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"InstructionsFile":       "internal config path, not patched",
 		"ResumeFlag":             "internal resume config, not patched directly (use ResumeCommand)",

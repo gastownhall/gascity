@@ -2,6 +2,50 @@ package config
 
 import "testing"
 
+// The harness serving-env binding parses, abstract upstream fields parse, and a
+// derived harness inherits the binding through the provider chain.
+func TestUpstreamHarnessBindingAndAbstractFields(t *testing.T) {
+	const toml = `
+[workspace]
+name = "c"
+
+[providers.claude]
+command = "claude"
+[providers.claude.upstream_env]
+base_url = "ANTHROPIC_BASE_URL"
+api_key  = "ANTHROPIC_API_KEY"
+
+[providers.my-claude]
+base = "provider:claude"
+
+[upstreams.bedrock]
+base_url = "https://bedrock.example/anthropic"
+api_key  = "$AWS_BEDROCK_KEY"
+`
+	cfg, err := Parse([]byte(toml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := cfg.Upstreams["bedrock"]
+	if u.BaseURL != "https://bedrock.example/anthropic" || u.APIKey != "$AWS_BEDROCK_KEY" {
+		t.Errorf("abstract upstream fields not parsed: %+v", u)
+	}
+	if !u.HasAbstractServing() {
+		t.Error("HasAbstractServing() = false, want true")
+	}
+	if got := cfg.Providers["claude"].UpstreamEnv.BaseURL; got != "ANTHROPIC_BASE_URL" {
+		t.Errorf("claude binding base_url = %q, want ANTHROPIC_BASE_URL", got)
+	}
+	// A derived harness inherits the binding via MergeProviderOverBuiltin.
+	resolved, err := ResolveProviderChain("my-claude", cfg.Providers["my-claude"], cfg.Providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if got := resolved.UpstreamEnv.APIKey; got != "ANTHROPIC_API_KEY" {
+		t.Errorf("my-claude inherited binding api_key = %q, want ANTHROPIC_API_KEY", got)
+	}
+}
+
 func TestUpstreamConfigSurface(t *testing.T) {
 	const toml = `
 [workspace]

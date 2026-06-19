@@ -134,6 +134,12 @@ type ProviderSpec struct {
 	// Each option maps to CLI args via its Choices[].FlagArgs field.
 	// Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side.
 	OptionsSchema []ProviderOption `toml:"options_schema,omitempty" json:"-"`
+	// UpstreamEnv is this harness's serving-env contract (Phase C — the Upstream
+	// axis): the env-var NAMES this CLI reads for the model-serving base URL and
+	// credential. It lets the resolver render an abstract [upstreams.<name>] onto
+	// the right names for this harness, so an upstream preset is portable across
+	// harnesses (claude → ANTHROPIC_*, codex → OPENAI_*).
+	UpstreamEnv UpstreamEnvBinding `toml:"upstream_env,omitempty"`
 	// PrintArgs are CLI arguments that enable one-shot non-interactive mode.
 	// The provider prints its response to stdout and exits. When empty, the
 	// provider does not support one-shot invocation.
@@ -210,6 +216,7 @@ type ResolvedProvider struct {
 	SessionIDFlag          string
 	PermissionModes        map[string]string
 	OptionsSchema          []ProviderOption
+	UpstreamEnv            UpstreamEnvBinding
 	PrintArgs              []string
 	TitleModel             string
 	ACPCommand             string
