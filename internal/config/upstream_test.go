@@ -2,6 +2,32 @@ package config
 
 import "testing"
 
+// The popular builtin harnesses carry their serving-env binding, so an abstract
+// [upstreams.<name>] works out-of-box without the user declaring one. Resolved
+// through the explicit alias (base = "builtin:<name>") as a city gets it.
+func TestBuiltinHarnessUpstreamBindings(t *testing.T) {
+	// Direct: the binding is seeded on the builtin spec.
+	if got := BuiltinProviders()["claude"].UpstreamEnv; got.BaseURL != "ANTHROPIC_BASE_URL" || got.APIKey != "ANTHROPIC_API_KEY" || got.AuthToken != "ANTHROPIC_AUTH_TOKEN" {
+		t.Errorf("builtin claude binding = %+v, want ANTHROPIC_*", got)
+	}
+	// Resolved-through-alias: the binding survives chain resolution.
+	for _, tc := range []struct {
+		name, baseURL, apiKey, authToken string
+	}{
+		{"claude", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"},
+		{"codex", "OPENAI_BASE_URL", "OPENAI_API_KEY", ""},
+	} {
+		resolved, err := ResolveProviderChain(tc.name, BuiltinProviderAlias(tc.name), nil)
+		if err != nil {
+			t.Fatalf("%s: ResolveProviderChain: %v", tc.name, err)
+		}
+		got := resolved.UpstreamEnv
+		if got.BaseURL != tc.baseURL || got.APIKey != tc.apiKey || got.AuthToken != tc.authToken {
+			t.Errorf("%s resolved binding = %+v, want base=%q key=%q auth=%q", tc.name, got, tc.baseURL, tc.apiKey, tc.authToken)
+		}
+	}
+}
+
 // The harness serving-env binding parses, abstract upstream fields parse, and a
 // derived harness inherits the binding through the provider chain.
 func TestUpstreamHarnessBindingAndAbstractFields(t *testing.T) {

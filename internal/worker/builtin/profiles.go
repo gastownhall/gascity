@@ -59,6 +59,14 @@ type BuiltinProviderSpec struct {
 	TitleModel             string
 	ACPCommand             string
 	ACPArgs                []string
+	// Upstream serving-env binding (Phase C — the Upstream axis): the env-var
+	// NAMES this harness reads for the model-serving base URL and credential, so
+	// an abstract [upstreams.<name>] renders onto the right names for this CLI.
+	// Empty = no built-in binding (the operator declares one, or uses the raw env
+	// escape hatch). Kept as plain strings (this package cannot import config).
+	UpstreamBaseURLEnv   string
+	UpstreamAPIKeyEnv    string
+	UpstreamAuthTokenEnv string
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -90,6 +98,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"claude": {
 		DisplayName: "Claude Code",
 		Command:     "claude",
+		// Anthropic serving-env binding (Claude Code reads these for a custom
+		// endpoint + credential).
+		UpstreamBaseURLEnv:   "ANTHROPIC_BASE_URL",
+		UpstreamAPIKeyEnv:    "ANTHROPIC_API_KEY",
+		UpstreamAuthTokenEnv: "ANTHROPIC_AUTH_TOKEN",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
 			"effort":          "max",
@@ -157,6 +170,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"codex": {
 		DisplayName: "Codex CLI",
 		Command:     "codex",
+		// OpenAI serving-env binding (Codex reads these for a custom endpoint +
+		// API key). Codex auth is the API key; no separate auth-token var.
+		UpstreamBaseURLEnv: "OPENAI_BASE_URL",
+		UpstreamAPIKeyEnv:  "OPENAI_API_KEY",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
 			"model":           "gpt-5.5",

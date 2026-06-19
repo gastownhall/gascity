@@ -455,10 +455,15 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		PermissionModes:        cloneStringMap(spec.PermissionModes),
 		OptionDefaults:         cloneStringMap(spec.OptionDefaults),
 		OptionsSchema:          providerOptionsFromWorker(spec.OptionsSchema),
-		PrintArgs:              cloneStrings(spec.PrintArgs),
-		TitleModel:             spec.TitleModel,
-		ACPCommand:             spec.ACPCommand,
-		ACPArgs:                cloneStrings(spec.ACPArgs),
+		UpstreamEnv: UpstreamEnvBinding{
+			BaseURL:   spec.UpstreamBaseURLEnv,
+			APIKey:    spec.UpstreamAPIKeyEnv,
+			AuthToken: spec.UpstreamAuthTokenEnv,
+		},
+		PrintArgs:  cloneStrings(spec.PrintArgs),
+		TitleModel: spec.TitleModel,
+		ACPCommand: spec.ACPCommand,
+		ACPArgs:    cloneStrings(spec.ACPArgs),
 	}
 }
 
