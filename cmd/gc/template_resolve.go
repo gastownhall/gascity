@@ -47,6 +47,11 @@ type TemplateParams struct {
 	Prompt string
 	// Env is the merged environment (passthrough + provider + agent + passthrough vars).
 	Env map[string]string
+	// Upstream is the selected model-serving endpoint name (a key in [upstreams],
+	// Phase C). Carried to runtime.Config.Upstream (launch-half fingerprint) so a
+	// switch relaunches the warm box; the resolved serving env is already merged
+	// into Env (and is not fingerprinted).
+	Upstream string
 	// Hints contains startup behavior (pre_start, session_setup, etc.).
 	Hints agent.StartupHints
 	// WorkDir is the resolved absolute working directory.
@@ -418,6 +423,27 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	prependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
+	// Step 10b: Upstream axis (Phase C). Inject the selected upstream's serving
+	// env LAST so it is authoritative for the model-serving keys, and after
+	// ScrubTokenEnv so its credential refs survive. The env-ref values ($VAR)
+	// resolve from the controller environment via expandEnvMap; the resolved
+	// credentials are NOT fingerprinted (the Config.Env allow-list excludes
+	// them), only the selected NAME — carried to runtime.Config.Upstream
+	// (launch-half) so switching upstream relaunches the agent in the warm box.
+	if upstreamName := cfgAgent.Upstream; upstreamName != "" {
+		var upstreams map[string]config.UpstreamSpec
+		if p.city != nil {
+			upstreams = p.city.Upstreams
+		}
+		spec, ok := upstreams[upstreamName]
+		if !ok {
+			return TemplateParams{}, fmt.Errorf("agent %q selects upstream %q which is not declared in [upstreams]", qualifiedName, upstreamName)
+		}
+		for k, v := range expandEnvMap(spec.Env) {
+			env[k] = v
+		}
+	}
+
 	// Step 11: Expand session setup templates.
 	configDir := p.cityPath
 	if cfgAgent.SourceDir != "" {
@@ -592,6 +618,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		Command:          command,
 		Prompt:           prompt,
 		Env:              env,
+		Upstream:         cfgAgent.Upstream,
 		Hints:            hints,
 		WorkDir:          workDir,
 		SessionName:      sessName,
@@ -757,6 +784,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	// overrides below are layered on top.
 	cfg := tp.Hints.ToRuntimeConfig()
 	cfg.Command = tp.Command
+	cfg.Upstream = tp.Upstream
 	cfg.PromptSuffix = promptSuffix
 	cfg.PromptFlag = promptFlag
 	cfg.Env = env
