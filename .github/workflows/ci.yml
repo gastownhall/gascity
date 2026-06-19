@@ -181,7 +181,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .cache/golangci-lint
-          key: ${{ runner.os }}-golangci-lint-${{ hashFiles('go.sum', '.golangci.yml', 'Makefile') }}
+          key: ${{ runner.os }}-golangci-lint-${{ hashFiles('go.sum', '.golangci.yml') }}
           restore-keys: |
             ${{ runner.os }}-golangci-lint-
       - name: Lint
