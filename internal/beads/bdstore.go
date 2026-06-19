@@ -248,7 +248,10 @@ type BdStore struct {
 	readyProjectionEnabled bool
 }
 
-const bdTransientWriteAttempts = 3
+const (
+	bdTransientWriteAttempts = 3
+	bdTransientReadAttempts  = 3
+)
 
 var _ ConditionalAssignmentReleaser = (*BdStore)(nil)
 
@@ -1728,6 +1731,25 @@ func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, ar
 	return out, err
 }
 
+// runBDTransientRead runs a read-only bd command, retrying on transient Dolt
+// connection errors (invalid connection, broken pipe, etc.). Reads are
+// idempotent so retry is unconditional on isBdAmbiguousWriteError, with no
+// stable-ID guard needed.
+func (s *BdStore) runBDTransientRead(args ...string) ([]byte, error) {
+	var (
+		out []byte
+		err error
+	)
+	for attempt := 1; attempt <= bdTransientReadAttempts; attempt++ {
+		out, err = s.runner(s.dir, "bd", args...)
+		if err == nil || !isBdAmbiguousWriteError(err) || attempt == bdTransientReadAttempts {
+			return out, err
+		}
+		time.Sleep(time.Duration(attempt) * 50 * time.Millisecond)
+	}
+	return out, err
+}
+
 func (s *BdStore) bdTransientWriteArgs(args []string) []string {
 	if !s.isDoltliteBackend() {
 		return args
@@ -2059,7 +2081,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		args = append(args, "--skip-labels")
 	}
 
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd list: %w", err)
 	}
@@ -2342,7 +2364,7 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
 	includeEphemeral := q.TierMode == TierBoth || q.TierMode == TierWisps
 	args := bdReadyArgs(q, includeEphemeral)
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
 	}

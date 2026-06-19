@@ -2215,6 +2215,45 @@ func TestBdStoreListIncludesInfra(t *testing.T) {
 	}
 }
 
+func TestBdStoreListRetriesOnInvalidConnection(t *testing.T) {
+	calls := 0
+	goodJSON := []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`)
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, fmt.Errorf("begin read tx: invalid connection")
+		}
+		return goodJSON, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen() error = %v, want nil after retry recovered", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListOpen() returned %d beads, want 1", len(got))
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 (1 transient + 1 success)", calls)
+	}
+}
+
+func TestBdStoreListRetryBoundedReturnsErrorAfterExhaustion(t *testing.T) {
+	calls := 0
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		return nil, fmt.Errorf("begin read tx: invalid connection")
+	}
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.ListOpen()
+	if err == nil {
+		t.Fatal("ListOpen() error = nil, want error after retries exhausted")
+	}
+	if calls < 2 {
+		t.Fatalf("calls = %d, want >= 2 (retry must be attempted)", calls)
+	}
+}
+
 // --- Ready ---
 
 func TestBdStoreReady(t *testing.T) {
@@ -4478,5 +4517,46 @@ func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testi
 				t.Fatalf("List() = %+v, want only %s after client filtering", got, tc.want)
 			}
 		})
+	}
+}
+
+// --- Read retry ---
+
+func TestBdStoreReadyRetriesOnInvalidConnection(t *testing.T) {
+	calls := 0
+	goodJSON := []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`)
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, fmt.Errorf("begin read tx: invalid connection")
+		}
+		return goodJSON, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatalf("Ready() error = %v, want nil after retry recovered", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Ready() returned %d beads, want 1", len(got))
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 (1 transient + 1 success)", calls)
+	}
+}
+
+func TestBdStoreReadyRetryBoundedReturnsErrorAfterExhaustion(t *testing.T) {
+	calls := 0
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		return nil, fmt.Errorf("begin read tx: invalid connection")
+	}
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Ready()
+	if err == nil {
+		t.Fatal("Ready() error = nil, want error after retries exhausted")
+	}
+	if calls < 2 {
+		t.Fatalf("calls = %d, want >= 2 (retry must be attempted)", calls)
 	}
 }
