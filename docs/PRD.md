@@ -1,248 +1,228 @@
-# Product Requirements Document: gc selfhost UX hardening (1.1.0)
+# Product Requirements Document: extmsg connected-client transport (SSE streaming)
 
-Source bead: `ga-r8hs`
-Generated: 2026-05-01 by `gascity/planner`
-Milestone: 1.1.0
-Type: umbrella PRD (synthesises seven per-bug PRDs)
+Source bead: `ga-ty8cfb`
+Generated: 2026-06-19 by `gascity/planner`
+Type: feature PRD
 
 ## Problem Statement
 
-On 2026-04-26, a mayor session was lost for hours debugging a cascading
-series of `gc start` and `gc stop` failures during the pack v1 → v2
-transition window. Each individual failure took 5–30 minutes to
-root-cause; many error messages were misleading, under-informative, or
-buried under retry-induced warning spam. The bug bundle (filed under
-meta-tracker `ga-r8hs`) decomposes into seven concrete defects across
-three clusters:
+The External Messaging Fabric (`internal/extmsg`) was designed with two
+assumptions: (a) inbound messages arrive from an external provider whose
+webhook gc handles, and (b) outbound replies are pushed by gc to that same
+provider's REST API. The `TransportAdapter` interface encodes this
+push-to-provider model explicitly.
 
-**gc start error UX**
-- `ga-qpbe` — pack v1 → v2 silent duplicate (emits a generic
-  duplicate-name error with no migration guidance)
-- `ga-ytx2` — duplicate-name error with empty `SourceDir` for
-  auto-imported system packs (forces a 30-minute scavenger hunt)
-- `ga-7zi8` — N×retries of identical `deprecated order path` warnings
-  drown the fatal cause at the bottom of the output
+A generic external client — a local voice assistant, a CLI bot, or an
+LLM-driven agent — has **no provider API for gc to push to**. It needs to
+hold a connection open and *receive* the session's replies as they arrive.
+The inbound leg already exists (`POST /v0/extmsg/inbound`): a client can
+send turns to a session using the existing provider-neutral path. The
+outbound leg — the client receiving the session's replies — does not exist.
 
-**Supervisor lifecycle robustness**
-- `ga-9gdd` — `gc stop` runs the same validation pipeline as `gc
-  start` and refuses to terminate when validation fails (firefighter
-  needs a permit to enter the burning building)
-- `ga-7kwr` — running `gascity-supervisor` keeps in-memory copies of
-  the previous binary and parsed packs across `go install` rebuilds
-  (no drift detection, no auto-restart)
-- `ga-sn06` — `bd config set` calls under bd ≥ 1.0.3 trigger a
-  schema auto-migration that exceeds the 30 s `op_init` provider
-  timeout, putting the supervisor in a `starting_bead_store` retry
-  loop with no actionable error
+The fabric's own design doc (`engdocs/design/external-messaging-fabric.md`)
+acknowledged this gap as **Open Question #2**: "Which controller-local API
+shape is best for out-of-process adapters?" This PRD answers that question
+for the generic LLM client use case: SSE over the existing HTTP API,
+`127.0.0.1` only.
 
-**Pack v2 documentation**
-- `ga-fli0` — no published guide for migrating `[[agent]]` blocks
-  from `pack.toml` (v1) to `agents/<name>/agent.toml` +
-  `prompt.template.md` (v2); operators reverse-engineer the layout,
-  the auto-import map, and `fallback = true` semantics from errors
+The first consumer is a local voice assistant (tincan-iris, tracked on its
+own rig). The feature must be generic enough that any future external client
+uses the same three HTTP calls, with no Gas City changes.
 
-The unifying user impact: a contributor who upgrades the SDK and
-tries to run their existing city against new packs hits a 30+ minute
-cascade of cryptic failures before they can even diagnose the
-problem. First-time tutorial users see ANSI-yellow walls of repeated
-warnings, miss the fatal cause entirely, and conclude the SDK is
-broken.
+## Goals
 
-## Goals & Non-Goals
+1. A generic external LLM client can receive a Gas City session's replies
+   by holding a single SSE stream open — no polling, no push webhook needed.
+2. Client identity is controller-issued: `AccountID` is derived from a
+   controller-assigned token, not from anything the client asserts.
+3. A client's replies are routed only to that client's stream; they cannot
+   reach another client's binding or the session's existing Discord DM.
+4. Streams reconnect transparently with replay: a client that drops and
+   reconnects within the retention window receives any messages it missed.
+5. The contract is transport-agnostic: the SSE endpoint shape and event
+   schema are designed so WS or gRPC can be added later without breaking
+   existing clients.
+6. Gas City never imports anything client-specific. The client is
+   `provider:"llm-client"` with opaque strings.
 
-### Goals
-- A first-time `gc start` against a working tutorial city produces no
-  warning spam; a failing `gc start` produces a single visually
-  distinct `FATAL:` line at the bottom of the output.
-- Every duplicate-name error names both contributing sources in a
-  way an operator can act on **without grepping the codebase**, and
-  v1/v2 collisions emit a distinct migration-guidance error linking
-  to a published migration page.
-- `gc stop` always reaches its core action (terminate supervisor,
-  clean up sockets/locks) regardless of pack/agent config validity.
-- After a `go install ./cmd/gc` rebuild, the next `gc start` brings
-  the running supervisor in line with the new binary and on-disk
-  packs without requiring the operator to know about systemd.
-- `op_init` is idempotent and fast (< 5 s p95) regardless of bd
-  minor version.
-- A pack maintainer can migrate a v1 `[[agent]]` block to the v2
-  layout in < 10 minutes using a published Mintlify guide, with the
-  v1/v2 collision error linking directly to that guide.
+## Non-Goals
 
-### Non-Goals
-- Building a `gc fix --packs` auto-migration tool (separate PRD if
-  desired; the fixes here document the manual procedure first).
-- Deprecating v1 `[[agent]]` syntax (v1 remains valid; v2 is the
-  recommended layout).
-- Restructuring the validation pipeline globally — fixes are local.
-- Solving binary-drift detection for non-systemd supervisor
-  launches (out of scope for 1.1.0; tracked separately).
-- Auto-migrating deprecated order paths (`formulas/orders/<name>/`)
-  — out of scope; the warning surface is the focus.
+- Replacing or extending the Discord pack or any other existing adapter.
+- WebSocket or gRPC transports (design for them; implement in a later PR).
+- Multi-city routing (127.0.0.1 / single controller, Phase 1).
+- A brokered multi-reader fan-out within a single conversation (one active
+  SSE stream per conversation per client is sufficient for v1).
+- Implementing the client side of the integration (tincan-iris is a separate
+  rig; this PRD only covers the Gas City server side).
+- Authentication beyond the local controller token (no mTLS, no OIDC for v1).
 
 ## User Stories
 
-- As a **first-time tutorial user**, I want my city to come up in
-  under 30 s on first start, with errors that point me at the exact
-  files I need to edit so I don't conclude the SDK is broken.
-- As a **gc contributor**, I want my freshly rebuilt `gc` binary to
-  take effect on the next `gc start` so I can iterate on changes
-  without learning systemd internals.
-- As a **city operator** in a config-driven outage, I want `gc stop`
-  to terminate my city so I can repair config offline.
-- As a **pack maintainer** wrapping a system pack, I want my users
-  to get clear migration prompts when they hit the v1/v2 mismatch so
-  I don't field repeated support tickets.
-- As an **on-call engineer**, I want a stable `FATAL:` marker in
-  `gc start` logs so I can grep paged-alert output programmatically.
+1. **As a local voice assistant** that wraps the mayor session, I want to
+   send the user's transcribed speech to the session and receive the reply
+   in real time over a held-open stream so I can speak the response without
+   polling.
 
-## Functional Requirements (cross-cutting)
+2. **As a CLI bot developer**, I want to open a persistent conversation with
+   a Gas City session from a Go or Python script, send turns, and receive
+   streamed replies — using only standard HTTP — without implementing a
+   webhook listener.
 
-The seven detailed FR sets are owned by their per-bug PRDs (see
-References §). The umbrella adds three cross-cutting requirements:
+3. **As a Gas City operator**, I want to configure which sessions a connected
+   client may reach so a rogue or misconfigured client cannot impersonate a
+   session or inject turns into an unrelated workflow.
+
+4. **As a test harness author**, I want two isolated test clients to use the
+   same dummy conversation UUID and not interfere with each other, because
+   client isolation comes from the controller-issued token, not from the
+   UUID I pick.
+
+5. **As a session (e.g. mayor)**, I want a generic `gc` command that replies
+   to the current external caller — without me knowing whether the caller
+   is Discord, a voice assistant, or something else — so the prompt template
+   author never has to write provider-specific reply commands.
+
+## Functional Requirements
 
 | ID | Requirement | Priority | Acceptance Criteria |
 |----|-------------|----------|---------------------|
-| FR-X1 | The seven fixes compose end-to-end. A `gc start` against a v1 pack colliding with a v2 system pack produces: a single distinct `FATAL:` line at the bottom, both source paths named, and a link to the migration guide — within the supervisor's existing 30 s `providerOpTimeout`. | Must | Integration test under `test/` (build tag) exercises the matrix end-to-end. |
-| FR-X2 | A `docs/troubleshooting/gc-start-walkthrough.md` (or equivalent Mintlify page) collects the seven failure modes and their resolutions, cross-linked from the FATAL output and from `docs/getting-started/troubleshooting.md`. | Should | Page exists, is in `docs.json` navigation, and is referenced from at least the v1/v2-collision and op_init-timeout error paths. |
-| FR-X3 | The 1.1.0 release notes / CHANGELOG include a "selfhost UX upgrades" section listing the seven shipped fixes with one-line summaries and bead links. | Must | Release notes entry exists at the milestone cut. |
+| FR-1 | **Token issuance.** A client calls `POST /v0/extmsg/clients` with a credential (operator-issued shared secret or no-auth for localhost-only mode) and receives a `client_id` + `token`. The `client_id` is the stable `AccountID` for that client's `ConversationRef`s; the token is presented on every subsequent call via a header (`Authorization: Bearer <token>` or `X-GC-Client-Token: <token>`). Issuance is idempotent for the same credential: the same credential always returns the same `client_id`. | Must | Unit tests cover: new issuance, repeat issuance returns same id, bad credential returns 401. |
+| FR-2 | **Bind on first turn.** `POST /v0/extmsg/inbound` with `provider:"llm-client"`, the client's `ConversationRef`, text, and `Actor` implicitly binds the conversation to the target session if no binding exists. The `AccountID` field of the presented `ConversationRef` MUST match the `client_id` from the token; the API rejects mismatches. | Must | Integration test: inbound with mismatched AccountID returns 403; inbound with correct AccountID creates binding visible in `GET /v0/extmsg/bindings`. |
+| FR-3 | **SSE subscribe endpoint.** `GET /v0/extmsg/{provider}/{account_id}/{conversation_id}/subscribe` opens an SSE stream. The client authenticates via token (same header as FR-1). The controller delivers the target session's replies to this stream as SSE events. The endpoint returns HTTP 200 with `Content-Type: text/event-stream`. On (re)connect the client MAY supply `Last-Event-ID`; the controller replays any transcript entries after that sequence before switching to live delivery. | Must | Acceptance: (a) client sends turn, target session replies, reply appears on stream within 5 s p95; (b) client disconnects, session replies, client reconnects with Last-Event-ID, missed reply is replayed. |
+| FR-4 | **In-process subscriber registry.** An in-memory registry (`ConversationRef → channel`) receives from `HandleOutbound` when the conversation's provider is `llm-client`. The registry is created once per controller lifetime (ephemeral, like `AdapterRegistry`). A `llm-client` `TransportAdapter` implementation writes to the registry instead of POSTing to a callback URL. Multiple goroutines subscribing to the same ref are serialized by the registry. | Must | Unit test: Publish to registry → event appears on subscriber channel within 100 ms; Publish with no subscriber → returns receipt with `Delivered:false`. |
+| FR-5 | **Generic session reply command.** A session can reply to the originating external caller (whatever provider it is) via a generic `gc extmsg reply --session <name> --conversation <ref> "<text>"` command or by posting to `POST /v0/extmsg/outbound` with an explicit `ConversationRef`. The target session's prompt template receives the `ConversationRef` in its context so it can construct the reply call without knowing the provider. | Must | Acceptance: session replies via generic command; the reply appears on the llm-client SSE stream. |
+| FR-6 | **SSE event schema.** Each SSE event carries: `id` (transcript sequence number as string), `event` (one of `message`, `heartbeat`, `error`), `data` (JSON object). For `message` events the data includes at minimum: `text`, `session_id`, `conversation`, `sequence`, `created_at`. Schema is documented and versioned via a `version` field in the data object. | Must | Schema documented in `engdocs/design/` before implementation begins; contract test validates round-trip. |
+| FR-7 | **Allowed-session config.** A `city.toml` section (or controller command) lets an operator restrict which sessions a connected client token may bind to. Default: any session on 127.0.0.1 is reachable. A client presenting a token that is not allowed to reach the requested session receives 403 on bind and on subscribe. | Should | Config surface defined by architect; acceptance test: token with explicit allowlist cannot bind to unlisted session. |
+| FR-8 | **Heartbeat.** The SSE stream emits a `heartbeat` event every 30 s (configurable) when no message has been sent, so client-side connection liveness checks work without a protocol-level ping. | Should | Integration test: idle stream emits heartbeat event within 35 s. |
+| FR-9 | **Stream cleanup on client disconnect.** When the SSE client disconnects, the subscriber registry entry is removed and the associated goroutine exits cleanly. The binding and transcript membership are retained (the client can reconnect). | Must | Unit test: disconnect → registry entry removed; no goroutine leak (goleak or manual count). |
+| FR-10 | **Transcript membership.** When a binding is created for `llm-client`, the `TranscriptService.EnsureMembership` is called with `BackfillPolicy: MembershipBackfillSinceJoin` (default). On reconnect with `Last-Event-ID`, the controller lists backfill from that sequence before switching to live delivery. | Must | Matches existing `TranscriptService` API; no new storage needed. |
 
-## Non-Functional Requirements (cross-cutting)
+## Non-Functional Requirements
 
 | ID | Requirement | Metric |
 |----|-------------|--------|
-| NFR-X1 | First-time `gc start` time for a tutorial city. | < 30 s p95 (down from "hangs / never reaches ready" on bd ≥ 1.0.3). |
-| NFR-X2 | Operator time-to-spot the fatal cause on a failed `gc start`. | < 5 min p95 (down from ~30 min anecdotally). |
-| NFR-X3 | Output line count for a typical failed `gc start`. | < 1/3 of pre-1.1.0 output (warning de-dup × visual FATAL distinction). |
-| NFR-X4 | Cross-cutting integration test wall-clock duration. | < 60 s under `go test -tags=integration ./test/...`. |
+| NFR-1 | **Latency (inbound→stream).** Time from session reply to SSE event at the client. | < 500 ms p95 on localhost. |
+| NFR-2 | **Concurrent clients.** Number of simultaneous SSE subscribers the controller can serve without memory pressure. | ≥ 50 concurrent streams on a 4-core dev machine (extrapolate to prod). |
+| NFR-3 | **Reconnect replay window.** Duration of replay window after disconnect, using existing transcript retention. | ≥ 7 days (matches existing closed-delivery-bead retention). |
+| NFR-4 | **No goroutine leak.** Each disconnected client SSE goroutine exits within 5 s of the HTTP connection closing. | Verified by goroutine count in integration test. |
+| NFR-5 | **127.0.0.1 only.** The subscribe and client-registration endpoints MUST NOT be reachable from off-loopback interfaces (matches existing extmsg surface). | Enforced by the existing `cityGet`/`cityPost` registration path; verified by test. |
+| NFR-6 | **Transport-agnostic contract.** The event schema and path structure must be designed so the SSE endpoint can be replaced by WS or gRPC later with a wire-compatible field set. | Verified by architect review of the schema doc before implementation. |
 
 ## Technical Constraints
 
-Aligned across all seven per-bug PRDs (each PRD also lists its own
-constraints from `CLAUDE.md`):
+Derived from `CLAUDE.md` and the extmsg fabric design:
 
-- **No status files — query live state.** No fix introduces a
-  sentinel file ("init done", supervisor PID file, drift cache).
-  State is queried from the process table, `/proc/<pid>/exe`,
-  on-disk mtimes, and the supervisor's own API.
-- **No premature abstractions.** Each fix is a localized change at
-  the relevant call site. The umbrella does not introduce a shared
-  "gc-start-error-format" library, "supervisor-lifecycle" framework,
-  or "validation-severity" subsystem.
-- **Tests next to code.** Per-bug regression tests live alongside
-  their fixes. The cross-cutting integration test (FR-X1) lives
-  under `test/` with the `integration` build tag.
-- **Layering invariants.** All fixes stay in their declared layers
-  (`internal/config`, `internal/supervisor`, `cmd/gc`). The
-  validation-bypass policy on `gc stop` is a CLI-layer decision, not
-  a validator-library policy.
-- **Bitter Lesson.** Fixes are policy choices encoded in code, not
-  configurable knobs. As error volume / supervisor complexity grow,
-  the fixes remain useful without further tuning.
-- **Tutorial harness compatibility.** Every fix preserves the Actual
-  tutorial acceptance harness behavior (see `isolated-tutorial-
-  harness` skill).
+- **No upward dependencies.** `internal/extmsg` must not import `internal/api`
+  or `cmd/gc`. The subscriber registry and `llm-client` adapter live in
+  `internal/extmsg`; the SSE HTTP handler lives in `internal/api`.
+- **Single controller writer.** Phase 1: all `extmsg` mutations go through
+  one controller process. The subscriber registry is in-process; no
+  cross-process fanout is needed.
+- **Adapter identity is controller-assigned.** The `AccountID` in the
+  `ConversationRef` is the controller-issued `client_id`, never
+  client-asserted. The API must validate this on every mutating call.
+- **No "latest route for session."** Reply routing must use a scoped
+  `(session, ConversationRef)` path, not a session-level catch-all. The
+  existing `DeliveryContextRecord` model already enforces this; the
+  `llm-client` path must follow the same rule.
+- **No status files — query live state.** The subscriber registry is
+  in-memory. Do not write SSE connection state to disk.
+- **Zero hardcoded role names.** No Go code may reference `"mayor"` or any
+  other role name. The allowed-session config is a set of session names
+  supplied by the operator, not hardcoded.
+- **Tests next to code.** Unit tests in `internal/extmsg`; HTTP handler tests
+  in `internal/api`; end-to-end reconnect test under `test/` with build tag
+  `integration`.
+- **TDD.** Test first, watch fail, make pass.
+- **Atomic file writes** for any config mutations (temp → rename).
+- **No panics in library code** — return errors.
 
 ## Dependencies
 
-- Each per-bug PRD owns its own dependency list. Cross-cutting:
-  - **FR-X1** depends on all seven child fixes shipping or being
-    available on a coordinated branch (four are already closed; three
-    are ready-to-build — see Status §).
-  - **FR-X2** (troubleshooting walkthrough) depends on
-    `pack-v1-to-v2-migration-guide` (`ga-fli0`) URL stability and on
-    the published `FATAL:` output format from
-    `gc-start-warning-suppression` (`ga-7zi8`).
-  - **FR-X3** (release notes) depends on the milestone cut date
-    being scheduled — coordinate with PM for the 1.1.0 release.
-- Mintlify docs build pipeline (`./mint.sh dev`, `make check-docs`).
-- bd ≥ 1.0.3 (the version that exposed `ga-sn06`); the fast-path
-  `op_init` (now shipped) keeps lower versions working too.
+- `internal/extmsg` — all services (Binding, DeliveryContext, Group,
+  Transcript) are reused as-is. No changes to existing service interfaces.
+- `internal/api` — new HTTP handler for `GET /v0/extmsg/{...}/subscribe`
+  and `POST /v0/extmsg/clients` wired via `supervisor_city_routes.go`.
+- `internal/events` — existing event bus; the outbound subscriber registry
+  may subscribe to `events.ExtMsgOutbound` events as an alternative to
+  direct adapter calls (architect to decide).
+- `city.toml` + `internal/config` — new `[extmsg.connected_clients]`
+  config section for token storage and allowed-session allowlists
+  (architect to design the exact shape).
+- SSE standard (W3C Server-Sent Events) — no new external libraries needed;
+  Go's `net/http` standard library handles SSE without a dependency.
+- `tincan-iris` rig — the first consumer client (tracked separately; not a
+  dependency for this PRD, but the schema design must accommodate it).
 
 ## Open Questions
 
-These are cross-cutting questions beyond the per-bug PRDs' open
-items. Architect / designer to resolve.
+These are unresolved items the architect and designer must address.
 
-1. **Architect** — Should `gc start` produce a structured
-   machine-readable summary line at the end (PID, binary path, drift
-   status, warnings emitted, fatal cause)? The seven per-bug PRDs
-   each touch this output surface; consolidating the output schema
-   now avoids re-formatting later.
-2. **Architect** — FR-X1's integration test harness: does the
-   existing `test/` suite already have a "fresh-city-from-scratch"
-   fixture, or does this need a new harness? If the latter, the
-   harness work may exceed FR-X1's scope and want its own bead.
-3. **Designer** — Where in the docs sidebar does FR-X2's
-   troubleshooting walkthrough live: extend
-   `docs/getting-started/troubleshooting.md`, sit under
-   `docs/troubleshooting/` (where `dolt-bloat-recovery.md` already
-   lives), or top-level `docs/walkthroughs/`? The choice affects
-   FATAL-line link strings.
-4. **Designer** — Should the FATAL-line ANSI style be a new style
-   (e.g., bold-red on red-tint) distinct from existing error
-   formatting, or a re-skin of the current style? Touches accessibility
-   review (no-color mode, screen readers).
-5. **PM** — Is the 1.1.0 release notes section (FR-X3) authored by
-   the PM after work decomposition, or does it want a designer pass
-   for tone? Recommend PM-owned with a designer review.
+### For the architect
 
-## Status
+1. **SSE endpoint path.** The proposal uses
+   `GET /v0/extmsg/{provider}/{account_id}/{conversation_id}/subscribe`.
+   Is the path encoded in URL segments or query params? Define the exact
+   path and whether a `ConversationRef` wrapper resource exists separately
+   from the subscribe endpoint.
 
-Children of `ga-r8hs` (per-bug PRDs and their downstream
-implementation beads):
+2. **Token storage.** Where are issued tokens stored durably? Options: (a)
+   beads with a new `extmsg_client_token` type, (b) a `city.toml` section
+   the operator manages, (c) a separate in-memory-only token issued fresh
+   each session (loses persistence across controller restart). Persistent
+   tokens (option a or b) let a voice assistant survive controller restarts
+   without re-registration.
 
-| Source bead | PRD slug | Architecture bead | Implementation bead | State |
-|-------------|---------|-------------------|---------------------|-------|
-| `ga-qpbe` | `pack-v1-v2-collision-detection` | `ga-9ogb` | `ga-9ogb.1` | shipped |
-| `ga-ytx2` | `duplicate-name-error-source-paths` | `ga-tpfc` | `ga-tpfc.1` | shipped |
-| `ga-fli0` | `pack-v1-to-v2-migration-guide` | `ga-6wrr` | `ga-6wrr.1` | designer pass / build-ready |
-| `ga-7zi8` | `gc-start-warning-suppression` | `ga-q0bf` | `ga-q0bf.1` | ready-to-build |
-| `ga-9gdd` | `gc-stop-bypass-validation` | `ga-r8iz` | `ga-r8iz.1` | ready-to-build |
-| `ga-7kwr` | `supervisor-binary-stale-detection` | `ga-a3ry` | `ga-a3ry.1` (closed); `ga-xxqx` (review) | shipped (phase 2 in review) |
-| `ga-sn06` | `gc-beads-bd-op-init-timeout` | `ga-5mym` | `ga-5mym.1` | shipped |
+3. **Subscriber registry vs. event bus wiring.** Two approaches for routing
+   session replies to SSE streams: (a) `HandleOutbound` calls the
+   `llm-client` adapter directly (adapter delivers to the registry); (b)
+   the SSE handler subscribes to the event bus and filters by conversation.
+   Approach (a) is simpler and consistent with the existing adapter model.
+   Approach (b) requires no adapter at all but needs a pub-sub mechanism on
+   the event bus. Architect to choose; if (a), define the `llm-client`
+   adapter interface clearly.
 
-**Cross-cutting work unrouted as of 2026-05-01** (this PRD adds):
+4. **Generic session reply.** Should the target session reply via
+   (a) `gc extmsg reply --conversation <ref>` (new CLI command), (b)
+   reuse `POST /v0/extmsg/outbound` from the session's prompt, or (c) a
+   named variable in the prompt template that auto-routes? Whichever is
+   chosen, the session must NOT need to know the provider is `llm-client`.
+   Architect to specify how the `ConversationRef` is surfaced to the session.
 
-- FR-X1 — cross-cutting integration test → `needs-architecture`
-- FR-X2 — `gc start` troubleshooting walkthrough page → `needs-design`
+5. **Backpressure.** If the SSE subscriber is slow (congested network, slow
+   client), how many undelivered messages does the registry buffer before
+   dropping or blocking? Architect to define the channel buffer size and
+   drop policy.
 
-Cross-cutting handoff beads will be created by the planner after
-this PRD is committed.
+6. **Multiple conversations per client.** The feature request confirms a
+   single client token can own multiple `ConversationID`s (namespaced by
+   `AccountID`). Architect to confirm no per-client conversation cap is
+   needed in v1.
+
+### For the designer (no UI/UX in this feature; designer reviews docs)
+
+7. **API reference page.** The three new HTTP calls (`POST /v0/extmsg/clients`,
+   `POST /v0/extmsg/inbound` with `llm-client` provider, and
+   `GET .../subscribe`) need an API reference section and a how-to guide.
+   Where does this live in the docs site (mintlify): `reference/`, `guides/`,
+   or a new `integrations/` section?
+
+8. **Error UX.** When a client's stream is closed server-side (token expired,
+   session stopped), what HTTP status and SSE `error` event payload should
+   the client receive? Define the error catalog for this endpoint.
 
 ## References
 
-- Source bead: `ga-r8hs`
-- Per-bug PRD drafts (rig root, currently untracked working copy):
-  - `docs/prd/duplicate-name-error-source-paths.md` (`ga-ytx2`)
-  - `docs/prd/gc-beads-bd-op-init-timeout.md` (`ga-sn06`)
-  - `docs/prd/gc-start-warning-suppression.md` (`ga-7zi8`)
-  - `docs/prd/gc-stop-bypass-validation.md` (`ga-9gdd`)
-  - `docs/prd/pack-v1-to-v2-migration-guide.md` (`ga-fli0`)
-  - `docs/prd/pack-v1-v2-collision-detection.md` (`ga-qpbe`)
-  - `docs/prd/supervisor-binary-stale-detection.md` (`ga-7kwr`)
-- Existing pack v2 documentation: `docs/packv2/`
-- Existing troubleshooting docs: `docs/troubleshooting/`,
-  `docs/getting-started/troubleshooting.md`
-- Source location for auto-import map (referenced by `ga-ytx2` and
-  `ga-qpbe`): `internal/config/config.go:2679`
-- Validator entry (referenced by both gc-start-error-UX PRDs):
-  `internal/config/config.go validateAgents` (~line 2374)
-- Build hash encoded in version output (referenced by `ga-7kwr`):
-  commit `acc19d24`
-- Hot patch and upstream PR for `op_init` (referenced by `ga-sn06`):
-  commit `e98fda07`, bd PR #1264
-
-## Cross-cutting
-
-The seven per-bug PRDs already self-classify into two clusters
-("gc start error UX" and "supervisor lifecycle robustness") plus one
-cross-cluster doc deliverable (`pack-v1-to-v2-migration-guide`). The
-umbrella treats them as a single 1.1.0 selfhost-UX initiative for
-release-notes purposes (FR-X3) and for the cross-cutting integration
-test (FR-X1).
-
-Architect should review FR-X1 and FR-X2 against the per-bug PRDs to
-confirm no duplicate work, and to decide whether the structured
-end-of-output summary (Open Question 1) wants its own bead or rides
-along with `ga-q0bf` (warning de-dup is the closest existing surface).
+- Source bead: `ga-ty8cfb`
+- External Messaging Fabric design:
+  `engdocs/design/external-messaging-fabric.md`
+  (Trust model §, Open Question #2, controller-assigned adapter identity)
+- External Messaging Shared Threads design:
+  `engdocs/design/external-messaging-shared-threads.md`
+  (Transcript service, backfill, MembershipBackfillPolicy — reused for replay)
+- Existing extmsg implementation:
+  `internal/extmsg/` (types.go, outbound.go, adapter_registry.go, transcript_service.go)
+- Existing API surface:
+  `internal/api/huma_handlers_extmsg.go`,
+  `internal/api/supervisor_city_routes.go` (lines 346–371)
+- First consumer: tincan-iris voice assistant (separate rig, tracked there)
