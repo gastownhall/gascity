@@ -186,8 +186,44 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
-      - name: Run make test
-        run: make test
+      - name: Run make test-mac
+        run: make test-mac
+
+  # cmd/gc unit/process tests — sharded 12-way so each shard comfortably fits
+  # the per-shard timeout even on slower Mac ARM runners. Mirrors the Linux
+  # cmd-gc-process matrix in ci.yml. cmd/gc is excluded from mac-unit's
+  # make test-mac sweep; coverage is preserved here across all 12 shards.
+  mac-cmd-gc-process:
+    name: Mac / cmd-gc process / shard ${{ matrix.shard }} of 12
+    needs: runner-policy
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'needs-mac')
+      )
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gascity-macos
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Run cmd/gc process shard
+        run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12
 
   # Tier A acceptance — smoke-level gate on every PR.
   mac-acceptance:
@@ -260,10 +296,10 @@ jobs:
           install-claude-cli: "true"
       - name: Install tools
         run: make install-tools
-      - name: Run test-cover
+      - name: Run test-cover-mac
         id: cover
         continue-on-error: true
-        run: make test-cover
+        run: make test-cover-mac
       - name: Upload coverage artifact
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -542,6 +578,7 @@ jobs:
       - runner-policy
       - mac-quality
       - mac-unit
+      - mac-cmd-gc-process
       - mac-acceptance
       - mac-cover
       - mac-integration-packages
@@ -554,6 +591,7 @@ jobs:
         env:
           QUALITY: ${{ needs.mac-quality.result }}
           UNIT: ${{ needs.mac-unit.result }}
+          CMD_GC: ${{ needs.mac-cmd-gc-process.result }}
           ACCEPTANCE: ${{ needs.mac-acceptance.result }}
           # Best-effort jobs: use outputs.outcome (not needs.*.result).
           COVER: ${{ needs.mac-cover.outputs.outcome || needs.mac-cover.result }}
@@ -568,9 +606,10 @@ jobs:
           | Job | Result |
           | --- | --- |
           | Mac / quality | ${QUALITY} |
-          | Mac / make test | ${UNIT} |
+          | Mac / make test-mac | ${UNIT} |
+          | Mac / cmd-gc process | ${CMD_GC} |
           | Mac / acceptance (Tier A) | ${ACCEPTANCE} |
-          | Mac / test-cover (best-effort) | ${COVER} |
+          | Mac / test-cover-mac (best-effort) | ${COVER} |
           | Mac / integration packages | ${INT_PACKAGES} |
           | Mac / integration bdstore (best-effort) | ${INT_BDSTORE} |
           | Mac / integration rest | ${INT_REST} |
@@ -578,7 +617,7 @@ jobs:
           EOF
 
           fail=0
-          for result in "$QUALITY" "$UNIT" "$ACCEPTANCE" "$INT_PACKAGES" "$INT_REST"; do
+          for result in "$QUALITY" "$UNIT" "$CMD_GC" "$ACCEPTANCE" "$INT_PACKAGES" "$INT_REST"; do
             # Skipped is acceptable (e.g. when run outside the needs-mac trigger set)
             case "$result" in
               success|skipped|"") ;;
