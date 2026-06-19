@@ -75,6 +75,24 @@ esac
 `
 }
 
+// separableWarmScript is separableScript but the in-box tmux session ALREADY
+// exists (has-session exits 0), so launchAgent takes the WARM-box relaunch path
+// (respawn-pane -k) instead of new-session.
+func separableWarmScript(logFile string) string {
+	return `
+op="$1"; name="$2"
+case "$op" in
+  protocol)  echo '{"version":0,"capabilities":["proc.exec","proc.provision"]}' ;;
+  provision) cat >/dev/null; echo "provision $name" >> "` + logFile + `" ;;
+  start)     cat >/dev/null; echo "start $name"     >> "` + logFile + `" ;;
+  exec)      cmd="$(cat)"; echo "exec: $cmd" >> "` + logFile + `"; exit 0 ;;
+  is-running) echo true ;;
+  stop)      ;;
+  *) exit 2 ;;
+esac
+`
+}
+
 // weldedScript declares proc.exec only (NOT proc.provision): the welded `start`
 // op provisions and launches, so the controller must not provision/launch.
 func weldedScript(logFile string) string {
@@ -182,6 +200,33 @@ func TestRelaunch_SeparablePackLaunchesOverExec(t *testing.T) {
 	}
 	if strings.Contains(log, "provision s") || strings.Contains(log, "start s") {
 		t.Errorf("separable Relaunch must not reprovision the box:\n%s", log)
+	}
+}
+
+// Relaunch when the in-box tmux session ALREADY exists takes the warm-box path:
+// it RESPAWNS the pane (respawn-pane -k) rather than creating a new session, and
+// still does not reprovision. Guards the B2/B3b warm-relaunch payoff — the
+// cold-path tests (has-session exit 1) never reach respawn-pane.
+func TestRelaunch_WarmBoxRespawnsPane(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableWarmScript(logf)))
+
+	if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent --resume"}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	log := readLog(t, logf)
+	if !strings.Contains(log, "has-session") {
+		t.Errorf("Relaunch should probe has-session first:\n%s", log)
+	}
+	if !strings.Contains(log, "respawn-pane") || !strings.Contains(log, "-k") || !strings.Contains(log, "agent --resume") {
+		t.Errorf("warm-box Relaunch should respawn-pane -k the agent command:\n%s", log)
+	}
+	if strings.Contains(log, "new-session") {
+		t.Errorf("warm-box Relaunch must NOT create a new session:\n%s", log)
+	}
+	if strings.Contains(log, "provision s") || strings.Contains(log, "start s") {
+		t.Errorf("warm-box Relaunch must not reprovision the box:\n%s", log)
 	}
 }
 
