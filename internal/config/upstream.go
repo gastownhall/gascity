@@ -43,8 +43,12 @@ type UpstreamSpec struct {
 	// var is upstream-dependent (GROQ_API_KEY, CEREBRAS_API_KEY, …), so the
 	// HARNESS has no single binding and the UPSTREAM names its own target.
 	// Precedence per field: this override > the harness binding > error.
-	BaseURLEnv   string `toml:"base_url_env,omitempty"`
-	APIKeyEnv    string `toml:"api_key_env,omitempty"`
+	BaseURLEnv string `toml:"base_url_env,omitempty"`
+	// APIKeyEnv overrides the harness binding's api_key env-var name for this
+	// upstream (see BaseURLEnv for when this is needed).
+	APIKeyEnv string `toml:"api_key_env,omitempty"`
+	// AuthTokenEnv overrides the harness binding's auth_token env-var name for this
+	// upstream (see BaseURLEnv).
 	AuthTokenEnv string `toml:"auth_token_env,omitempty"`
 	// Env is a harness-specific escape hatch: raw env keys merged AFTER the
 	// abstract fields render. Values may use $VAR refs.

@@ -10,10 +10,16 @@ import (
 // ProviderOption declares a single configurable option for a provider.
 // Options are rendered as UI controls in a dashboard's session creation form.
 type ProviderOption struct {
-	Key     string         `toml:"key"     json:"key"`
-	Label   string         `toml:"label"   json:"label"`
-	Type    string         `toml:"type"    json:"type"` // "select" only (v1)
-	Default string         `toml:"default" json:"default"`
+	// Key is the option identifier (e.g. "model"); also the merge key for
+	// options_schema_merge = "by_key".
+	Key string `toml:"key"     json:"key"`
+	// Label is the human-readable option name shown in tooling.
+	Label string `toml:"label"   json:"label"`
+	Type  string `toml:"type"    json:"type"` // "select" only (v1)
+	// Default is the Value of the choice selected when the user makes none.
+	Default string `toml:"default" json:"default"`
+	// Choices are the allowed values; selecting one injects its FlagArgs into the
+	// agent command line (how the Model axis renders to a harness CLI flag).
 	Choices []OptionChoice `toml:"choices" json:"choices"`
 	// Omit is the removal sentinel for options_schema_merge = "by_key".
 	// When set on a child layer's entry, the matching Key inherited from
@@ -23,7 +29,10 @@ type ProviderOption struct {
 
 // OptionChoice is one allowed value for a "select" option.
 type OptionChoice struct {
+	// Value is the choice identifier matched against ProviderOption.Default and
+	// the user's selection (e.g. "opus-4.8").
 	Value string `toml:"value"     json:"value"`
+	// Label is the human-readable choice name shown in tooling.
 	Label string `toml:"label"     json:"label"`
 	// FlagArgs are the CLI arguments injected when this choice is selected.
 	// json:"-" is intentional: FlagArgs must never appear in the public API DTO

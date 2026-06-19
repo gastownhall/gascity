@@ -1857,10 +1857,12 @@
     "OptionChoice": {
       "properties": {
         "value": {
-          "type": "string"
+          "type": "string",
+          "description": "Value is the choice identifier matched against ProviderOption.Default and\nthe user's selection (e.g. \"opus-4.8\")."
         },
         "label": {
-          "type": "string"
+          "type": "string",
+          "description": "Label is the human-readable choice name shown in tooling."
         },
         "flag_args": {
           "items": {
@@ -2081,23 +2083,27 @@
     "ProviderOption": {
       "properties": {
         "key": {
-          "type": "string"
+          "type": "string",
+          "description": "Key is the option identifier (e.g. \"model\"); also the merge key for\noptions_schema_merge = \"by_key\"."
         },
         "label": {
-          "type": "string"
+          "type": "string",
+          "description": "Label is the human-readable option name shown in tooling."
         },
         "type": {
           "type": "string",
           "description": "\"select\" only (v1)"
         },
         "default": {
-          "type": "string"
+          "type": "string",
+          "description": "Default is the Value of the choice selected when the user makes none."
         },
         "choices": {
           "items": {
             "$ref": "#/$defs/OptionChoice"
           },
-          "type": "array"
+          "type": "array",
+          "description": "Choices are the allowed values; selecting one injects its FlagArgs into the\nagent command line (how the Model axis renders to a harness CLI flag)."
         },
         "omit": {
           "type": "boolean",
@@ -2756,10 +2762,12 @@
           "description": "BaseURLEnv/APIKeyEnv/AuthTokenEnv override the HARNESS binding's env-var\nname for the corresponding abstract field. Needed for GATEWAY harnesses —\none CLI (e.g. opencode) fronting many upstreams where the credential env\nvar is upstream-dependent (GROQ_API_KEY, CEREBRAS_API_KEY, …), so the\nHARNESS has no single binding and the UPSTREAM names its own target.\nPrecedence per field: this override \u003e the harness binding \u003e error."
         },
         "api_key_env": {
-          "type": "string"
+          "type": "string",
+          "description": "APIKeyEnv overrides the harness binding's api_key env-var name for this\nupstream (see BaseURLEnv for when this is needed)."
         },
         "auth_token_env": {
-          "type": "string"
+          "type": "string",
+          "description": "AuthTokenEnv overrides the harness binding's auth_token env-var name for this\nupstream (see BaseURLEnv)."
         },
         "env": {
           "additionalProperties": {

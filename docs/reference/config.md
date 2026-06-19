@@ -527,8 +527,8 @@ OptionChoice is one allowed value for a "select" option.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `value` | string | **yes** |  |  |
-| `label` | string | **yes** |  |  |
+| `value` | string | **yes** |  | Value is the choice identifier matched against ProviderOption.Default and the user's selection (e.g. "opus-4.8"). |
+| `label` | string | **yes** |  | Label is the human-readable choice name shown in tooling. |
 | `flag_args` | []string | **yes** |  | FlagArgs are the CLI arguments injected when this choice is selected. json:"-" is intentional: FlagArgs must never appear in the public API DTO (security boundary — prevents clients from seeing internal CLI flags). |
 | `flag_aliases` | []array |  |  | FlagAliases are equivalent CLI argument sequences stripped from legacy provider args. Like FlagArgs, they stay server-side only. |
 
@@ -609,11 +609,11 @@ ProviderOption declares a single configurable option for a provider.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `key` | string | **yes** |  |  |
-| `label` | string | **yes** |  |  |
+| `key` | string | **yes** |  | Key is the option identifier (e.g. "model"); also the merge key for options_schema_merge = "by_key". |
+| `label` | string | **yes** |  | Label is the human-readable option name shown in tooling. |
 | `type` | string | **yes** |  | "select" only (v1) |
-| `default` | string | **yes** |  |  |
-| `choices` | []OptionChoice | **yes** |  |  |
+| `default` | string | **yes** |  | Default is the Value of the choice selected when the user makes none. |
+| `choices` | []OptionChoice | **yes** |  | Choices are the allowed values; selecting one injects its FlagArgs into the agent command line (how the Model axis renders to a harness CLI flag). |
 | `omit` | boolean |  |  | Omit is the removal sentinel for options_schema_merge = "by_key". When set on a child layer's entry, the matching Key inherited from a parent layer is pruned from the resolved schema. |
 
 ## ProviderPatch
@@ -816,8 +816,8 @@ UpstreamSpec is a named model-serving endpoint preset (Phase C — the Upstream 
 | `api_key` | string |  |  | APIKey is the abstract credential, rendered onto the harness's api_key env var name. May be a $VAR ref so the secret stays out of config. |
 | `auth_token` | string |  |  | AuthToken is an abstract bearer-token credential (an alternative to APIKey for harnesses/upstreams that use a token), rendered onto the harness's auth_token env var name. |
 | `base_url_env` | string |  |  | BaseURLEnv/APIKeyEnv/AuthTokenEnv override the HARNESS binding's env-var name for the corresponding abstract field. Needed for GATEWAY harnesses — one CLI (e.g. opencode) fronting many upstreams where the credential env var is upstream-dependent (GROQ_API_KEY, CEREBRAS_API_KEY, …), so the HARNESS has no single binding and the UPSTREAM names its own target. Precedence per field: this override &gt; the harness binding &gt; error. |
-| `api_key_env` | string |  |  |  |
-| `auth_token_env` | string |  |  |  |
+| `api_key_env` | string |  |  | APIKeyEnv overrides the harness binding's api_key env-var name for this upstream (see BaseURLEnv for when this is needed). |
+| `auth_token_env` | string |  |  | AuthTokenEnv overrides the harness binding's auth_token env-var name for this upstream (see BaseURLEnv). |
 | `env` | map[string]string |  |  | Env is a harness-specific escape hatch: raw env keys merged AFTER the abstract fields render. Values may use $VAR refs. |
 
 ## Workspace
