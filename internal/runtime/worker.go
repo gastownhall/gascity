@@ -33,7 +33,7 @@ type WorkerSpec struct {
 	Harness   string // the agent CLI / harness ("claude-code", "codex", ...)
 	Model     string // the single model request label ("opus-4.8")
 	Upstream  string // who serves+resolves the model ("anthropic", "bedrock", "proxy:acme")
-	Runtime   string // WHERE it runs ("local", "k8s", "ssh:user@host", "daytona", ...)
+	Runtime   string // WHERE it runs ("local", "k8s", "ssh:user@host", "exec:<pack>", ...)
 	Transport string // HOW gc drives it ("tmux", "acp")
 
 	WorkDir string

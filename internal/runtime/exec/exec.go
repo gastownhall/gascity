@@ -470,7 +470,7 @@ func (p *Provider) carrier() runtime.Carrier {
 // The dedicated-wire-op driving helpers. The public driving methods
 // (Nudge/Peek/SendKeys/Interrupt/ClearScrollback) try the tmux carrier over the
 // exec op first and fall back to these when the runtime does not implement exec
-// (ErrExecUnsupported): a pack that ships exec + tmux-in-box (daytona, etc.) is
+// (ErrExecUnsupported): a pack that ships exec + tmux-in-box is
 // driven over the carrier, while a pack that only implements the older dedicated
 // driving ops (the gc-session-k8s reference) keeps working unchanged. The
 // startup readiness + dialog-dismissal subsystem calls the same public methods,

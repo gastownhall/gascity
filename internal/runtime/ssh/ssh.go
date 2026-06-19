@@ -9,9 +9,9 @@
 // It is selectable via the "ssh:" runtime prefix (ssh:[user@]host[:port]; key and
 // known_hosts resolve from ~/.ssh/config). The backend serves the direct-ssh
 // topology — gc dials a reachable box — carrying exec today and a future stream
-// (ssh -T) / attach (ssh -t) over one connection. It does NOT subsume daytona's
-// bd-ssh-shim or the in-sandbox Tailscale bootstrap: those are the reverse,
-// sandbox-to-controller env.ledger reach-back, a separate concern.
+// (ssh -T) / attach (ssh -t) over one connection. It does NOT subsume a sandbox
+// runtime's controller reach-back (the reverse, sandbox-to-controller env.ledger
+// path, e.g. an in-sandbox tunnel bootstrap): a separate concern.
 //
 // Host-key policy is StrictHostKeyChecking=accept-new (trust-on-first-use): an
 // unknown host key is accepted and pinned on first contact, a changed key is

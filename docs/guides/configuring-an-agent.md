@@ -222,9 +222,8 @@ provider = "k8s"        # run every session in a Kubernetes pod
 Built-in runtime backends: `tmux` (local, default), `subprocess` (local,
 headless), `k8s` (pods), `ssh:user@host` (a remote box over SSH), and
 `exec:<script>` (a pluggable [exec session pack](/reference/exec-session-provider)
-— this is how the Daytona / E2B / Morph / Runloop / Blaxel sandbox runtimes
-plug in). `GC_SESSION=ssh:user@host` or `GC_SESSION=exec:gc-runtime-daytona`
-selects one without editing `city.toml`.
+— this is how sandbox / micro-VM runtime packs plug in). `GC_SESSION=ssh:user@host`
+or `GC_SESSION=exec:<runtime-pack>` selects one without editing `city.toml`.
 
 > An agent that never needs interactive attach can set `attach = false` to let gc
 > pick a lighter runtime (subprocess) where the city allows it.
