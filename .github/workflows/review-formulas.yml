@@ -1,6 +1,4 @@
-name: CI
-# Keep the historical check name `CI / Integration / review-formulas` even
-# though the shard now lives in a dedicated workflow.
+name: Review Formulas
 
 on:
   push:
