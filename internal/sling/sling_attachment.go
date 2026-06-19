@@ -364,7 +364,10 @@ func hasLiveTrackingConvoy(store beads.Store, itemID string) bool {
 		return false
 	}
 	for _, convoy := range convoys {
-		if beads.IsReadyExcludedBead(convoy) {
+		// These are convoys by construction, so the convoy type's Ready
+		// exclusion (#3591) does not apply here — only skip convoys excluded
+		// by infrastructure label (session/order-tracking bookkeeping).
+		if beads.HasReadyExcludedLabel(convoy) {
 			continue
 		}
 		if !convoycore.IsTerminalStatus(convoy.Status) {
