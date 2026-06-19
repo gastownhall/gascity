@@ -87,6 +87,36 @@ else
   echo "SKIP: neither perl nor python3 on PATH; cannot exercise sub-second fallbacks"
 fi
 
+# A PATH shim emulates a coreutils 'date' that ignores the %3 width in
+# '+%s%3N' (observed: WSL2): %N emits all 9 nanosecond digits, yielding a
+# 19-digit all-digit value. The lower-bound-only plausibility guard accepted
+# it as epoch-ms (~1e6x inflated latency); the upper bound now rejects it, so
+# the perl/python3 fallback must still produce a sub-second reading.
+mkdir -p "$SHIM_DIR/wsl"
+cat > "$SHIM_DIR/wsl/date" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = "+%s%3N" ]; then
+  printf '%s%09d\n' "\$("$REAL_DATE" +%s)" 0
+else
+  exec "$REAL_DATE" "\$@"
+fi
+EOF
+chmod +x "$SHIM_DIR/wsl/date"
+
+if command -v perl >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
+  d=$( (
+    PATH="$SHIM_DIR/wsl:$PATH"; export PATH
+    s=$(now_ms); sleep 0.05; e=$(now_ms); echo $((e - s))
+  ) )
+  if [ "$d" -ge 5 ] && [ "$d" -le 800 ]; then
+    pass "WSL-date shim: 19-digit ns rejected, perl/python3 fallback keeps sub-second resolution (${d}ms)"
+  else
+    bad "WSL-date shim: got ${d}ms for a 50ms sleep, want 5..800 (19-digit ns accepted as ms)"
+  fi
+else
+  echo "SKIP: neither perl nor python3 on PATH; cannot exercise sub-second fallbacks"
+fi
+
 # With GNU date, perl, and python3 all unavailable, now_ms must degrade to
 # whole seconds (a plausible epoch reading ending in 000) rather than emit
 # garbage or crash.
