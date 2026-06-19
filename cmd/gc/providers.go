@@ -129,12 +129,31 @@ func providerStateDir(providerName, cityPath string) string {
 //   - "<pack runtime>" → exec proxy bound to the pack's declared command
 //   - default → real tmux provider
 func newSessionProviderForCityByName(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-	// Selection now flows through the de-conflated WorkerSpec atom and the
-	// Resolver. The Runtime axis is the legacy selection name; the other axes
-	// (Transport/Model/Upstream/Harness) are not yet acted on here — they become
-	// independent once the un-weld (Provision/Launch split) and the Upstream
-	// split land. Behavior is identical to the prior reg.New(name, ...).
-	return resolveWorkerSpec(cfg, runtime.WorkerSpec{Runtime: name}, sc, cityName, cityPath)
+	// Selection flows through the de-conflated WorkerSpec atom and the Resolver.
+	// The Runtime axis is the selection name; Transport is populated from it
+	// (transport is bundled with the runtime today — "acp" is a whole provider,
+	// not a transport over a box — so the name determines it). Per-session
+	// Transport composition (tmux↔acp routing) lives in resolveSessionTransportProvider.
+	// Model/Upstream/Harness are carried by the session config, not this seam.
+	return resolveWorkerSpec(cfg, runtime.WorkerSpec{Runtime: name, Transport: transportForRuntimeName(name)}, sc, cityName, cityPath)
+}
+
+// transportForRuntimeName reports the Transport axis value bundled with a Runtime
+// selection name. Transport (HOW gc drives the agent: tmux vs acp) is coupled to
+// the runtime today — acp is its own provider — so the name fixes it: "acp" → acp,
+// "t3bridge" → its bespoke turn transport, everything else (tmux/exec/ssh/k8s/…)
+// → the tmux carrier. This makes WorkerSpec.Transport explicit at the Resolver
+// seam (where per-spec Transport honoring would land when runtime↔transport are
+// genuinely decoupled).
+func transportForRuntimeName(name string) string {
+	switch {
+	case name == "acp":
+		return config.SessionTransportACP
+	case name == "t3bridge" || (strings.HasPrefix(name, "exec:") && isLegacyT3BridgeExecScript(strings.TrimPrefix(name, "exec:"))):
+		return "t3"
+	default:
+		return config.SessionTransportTmux
+	}
 }
 
 // resolveWorkerSpec resolves a [runtime.WorkerSpec] to a session provider. It is
@@ -215,14 +234,27 @@ func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *ses
 }
 
 func newSessionProviderFromContextWithError(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	sp, err := buildSessionProviderByName(ctx.cfg, ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
+	return resolveSessionTransportProvider(ctx, sessionBeads)
+}
+
+// resolveSessionTransportProvider is the single Resolver seam that composes the
+// session Transport axis (tmux vs acp). It builds the base provider for the
+// city's session-provider name (the Runtime axis, via buildSessionProviderByName
+// → resolveWorkerSpec) and — when the base is not acp but some agents select the
+// acp transport — composes an auto.Provider that routes those sessions to an acp
+// backend. Per-session transport is the auto router's job; this is where the
+// composition is owned (construction time). Dynamically-created sessions are
+// routed at start via the same auto.Provider (build_desired_state RouteACP).
+// Behavior is identical to the prior inline composition.
+func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
+	base, err := buildSessionProviderByName(ctx.cfg, ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
 	if err != nil {
 		return nil, err
 	}
-	// If the city-level provider is not ACP but some agents need ACP,
-	// wrap in an auto provider that routes per-session.
-	// NOTE: agents comes from loadCityConfig which applies pack overrides,
-	// so the Session field from overrides is already resolved here.
+	// If the city-level provider is not ACP but some agents need ACP, wrap in an
+	// auto provider that routes per-session.
+	// NOTE: agents comes from loadCityConfig which applies pack overrides, so the
+	// Session field from overrides is already resolved here.
 	requireACPWrapper := requiresACPProviderWrapper(sessionBeads, ctx.cityName, ctx.cfg)
 	if ctx.providerName != "acp" && needsACPProviderWrapper(sessionBeads, ctx.cityName, ctx.cfg) {
 		acpSP, acpErr := buildSessionProviderByName(ctx.cfg, "acp", ctx.sc, ctx.cityName, ctx.cityPath)
@@ -230,15 +262,15 @@ func newSessionProviderFromContextWithError(ctx sessionProviderContext, sessionB
 			if requireACPWrapper {
 				return nil, fmt.Errorf("acp provider: %w", acpErr)
 			}
-			return sp, nil
+			return base, nil
 		}
-		autoSP := sessionauto.New(sp, acpSP)
+		autoSP := sessionauto.New(base, acpSP)
 		for _, sessName := range configuredACPRouteNames(sessionBeads, ctx.cityName, ctx.cfg) {
 			autoSP.RouteACP(sessName)
 		}
 		return autoSP, nil
 	}
-	return sp, nil
+	return base, nil
 }
 
 func agentSessionCreateTransport(cfg *config.City, agentCfg config.Agent) string {
