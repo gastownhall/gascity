@@ -475,6 +475,8 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			processedThisCycle = true
 		}
 		if processedThisCycle {
+			// Signal workers to skip their poll sleep: new step beads may be ready.
+			writeDispatchWakeFile(cityPath)
 			continue
 		}
 		if pendingCount > 0 {
@@ -732,4 +734,23 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 		return []hookBead{bead}, nil
 	}
 	return nil, fmt.Errorf("unexpected work query output: %s", trimmed)
+}
+
+// dispatchWakeFile returns the path of the dispatch-wake sentinel file.
+// The control dispatcher touches it after each successful batch so workers
+// can skip their poll sleep and call gc hook immediately.
+func dispatchWakeFile(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "dispatch-wake")
+}
+
+// writeDispatchWakeFile updates the mtime of the dispatch-wake sentinel file.
+// Best-effort: if the write fails the dispatch cycle continues normally;
+// workers fall back to their standard poll interval.
+func writeDispatchWakeFile(cityPath string) {
+	path := dispatchWakeFile(cityPath)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	_ = f.Close()
 }
