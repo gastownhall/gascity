@@ -66,8 +66,11 @@ base            = "builtin:claude"
 option_defaults = { model = "haiku" }
 ```
 
-See [Understanding Packs](/guides/understanding-packs) for shipping a harness
-preset as a reusable pack.
+For copy-paste setup of each built-in harness — the env vars it reads and the
+direct / custom-endpoint / model permutations — see
+[Harness Recipes](/guides/harness-recipes). See
+[Understanding Packs](/guides/understanding-packs) for shipping a harness preset
+as a reusable pack.
 
 ## Axis 2 — Model (`option_defaults.model`)
 
