@@ -331,6 +331,75 @@ func TestRestartTargetResolvesByNameOnce(t *testing.T) {
 	}
 }
 
+// The bespoke per-command resolvers (resolveStopCityPath, resolveStartDir)
+// must also accept a name and resist the walk-up footgun; the central
+// resolveCommandCity tests cover reload/suspend/resume/status, which share
+// that seam.
+func TestResolveStopCityPathByNameFromInsideAnotherCity(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	ambient := t.TempDir()
+	mkTestCity(t, ambient)
+	t.Chdir(ambient)
+	otherPath := filepath.Join(t.TempDir(), "other")
+	mkTestCity(t, otherPath)
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(otherPath, "other"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveStopCityPath([]string{"other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if samePath(got, ambient) {
+		t.Fatalf("resolveStopCityPath targeted the ambient city %q (walk-up footgun)", ambient)
+	}
+	if !samePath(got, otherPath) {
+		t.Fatalf("resolveStopCityPath(other) = %q, want %q", got, otherPath)
+	}
+}
+
+func TestResolveStartDirByName(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	cityPath := filepath.Join(t.TempDir(), "alpha")
+	mkTestCity(t, cityPath)
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveStartDir([]string{"alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(got, cityPath) {
+		t.Fatalf("resolveStartDir(alpha) = %q, want %q", got, cityPath)
+	}
+}
+
+// GC_CITY uses path-first / local-wins precedence (a documented deviation from
+// the loud-ambiguity policy of the positional arg and --city flag): a local
+// city dir of the same name wins over a different registration, silently.
+func TestResolveExplicitCityPathEnvLocalWinsOverRegistration(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	local := filepath.Join(cwd, "alpha")
+	mkTestCity(t, local) // local ./alpha city
+	registeredElsewhere := filepath.Join(t.TempDir(), "alpha")
+	mkTestCity(t, registeredElsewhere)
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(registeredElsewhere, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", "alpha")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	got, ok := resolveExplicitCityPathEnv()
+	if !ok {
+		t.Fatal("GC_CITY=alpha should resolve")
+	}
+	if !samePath(got, local) {
+		t.Fatalf("GC_CITY=alpha resolved to %q, want the local city %q (path-first/local-wins)", got, local)
+	}
+}
+
 func TestCityNameCandidatesFiltersByPrefix(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())

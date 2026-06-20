@@ -88,11 +88,6 @@ func restartTarget(args []string) (cityPath, nameOverride string, err error) {
 	return cityPath, nameOverride, nil
 }
 
-func restartRegistrationName(args []string) (string, error) {
-	_, nameOverride, err := restartTarget(args)
-	return nameOverride, err
-}
-
 // newRigRestartCmd creates the "gc rig restart <name>" subcommand.
 func newRigRestartCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{

@@ -18,6 +18,14 @@ func resolveExplicitCityPathEnv() (string, bool) {
 		}
 		// GC_CITY (the generic key) additionally accepts a registered city
 		// NAME; GC_CITY_PATH / GC_CITY_ROOT are path-only by their names.
+		//
+		// Precedence note (intentional, differs from the positional arg and
+		// --city flag): an env var is set deliberately and is ambient, so it
+		// uses path-first / local-wins — validateCityPath above already returned
+		// a same-named local city dir if one exists, and only an unshadowed name
+		// reaches the registry lookup here. The interactive positional and
+		// --city forms instead raise a loud ambiguity error when a local city
+		// and a different registration collide (see resolveCityNameRef).
 		if key == "GC_CITY" && supervisor.IsValidCityName(raw) {
 			if entry, ok := supervisor.NewRegistry(supervisor.RegistryPath()).LookupCityByName(raw); ok {
 				return entry.Path, true

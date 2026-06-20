@@ -82,7 +82,7 @@ func completeOrderNames(_ *cobra.Command, args []string, toComplete string) ([]s
 // shell should still offer filesystem paths alongside the registered names.
 func completeCityNames(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	if len(args) > 0 {
-		return nil, cobra.ShellCompDirectiveDefault
+		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 	return cityNameCandidates(toComplete), cobra.ShellCompDirectiveDefault
 }

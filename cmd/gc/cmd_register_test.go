@@ -214,7 +214,7 @@ func TestRegisteredCityNamePreservesExistingRegistryAlias(t *testing.T) {
 	}
 }
 
-func TestRestartRegistrationNameCapturesExistingRegistryAlias(t *testing.T) {
+func TestRestartTargetCapturesExistingRegistryAlias(t *testing.T) {
 	dir := t.TempDir()
 	cityPath := filepath.Join(dir, "my-city")
 	if err := ensureCityScaffold(cityPath); err != nil {
@@ -233,12 +233,15 @@ func TestRestartRegistrationNameCapturesExistingRegistryAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := restartRegistrationName([]string{cityPath})
+	gotPath, gotName, err := restartTarget([]string{cityPath})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "machine-alias" {
-		t.Fatalf("restartRegistrationName = %q, want existing machine-local alias", got)
+	if gotName != "machine-alias" {
+		t.Fatalf("restartTarget name = %q, want existing machine-local alias", gotName)
+	}
+	if gotPath == "" {
+		t.Fatal("restartTarget returned empty city path")
 	}
 }
 

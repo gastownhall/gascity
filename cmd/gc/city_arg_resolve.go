@@ -122,7 +122,7 @@ func cityRefAmbiguousErr(name, localDir, registeredPath string) error {
 
 func cityRefNotFoundErr(name, localDir string) error {
 	return fmt.Errorf(
-		"%q is not a registered city name, and %s is not a city directory (run 'gc cities' to list registered cities)",
+		"%q is not a registered city name, and %s is not a city directory (run 'gc cities' to list registered cities, or pass a directory path to act on an unregistered city)",
 		name, localDir)
 }
 

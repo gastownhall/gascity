@@ -42,6 +42,14 @@ conflicting notes in §3, §5, and Appendix A below.
    direct `filepath.Abs(cityFlag)` (cmd_start.go ~571). Because these feed
    nearly every command, this is the highest-risk wiring and gets its own
    phase with dedicated precedence/regression tests.
+   **Refinement (precedence for GC_CITY):** the positional arg and `--city`
+   flag are explicit user input and use the loud-ambiguity policy of
+   decision 1. `GC_CITY` is ambient and deliberately set, so it uses
+   **path-first / local-wins**: a same-named local city directory wins over a
+   different registration silently (no loud ambiguity), matching the env's
+   "this is my working city" intent. Per-command `--city` flags that bypass
+   the central chain (e.g. `gc bd --city`) remain path-only and are tracked as
+   a separate follow-up.
 
 3. **`gc restart` resolves the reference once at the top** and threads the
    resolved **path** (never the raw name) into both the stop and start legs
@@ -134,7 +142,7 @@ Per-command (each *_test.go, isolated GC_HOME via t.Setenv plus supervisor.NewRe
 
 ## 10. Risks and open questions
 
-Two resolver families (family A reload/suspend/resume/status via resolveCommandCity vs bespoke stop/start/restart/unregister): mitigated by the single shared seam every entrypoint adopts; a grep checklist of all nine entrypoints is in the test plan. restart fan-out: cmdRestartJSON threads raw args into three legs; resolve once at the top and thread the PATH down (covered by TestRestartByName_SingleTargetAcrossLegs). Stale registry: LookupCityByName may return a path whose city.toml/.gc was deleted; name resolution returns only the path and downstream validation errors clearly referencing the resolved path so the user can gc unregister it (no worse than today). Symlink normalization: returned registry paths must flow through the same normalization the path branch uses; for unregister the resolved value re-enters registeredCityEntry then normalizeRegisteredCityPath (EvalSymlinks), verify in tests. EffectiveName snapshot vs live name: lookup matches the registered name not a post-registration rename (correct, gascity#602, documented). --city/GC_CITY gap: deferred; gc --city name stop still misses in v1, documented. Open questions: should register completion show names at all or files only (proposed hints); is --city name worth scheduling now or on demand.
+Two resolver families (family A reload/suspend/resume/status via resolveCommandCity vs bespoke stop/start/restart/unregister): mitigated by the single shared seam every entrypoint adopts; a grep checklist of all nine entrypoints is in the test plan. restart fan-out: cmdRestartJSON threads raw args into three legs; resolve once at the top and thread the PATH down (covered by TestRestartByName_SingleTargetAcrossLegs). Stale registry: LookupCityByName may return a path whose city.toml/.gc was deleted; name resolution returns only the path and downstream validation errors clearly referencing the resolved path so the user can gc unregister it (no worse than today). Symlink normalization: returned registry paths must flow through the same normalization the path branch uses; for unregister the resolved value re-enters registeredCityEntry then normalizeRegisteredCityPath (EvalSymlinks), verify in tests. EffectiveName snapshot vs live name: lookup matches the registered name not a post-registration rename (correct, gascity#602, documented). --city/GC_CITY: name support SHIPPED (the persistent --city flag and GC_CITY both accept a name; GC_CITY uses local-wins precedence per decision 2). Per-command --city flags that bypass the central chain (gc bd/import/analyze) remain path-only — tracked as a separate follow-up. Open questions: should register completion show names at all or files only (resolved: hints).
 
 ## 11. Phased implementation plan (each phase 5 files or fewer)
 
