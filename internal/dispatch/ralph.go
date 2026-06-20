@@ -239,6 +239,7 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	// the env vars are omitted, matching the sling-time GC_ARTIFACT_DIR
 	// contract that pack scripts already handle.
 	moleculeDir, artifactDir := resolveRalphCheckMoleculePaths(pathBead, cityPath)
+	opts.tracef("ralph check-start bead=%s script=%s timeout=%s", bead.ID, scriptPath, timeout)
 	result := convergence.RunCondition(context.Background(), scriptPath, convergence.ConditionEnv{
 		BeadID:      conditionBeadID,
 		Iteration:   attempt,
@@ -248,6 +249,7 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		MoleculeDir: moleculeDir,
 		ArtifactDir: artifactDir,
 	}, timeout, 0)
+	opts.tracef("ralph check-done bead=%s outcome=%s dur=%s", bead.ID, result.Outcome, result.Duration)
 	return result, nil
 }
 
