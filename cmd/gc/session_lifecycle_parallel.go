@@ -1786,7 +1786,10 @@ func commitStartResultTraced(
 		} else {
 			session.Metadata["last_woke_at"] = ""
 		}
-		recordWakeFailure(session, store, clk)
+		// tp.DisplayName() is the exact identity the start counter records, so a
+		// quarantine triggered by repeated start failures joins the start series
+		// even for a namepool-themed pool instance whose bead predates agent_name.
+		recordWakeFailure(session, store, clk, tp.DisplayName())
 		if trace != nil {
 			trace.recordOperation("reconciler.start.failed", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
 				"error": formatLifecycleError(result.err),
@@ -2574,12 +2577,12 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 				}
 				if name != "" {
 					sessionIDs[name] = bead.ID
-					if agentName := sessionAgentMetricIdentity(bead.Metadata); agentName != "" {
+					if agentName := sessionAgentMetricIdentity(bead, cfg); agentName != "" {
 						sessionAgentNames[name] = agentName
 					}
 					subject := sessionBeadAgentName(bead)
-					if subject == "" && template != "" && bead.Metadata["pool_slot"] != "" {
-						subject = template + "-" + bead.Metadata["pool_slot"]
+					if subject == "" {
+						subject = pooledFallbackIdentity(bead, cfg)
 					}
 					if subject == "" {
 						subject = template

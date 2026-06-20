@@ -1249,7 +1249,7 @@ func TestRecordWakeFailure_Quarantine(t *testing.T) {
 		"wake_attempts": "4", // one below threshold
 	})
 
-	recordWakeFailure(&session, store, clk)
+	recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["wake_attempts"] != "5" {
 		t.Errorf("wake_attempts = %q, want 5", session.Metadata["wake_attempts"])
@@ -1271,7 +1271,7 @@ func TestRecordWakeFailure_BelowThreshold(t *testing.T) {
 		"wake_attempts": "1",
 	})
 
-	recordWakeFailure(&session, store, clk)
+	recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["wake_attempts"] != "2" {
 		t.Errorf("wake_attempts = %q, want 2", session.Metadata["wake_attempts"])
@@ -1291,7 +1291,7 @@ func TestRecordWakeFailure_ClearsStartedConfigHash(t *testing.T) {
 		"started_config_hash": "abc123",
 	})
 
-	recordWakeFailure(&session, store, clk)
+	recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["session_key"] != "" {
 		t.Errorf("session_key = %q, want empty", session.Metadata["session_key"])
@@ -1310,7 +1310,7 @@ func TestRecordWakeFailure_ClearsStartedConfigHashWhenSessionKeyAlreadyEmpty(t *
 		"started_config_hash": "abc123",
 	})
 
-	recordWakeFailure(&session, store, clk)
+	recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["started_config_hash"] != "" {
 		t.Errorf("started_config_hash = %q, want empty", session.Metadata["started_config_hash"])
@@ -2749,7 +2749,7 @@ func TestRecordChurn_Quarantine(t *testing.T) {
 		"churn_count": "2", // one below threshold (defaultMaxChurnCycles=3)
 	})
 
-	recordChurn(&session, store, clk)
+	recordChurn(&session, store, clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["churn_count"] != "3" {
 		t.Errorf("churn_count = %q, want 3", session.Metadata["churn_count"])
@@ -2771,7 +2771,7 @@ func TestRecordChurn_BelowThreshold(t *testing.T) {
 		"churn_count": "0",
 	})
 
-	recordChurn(&session, store, clk)
+	recordChurn(&session, store, clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["churn_count"] != "1" {
 		t.Errorf("churn_count = %q, want 1", session.Metadata["churn_count"])
@@ -2791,7 +2791,7 @@ func TestRecordChurn_ClearsSessionKey(t *testing.T) {
 		"session_key": "old-key-123",
 	})
 
-	recordChurn(&session, store, clk)
+	recordChurn(&session, store, clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["session_key"] != "" {
 		t.Error("session_key should be cleared on churn")

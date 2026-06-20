@@ -416,7 +416,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "gascity--gc__worker",
 		})
 
-		recordWakeFailure(&session, store, clk)
+		recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, nil))
 
 		if session.Metadata["quarantined_until"] == "" {
 			t.Fatal("fixture must quarantine at max attempts")
@@ -438,7 +438,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "worker-1",
 		})
 
-		recordWakeFailure(&session, store, clk)
+		recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, nil))
 
 		if session.Metadata["quarantined_until"] != "" {
 			t.Fatal("fixture must not quarantine below threshold")
@@ -457,7 +457,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "gc-city-dog-1",
 		})
 
-		recordWakeFailure(&session, store, clk)
+		recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, nil))
 
 		points := collectCounterDataPoints(t, reader, "gc.agent.quarantines.total")
 		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "dog-1"}) {
@@ -482,7 +482,7 @@ func TestRecordChurn_QuarantineRecordsMetric(t *testing.T) {
 		"session_name": "gascity--gc__worker",
 	})
 
-	recordChurn(&session, store, clk)
+	recordChurn(&session, store, clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["quarantined_until"] == "" {
 		t.Fatal("fixture must quarantine at max churn cycles")
@@ -498,9 +498,10 @@ func TestRecordChurn_QuarantineRecordsMetric(t *testing.T) {
 
 // TestCmdSessionKill_RecordsAgentStopMetric verifies a successful
 // `gc session kill` increments gc.agent.stops.total exactly once with the
-// agent identity from the session bead, reason "stopped", and status "ok" —
-// beside its SessionStopped emission (ga-rjk4or). The session name differs
-// from the agent identity so the metric cannot silently use the session name.
+// agent identity from the session bead, reason "killed" (matching the adjacent
+// SessionStopped event payload), and status "ok" (ga-rjk4or). The session name
+// differs from the agent identity so the metric cannot silently use the
+// session name.
 func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
@@ -571,9 +572,9 @@ func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 	}
 
 	points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
-	want := map[string]string{"agent": agentIdentity, "reason": "stopped", "status": "ok"}
+	want := map[string]string{"agent": agentIdentity, "reason": "killed", "status": "ok"}
 	if !hasDataPointWithStringAttrs(points, want) {
-		t.Fatalf("gc.agent.stops.total has no datapoint with agent=%s reason=stopped status=ok: %+v", agentIdentity, points)
+		t.Fatalf("gc.agent.stops.total has no datapoint with agent=%s reason=killed status=ok: %+v", agentIdentity, points)
 	}
 	if hasDataPointWithStringAttrs(points, map[string]string{"agent": sessionName}) {
 		t.Fatalf("gc.agent.stops.total must not label agent with the session name %q: %+v", sessionName, points)
@@ -604,7 +605,7 @@ func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
 	t.Run("bead load failure records nothing", func(t *testing.T) {
 		reader := installManualMetricReader(t)
 
-		recordSessionKillStop(beads.Bead{}, errors.New("store unavailable"))
+		recordSessionKillStop(beads.Bead{}, errors.New("store unavailable"), nil)
 
 		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
 			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none when the bead failed to load", points)
@@ -614,7 +615,7 @@ func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
 	t.Run("empty session name records nothing", func(t *testing.T) {
 		reader := installManualMetricReader(t)
 
-		recordSessionKillStop(beads.Bead{Metadata: map[string]string{"session_name": "  "}}, nil)
+		recordSessionKillStop(beads.Bead{Metadata: map[string]string{"session_name": "  "}}, nil, nil)
 
 		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
 			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none for a blank session name", points)
@@ -627,14 +628,30 @@ func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
 		recordSessionKillStop(beads.Bead{Metadata: map[string]string{
 			"session_name": "gascity--gc__worker",
 			"agent_name":   "gascity/gc.worker",
-		}}, nil)
+		}}, nil, nil)
 
 		points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
-		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity/gc.worker", "reason": "stopped", "status": "ok"}) {
-			t.Fatalf("gc.agent.stops.total has no datapoint with agent=gascity/gc.worker reason=stopped status=ok: %+v", points)
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity/gc.worker", "reason": "killed", "status": "ok"}) {
+			t.Fatalf("gc.agent.stops.total has no datapoint with agent=gascity/gc.worker reason=killed status=ok: %+v", points)
 		}
 		if hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity--gc__worker"}) {
 			t.Fatalf("gc.agent.stops.total must not label agent with the session name: %+v", points)
+		}
+	})
+
+	t.Run("bounded session name but unresolved identity records nothing", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+
+		// A bead with a bounded session_name but no agent_name, agent: label,
+		// or template passes the session-name guard yet resolves to an empty
+		// agent identity. The RecordAgentStop backstop must drop it so the
+		// counter is never polluted with a blank, unjoinable agent series.
+		recordSessionKillStop(beads.Bead{Metadata: map[string]string{
+			"session_name": "gascity--gc__worker",
+		}}, nil, nil)
+
+		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
+			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none when the agent identity resolves empty", points)
 		}
 	})
 }
@@ -685,4 +702,332 @@ func TestReconcileSessionBeads_RecordsReconcileCycleMetric(t *testing.T) {
 
 		assertCycleRecorded(t, reader)
 	})
+}
+
+// TestSessionAgentMetricIdentity_PooledFallback pins the gc.agent.* identity
+// resolver against the start path's tp.DisplayName() value space. The riskiest
+// cases are legacy aliasless pooled session beads (template + pool_slot, no
+// agent_name): a non-themed pool must record agent="<template>-<slot>", and a
+// namepool-themed pool must record its themed instance identity (reusing the
+// start path's poolInstanceIdentity), never the numeric "<template>-<slot>"
+// form, so the stop/quarantine series join the start counter.
+func TestSessionAgentMetricIdentity_PooledFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		bead beads.Bead
+		cfg  *config.City
+		want string
+	}{
+		{
+			name: "agent_name wins over template and pool_slot",
+			bead: beads.Bead{Metadata: map[string]string{
+				"agent_name": "dog-3", "template": "dog", "pool_slot": "3",
+			}},
+			want: "dog-3",
+		},
+		{
+			name: "agent label fallback when agent_name empty",
+			bead: beads.Bead{
+				Labels:   []string{"agent:dog-7"},
+				Metadata: map[string]string{"template": "dog", "pool_slot": "7"},
+			},
+			want: "dog-7",
+		},
+		{
+			name: "legacy aliasless pooled bead synthesizes template-pool_slot",
+			bead: beads.Bead{Metadata: map[string]string{
+				"session_name": "s-dog-3-abc", "template": "dog", "pool_slot": "3",
+			}},
+			want: "dog-3",
+		},
+		{
+			name: "rig-qualified legacy pooled bead keeps the qualified base",
+			bead: beads.Bead{Metadata: map[string]string{
+				"session_name": "s-myrig--dog-3", "template": "myrig/dog", "pool_slot": "3",
+			}},
+			want: "myrig/dog-3",
+		},
+		{
+			name: "non-pool bead falls back to the bare template",
+			bead: beads.Bead{Metadata: map[string]string{
+				"session_name": "s-worker", "template": "gascity/gc.worker",
+			}},
+			want: "gascity/gc.worker",
+		},
+		{
+			name: "no identity metadata resolves empty",
+			bead: beads.Bead{Metadata: map[string]string{"session_name": "s-orphan"}},
+			want: "",
+		},
+		{
+			name: "namepool-themed legacy pooled bead records the themed start identity",
+			bead: beads.Bead{Metadata: map[string]string{
+				"session_name": "s-fenrir", "template": "gascity/dog", "pool_slot": "1",
+			}},
+			cfg: &config.City{Agents: []config.Agent{{
+				Dir: "gascity", Name: "dog", NamepoolNames: []string{"fenrir", "wolf"},
+			}}},
+			// Start records QualifiedInstanceName(poolInstanceName("dog",1,agent))
+			// = "gascity/fenrir"; the numeric "gascity/dog-1" would not join.
+			want: "gascity/fenrir",
+		},
+		{
+			name: "namepool-themed legacy pooled bead resolves the second slot",
+			bead: beads.Bead{Metadata: map[string]string{
+				"session_name": "s-wolf", "template": "gascity/dog", "pool_slot": "2",
+			}},
+			cfg: &config.City{Agents: []config.Agent{{
+				Dir: "gascity", Name: "dog", NamepoolNames: []string{"fenrir", "wolf"},
+			}}},
+			want: "gascity/wolf",
+		},
+		{
+			name: "non-themed pooled bead with cfg keeps the qualified numbered instance",
+			bead: beads.Bead{Metadata: map[string]string{
+				"session_name": "s-dog-3", "template": "gascity/dog", "pool_slot": "3",
+			}},
+			cfg:  &config.City{Agents: []config.Agent{{Dir: "gascity", Name: "dog"}}},
+			want: "gascity/dog-3",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sessionAgentMetricIdentity(tc.bead, tc.cfg); got != tc.want {
+				t.Fatalf("sessionAgentMetricIdentity = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStopTargetsForNames_LegacyPooledIdentityJoinsStartIdentity drives the
+// metric identity through the real stop-target builder for a legacy aliasless
+// pooled session bead. The resulting stopTarget.agentName feeds
+// gc.agent.stops.total, so it must equal the start path's "<template>-<slot>"
+// instance identity rather than the bare base template.
+func TestStopTargetsForNames_LegacyPooledIdentityJoinsStartIdentity(t *testing.T) {
+	const sessionName = "s-dog-3-legacy"
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "legacy pooled session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": sessionName,
+			"template":     "dog",
+			"pool_slot":    "3",
+			// No agent_name and no agent: label: the legacy aliasless pooled
+			// shape the migration must keep joinable.
+		},
+	}); err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	targets := stopTargetsForNames([]string{sessionName}, &config.City{}, store, &stderr)
+	if len(targets) != 1 {
+		t.Fatalf("stopTargetsForNames returned %d targets, want 1", len(targets))
+	}
+	if got := targets[0].agentName; got != "dog-3" {
+		t.Fatalf("stopTarget.agentName = %q, want dog-3 (must join the start identity, not the bare template)", got)
+	}
+}
+
+// TestFinalizeDrainAckStoppedSession_WitnessBranchDoesNotRecordMetric pins the
+// drain-ack idempotency fix: when this observer only witnesses that another
+// actor already closed the drained bead, it must NOT increment
+// gc.agent.stops.total — otherwise every redundant NDI observer inflates the
+// monotonic stop counter for a single drain-ack.
+func TestFinalizeDrainAckStoppedSession_WitnessBranchDoesNotRecordMetric(t *testing.T) {
+	const sessionName = "gascity--gc__worker"
+	const identity = "gascity/gc.worker"
+	reader := installManualMetricReader(t)
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	session := env.createSessionBead(sessionName, identity)
+	env.setSessionMetadata(&session, map[string]string{"agent_name": identity})
+	patch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+	if err := env.store.SetMetadataBatch(session.ID, patch); err != nil {
+		t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+	}
+	session.Metadata = patch.Apply(session.Metadata)
+
+	// Another observer already closed the drained bead. This finalize call is
+	// then a witness: it must observe the close (line 341 branch) without
+	// re-recording the stop metric.
+	if err := env.store.Close(session.ID); err != nil {
+		t.Fatalf("pre-closing the bead to force the witness branch: %v", err)
+	}
+
+	finalizeDrainAckStoppedSession(
+		"", env.cfg, env.store, nil, &session, identity, true,
+		newFakeDrainOps(), env.dt, env.clk, events.NewFake(), &env.stderr,
+	)
+
+	if session.Status != "closed" {
+		t.Fatalf("session status = %q, want closed (fixture must reach the witness branch)", session.Status)
+	}
+	if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
+		t.Fatalf("gc.agent.stops.total datapoints = %+v, want none on the witness branch", points)
+	}
+}
+
+// TestRecordWakeFailure_QuarantineLegacyPooledIdentity pins the attempt-3 review
+// fix: a legacy aliasless pooled session bead (template + pool_slot, no
+// agent_name and no agent: label) that quarantines via repeated wake failures
+// must record gc.agent.quarantines.total with the start-path-joinable instance
+// identity — "<template>-<slot>" for a non-themed pool and the themed instance
+// for a namepool pool — never the bare template. The identity is resolved at the
+// call site exactly as checkStability does, through sessionAgentMetricIdentity.
+func TestRecordWakeFailure_QuarantineLegacyPooledIdentity(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+
+	t.Run("non-themed pool joins template-slot, never the bare template", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		store := newTestStore()
+		session := makeBead("b1", map[string]string{
+			"wake_attempts": "4", // one below threshold (defaultMaxWakeAttempts=5)
+			"template":      "dog",
+			"pool_slot":     "3",
+			"session_name":  "s-dog-3-legacy",
+		})
+
+		recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, nil))
+
+		if session.Metadata["quarantined_until"] == "" {
+			t.Fatal("fixture must quarantine at max attempts")
+		}
+		points := collectCounterDataPoints(t, reader, "gc.agent.quarantines.total")
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "dog-3"}) {
+			t.Fatalf("gc.agent.quarantines.total has no datapoint with agent=dog-3: %+v", points)
+		}
+		if hasDataPointWithStringAttrs(points, map[string]string{"agent": "dog"}) {
+			t.Fatalf("gc.agent.quarantines.total must not label agent with the bare template: %+v", points)
+		}
+	})
+
+	t.Run("namepool-themed pool joins the themed start identity", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		store := newTestStore()
+		cfg := &config.City{Agents: []config.Agent{{
+			Dir: "gascity", Name: "dog", NamepoolNames: []string{"fenrir", "wolf"},
+		}}}
+		session := makeBead("b1", map[string]string{
+			"wake_attempts": "4",
+			"template":      "gascity/dog",
+			"pool_slot":     "1",
+			"session_name":  "s-fenrir-legacy",
+		})
+
+		recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, cfg))
+
+		if session.Metadata["quarantined_until"] == "" {
+			t.Fatal("fixture must quarantine at max attempts")
+		}
+		points := collectCounterDataPoints(t, reader, "gc.agent.quarantines.total")
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity/fenrir"}) {
+			t.Fatalf("gc.agent.quarantines.total has no datapoint with agent=gascity/fenrir: %+v", points)
+		}
+		if hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity/dog-1"}) {
+			t.Fatalf("gc.agent.quarantines.total must not label the themed pool with the numeric fallback: %+v", points)
+		}
+	})
+}
+
+// TestRecordChurn_QuarantineLegacyPooledIdentity mirrors
+// TestRecordWakeFailure_QuarantineLegacyPooledIdentity for the context-churn
+// quarantine producer.
+func TestRecordChurn_QuarantineLegacyPooledIdentity(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+
+	t.Run("non-themed pool joins template-slot, never the bare template", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		store := newTestStore()
+		session := makeBead("b1", map[string]string{
+			"churn_count":  "2", // one below threshold (defaultMaxChurnCycles=3)
+			"template":     "dog",
+			"pool_slot":    "3",
+			"session_name": "s-dog-3-legacy",
+		})
+
+		recordChurn(&session, store, clk, sessionAgentMetricIdentity(session, nil))
+
+		if session.Metadata["quarantined_until"] == "" {
+			t.Fatal("fixture must quarantine at max churn cycles")
+		}
+		points := collectCounterDataPoints(t, reader, "gc.agent.quarantines.total")
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "dog-3"}) {
+			t.Fatalf("gc.agent.quarantines.total has no datapoint with agent=dog-3: %+v", points)
+		}
+		if hasDataPointWithStringAttrs(points, map[string]string{"agent": "dog"}) {
+			t.Fatalf("gc.agent.quarantines.total must not label agent with the bare template: %+v", points)
+		}
+	})
+
+	t.Run("namepool-themed pool joins the themed start identity", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		store := newTestStore()
+		cfg := &config.City{Agents: []config.Agent{{
+			Dir: "gascity", Name: "dog", NamepoolNames: []string{"fenrir", "wolf"},
+		}}}
+		session := makeBead("b1", map[string]string{
+			"churn_count":  "2",
+			"template":     "gascity/dog",
+			"pool_slot":    "2",
+			"session_name": "s-wolf-legacy",
+		})
+
+		recordChurn(&session, store, clk, sessionAgentMetricIdentity(session, cfg))
+
+		if session.Metadata["quarantined_until"] == "" {
+			t.Fatal("fixture must quarantine at max churn cycles")
+		}
+		points := collectCounterDataPoints(t, reader, "gc.agent.quarantines.total")
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity/wolf"}) {
+			t.Fatalf("gc.agent.quarantines.total has no datapoint with agent=gascity/wolf: %+v", points)
+		}
+		if hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity/dog-2"}) {
+			t.Fatalf("gc.agent.quarantines.total must not label the themed pool with the numeric fallback: %+v", points)
+		}
+	})
+}
+
+// TestStopTargetsForNames_NamepoolThemedPooledIdentityJoinsStart drives the stop
+// metric identity through the real stop-target builder for a namepool-themed
+// legacy aliasless pooled bead. stopTarget.agentName feeds gc.agent.stops.total
+// and must equal the themed start identity (poolInstanceIdentity), not the
+// numeric "<template>-<slot>" form. It also asserts the stop event subject shares
+// that single resolved identity, guarding the deduplicated fallback path.
+func TestStopTargetsForNames_NamepoolThemedPooledIdentityJoinsStart(t *testing.T) {
+	const sessionName = "s-fenrir-legacy"
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "namepool-themed legacy pooled session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": sessionName,
+			"template":     "gascity/dog",
+			"pool_slot":    "1",
+			// No agent_name and no agent: label: the legacy aliasless pooled
+			// shape whose themed identity the migration must keep joinable.
+		},
+	}); err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	cfg := &config.City{Agents: []config.Agent{{
+		Dir: "gascity", Name: "dog", NamepoolNames: []string{"fenrir", "wolf"},
+	}}}
+	var stderr bytes.Buffer
+	targets := stopTargetsForNames([]string{sessionName}, cfg, store, &stderr)
+	if len(targets) != 1 {
+		t.Fatalf("stopTargetsForNames returned %d targets, want 1", len(targets))
+	}
+	if got := targets[0].agentName; got != "gascity/fenrir" {
+		t.Fatalf("stopTarget.agentName = %q, want gascity/fenrir (themed start identity, not gascity/dog-1)", got)
+	}
+	if got := targets[0].subject; got != "gascity/fenrir" {
+		t.Fatalf("stopTarget.subject = %q, want gascity/fenrir (subject must share the resolved metric identity)", got)
+	}
 }

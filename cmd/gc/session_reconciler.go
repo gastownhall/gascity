@@ -289,10 +289,17 @@ func finalizeDrainAckStoppedSession(
 	if template == "" {
 		template = session.Metadata["template"]
 	}
-	recordStopped := func() {
-		// The metric reflects the stop itself, so it is recorded even when
-		// no event recorder is wired (matching every other stop call site).
-		telemetry.RecordAgentStop(context.Background(), name, firstNonEmptyGCString(session.Metadata["agent_name"], template), "drain-ack", nil)
+	recordStopped := func(performedStop bool) {
+		// gc.agent.stops.total counts the stop action, so only the observer
+		// that actually performs the stop transition records it. Under NDI
+		// multiple observers process the same drain-ack; the witness branch
+		// (the bead was already closed by another observer) still re-emits the
+		// SessionStopped event for parity with existing event semantics (events
+		// dedupe downstream by session id) but must not inflate the monotonic
+		// action counter.
+		if performedStop {
+			telemetry.RecordAgentStop(context.Background(), name, sessionAgentMetricIdentity(*session, cfg), "drain-ack", nil)
+		}
 		if rec == nil {
 			return
 		}
@@ -325,7 +332,7 @@ func finalizeDrainAckStoppedSession(
 				dt.clearIdleProbe(session.ID)
 				dt.remove(session.ID)
 			}
-			recordStopped()
+			recordStopped(true)
 			return
 		}
 		if latest, err := store.Get(session.ID); err == nil && latest.Status == "closed" {
@@ -338,7 +345,7 @@ func finalizeDrainAckStoppedSession(
 				dt.clearIdleProbe(session.ID)
 				dt.remove(session.ID)
 			}
-			recordStopped()
+			recordStopped(false)
 			return
 		}
 		assignedAfterCloseGate, closeGateAssignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
@@ -381,7 +388,7 @@ func finalizeDrainAckStoppedSession(
 		dt.clearIdleProbe(session.ID)
 		dt.remove(session.ID)
 	}
-	recordStopped()
+	recordStopped(true)
 	if hasAssignedWork {
 		recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, *session, template, template, name, rec, stderr)
 	}

@@ -605,7 +605,7 @@ func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drain
 	if sessionpkg.DecideSessionExit(sessionExitFacts(session, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
 		return false
 	}
-	recordWakeFailure(session, store, clk)
+	recordWakeFailure(session, store, clk, sessionAgentMetricIdentity(*session, cfg))
 	clearLastWokeAt(session, store)
 	return true
 }
@@ -686,7 +686,10 @@ func recordRateLimitQuarantine(session *beads.Bead, store beads.Store, clk clock
 }
 
 // recordWakeFailure increments wake_attempts and quarantines if threshold exceeded.
-func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) {
+// agentIdentity is the start-path-joinable agent label for gc.agent.quarantines.total,
+// resolved by the caller from its authoritative source (the cfg-aware metric
+// resolver for reconcile paths, tp.DisplayName() for the start-failure path).
+func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock, agentIdentity string) {
 	attempts, _ := strconv.Atoi(session.Metadata["wake_attempts"])
 
 	if session.Metadata == nil {
@@ -716,10 +719,7 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 			for k, v := range accrual.Patch {
 				session.Metadata[k] = v
 			}
-			telemetry.RecordAgentQuarantine(context.Background(), firstNonEmptyGCString(
-				session.Metadata["agent_name"],
-				session.Metadata["template"],
-			))
+			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
 		}
 	} else {
 		next := accrual.Patch["wake_attempts"]
@@ -760,7 +760,7 @@ func clearWakeFailures(session *beads.Bead, store beads.Store) {
 func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, store beads.Store, clk clock.Clock) bool {
 	switch sessionpkg.DecideSessionExit(sessionExitFacts(session, cfg, alive, dt, clk)) {
 	case sessionpkg.ExitChurn:
-		recordChurn(session, store, clk)
+		recordChurn(session, store, clk, sessionAgentMetricIdentity(*session, cfg))
 		// Clear last_woke_at so this death is not re-counted next tick
 		// (edge-triggered, same pattern as checkStability).
 		_ = store.SetMetadata(session.ID, "last_woke_at", "")
@@ -784,7 +784,9 @@ func isDeliberateSleepReason(reason string) bool {
 // recordChurn increments the churn counter and clears session_key on
 // every churn event to force a fresh conversation on next wake. When
 // the counter reaches defaultMaxChurnCycles, the session is quarantined.
-func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock) {
+// agentIdentity is the start-path-joinable agent label for
+// gc.agent.quarantines.total, resolved by the caller.
+func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock, agentIdentity string) {
 	count, _ := strconv.Atoi(session.Metadata["churn_count"])
 
 	if session.Metadata == nil {
@@ -808,10 +810,7 @@ func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock) {
 			for k, v := range accrual.Patch {
 				session.Metadata[k] = v
 			}
-			telemetry.RecordAgentQuarantine(context.Background(), firstNonEmptyGCString(
-				session.Metadata["agent_name"],
-				session.Metadata["template"],
-			))
+			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
 		}
 		return
 	}

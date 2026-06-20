@@ -299,13 +299,20 @@ func RecordAgentStart(ctx context.Context, sessionName, agentName string, err er
 func RecordAgentStop(ctx context.Context, sessionName, agentName, reason string, err error) {
 	initInstruments()
 	status := statusStr(err)
-	inst.agentStopTotal.Add(ctx, 1,
-		metric.WithAttributes(
-			attribute.String("agent", agentName),
-			attribute.String("reason", reason),
-			attribute.String("status", status),
-		),
-	)
+	// A blank agent identity cannot be joined against the start/crash/kill
+	// counters and only pollutes gc.agent.stops.total with an unattributable
+	// series, so skip the metric when identity resolution failed. The log
+	// event below still records the stop (keyed by the session name) so the
+	// stop itself is never lost.
+	if strings.TrimSpace(agentName) != "" {
+		inst.agentStopTotal.Add(ctx, 1,
+			metric.WithAttributes(
+				attribute.String("agent", agentName),
+				attribute.String("reason", reason),
+				attribute.String("status", status),
+			),
+		)
+	}
 	emit(ctx, "agent.stop", severity(err),
 		otellog.String("session", sessionName),
 		otellog.String("agent", agentName),
