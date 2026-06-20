@@ -3375,6 +3375,7 @@ gc session new helper --no-attach
 | `--no-attach` | bool |  | create session without attaching |
 | `--title` | string |  | human-readable session title |
 | `--title-hint` | string |  | text to auto-generate a session title from |
+| `--wait-timeout` | duration | `30s` | how long to wait for the session to start (0 = no timeout) |
 
 ## gc session nudge
 
