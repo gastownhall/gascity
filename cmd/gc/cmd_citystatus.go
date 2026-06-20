@@ -116,11 +116,12 @@ func newStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonFlag bool
 	var formatFlag string
 	cmd := &cobra.Command{
-		Use:   "status [path]",
+		Use:   "status [path|name]",
 		Short: "Show city-wide status overview",
 		Long: `Shows a city-wide overview: controller state, suspension,
 all agents with running status, rigs, and a summary count.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
 			format := strings.ToLower(strings.TrimSpace(formatFlag))
 			switch format {

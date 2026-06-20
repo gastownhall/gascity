@@ -31,7 +31,8 @@ When --name is omitted, the current effective city identity is used
 otherwise the directory basename) — in every case city.toml is not modified.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if doRegisterWithOptionsJSON(args, nameFlag, jsonOut, stdout, stderr) != 0 {
 				return errExit
@@ -116,16 +117,21 @@ func resolveRegistrationName(cityPath, nameOverride string) (string, error) {
 func newUnregisterCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "unregister [path]",
+		Use:   "unregister [path|name]",
 		Short: "Remove a city from the machine-wide supervisor",
 		Long: `Remove a city from the machine-wide supervisor registry.
 
-If no path is given, unregisters the current city (discovered from cwd).
-If the supervisor is running, it immediately stops managing the city.
-Takes a city directory path, not the name shown by 'gc cities'. Unlike
-'gc register' (which is idempotent), this errors when the resolved path is not
-a registered city, so it is not a silent no-op on an unknown target.`,
-		Args: cobra.MaximumNArgs(1),
+The argument may be a path to a city directory or a registered city name (as
+shown by 'gc cities'); a name is resolved against the supervisor registry. An
+existing local city directory of the same name takes precedence over a
+registration; a local city plus a different registration is reported as
+ambiguous. If no argument is given, unregisters the current city (discovered
+from cwd). If the supervisor is running, it immediately stops managing the
+city. Unlike 'gc register' (which is idempotent), this errors when the resolved
+path is not a registered city, so it is not a silent no-op on an unknown
+target.`,
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if doUnregisterJSON(args, jsonOut, stdout, stderr) != 0 {
 				return errExit
@@ -145,10 +151,13 @@ func doUnregisterJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 	var cityPath string
 	var err error
 	if len(args) > 0 {
-		cityPath, err = filepath.Abs(args[0])
-		if err == nil {
-			cityPath = normalizePathForCompare(cityPath)
-		}
+		cityPath, err = resolveCityRef(args[0], cityRefOpts{cmd: "gc unregister", allowNameFallback: true}, func(ref string) (string, error) {
+			abs, aerr := filepath.Abs(ref)
+			if aerr != nil {
+				return "", aerr
+			}
+			return normalizePathForCompare(abs), nil
+		})
 	} else {
 		cityPath, err = resolveCommandCity(nil)
 	}
@@ -161,17 +170,13 @@ func doUnregisterJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "gc unregister: %v\n", lookupErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	rawArg := ""
-	if len(args) > 0 {
-		rawArg = args[0]
-	}
 	if !registered {
-		// gc unregister takes a city directory path, not a name. The common
-		// footgun is passing the NAME shown by `gc cities`, or a wrong path:
-		// the target resolves to a path that was never registered. Fail loudly
-		// rather than exit 0 silently (non-JSON) or fabricate a success record
-		// (JSON), which would leave the city registered and mislead the caller.
-		writeUnregisterNotRegistered(stderr, rawArg, cityPath)
+		// The reference resolved to a path (an explicit path, a local city, or
+		// the cwd city) that is not registered. A bare unregistered NAME is
+		// already rejected by resolveCityRef. Fail loudly rather than exit 0
+		// silently (non-JSON) or fabricate a success record (JSON), which would
+		// leave the city registered and mislead the caller.
+		writeUnregisterNotRegistered(stderr, cityPath)
 		return 1
 	}
 	unregisterStdout := stdout
@@ -192,7 +197,7 @@ func doUnregisterJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 		// the loud not-registered failure instead of emitting a fabricated
 		// success record. The helper's handled bool, not the earlier pre-check,
 		// is the authority on whether anything was actually unregistered.
-		writeUnregisterNotRegistered(stderr, rawArg, cityPath)
+		writeUnregisterNotRegistered(stderr, cityPath)
 		return 1
 	}
 	if !jsonOut {
@@ -208,20 +213,12 @@ func doUnregisterJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 }
 
 // writeUnregisterNotRegistered emits an actionable diagnostic when the
-// unregister target does not resolve to a registered city. rawArg is the
-// original CLI argument (empty when the city was discovered from cwd) and
-// cityPath is the resolved absolute path that failed to match.
-func writeUnregisterNotRegistered(stderr io.Writer, rawArg, cityPath string) {
-	fmt.Fprintf(stderr, "gc unregister: no registered city at %s\n", cityPath) //nolint:errcheck // best-effort stderr
-	// Only the bare-NAME footgun warrants the name-vs-path hint. A path-shaped
-	// argument (relative like ./city, a trailing slash, or a symlink) is a
-	// genuine path that simply was not registered; comparing the raw token to
-	// the fully normalized cityPath would misfire and contradict the diagnostic,
-	// so gate on "no path separator" instead of raw-string inequality.
-	if trimmed := strings.TrimSpace(rawArg); trimmed != "" && !strings.ContainsRune(trimmed, filepath.Separator) {
-		fmt.Fprintf(stderr, "gc unregister: %q looks like a name — gc unregister takes a city directory path, not a name\n", trimmed) //nolint:errcheck // best-effort stderr
-	}
-	fmt.Fprintf(stderr, "gc unregister: run 'gc cities' to see registered cities, then 'gc unregister <path>'\n") //nolint:errcheck // best-effort stderr
+// unregister target — an explicit path, a resolved local city, or the cwd
+// city — is not registered. (A bare unregistered NAME is rejected earlier by
+// resolveCityRef with its own name-aware message.)
+func writeUnregisterNotRegistered(stderr io.Writer, cityPath string) {
+	fmt.Fprintf(stderr, "gc unregister: no registered city at %s\n", cityPath)       //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "gc unregister: run 'gc cities' to see registered cities\n") //nolint:errcheck // best-effort stderr
 }
 
 func replayJSONModeProgress(stderr io.Writer, progress *bytes.Buffer) {

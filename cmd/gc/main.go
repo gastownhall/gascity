@@ -433,6 +433,21 @@ func resolveCommandContext(args []string) (resolvedContext, error) {
 	if len(args) == 0 {
 		return resolveContext()
 	}
+	// A name-shaped positional may be a registered city name. Resolve it
+	// against the registry before falling back to path resolution, so a bare
+	// name is never fed to resolveContextFromPath's upward city walk (which
+	// would silently target an ambient ancestor city).
+	if classifyCityRef(args[0]) == cityRefName {
+		registeredPath, useLocal, err := resolveCityNameRef(strings.TrimSpace(args[0]))
+		if err != nil {
+			return resolvedContext{}, err
+		}
+		if !useLocal {
+			return resolvedContext{CityPath: registeredPath}, nil
+		}
+		// useLocal: cwd/<name> is a real city — fall through to path resolution
+		// so the rig-from-cwd behavior is identical to passing the path.
+	}
 	return resolveContextFromPath(args[0])
 }
 
@@ -464,7 +479,7 @@ func resolveContext() (resolvedContext, error) {
 
 	// Step 1: --city + --rig
 	if city != "" && rig != "" {
-		cp, err := validateCityPath(city)
+		cp, err := resolveCityFlagValue(city)
 		if err != nil {
 			return resolvedContext{}, err
 		}
@@ -473,7 +488,7 @@ func resolveContext() (resolvedContext, error) {
 
 	// Step 2: --city only
 	if city != "" {
-		cp, err := validateCityPath(city)
+		cp, err := resolveCityFlagValue(city)
 		if err != nil {
 			return resolvedContext{}, err
 		}

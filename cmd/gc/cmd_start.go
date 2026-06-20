@@ -367,7 +367,7 @@ func newStartCmd(stdout, stderr io.Writer) *cobra.Command {
 	var foregroundMode bool
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "start [path]",
+		Use:   "start [path|name]",
 		Short: "Start the city under the machine-wide supervisor",
 		Long: `Start the city under the machine-wide supervisor.
 
@@ -379,7 +379,8 @@ Use "gc supervisor run" for foreground operation.`,
   gc start ~/my-city
   gc start --dry-run
   gc supervisor run`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if jsonOut && (foregroundMode || dryRunMode) {
 				fmt.Fprintln(stderr, "gc start: --json is only supported for supervisor-managed start") //nolint:errcheck // best-effort stderr
@@ -566,9 +567,9 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 func resolveStartDir(args []string) (string, error) {
 	switch {
 	case len(args) > 0:
-		return filepath.Abs(args[0])
+		return resolveCityRef(args[0], cityRefOpts{cmd: "gc start", allowNameFallback: true}, filepath.Abs)
 	case cityFlag != "":
-		return filepath.Abs(cityFlag)
+		return resolveCityRef(cityFlag, cityRefOpts{cmd: "gc start", allowNameFallback: true}, filepath.Abs)
 	default:
 		return os.Getwd()
 	}

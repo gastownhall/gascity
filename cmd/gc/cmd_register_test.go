@@ -486,11 +486,10 @@ func TestDoUnregister(t *testing.T) {
 	}
 }
 
-// gc unregister takes a city directory path, not a name. When the argument
-// does not resolve to a registered city — the common footgun is passing the
-// NAME shown by `gc cities`, or a wrong path — unregister must fail loudly
-// instead of silently exiting 0 (non-JSON) or reporting a false success
-// (JSON). Regression for ga-m3ev9r.
+// gc unregister fails loudly when the target resolves to a path that is not
+// registered (rather than exiting 0 silently / fabricating JSON success).
+// A bare unregistered NAME is handled separately by resolveCityRef; this
+// covers an explicit unregistered path. Regression for ga-m3ev9r.
 func TestDoUnregisterUnknownTargetFailsLoudly(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GC_HOME", dir)
@@ -616,42 +615,51 @@ func TestUnregisterUnknownTargetJSONEnvelopeReportsNotOK(t *testing.T) {
 	}
 }
 
-// The name-vs-path hint must fire for a bare NAME (the common footgun of
-// passing the name shown by `gc cities`). Regression for ga-m3ev9r.
-func TestWriteUnregisterNotRegisteredNameHint(t *testing.T) {
-	var stderr bytes.Buffer
-	writeUnregisterNotRegistered(&stderr, "my-city", "/abs/my-city")
-	out := stderr.String()
-	if !strings.Contains(out, "no registered city at /abs/my-city") {
-		t.Fatalf("stderr = %q, want a 'no registered city' line", out)
+// gc unregister accepts a registered city NAME (as shown by gc cities), not
+// just a path (ga-m3ev9r).
+func TestDoUnregisterByName(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GC_HOME", dir)
+	t.Chdir(t.TempDir()) // cwd has no ./my-city, so the name resolves via the registry
+
+	cityPath := filepath.Join(dir, "my-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(out, "not a name") {
-		t.Fatalf("stderr = %q, want the name-vs-path hint for a bare name", out)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(out, "gc cities") {
-		t.Fatalf("stderr = %q, want the 'gc cities' guidance", out)
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "my-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doUnregister([]string{"my-city"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("registry entries = %v, want empty after unregister-by-name", entries)
 	}
 }
 
-// The name-vs-path hint must NOT fire for a path-shaped argument (relative
-// path, trailing slash, or nested path). Those are genuine paths that simply
-// were not registered, so claiming they "look like a name" contradicts the
-// diagnostic. Comparing the raw token to the fully normalized cityPath used to
-// misfire here. Regression for ga-m3ev9r finding #2.
-func TestWriteUnregisterNotRegisteredPathShapedNoNameHint(t *testing.T) {
-	for _, rawArg := range []string{"./my-city", "/abs/my-city/", "sub/my-city"} {
-		var stderr bytes.Buffer
-		writeUnregisterNotRegistered(&stderr, rawArg, "/abs/my-city")
-		out := stderr.String()
-		if !strings.Contains(out, "no registered city at /abs/my-city") {
-			t.Fatalf("rawArg=%q stderr = %q, want a 'no registered city' line", rawArg, out)
-		}
-		if strings.Contains(out, "not a name") {
-			t.Fatalf("rawArg=%q stderr = %q, name-vs-path hint must not fire for a path-shaped arg", rawArg, out)
-		}
-		if !strings.Contains(out, "gc cities") {
-			t.Fatalf("rawArg=%q stderr = %q, want the 'gc cities' guidance", rawArg, out)
-		}
+func TestDoUnregisterByUnknownNameFailsLoudly(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GC_HOME", dir)
+	t.Chdir(t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := doUnregister([]string{"ghost-name"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not a registered city name") {
+		t.Fatalf("stderr = %q, want a name-aware 'not a registered city name' diagnostic", stderr.String())
 	}
 }
 

@@ -18,7 +18,7 @@ import (
 func newSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "suspend [path]",
+		Use:   "suspend [path|name]",
 		Short: "Suspend the city (all agents effectively suspended)",
 		Long: `Suspends the city by recording an explicit "suspended" preference
 in .gc/runtime/suspension-state.json (per-clone runtime state, not
@@ -29,7 +29,8 @@ effectively suspended regardless of their individual suspended fields.
 The reconciler won't spawn agents, gc hook/prime return empty.
 
 Use "gc resume" to restore.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSuspend(args, jsonOut, stdout, stderr) != 0 {
 				return errExit
@@ -45,7 +46,7 @@ Use "gc resume" to restore.`,
 func newResumeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "resume [path]",
+		Use:   "resume [path|name]",
 		Short: "Resume a suspended city",
 		Long: `Resume a suspended city by recording an explicit "resumed" preference
 in .gc/runtime/suspension-state.json. The override sticks across city
@@ -54,7 +55,8 @@ restarts even when [workspace] declares suspended_on_start = true.
 Restores normal operation: the reconciler will spawn agents again and
 gc hook/prime will return work. Use "gc agent resume" to resume
 individual agents, or "gc rig resume" for rigs.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdResume(args, jsonOut, stdout, stderr) != 0 {
 				return errExit

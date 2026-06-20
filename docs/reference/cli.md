@@ -2812,7 +2812,7 @@ maps to a configured agent are NOT updated; normal orphan/suspended
 drain handles them on the next tick.
 
 ```
-gc reload [path] [flags]
+gc reload [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -2831,7 +2831,7 @@ mode this unregisters the city, then re-registers it and triggers an
 immediate reconcile.
 
 ```
-gc restart [path] [flags]
+gc restart [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -2849,7 +2849,7 @@ gc hook/prime will return work. Use "gc agent resume" to resume
 individual agents, or "gc rig resume" for rigs.
 
 ```
-gc resume [path] [flags]
+gc resume [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -3750,7 +3750,7 @@ ensures the supervisor is running, and triggers immediate reconciliation.
 Use "gc supervisor run" for foreground operation.
 
 ```
-gc start [path] [flags]
+gc start [path|name] [flags]
 ```
 
 **Example:**
@@ -3775,7 +3775,7 @@ Shows a city-wide overview: controller state, suspension,
 all agents with running status, rigs, and a summary count.
 
 ```
-gc status [path] [flags]
+gc status [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -3799,7 +3799,7 @@ cleanup pass. Use --force to skip the interrupt grace period and go
 straight to kill.
 
 ```
-gc stop [path] [flags]
+gc stop [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -3976,7 +3976,7 @@ The reconciler won't spawn agents, gc hook/prime return empty.
 Use "gc resume" to restore.
 
 ```
-gc suspend [path] [flags]
+gc suspend [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -4104,14 +4104,17 @@ gc trace tail [flags]
 
 Remove a city from the machine-wide supervisor registry.
 
-If no path is given, unregisters the current city (discovered from cwd).
+The argument may be a path to a city directory or a registered city name (as
+shown by 'gc cities'); a name is resolved against the supervisor registry. An
+existing local directory of the same name takes precedence over a registration.
+If no argument is given, unregisters the current city (discovered from cwd).
 If the supervisor is running, it immediately stops managing the city.
 Takes a city directory path, not the name shown by 'gc cities'. Unlike
 'gc register' (which is idempotent), this errors when the resolved path is not
 a registered city, so it is not a silent no-op on an unknown target.
 
 ```
-gc unregister [path] [flags]
+gc unregister [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |

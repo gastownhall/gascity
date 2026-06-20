@@ -67,11 +67,35 @@ func resolveCityRef(ref string, opts cityRefOpts, pathResolve func(string) (stri
 	if classifyCityRef(ref) != cityRefName || !opts.allowNameFallback {
 		return pathResolve(ref)
 	}
-	name := strings.TrimSpace(ref)
-
-	cwd, err := os.Getwd()
+	registeredPath, useLocal, err := resolveCityNameRef(strings.TrimSpace(ref))
 	if err != nil {
-		return "", fmt.Errorf("resolving working directory: %w", err)
+		return "", err
+	}
+	if useLocal {
+		// The local city wins. Route through the command's path resolver so the
+		// path branch behaves exactly as if a path were supplied; because
+		// cwd/<name> is a real city, findCity returns it without walking up.
+		return pathResolve(strings.TrimSpace(ref))
+	}
+	return registeredPath, nil
+}
+
+// resolveCityNameRef resolves a name-shaped city reference (the caller
+// guarantees classifyCityRef(name) == cityRefName) against the cwd and the
+// supervisor registry:
+//
+//   - useLocal == true: cwd/<name> is itself a city; the caller should resolve
+//     it as a local path.
+//   - registeredPath != "": the name resolves to a registered city.
+//   - err != nil: ambiguous (a local city AND a different registration) or not
+//     found (neither a local city nor a registered name).
+//
+// It never feeds the name to a path resolver, so findCity's upward walk can
+// never silently resolve a bare name to an ambient ancestor city.
+func resolveCityNameRef(name string) (registeredPath string, useLocal bool, err error) {
+	cwd, werr := os.Getwd()
+	if werr != nil {
+		return "", false, fmt.Errorf("resolving working directory: %w", werr)
 	}
 	localDir := filepath.Join(cwd, name)
 	localIsCity := citylayout.HasCityConfig(localDir)
@@ -80,19 +104,31 @@ func resolveCityRef(ref string, opts cityRefOpts, pathResolve func(string) (stri
 
 	switch {
 	case localIsCity && registered && !samePath(localDir, entry.Path):
-		return "", fmt.Errorf(
-			"%q is ambiguous: it is both a local city directory (%s) and a registered city at %s; pass ./%s for the local one, or cd elsewhere to use the registered city",
-			name, localDir, entry.Path, name)
+		return "", false, cityRefAmbiguousErr(name, localDir, entry.Path)
 	case localIsCity:
-		// The local city wins. Route through the command's path resolver so the
-		// path branch behaves exactly as if a path were supplied; because
-		// cwd/<name> is a real city, findCity returns it without walking up.
-		return pathResolve(name)
+		return "", true, nil
 	case registered:
-		return entry.Path, nil
+		return entry.Path, false, nil
 	default:
-		return "", fmt.Errorf(
-			"%q is not a registered city name, and %s is not a city directory (run 'gc cities' to list registered cities)",
-			name, localDir)
+		return "", false, cityRefNotFoundErr(name, localDir)
 	}
+}
+
+func cityRefAmbiguousErr(name, localDir, registeredPath string) error {
+	return fmt.Errorf(
+		"%q is ambiguous: it is both a local city directory (%s) and a registered city at %s; pass ./%s for the local one, or cd elsewhere to use the registered city",
+		name, localDir, registeredPath, name)
+}
+
+func cityRefNotFoundErr(name, localDir string) error {
+	return fmt.Errorf(
+		"%q is not a registered city name, and %s is not a city directory (run 'gc cities' to list registered cities)",
+		name, localDir)
+}
+
+// resolveCityFlagValue resolves the --city flag value, accepting either a
+// directory path or a registered city name (parallel to the positional
+// argument). validateCityPath provides the path branch.
+func resolveCityFlagValue(city string) (string, error) {
+	return resolveCityRef(city, cityRefOpts{cmd: "gc", allowNameFallback: true}, validateCityPath)
 }

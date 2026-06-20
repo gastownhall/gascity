@@ -212,3 +212,145 @@ func TestResolveCityRefFromInsideCityDoesNotWalkUp(t *testing.T) {
 		t.Fatalf("got %q, want registered other-city %q", got, otherPath)
 	}
 }
+
+// resolveCommandCity is the central seam reload/suspend/resume/status use; a
+// name passed to it must resolve via the registry.
+func TestResolveCommandCityByName(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	cityPath := filepath.Join(t.TempDir(), "alpha")
+	mkTestCity(t, cityPath)
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveCommandCity([]string{"alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(got, cityPath) {
+		t.Fatalf("resolveCommandCity(alpha) = %q, want %q", got, cityPath)
+	}
+}
+
+// The central seam must also resist the walk-up footgun: a bare name from
+// inside city A targets the registered city, not A.
+func TestResolveCommandCityByNameFromInsideAnotherCity(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	ambient := t.TempDir()
+	mkTestCity(t, ambient)
+	t.Chdir(ambient)
+	otherPath := filepath.Join(t.TempDir(), "other")
+	mkTestCity(t, otherPath)
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(otherPath, "other"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveCommandCity([]string{"other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if samePath(got, ambient) {
+		t.Fatalf("resolveCommandCity targeted the ambient city %q (walk-up footgun)", ambient)
+	}
+	if !samePath(got, otherPath) {
+		t.Fatalf("resolveCommandCity(other) = %q, want %q", got, otherPath)
+	}
+}
+
+func TestResolveCommandCityUnknownNameFailsLoudly(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	_, err := resolveCommandCity([]string{"ghost-name"})
+	if err == nil || !strings.Contains(err.Error(), "not a registered city name") {
+		t.Fatalf("err = %v, want a name-aware not-found error", err)
+	}
+}
+
+func TestResolveCityFlagValueByName(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	cityPath := filepath.Join(t.TempDir(), "alpha")
+	mkTestCity(t, cityPath)
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveCityFlagValue("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(got, cityPath) {
+		t.Fatalf("resolveCityFlagValue(alpha) = %q, want %q", got, cityPath)
+	}
+}
+
+func TestResolveExplicitCityPathEnvByName(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	cityPath := filepath.Join(t.TempDir(), "alpha")
+	mkTestCity(t, cityPath)
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+
+	// GC_CITY accepts a registered name.
+	t.Setenv("GC_CITY", "alpha")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	got, ok := resolveExplicitCityPathEnv()
+	if !ok || !samePath(got, cityPath) {
+		t.Fatalf("resolveExplicitCityPathEnv() = (%q,%v), want (%q,true)", got, ok, cityPath)
+	}
+
+	// GC_CITY_PATH is path-only: a bare name must NOT resolve via the registry.
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "alpha")
+	if _, ok := resolveExplicitCityPathEnv(); ok {
+		t.Fatal("GC_CITY_PATH must not resolve a bare registered name")
+	}
+}
+
+func TestRestartTargetResolvesByNameOnce(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	cityPath := filepath.Join(t.TempDir(), "alpha")
+	mkTestCity(t, cityPath)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil { // bootstrapped runtime root
+		t.Fatal(err)
+	}
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	gotPath, gotName, err := restartTarget([]string{"alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(gotPath, cityPath) {
+		t.Fatalf("restartTarget path = %q, want %q", gotPath, cityPath)
+	}
+	if gotName != "alpha" {
+		t.Fatalf("restartTarget name = %q, want alpha", gotName)
+	}
+}
+
+func TestCityNameCandidatesFiltersByPrefix(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	for _, n := range []string{"alpha", "alpine", "beta"} {
+		p := filepath.Join(t.TempDir(), n)
+		mkTestCity(t, p)
+		if err := reg.Register(p, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := cityNameCandidates("alp")
+	if len(got) != 2 {
+		t.Fatalf("cityNameCandidates(\"alp\") = %v, want 2 (alpha, alpine)", got)
+	}
+	for _, c := range got {
+		if !strings.HasPrefix(c, "alp") {
+			t.Fatalf("candidate %q does not match prefix", c)
+		}
+		if !strings.Contains(c, "\t") {
+			t.Fatalf("candidate %q missing tab-separated path description", c)
+		}
+	}
+}
