@@ -1062,6 +1062,76 @@ func TestDoltliteReadStoreBoundedSameSecondPrefixMatchesUnbounded(t *testing.T) 
 	})
 }
 
+// TestDoltliteReadStoreBoundedMixedTimestampLayoutPrefixMatchesUnbounded pins the
+// #3449 post-merge review fix for mixed on-disk created_at layouts. parseTimeString
+// accepts both RFC3339 ("...T...") and time.Time.String()'s space-separated form, and
+// scanBead parses every row to a real instant, so the Go merge orders rows
+// chronologically regardless of stored layout. The bounded SQL paths order by
+// substr(created_at, 1, 19), whose 11th char is the layout separator ('T' = 0x54 vs
+// ' ' = 0x20): within one date every space-separated row sorts lexically before every
+// RFC3339 row no matter the actual time, so a raw-substr LIMIT can cut a different
+// top-N than the unbounded merge. The rows below share one date and interleave layouts
+// by instant, so a raw-substr ordering inverts the canonical prefix at the limit=1
+// boundary. Covers the multi-table bounded path (selectBoundedTopNIDs) and the
+// single-table limited path (queryIssueTable).
+func TestDoltliteReadStoreBoundedMixedTimestampLayoutPrefixMatchesUnbounded(t *testing.T) {
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// rfc3339 and spaced encode the same instant in the two layouts parseTimeString
+	// accepts; their substr(...,1,19) prefixes differ only at the 'T'/' ' separator.
+	rfc3339 := func(ts time.Time) string { return ts.UTC().Format(time.RFC3339Nano) }
+	spaced := func(ts time.Time) string { return ts.UTC().Format("2006-01-02 15:04:05.999999999 -0700 MST") }
+
+	assertPrefixParity := func(t *testing.T, store *DoltliteReadStore, tier TierMode) {
+		t.Helper()
+		for _, sort := range []SortOrder{SortCreatedDesc, SortCreatedAsc} {
+			unbounded, err := store.List(ListQuery{Label: "ml", Sort: sort, TierMode: tier})
+			if err != nil {
+				t.Fatalf("List unbounded (tier=%v sort=%v): %v", tier, sort, err)
+			}
+			if len(unbounded) != 4 {
+				t.Fatalf("unbounded len = %d, want 4 (ids %v)", len(unbounded), testBeadIDs(unbounded))
+			}
+			for k := 1; k <= 4; k++ {
+				bounded, err := store.List(ListQuery{Label: "ml", Sort: sort, TierMode: tier, Limit: k})
+				if err != nil {
+					t.Fatalf("List(tier=%v sort=%v limit=%d): %v", tier, sort, k, err)
+				}
+				got, want := testBeadIDs(bounded), testBeadIDs(unbounded[:k])
+				if !slices.Equal(got, want) {
+					t.Fatalf("bounded prefix (tier=%v sort=%v limit=%d) = %v, want unbounded prefix %v", tier, sort, k, got, want)
+				}
+			}
+		}
+	}
+
+	t.Run("tier_issues_multi_table", func(t *testing.T) {
+		// Chronological order a<b<c<d; durable issues carry RFC3339 text and durable
+		// wisps carry space-separated text, so stored layout interleaves true instant
+		// order across the two tables the bounded multi-table read unions.
+		issues := []testDoltliteIssue{
+			{ID: "gc-ml-a", Title: "a", CreatedAt: base.Add(1 * time.Second), RawCreatedAt: rfc3339(base.Add(1 * time.Second)), Labels: []string{"ml"}},
+			{ID: "gc-ml-c", Title: "c", CreatedAt: base.Add(3 * time.Second), RawCreatedAt: rfc3339(base.Add(3 * time.Second)), Labels: []string{"ml"}},
+		}
+		wisps := []testDoltliteIssue{
+			{ID: "gc-ml-b", Title: "b", CreatedAt: base.Add(2 * time.Second), RawCreatedAt: spaced(base.Add(2 * time.Second)), Labels: []string{"ml"}, NoHistory: true},
+			{ID: "gc-ml-d", Title: "d", CreatedAt: base.Add(4 * time.Second), RawCreatedAt: spaced(base.Add(4 * time.Second)), Labels: []string{"ml"}, NoHistory: true},
+		}
+		assertPrefixParity(t, newDoltliteStoreWithRows(t, issues, wisps), TierIssues)
+	})
+
+	t.Run("tier_wisps_single_table", func(t *testing.T) {
+		// One table, layouts alternating by instant, so the single-table SQL
+		// ORDER BY ... LIMIT must still cut the chronological prefix.
+		wisps := []testDoltliteIssue{
+			{ID: "gc-ml-a", Title: "a", CreatedAt: base.Add(1 * time.Second), RawCreatedAt: rfc3339(base.Add(1 * time.Second)), Labels: []string{"ml"}, NoHistory: true},
+			{ID: "gc-ml-b", Title: "b", CreatedAt: base.Add(2 * time.Second), RawCreatedAt: spaced(base.Add(2 * time.Second)), Labels: []string{"ml"}, NoHistory: true},
+			{ID: "gc-ml-c", Title: "c", CreatedAt: base.Add(3 * time.Second), RawCreatedAt: rfc3339(base.Add(3 * time.Second)), Labels: []string{"ml"}, NoHistory: true},
+			{ID: "gc-ml-d", Title: "d", CreatedAt: base.Add(4 * time.Second), RawCreatedAt: spaced(base.Add(4 * time.Second)), Labels: []string{"ml"}, NoHistory: true},
+		}
+		assertPrefixParity(t, newDoltliteStoreWithRows(t, nil, wisps), TierWisps)
+	})
+}
+
 // TestDoltliteReadStoreBoundedHydrationChunksLargeIDSet pins the deep-pagination
 // fix for the bounded multi-table read (#3449 review). The bounded path selects
 // up to `limit` ids in one SQL statement and hydrates them with an
@@ -1462,13 +1532,18 @@ type testDoltliteDependency struct {
 }
 
 type testDoltliteIssue struct {
-	ID           string
-	Title        string
-	Status       string
-	IssueType    string
-	Priority     int
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID        string
+	Title     string
+	Status    string
+	IssueType string
+	Priority  int
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	// RawCreatedAt, when set, is written to the created_at column verbatim
+	// instead of CreatedAt.Format(time.RFC3339Nano), so a test can seed a
+	// specific on-disk timestamp layout (e.g. time.Time.String()'s
+	// space-separated form) and exercise mixed-layout read ordering.
+	RawCreatedAt string
 	Assignee     string
 	Description  string
 	Labels       []string
@@ -1572,6 +1647,10 @@ func insertTestDoltliteIssue(t testing.TB, db *sql.DB, issueTable, labelTable, d
 	if issue.UpdatedAt.IsZero() {
 		issue.UpdatedAt = issue.CreatedAt
 	}
+	createdAt := issue.CreatedAt.Format(time.RFC3339Nano)
+	if issue.RawCreatedAt != "" {
+		createdAt = issue.RawCreatedAt
+	}
 	metadata := "{}"
 	if len(issue.Metadata) > 0 {
 		raw, err := json.Marshal(issue.Metadata)
@@ -1590,7 +1669,7 @@ func insertTestDoltliteIssue(t testing.TB, db *sql.DB, issueTable, labelTable, d
 		issue.Status,
 		issue.IssueType,
 		issue.Priority,
-		issue.CreatedAt.Format(time.RFC3339Nano),
+		createdAt,
 		issue.UpdatedAt.Format(time.RFC3339Nano),
 		issue.Assignee,
 		issue.Description,
