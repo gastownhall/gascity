@@ -27,7 +27,6 @@ func (c *City) StartWithSupervisor() {
 		c.t.Fatalf("gc start failed: %v\n%s", err, out)
 	}
 	c.started = true
-	c.usedSupervisor = true
 	c.t.Cleanup(func() {
 		c.Stop()
 		RunGC(c.Env, "", "supervisor", "stop", "--wait") //nolint:errcheck

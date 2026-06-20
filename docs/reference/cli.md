@@ -4106,6 +4106,9 @@ Remove a city from the machine-wide supervisor registry.
 
 If no path is given, unregisters the current city (discovered from cwd).
 If the supervisor is running, it immediately stops managing the city.
+Takes a city directory path, not the name shown by 'gc cities'. Unlike
+'gc register' (which is idempotent), this errors when the resolved path is not
+a registered city, so it is not a silent no-op on an unknown target.
 
 ```
 gc unregister [path] [flags]

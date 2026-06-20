@@ -131,8 +131,9 @@ func restoreRealHomeDuring(env *helpers.Env) func() {
 func teardownLiveHandleCityRuntime(env *helpers.Env, cityDir string) {
 	restoreHome := restoreRealHomeDuring(env)
 	defer restoreHome()
+	// gc stop also unregisters the city, so a follow-up gc unregister would now
+	// fail loudly on the already-cleared registry.
 	_, _ = runGCWithTimeout(liveShutdownTimeout, env, cityDir, "stop", cityDir)
-	_, _ = runGCWithTimeout(liveShutdownTimeout, env, cityDir, "unregister", cityDir)
 	_, _ = runGCWithTimeout(liveShutdownTimeout, env, "", "supervisor", "stop", "--wait")
 }
 

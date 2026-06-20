@@ -616,6 +616,45 @@ func TestUnregisterUnknownTargetJSONEnvelopeReportsNotOK(t *testing.T) {
 	}
 }
 
+// The name-vs-path hint must fire for a bare NAME (the common footgun of
+// passing the name shown by `gc cities`). Regression for ga-m3ev9r.
+func TestWriteUnregisterNotRegisteredNameHint(t *testing.T) {
+	var stderr bytes.Buffer
+	writeUnregisterNotRegistered(&stderr, "my-city", "/abs/my-city")
+	out := stderr.String()
+	if !strings.Contains(out, "no registered city at /abs/my-city") {
+		t.Fatalf("stderr = %q, want a 'no registered city' line", out)
+	}
+	if !strings.Contains(out, "not a name") {
+		t.Fatalf("stderr = %q, want the name-vs-path hint for a bare name", out)
+	}
+	if !strings.Contains(out, "gc cities") {
+		t.Fatalf("stderr = %q, want the 'gc cities' guidance", out)
+	}
+}
+
+// The name-vs-path hint must NOT fire for a path-shaped argument (relative
+// path, trailing slash, or nested path). Those are genuine paths that simply
+// were not registered, so claiming they "look like a name" contradicts the
+// diagnostic. Comparing the raw token to the fully normalized cityPath used to
+// misfire here. Regression for ga-m3ev9r finding #2.
+func TestWriteUnregisterNotRegisteredPathShapedNoNameHint(t *testing.T) {
+	for _, rawArg := range []string{"./my-city", "/abs/my-city/", "sub/my-city"} {
+		var stderr bytes.Buffer
+		writeUnregisterNotRegistered(&stderr, rawArg, "/abs/my-city")
+		out := stderr.String()
+		if !strings.Contains(out, "no registered city at /abs/my-city") {
+			t.Fatalf("rawArg=%q stderr = %q, want a 'no registered city' line", rawArg, out)
+		}
+		if strings.Contains(out, "not a name") {
+			t.Fatalf("rawArg=%q stderr = %q, name-vs-path hint must not fire for a path-shaped arg", rawArg, out)
+		}
+		if !strings.Contains(out, "gc cities") {
+			t.Fatalf("rawArg=%q stderr = %q, want the 'gc cities' guidance", rawArg, out)
+		}
+	}
+}
+
 func TestDoCities(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GC_HOME", dir)
