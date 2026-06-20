@@ -1737,65 +1737,7 @@ func commitStartResultTraced(
 		return false
 	}
 	if result.err != nil {
-		fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
-		if result.rateLimitScreen {
-			if err := recordRateLimitQuarantine(session, store, clk); err != nil {
-				fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, err) //nolint:errcheck
-				if trace != nil {
-					trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "hold_deferred", traceRecordPayload{
-						"error": formatLifecycleError(result.err),
-						"cause": err.Error(),
-					}, "")
-				}
-				logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
-				return false
-			}
-			if trace != nil {
-				trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "held", traceRecordPayload{
-					"error": formatLifecycleError(result.err),
-				}, "")
-			}
-			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
-			return false
-		}
-		if result.rollbackPending {
-			if errors.Is(result.err, context.DeadlineExceeded) {
-				rec.Record(events.Event{
-					Type:    events.SessionColdStartTimeout,
-					Actor:   "controller",
-					Subject: name,
-					Message: fmt.Sprintf("session %q cold start timed out", name),
-				})
-			}
-			// A rolled-back pending create is closed and recreated fresh on the
-			// next tick, so it deliberately does not record a wake failure (see
-			// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError).
-			// Genuine wake-failure accounting happens on the non-rollback path
-			// below via recordWakeFailure.
-			if trace != nil {
-				trace.recordOperation("reconciler.start.rollback_pending", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
-					"error": formatLifecycleError(result.err),
-				}, "")
-			}
-			rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
-			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
-			return false
-		}
-		if err := store.SetMetadata(session.ID, "last_woke_at", ""); err != nil {
-			fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
-		} else {
-			session.Metadata["last_woke_at"] = ""
-		}
-		// tp.DisplayName() is the exact identity the start counter records, so a
-		// quarantine triggered by repeated start failures joins the start series
-		// even for a namepool-themed pool instance whose bead predates agent_name.
-		recordWakeFailure(session, store, clk, tp.DisplayName())
-		if trace != nil {
-			trace.recordOperation("reconciler.start.failed", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
-				"error": formatLifecycleError(result.err),
-			}, "")
-		}
-		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+		commitStartFailure(result, store, clk, rec, wave, stderr, trace)
 		return false
 	}
 	coreBreakdown := ""
@@ -1816,7 +1758,10 @@ func commitStartResultTraced(
 		ConfirmState:            confirmPendingStart(session.Metadata["state"]),
 		ClearSleepReason:        session.Metadata["sleep_reason"] != "",
 		ClearPendingCreateClaim: shouldRollbackPendingCreate(session),
-		Now:                     clk.Now(),
+		// A confirmed transition out of a dormant/creating state opens a new
+		// awake interval — stamp a fresh compute-usage epoch for it.
+		StartsAwakeInterval: confirmPendingStart(session.Metadata["state"]),
+		Now:                 clk.Now(),
 	})
 	storedMCPSnapshot, err := sessionpkg.EncodeMCPServersSnapshot(result.prepared.cfg.MCPServers)
 	if err != nil {
@@ -1888,6 +1833,76 @@ func commitStartResultTraced(
 	return true
 }
 
+// commitStartFailure performs the failure-path side effects for a start that
+// returned an error: startup rate-limit quarantine, pending-create rollback, or
+// wake-failure accounting, plus the matching trace and log records. It is split
+// out of commitStartResultTraced to keep the success path legible; the caller
+// returns false after invoking it.
+func commitStartFailure(result startResult, store beads.Store, clk clock.Clock, rec events.Recorder, wave int, stderr io.Writer, trace *sessionReconcilerTraceCycle) {
+	session := result.prepared.candidate.session
+	name := result.prepared.candidate.name()
+	tp := result.prepared.candidate.tp
+	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+	if result.rateLimitScreen {
+		if err := recordRateLimitQuarantine(session, store, clk); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, err) //nolint:errcheck
+			if trace != nil {
+				trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "hold_deferred", traceRecordPayload{
+					"error": formatLifecycleError(result.err),
+					"cause": err.Error(),
+				}, "")
+			}
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+			return
+		}
+		if trace != nil {
+			trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "held", traceRecordPayload{
+				"error": formatLifecycleError(result.err),
+			}, "")
+		}
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+		return
+	}
+	if result.rollbackPending {
+		if errors.Is(result.err, context.DeadlineExceeded) {
+			rec.Record(events.Event{
+				Type:    events.SessionColdStartTimeout,
+				Actor:   "controller",
+				Subject: name,
+				Message: fmt.Sprintf("session %q cold start timed out", name),
+			})
+		}
+		// A rolled-back pending create is closed and recreated fresh on the
+		// next tick, so it deliberately does not record a wake failure (see
+		// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError).
+		// Genuine wake-failure accounting happens on the non-rollback path
+		// below via recordWakeFailure.
+		if trace != nil {
+			trace.recordOperation("reconciler.start.rollback_pending", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+				"error": formatLifecycleError(result.err),
+			}, "")
+		}
+		rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+		return
+	}
+	if err := store.SetMetadata(session.ID, "last_woke_at", ""); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
+	} else {
+		session.Metadata["last_woke_at"] = ""
+	}
+	// tp.DisplayName() is the exact identity the start counter records, so a
+	// quarantine triggered by repeated start failures joins the start series
+	// even for a namepool-themed pool instance whose bead predates agent_name.
+	recordWakeFailure(session, store, clk, tp.DisplayName())
+	if trace != nil {
+		trace.recordOperation("reconciler.start.failed", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+			"error": formatLifecycleError(result.err),
+		}, "")
+	}
+	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+}
+
 func recoverRunningPendingCreate(
 	session *beads.Bead,
 	tp TemplateParams,
@@ -1933,7 +1948,11 @@ func recoverRunningPendingCreate(
 		// at this point the claim is guaranteed to be set — hard-code the
 		// clear rather than re-evaluating the same predicate.
 		ClearPendingCreateClaim: true,
-		Now:                     now,
+		// Recovering an already-awake runtime must not reset the in-flight
+		// awake interval, so key the fresh epoch on a genuine dormant/creating
+		// start only — not the StateAwake re-confirmation above.
+		StartsAwakeInterval: confirmPendingStart(session.Metadata["state"]),
+		Now:                 now,
 	})
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		if trace != nil {

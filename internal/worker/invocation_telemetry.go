@@ -7,12 +7,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/pricing"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/usage"
 )
 
 var (
@@ -33,7 +35,11 @@ func defaultPricingRegistry() *pricing.Registry {
 // recordInvocationTelemetry emits gc.agent.tokens.* and
 // gc.agent.invocation.cost_usd for usage-bearing transcript entries that
 // completed since the session's persisted invocation-usage cursor
-// (session.MetadataKeyInvocationUsageCursor). It is called at
+// (session.MetadataKeyInvocationUsageCursor), and — when the handle has a live
+// usage sink — emits one model usage.Fact per entry to that sink (the data
+// behind gc costs and external aggregators). Both consume the same extracted
+// per-invocation usage and the same cursor, so token metrics and model facts
+// stay aligned. It is called at
 // prompt-operation (message/nudge) finish: prompt submission returns at
 // keystroke-delivery time, so the transcript tail at that point holds
 // previously COMPLETED invocations — the turn this operation triggers is
@@ -138,6 +144,12 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if agentName == "" {
 		agentName = strings.TrimSpace(info.SessionName)
 	}
+	// Model usage facts flow to the configured usage sink (gc costs / external
+	// aggregators), independent of the metrics above and of operation-event
+	// recording: a sink-only handle (CLI factory path) still emits. Resolved once
+	// per loop because the gate is per-handle.
+	emitFacts := h.usageFactRecordingEnabled()
+	now := time.Now().UTC()
 	for _, u := range pending {
 		labels := telemetry.InvocationLabels{
 			AgentName: agentName,
@@ -147,13 +159,17 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 		telemetry.RecordInvocationTokens(ctx, labels,
 			int64(u.InputTokens), int64(u.OutputTokens),
 			int64(u.CacheReadTokens), int64(u.CacheCreationTokens))
-		if cost, ok := h.pricing.Estimate(providerFamily, u.Model, pricing.Usage{
+		cost, priced := h.pricing.Estimate(providerFamily, u.Model, pricing.Usage{
 			PromptTokens:        u.InputTokens,
 			CompletionTokens:    u.OutputTokens,
 			CacheReadTokens:     u.CacheReadTokens,
 			CacheCreationTokens: u.CacheCreationTokens,
-		}); ok {
+		})
+		if priced {
 			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
+		}
+		if emitFacts {
+			h.recordModelUsageFact(modelUsageFact(u, b, id, info.SessionName, providerFamily, cost, priced, now))
 		}
 	}
 	// Best-effort: a failed cursor write means the next prompt op may
@@ -162,6 +178,40 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if err := h.manager.PersistInvocationUsageCursor(id, usageIdentity(pending[len(pending)-1])); err != nil {
 		slog.Debug("persisting invocation usage cursor failed; next prompt op may re-record",
 			slog.String("session_id", id), slog.Any("error", err))
+	}
+}
+
+// modelUsageFact builds a model usage Fact from one transcript invocation. The
+// run id is resolved from the session bead through the shared
+// beadmeta.ResolveRunID — the same resolver the compute-fact emitter uses — so a
+// run's model and compute facts carry the same RunID and group together in
+// gc costs. The dedup identity is the invocation's provider message id (or the
+// transcript entry uuid when none), so the best-effort cursor races noted on
+// recordInvocationTelemetry collapse a re-recorded invocation to one fact at the
+// sink via IdempotencyKey. Unpriced is true exactly when the pricing registry
+// had no entry for the (family, model) pair; cost is then left zero and must be
+// read as "not measured", never as a free invocation.
+func modelUsageFact(u sessionlog.TailUsage, bead beads.Bead, sessionID, worker, providerFamily string, cost float64, priced bool, now time.Time) usage.Fact {
+	runID := beadmeta.ResolveRunID(bead.Metadata, bead.ID, sessionID)
+	reqID := usageIdentity(u)
+	if !priced {
+		cost = 0
+	}
+	return usage.Fact{
+		RunID:               runID,
+		Worker:              strings.TrimSpace(worker),
+		Kind:                usage.KindModel,
+		Model:               strings.TrimSpace(u.Model),
+		Provider:            strings.TrimSpace(providerFamily),
+		InputTokens:         u.InputTokens,
+		OutputTokens:        u.OutputTokens,
+		CacheReadTokens:     u.CacheReadTokens,
+		CacheCreationTokens: u.CacheCreationTokens,
+		CostUSDEstimate:     cost,
+		Unpriced:            !priced,
+		UpstreamReqID:       reqID,
+		At:                  now.UnixMilli(),
+		IdempotencyKey:      usage.ModelIdempotencyKey(runID, reqID),
 	}
 }
 

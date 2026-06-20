@@ -898,6 +898,30 @@ provider = "file"
 	}
 }
 
+func TestLoadWithIncludes_UsageSectionFromFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["infra.toml"]
+
+[workspace]
+name = "test"
+`)
+	// The root city does not configure [usage]; an imported fragment does. The
+	// composed config must honor the fragment's sink, not silently fall back to
+	// the default local sink (gastownhall/gascity#3513 review).
+	fs.Files["/city/infra.toml"] = []byte(`
+[usage]
+provider = "discard"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Usage.Provider != "discard" {
+		t.Errorf("Usage.Provider = %q, want %q (imported [usage] fragment must compose)", cfg.Usage.Provider, "discard")
+	}
+}
+
 func TestResolveConfigPath(t *testing.T) {
 	tests := []struct {
 		name     string

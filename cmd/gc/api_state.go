@@ -32,8 +32,8 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
+	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
-	"github.com/gastownhall/gascity/usage"
 )
 
 // controllerState implements api.State and api.StateMutator.
@@ -117,10 +117,6 @@ func newControllerState(
 		ctx = context.Background()
 	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
-	usageProvider := ""
-	if cfg != nil {
-		usageProvider = cfg.Usage.Provider
-	}
 	var beadEventStartSeq uint64
 	if ep != nil {
 		if seq, err := ep.LatestSeq(); err == nil {
@@ -132,7 +128,7 @@ func newControllerState(
 		sp:                sp,
 		cacheCtx:          ctx,
 		eventProv:         ep,
-		usageSink:         newUsageSinkByName(usageProvider, filepath.Join(cityPath, ".gc", "usage.jsonl")),
+		usageSink:         usageSinkForCity(cfg, cityPath),
 		editor:            configedit.NewEditor(fsys.OSFS{}, tomlPath),
 		cityName:          cityName,
 		cityPath:          cityPath,
@@ -583,6 +579,9 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// Build new stores outside the lock (may do file I/O / subprocess spawns).
 	stores := cs.buildStores(cfg)
 	storeSignature := storeMetadataSignature(cs.cityPath, cfg)
+	// Recompute the usage sink so a changed [usage].provider takes effect on
+	// reload instead of writing to the old sink until the controller restarts.
+	usageSink := usageSinkForCity(cfg, cs.cityPath)
 	// Reopen city-level store for session beads and mail.
 	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath)
 	if err != nil {
@@ -605,6 +604,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.mu.Lock()
 	cs.cfg = cfg
 	cs.sp = sp
+	cs.usageSink = usageSink
 	oldRigStores = cs.beadStores
 	cs.beadStores = stores
 	if cityStore != nil {
@@ -724,9 +724,13 @@ func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runt
 	cs.updateMu.Lock()
 	defer cs.updateMu.Unlock()
 
+	// Recompute the usage sink so a changed [usage].provider takes effect even on
+	// the store-reuse reload path.
+	usageSink := usageSinkForCity(cfg, cs.cityPath)
 	cs.mu.Lock()
 	cs.cfg = cfg
 	cs.sp = sp
+	cs.usageSink = usageSink
 	cs.mu.Unlock()
 }
 

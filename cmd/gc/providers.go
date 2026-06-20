@@ -33,7 +33,7 @@ import (
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
-	"github.com/gastownhall/gascity/usage"
+	"github.com/gastownhall/gascity/internal/usage"
 )
 
 type sessionProviderContext struct {
@@ -838,6 +838,27 @@ func newUsageSinkByName(v, usagePath string) usage.Sink {
 	default: // "" or "local"
 		return usage.NewLocalSink(usagePath)
 	}
+}
+
+// usageSinkForCity builds the usage-fact sink for a city from its configured
+// [usage] provider, anchoring the durable local JSONL sink at
+// <cityPath>/.gc/usage.jsonl. This is the single construction point shared by
+// the controller state and the CLI worker factory so a configured provider
+// reaches every worker path, not just the API server.
+//
+// A nil cfg (or empty provider) yields the default local sink. When cityPath is
+// empty there is no durable home for a file-backed sink, so a file-backed
+// provider falls back to usage.Discard; an exec: provider stays valid because
+// it carries its own command and needs no path.
+func usageSinkForCity(cfg *config.City, cityPath string) usage.Sink {
+	provider := ""
+	if cfg != nil {
+		provider = strings.TrimSpace(cfg.Usage.Provider)
+	}
+	if strings.TrimSpace(cityPath) == "" && !strings.HasPrefix(provider, "exec:") {
+		return usage.Discard
+	}
+	return newUsageSinkByName(provider, filepath.Join(cityPath, ".gc", "usage.jsonl"))
 }
 
 type eventsRotationSettings struct {

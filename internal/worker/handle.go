@@ -10,7 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/usage"
+	"github.com/gastownhall/gascity/internal/usage"
 )
 
 var (

@@ -421,7 +421,7 @@ type WorkerOperationEventPayload struct {
 	// RunID is the run-root identifier this operation belongs to, resolved
 	// per-operation from the work/session bead metadata chain (workflow_id ||
 	// molecule_id || gc.root_bead_id-or-self || bead id || session id for
-	// manual chat). Wired: YES — resolved at finish() via resolveRunID.
+	// manual chat). Wired: YES — resolved at finish() via beadmeta.ResolveRunID.
 	RunID string `json:"run_id,omitempty" doc:"Run-root identifier for rolling this operation up to a workflow/molecule/chat run (best-effort)."`
 	// Unpriced is a tri-state flag: absent = pricing not evaluated, true =
 	// tokens observed but no price resolved (CostUSDEstimate not authoritative),

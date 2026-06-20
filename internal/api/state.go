@@ -17,8 +17,8 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
-	"github.com/gastownhall/gascity/usage"
 )
 
 // MaintenanceProvider is the subset of supervisor.StoreMaintenanceLoop that

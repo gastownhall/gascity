@@ -7,10 +7,13 @@
 // insight (see the gc costs reader). A [Sink] may instead forward facts to an
 // external aggregator.
 //
-// This package is deliberately dependency-free (standard library only). It holds
+// This package is deliberately dependency-free (standard library only) and holds
 // no identity or pricing logic: cost is computed by the emitter and stored on
-// the fact as a plain estimate. Keeping it free of internal/ imports lets code
-// outside this module consume it.
+// the fact as a plain estimate. It lives under internal/ — like every other
+// gascity package it stays private to the gc binary until the API stabilizes
+// (see AGENTS.md "internal/ packages for now"). The stdlib-only constraint keeps
+// this low-level accounting substrate free of upward dependencies; it is not a
+// promise of an out-of-module public API.
 package usage
 
 import (

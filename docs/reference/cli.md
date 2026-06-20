@@ -1102,7 +1102,11 @@ gc convoy target <convoy-id> <branch> [flags]
 Aggregate recorded usage facts (model tokens and compute wall-seconds)
 by run for local cost insight.
 
-Reads .gc/usage.jsonl (the usage sink output) and groups facts by run id.
+Reads .gc/usage.jsonl (the local usage sink) and groups facts by run id. This
+reflects facts only under the default "local" usage provider; with an "exec:"
+or "discard" provider the facts are forwarded out of process or dropped, so
+gc costs shows nothing local.
+
 Cost is a list-price estimate for decision support, not an authoritative
 charge; invocations with no pricing are flagged "unpriced" and excluded from
 the cost total.

@@ -7,7 +7,7 @@ import (
 	"sort"
 	"text/tabwriter"
 
-	"github.com/gastownhall/gascity/usage"
+	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/spf13/cobra"
 )
 
@@ -18,7 +18,11 @@ func newCostsCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Aggregate recorded usage facts (model tokens and compute wall-seconds)
 by run for local cost insight.
 
-Reads .gc/usage.jsonl (the usage sink output) and groups facts by run id.
+Reads .gc/usage.jsonl (the local usage sink) and groups facts by run id. This
+reflects facts only under the default "local" usage provider; with an "exec:"
+or "discard" provider the facts are forwarded out of process or dropped, so
+gc costs shows nothing local.
+
 Cost is a list-price estimate for decision support, not an authoritative
 charge; invocations with no pricing are flagged "unpriced" and excluded from
 the cost total.`,
@@ -90,10 +94,15 @@ func doCosts(stdout, stderr io.Writer) int {
 		return 1
 	}
 	usagePath := filepath.Join(cityPath, ".gc", "usage.jsonl")
-	facts, err := usage.ReadFacts(usagePath)
+	facts, warnings, err := usage.ReadFacts(usagePath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc costs: reading %s: %v\n", usagePath, err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// Surface skipped malformed lines so a partially corrupt log never silently
+	// undercounts without a trace (the read itself stays non-fatal).
+	for _, w := range warnings {
+		fmt.Fprintf(stderr, "gc costs: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
 	rows := aggregateRunCosts(facts)
 

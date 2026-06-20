@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/usage"
+	"github.com/gastownhall/gascity/internal/usage"
 )
 
 // NewSessionHandle constructs a session-backed worker handle.

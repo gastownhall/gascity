@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/gastownhall/gascity/usage"
+	"github.com/gastownhall/gascity/internal/usage"
 )
 
 func TestAggregateRunCosts(t *testing.T) {

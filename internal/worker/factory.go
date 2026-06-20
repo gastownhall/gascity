@@ -10,7 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/usage"
+	"github.com/gastownhall/gascity/internal/usage"
 )
 
 // SessionRuntimeResolver resolves provider/runtime details for an existing
@@ -95,6 +95,15 @@ func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime
 // session manager.
 func (f *Factory) Catalog() (*SessionCatalog, error) {
 	return NewSessionCatalog(f.manager)
+}
+
+// UsageSink returns the usage-fact sink the factory threads into every handle it
+// constructs. Never nil: usage.Discard when usage is disabled or unset.
+func (f *Factory) UsageSink() usage.Sink {
+	if f.usageSink == nil {
+		return usage.Discard
+	}
+	return f.usageSink
 }
 
 // Session returns a worker-owned session handle backed by the factory's

@@ -18,8 +18,8 @@ import (
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
-	"github.com/gastownhall/gascity/usage"
 )
 
 // newPostRequest creates a POST httptest request with the X-GC-Request header

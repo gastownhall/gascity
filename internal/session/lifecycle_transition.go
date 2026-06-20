@@ -58,6 +58,18 @@ func pendingCreateStartedAt(now time.Time) string {
 	return now.UTC().Format(time.RFC3339)
 }
 
+// awakeIntervalStartedAt formats the immutable start-of-awake-interval marker.
+// Nanosecond precision lets two intervals that begin within the same wall-clock
+// second still receive distinct epochs: the compute usage fact keys both its
+// per-interval emit marker and its idempotency key on this value, so a coarser
+// timestamp would silently drop the second interval (gastownhall/gascity#3513).
+func awakeIntervalStartedAt(now time.Time) string {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return now.UTC().Format(time.RFC3339Nano)
+}
+
 // RequestExplicitWakePatch records durable wake intent without claiming a
 // concrete start. The reconciler consumes the request when it prepares the
 // runtime start.
@@ -199,8 +211,9 @@ func ConfirmStartedPatch(now time.Time) MetadataPatch {
 		// awake_started_at is the immutable start of this awake interval. Unlike
 		// last_woke_at (a wake-attempt lease cleared by many teardown paths) it
 		// is never cleared, so a compute usage fact can recover the interval
-		// start and key idempotency on it at teardown. Doubles as the awake epoch.
-		"awake_started_at":          now.UTC().Format(time.RFC3339),
+		// start and key idempotency on it at teardown. Every confirmed start
+		// stamps a fresh epoch so each awake interval bills exactly once.
+		"awake_started_at":          awakeIntervalStartedAt(now),
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
 		"sleep_reason":              "",
@@ -224,7 +237,14 @@ type CommitStartedPatchInput struct {
 	ConfirmState            bool
 	ClearSleepReason        bool
 	ClearPendingCreateClaim bool
-	Now                     time.Time
+	// StartsAwakeInterval marks a commit that begins a new awake interval (a
+	// first start or a wake from a dormant state), as opposed to a recovery
+	// re-confirmation of an already-running runtime. When true the patch stamps
+	// a fresh awake_started_at epoch so each awake interval emits exactly one
+	// compute usage fact; the controller wake path does not otherwise refresh it
+	// (gastownhall/gascity#3513).
+	StartsAwakeInterval bool
+	Now                 time.Time
 }
 
 // CommitStartedPatch records a successful runtime start atomically with the
@@ -259,6 +279,13 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	if input.ClearPendingCreateClaim {
 		patch["pending_create_claim"] = ""
 		patch["pending_create_started_at"] = ""
+	}
+	// A genuine (re)start opens a new awake interval. Stamp a fresh, immutable
+	// epoch so the compute usage fact for this interval is distinct from any
+	// prior interval on a reused session bead; a recovery re-confirmation of an
+	// already-running runtime leaves the in-flight interval's epoch untouched.
+	if input.StartsAwakeInterval {
+		patch["awake_started_at"] = awakeIntervalStartedAt(input.Now)
 	}
 	return patch
 }
