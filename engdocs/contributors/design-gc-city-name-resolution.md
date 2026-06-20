@@ -8,7 +8,7 @@
 > **Critical insight from adversarial review (do not skip):**
 > All three proposals share a fatal flaw the break-testers exposed: they frame name resolution as run-the-path-resolver-first then fall-back-to-registry-on-error. But every existing path resolver ends in findCity(cwd/token), which WALKS UP the directory tree (verified in city_discovery.go:19-49: from inside any city, findCity returns the ambient ancestor city with err=nil). So a bare name run from inside a city resolves to the AMBIENT city, the path resolver succeeds, the name fallback never fires, and stop/suspend/reload/restart silently mis-target; under --json this reports ok:true for the wrong city. The fix is to classify by arg SHAPE up front and ROUTE accordingly: a name-shaped token that is NOT an existing directory in cwd must skip the path resolver entirely and go straight to Registry.LookupCityByName. This is the only synthesis that resolves every blocking issue. I drop proposal 3's --as-name/--as-path escape-hatch flags (YAGNI; the single ambiguous case is handled deterministically with a stderr breadcrumb).
 
-**Chosen approach:** 
+**Chosen approach:**
 Hybrid: shape-classify-then-route (proposal 3 shape gate) plus per-command class awareness so register opts out of name fallback (proposal 2), MINUS the escape-hatch flags. The decisive correction over all three: a name-shaped token that does not name an existing *city* directory is routed directly to the registry and NEVER passed to the walk-up path resolver, eliminating the silent ambient-city mis-target. A single shared resolver plus Registry.LookupCityByName and IsValidCityName; each command injects its existing path resolver as a closure used only for the path-shaped and city-dir-exists branches.
 
 ---

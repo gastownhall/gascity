@@ -59,7 +59,7 @@ func TestResolveCityRefPathShapedSkipsRegistry(t *testing.T) {
 		called = true
 		return "/resolved/" + ref, nil
 	}
-	got, err := resolveCityRef("foo/bar", cityRefOpts{cmd: "gc test", allowNameFallback: true}, pathResolve)
+	got, err := resolveCityRef("foo/bar", cityRefOpts{allowNameFallback: true}, pathResolve)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestResolveCityRefNameNoLocalDirHitsRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := resolveCityRef("alpha", cityRefOpts{cmd: "gc test", allowNameFallback: true}, failingPathResolve(t))
+	got, err := resolveCityRef("alpha", cityRefOpts{allowNameFallback: true}, failingPathResolve(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestResolveCityRefNameNoMatchLoudError(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 
-	_, err := resolveCityRef("ghost", cityRefOpts{cmd: "gc test", allowNameFallback: true}, failingPathResolve(t))
+	_, err := resolveCityRef("ghost", cityRefOpts{allowNameFallback: true}, failingPathResolve(t))
 	if err == nil {
 		t.Fatal("expected a loud error for an unknown name with no local city")
 	}
@@ -111,7 +111,7 @@ func TestResolveCityRefLocalCityWins(t *testing.T) {
 
 	called := ""
 	pathResolve := func(ref string) (string, error) { called = ref; return local, nil }
-	got, err := resolveCityRef("mycity", cityRefOpts{cmd: "gc test", allowNameFallback: true}, pathResolve)
+	got, err := resolveCityRef("mycity", cityRefOpts{allowNameFallback: true}, pathResolve)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestResolveCityRefAmbiguousLoudError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := resolveCityRef("dup", cityRefOpts{cmd: "gc test", allowNameFallback: true}, failingPathResolve(t))
+	_, err := resolveCityRef("dup", cityRefOpts{allowNameFallback: true}, failingPathResolve(t))
 	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("expected ambiguity error, got %v", err)
 	}
@@ -153,7 +153,7 @@ func TestResolveCityRefLocalAndRegisteredSamePathNotAmbiguous(t *testing.T) {
 
 	called := false
 	pathResolve := func(string) (string, error) { called = true; return local, nil }
-	got, err := resolveCityRef("same", cityRefOpts{cmd: "gc test", allowNameFallback: true}, pathResolve)
+	got, err := resolveCityRef("same", cityRefOpts{allowNameFallback: true}, pathResolve)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestResolveCityRefRegisterNoNameFallback(t *testing.T) {
 
 	called := false
 	pathResolve := func(ref string) (string, error) { called = true; return "/p/" + ref, nil }
-	got, err := resolveCityRef("alpha", cityRefOpts{cmd: "gc register", allowNameFallback: false}, pathResolve)
+	got, err := resolveCityRef("alpha", cityRefOpts{allowNameFallback: false}, pathResolve)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestResolveCityRefFromInsideCityDoesNotWalkUp(t *testing.T) {
 	// walkUp simulates findCity: it returns the ambient city. If resolveCityRef
 	// ever feeds the bare name to it, the assertion below catches the mis-target.
 	walkUp := func(string) (string, error) { return ambient, nil }
-	got, err := resolveCityRef("other", cityRefOpts{cmd: "gc stop", allowNameFallback: true}, walkUp)
+	got, err := resolveCityRef("other", cityRefOpts{allowNameFallback: true}, walkUp)
 	if err != nil {
 		t.Fatal(err)
 	}

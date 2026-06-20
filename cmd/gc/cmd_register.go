@@ -124,12 +124,12 @@ func newUnregisterCmd(stdout, stderr io.Writer) *cobra.Command {
 The argument may be a path to a city directory or a registered city name (as
 shown by 'gc cities'); a name is resolved against the supervisor registry. An
 existing local city directory of the same name takes precedence over a
-registration; a local city plus a different registration is reported as
-ambiguous. If no argument is given, unregisters the current city (discovered
-from cwd). If the supervisor is running, it immediately stops managing the
-city. Unlike 'gc register' (which is idempotent), this errors when the resolved
-path is not a registered city, so it is not a silent no-op on an unknown
-target.`,
+registration; if a local city directory and a different registration both
+exist, the name is reported as ambiguous.
+If no argument is given, unregisters the current city (discovered from cwd).
+If the supervisor is running, it immediately stops managing the city. Unlike
+'gc register' (which is idempotent), this errors when the resolved path is not
+a registered city, so it is not a silent no-op on an unknown target.`,
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -151,7 +151,7 @@ func doUnregisterJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 	var cityPath string
 	var err error
 	if len(args) > 0 {
-		cityPath, err = resolveCityRef(args[0], cityRefOpts{cmd: "gc unregister", allowNameFallback: true}, func(ref string) (string, error) {
+		cityPath, err = resolveCityRef(args[0], cityRefOpts{allowNameFallback: true}, func(ref string) (string, error) {
 			abs, aerr := filepath.Abs(ref)
 			if aerr != nil {
 				return "", aerr

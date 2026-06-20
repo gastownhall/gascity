@@ -156,7 +156,7 @@ func resolveStopCityPath(args []string) (string, error) {
 	if len(args) == 0 {
 		return resolveCommandCity(nil)
 	}
-	return resolveCityRef(args[0], cityRefOpts{cmd: "gc stop", allowNameFallback: true}, stopCityPathFromArg)
+	return resolveCityRef(args[0], cityRefOpts{allowNameFallback: true}, stopCityPathFromArg)
 }
 
 // stopCityPathFromArg resolves a path-shaped stop argument (or a local city) to

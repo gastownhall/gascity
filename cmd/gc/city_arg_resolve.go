@@ -36,8 +36,6 @@ func classifyCityRef(ref string) cityRefKind {
 
 // cityRefOpts configures resolveCityRef.
 type cityRefOpts struct {
-	// cmd is the command label used in diagnostics, e.g. "gc unregister".
-	cmd string
 	// allowNameFallback enables resolving a bare registered city NAME. Commands
 	// that create a registration from a path (gc register) set this false, so a
 	// name-shaped argument is always treated as a path.
@@ -130,5 +128,5 @@ func cityRefNotFoundErr(name, localDir string) error {
 // directory path or a registered city name (parallel to the positional
 // argument). validateCityPath provides the path branch.
 func resolveCityFlagValue(city string) (string, error) {
-	return resolveCityRef(city, cityRefOpts{cmd: "gc", allowNameFallback: true}, validateCityPath)
+	return resolveCityRef(city, cityRefOpts{allowNameFallback: true}, validateCityPath)
 }

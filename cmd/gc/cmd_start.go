@@ -567,9 +567,9 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 func resolveStartDir(args []string) (string, error) {
 	switch {
 	case len(args) > 0:
-		return resolveCityRef(args[0], cityRefOpts{cmd: "gc start", allowNameFallback: true}, filepath.Abs)
+		return resolveCityRef(args[0], cityRefOpts{allowNameFallback: true}, filepath.Abs)
 	case cityFlag != "":
-		return resolveCityRef(cityFlag, cityRefOpts{cmd: "gc start", allowNameFallback: true}, filepath.Abs)
+		return resolveCityRef(cityFlag, cityRefOpts{allowNameFallback: true}, filepath.Abs)
 	default:
 		return os.Getwd()
 	}
