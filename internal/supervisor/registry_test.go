@@ -764,3 +764,80 @@ func TestPathHasPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestLookupCityByName(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRegistry(filepath.Join(dir, "cities.toml"))
+
+	cityA := filepath.Join(dir, "alpha")
+	cityB := filepath.Join(dir, "beta")
+	for _, p := range []string{cityA, cityB} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Register(cityA, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(cityB, "beta"); err != nil {
+		t.Fatal(err)
+	}
+
+	entry, ok := r.LookupCityByName("alpha")
+	if !ok {
+		t.Fatal("expected to find city by name 'alpha'")
+	}
+	testutil.AssertSamePath(t, entry.Path, cityA)
+	if entry.EffectiveName() != "alpha" {
+		t.Fatalf("entry name = %q, want alpha", entry.EffectiveName())
+	}
+
+	entry, ok = r.LookupCityByName("beta")
+	if !ok {
+		t.Fatal("expected to find city by name 'beta'")
+	}
+	testutil.AssertSamePath(t, entry.Path, cityB)
+
+	if _, ok := r.LookupCityByName("nonexistent"); ok {
+		t.Fatal("expected no match for nonexistent name")
+	}
+	// Match is exact and case-sensitive (mirrors Register dedup).
+	if _, ok := r.LookupCityByName("Alpha"); ok {
+		t.Fatal("expected case-sensitive lookup to miss 'Alpha'")
+	}
+}
+
+func TestLookupCityByNameEmptyRegistry(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRegistry(filepath.Join(dir, "cities.toml"))
+	if _, ok := r.LookupCityByName("anything"); ok {
+		t.Fatal("expected no match against an empty/missing registry")
+	}
+}
+
+func TestIsValidCityName(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"chris-city", true},
+		{"a.b", true},
+		{"a_b", true},
+		{"1city", true},
+		{"  chris-city  ", true}, // surrounding whitespace ignored
+		{"a/b", false},           // names cannot contain a separator -> it's a path
+		{"./x", false},
+		{"../x", false},
+		{"~/x", false},
+		{"/abs", false},
+		{"", false},
+		{"has space", false},
+		{"-leading-dash", false}, // must start alphanumeric
+		{".leading-dot", false},
+	}
+	for _, tt := range tests {
+		if got := IsValidCityName(tt.in); got != tt.want {
+			t.Errorf("IsValidCityName(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
