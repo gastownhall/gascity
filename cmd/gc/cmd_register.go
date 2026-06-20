@@ -153,7 +153,24 @@ func doUnregisterJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "gc unregister: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	entry, registered, _ := registeredCityEntry(cityPath)
+	entry, registered, lookupErr := registeredCityEntry(cityPath)
+	if lookupErr != nil {
+		fmt.Fprintf(stderr, "gc unregister: %v\n", lookupErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !registered {
+		// gc unregister takes a city directory path, not a name. The common
+		// footgun is passing the NAME shown by `gc cities`, or a wrong path:
+		// the target resolves to a path that was never registered. Fail loudly
+		// rather than exit 0 silently (non-JSON) or fabricate a success record
+		// (JSON), which would leave the city registered and mislead the caller.
+		rawArg := ""
+		if len(args) > 0 {
+			rawArg = args[0]
+		}
+		writeUnregisterNotRegistered(stderr, rawArg, cityPath)
+		return 1
+	}
 	unregisterStdout := stdout
 	var unregisterProgress bytes.Buffer
 	if jsonOut {
@@ -167,17 +184,25 @@ func doUnregisterJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 	if !jsonOut {
 		return code
 	}
-	cityName := ""
-	if registered {
-		cityName = entry.EffectiveName()
-	}
 	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc unregister", lifecycleActionJSON{
 		Command:  "unregister",
 		Action:   "unregister",
 		Message:  "City unregistered.",
-		CityName: cityName,
+		CityName: entry.EffectiveName(),
 		CityPath: cityPath,
 	})
+}
+
+// writeUnregisterNotRegistered emits an actionable diagnostic when the
+// unregister target does not resolve to a registered city. rawArg is the
+// original CLI argument (empty when the city was discovered from cwd) and
+// cityPath is the resolved absolute path that failed to match.
+func writeUnregisterNotRegistered(stderr io.Writer, rawArg, cityPath string) {
+	fmt.Fprintf(stderr, "gc unregister: no registered city at %s\n", cityPath) //nolint:errcheck // best-effort stderr
+	if trimmed := strings.TrimSpace(rawArg); trimmed != "" && trimmed != cityPath {
+		fmt.Fprintf(stderr, "gc unregister: %q was treated as a path — gc unregister takes a city directory path, not a name\n", trimmed) //nolint:errcheck // best-effort stderr
+	}
+	fmt.Fprintf(stderr, "gc unregister: run 'gc cities' to see registered cities, then 'gc unregister <path>'\n") //nolint:errcheck // best-effort stderr
 }
 
 func replayJSONModeProgress(stderr io.Writer, progress *bytes.Buffer) {

@@ -486,6 +486,136 @@ func TestDoUnregister(t *testing.T) {
 	}
 }
 
+// gc unregister takes a city directory path, not a name. When the argument
+// does not resolve to a registered city — the common footgun is passing the
+// NAME shown by `gc cities`, or a wrong path — unregister must fail loudly
+// instead of silently exiting 0 (non-JSON) or reporting a false success
+// (JSON). Regression for ga-m3ev9r.
+func TestDoUnregisterUnknownTargetFailsLoudly(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GC_HOME", dir)
+
+	cityPath := filepath.Join(dir, "my-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "my-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	// An absolute path that is not registered — the same not-registered code
+	// path a bare name like "my-city" hits once it is resolved relative to cwd.
+	ghostPath := filepath.Join(dir, "ghost-city")
+
+	var stdout, stderr bytes.Buffer
+	code := doUnregister([]string{ghostPath}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no registered city") {
+		t.Fatalf("stderr = %q, want a 'no registered city' diagnostic", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc cities") {
+		t.Fatalf("stderr = %q, want a pointer to 'gc cities'", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Unregistered city") {
+		t.Fatalf("stdout = %q, want no false success message", stdout.String())
+	}
+
+	// The real registration must be left untouched.
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("registry entries = %v, want the original city left registered", entries)
+	}
+}
+
+func TestDoUnregisterJSONUnknownTargetDoesNotReportFalseSuccess(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GC_HOME", dir)
+
+	cityPath := filepath.Join(dir, "my-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "my-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	ghostPath := filepath.Join(dir, "ghost-city")
+
+	var stdout, stderr bytes.Buffer
+	code := doUnregisterJSON([]string{ghostPath}, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	// doUnregisterJSON must not emit a success record; the central JSON
+	// failure envelope is written by run() when RunE returns errExit.
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty JSON stdout on failure", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "no registered city") {
+		t.Fatalf("stderr = %q, want a 'no registered city' diagnostic", stderr.String())
+	}
+
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("registry entries = %v, want the original city left registered", entries)
+	}
+}
+
+// End-to-end through run(): the --json failure envelope must report ok:false,
+// not the previous fabricated {"ok":true,"message":"City unregistered."}.
+func TestUnregisterUnknownTargetJSONEnvelopeReportsNotOK(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GC_HOME", dir)
+
+	cityPath := filepath.Join(dir, "my-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "my-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	ghostPath := filepath.Join(dir, "ghost-city")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"unregister", ghostPath, "--json"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City unregistered") {
+		t.Fatalf("stdout = %q, want no false success message", stdout.String())
+	}
+	var env struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatalf("stdout is not a JSON envelope: %v\n%s", err, stdout.String())
+	}
+	if env.OK {
+		t.Fatalf("stdout ok = true, want false: %s", stdout.String())
+	}
+}
+
 func TestDoCities(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GC_HOME", dir)
