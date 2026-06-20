@@ -4835,6 +4835,90 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 	}
 }
 
+// TestRunWorkflowServeFollowDrainsObservedWakeBeforeSurfacingWatcherErr is the
+// regression guard for the coalescing bug where a relevant event observed just
+// before a fatal watcher error was consumed without its promised re-scan. When
+// the wait reports a relevant wake AND a pending fatal stream error (the error
+// arrived inside the same coalescing window), the loop must perform the one
+// drain that wake scheduled before surfacing the error, so newly-ready work is
+// serviced in-process rather than stranded until an external dispatcher
+// restart re-scans.
+func TestRunWorkflowServeFollowDrainsObservedWakeBeforeSurfacingWatcherErr(t *testing.T) {
+	eventsDir := t.TempDir()
+	ep := newTestProvider(t, eventsDir)
+
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevProvider := workflowServeOpenEventsProvider
+	prevWait := workflowServeWaitForWake
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeOpenEventsProvider = prevProvider
+		workflowServeWaitForWake = prevWait
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+
+	watcherErr := errors.New("event stream closed")
+	waitCalls := 0
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+		waitCalls++
+		if waitCalls == 1 {
+			// A relevant event was observed, then a fatal watcher error arrived
+			// inside the coalescing window: report the wake AND the error.
+			return true, watcherErr
+		}
+		t.Fatalf("unexpected wait call %d: the loop must drain the observed wake and exit, not wait again", waitCalls)
+		return false, watcherErr
+	}
+
+	listCalls := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		listCalls++
+		switch listCalls {
+		case 1:
+			// Initial drain before the first wait: nothing ready yet.
+			return nil, nil
+		case 2:
+			// The re-scan the observed wake promised finds newly-ready work that
+			// must be processed before the loop surfaces the watcher error.
+			return []hookBead{{ID: "gc-woke", Metadata: map[string]string{"gc.kind": "scope-check"}}}, nil
+		case 3:
+			// Drain's internal exit poll after processing gc-woke.
+			return nil, nil
+		default:
+			t.Fatalf("unexpected list call %d: the loop must perform exactly one re-scan for the observed wake before exiting", listCalls)
+			return nil, nil
+		}
+	}
+	processedAfterWake := false
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+		if beadID == "gc-woke" {
+			processedAfterWake = true
+		}
+		return nil
+	}
+
+	agent := config.Agent{Name: "control-dispatcher"}
+	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, io.Discard)
+	if !errors.Is(err, watcherErr) {
+		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, watcherErr)
+	}
+	if waitCalls != 1 {
+		t.Fatalf("wait calls = %d, want 1 (loop must drain the observed wake then exit, not wait again)", waitCalls)
+	}
+	if !processedAfterWake {
+		t.Fatal("observed wake's newly-ready bead was not processed before the watcher error surfaced")
+	}
+}
+
 // TestRunWorkflowServeFollowSurvivesTransientWorkQueryTimeout is the
 // regression guard for the bug where a single transient work-query timeout
 // (the bead store briefly saturated) killed the entire control-dispatcher
@@ -5895,6 +5979,12 @@ func TestFollowSleepDurationBacksOffThenCaps(t *testing.T) {
 }
 
 func TestWaitForRelevantWorkflowWakeReturnsTrueOnRelevantEvent(t *testing.T) {
+	// Set the debounce explicitly so a lone relevant wake is fast and
+	// intentional rather than silently inheriting the package default.
+	prevDebounce := workflowServeWakeDebounce
+	workflowServeWakeDebounce = 5 * time.Millisecond
+	defer func() { workflowServeWakeDebounce = prevDebounce }()
+
 	eventCh := make(chan workflowWatchResult, 1)
 	eventCh <- workflowWatchResult{evt: events.Event{Type: events.BeadCreated, Subject: "gc-1"}}
 
@@ -6011,13 +6101,45 @@ func TestWaitForRelevantWorkflowWakeBurstSurfacesWatcherErr(t *testing.T) {
 	eventCh <- workflowWatchResult{err: os.ErrDeadlineExceeded}
 
 	// A fatal stream error that arrives during the coalescing window must still
-	// terminate the serve loop, not be swallowed by the debounce drain.
+	// terminate the serve loop, but the relevant event observed just before it
+	// must still report a wake so runWorkflowServeFollow performs the one
+	// promised re-scan for that wake before surfacing the error. Returning
+	// (false, err) here would strand the just-observed work until a dispatcher
+	// restart re-scans.
 	eventWake, err := waitForRelevantWorkflowWake(eventCh, time.Second)
 	if err == nil {
 		t.Fatal("wait returned nil err, want watcher err surfaced from coalescing window")
 	}
-	if eventWake {
-		t.Fatal("eventWake = true on error path, want false")
+	if !eventWake {
+		t.Fatal("eventWake = false, want true: the relevant event observed before the error must still wake the loop for its re-scan")
+	}
+}
+
+func TestWaitForRelevantWorkflowWakeDisabledDebounceDoesNotCoalesce(t *testing.T) {
+	prevDebounce := workflowServeWakeDebounce
+	workflowServeWakeDebounce = 0
+	defer func() { workflowServeWakeDebounce = prevDebounce }()
+
+	// With coalescing disabled (debounce <= 0) the escape hatch restores
+	// one-event-one-drain: a relevant event still wakes the loop, but the helper
+	// must not consume any trailing buffered events.
+	eventCh := make(chan workflowWatchResult, 2)
+	eventCh <- workflowWatchResult{evt: events.Event{Type: events.BeadCreated, Subject: "gc-1"}}
+	eventCh <- workflowWatchResult{evt: events.Event{Type: events.BeadCreated, Subject: "gc-2"}}
+
+	start := time.Now()
+	eventWake, err := waitForRelevantWorkflowWake(eventCh, time.Second)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !eventWake {
+		t.Fatal("eventWake = false, want true for a relevant event with coalescing disabled")
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("returned after %v, want near-immediate when debounce is disabled", elapsed)
+	}
+	if leftover := len(eventCh); leftover != 1 {
+		t.Fatalf("eventCh has %d buffered events, want 1 (disabled debounce must not drain the trailing event)", leftover)
 	}
 }
 
