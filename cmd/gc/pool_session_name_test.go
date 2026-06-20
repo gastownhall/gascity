@@ -1917,6 +1917,68 @@ func TestReleaseOrphanedPoolAssignments_ReleasesNamedIdentityForUnreachableStore
 	}
 }
 
+// A live, cross-store-eligible (city-scoped, Scope="city") NAMED session
+// legitimately owns rig-routed work whose bead lives in a rig store (vp-kvp).
+// assigneePreservesNamedSessionRoute must preserve that claim instead of letting
+// the bead be released — the named-route analogue of the pool-worker
+// openSessionOwnsWork cross-store fix (#3453). Without it a backup worker is
+// minted on the same in_progress bead. Contrast
+// ReleasesNamedIdentityForUnreachableStore, where the named agent is rig-scoped
+// and genuinely cannot reach the work, so release is still correct.
+func TestReleaseOrphanedPoolAssignments_PreservesCrossStoreEligibleNamedIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	work, err := rigStore.Create(beads.Bead{
+		Title:    "rig work owned by a city-scoped named session",
+		Assignee: "reviewer",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+	if err := rigStore.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set rig work status: %v", err)
+	}
+	work, err = rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload rig work bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Rigs:   []config.Rig{{Name: "repo", Path: t.TempDir()}},
+		Agents: []config.Agent{{Name: "worker", Scope: "city", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "reviewer",
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+		ResolvedWorkspaceName: "test-city",
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		cityStore,
+		cfg,
+		cityPath,
+		nil,
+		[]beads.Bead{work},
+		[]beads.Store{rigStore},
+		[]string{"repo"}, // rig store-ref != city named agent ref "" — the mismatch the fix must federate over
+		map[string]beads.Store{"repo": rigStore},
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none — a live city-scoped named session owns rig-routed work across stores (vp-kvp)", released)
+	}
+
+	got, err := rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get rig work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "reviewer" {
+		t.Fatalf("rig work = status %q assignee %q, want in_progress/reviewer (claim preserved)", got.Status, got.Assignee)
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_PreservesNamedIdentityForSameStore(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
