@@ -1693,6 +1693,82 @@ func TestReleaseOrphanedPoolAssignments_ReleasesRigWorkAssignedToUnreachableOpen
 	}
 }
 
+// A live, cross-store-eligible (city-scoped, Scope="city") open session
+// legitimately owns rig-routed work whose bead lives in a rig store — city
+// agents federate across every store (vp-kvp). The release path must recognize
+// that ownership and NOT reopen the bead. This is the exact inverse of
+// ReleasesRigWorkAssignedToUnreachableOpenSession, where the holder is
+// rig-scoped and genuinely cannot reach the work; here the holder can. Reopening
+// a live city holder's claim is the #3453 root cause: openSessionOwnsWork
+// returns false on a store-ref mismatch, demand reappears, and a backup worker
+// is minted on the same in_progress bead (duplicate token burn + double-write).
+func TestReleaseOrphanedPoolAssignments_KeepsCrossStoreEligibleHolderRigWork(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	session, err := cityStore.Create(beads.Bead{
+		Title:  "city worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name":         "worker-live",
+			"template":             "worker",
+			"agent_name":           "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create city session bead: %v", err)
+	}
+	work, err := rigStore.Create(beads.Bead{
+		Title:    "rig pool work owned by a live city session",
+		Assignee: "worker-live",
+		Metadata: map[string]string{"gc.routed_to": "repo/worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+	if err := rigStore.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set rig work status: %v", err)
+	}
+	work, err = rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload rig work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		cityStore,
+		&config.City{
+			Rigs: []config.Rig{{Name: "repo", Path: t.TempDir()}},
+			Agents: []config.Agent{
+				// The session's "worker" template resolves to this city-scoped
+				// agent (cross-store eligible). The rig agent below exists only so
+				// the work's routed "repo/worker" template resolves and the bead
+				// reaches the ownership gate instead of being skipped earlier.
+				{Name: "worker", Scope: "city", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+				{Name: "worker", Dir: "repo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			},
+		},
+		cityPath,
+		[]beads.Bead{session},
+		[]beads.Bead{work},
+		[]beads.Store{rigStore},
+		[]string{"repo"}, // work store-ref "repo" != city agent ref "" — the mismatch the fix must federate over
+		map[string]beads.Store{"repo": rigStore},
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none — a live city-scoped session owns rig-routed work across stores (vp-kvp)", released)
+	}
+
+	got, err := rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get rig work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-live" {
+		t.Fatalf("rig work = status %q assignee %q, want in_progress/worker-live (claim preserved)", got.Status, got.Assignee)
+	}
+}
+
 func TestStoreForPoolAssignment_UsesConfiguredHyphenatedIDPrefix(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()

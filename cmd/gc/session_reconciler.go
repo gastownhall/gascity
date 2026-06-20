@@ -2701,20 +2701,7 @@ func sessionHasAwakeAssignedWorkForReachableStore(
 }
 
 func assignedWorkStoreRefForSession(cityPath string, cfg *config.City, session beads.Bead) (string, bool) {
-	if cfg == nil {
-		return "", false
-	}
-	template := normalizedSessionTemplate(session, cfg)
-	if template == "" {
-		template = strings.TrimSpace(session.Metadata["template"])
-	}
-	if template == "" {
-		template = strings.TrimSpace(session.Metadata["common_name"])
-	}
-	if template == "" {
-		return "", false
-	}
-	agentCfg := findAgentByTemplate(cfg, template)
+	agentCfg := sessionAgentConfig(cfg, session)
 	if agentCfg == nil {
 		return "", false
 	}

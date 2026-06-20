@@ -243,6 +243,12 @@ func clearDetachedProbeMetadata(store beads.Store, id string) {
 
 const unresolvedOpenSessionStoreRef = "\x00unresolved"
 
+// crossStoreOpenSessionStoreRef marks an open session whose backing agent is
+// cross-store eligible (city-scoped). Such a session federates across every
+// store (vp-kvp), so openSessionOwnsWork matches it against any work store-ref.
+// The \x00 prefix cannot collide with a real rig name.
+const crossStoreOpenSessionStoreRef = "\x00crossstore"
+
 func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSessionBeads []beads.Bead, storeRefAware bool) map[string]map[string]struct{} {
 	index := make(map[string]map[string]struct{}, len(openSessionBeads)*5)
 	if !storeRefAware {
@@ -252,10 +258,7 @@ func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSession
 		if sb.Status == "closed" {
 			continue
 		}
-		storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, sb)
-		if !ok {
-			storeRef = unresolvedOpenSessionStoreRef
-		}
+		storeRef := openSessionReachableStoreRef(cityPath, cfg, sb)
 		for _, id := range sessionBeadAssigneeIdentities(sb) {
 			addOpenSessionStoreRef(index, id, storeRef)
 		}
@@ -286,6 +289,9 @@ func openSessionOwnsWork(legacyIdentifiers map[string]struct{}, scopedIdentifier
 		return false
 	}
 	if _, ok := refs[unresolvedOpenSessionStoreRef]; ok {
+		return true
+	}
+	if _, ok := refs[crossStoreOpenSessionStoreRef]; ok {
 		return true
 	}
 	_, ok := refs[workStoreRef]
