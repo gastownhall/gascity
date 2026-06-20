@@ -12,11 +12,10 @@
 // watch notifications), sendMessageIMessage (outbound pipeline), and the
 // iMessage conversation-id model. Routing policy stays in gc.
 
-import http from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { loadIMessageConnector } from './lib/openclaw.mjs'
-
-const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d)
+import { env, makeGcClient, startCallbackServer, makeAdapterRegistrar, makeShutdown } from './lib/gc-client.mjs'
+import { forwardWithRetry } from './lib/inbound.mjs'
 
 const CITY = process.env.GC_CITY
 if (!CITY) {
@@ -37,17 +36,8 @@ const ocConfig = {
   channels: { imessage: { enabled: true, cliPath: CLI, service: 'auto', region: 'US' } },
 }
 
-async function gcFetch(method, p, body) {
-  const res = await fetch(`${GC_BASE}/v0/city/${encodeURIComponent(CITY)}${p}`, {
-    method,
-    headers: { 'Content-Type': 'application/json', 'X-GC-Request': '1' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(15000), // a wedged gc must not wedge the bridge (esp. shutdown)
-  })
-  const text = await res.text()
-  if (!res.ok) throw new Error(`${method} ${p}: HTTP ${res.status}: ${text.slice(0, 300)}`)
-  return text ? JSON.parse(text) : null
-}
+// gc HTTP client (see lib/gc-client.mjs).
+const { gcFetch } = makeGcClient({ baseUrl: GC_BASE, city: CITY })
 
 const oc = await loadIMessageConnector()
 
@@ -77,27 +67,44 @@ log(`imsg probe ok via ${CLI}`)
 
 // 2. Persistent JSON-RPC client; watch notifications become gc inbound posts.
 //    Forwards are serialized through one promise chain so transcript order
-//    matches platform order, with a few retries so a gc restart doesn't drop
-//    a message the daemon has already moved past.
+//    matches platform order. Each forward runs through the shared
+//    forwardWithRetry policy (lib/inbound.mjs) — the same retry/drop classifier
+//    Telegram uses — so a permanently-rejected (non-429 4xx) message is dropped
+//    fast instead of stalling the chain. Unlike Telegram, the iMessage watch
+//    stream has NO redelivery cursor: once the daemon hands us a notification it
+//    will not resend it, so the bridge is the sole owner until gc accepts it. We
+//    therefore retry transient gc failures unboundedly while the process is live
+//    (maxAttempts: Infinity); the serialized chain holds later notifications
+//    behind a stuck forward instead of dropping them, preserving order. The only
+//    unavoidable loss is shutdown interrupting an in-flight forward — there is no
+//    source to redeliver from — so we count those and fail the shutdown loudly
+//    (non-zero exit) rather than claiming a clean stop.
 let shuttingDown = false
 let inboundChain = Promise.resolve()
+let undeliveredOnShutdown = 0
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const client = await oc.createIMessageRpcClient({
   cliPath: CLI,
   onNotification: (msg) => {
     if (msg?.method !== 'message') return
+    const params = msg.params
+    const m = params?.message
+    // forwardWithRetry logs update?.update_id; iMessage params carry none, so
+    // surface the message guid/id for debuggable drop logs while leaving the
+    // body onInbound reads (params.message) intact.
+    const update = m && typeof m === 'object' ? { ...params, update_id: m.guid ?? m.id } : params
     inboundChain = inboundChain.then(async () => {
-      for (let attempt = 1; ; attempt++) {
-        try {
-          await onInbound(msg.params)
-          return
-        } catch (err) {
-          if (attempt >= 5) {
-            log('inbound forward dropped after retries:', err.message)
-            return
-          }
-          await new Promise((r) => setTimeout(r, attempt * 2000))
-        }
-      }
+      const handled = await forwardWithRetry({
+        update,
+        deliver: onInbound,
+        maxAttempts: Infinity, // no watch-stream cursor: retry until gc accepts, never drop on a transient outage
+        isShuttingDown: () => shuttingDown,
+        sleep,
+        log,
+      })
+      // false here means shutdown interrupted the retry before gc accepted the
+      // message; with no source redelivery that notification is lost.
+      if (!handled) undeliveredOnShutdown += 1
     })
   },
 })
@@ -149,33 +156,15 @@ async function onInbound(params) {
     text,
     received_at: m.created_at ? new Date(m.created_at).toISOString() : new Date().toISOString(),
     ...(m.reply_to_id != null ? { reply_to_message_id: String(m.reply_to_id) } : {}),
-    ...(typeof m.guid === 'string' && m.guid !== '' ? { dedup_key: m.guid } : {}),
   }
   const result = await gcFetch('POST', '/extmsg/inbound', { message })
   log(`inbound ${conversationId}: ${JSON.stringify(text)} -> session ${result?.TargetSessionID || '(unbound)'}`)
 }
 
-// 3. HTTP callback server for gc -> bridge publishes.
-const server = http.createServer((req, res) => {
-  const chunks = []
-  req.on('data', (c) => chunks.push(c))
-  req.on('end', () => {
-    handleRequest(req, Buffer.concat(chunks).toString('utf8'))
-      .then(({ status, body }) => {
-        res.writeHead(status, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(body))
-      })
-      .catch((err) => {
-        res.writeHead(500, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: String(err?.message ?? err) }))
-      })
-  })
-})
-
+// 3. HTTP callback server for gc -> bridge publishes (started below, before
+//    registration, so gc never publishes before the bridge can receive).
+//    GET /healthz is handled by the shared callback server (lib/gc-client.mjs).
 async function handleRequest(req, rawBody) {
-  if (req.method === 'GET' && req.url === '/healthz') {
-    return { status: 200, body: { ok: true } }
-  }
   if (req.method === 'POST' && req.url === '/publish') {
     return { status: 200, body: await handlePublish(JSON.parse(rawBody)) }
   }
@@ -203,11 +192,15 @@ async function handlePublish(pub) {
       timeoutMs: 20000,
     })
     log(`publish -> ${target}: ${JSON.stringify(pub?.text ?? '')} (message_id=${result.messageId})`)
+    // Coerce openclaw's return values to strings at the edge, like
+    // provider_message_id elsewhere: gc's wirePublishReceipt decodes
+    // message_id and metadata as strings, so a future numeric openclaw return
+    // would otherwise flip a delivered message to a malformed (transient) receipt.
     return {
-      message_id: result.messageId,
+      message_id: String(result.messageId ?? ''),
       conversation: conv,
       delivered: true,
-      ...(result.guid ? { metadata: { guid: result.guid } } : {}),
+      ...(result.guid ? { metadata: { guid: String(result.guid) } } : {}),
     }
   } catch (err) {
     log(`publish -> ${target} FAILED: ${err?.message ?? err}`)
@@ -220,10 +213,7 @@ async function handlePublish(pub) {
   }
 }
 
-await new Promise((resolve, reject) => {
-  server.once('error', reject)
-  server.listen(PORT, '127.0.0.1', resolve)
-})
+const server = await startCallbackServer({ handleRequest, port: PORT })
 log(`callback server on http://127.0.0.1:${PORT}`)
 
 const subscribed = await client.request(
@@ -236,55 +226,51 @@ log('subscribed to imsg watch notifications')
 
 // 4. Register with gc last, so gc never publishes before we can send. The
 //    registry is in-memory on the gc side, so re-register on an interval to
-//    survive controller restarts.
-async function register() {
-  await gcFetch('POST', '/extmsg/adapters', {
-    provider: PROVIDER,
-    account_id: ACCOUNT,
-    name: 'openclaw-imessage-bridge',
-    callback_url: `http://127.0.0.1:${PORT}`,
-    // PascalCase is correct here: extmsg.AdapterCapabilities is intentionally
-    // untagged on the gc side (internal/extmsg/types.go) while the rest of
-    // this request body is snake_case.
-    capabilities: { SupportsChildConversations: false, SupportsAttachments: false, MaxMessageLength: 0 },
-  })
-}
-
-{
-  let attempts = 0
-  for (;;) {
-    try {
-      await register()
-      break
-    } catch (err) {
-      attempts += 1
-      if (attempts >= 60) throw err
-      if (attempts === 1) log(`waiting for gc at ${GC_BASE} (${err.message})`)
-      await new Promise((r) => setTimeout(r, 1000))
-    }
-  }
-}
+//    survive controller restarts. PascalCase capabilities are correct here:
+//    extmsg.AdapterCapabilities is intentionally untagged on the gc side
+//    (internal/extmsg/types.go) while the rest of this request body is snake_case.
+const registrar = makeAdapterRegistrar({
+  gcFetch,
+  baseUrl: GC_BASE,
+  provider: PROVIDER,
+  account: ACCOUNT,
+  name: 'openclaw-imessage-bridge',
+  callbackUrl: `http://127.0.0.1:${PORT}`,
+  capabilities: { SupportsChildConversations: false, SupportsAttachments: false, MaxMessageLength: 0 },
+  log,
+})
+await registrar.registerWithRetry()
 log(`registered adapter provider=${PROVIDER} account=${ACCOUNT} city=${CITY}`)
-const reregister = setInterval(() => register().catch((err) => log('re-register failed:', err.message)), 30000)
+const reregister = registrar.startReregister()
 
-async function shutdown() {
-  shuttingDown = true
-  log('shutting down')
-  clearInterval(reregister)
-  try {
-    await client.request('watch.unsubscribe', { subscription: subscriptionID }, { timeoutMs: 2000 })
-  } catch {
-    // daemon may already be gone
-  }
-  try {
-    await gcFetch('DELETE', '/extmsg/adapters', { provider: PROVIDER, account_id: ACCOUNT })
-  } catch {
-    // gc may already be gone
-  }
-  await client.stop().catch(() => {})
-  server.close()
-  process.exit(0)
-}
+const shutdown = makeShutdown({
+  log,
+  reregister,
+  unregister: registrar.unregister,
+  server,
+  teardown: async () => {
+    shuttingDown = true
+    // Let the in-flight inbound forward settle before we exit, mirroring the
+    // Telegram bridge's `await pollDone`. forwardWithRetry breaks its retry loop
+    // once shuttingDown is true, so this only waits out the current gcFetch
+    // (bounded by its 15s timeout), not a fresh round of retries.
+    await inboundChain.catch(() => {})
+    if (undeliveredOnShutdown > 0) {
+      console.error(
+        `[bridge] ${undeliveredOnShutdown} inbound message(s) were not delivered to gc before shutdown; ` +
+          'the iMessage watch stream has no redelivery cursor, so they are lost',
+      )
+    }
+    try {
+      await client.request('watch.unsubscribe', { subscription: subscriptionID }, { timeoutMs: 2000 })
+    } catch {
+      // daemon may already be gone
+    }
+    await client.stop().catch(() => {})
+  },
+  // Refuse a clean exit if an already-consumed notification was lost on shutdown.
+  exitCode: () => (undeliveredOnShutdown > 0 ? 1 : 0),
+})
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
 log('ready')

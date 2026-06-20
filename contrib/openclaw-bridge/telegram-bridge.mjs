@@ -15,10 +15,9 @@
 // layer gc replaces. Telegram's inbound protocol is small enough to own.
 // Routing policy stays in gc.
 
-import http from 'node:http'
 import { loadTelegramConnector } from './lib/openclaw.mjs'
-
-const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d)
+import { env, makeGcClient, startCallbackServer, makeAdapterRegistrar, makeShutdown } from './lib/gc-client.mjs'
+import { forwardWithRetry, drainBatch } from './lib/inbound.mjs'
 
 const CITY = process.env.GC_CITY
 if (!CITY) {
@@ -68,17 +67,9 @@ const ocConfig = {
   channels: { telegram: { enabled: true, botToken: TOKEN, apiRoot: API_ROOT } },
 }
 
-async function gcFetch(method, p, body) {
-  const res = await fetch(`${GC_BASE}/v0/city/${encodeURIComponent(CITY)}${p}`, {
-    method,
-    headers: { 'Content-Type': 'application/json', 'X-GC-Request': '1' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(15000), // a wedged gc must not wedge the bridge (esp. shutdown)
-  })
-  const text = await res.text()
-  if (!res.ok) throw new Error(`${method} ${p}: HTTP ${res.status}: ${text.slice(0, 300)}`)
-  return text ? JSON.parse(text) : null
-}
+// gc HTTP client (see lib/gc-client.mjs): gcFetch attaches err.status on non-2xx
+// so inbound forwarding can tell a transient gc outage from a permanent reject.
+const { gcFetch } = makeGcClient({ baseUrl: GC_BASE, city: CITY })
 
 const oc = await loadTelegramConnector()
 
@@ -90,30 +81,26 @@ if (!probe || probe.ok !== true) {
 }
 log(`telegram probe ok: @${probe.bot?.username ?? '?'} via ${API_ROOT}`)
 
-// 2. Inbound: getUpdates long-poll. Forwards are serialized through one
-//    promise chain so transcript order matches platform order, with a few
-//    retries so a gc restart doesn't drop an update the offset has already
-//    moved past.
+// 2. Inbound: getUpdates long-poll. Each update is forwarded to gc (with a few
+//    retries) BEFORE the poll offset advances past it. Telegram acknowledges
+//    updates server-side as soon as the next getUpdates sends a higher offset,
+//    so advancing before a successful forward is exactly what would let a gc
+//    outage silently drop an inbound message. Forwarding inline also keeps
+//    transcript order matching platform order; gc dedupes on
+//    (conversation, provider_message_id), so a redelivered update after a crash
+//    is harmless.
 let shuttingDown = false
-let inboundChain = Promise.resolve()
 let pollAbort = null
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-function enqueueInbound(update) {
-  inboundChain = inboundChain.then(async () => {
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await onInbound(update)
-        return
-      } catch (err) {
-        if (attempt >= 5) {
-          log('inbound forward dropped after retries:', err.message)
-          return
-        }
-        await new Promise((r) => setTimeout(r, attempt * 2000))
-      }
-    }
-  })
-}
+// Forward one update to gc before the poll offset advances past it. Transient
+// failures (gc outage, 5xx, 429, network/timeout) are retried and then left
+// un-acked for Telegram to redeliver; a permanent non-429 4xx is dropped past
+// the offset so one poison update cannot wedge the whole inbound stream.
+// Intentional skips (bot/unallowed sender/non-text) resolve without a POST and
+// advance the offset normally. (See lib/inbound.mjs for the durability model.)
+const forwardInbound = (update) =>
+  forwardWithRetry({ update, deliver: onInbound, isShuttingDown: () => shuttingDown, sleep, log })
 
 async function pollUpdates() {
   let offset = 0
@@ -131,10 +118,15 @@ async function pollUpdates() {
       const data = await res.json()
       if (data.ok !== true) throw new Error(`getUpdates: ${JSON.stringify(data).slice(0, 200)}`)
       failures = 0
-      for (const u of data.result ?? []) {
-        offset = Math.max(offset, u.update_id + 1)
-        enqueueInbound(u)
-      }
+      // Forward each update before advancing the offset. drainBatch stops at the
+      // first transient failure and holds the offset there, so Telegram
+      // redelivers from that update on the next poll instead of losing it.
+      offset = await drainBatch({
+        batch: data.result ?? [],
+        offset,
+        forward: forwardInbound,
+        isShuttingDown: () => shuttingDown,
+      })
     } catch (err) {
       if (shuttingDown) return
       failures += 1
@@ -158,6 +150,20 @@ const childConversationId = (chatId, topicId) => `${chatId}:topic:${topicId}`
 const parseChildConversationId = (conversationId) => {
   const m = /^(-?\d+):topic:(\d+)$/.exec(String(conversationId ?? ''))
   return m ? { chatId: m[1], topicId: Number(m[2]) } : null
+}
+
+// Map a createForumTopicTelegram failure to the status gc should see. Structural
+// rejections (parent is not a forum supergroup, etc.) come back from the Bot API
+// as a 4xx and are permanent — gc must not retry them. Only a positive transient
+// signal upgrades to 503: a Bot API 5xx, or a transport abort/timeout. Anything
+// else (including an error whose shape we cannot read) stays 400, so a permanent
+// structural rejection is never mislabeled retryable.
+const childConversationFailureStatus = (err) => {
+  const code = Number(err?.error_code ?? err?.status ?? err?.statusCode)
+  if (Number.isInteger(code) && code >= 500) return 503
+  const name = String(err?.name ?? '')
+  if (name === 'AbortError' || name === 'TimeoutError') return 503
+  return 400
 }
 
 async function onInbound(update) {
@@ -197,8 +203,10 @@ async function onInbound(update) {
   }
   const from = m.from ?? {}
   const message = {
-    // message_id is chat-scoped in Telegram; keep it raw so replies map back,
-    // and qualify the dedup key with the chat id for global uniqueness.
+    // message_id is chat-scoped in Telegram; keep it raw so replies map back. gc
+    // dedupes inbound on (conversation, provider_message_id), and the
+    // conversation_id is itself chat- (or chat:topic-) scoped, so the pair is
+    // globally unique without a separate dedup key.
     provider_message_id: String(m.message_id),
     conversation,
     actor: {
@@ -211,33 +219,15 @@ async function onInbound(update) {
     ...(m.reply_to_message?.message_id != null
       ? { reply_to_message_id: String(m.reply_to_message.message_id) }
       : {}),
-    dedup_key: `tg:${chat.id}:${m.message_id}`,
   }
   const result = await gcFetch('POST', '/extmsg/inbound', { message })
   log(`inbound ${conversation.conversation_id}: ${JSON.stringify(text)} -> session ${result?.TargetSessionID || '(unbound)'}`)
 }
 
-// 3. HTTP callback server for gc -> bridge publishes.
-const server = http.createServer((req, res) => {
-  const chunks = []
-  req.on('data', (c) => chunks.push(c))
-  req.on('end', () => {
-    handleRequest(req, Buffer.concat(chunks).toString('utf8'))
-      .then(({ status, body }) => {
-        res.writeHead(status, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(body))
-      })
-      .catch((err) => {
-        res.writeHead(500, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: String(err?.message ?? err) }))
-      })
-  })
-})
-
+// 3. HTTP callback server for gc -> bridge publishes (started below, before
+//    registration, so gc never publishes before the bridge can receive).
+//    GET /healthz is handled by the shared callback server (lib/gc-client.mjs).
 async function handleRequest(req, rawBody) {
-  if (req.method === 'GET' && req.url === '/healthz') {
-    return { status: 200, body: { ok: true } }
-  }
   if (req.method === 'POST' && req.url === '/publish') {
     return { status: 200, body: await handlePublish(JSON.parse(rawBody)) }
   }
@@ -280,8 +270,11 @@ async function handleChildConversation(body) {
       },
     }
   } catch (err) {
-    log(`child-conversation ${chatId} FAILED: ${err?.message ?? err}`)
-    return { status: 400, body: { error: redact(err?.message ?? err) } }
+    // A transient Bot API/transport failure must look retryable to gc, while a
+    // structural rejection (not a forum supergroup, etc.) stays a permanent 400.
+    const status = childConversationFailureStatus(err)
+    log(`child-conversation ${chatId} FAILED (HTTP ${status}): ${err?.message ?? err}`)
+    return { status, body: { error: redact(err?.message ?? err) } }
   }
 }
 
@@ -303,11 +296,15 @@ async function handlePublish(pub) {
       ...(Number.isInteger(replyTo) && replyTo > 0 ? { replyToMessageId: replyTo } : {}),
     })
     log(`publish -> ${target}${child ? `#${child.topicId}` : ''}: ${JSON.stringify(pub?.text ?? '')} (message_id=${result.messageId})`)
+    // Coerce openclaw's return values to strings at the edge, like
+    // provider_message_id elsewhere: gc's wirePublishReceipt decodes
+    // message_id and metadata as strings, so a future numeric openclaw return
+    // would otherwise flip a delivered message to a malformed (transient) receipt.
     return {
-      message_id: result.messageId,
+      message_id: String(result.messageId ?? ''),
       conversation: conv,
       delivered: true,
-      metadata: { chat_id: result.chatId },
+      metadata: { chat_id: String(result.chatId ?? '') },
     }
   } catch (err) {
     log(`publish -> ${target} FAILED: ${err?.message ?? err}`)
@@ -320,10 +317,7 @@ async function handlePublish(pub) {
   }
 }
 
-await new Promise((resolve, reject) => {
-  server.once('error', reject)
-  server.listen(PORT, '127.0.0.1', resolve)
-})
+const server = await startCallbackServer({ handleRequest, port: PORT })
 log(`callback server on http://127.0.0.1:${PORT}`)
 
 const pollDone = pollUpdates()
@@ -331,51 +325,34 @@ log('polling telegram getUpdates')
 
 // 4. Register with gc last, so gc never publishes before we can send. The
 //    registry is in-memory on the gc side, so re-register on an interval to
-//    survive controller restarts.
-async function register() {
-  await gcFetch('POST', '/extmsg/adapters', {
-    provider: PROVIDER,
-    account_id: ACCOUNT,
-    name: 'openclaw-telegram-bridge',
-    callback_url: `http://127.0.0.1:${PORT}`,
-    // PascalCase is correct here: extmsg.AdapterCapabilities is intentionally
-    // untagged on the gc side (internal/extmsg/types.go) while the rest of
-    // this request body is snake_case.
-    capabilities: { SupportsChildConversations: true, SupportsAttachments: false, MaxMessageLength: 0 },
-  })
-}
-
-{
-  let attempts = 0
-  for (;;) {
-    try {
-      await register()
-      break
-    } catch (err) {
-      attempts += 1
-      if (attempts >= 60) throw err
-      if (attempts === 1) log(`waiting for gc at ${GC_BASE} (${err.message})`)
-      await new Promise((r) => setTimeout(r, 1000))
-    }
-  }
-}
+//    survive controller restarts. PascalCase capabilities are correct here:
+//    extmsg.AdapterCapabilities is intentionally untagged on the gc side
+//    (internal/extmsg/types.go) while the rest of this request body is snake_case.
+const registrar = makeAdapterRegistrar({
+  gcFetch,
+  baseUrl: GC_BASE,
+  provider: PROVIDER,
+  account: ACCOUNT,
+  name: 'openclaw-telegram-bridge',
+  callbackUrl: `http://127.0.0.1:${PORT}`,
+  capabilities: { SupportsChildConversations: true, SupportsAttachments: false, MaxMessageLength: 0 },
+  log,
+})
+await registrar.registerWithRetry()
 log(`registered adapter provider=${PROVIDER} account=${ACCOUNT} city=${CITY}`)
-const reregister = setInterval(() => register().catch((err) => log('re-register failed:', err.message)), 30000)
+const reregister = registrar.startReregister()
 
-async function shutdown() {
-  shuttingDown = true
-  log('shutting down')
-  clearInterval(reregister)
-  pollAbort?.abort()
-  try {
-    await gcFetch('DELETE', '/extmsg/adapters', { provider: PROVIDER, account_id: ACCOUNT })
-  } catch {
-    // gc may already be gone
-  }
-  await pollDone.catch(() => {})
-  server.close()
-  process.exit(0)
-}
+const shutdown = makeShutdown({
+  log,
+  reregister,
+  unregister: registrar.unregister,
+  server,
+  teardown: async () => {
+    shuttingDown = true
+    pollAbort?.abort()
+    await pollDone.catch(() => {})
+  },
+})
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
 log('ready')

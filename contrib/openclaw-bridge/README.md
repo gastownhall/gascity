@@ -45,11 +45,16 @@ bridge imports and runs as-is:
 
 Ours is the thin glue (`bridge.mjs`, ~250 lines): map openclaw's inbound
 payload to gc's `ExternalInboundMessage`, map gc's `PublishRequest` to a
-connector send, serve the `/publish` callback, register the adapter. Routing
-policy (which session owns a conversation, fan-out, transcripts) stays
-entirely in gc — openclaw's own routing/pairing/agent-dispatch layer is
-deliberately *not* hosted, which is exactly the split gc's external-messaging
-fabric design intends (`engdocs/design/external-messaging-fabric.md`).
+connector send, serve the `/publish` callback, register the adapter. The
+gc-facing half of that glue — the city-scoped `gcFetch` (CSRF header, timeout),
+the callback server, and the register/re-register/shutdown lifecycle — is
+shared across both connectors in `lib/gc-client.mjs`, so each bridge owns only
+its provider-specific inbound/send mapping and the two cannot drift on
+controller-facing behavior. Routing policy (which session owns a conversation,
+fan-out, transcripts) stays entirely in gc — openclaw's own
+routing/pairing/agent-dispatch layer is deliberately *not* hosted, which is
+exactly the split gc's external-messaging fabric design intends
+(`engdocs/design/external-messaging-fabric.md`).
 
 ## Wire mapping (openclaw ⇄ gc)
 
@@ -136,6 +141,7 @@ bridge shape generalizes. It does — and Telegram is the **easier** import:
 ```bash
 cd contrib/openclaw-bridge
 ./demo-telegram.sh      # Linux end-to-end demo against a fake local Bot API
+npm test                # unit tests: inbound redelivery + gc client + entrypoint/loader smoke
 
 # real Telegram: token from @BotFather, nothing else changes
 GC_CITY=<city> TELEGRAM_BOT_TOKEN=<token> node telegram-bridge.mjs
@@ -210,6 +216,15 @@ non-forum chats are refused with a clean 400. The fake Bot API implements
 `createForumTopic` + thread-aware `sendMessage` with real-API error shapes,
 and `demo-telegram.sh` exercises a per-workstream thread end to end.
 
+> **Forward-looking capability.** The bridge advertises
+> `SupportsChildConversations: true` and serves `/child-conversation` through
+> gc's `HTTPAdapter` transport seam, but gc has no API/service route that
+> *consumes* that capability yet: no gc runtime code reads
+> `SupportsChildConversations` or calls `EnsureChildConversation` outside
+> tests. Today the endpoint is reachable through the `HTTPAdapter` transport
+> and directly (as the demo does); the capability flag is wiring for a future
+> gc-side child-conversation router, not a switch gc reads now.
+
 ### Telegram findings
 
 6. **Telegram needed zero loader hacks.** Everything the bridge uses is on
@@ -222,8 +237,40 @@ and `demo-telegram.sh` exercises a per-workstream thread end to end.
    polling is fused into `monitorTelegramProvider`). Where the platform
    protocol is simple (Telegram), owning inbound in the bridge is cheaper
    than asking upstream for an export. The PoC simplifications are shared
-   with iMessage: publish failures all report `transient`, `/publish` has no
-   auth, and non-text media is skipped (no gc representation — finding 4).
+   with iMessage: publish failures all report `transient`, every callback
+   endpoint (`/publish` and the state-changing `/child-conversation`) is
+   unauthenticated, and non-text media is skipped (no gc representation —
+   finding 4). Both endpoints bind `127.0.0.1`, so the gap is local-only, but
+   close all of them — not just `/publish` — before pointing the bridge at a
+   real account.
+8. **Shared retry/drop policy; durability differs per connector.** Both
+   connectors forward to gc through the same `forwardWithRetry` helper
+   (`lib/inbound.mjs`), so they classify failures identically: a transient gc
+   problem (5xx, 429, network/timeout) is retried, while a *permanent* non-429
+   4xx — a "poison" message gc can never accept — is logged and dropped instead
+   of retried forever. gc encodes that split in its status codes: a normalized-
+   inbound *storage* fault (binding/route/transcript) returns 5xx so it
+   redelivers, and only a schema-invalid body (422) or malformed/unroutable
+   conversation (400) returns 4xx. gc dedupes inbound on
+   `(conversation, provider_message_id)`, so a redelivered message after a retry
+   or crash is harmless — each connector already sends a per-conversation-unique
+   `provider_message_id` (the iMessage `guid`, the Telegram `message_id`). What
+   differs is the redelivery *source*. Telegram is at-least-once via its poll
+   offset: the bridge forwards each `getUpdates` result *before* advancing the
+   offset, so a held update is redelivered on the next poll. iMessage's watch
+   stream has no such cursor, so the bridge is the sole owner of a notification
+   until gc accepts it: it retries transient gc failures *unboundedly while the
+   process is live* (`maxAttempts: Infinity`), serialized so a stuck forward
+   holds — never drops — the notifications behind it. The only unavoidable gap is
+   a hard crash, or a shutdown that interrupts an in-flight forward; with no
+   source to redeliver from, the bridge logs the loss and exits non-zero rather
+   than claiming a clean stop (a durable `chat.db` ROWID cursor would be the
+   cross-restart parity path). The policy is isolated in `lib/inbound.mjs` and
+   covered by `npm test` (`test/inbound.test.mjs`) — transient-failure-then-
+   redelivery, poison-update-drop, and the iMessage unbounded-retry cases — which
+   runs in CI via the `openclaw-bridge` job (and `make test-openclaw-bridge`).
+   That job also `node --check`s both entrypoints and smoke-loads the openclaw
+   connectors (`test/entrypoints.test.mjs`, `test/openclaw-loader.test.mjs`).
 
 A Slack/Discord bridge would follow the same shape; their plugins are
 bigger but the bridge-facing surface (send adapter + inbound normalization +

@@ -191,7 +191,7 @@ step "OUTBOUND: the session replies through gc"
 REPLY="**assistant:** Build is green — all tests passing."
 OUTBOUND_BODY="$(python3 -c 'import json,sys; print(json.dumps({"session_id": sys.argv[1], "conversation": json.loads(sys.argv[2]), "text": sys.argv[3]}))' "$SID" "$CONV" "$REPLY")"
 RECEIPT="$(curl -fsX POST "$BASE/extmsg/outbound" -H 'X-GC-Request: 1' -H 'Content-Type: application/json' -d "$OUTBOUND_BODY")"
-printf '%s' "$RECEIPT" | python3 -c 'import json,sys; r=json.load(sys.stdin)["Receipt"]; print("receipt: delivered=%s message_id=%s" % (r["Delivered"], r["MessageID"]))'
+printf '%s' "$RECEIPT" | python3 -c 'import json,sys; r=json.load(sys.stdin)["Receipt"]; assert r["Delivered"] and r["MessageID"], "publish receipt not delivered: %r" % (r,); print("receipt: delivered=%s message_id=%s" % (r["Delivered"], r["MessageID"]))'
 wait_for 10 "fake Bot API delivery" grep -q "Build is green" "$FAKE_TG_DIR/outbox.jsonl"
 bold "delivered to Telegram (note: markdown converted to Telegram HTML by openclaw's send pipeline):"
 tail -1 "$FAKE_TG_DIR/outbox.jsonl"

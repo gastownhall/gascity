@@ -66,6 +66,7 @@ jobs:
       worker_phase2: ${{ steps.filter.outputs.worker_phase2 == 'true' || steps.filter.outputs.shared == 'true' }}
       cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process == 'true' || steps.filter.outputs.shared == 'true' }}
       integration: ${{ steps.filter.outputs.integration == 'true' || steps.filter.outputs.shared == 'true' }}
+      openclaw_bridge: ${{ steps.filter.outputs.openclaw_bridge }}
       # Raw cross-cutting signal and per-run coverage classification (metric).
       shared: ${{ steps.filter.outputs.shared }}
       suite_mode: ${{ steps.coverage.outputs.suite_mode }}
@@ -136,6 +137,9 @@ jobs:
               - 'scripts/test-go-test-shard'
               - 'scripts/go-test-observable'
               - 'examples/gastown/**'
+            openclaw_bridge:
+              - 'contrib/openclaw-bridge/**'
+              - '.github/workflows/**'
             # Cross-cutting core paths. A change here is folded into every
             # gated output above, forcing a full union run. Beads is the
             # universal persistence substrate, events the universal observation
@@ -1048,6 +1052,27 @@ jobs:
         run: npm run build --silent
         working-directory: cmd/gc/dashboard/web
 
+  # openclaw-bridge Node test suite. The bridge ships its own npm tests
+  # (inbound at-least-once redelivery + gc client wire shapes); without this
+  # gate, regressions under contrib/openclaw-bridge/** could merge because the
+  # only other npm job runs in cmd/gc/dashboard/web. Path-gated, so non-bridge
+  # PRs skip it (and ci-required allows the skip).
+  openclaw-bridge:
+    name: openclaw-bridge Node tests
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.openclaw_bridge == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Install and test
+        run: npm ci --no-audit --no-fund && npm test
+        working-directory: contrib/openclaw-bridge
+
   # Runs when mail-related source paths change.
   mcp-mail:
     name: MCP mail conformance
@@ -1209,6 +1234,7 @@ jobs:
       - pack-gate
       - docker-session
       - k8s-session
+      - openclaw-bridge
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -1227,6 +1253,7 @@ jobs:
               "pack-gate",
               "docker-session",
               "k8s-session",
+              "openclaw-bridge",
           }
           failed = {}
           for job, meta in sorted(needs.items()):
