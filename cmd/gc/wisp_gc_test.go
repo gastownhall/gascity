@@ -806,6 +806,45 @@ func TestWispGC_ReapHonorsBatchCap(t *testing.T) {
 	}
 }
 
+// TestWispGC_ReapBatchCapBoundsAttemptsNotJustSuccesses is the post-merge
+// regression for the finding that the orphan reaper's batch cap advanced only on
+// SUCCESSFUL deletes: a failing delete backend could attempt every eligible
+// orphan in a single tick even though the cap is the safety bound for sweep
+// work. With the cap at 1 and EVERY eligible orphan's delete failing, a sweep
+// must stop after a single delete ATTEMPT — leaving the rest for a later tick —
+// rather than walking the whole backlog because no success ever advanced the
+// counter. Both candidates fail so the assertion is independent of which one the
+// store lists first.
+func TestWispGC_ReapBatchCapBoundsAttemptsNotJustSuccesses(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	withReapOrphanBatchCap(t, 1)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCOrphanWisp("orphan-fail-1", now.Add(-2*time.Hour), "ghost-root"),
+		makeGCOrphanWisp("orphan-fail-2", now.Add(-2*time.Hour), "ghost-root"),
+	})
+	store.deleteErrors["orphan-fail-1"] = fmt.Errorf("delete failed")
+	store.deleteErrors["orphan-fail-2"] = fmt.Errorf("delete failed")
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err == nil {
+		t.Fatal("expected reap delete error to be surfaced")
+	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err = %v, want delete failure to be included", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 (every delete failed)", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deletedIDs = %v, want none (every delete failed)", store.deletedIDs)
+	}
+	if len(store.deleteAttempts) != 1 {
+		t.Fatalf("delete attempts = %v (n=%d), want exactly 1; the batch cap must bound delete ATTEMPTS, not just successful reaps", store.deleteAttempts, len(store.deleteAttempts))
+	}
+}
+
 func TestWispGC_ReapSkipsRowsWithoutRootPointer(t *testing.T) {
 	withReapOrphansEnforced(t, true)
 	now := time.Now()
@@ -1124,6 +1163,47 @@ func TestWispGC_CollectsClosedGraphWorkflowRoot(t *testing.T) {
 	}
 }
 
+// TestWispGC_ClosurePurgeHonorsBatchCap is the post-merge regression for the
+// finding that the closed-root closure purge had no per-tick bound. The selector
+// expansion (adding graph.v2/workflow roots) made a never-before-collected class
+// of closed roots eligible, so the first GC tick after deploy could delete the
+// whole accumulated backlog's ownership closures in one uncapped pass. With the
+// cap shrunk to 1 a single sweep purges at most one root closure and the rest
+// drain on later ticks; a second sweep collects the next root, proving the
+// backlog clears across ticks rather than being dropped.
+func TestWispGC_ClosurePurgeHonorsBatchCap(t *testing.T) {
+	withClosurePurgeBatchCap(t, 1)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-a", now.Add(-2*time.Hour), "closed", "molecule"),
+		makeGCBead("mol-b", now.Add(-2*time.Hour), "closed", "molecule"),
+		makeGCBead("mol-c", now.Add(-2*time.Hour), "closed", "molecule"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 (closure purge batch cap bounds roots per tick)", purged)
+	}
+	if len(store.deletedIDs) != 1 {
+		t.Fatalf("deleted = %v, want exactly 1 root closure per capped sweep", store.deletedIDs)
+	}
+
+	purged2, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC second sweep: %v", err)
+	}
+	if purged2 != 1 {
+		t.Fatalf("second sweep purged = %d, want 1 (backlog drains across ticks)", purged2)
+	}
+	if len(store.deletedIDs) != 2 {
+		t.Fatalf("after two sweeps deleted = %v, want 2 distinct root closures", store.deletedIDs)
+	}
+}
+
 func TestWispGC_LeavesOpenRootWithLiveDescendant(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
@@ -1321,6 +1401,10 @@ type gcTestStore struct {
 	deleteErrors map[string]error
 	getErrors    map[string]error
 	deletedIDs   []string
+	// deleteAttempts records every Delete call, success or failure, so tests can
+	// assert that a batch cap bounds delete ATTEMPTS and not merely successful
+	// deletes (a failed delete leaves no trace in deletedIDs).
+	deleteAttempts []string
 }
 
 func newGCStore(existing []beads.Bead) *gcTestStore {
@@ -1347,6 +1431,7 @@ func (s *gcTestStore) Get(id string) (beads.Bead, error) {
 }
 
 func (s *gcTestStore) Delete(id string) error {
+	s.deleteAttempts = append(s.deleteAttempts, id)
 	if err := s.deleteErrors[id]; err != nil {
 		return err
 	}
@@ -1427,6 +1512,15 @@ func withReapOrphanBatchCap(t *testing.T, batchCap int) {
 	prev := wispGCReapOrphanBatchCap
 	wispGCReapOrphanBatchCap = batchCap
 	t.Cleanup(func() { wispGCReapOrphanBatchCap = prev })
+}
+
+// withClosurePurgeBatchCap overrides the per-sweep closed-root closure purge cap
+// for the duration of a test, restoring the prior value on cleanup.
+func withClosurePurgeBatchCap(t *testing.T, batchCap int) {
+	t.Helper()
+	prev := wispGCClosurePurgeBatchCap
+	wispGCClosurePurgeBatchCap = batchCap
+	t.Cleanup(func() { wispGCClosurePurgeBatchCap = prev })
 }
 
 func captureWispGCLog(t *testing.T, fn func()) string {

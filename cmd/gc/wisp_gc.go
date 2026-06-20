@@ -61,6 +61,14 @@ var closeAbandonedEnforced = func() bool {
 // unbounded amount of deletion work. Package var so tests can shrink it.
 var wispGCReapOrphanBatchCap = 500
 
+// wispGCClosurePurgeBatchCap bounds how many closed-root ownership closures a
+// single sweep will purge. Like wispGCReapOrphanBatchCap it caps DELETE
+// ATTEMPTS per tick — counting failures, not just successful purges — so the
+// first-deploy backlog of newly-collectible closed graph.v2/workflow roots, and
+// a failing delete backend, drain across successive ticks instead of one
+// unbounded pass. Package var so tests can shrink it.
+var wispGCClosurePurgeBatchCap = 500
+
 // reapOrphansEnforced reports whether orphaned-closed-wisp reaping should
 // actually delete rows (true) or run dry (false). It is a package var so tests
 // can flip it without touching the process environment. By default it reads
@@ -167,7 +175,7 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 		}
 
 		cutoff := now.Add(-m.ttl)
-		closurePurged, closureDeleteErr := purgeExpiredBeadClosures(store, entries, cutoff)
+		closurePurged, closureDeleteErr := purgeExpiredBeadClosures(store, entries, cutoff, wispGCClosurePurgeBatchCap)
 		purged += closurePurged
 		deleteErr = errors.Join(deleteErr, closureDeleteErr)
 
@@ -307,13 +315,16 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	var collectErr error
 
 	reaped := 0
+	attempted := 0
 	var deleteErr error
 	for _, c := range candidates {
-		// The batch cap bounds DELETION work per sweep. In dry-run keep counting
-		// past the cap so the logged estimate reflects the true eligible backlog
-		// an operator needs before enabling enforcement, not just the cap-sized
-		// prefix the enforced sweep would reap this tick.
-		if enforce && batchCap > 0 && reaped >= batchCap {
+		// The batch cap bounds DELETION ATTEMPTS per sweep — counting failed
+		// deletes, not just successful reaps — so a failing delete backend can't
+		// attempt the whole backlog in one tick. In dry-run attempted stays 0 and
+		// reaped keeps counting past the cap so the logged estimate reflects the
+		// true eligible backlog an operator needs before enabling enforcement, not
+		// just the cap-sized prefix the enforced sweep would reap this tick.
+		if enforce && batchCap > 0 && attempted >= batchCap {
 			break
 		}
 
@@ -355,6 +366,7 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			continue
 		}
 
+		attempted++
 		if err := deleteWorkflowBead(store, c.ID); err != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("reaping orphaned closed wisp %q: %w", c.ID, err))
 			continue
@@ -538,21 +550,40 @@ func readMessageWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 	return entries, nil
 }
 
-func purgeExpiredBeadClosures(store beads.Store, entries []beads.Bead, cutoff time.Time) (int, error) {
-	return purgeExpiredBeads(store, entries, cutoff, deleteExpiredBeadClosure)
+// purgeExpiredBeadClosures purges aged closed roots, deleting each root's full
+// ownership closure. batchCap bounds how many root closures one sweep attempts
+// (see wispGCClosurePurgeBatchCap) so a first-deploy backlog of newly-collectible
+// roots drains across ticks instead of in one unbounded pass.
+func purgeExpiredBeadClosures(store beads.Store, entries []beads.Bead, cutoff time.Time, batchCap int) (int, error) {
+	return purgeExpiredBeads(store, entries, cutoff, batchCap, deleteExpiredBeadClosure)
 }
 
+// purgeExpiredBeadRoots purges aged single-row roots (the read-message mail
+// retention sweep). It is intentionally unbounded (batchCap=0): it predates the
+// wisp-GC reaper caps and its candidate set is not the first-deploy backlog the
+// closure-purge cap guards against.
 func purgeExpiredBeadRoots(store beads.Store, entries []beads.Bead, cutoff time.Time) (int, error) {
-	return purgeExpiredBeads(store, entries, cutoff, deleteWorkflowBead)
+	return purgeExpiredBeads(store, entries, cutoff, 0, deleteWorkflowBead)
 }
 
-func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time, deleteFn func(beads.Store, string) error) (int, error) {
+// purgeExpiredBeads deletes each entry older than cutoff via deleteFn and
+// returns the count successfully purged. When batchCap > 0 it bounds the number
+// of DELETE ATTEMPTS per call — counting failures, not just successes — so a
+// large backlog or a failing delete backend cannot make one sweep attempt an
+// unbounded amount of deletion work; the remainder drains on later ticks.
+// batchCap <= 0 disables the bound. Entries skipped for age never consume the cap.
+func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time, batchCap int, deleteFn func(beads.Store, string) error) (int, error) {
 	purged := 0
+	attempted := 0
 	var deleteErr error
 	for _, entry := range entries {
+		if batchCap > 0 && attempted >= batchCap {
+			break
+		}
 		if entry.CreatedAt.IsZero() || !entry.CreatedAt.Before(cutoff) {
 			continue
 		}
+		attempted++
 		if err := deleteFn(store, entry.ID); err != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting expired bead %q: %w", entry.ID, err))
 			continue
