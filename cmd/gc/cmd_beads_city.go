@@ -43,9 +43,9 @@ city to an external Dolt endpoint and rewrite inherited rig mirrors.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc beads city: missing subcommand (use-managed, use-external)") //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: missing subcommand (use-managed, use-external)\n", cmdName("beads city")) //nolint:errcheck
 			} else {
-				fmt.Fprintf(stderr, "gc beads city: unknown subcommand %q\n", args[0]) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: unknown subcommand %q\n", cmdName("beads city"), args[0]) //nolint:errcheck
 			}
 			return errExit
 		},
@@ -99,7 +99,7 @@ func newBeadsCityUseExternalCmd(stdout, stderr io.Writer) *cobra.Command {
 func cmdBeadsCityUseManaged(opts cityEndpointOptions, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc beads city use-managed: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "beads city use-managed", err)
 		return 1
 	}
 	return doBeadsCityEndpoint(fsys.OSFS{}, cityPath, opts, stdout, stderr)
@@ -108,7 +108,7 @@ func cmdBeadsCityUseManaged(opts cityEndpointOptions, stdout, stderr io.Writer) 
 func cmdBeadsCityUseExternal(opts cityEndpointOptions, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc beads city use-external: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "beads city use-external", err)
 		return 1
 	}
 	return doBeadsCityEndpoint(fsys.OSFS{}, cityPath, opts, stdout, stderr)
@@ -247,9 +247,9 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 
 func cityEndpointCommandName(opts cityEndpointOptions) string {
 	if opts.External {
-		return "gc beads city use-external"
+		return cmdName("beads city use-external")
 	}
-	return "gc beads city use-managed"
+	return cmdName("beads city use-managed")
 }
 
 func validateExplicitExternalHost(host string) error {
@@ -534,7 +534,7 @@ func cityEndpointFollowupCommand(state contract.ConfigState) string {
 	if state.EndpointOrigin != contract.EndpointOriginCityCanonical || state.EndpointStatus != contract.EndpointStatusUnverified {
 		return ""
 	}
-	parts := []string{"gc beads city use-external", "--host", state.DoltHost, "--port", state.DoltPort}
+	parts := []string{cmdName("beads city use-external"), "--host", state.DoltHost, "--port", state.DoltPort}
 	if user := strings.TrimSpace(state.DoltUser); user != "" {
 		parts = append(parts, "--user", user)
 	}

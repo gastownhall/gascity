@@ -20,7 +20,7 @@ func newSkillCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd = &cobra.Command{
 		Use:   "skill",
 		Short: "List visible skills",
-		Long: `List skills visible to the current city.
+		Long: fmt.Sprintf(`List skills visible to the current city.
 
 Output includes:
   - City pack skills (skills/<name>/SKILL.md under the city root)
@@ -32,14 +32,14 @@ The listing is a diagnostic view of what's *available*. It does not
 collapse precedence, filter to agents whose provider has a vendor
 sink, or predict exactly which entries the materializer will pick on
 name collision. For the materialized set, inspect the
-<scope-root>/.<vendor>/skills/ sink after "gc start" or run
-"gc doctor" to surface collisions.`,
+<scope-root>/.<vendor>/skills/ sink after "%s start" or run
+"%s doctor" to surface collisions.`, prog(), prog()),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			fmt.Fprintf(stderr, "gc skill: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: unknown subcommand %q\n", cmdName("skill"), args[0]) //nolint:errcheck // best-effort stderr
 			return errExit
 		},
 	}
@@ -58,17 +58,17 @@ func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if strings.TrimSpace(agentName) != "" && strings.TrimSpace(sessionID) != "" {
-				fmt.Fprintln(stderr, "gc skill list: --agent and --session are mutually exclusive") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --agent and --session are mutually exclusive\n", cmdName("skill list")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			cityPath, err := resolveCity()
 			if err != nil {
-				fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "skill list", err)
 				return errExit
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "skill list", err)
 				return errExit
 			}
 
@@ -76,14 +76,14 @@ func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 			if strings.TrimSpace(sessionID) != "" {
 				store, err = openCityStoreAt(cityPath)
 				if err != nil {
-					fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
+					cmdErr(stderr, "skill list", err)
 					return errExit
 				}
 			}
 
 			entries, err := listVisibleSkillEntries(cityPath, cfg, store, agentName, sessionID)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "skill list", err)
 				return errExit
 			}
 			if jsonOut {

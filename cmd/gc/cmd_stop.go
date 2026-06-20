@@ -69,7 +69,7 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.Duration, force bool, jsonOut bool) int {
 	cityPath, err := resolveStopCityPath(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("stop")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -103,7 +103,7 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 			}
 			return code
 		}
-		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("stop")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -130,7 +130,7 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 		}
 		return out.code
 	case <-time.After(wallClockCap):
-		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — retry with --force if stop is wedged, or raise --timeout for large stop sets\n", wallClockCap) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("stop")+": timed out after %s; some sessions may not have stopped — retry with --force if stop is wedged, or raise --timeout for large stop sets\n", wallClockCap) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 }
@@ -274,12 +274,12 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 	// If a controller is running, ask it to shut down (it stops agents).
 	if tryStopControllerWithForce(cityPath, stdout, force) {
 		if err := waitForStandaloneControllerStop(cityPath, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second); err != nil {
-			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("stop")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		// Controller handled the shutdown — still stop bead store below.
 		if err := shutdownBeadsProviderForStop(cityPath); err != nil {
-			fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("stop")+": bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 		fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 		return 0
@@ -327,7 +327,7 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 
 	// Stop bead store's backing service after agents.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("stop")+": bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning.
 	}
 
@@ -348,9 +348,9 @@ func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
 	if store == nil {
 		return
 	}
-	sessions, err := store.ListByLabel("gc:session", 0)
+	sessions, err := store.ListByLabel(sessionBeadLabel, 0)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc stop: marking sessions: %v\n", err) //nolint:errcheck // best-effort warning
+		fmt.Fprintf(stderr, cmdName("stop")+": marking sessions: %v\n", err) //nolint:errcheck // best-effort warning
 		return
 	}
 	for _, session := range sessions {
@@ -362,7 +362,7 @@ func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
 			continue
 		}
 		if err := store.SetMetadata(session.ID, "sleep_reason", sleepReasonCityStop); err != nil {
-			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", session.ID, err) //nolint:errcheck // best-effort warning
+			fmt.Fprintf(stderr, "%s: marking session %s: %v\n", cmdName("stop"), session.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}
 }
@@ -370,7 +370,7 @@ func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
 func stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath string, stderr io.Writer) bool {
 	_, err := stopCityManagedBeadsProvider(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("stop")+": bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return false
 	}
 	return true
@@ -391,12 +391,12 @@ var shutdownBeadsProviderForStop = shutdownBeadsProvider
 func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stderr io.Writer, force bool) (bool, int) {
 	controllerStopped, controllerErr := stopStandaloneControllerWithoutConfig(cityPath, stdout, force)
 	if controllerErr != nil {
-		fmt.Fprintf(stderr, "gc stop: %v\n", controllerErr) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("stop")+": %v\n", controllerErr) //nolint:errcheck // best-effort stderr
 		return true, 1
 	}
 	stopped, stopErr := stopCityManagedBeadsProvider(cityPath)
 	if stopErr != nil {
-		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", stopErr) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("stop")+": bead store: %v\n", stopErr) //nolint:errcheck // best-effort stderr
 		return true, 1
 	}
 	if !controllerStopped && !stopped {
@@ -436,7 +436,7 @@ func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
 	if err == nil {
 		return
 	}
-	fmt.Fprintf(stderr, "gc stop: stopped city despite invalid config: %v\n", err) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, cmdName("stop")+": stopped city despite invalid config: %v\n", err) //nolint:errcheck // best-effort stderr
 }
 
 // stopOrphans stops sessions that are not in the desired set. Used by gc stop
@@ -448,11 +448,11 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 	running, err := sp.ListRunning("")
 	partialList := runtime.IsPartialListError(err)
 	if err != nil && !partialList {
-		fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("stop")+": listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 		return
 	}
 	if partialList {
-		fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("stop")+": listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	var orphans []string
 	for _, name := range running {
@@ -531,11 +531,11 @@ func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store 
 		names, err := sp.ListRunning("")
 		partialList := runtime.IsPartialListError(err)
 		if err != nil && !partialList {
-			fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("stop")+": listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 			names = nil
 		}
 		if partialList {
-			fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("stop")+": listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 		for _, name := range names {
 			if name = strings.TrimSpace(name); name != "" {

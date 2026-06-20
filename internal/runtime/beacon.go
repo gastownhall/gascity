@@ -1,6 +1,10 @@
 package runtime
 
-import "time"
+import (
+	"time"
+
+	"github.com/gastownhall/gascity/internal/progname"
+)
 
 // FormatBeacon returns a startup identification string that appears in
 // the agent's initial prompt. When an agent crashes and restarts in a
@@ -21,7 +25,7 @@ func FormatBeacon(cityName, agentName string, includePrimeInstruction bool) stri
 func FormatBeaconAt(cityName, agentName string, includePrimeInstruction bool, t time.Time) string {
 	beacon := "[" + cityName + "] " + agentName + " \u2022 " + t.Format("2006-01-02T15:04:05")
 	if includePrimeInstruction {
-		beacon += "\n\nRun `gc prime` to initialize your context."
+		beacon += "\n\nRun `" + progname.Get() + " prime` to initialize your context."
 	}
 	return beacon
 }

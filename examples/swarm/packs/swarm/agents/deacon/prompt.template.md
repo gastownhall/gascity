@@ -24,8 +24,8 @@ Check that agents are responsive:
 
 ## Communication
 
-- **Report to mayor**: `gc mail send mayor "Agent coder-2 stalled — restarting"`
-- **Broadcast alerts**: `gc mail send --all "Maintenance: restarting rig agents"`
+- **Report to mayor**: `{{ cmd }} mail send mayor "Agent coder-2 stalled — restarting"`
+- **Broadcast alerts**: `{{ cmd }} mail send --all "Maintenance: restarting rig agents"`
 
 ## Never Code
 

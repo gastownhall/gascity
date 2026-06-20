@@ -5,6 +5,7 @@
 # behavior through the real reconciler path.
 
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 
 cd "$GC_CITY"
 export BEADS_DIR="$GC_CITY/.beads"
@@ -208,11 +209,11 @@ ack_drain_if_idle() {
     if [ -z "$ASSIGNEE" ]; then
         return 1
     fi
-    if ! gc runtime drain-check 2>/dev/null; then
+    if ! "$GC_BIN" runtime drain-check 2>/dev/null; then
         return 1
     fi
     trace "drain-requested assignee=$ASSIGNEE"
-    gc runtime drain-ack 2>/dev/null || true
+    "$GC_BIN" runtime drain-ack 2>/dev/null || true
     trace "drain-acked assignee=$ASSIGNEE"
     exit 0
 }
@@ -263,7 +264,7 @@ fetch_ready_queue() {
     # gc hook resolves the current session via GC_ALIAS/GC_AGENT and uses the
     # session model work query tiers, so it can see both directly assigned work
     # and generic routed work for controller-materialized sessions.
-    timeout 10 gc hook 2>/dev/null
+    timeout 10 "$GC_BIN" hook 2>/dev/null
 }
 
 fetch_in_progress_queue() {

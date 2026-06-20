@@ -195,7 +195,7 @@ func cleanupSupervisorWorkspaceServicesForSupervisorStart(gcHome string) error {
 	}
 	if supervisorRuntimeGOOS != "linux" {
 		if len(scope.cityPaths) > 0 {
-			warnSupervisorWorkspaceServiceCleanup("gc supervisor: workspace-service startup cleanup is not available on %s; after a non-graceful supervisor exit, stale workspace-service processes may keep sockets bound. Registered workspace-service roots: %s. Stop stale processes whose environment includes GC_SERVICE_STATE_ROOT under those roots, then restart those cities.\n", supervisorRuntimeGOOS, strings.Join(supervisorWorkspaceServiceStateRoots(scope), ", "))
+			warnSupervisorWorkspaceServiceCleanup(cmdName("supervisor")+": workspace-service startup cleanup is not available on %s; after a non-graceful supervisor exit, stale workspace-service processes may keep sockets bound. Registered workspace-service roots: %s. Stop stale processes whose environment includes GC_SERVICE_STATE_ROOT under those roots, then restart those cities.\n", supervisorRuntimeGOOS, strings.Join(supervisorWorkspaceServiceStateRoots(scope), ", "))
 		}
 		return nil
 	}
@@ -483,35 +483,35 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 		return delegatedSupervisorStart(delegation, stdout, stderr, jsonOut)
 	}
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
-		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("supervisor start")+": %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if pid := supervisorAlive(); pid != 0 {
-		fmt.Fprintf(stderr, "gc supervisor start: supervisor already running (PID %d)\n", pid) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("supervisor start")+": supervisor already running (PID %d)\n", pid) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	lock, err := acquireSupervisorLock()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor start", err)
 		return 1
 	}
 	lock.Close() //nolint:errcheck // release probe lock
 
 	gcPath, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor start: finding executable: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor start: finding executable", err)
 		return 1
 	}
 
 	logPath := supervisorLogPath()
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor start: creating log dir: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor start: creating log dir", err)
 		return 1
 	}
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor start: opening log: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor start: opening log", err)
 		return 1
 	}
 	defer logFile.Close() //nolint:errcheck // best-effort cleanup
@@ -524,7 +524,7 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	child.Env = os.Environ()
 
 	if err := child.Start(); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor start", err)
 		return 1
 	}
 
@@ -545,7 +545,7 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 		time.Sleep(supervisorReadyPollInterval)
 	}
 
-	fmt.Fprintf(stderr, "gc supervisor start: supervisor did not become ready; see %s\n", logPath) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, cmdName("supervisor start")+": supervisor did not become ready; see %s\n", logPath) //nolint:errcheck // best-effort stderr
 	return 1
 }
 
@@ -584,7 +584,7 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 		return 1
 	}
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
-		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("supervisor start")+": %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	// Always regenerate the service file so upgrades pick up template
@@ -728,7 +728,7 @@ func waitForSupervisorReady(stderr io.Writer) int {
 	if waitForSupervisorPID() != 0 {
 		return 0
 	}
-	fmt.Fprintf(stderr, "gc: supervisor did not become ready; see %s\n", supervisorLogPath()) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, prog()+": supervisor did not become ready; see %s\n", supervisorLogPath()) //nolint:errcheck // best-effort stderr
 	return 1
 }
 
@@ -849,7 +849,7 @@ func doSupervisorLogs(numLines int, follow bool, stdout, stderr io.Writer) int {
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor logs", err)
 		return 1
 	}
 	return 0
@@ -888,12 +888,12 @@ func doSupervisorInstall(stdout, stderr io.Writer) int {
 		return 1
 	}
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
-		fmt.Fprintf(stderr, "gc supervisor install: %s\n", msg) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("supervisor install")+": %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	data, err := buildSupervisorServiceData()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor install", err)
 		return 1
 	}
 
@@ -903,7 +903,7 @@ func doSupervisorInstall(stdout, stderr io.Writer) int {
 	case "linux":
 		return installSupervisorSystemd(data, stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "gc supervisor install: not supported on %s\n", goruntime.GOOS) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("supervisor install")+": not supported on %s\n", goruntime.GOOS) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 }
@@ -941,7 +941,7 @@ func doSupervisorUninstall(stdout, stderr io.Writer) int {
 	}
 	data, err := buildSupervisorServiceData()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor uninstall: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor uninstall", err)
 		return 1
 	}
 
@@ -951,7 +951,7 @@ func doSupervisorUninstall(stdout, stderr io.Writer) int {
 	case "linux":
 		return uninstallSupervisorSystemd(data, stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "gc supervisor uninstall: not supported on %s\n", goruntime.GOOS) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("supervisor uninstall")+": not supported on %s\n", goruntime.GOOS) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 }
@@ -1455,7 +1455,7 @@ func warnSupervisorLaunchdRollback(stderr io.Writer, format string, args ...any)
 	if stderr == nil {
 		return
 	}
-	fmt.Fprintf(stderr, "gc supervisor install: warning: restoring launchd service: "+format+"\n", args...) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: warning: restoring launchd service: "+format+"\n", append([]any{cmdName("supervisor install")}, args...)...) //nolint:errcheck // best-effort stderr
 }
 
 func legacySupervisorLaunchdPlistPath() string {
@@ -1721,13 +1721,13 @@ func restorePreviousSupervisorSystemdInstall(path, service string, previousConte
 }
 
 func warnSupervisorSystemdWarmRefreshPreservedUnit(stderr io.Writer, service string) {
-	fmt.Fprintf(stderr, "gc supervisor install: leaving refreshed systemd unit %s in place after warm-refresh failure; not restoring the previous unit because it may lack KillMode=process. Resolve the error, then run 'systemctl --user start %s' or rerun 'gc supervisor install'.\n", service, service) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, cmdName("supervisor install")+": leaving refreshed systemd unit %s in place after warm-refresh failure; not restoring the previous unit because it may lack KillMode=process. Resolve the error, then run 'systemctl --user start %s' or rerun 'gc supervisor install'.\n", service, service) //nolint:errcheck // best-effort stderr
 }
 
 func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Writer) int {
 	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor install: rendering plist: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor install: rendering plist", err)
 		return 1
 	}
 
@@ -1737,7 +1737,7 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 	hadCurrent := err == nil
 	contentUnchanged := hadCurrent && string(existing) == content
 	if err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(stderr, "gc supervisor install: reading existing plist: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor install: reading existing plist", err)
 		return 1
 	}
 	if hadCurrent && !supervisorInstallForce {
@@ -1756,7 +1756,11 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 		return 0
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor install", err)
+		return 1
+	}
+	if err := ensureSupervisorServiceLogDir(data.LogPath); err != nil {
+		fmt.Fprintf(stderr, cmdName("supervisor install")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := ensureSupervisorServiceLogDir(data.LogPath); err != nil {
@@ -1764,11 +1768,11 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 		return 1
 	}
 	if err := writeSupervisorServiceFile(path, []byte(content)); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor install: writing plist: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor install: writing plist", err)
 		return 1
 	}
 	if err := unloadLegacySupervisorLaunchd(false); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor install", err)
 		return 1
 	}
 
@@ -1781,13 +1785,13 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 			rollbackErr = rollbackNewSupervisorLaunchdInstall(path, legacyPresent, stderr)
 		}
 		if rollbackErr != nil {
-			fmt.Fprintf(stderr, "gc supervisor install: rollback after launchctl failure: %v\n", rollbackErr) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "supervisor install: rollback after launchctl load failure", rollbackErr)
 		}
-		fmt.Fprintf(stderr, "gc supervisor install: launchctl %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor install: launchctl load", err)
 		return 1
 	}
 	if err := unloadLegacySupervisorLaunchd(true); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor install: warning: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor install: warning", err)
 	}
 
 	fmt.Fprintf(stdout, "Installed launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
@@ -1805,17 +1809,17 @@ func uninstallSupervisorLaunchd(_ *supervisorServiceData, stdout, stderr io.Writ
 			return code
 		}
 	} else if active {
-		fmt.Fprintf(stderr, "gc supervisor uninstall: launchd service %s is active but the control socket is unavailable; run 'gc supervisor start' to re-adopt sessions, then retry uninstall\n", supervisorLaunchdLabel()) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("supervisor uninstall")+": launchd service %s is active but the control socket is unavailable; run 'gc supervisor start' to re-adopt sessions, then retry uninstall\n", supervisorLaunchdLabel()) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	_ = supervisorLaunchctlRun("unload", path)
 	_ = supervisorLaunchctlRun("disable", supervisorLaunchdServiceTarget(supervisorLaunchdLabel()))
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(stderr, "gc supervisor uninstall: removing plist: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor uninstall: removing plist", err)
 		return 1
 	}
 	if err := unloadLegacySupervisorLaunchd(true); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor uninstall: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor uninstall", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Uninstalled launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
@@ -1901,7 +1905,7 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 	// single clean error is the right shape here.
 	if !supervisorSystemctlUserAvailable() {
 		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-			"gc supervisor install: per-user systemd instance is not available "+
+			cmdName("supervisor install")+": per-user systemd instance is not available "+
 				"(systemctl --user could not reach the user manager). "+
 				"Either enable lingering for this account ('sudo loginctl enable-linger %s'), "+
 				"log in via a PAM session that starts user-systemd, or run the supervisor "+
@@ -1912,7 +1916,7 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 
 	content, err := renderSupervisorTemplate(supervisorSystemdTemplate, data)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor install: rendering unit: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor install: rendering unit", err)
 		return 1
 	}
 
@@ -1931,16 +1935,16 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 	if contentChanged && active {
 		pid, ready, err := supervisorRunningPreserveSignalReady()
 		if err != nil {
-			fmt.Fprintf(stderr, "gc supervisor install: cannot verify active supervisor preserve-mode readiness: %v. Refusing systemd warm refresh because signaling an older supervisor can stop managed sessions. Stop or drain agents intentionally with 'gc supervisor stop --wait', then rerun 'gc supervisor install'.\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("supervisor install")+": cannot verify active supervisor preserve-mode readiness: %v. Refusing systemd warm refresh because signaling an older supervisor can stop managed sessions. Stop or drain agents intentionally with 'gc supervisor stop --wait', then rerun 'gc supervisor install'.\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if !ready {
-			fmt.Fprintf(stderr, "gc supervisor install: active supervisor pid %d does not have %s=1. Refusing systemd warm refresh because this first post-upgrade install would stop managed sessions. Stop or drain agents intentionally with 'gc supervisor stop --wait', then rerun 'gc supervisor install'.\n", pid, supervisorPreserveSessionsOnSignalEnv) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("supervisor install")+": active supervisor pid %d does not have %s=1. Refusing systemd warm refresh because this first post-upgrade install would stop managed sessions. Stop or drain agents intentionally with 'gc supervisor stop --wait', then rerun 'gc supervisor install'.\n", pid, supervisorPreserveSessionsOnSignalEnv) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
 	if err := writeSupervisorServiceFile(path, []byte(content)); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor install: writing unit: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor install: writing unit", err)
 		return 1
 	}
 
@@ -1956,14 +1960,14 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 				rollbackErr = rollbackNewSupervisorSystemdInstall(path, service, false)
 			}
 			if rollbackErr != nil {
-				fmt.Fprintf(stderr, "gc supervisor install: rollback after systemctl %s failure: %v\n", strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, cmdName("supervisor install")+": rollback after systemctl %s failure: %v\n", strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
 			}
-			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("supervisor install")+": systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
 	if err := unloadLegacySupervisorSystemd(false); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor install", err)
 		return 1
 	}
 
@@ -1977,21 +1981,21 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 				rollbackErr = rollbackNewSupervisorSystemdInstall(path, service, legacyPresent)
 			}
 			if rollbackErr != nil {
-				fmt.Fprintf(stderr, "gc supervisor install: rollback after systemctl %s failure: %v\n", strings.Join(stopArgs, " "), rollbackErr) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, cmdName("supervisor install")+": rollback after systemctl %s failure: %v\n", strings.Join(stopArgs, " "), rollbackErr) //nolint:errcheck // best-effort stderr
 			}
-			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(stopArgs, " "), err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("supervisor install")+": systemctl %s: %v\n", strings.Join(stopArgs, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if err := cleanupSupervisorWorkspaceServicesForWarmRefresh(data.GCHome); err != nil {
 			warnSupervisorSystemdWarmRefreshPreservedUnit(stderr, service)
-			fmt.Fprintf(stderr, "gc supervisor install: workspace-service cleanup after systemctl %s: %v\n", strings.Join(stopArgs, " "), err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("supervisor install")+": workspace-service cleanup after systemctl %s: %v\n", strings.Join(stopArgs, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		_ = supervisorSystemctlRun("--user", "reset-failed", service)
 		startArgs := []string{"--user", "start", service}
 		if err := supervisorSystemctlRun(startArgs...); err != nil {
 			warnSupervisorSystemdWarmRefreshPreservedUnit(stderr, service)
-			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(startArgs, " "), err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("supervisor install")+": systemctl %s: %v\n", strings.Join(startArgs, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	} else if !active {
@@ -2004,14 +2008,14 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 				rollbackErr = rollbackNewSupervisorSystemdInstall(path, service, legacyPresent)
 			}
 			if rollbackErr != nil {
-				fmt.Fprintf(stderr, "gc supervisor install: rollback after systemctl %s failure: %v\n", strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, cmdName("supervisor install")+": rollback after systemctl %s failure: %v\n", strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
 			}
-			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("supervisor install")+": systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
 	if err := unloadLegacySupervisorSystemd(true); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor install: warning: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor install: warning", err)
 	} else {
 		_ = supervisorSystemctlRun("--user", "daemon-reload")
 	}
@@ -2041,7 +2045,7 @@ func uninstallSupervisorSystemd(_ *supervisorServiceData, stdout, stderr io.Writ
 	active := supervisorSystemctlActive(service)
 	if active {
 		if sockPath, _ := runningSupervisorSocket(); sockPath == "" {
-			fmt.Fprintf(stderr, "gc supervisor uninstall: systemd service %s is active but the control socket is unavailable; run 'gc supervisor start' to re-adopt sessions, then retry uninstall\n", service) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("supervisor uninstall")+": systemd service %s is active but the control socket is unavailable; run 'gc supervisor start' to re-adopt sessions, then retry uninstall\n", service) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		// Socket-protocol stop, never the delegated redirect: uninstall is
@@ -2054,11 +2058,11 @@ func uninstallSupervisorSystemd(_ *supervisorServiceData, stdout, stderr io.Writ
 	_ = supervisorSystemctlRun("--user", "stop", service)
 	_ = supervisorSystemctlRun("--user", "disable", service)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(stderr, "gc supervisor uninstall: removing unit: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor uninstall: removing unit", err)
 		return 1
 	}
 	if err := unloadLegacySupervisorSystemd(true); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor uninstall: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "supervisor uninstall", err)
 		return 1
 	}
 	_ = supervisorSystemctlRun("--user", "daemon-reload")

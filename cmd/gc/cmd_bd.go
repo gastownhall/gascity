@@ -156,7 +156,7 @@ func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execS
 	if len(drift) == 0 {
 		return
 	}
-	_, _ = fmt.Fprintf(stderr, "gc bd: warning: ignoring ambient Dolt host/port override for external target: %s\n", strings.Join(drift, ", "))
+	_, _ = fmt.Fprintf(stderr, cmdName("bd")+": warning: ignoring ambient Dolt host/port override for external target: %s\n", strings.Join(drift, ", "))
 }
 
 // rewriteBdHeartbeatArgs expands the gc-only `heartbeat <issue-id>`
@@ -197,7 +197,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	cityPath, err := resolveBdCity(cityName)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("bd")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -208,13 +208,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// in resolveBdScopeTarget / bdRigScopeTarget.
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("bd")+": loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("bd")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
@@ -225,7 +225,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return doBdReleaseIfCurrent(cityPath, target, id, expectedAssignee, stdout, stderr)
 	}
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
-		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("bd")+": only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {
 			fmt.Fprintf(stderr, "  hint: %s\n", hint) //nolint:errcheck // best-effort stderr
 		}
@@ -290,7 +290,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	bdPath, err := exec.LookPath("bd")
 	if err != nil {
-		fmt.Fprintln(stderr, "gc bd: bd not found in PATH") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, cmdName("bd")+": bd not found in PATH") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -307,7 +307,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
 	env, err := bdCommandEnv(cityPath, cfg, target)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("bd")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
@@ -329,7 +329,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		if traceExit > 0 {
 			return traceExit
 		}
-		fmt.Fprintf(stderr, "gc bd: %v\n", runErr) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("bd")+": %v\n", runErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

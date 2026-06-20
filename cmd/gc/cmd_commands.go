@@ -37,7 +37,7 @@ func addDiscoveredCommandsToRoot(root *cobra.Command, entries []config.Discovere
 	for _, binding := range bindings {
 		if core[binding] {
 			if warnOnCollision {
-				fmt.Fprintf(stderr, "gc: import binding %q: name shadows core command, skipping\n", binding) //nolint:errcheck
+				fmt.Fprintf(stderr, prog()+": import binding %q: name shadows core command, skipping\n", binding) //nolint:errcheck
 			}
 			continue
 		}
@@ -173,7 +173,7 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 		if errors.As(err, &exitErr) {
 			return exitErr.ExitCode()
 		}
-		fmt.Fprintf(stderr, "gc %s %s: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s %s: %v\n", cmdName(entry.BindingName), strings.Join(entry.Command, " "), err) //nolint:errcheck
 		return 1
 	}
 	return 0

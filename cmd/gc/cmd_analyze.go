@@ -22,7 +22,7 @@ live controller.`,
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			fmt.Fprintf(stderr, "gc analyze: unknown subcommand %q\n", args[0]) //nolint:errcheck
+			fmt.Fprintf(stderr, cmdName("analyze")+": unknown subcommand %q\n", args[0]) //nolint:errcheck
 			return errExit
 		},
 	}

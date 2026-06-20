@@ -95,7 +95,7 @@ and can be managed even when the controller is offline.`,
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			fmt.Fprintf(stderr, "gc trace: unknown subcommand %q\n", args[0]) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: unknown subcommand %q\n", cmdName("trace"), args[0]) //nolint:errcheck
 			return errExit
 		},
 	}
@@ -249,21 +249,21 @@ func newTraceTailCmd(stdout, stderr io.Writer) *cobra.Command {
 
 func cmdTraceStart(template, forDuration string, auto bool, level string, stdout, stderr io.Writer) int {
 	if strings.TrimSpace(template) == "" {
-		fmt.Fprintln(stderr, "gc trace start: missing --template") //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: missing --template\n", cmdName("trace start")) //nolint:errcheck
 		return 1
 	}
 	dur, err := time.ParseDuration(forDuration)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace start: invalid --for %q: %v\n", forDuration, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: invalid --for %q: %v\n", cmdName("trace start"), forDuration, err) //nolint:errcheck
 		return 1
 	}
 	if dur <= 0 {
-		fmt.Fprintf(stderr, "gc trace start: invalid duration %q\n", forDuration) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: invalid duration %q\n", cmdName("trace start"), forDuration) //nolint:errcheck
 		return 1
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace start: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace start")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	now := time.Now().UTC()
@@ -291,7 +291,7 @@ func cmdTraceStart(template, forDuration string, auto bool, level string, stdout
 	req.ActorPID = os.Getpid()
 	status, msg, err := applyTraceControlMaybeRemote(cityPath, req)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace start: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace start")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	fmt.Fprintln(stdout, msg) //nolint:errcheck
@@ -303,12 +303,12 @@ func cmdTraceStart(template, forDuration string, auto bool, level string, stdout
 
 func cmdTraceStop(template string, all bool, stdout, stderr io.Writer) int {
 	if strings.TrimSpace(template) == "" {
-		fmt.Fprintln(stderr, "gc trace stop: missing --template") //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: missing --template\n", cmdName("trace stop")) //nolint:errcheck
 		return 1
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace stop: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace stop")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	req := traceControlRequest{
@@ -331,7 +331,7 @@ func cmdTraceStop(template string, all bool, stdout, stderr io.Writer) int {
 	req.ActorPID = os.Getpid()
 	status, msg, err := applyTraceControlMaybeRemote(cityPath, req)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace stop: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace stop")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	fmt.Fprintln(stdout, msg) //nolint:errcheck
@@ -348,17 +348,17 @@ func cmdTraceStatus(stdout, stderr io.Writer) int {
 func cmdTraceStatusWithJSON(jsonOut bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace status: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace status")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	status, err := traceStatusMaybeRemote(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace status: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace status")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	head, err := traceStatusHeadSeq(status, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace status: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace status")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	activeArms := status.ActiveArms
@@ -406,7 +406,7 @@ func traceStatusHeadSeq(status traceStatusJSON, cityPath string) (uint64, error)
 func cmdTraceShow(template, since, traceID, tickID, recordType, reason string, jsonOut bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace show: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace show")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	filter := TraceFilter{
@@ -419,14 +419,14 @@ func cmdTraceShow(template, since, traceID, tickID, recordType, reason string, j
 	if since != "" {
 		d, err := time.ParseDuration(since)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc trace show: invalid --since %q: %v\n", since, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: invalid --since %q: %v\n", cmdName("trace show"), since, err) //nolint:errcheck
 			return 1
 		}
 		filter.Since = time.Now().Add(-d)
 	}
 	recs, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), filter)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace show: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace show")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if recs == nil {
@@ -457,17 +457,17 @@ func cmdTraceShow(template, since, traceID, tickID, recordType, reason string, j
 func cmdTraceCycle(tickID string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace cycle: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace cycle")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	recs, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{TickID: tickID})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace cycle: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace cycle")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	data, err := json.MarshalIndent(recs, "", "  ")
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace cycle: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace cycle")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	fmt.Fprintln(stdout, string(data)) //nolint:errcheck
@@ -477,21 +477,21 @@ func cmdTraceCycle(tickID string, stdout, stderr io.Writer) int {
 func cmdTraceReasons(template, since string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace reasons: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace reasons")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	filter := TraceFilter{Template: normalizedTraceTemplate(template)}
 	if since != "" {
 		d, err := time.ParseDuration(since)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc trace reasons: invalid --since %q: %v\n", since, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: invalid --since %q: %v\n", cmdName("trace reasons"), since, err) //nolint:errcheck
 			return 1
 		}
 		filter.Since = time.Now().Add(-d)
 	}
 	recs, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), filter)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace reasons: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace reasons")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	reasons := make(map[string]int)
@@ -502,7 +502,7 @@ func cmdTraceReasons(template, since string, stdout, stderr io.Writer) int {
 	}
 	data, err := json.MarshalIndent(reasons, "", "  ")
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace reasons: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace reasons")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	fmt.Fprintln(stdout, string(data)) //nolint:errcheck
@@ -512,28 +512,28 @@ func cmdTraceReasons(template, since string, stdout, stderr io.Writer) int {
 func cmdTraceTail(template, since string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace tail: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace tail")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	filter := TraceFilter{Template: normalizedTraceTemplate(template)}
 	if since != "" {
 		d, err := time.ParseDuration(since)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc trace tail: invalid --since %q: %v\n", since, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: invalid --since %q: %v\n", cmdName("trace tail"), since, err) //nolint:errcheck
 			return 1
 		}
 		filter.Since = time.Now().Add(-d)
 	}
 	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), filter)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc trace tail: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("trace tail")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	records = traceRecentRecords(records, 20)
 	var lastSeq uint64
 	for _, rec := range records {
 		if err := writeTraceTailRecord(stdout, rec); err != nil {
-			fmt.Fprintf(stderr, "gc trace tail: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, cmdName("trace tail")+": %v\n", err) //nolint:errcheck
 			return 1
 		}
 		if rec.Seq > lastSeq {
@@ -551,12 +551,12 @@ func cmdTraceTail(template, since string, stdout, stderr io.Writer) int {
 		filter.SeqAfter = lastSeq
 		next, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), filter)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc trace tail: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, cmdName("trace tail")+": %v\n", err) //nolint:errcheck
 			return 1
 		}
 		for _, rec := range next {
 			if err := writeTraceTailRecord(stdout, rec); err != nil {
-				fmt.Fprintf(stderr, "gc trace tail: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("trace tail")+": %v\n", err) //nolint:errcheck
 				return 1
 			}
 			if rec.Seq > lastSeq {

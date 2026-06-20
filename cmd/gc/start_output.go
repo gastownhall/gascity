@@ -166,9 +166,9 @@ func (p *startOutputProxy) deriveFatalFromRecords() string {
 		if strings.HasPrefix(line, "hint: ") {
 			continue
 		}
-		return strings.TrimSpace(strings.TrimPrefix(line, "gc start:"))
+		return strings.TrimSpace(strings.TrimPrefix(line, cmdName("start")+""))
 	}
-	return "gc start failed"
+	return cmdName("start failed")
 }
 
 func isStartWarningLine(line string) bool {

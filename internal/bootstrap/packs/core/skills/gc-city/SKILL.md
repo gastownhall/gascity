@@ -10,66 +10,66 @@ A city is a directory containing `city.toml` and `.gc/` runtime state.
 ## Initialization
 
 ```
-gc init                                # Initialize city in current directory
-gc init <path>                         # Initialize city at path
+{{binary}} init                                # Initialize city in current directory
+{{binary}} init <path>                         # Initialize city at path
 ```
 
 ## Starting and stopping
 
 ```
-gc start                               # Start city under the supervisor
-gc start <path>                        # Start city at path under the supervisor
-gc supervisor run                      # Run the supervisor in the foreground
-gc start --dry-run                     # Preview what would start
-gc stop                                # Stop the current city
-gc restart                             # Stop then start
+{{binary}} start                               # Start city under the supervisor
+{{binary}} start <path>                        # Start city at path under the supervisor
+{{binary}} supervisor run                      # Run the supervisor in the foreground
+{{binary}} start --dry-run                     # Preview what would start
+{{binary}} stop                                # Stop the current city
+{{binary}} restart                             # Stop then start
 ```
 
-`gc init` and `gc start` register the city with the machine supervisor,
+`{{binary}} init` and `{{binary}} start` register the city with the machine supervisor,
 ensure it is running, and trigger an immediate reconcile. Interactive
-sessions are created separately with `gc session new <template>`.
+sessions are created separately with `{{binary}} session new <template>`.
 
 ## Status
 
 ```
-gc status                              # City-wide overview
-gc session list                        # Session / agent status
-gc rig status <name>                   # Rig status
+{{binary}} status                              # City-wide overview
+{{binary}} session list                        # Session / agent status
+{{binary}} rig status <name>                   # Rig status
 ```
 
 ## Suspending
 
 ```
-gc suspend                             # Suspend entire city
-gc resume                              # Resume suspended city
+{{binary}} suspend                             # Suspend entire city
+{{binary}} resume                              # Resume suspended city
 ```
 
 ## Configuration
 
 ```
-gc config show                         # Show resolved configuration
-gc config explain                      # Show config layering and provenance
-gc doctor                              # Run health checks
+{{binary}} config show                         # Show resolved configuration
+{{binary}} config explain                      # Show config layering and provenance
+{{binary}} doctor                              # Run health checks
 ```
 
 ## Events
 
 ```
-gc events                              # Tail the event log
-gc event emit <type> [data]            # Emit a custom event
+{{binary}} events                              # Tail the event log
+{{binary}} event emit <type> [data]            # Emit a custom event
 ```
 
 ## Dashboard
 
-See `gc skills dashboard` for full dashboard reference.
+See `{{binary}} skills dashboard` for full dashboard reference.
 
 ## Packs
 
 Packs extend Gas City with additional commands, prompts, formulas, and
-doctor checks. Pack commands appear as top-level `gc <pack> <command>`
+doctor checks. Pack commands appear as top-level `{{binary}} <pack> <command>`
 subcommands.
 
 ```
-gc pack list                           # List installed packs
-gc pack fetch                          # Fetch remote packs
+{{binary}} pack list                           # List installed packs
+{{binary}} pack fetch                          # Fetch remote packs
 ```

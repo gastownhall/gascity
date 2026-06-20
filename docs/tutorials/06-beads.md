@@ -449,5 +449,5 @@ convoys are beads; a formula materializes its work as beads when run.
 
 ## What's next
 
-- **[Orders](/tutorials/07-orders)** — formulas and scripts on autopilot, triggered
+- **[Orders](./07-orders.md)** — formulas and scripts on autopilot, triggered
   by time, schedule, conditions, or events

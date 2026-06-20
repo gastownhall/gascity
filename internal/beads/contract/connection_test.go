@@ -1092,10 +1092,22 @@ func reachableNonLoopbackHost(t *testing.T) string {
 		if err != nil {
 			continue
 		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		// Also verify that a client can actually reach the bound port —
+		// some interfaces can bind but are not self-reachable (VPNs,
+		// CGNAT, Docker bridges, macOS utun*). validManagedRuntimeState
+		// runs contractPortReachable which dials the host; if the host
+		// can't loopback through its own non-loopback IP, the state is
+		// always rejected as "unavailable".
+		conn, dialErr := net.DialTimeout("tcp", net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port)), 500*time.Millisecond)
 		_ = listener.Close()
+		if dialErr != nil {
+			continue
+		}
+		_ = conn.Close()
 		return ip.String()
 	}
-	t.Skip("no bindable non-loopback IPv4 address")
+	t.Skip("no reachable non-loopback IPv4 address")
 	return ""
 }
 

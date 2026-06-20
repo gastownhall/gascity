@@ -59,7 +59,7 @@ func newConvergeCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			rctx, err := resolveContext()
 			if err != nil {
-				fmt.Fprintf(stderr, "gc converge create: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("converge create")+": %v\n", err) //nolint:errcheck
 				return errExit
 			}
 
@@ -83,7 +83,7 @@ func newConvergeCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 			for _, v := range vars {
 				parts := strings.SplitN(v, "=", 2)
 				if len(parts) != 2 {
-					fmt.Fprintf(stderr, "gc converge create: invalid --var %q (expected key=value)\n", v) //nolint:errcheck
+					fmt.Fprintf(stderr, "%s: invalid --var %q (expected key=value)\n", cmdName("converge create"), v) //nolint:errcheck
 					return errExit
 				}
 				params["var."+parts[0]] = parts[1]
@@ -96,18 +96,18 @@ func newConvergeCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			reply, err := sendConvergenceRequest(rctx.CityPath, req)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc converge create: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("converge create")+": %v\n", err) //nolint:errcheck
 				return errExit
 			}
 			if reply.Error != "" {
-				fmt.Fprintf(stderr, "gc converge create: %s\n", reply.Error) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: %s\n", cmdName("converge create"), reply.Error) //nolint:errcheck
 				return errExit
 			}
 
 			// Parse result for bead ID.
 			var result convergence.CreateResult
 			if err := json.Unmarshal(reply.Result, &result); err != nil {
-				fmt.Fprintf(stderr, "gc converge create: parsing result: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("converge create")+": parsing result: %v\n", err) //nolint:errcheck
 				return errExit
 			}
 			if jsonOutput {
@@ -153,11 +153,11 @@ func newConvergeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			b, err := store.Get(beadID)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc converge status: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("converge status")+": %v\n", err) //nolint:errcheck
 				return errExit
 			}
 			if b.Type != "convergence" {
-				fmt.Fprintf(stderr, "gc converge status: bead %s is type %q, not convergence\n", beadID, b.Type) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: bead %s is type %q, not convergence\n", cmdName("converge status"), beadID, b.Type) //nolint:errcheck
 				return errExit
 			}
 
@@ -433,11 +433,11 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			b, err := store.Get(beadID)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc converge test-gate: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("converge test-gate")+": %v\n", err) //nolint:errcheck
 				return errExit
 			}
 			if b.Type != "convergence" {
-				fmt.Fprintf(stderr, "gc converge test-gate: bead %s is type %q, not convergence\n", beadID, b.Type) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: bead %s is type %q, not convergence\n", cmdName("converge test-gate"), beadID, b.Type) //nolint:errcheck
 				return errExit
 			}
 			meta := b.Metadata
@@ -447,7 +447,7 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 
 			gateConfig, err := convergence.ParseGateConfig(meta)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc converge test-gate: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("converge test-gate")+": %v\n", err) //nolint:errcheck
 				return errExit
 			}
 
@@ -671,7 +671,7 @@ func newConvergeRetryCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			rctx, err := resolveContext()
 			if err != nil {
-				fmt.Fprintf(stderr, "gc converge retry: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("converge retry")+": %v\n", err) //nolint:errcheck
 				return errExit
 			}
 
@@ -690,17 +690,17 @@ func newConvergeRetryCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			reply, err := sendConvergenceRequest(rctx.CityPath, req)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc converge retry: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("converge retry")+": %v\n", err) //nolint:errcheck
 				return errExit
 			}
 			if reply.Error != "" {
-				fmt.Fprintf(stderr, "gc converge retry: %s\n", reply.Error) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: %s\n", cmdName("converge retry"), reply.Error) //nolint:errcheck
 				return errExit
 			}
 
 			var result convergence.RetryResult
 			if err := json.Unmarshal(reply.Result, &result); err != nil {
-				fmt.Fprintf(stderr, "gc converge retry: parsing result: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("converge retry")+": parsing result: %v\n", err) //nolint:errcheck
 				return errExit
 			}
 			if jsonOutput {
@@ -727,7 +727,7 @@ func newConvergeRetryCmd(stdout, stderr io.Writer) *cobra.Command {
 func convergeSocketCmd(beadID, command string, params map[string]string, jsonOutput bool, stdout, stderr io.Writer) error {
 	rctx, err := resolveContext()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc converge %s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName("converge "+command), err) //nolint:errcheck
 		return errExit
 	}
 	if params == nil {
@@ -743,11 +743,11 @@ func convergeSocketCmd(beadID, command string, params map[string]string, jsonOut
 	}
 	reply, err := sendConvergenceRequest(rctx.CityPath, req)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc converge %s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName("converge "+command), err) //nolint:errcheck
 		return errExit
 	}
 	if reply.Error != "" {
-		fmt.Fprintf(stderr, "gc converge %s: %s\n", command, reply.Error) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %s\n", cmdName("converge "+command), reply.Error) //nolint:errcheck
 		return errExit
 	}
 

@@ -4,6 +4,7 @@
 # After reporting once, the agent stays alive but honors runtime drain
 # requests so config-drift and restart tests can observe a clean restart.
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 
 # Allow any user to delete files created by this script.
 # Docker containers run as root, but the test runner is non-root.
@@ -46,8 +47,8 @@ REPORT="${REPORT_DIR}/${SAFE_NAME}.report"
 } > "$REPORT" 2>&1
 
 while true; do
-    if gc runtime drain-check 2>/dev/null; then
-        gc runtime drain-ack 2>/dev/null || true
+    if "$GC_BIN" runtime drain-check 2>/dev/null; then
+        "$GC_BIN" runtime drain-ack 2>/dev/null || true
         exit 0
     fi
     sleep 0.2

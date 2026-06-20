@@ -722,7 +722,7 @@ func isConventionDiscoveryDirName(base string) bool {
 func watchConfigTargets(targets []config.WatchTarget, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: config watcher: %v (reload on tick only)\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: config watcher: %v (reload on tick only)\n", cmdName("start"), err) //nolint:errcheck // best-effort stderr
 		return func() {}
 	}
 	registrar := newConfigWatchRegistrar(watcher, stderr)
@@ -1177,7 +1177,7 @@ func controllerLoop(
 		suspendedNames:      suspendedNames,
 		pokeCh:              make(chan struct{}, 1),
 		controlDispatcherCh: make(chan struct{}, 1),
-		logPrefix:           "gc start",
+		logPrefix:           cmdName("start"),
 		stdout:              stdout,
 		stderr:              stderr,
 	}
@@ -1238,7 +1238,7 @@ func runController(
 ) int {
 	lock, err := acquireControllerLock(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	defer lock.Close() //nolint:errcheck // best-effort cleanup
@@ -1264,7 +1264,7 @@ func runController(
 	forceShutdown := &atomic.Bool{}
 	lis, err := startControllerSocket(cityPath, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	defer lis.Close()         //nolint:errcheck // best-effort cleanup
@@ -1278,12 +1278,12 @@ func runController(
 	// explicitly through function parameters.
 	controllerToken, err := convergence.GenerateToken()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	_ = controllerToken // available for future waves via function parameters
 	if err := convergence.WriteToken(cityPath, controllerToken); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup

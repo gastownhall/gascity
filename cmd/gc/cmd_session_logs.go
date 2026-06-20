@@ -68,12 +68,12 @@ func cmdSessionLogs(args []string, follow bool, tail int, jsonOutput bool, stdou
 
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "session logs", err)
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "session logs", err)
 		return 1
 	}
 
@@ -89,20 +89,20 @@ func cmdSessionLogs(args []string, follow bool, tail int, jsonOutput bool, stdou
 		var diagnostic string
 		path, provider, ok, diagnostic = resolveStoredSessionLogSource(cityPath, cfg, store, identifier, searchPaths)
 		if ok && path == "" && diagnostic != "" {
-			fmt.Fprintf(stderr, "gc session logs: %s\n", diagnostic) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("session logs")+": %s\n", diagnostic) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
 	if !ok {
 		workDir, found := resolveConfiguredSessionLogContext(cityPath, cfg, identifier)
 		if !found {
-			fmt.Fprintf(stderr, "gc session logs: session %q not found\n", identifier) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: session %q not found\n", cmdName("session logs"), identifier) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		path = resolveSessionLogPath(searchPaths, sessionLogContext{workDir: workDir})
 	}
 	if path == "" {
-		fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", identifier) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: no session file found for %q\n", cmdName("session logs"), identifier) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -354,12 +354,12 @@ func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, ident
 // `--tail 5` prints the LAST 5 entries of the transcript, not the first 5.
 func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr io.Writer) int {
 	if tail < 0 {
-		fmt.Fprintln(stderr, "gc session logs: --tail must be >= 0") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: --tail must be >= 0\n", cmdName("session logs")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	factory, err := worker.NewFactory(worker.FactoryConfig{})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "session logs", err)
 		return 1
 	}
 
@@ -516,7 +516,7 @@ func runSessionLogs(factory *worker.Factory, provider, path string, follow bool,
 	// are a true "last N entries" window regardless of compaction boundaries.
 	sess, readErr := read(factory, provider, path)
 	if readErr != nil {
-		fmt.Fprintf(stderr, "gc session logs: %v\n", readErr) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "session logs", readErr)
 		return 1
 	}
 
@@ -548,7 +548,7 @@ func runSessionLogs(factory *worker.Factory, provider, path string, follow bool,
 		if readErr != nil {
 			consecErrors++
 			if consecErrors >= maxConsecErrors {
-				fmt.Fprintf(stderr, "gc session logs: %d consecutive read errors, last: %v\n", consecErrors, readErr) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: %d consecutive read errors, last: %v\n", cmdName("session logs"), consecErrors, readErr) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			continue

@@ -50,7 +50,7 @@ func (c *mcpConfigDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		Status:  doctor.StatusError,
 		Message: summarizeMCPIssues(issues),
 		Details: issues,
-		FixHint: `fix the reported MCP definitions or provider/runtime settings, then rerun "gc doctor"`,
+		FixHint: fmt.Sprintf(`fix the reported MCP definitions or provider/runtime settings, then rerun %q`, cmdName("doctor")),
 	}
 }
 

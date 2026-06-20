@@ -334,7 +334,7 @@ one of those in the Formulas tutorial.
 You've created a city, added a project as a rig, and slung work to an agent on
 that rig. From here:
 
-- **[Agents](/tutorials/02-agents)** — go deeper on agent configuration:
+- **[Agents](./02-agents.md)** — go deeper on agent configuration:
   prompts, sessions, scope, working directories
 - **[Sessions](/tutorials/03-sessions)** — interactive conversations with
   agents, on-demand workers and persistent worker pools

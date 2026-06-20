@@ -369,12 +369,12 @@ func newStartCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start [path|name]",
 		Short: "Start the city under the machine-wide supervisor",
-		Long: `Start the city under the machine-wide supervisor.
+		Long: fmt.Sprintf(`Start the city under the machine-wide supervisor.
 
-Requires an existing city bootstrapped by "gc init". Fetches remote
+Requires an existing city bootstrapped by "%s init". Fetches remote
 packs as needed, registers the city with the machine-wide supervisor,
 ensures the supervisor is running, and triggers immediate reconciliation.
-Use "gc supervisor run" for foreground operation.`,
+Use "%s supervisor run" for foreground operation.`, prog(), prog()),
 		Example: `  gc start
   gc start ~/my-city
   gc start --dry-run
@@ -453,7 +453,7 @@ func doStartWithNameOverrideAndSummary(args []string, controllerMode bool, stdou
 		proxy.SetFatal(fatal)
 	}
 	if err := proxy.Flush(); err != nil && stderr != nil {
-		fmt.Fprintf(stderr, "gc start: flushing output: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("start")+": flushing output: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	writeStartSummary(stderr, startSummary{
 		PID:      currentSupervisorPID(),
@@ -479,13 +479,13 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 
 	dir, err := resolveStartDir(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
 	cityPath, err := requireBootstrappedCity(dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
@@ -493,7 +493,7 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	// invocation (e.g. `gc start --file=foo`) fails fast without
 	// triggering a supervisor restart.
 	if len(extraConfigFiles) > 0 || noStrictMode {
-		fmt.Fprintln(stderr, "gc start: --file and --no-strict only apply to the legacy standalone controller; use --foreground or remove those flags") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, cmdName("start")+": --file and --no-strict only apply to the legacy standalone controller; use --foreground or remove those flags") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -516,11 +516,11 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	}
 
 	if err := ensureCityScaffold(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start: runtime scaffold", err)
 		return 1
 	}
 	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
-		fmt.Fprintf(stderr, "gc start: missing required dependencies:\n\n") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing required dependencies:\n\n", cmdName("start")) //nolint:errcheck // best-effort stderr
 		for _, dep := range missing {
 			fmt.Fprintf(stderr, "  - %s", dep.name) //nolint:errcheck // best-effort stderr
 			if dep.installHint != "" {
@@ -528,12 +528,12 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 			}
 			fmt.Fprintln(stderr) //nolint:errcheck // best-effort stderr
 		}
-		fmt.Fprintln(stderr)                                                               //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "gc start: install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr)                                                                        //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, cmdName("start")+": install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if status := checkDoltAuthorIdentity(cityPath); status.blocked() {
-		printDoltAuthorIdentityBlock(stderr, "gc start", status)
+		printDoltAuthorIdentityBlock(stderr, cmdName("start"), status)
 		return 1
 	}
 	startStdout := stdout
@@ -599,13 +599,13 @@ func requireBootstrappedCity(dir string) (string, error) {
 	if err != nil {
 		absDir, absErr := filepath.Abs(dir)
 		if absErr == nil {
-			return "", fmt.Errorf("%w; run \"gc init %s\" first", err, absDir)
+			return "", fmt.Errorf("%w; run \"%s %s\" first", err, cmdName("init"), absDir)
 		}
-		return "", fmt.Errorf("%w; run \"gc init\" first", err)
+		return "", fmt.Errorf("%w; run \"%s\" first", err, cmdName("init"))
 	}
 	cityPath := ctx.CityPath
 	if !citylayout.HasRuntimeRoot(cityPath) {
-		return "", fmt.Errorf("city runtime not bootstrapped at %s; run \"gc init %s\" first", cityPath, cityPath)
+		return "", fmt.Errorf("city runtime not bootstrapped at %s; run \"%s %s\" first", cityPath, cmdName("init"), cityPath)
 	}
 	return cityPath, nil
 }
@@ -619,32 +619,32 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	dir, err := resolveStartDir(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
 	cityPath, err := requireBootstrappedCity(dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	if controllerMode {
 		_, registered, err := registeredCityEntry(cityPath)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "start", err)
 			return 1
 		}
 		if registered {
-			fmt.Fprintf(stderr, "gc start: city is registered with the supervisor; run \"gc unregister %s\" before using --foreground\n", cityPath) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: city is registered with the supervisor; run \"%s %s\" before using --foreground\n", cmdName("start"), cmdName("unregister"), cityPath) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
 	if err := ensureCityScaffold(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start: runtime scaffold", err)
 		return 1
 	}
 	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
-		fmt.Fprintf(stderr, "gc start: missing required dependencies:\n\n") //nolint:errcheck // best-effort stderr
+		fmt.Fprint(stderr, cmdName("start")+": missing required dependencies:\n\n") //nolint:errcheck // best-effort stderr
 		for _, dep := range missing {
 			fmt.Fprintf(stderr, "  - %s", dep.name) //nolint:errcheck // best-effort stderr
 			if dep.installHint != "" {
@@ -652,22 +652,22 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 			}
 			fmt.Fprintln(stderr) //nolint:errcheck // best-effort stderr
 		}
-		fmt.Fprintln(stderr)                                                               //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "gc start: install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr)                                                                        //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, cmdName("start")+": install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if status := checkDoltAuthorIdentity(cityPath); status.blocked() {
-		printDoltAuthorIdentityBlock(stderr, "gc start", status)
+		printDoltAuthorIdentityBlock(stderr, cmdName("start"), status)
 		return 1
 	}
 	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start: fetching packs", err)
 		return 1
 	}
 	cfg, prov, err := loadStartCityConfig(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
+		fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", cmdName("doctor")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	applyFeatureFlags(cfg)
@@ -675,42 +675,42 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Strict mode (default) promotes strict-eligible config warnings to errors.
 	if strictMode && len(fatalWarnings) > 0 {
 		for _, w := range fatalWarnings {
-			fmt.Fprintf(stderr, "gc start: strict: %s\n", w) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("start")+": strict: %s\n", w) //nolint:errcheck // best-effort stderr
 		}
 		for _, w := range nonFatalWarnings {
-			fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("start")+": warning: %s\n", w) //nolint:errcheck // best-effort stderr
 		}
-		fmt.Fprintln(stderr, "gc start: use --no-strict to disable strict checking") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, cmdName("start")+": use --no-strict to disable strict checking") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	for _, w := range prov.Warnings {
-		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("start")+": warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
 
 	// Validate rigs (prefix collisions, missing fields).
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
-	ensureInitArtifacts(cityPath, stderr, "gc start")
+	ensureInitArtifacts(cityPath, stderr, cmdName("start"))
 
 	// Resolve rig paths and run the full bead store lifecycle:
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if err := startBeadsLifecycle(cityPath, cityName, cfg, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
+		fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", cmdName("doctor")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -718,7 +718,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// The gc-beads-bd script's health operation validates server liveness
 	// (TCP + query probe). Recovery is attempted on failure.
 	if err := healthBeadsProvider(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: beads health check: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start: beads health check", err)
 		// Non-fatal warning — server may recover by the time agents need it.
 	}
 
@@ -734,7 +734,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// System formulas/orders now arrive via the core bootstrap pack.
 	if len(cfg.FormulaLayers.City) > 0 {
 		if err := ResolveFormulas(cityPath, cfg.FormulaLayers.City); err != nil {
-			fmt.Fprintf(stderr, "gc start: city formulas: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "start: city formulas", err)
 		}
 	}
 	for _, r := range cfg.Rigs {
@@ -744,19 +744,19 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 		if len(layers) > 0 {
 			if err := ResolveFormulas(r.Path, layers); err != nil {
-				fmt.Fprintf(stderr, "gc start: rig %q formulas: %v\n", r.Name, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, cmdName("start")+": rig %q formulas: %v\n", r.Name, err) //nolint:errcheck // best-effort stderr
 			}
 		}
 	}
 
 	// Prune legacy top-level scripts/ symlinks left by pre-PackV2 runtimes.
 	pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
-		fmt.Fprintf(stderr, "gc start: pruning legacy %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("start")+": pruning legacy %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
 	})
 
 	// Validate agents.
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
@@ -768,7 +768,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// engdocs/proposals/skill-materialization.md § "Collision
 	// validation (startup validator)".
 	if err := checkSkillCollisions(cfg, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
@@ -783,21 +783,21 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// write failures must block startup before sessions launch against stale or
 	// ambiguous MCP state.
 	if err := runStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
 	// Validate install_agent_hooks (workspace + all agents).
 	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
 		if err := hooks.Validate(ih); err != nil {
-			fmt.Fprintf(stderr, "gc start: workspace: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "start: workspace", err)
 			return 1
 		}
 	}
 	for _, a := range cfg.Agents {
 		if len(a.InstallAgentHooks) > 0 {
 			if err := hooks.Validate(a.InstallAgentHooks); err != nil {
-				fmt.Fprintf(stderr, "gc start: agent %q: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, cmdName("start")+": agent %q: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 		}
@@ -830,7 +830,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	// Pre-check container images once (fail fast before N serial starts).
 	if err := checkAgentImages(sp, cfg.Agents, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
@@ -884,7 +884,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	sessionQueryPartial := false
 	sessionBeads, err := loadSessionBeadSnapshot(oneShotStore)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "start: loading session beads", err)
 		sessionBeads = nil
 		sessionQueryPartial = true
 	}
@@ -940,7 +940,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Post-reconcile sync: update bead state to reflect post-start reality.
 	sessionBeads, err = loadSessionBeadSnapshot(oneShotStore)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "start: loading session beads", err)
 		sessionBeads = nil
 	}
 	dsResult = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, rigStores, sessionBeads, nil, stderr)

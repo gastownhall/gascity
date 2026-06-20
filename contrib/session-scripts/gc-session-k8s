@@ -34,6 +34,7 @@
 #   GC_K8S_SERVICE_ACCOUNT - Pod service account name (default: namespace default)
 
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 
 op="${1:?missing operation}"
 name="${2:-}"
@@ -530,8 +531,8 @@ case "$op" in
       tar chf - -C "$city_dir" --exclude='.gc' . | \
         "${KUBECTL[@]}" exec -i "$pod" -- tar xf - -C /tmp/city-src || \
         echo "start: warning: failed to copy city dir" >&2
-      "${KUBECTL[@]}" exec "$pod" -- gc init --from /tmp/city-src /workspace || \
-        echo "start: warning: gc init failed" >&2
+      "${KUBECTL[@]}" exec "$pod" -- "$GC_BIN" init --from /tmp/city-src /workspace || \
+        echo "start: warning: $GC_BIN init failed" >&2
       "${KUBECTL[@]}" exec "$pod" -- rm -rf /tmp/city-src 2>/dev/null || true
     fi
 

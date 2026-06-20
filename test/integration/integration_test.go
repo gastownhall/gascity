@@ -88,6 +88,8 @@ func TestMain(m *testing.M) {
 	if os.Getenv("GC_INTEGRATION_SUPERVISOR_STOP_HELPER") == "1" {
 		select {}
 	}
+	stopSignalSweeper := installIntegrationSignalSweeper(subprocess)
+	defer stopSignalSweeper()
 
 	subprocess := os.Getenv("GC_SESSION") == "subprocess"
 

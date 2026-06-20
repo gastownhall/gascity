@@ -136,7 +136,7 @@ func cityInitFinalize(_ context.Context, req cityinit.InitRequest) error {
 	if code := finalizeInit(req.Dir, &stdout, &stderr, initFinalizeOptions{
 		skipProviderReadiness: req.SkipProviderReadiness,
 		showProgress:          false,
-		commandName:           "gc init",
+		commandName:           cmdName("init"),
 	}); code != 0 {
 		detail := strings.TrimSpace(stderr.String())
 		if detail == "" {

@@ -9,11 +9,12 @@
 #   PATH     — must include gc and bd binaries
 
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 cd "$GC_CITY"
 
 while true; do
     # Check inbox for dispatch requests
-    inbox=$(gc mail inbox "$GC_AGENT" 2>/dev/null || true)
+    inbox=$("$GC_BIN" mail inbox "$GC_AGENT" 2>/dev/null || true)
 
     if echo "$inbox" | grep -q "^gc-"; then
         # Process each message
@@ -21,7 +22,7 @@ while true; do
             msg_id=$(echo "$line" | awk '{print $1}')
 
             # Read the dispatch request
-            msg=$(gc mail read "$msg_id" 2>/dev/null || true)
+            msg=$("$GC_BIN" mail read "$msg_id" 2>/dev/null || true)
             body=$(echo "$msg" | grep "^Body:" | sed 's/^Body:   //')
 
             # Create a work bead based on the message

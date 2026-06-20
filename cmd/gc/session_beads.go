@@ -22,7 +22,7 @@ import (
 )
 
 // sessionBeadLabel is the label for all session beads.
-const sessionBeadLabel = "gc:session"
+var sessionBeadLabel = prog() + ":session"
 
 // sessionBeadType is the bead type for session beads.
 const sessionBeadType = "session"

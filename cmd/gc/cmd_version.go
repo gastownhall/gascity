@@ -89,10 +89,10 @@ func newVersionCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "version",
-		Short: "Print gc version",
-		Long: `Print the gc version string.
+		Short: fmt.Sprintf("Print %s version", prog()),
+		Long: fmt.Sprintf(`Print the %s version string.
 
-Use --long to include git commit and build date metadata.`,
+Use --long to include git commit and build date metadata.`, prog()),
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if jsonOut {

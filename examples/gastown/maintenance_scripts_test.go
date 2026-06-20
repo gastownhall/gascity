@@ -3475,6 +3475,57 @@ exit 0
 	}
 }
 
+func TestReaperSkipsDependencyQueriesWithoutSplitDependencyTargets(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":          doltLog,
+		"DOLT_DBS":               "beads",
+		"DOLT_DEPENDENCY_SCHEMA": "legacy",
+		"GC_CALL_LOG":            gcLog,
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_DOLT_HOST":           "127.0.0.1",
+		"GC_DOLT_PORT":           "3307",
+		"GC_DOLT_USER":           "root",
+		"GC_DOLT_PASSWORD":       "",
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "SHOW COLUMNS FROM `beads`.dependencies") {
+		t.Fatalf("reaper did not probe dependency target columns:\n%s", log)
+	}
+	if strings.Contains(log, "FROM `beads`.dependencies d") || strings.Contains(log, "JOIN `beads`.dependencies d") {
+		t.Fatalf("reaper ran dependency-aware queries against legacy dependency schema:\n%s", log)
+	}
+
+	// A silently-skipped DB may make no gc calls at all, so a missing
+	// gc log is a valid no-escalation outcome.
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "dependencies table lacks split target columns") {
+		t.Errorf("reaper escalated the legacy dependency schema as an anomaly; the split-target gate must skip silently:\n%s", gcData)
+	}
+}
+
 func TestReaperPrunesClosedSessionBeadsWithBdPrune(t *testing.T) {
 	cityDir := t.TempDir()
 	if resolved, err := filepath.EvalSymlinks(cityDir); err == nil {
@@ -4324,6 +4375,9 @@ exit 0
 	}
 	if !strings.Contains(log, "d.depends_on_wisp_id = parent_wisp.id") || !strings.Contains(log, "d.depends_on_issue_id = parent_issue.id") {
 		t.Fatalf("reaper stale-wisp close path does not use typed dependency target columns:\n%s", log)
+	}
+	if !strings.Contains(log, "d.depends_on_wisp_id = parent_wisp.id") || !strings.Contains(log, "d.depends_on_issue_id = parent_issue.id") {
+		t.Fatalf("reaper stale-wisp close path does not use split dependency target columns:\n%s", log)
 	}
 	if strings.Contains(log, "parent_wisp.id IS NULL AND parent_issue.id IS NULL") {
 		t.Fatalf("reaper closes stale wisps when parent liveness is unresolved:\n%s", log)
@@ -6676,6 +6730,10 @@ case "$*" in
     printf 'depends_on_issue_id,varchar,YES,,,\n'
     printf 'depends_on_wisp_id,varchar,YES,,,\n'
     printf 'depends_on_external,varchar,YES,,,\n'
+    printf 'type,varchar,NO,,,\n'
+  elif [ "$dependency_schema" = "legacy" ]; then
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_id,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
   else
     printf 'issue_id,varchar,NO,,,\n'

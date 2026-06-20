@@ -27,6 +27,23 @@ func New(workDir string) *Git {
 	return &Git{workDir: workDir}
 }
 
+// InsideWorkTree reports whether dir (or any of its ancestors) contains a
+// .git entry, indicating a git working tree. Uses fast os.Stat calls only —
+// no subprocess is spawned. Callers that want to skip git operations for
+// non-repo directories should prefer this over IsRepo.
+func InsideWorkTree(dir string) bool {
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
+}
+
 // IsRepo reports whether workDir is inside a git repository.
 func (g *Git) IsRepo() bool {
 	return g.IsRepoCtx(context.Background())

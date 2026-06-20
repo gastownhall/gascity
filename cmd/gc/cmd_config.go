@@ -93,25 +93,25 @@ config element. Use -f to layer additional config files.`,
 func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("config show")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc config show: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("config show")+": fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	cfg, prov, err := loadConfigCommandCityConfig(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("config show")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	compositionWarnings := append([]string(nil), prov.Warnings...)
 	if !asJSON {
 		for _, w := range compositionWarnings {
-			fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("config show")+": warning: %s\n", w) //nolint:errcheck // best-effort stderr
 		}
 	}
 
@@ -142,11 +142,11 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 			return 0
 		}
 		for _, w := range validationWarnings {
-			fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("config show")+": warning: %s\n", w) //nolint:errcheck // best-effort stderr
 		}
 		if len(validationErrors) > 0 {
 			for _, e := range validationErrors {
-				fmt.Fprintf(stderr, "gc config show: %s\n", e) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, cmdName("config show")+": %s\n", e) //nolint:errcheck // best-effort stderr
 			}
 			return 1
 		}
@@ -164,10 +164,10 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 
 	// Print validation warnings even in show mode.
 	for _, w := range validationWarnings {
-		fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("config show")+": warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
 	for _, e := range validationErrors {
-		fmt.Fprintf(stderr, "gc config show: warning: %s\n", e) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("config show")+": warning: %s\n", e) //nolint:errcheck // best-effort stderr
 	}
 
 	if showProvenance {
@@ -177,7 +177,7 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 
 	data, err := configForDisplay(cfg).Marshal()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("config show")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	// Emit provider inheritance chain annotations as a comment block
@@ -325,7 +325,7 @@ Use --json to emit machine-readable output (providers only).`,
 				return nil
 			}
 			if asJSON {
-				fmt.Fprintln(stderr, "gc config explain: --json is only supported with --provider") //nolint:errcheck
+				fmt.Fprintln(stderr, cmdName("config explain")+": --json is only supported with --provider") //nolint:errcheck
 				return errExit
 			}
 			if doConfigExplain(rigFilter, agentFilter, stdout, stderr) != 0 {
@@ -506,18 +506,18 @@ func collectLegacyGraphAssigneeErrors(
 func doConfigExplain(rigFilter, agentFilter string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("config explain")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc config explain: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("config explain")+": fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	cfg, prov, err := loadConfigCommandCityConfig(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("config explain")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -535,9 +535,9 @@ func doConfigExplain(rigFilter, agentFilter string, stdout, stderr io.Writer) in
 
 	if len(agents) == 0 {
 		if rigFilter != "" || agentFilter != "" {
-			fmt.Fprintf(stderr, "gc config explain: no agents match filters (rig=%q agent=%q)\n", rigFilter, agentFilter) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("config explain")+": no agents match filters (rig=%q agent=%q)\n", rigFilter, agentFilter) //nolint:errcheck // best-effort stderr
 		} else {
-			fmt.Fprintf(stderr, "gc config explain: no agents configured\n") //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: no agents configured\n", cmdName("config explain")) //nolint:errcheck // best-effort stderr
 		}
 		return 1
 	}
@@ -628,29 +628,29 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 func doConfigExplainProvider(providerName string, asJSON bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("config explain")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 
 	if quickCfg, qErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); qErr == nil && len(quickCfg.Packs) > 0 {
 		if fErr := config.FetchPacks(quickCfg.Packs, cityPath); fErr != nil {
-			fmt.Fprintf(stderr, "gc config explain: fetching packs: %v\n", fErr) //nolint:errcheck
+			fmt.Fprintf(stderr, cmdName("config explain")+": fetching packs: %v\n", fErr) //nolint:errcheck
 			return 1
 		}
 	}
 
 	cfg, _, err := loadConfigCommandCityConfig(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("config explain")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 
 	resolved, ok := config.ResolvedProviderCached(cfg, providerName)
 	if !ok {
 		if _, isBuiltin := config.BuiltinProviders()[providerName]; isBuiltin {
-			fmt.Fprintf(stderr, "gc config explain: %q is a built-in provider; --provider only resolves custom entries\n", providerName) //nolint:errcheck
+			fmt.Fprintf(stderr, cmdName("config explain")+": %q is a built-in provider; --provider only resolves custom entries\n", providerName) //nolint:errcheck
 		} else {
-			fmt.Fprintf(stderr, "gc config explain: no provider %q in resolved config\n", providerName) //nolint:errcheck
+			fmt.Fprintf(stderr, cmdName("config explain")+": no provider %q in resolved config\n", providerName) //nolint:errcheck
 		}
 		return 1
 	}

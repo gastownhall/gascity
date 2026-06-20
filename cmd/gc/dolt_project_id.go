@@ -85,12 +85,12 @@ func newEnsureProjectIDCmd(stdout, stderr io.Writer) *cobra.Command {
 			defer closeRecorder()
 			report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, database, cityPath, rec)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state ensure-project-id: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state ensure-project-id", err)
 				return errExit
 			}
 			for _, line := range managedDoltProjectIDFields(report) {
 				if _, writeErr := fmt.Fprintln(stdout, line); writeErr != nil {
-					fmt.Fprintf(stderr, "gc dolt-state ensure-project-id: %v\n", writeErr) //nolint:errcheck
+					cmdErr(stderr, "dolt-state ensure-project-id", writeErr)
 					return errExit
 				}
 			}
@@ -117,7 +117,7 @@ func ensureManagedDoltProjectID(metadataPath, port string) (managedDoltProjectID
 func openProjectIdentityEventRecorder(cityPath string, stderr io.Writer) (events.Recorder, func()) {
 	rec, err := events.NewFileRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc dolt-state ensure-project-id: events recorder unavailable: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("dolt-state ensure-project-id")+": events recorder unavailable: %v\n", err) //nolint:errcheck
 		return events.Discard, func() {}
 	}
 	return rec, func() {
@@ -406,7 +406,7 @@ func emitProjectIdentityStampedEvent(rec events.Recorder, cityPath, scopeRoot, s
 	}
 	rec.Record(events.Event{
 		Type:    events.ProjectIdentityStamped,
-		Actor:   "gc dolt-state ensure-project-id",
+		Actor:   cmdName("dolt-state ensure-project-id"),
 		Subject: payload.ScopeRoot,
 		Payload: data,
 	})

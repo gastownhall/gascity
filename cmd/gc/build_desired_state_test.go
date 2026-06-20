@@ -130,6 +130,7 @@ type demandListCountingStore struct {
 	liveInProgressIssueLists int
 	liveInProgressWispLists  int
 	liveOpenMolecules        int
+	livePoolDemand           int
 	fullPrimeLists           int
 }
 
@@ -147,6 +148,9 @@ func (s *demandListCountingStore) List(query beads.ListQuery) ([]beads.Bead, err
 	}
 	if query.Live && query.Status == "open" && query.Type == "molecule" {
 		s.liveOpenMolecules++
+	}
+	if query.Live && query.Status == "open" && query.Metadata[poolDemandMetadataKey] == poolDemandMetadataValue {
+		s.livePoolDemand++
 	}
 	return s.Store.List(query)
 }
@@ -1153,6 +1157,11 @@ func TestDefaultScaleCheckCountsExcludesBeadsAssignedToSession(t *testing.T) {
 		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (session-identity assignee is Path 1's territory; counting here would double-count)", template, got)
 	}
 }
+
+// TestDefaultScaleCheckCountsExcludesBeadsAssignedToSession pins the
+// invariant that beads with assignee==<session-id> (Path 1 territory) are
+// NOT counted by defaultScaleCheckCounts, to avoid double-counting when
+// collectAssignedWorkBeadsWithStores has already counted them.
 
 func TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers(t *testing.T) {
 	backing := &demandListCountingStore{Store: beads.NewMemStore()}

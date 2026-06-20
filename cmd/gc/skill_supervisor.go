@@ -46,9 +46,9 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 		if result.Err != nil {
 			if stderr != nil {
 				if rigName == "" {
-					fmt.Fprintf(stderr, "gc: stage-1 materialize-skills: load shared skill catalog for city scope: %v\n", result.Err) //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, prog()+": stage-1 materialize-skills: load shared skill catalog for city scope: %v\n", result.Err) //nolint:errcheck // best-effort stderr
 				} else {
-					fmt.Fprintf(stderr, "gc: stage-1 materialize-skills: load shared skill catalog for rig %q: %v\n", rigName, result.Err) //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, prog()+": stage-1 materialize-skills: load shared skill catalog for rig %q: %v\n", rigName, result.Err) //nolint:errcheck // best-effort stderr
 				}
 			}
 			if result.Mode == sharedCatalogLoadDirect {
@@ -75,7 +75,7 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 
 		agentCat, lerr := materialize.LoadAgentCatalog(agent.SkillsDir)
 		if lerr != nil {
-			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills for agent %q: LoadAgentCatalog %q: %v\n", //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+": stage-1 materialize-skills for agent %q: LoadAgentCatalog %q: %v\n", //nolint:errcheck // best-effort stderr
 				agent.QualifiedName(), agent.SkillsDir, lerr)
 			// Continue with empty agent catalog rather than skipping the
 			// whole materialization — the shared catalog still delivers.
@@ -113,16 +113,16 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 			LegacyNames: materialize.LegacyStubNames(),
 		})
 		if merr != nil {
-			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills for agent %q at %s: %v\n", //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+": stage-1 materialize-skills for agent %q at %s: %v\n", //nolint:errcheck // best-effort stderr
 				agent.QualifiedName(), sinkDir, merr)
 			continue
 		}
 		for _, s := range res.Skipped {
-			fmt.Fprintf(stderr, "gc: agent %q skipped skill %q at %s — %s\n", //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+": agent %q skipped skill %q at %s — %s\n", //nolint:errcheck // best-effort stderr
 				agent.QualifiedName(), s.Name, s.Path, s.Reason)
 		}
 		for _, w := range res.Warnings {
-			fmt.Fprintf(stderr, "gc: agent %q stage-1 materialize warning: %s\n", //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+": agent %q stage-1 materialize warning: %s\n", //nolint:errcheck // best-effort stderr
 				agent.QualifiedName(), w)
 		}
 	}

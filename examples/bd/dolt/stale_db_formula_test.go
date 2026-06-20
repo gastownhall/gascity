@@ -40,18 +40,18 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`TMP_DIR=$(mktemp -d`,
 		`trap cleanup EXIT`,
 		`drain_ack_once()`,
-		`gc dolt-cleanup --json --probe > "$SCAN_FILE"`,
-		`gc dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"`,
+		`{{binary}} dolt-cleanup --json --probe > "$SCAN_FILE"`,
+		`{{binary}} dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"`,
 		`jq -r '.dropped.count // 0'`,
 		`jq -r '[.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length'`,
 		`jq -r '[.force_blockers[]?] | length'`,
 		`jq -r '.reaped.targets | length'`,
-		`gc event emit mol-dog-stale-db.scan`,
-		`gc event emit mol-dog-stale-db.drop`,
-		`gc event emit mol-dog-stale-db.purge`,
-		`gc event emit mol-dog-stale-db.reap`,
-		`gc event emit mol-dog-stale-db.done`,
-		`gc event emit mol-dog-stale-db.escalate`,
+		`{{binary}} event emit mol-dog-stale-db.scan`,
+		`{{binary}} event emit mol-dog-stale-db.drop`,
+		`{{binary}} event emit mol-dog-stale-db.purge`,
+		`{{binary}} event emit mol-dog-stale-db.reap`,
+		`{{binary}} event emit mol-dog-stale-db.done`,
+		`{{binary}} event emit mol-dog-stale-db.escalate`,
 		`if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then`,
 		`leaving work bead open`,
 		`maintenance_notice "MAINTENANCE_WARN: $ORPHAN_TOTAL Dolt orphan(s) seen this scan`,
@@ -943,12 +943,15 @@ func renderStaleDBFormulaShell(t *testing.T) string {
 		t.Fatalf("len(Steps) = %d, want 1", len(f.Steps))
 	}
 
-	vars := make(map[string]string, len(f.Vars))
+	vars := make(map[string]string, len(f.Vars)+1)
 	for name, def := range f.Vars {
 		if def.Default != nil {
 			vars[name] = *def.Default
 		}
 	}
+	// {{binary}} is a built-in variable registered at runtime, not declared
+	// in the formula's [vars] section. Supply it here for rendering.
+	vars["binary"] = "gc"
 	rendered := formula.Substitute(f.Steps[0].Description, vars)
 	if residual := formula.CheckResidualVars(rendered); len(residual) != 0 {
 		t.Fatalf("rendered formula has residual vars: %v", residual)

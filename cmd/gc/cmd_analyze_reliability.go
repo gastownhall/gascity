@@ -57,7 +57,7 @@ Read-only: this command never writes events or beads.`,
 				if errors.Is(err, errExit) {
 					return err
 				}
-				fmt.Fprintf(stderr, "gc analyze reliability: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("analyze reliability")+": %v\n", err) //nolint:errcheck
 				return errExit
 			}
 			return nil

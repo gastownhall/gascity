@@ -91,6 +91,7 @@ mol-polecat-report
 mol-prompt-synth
 mol-review-quorum
 mol-scoped-work
+mol-shutdown-dance
 pancakes
 ```
 
@@ -624,5 +625,5 @@ set.
   top-level key, every step field, and the v2 runtime constructs
 - **[Beads](/tutorials/06-beads)** — the universal work primitive underneath
   formulas, sessions, and everything else
-- **[Orders](/tutorials/07-orders)** — formulas with scheduling triggers for
+- **[Orders](./07-orders.md)** — formulas with scheduling triggers for
   periodic dispatch

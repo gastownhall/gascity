@@ -145,8 +145,8 @@ func newEventsCmd(stdout, stderr io.Writer) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "events",
-		Short: "Show events from the GC API",
-		Long: `Show events from the GC API with optional filtering.
+		Short: fmt.Sprintf("Show events from the %s API", prog()),
+		Long: fmt.Sprintf(`Show events from the %s API with optional filtering.
 
 The API is the source of truth for both city-scoped and supervisor-scoped
 events. In a city directory (or with --city), this command reflects the
@@ -154,17 +154,17 @@ city's /v0/city/{cityName}/events and /stream endpoints. Without a city in
 scope, it reflects the supervisor's /v0/events and /stream endpoints.
 
 List, watch, and follow output are always JSON Lines. Each line is one API
-DTO or SSE envelope.`,
-		Example: `  gc events
-  gc events --type bead.created --since 1h
-  gc events --watch --type convoy.closed --timeout 5m
-  gc events --follow
-  gc events --seq
-  gc events --follow --after-cursor city-a:12,city-b:9`,
+DTO or SSE envelope.`, prog()),
+		Example: fmt.Sprintf(`  %[1]s events
+  %[1]s events --type bead.created --since 1h
+  %[1]s events --watch --type convoy.closed --timeout 5m
+  %[1]s events --follow
+  %[1]s events --seq
+  %[1]s events --follow --after-cursor city-a:12,city-b:9`, prog()),
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if afterFlag > 0 && strings.TrimSpace(afterCursor) != "" {
-				fmt.Fprintln(stderr, "gc events: --after and --after-cursor are mutually exclusive") //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: --after and --after-cursor are mutually exclusive\n", cmdName("events")) //nolint:errcheck
 				return errExit
 			}
 			if seqFlag {
@@ -191,7 +191,7 @@ DTO or SSE envelope.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&apiURL, "api", "", "GC API server URL override (auto-discovered by default)")
+	cmd.Flags().StringVar(&apiURL, "api", "", fmt.Sprintf("%s API server URL override (auto-discovered by default)", prog()))
 	cmd.Flags().StringVar(&typeFilter, "type", "", "Filter by event type (e.g. bead.created)")
 	cmd.Flags().StringVar(&sinceFlag, "since", "", "Show events since duration ago (e.g. 1h, 30m)")
 	cmd.Flags().BoolVar(&watchFlag, "watch", false, "Block until matching events arrive (exits after first match or buffered replay)")
@@ -234,12 +234,12 @@ Output is one JSON line. Empty active logs are successful no-ops.`,
 
 func cmdEvents(apiURLOverride, typeFilter, sinceFlag string, payloadMatchArgs []string, stdout, stderr io.Writer) int {
 	if err := validateEventsSince(sinceFlag); err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1
 	}
 	pm, err := parsePayloadMatch(payloadMatchArgs)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1
 	}
 	scope, code := openEventsScope(apiURLOverride, stderr)
@@ -260,7 +260,7 @@ func cmdEventsSeq(apiURLOverride string, stdout, stderr io.Writer) int {
 func cmdEventsFollow(apiURLOverride, typeFilter string, payloadMatchArgs []string, afterSeq uint64, afterCursor string, stdout, stderr io.Writer) int {
 	pm, err := parsePayloadMatch(payloadMatchArgs)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1
 	}
 	scope, code := openEventsScope(apiURLOverride, stderr)
@@ -268,7 +268,7 @@ func cmdEventsFollow(apiURLOverride, typeFilter string, payloadMatchArgs []strin
 		return code
 	}
 	if err := validateEventsCursor(scope, afterSeq, afterCursor); err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1
 	}
 	return doEventsFollow(scope, typeFilter, pm, afterSeq, afterCursor, stdout, stderr)
@@ -277,12 +277,12 @@ func cmdEventsFollow(apiURLOverride, typeFilter string, payloadMatchArgs []strin
 func cmdEventsWatch(apiURLOverride, typeFilter string, payloadMatchArgs []string, afterSeq uint64, afterCursor, timeoutFlag string, stdout, stderr io.Writer) int {
 	timeout, err := time.ParseDuration(timeoutFlag)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: invalid --timeout %q: %v\n", timeoutFlag, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: invalid --timeout %q: %v\n", cmdName("events"), timeoutFlag, err) //nolint:errcheck
 		return 1
 	}
 	pm, err := parsePayloadMatch(payloadMatchArgs)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1
 	}
 	scope, code := openEventsScope(apiURLOverride, stderr)
@@ -290,7 +290,7 @@ func cmdEventsWatch(apiURLOverride, typeFilter string, payloadMatchArgs []string
 		return code
 	}
 	if err := validateEventsCursor(scope, afterSeq, afterCursor); err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1
 	}
 	return doEventsWatch(scope, typeFilter, pm, afterSeq, afterCursor, timeout, stdout, stderr)
@@ -299,7 +299,7 @@ func cmdEventsWatch(apiURLOverride, typeFilter string, payloadMatchArgs []string
 func cmdEventsRotate(apiURLOverride string, wait bool, stdout, stderr io.Writer) int {
 	scope, err := resolveEventsScope(apiURLOverride)
 	if err != nil {
-		fmt.Fprintln(stderr, "gc events: rotate requires a running supervisor; start it with 'gc supervisor start'") //nolint:errcheck
+		fmt.Fprintln(stderr, cmdName("events")+": rotate requires a running supervisor; start it with 'gc supervisor start'") //nolint:errcheck
 		return 1
 	}
 	return doEventsRotate(scope, wait, stdout, stderr)
@@ -308,7 +308,7 @@ func cmdEventsRotate(apiURLOverride string, wait bool, stdout, stderr io.Writer)
 func openEventsScope(apiURLOverride string, stderr io.Writer) (eventsAPIScope, int) {
 	scope, err := resolveEventsScope(apiURLOverride)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return eventsAPIScope{}, 1
 	}
 	return scope, 0
@@ -359,7 +359,7 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 	if cityPath == "" {
 		return eventsAPIScope{}, fmt.Errorf(
 			"could not auto-discover the supervisor API; start the supervisor with %q or pass --api explicitly",
-			"gc supervisor start",
+			cmdName("supervisor start"),
 		)
 	}
 	// Standalone-controller mode: the controller's API now serves
@@ -383,7 +383,7 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 	return eventsAPIScope{}, fmt.Errorf(
 		"could not auto-discover the supervisor API for %q; start the supervisor with %q or pass --api explicitly",
 		cityPath,
-		"gc supervisor start",
+		cmdName("supervisor start"),
 	)
 }
 
@@ -491,7 +491,7 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 	if scope.localOnly {
 		fallback, _, fallbackErr := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), typeFilter, sinceFlag, stderr)
 		if fallbackErr != nil {
-			fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
+			cmdErr(stderr, "events", fallbackErr)
 			return 1
 		}
 		fallback = filterCityEvents(fallback, 0, typeFilter, payloadMatch)
@@ -500,7 +500,7 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 
 	client, err := scope.client()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1
 	}
 
@@ -510,7 +510,7 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 	if scope.isSupervisor() {
 		items, err := fetchSupervisorEvents(ctx, client, typeFilter, sinceFlag)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "events", err)
 			return 1
 		}
 		items = filterSupervisorEvents(items, typeFilter, payloadMatch)
@@ -521,13 +521,13 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 	if err != nil {
 		if fallback, ok, fallbackErr := readLocalCityEvents(scope, err, typeFilter, sinceFlag, stderr); ok {
 			if fallbackErr != nil {
-				fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
+				cmdErr(stderr, "events", fallbackErr)
 				return 1
 			}
 			fallback = filterCityEvents(fallback, 0, typeFilter, payloadMatch)
 			return printJSONLines(fallback, stdout, stderr)
 		}
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1
 	}
 	items = filterCityEvents(items, 0, typeFilter, payloadMatch)
@@ -538,7 +538,7 @@ func doEventsSeq(scope eventsAPIScope, stdout, stderr io.Writer) int {
 	if scope.localOnly {
 		fallback, _, fallbackErr := readLocalCityHeadIndex(scope, stoppedCityLocalFallbackError(scope))
 		if fallbackErr != nil {
-			fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
+			cmdErr(stderr, "events", fallbackErr)
 			return 1
 		}
 		fmt.Fprintln(stdout, fallback) //nolint:errcheck
@@ -547,7 +547,7 @@ func doEventsSeq(scope eventsAPIScope, stdout, stderr io.Writer) int {
 
 	client, err := scope.client()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1
 	}
 
@@ -557,7 +557,7 @@ func doEventsSeq(scope eventsAPIScope, stdout, stderr io.Writer) int {
 	if scope.isSupervisor() {
 		cursor, err := fetchSupervisorHeadCursor(ctx, client)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "events", err)
 			return 1
 		}
 		if cursor == "" {
@@ -571,13 +571,13 @@ func doEventsSeq(scope eventsAPIScope, stdout, stderr io.Writer) int {
 	if err != nil {
 		if fallback, ok, fallbackErr := readLocalCityHeadIndex(scope, err); ok {
 			if fallbackErr != nil {
-				fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
+				cmdErr(stderr, "events", fallbackErr)
 				return 1
 			}
 			fmt.Fprintln(stdout, fallback) //nolint:errcheck
 			return 0
 		}
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, index) //nolint:errcheck
@@ -640,8 +640,11 @@ func shouldUseLocalCityEventsFallback(scope eventsAPIScope, apiErr error) bool {
 func printStreamingCityAPIRequirement(mode string, stderr io.Writer) {
 	_, _ = fmt.Fprintf(
 		stderr,
-		"gc events: %s requires a running city API; local fallback only supports `gc events` and `gc events --seq` when the city is stopped\n",
+		"%s: %s requires a running city API; local fallback only supports `%s events` and `%s events --seq` when the city is stopped\n",
+		cmdName("events"),
 		mode,
+		prog(),
+		prog(),
 	)
 }
 
@@ -654,7 +657,7 @@ func requireStreamingCityAPI(ctx context.Context, client *genclient.ClientWithRe
 		printStreamingCityAPIRequirement(mode, stderr)
 		return "", false
 	}
-	fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+	cmdErr(stderr, "events", err)
 	return "", false
 }
 
@@ -664,7 +667,7 @@ func requireStreamingCityEventsReachable(ctx context.Context, client *genclient.
 			printStreamingCityAPIRequirement(mode, stderr)
 			return false
 		}
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return false
 	}
 	return true
@@ -743,7 +746,7 @@ func doEventsFollow(scope eventsAPIScope, typeFilter string, payloadMatch map[st
 
 	client, err := scope.client()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1
 	}
 
@@ -753,7 +756,7 @@ func doEventsFollow(scope eventsAPIScope, typeFilter string, payloadMatch map[st
 		if cursor == "" {
 			cursor, err = fetchSupervisorHeadCursor(ctx, client)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "events", err)
 				return 1
 			}
 		}
@@ -768,7 +771,7 @@ func doEventsFollow(scope eventsAPIScope, typeFilter string, payloadMatch map[st
 		}
 		resumeSeq, err = strconv.ParseUint(head, 10, 64)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc events: invalid X-GC-Index %q\n", head) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: invalid X-GC-Index %q\n", cmdName("events"), head) //nolint:errcheck
 			return 1
 		}
 	} else if !requireStreamingCityEventsReachable(ctx, client, scope, "--follow", stderr) {
@@ -785,7 +788,7 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 
 	client, err := scope.client()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1
 	}
 
@@ -797,7 +800,7 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 		if cursor != "" {
 			items, err := fetchSupervisorEvents(ctx, client, "", "")
 			if err != nil {
-				fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "events", err)
 				return 1
 			}
 			matches := filterSupervisorEventsAfterCursor(items, cursor, typeFilter, payloadMatch)
@@ -807,7 +810,7 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 		} else {
 			cursor, err = fetchSupervisorHeadCursor(ctx, client)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "events", err)
 				return 1
 			}
 		}
@@ -822,7 +825,7 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 				printStreamingCityAPIRequirement("--watch", stderr)
 				return 1
 			}
-			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "events", err)
 			return 1
 		}
 		matches := filterCityEvents(items, resumeSeq, typeFilter, payloadMatch)
@@ -836,7 +839,7 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 		}
 		resumeSeq, err = strconv.ParseUint(head, 10, 64)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc events: invalid X-GC-Index %q\n", head) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: invalid X-GC-Index %q\n", cmdName("events"), head) //nolint:errcheck
 			return 1
 		}
 	}
@@ -850,13 +853,13 @@ func doEventsRotate(scope eventsAPIScope, wait bool, stdout, stderr io.Writer) i
 		return 1
 	}
 	if scope.isSupervisor() {
-		fmt.Fprintln(stderr, "gc events: rotate requires a city in scope; run from a city directory or pass --city") //nolint:errcheck
+		fmt.Fprintln(stderr, cmdName("events")+": rotate requires a city in scope; run from a city directory or pass --city") //nolint:errcheck
 		return 1
 	}
 
 	client, err := scope.client()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("events")+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 
@@ -871,7 +874,7 @@ func doEventsRotate(scope eventsAPIScope, wait bool, stdout, stderr io.Writer) i
 	if wait && resp.Rotated && resp.Archive != nil && resp.Archive.CompressionStatus != "complete" {
 		_, _ = fmt.Fprintf(
 			stderr,
-			"gc events: rotation succeeded but compression did not complete within 30s; archive_path=%s; check disk space and retry\n",
+			cmdName("events")+": rotation succeeded but compression did not complete within 30s; archive_path=%s; check disk space and retry\n",
 			resp.Archive.Path,
 		)
 		return 1
@@ -920,17 +923,17 @@ func printEventsRotateError(scope eventsAPIScope, err error, stderr io.Writer) {
 	if errors.As(err, &apiErr) {
 		msg := strings.TrimSpace(apiErr.Error())
 		if apiErr.statusCode == http.StatusNotFound && gcapi.IsCityNotFoundOrNotRunningDetail(apiErr.detail) {
-			fmt.Fprintf(stderr, "gc events: city '%s' not found; run 'gc supervisor cities' to list registered cities\n", scope.cityName) //nolint:errcheck
+			fmt.Fprintf(stderr, cmdName("events")+": city '%s' not found; run 'gc supervisor cities' to list registered cities\n", scope.cityName) //nolint:errcheck
 			return
 		}
 		if apiErr.statusCode == http.StatusMethodNotAllowed && strings.HasPrefix(msg, "rotation is only supported") {
 			msg = "rotate" + strings.TrimPrefix(msg, "rotation")
 		}
-		fmt.Fprintf(stderr, "gc events: %s\n", msg) //nolint:errcheck
+		fmt.Fprintf(stderr, cmdName("events")+": %s\n", msg) //nolint:errcheck
 		return
 	}
 
-	fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+	fmt.Fprintf(stderr, cmdName("events")+": %v\n", err) //nolint:errcheck
 }
 
 func isEventsRotateSupervisorRequired(err error) bool {
@@ -939,7 +942,7 @@ func isEventsRotateSupervisorRequired(err error) bool {
 }
 
 func printEventsRotateSupervisorRequired(stderr io.Writer) {
-	fmt.Fprintln(stderr, "gc events: rotate requires a running supervisor; start it with 'gc supervisor start'") //nolint:errcheck
+	fmt.Fprintln(stderr, cmdName("events")+": rotate requires a running supervisor; start it with 'gc supervisor start'") //nolint:errcheck
 }
 
 func probeCityEventsReachable(ctx context.Context, client *genclient.ClientWithResponses, cityName string) error {
@@ -1101,34 +1104,34 @@ func printJSONLines(items any, stdout, stderr io.Writer) int {
 	case []cliWireEvent:
 		for _, item := range typed {
 			if err := writeJSONLValue(stdout, item); err != nil {
-				fmt.Fprintf(stderr, "gc events: marshal: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "events: marshal", err)
 				return 1
 			}
 		}
 	case []cliWireTaggedEvent:
 		for _, item := range typed {
 			if err := writeJSONLValue(stdout, item); err != nil {
-				fmt.Fprintf(stderr, "gc events: marshal: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "events: marshal", err)
 				return 1
 			}
 		}
 	case []genclient.EventStreamEnvelope:
 		for _, item := range typed {
 			if err := writeJSONLValue(stdout, item); err != nil {
-				fmt.Fprintf(stderr, "gc events: marshal: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "events: marshal", err)
 				return 1
 			}
 		}
 	case []genclient.TaggedEventStreamEnvelope:
 		for _, item := range typed {
 			if err := writeJSONLValue(stdout, item); err != nil {
-				fmt.Fprintf(stderr, "gc events: marshal: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "events: marshal", err)
 				return 1
 			}
 		}
 	default:
 		if err := writeJSONLValue(stdout, typed); err != nil {
-			fmt.Fprintf(stderr, "gc events: marshal: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "events: marshal", err)
 			return 1
 		}
 	}
@@ -1264,10 +1267,10 @@ func streamCityEventsOnce(ctx context.Context, client *genclient.ClientWithRespo
 		// rather than exiting status=1. --watch is bounded by its own
 		// timeout so stopAfterMatch=true still exits on setup failure.
 		if !stopAfterMatch {
-			fmt.Fprintf(stderr, "gc events: connect failed, retrying: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "events: connect failed, retrying", err)
 			return 0, afterSeq, true
 		}
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1, afterSeq, false
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -1285,13 +1288,13 @@ func streamCityEventsOnce(ctx context.Context, client *genclient.ClientWithRespo
 			}
 			if errors.Is(err, io.EOF) {
 				if stopAfterMatch {
-					fmt.Fprintln(stderr, "gc events: stream ended before a matching event arrived") //nolint:errcheck
+					fmt.Fprintf(stderr, "%s: stream ended before a matching event arrived\n", cmdName("events")) //nolint:errcheck
 					return 1, lastSeq, false
 				}
 				// Follow mode: reconnect with lastSeq.
 				return 0, lastSeq, true
 			}
-			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "events", err)
 			return 1, lastSeq, false
 		}
 		if frame.Event == "heartbeat" || strings.TrimSpace(frame.Data) == "" {
@@ -1303,7 +1306,7 @@ func streamCityEventsOnce(ctx context.Context, client *genclient.ClientWithRespo
 
 		var envelope genclient.EventStreamEnvelope
 		if err := json.Unmarshal([]byte(frame.Data), &envelope); err != nil {
-			fmt.Fprintf(stderr, "gc events: decode: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "events: decode", err)
 			return 1, lastSeq, false
 		}
 		if envelope.Seq > 0 && uint64(envelope.Seq) > lastSeq {
@@ -1316,7 +1319,7 @@ func streamCityEventsOnce(ctx context.Context, client *genclient.ClientWithRespo
 			continue
 		}
 		if err := writeJSONLValue(stdout, envelope); err != nil {
-			fmt.Fprintf(stderr, "gc events: marshal: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "events: marshal", err)
 			return 1, lastSeq, false
 		}
 		if stopAfterMatch {
@@ -1362,10 +1365,10 @@ func streamSupervisorEventsOnce(ctx context.Context, client *genclient.ClientWit
 		// outer backoff. --watch (stopAfterMatch=true) is bounded by
 		// its own timeout and still exits on setup failure.
 		if !stopAfterMatch {
-			fmt.Fprintf(stderr, "gc events: connect failed, retrying: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "events: connect failed, retrying", err)
 			return 0, afterCursor, true
 		}
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "events", err)
 		return 1, afterCursor, false
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -1384,12 +1387,12 @@ func streamSupervisorEventsOnce(ctx context.Context, client *genclient.ClientWit
 			}
 			if errors.Is(err, io.EOF) {
 				if stopAfterMatch {
-					fmt.Fprintln(stderr, "gc events: stream ended before a matching event arrived") //nolint:errcheck
+					fmt.Fprintf(stderr, "%s: stream ended before a matching event arrived\n", cmdName("events")) //nolint:errcheck
 					return 1, lastCursor, false
 				}
 				return 0, lastCursor, true
 			}
-			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "events", err)
 			return 1, lastCursor, false
 		}
 		if frame.Event == "heartbeat" || strings.TrimSpace(frame.Data) == "" {
@@ -1406,7 +1409,7 @@ func streamSupervisorEventsOnce(ctx context.Context, client *genclient.ClientWit
 
 		var envelope genclient.TaggedEventStreamEnvelope
 		if err := json.Unmarshal([]byte(frame.Data), &envelope); err != nil {
-			fmt.Fprintf(stderr, "gc events: decode: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "events: decode", err)
 			return 1, lastCursor, false
 		}
 		// Track per-city seq in the composite cursor so reconnects resume
@@ -1427,7 +1430,7 @@ func streamSupervisorEventsOnce(ctx context.Context, client *genclient.ClientWit
 			continue
 		}
 		if err := writeJSONLValue(stdout, envelope); err != nil {
-			fmt.Fprintf(stderr, "gc events: marshal: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "events: marshal", err)
 			return 1, lastCursor, false
 		}
 		if stopAfterMatch {
@@ -1440,14 +1443,14 @@ func printStreamError(resp *http.Response, stderr io.Writer) int {
 	defer resp.Body.Close() //nolint:errcheck
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: HTTP %d\n", resp.StatusCode) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: HTTP %d\n", cmdName("events"), resp.StatusCode) //nolint:errcheck
 		return 1
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "json") {
 		var problem genclient.ErrorModel
 		if err := json.Unmarshal(body, &problem); err == nil {
 			if problem.Detail != nil && strings.TrimSpace(*problem.Detail) != "" {
-				fmt.Fprintf(stderr, "gc events: %s\n", strings.TrimSpace(*problem.Detail)) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: %s\n", cmdName("events"), strings.TrimSpace(*problem.Detail)) //nolint:errcheck
 				return 1
 			}
 		}
@@ -1456,7 +1459,7 @@ func printStreamError(resp *http.Response, stderr io.Writer) int {
 	if msg == "" {
 		msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
 	}
-	fmt.Fprintf(stderr, "gc events: %s\n", msg) //nolint:errcheck
+	fmt.Fprintf(stderr, "%s: %s\n", cmdName("events"), msg) //nolint:errcheck
 	return 1
 }
 

@@ -1016,16 +1016,10 @@ func doltliteSortOrder(order SortOrder) SortOrder {
 // merge and post-hydration re-sort compare the truncated CreatedAt, so cutting
 // on raw sub-second precision could select a different same-second prefix than
 // the unbounded merge (#3449 review). The first 19 chars span
-// "YYYY-MM-DD?HH:MM:SS" for every layout parseTimeString accepts, where the 11th
-// char is the date/time separator: RFC3339 stores 'T' (0x54) and
-// time.Time.String() stores ' ' (0x20). Both are valid on-disk layouts, so a raw
-// prefix sorts every space-separated row before every 'T' row that shares a date
-// regardless of the actual time, cutting a different bounded prefix than the Go
-// merge's instant comparison. Normalizing 'T' to ' ' makes the prefix sort by
-// second exactly as the parsed, truncated time does for either layout (#3449
-// post-merge review).
+// "YYYY-MM-DD?HH:MM:SS" for every layout parseTimeString accepts, so the prefix
+// sorts by second exactly as the truncated time does.
 func doltliteCreatedAtSortKey(alias string) string {
-	return "replace(substr(" + alias + ".created_at, 1, 19), 'T', ' ')"
+	return "substr(" + alias + ".created_at, 1, 19)"
 }
 
 // doltliteMatchingIssuesAntiJoin returns the "i.id NOT IN (SELECT i.id FROM

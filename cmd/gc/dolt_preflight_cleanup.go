@@ -92,7 +92,8 @@ func fileOpenedByAnyProcess(path string) (bool, error) {
 	if checked {
 		return open, nil
 	}
-	if _, err := exec.LookPath("lsof"); err != nil {
+	lsofBin, lsofErr := findLsofBinary()
+	if lsofErr != nil {
 		if procErr != nil {
 			return false, fmt.Errorf("%w: proc probe timed out and lsof unavailable", errManagedDoltOpenStateUnknown)
 		}
@@ -100,7 +101,7 @@ func fileOpenedByAnyProcess(path string) (bool, error) {
 	}
 	lsofCtx, lsofCancel := context.WithTimeout(context.Background(), managedDoltLsofTimeout)
 	defer lsofCancel()
-	cmd := exec.CommandContext(lsofCtx, "lsof", path)
+	cmd := exec.CommandContext(lsofCtx, lsofBin, path)
 	cmd.WaitDelay = 100 * time.Millisecond
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

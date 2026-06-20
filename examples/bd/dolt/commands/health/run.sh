@@ -7,6 +7,7 @@
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_HOST, GC_DOLT_USER,
 #              GC_DOLT_PASSWORD, GC_DOLT_RIG_LIST_TIMEOUT_SECS
 set -e
+GC_BIN="${GC_BIN:-gc}"
 
 : "${GC_DOLT_USER:=root}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
@@ -15,7 +16,7 @@ PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
 
-  if command -v gc >/dev/null 2>&1; then
+  if command -v "$GC_BIN" >/dev/null 2>&1; then
     # Bound the gc rig list call: if gc is itself in a bad state (the
     # failure mode this patrol is meant to detect) we must not block
     # here. Degrade to the fallback rig scan below. The bound (default in

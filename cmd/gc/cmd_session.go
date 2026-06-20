@@ -44,9 +44,9 @@ continuity.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc session: missing subcommand (new, list, attach, submit, suspend, pin, unpin, reset, close, rename, prune, peek, kill, nudge, logs, wake, wait)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: missing subcommand (new, list, attach, submit, suspend, pin, unpin, reset, close, rename, prune, peek, kill, nudge, logs, wake, wait)\n", cmdName("session")) //nolint:errcheck // best-effort stderr
 			} else {
-				fmt.Fprintf(stderr, "gc session: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: unknown subcommand %q\n", cmdName("session"), args[0]) //nolint:errcheck // best-effort stderr
 			}
 			return errExit
 		},
@@ -90,7 +90,7 @@ according to the selected semantic intent.`,
 		RunE: func(_ *cobra.Command, args []string) error {
 			parsedIntent, err := parseSessionSubmitIntent(intent)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, prog()+" session submit"+": %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			if cmdSessionSubmit(args, parsedIntent, jsonOutput, stdout, stderr) != 0 {
@@ -160,12 +160,12 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -173,20 +173,20 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	// not concrete pool member names like worker-2.
 	found, ok := resolveSessionTemplate(cfg, templateName, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintln(stderr, agentNotFoundMsg("gc session new", templateName, cfg)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg(cmdName("session new"), templateName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	// Resolve the provider.
 	resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	sessionTransport := config.ResolveSessionCreateTransport(found.Session, resolved)
 	requestedAlias, err := session.ValidateAlias(alias)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	alias = requestedAlias
@@ -196,19 +196,19 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	cityName := loadedCityName(cfg, cityPath)
 	explicitName, err := sessionExplicitNameForNewSession(cityPath, cityName, cfg.Rigs, &found, alias)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	// Open the bead store.
-	store, code := openCityStore(stderr, "gc session new")
+	store, code := openCityStore(stderr, prog()+" session new")
 	if store == nil {
 		return code
 	}
 
 	sp := newSessionProvider()
 	if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
-		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -221,7 +221,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		sessionQualifiedName,
 	)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -245,7 +245,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	}
 	sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil, sessionTransport)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -276,7 +276,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 				kindMeta,
 			)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
@@ -296,7 +296,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 				kindMeta,
 			)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			var info session.Info
@@ -317,7 +317,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 				return createErr
 			})
 			if err != nil {
-				fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 
@@ -356,12 +356,12 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			// Wait for the reconciler to start the session before attaching.
 			fmt.Fprintln(stdout, "Waiting for session to start...") //nolint:errcheck // best-effort stdout
 			if waitErr := waitForSession(sp, info.SessionName, 30*time.Second, store, info.ID, stderr); waitErr != nil {
-				fmt.Fprintf(stderr, "gc session new: %v\n", waitErr) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, prog()+" session new"+": %v\n", waitErr) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
 			if err := handle.Attach(context.Background()); err != nil {
-				fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, prog()+" session new"+": attaching: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			return 0
@@ -390,7 +390,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		kindMeta,
 	)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
@@ -410,7 +410,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		kindMeta,
 	)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	var info session.Info
@@ -431,7 +431,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		return createErr
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session new"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -466,7 +466,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 
 	fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
 	if err := handle.Attach(context.Background()); err != nil {
-		fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session new"+": attaching: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0
@@ -861,10 +861,10 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	if jsonOutput {
 		storeStderr = io.Discard
 	}
-	store, code := openCityStore(storeStderr, "gc session list")
+	store, code := openCityStore(storeStderr, prog()+" session list")
 	if store == nil {
 		if jsonOutput {
-			return writeJSONError(stdout, stderr, "store_open_failed", "gc session list: opening bead store failed", code)
+			return writeJSONError(stdout, stderr, "store_open_failed", prog()+" session list"+": opening bead store failed", code)
 		}
 		return code
 	}
@@ -894,9 +894,9 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	})
 	if err != nil {
 		if jsonOutput {
-			return writeJSONError(stdout, stderr, "session_list_failed", fmt.Sprintf("gc session list: listing sessions: %v", err), 1)
+			return writeJSONError(stdout, stderr, "session_list_failed", fmt.Sprintf(prog()+" session list"+": listing sessions: %v", err), 1)
 		}
-		fmt.Fprintf(stderr, "gc session list: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session list"+": listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -905,9 +905,9 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	catalog, err := workerSessionCatalogWithConfig("", store, sp, providerCtx.cfg)
 	if err != nil {
 		if jsonOutput {
-			return writeJSONError(stdout, stderr, "session_catalog_failed", fmt.Sprintf("gc session list: %v", err), 1)
+			return writeJSONError(stdout, stderr, "session_catalog_failed", fmt.Sprintf(prog()+" session list"+": %v", err), 1)
 		}
-		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session list"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	listResult := catalog.ListFullFromBeads(allSessionBeads, stateFilter, templateFilter)
@@ -925,7 +925,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 
 	waitRes := <-waitCh
 	if waitRes.err != nil {
-		fmt.Fprintf(stderr, "gc session list: ready wait indicators degraded: %v\n", waitRes.err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session list"+": ready wait indicators degraded: %v\n", waitRes.err) //nolint:errcheck // best-effort stderr
 	}
 	readyWaitSet := waitRes.set
 	cfg := providerCtx.cfg
@@ -1374,48 +1374,48 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session attach"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session attach"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	store, code := openCityStore(stderr, "gc session attach")
+	store, code := openCityStore(stderr, prog()+" session attach")
 	if store == nil {
 		return code
 	}
 
 	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session attach"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	sp := newSessionProvider()
 	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session attach"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	// Get the session to find its template.
 	info, err := catalog.Get(sessionID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session attach"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session attach"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	fmt.Fprintf(stdout, "Attaching to session %s (%s)...\n", sessionID, info.Template) //nolint:errcheck // best-effort stdout
 	if err := handle.Attach(context.Background()); err != nil {
-		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session attach"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0
@@ -1579,7 +1579,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session suspend"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1596,7 +1596,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 				"sleep_intent": "user-hold",
 				"state":        "suspended",
 			}); err != nil {
-				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, prog()+" session suspend"+": %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			// Poke again to trigger immediate reconciler tick.
@@ -1622,12 +1622,12 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	sp := newSessionProvider()
 	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session suspend"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	if err := handle.Stop(context.Background()); err != nil {
-		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session suspend"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1684,14 +1684,14 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session close"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	sp := newSessionProvider()
 	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session close"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	// Capture the session bead state BEFORE close so we have its assignment
@@ -1705,12 +1705,12 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 
 	closeResult, err := handle.CloseDetailed(context.Background())
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session close"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if cityErr == nil {
 		if err := withdrawQueuedWaitNudges(cityPath, closeResult.WaitNudgeIDs); err != nil {
-			fmt.Fprintf(stderr, "gc session close: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+" session close"+": warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}
 
@@ -1765,7 +1765,7 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer, jsonOutput ...boo
 	asJSON := sessionJSONRequested(jsonOutput)
 	title := args[1]
 
-	store, code := openCityStore(stderr, "gc session rename")
+	store, code := openCityStore(stderr, prog()+" session rename")
 	if store == nil {
 		return code
 	}
@@ -1777,18 +1777,18 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer, jsonOutput ...boo
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session rename"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	sp := newSessionProvider()
 	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session rename"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := handle.Rename(context.Background(), title); err != nil {
-		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session rename"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1841,7 +1841,7 @@ func cmdSessionPrune(beforeStr, statesStr string, stdout, stderr io.Writer, json
 	asJSON := sessionJSONRequested(jsonOutput)
 	dur, err := parsePruneDuration(beforeStr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session prune"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1859,19 +1859,19 @@ func cmdSessionPrune(beforeStr, statesStr string, stdout, stderr io.Writer, json
 	sp := newSessionProvider()
 	catalog, err := workerSessionCatalogWithConfig("", store, sp, nil)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session prune"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	cutoff := time.Now().Add(-dur)
 	result, err := catalog.PruneBefore(cutoff, states...)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session prune"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if cityPath, err := resolveCity(); err == nil {
 		if err := withdrawQueuedWaitNudges(cityPath, result.WaitNudgeIDs); err != nil {
-			fmt.Fprintf(stderr, "gc session prune: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+" session prune"+": warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}
 
@@ -2093,20 +2093,20 @@ func doSessionPeekFallback(target string, lines int, jsonOutput bool, stdout, st
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, target)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session peek"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	sp := newSessionProvider()
 	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session peek"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	output, err := handle.Peek(context.Background(), lines)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session peek"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -2184,7 +2184,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session kill"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -2199,7 +2199,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 
 	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session kill"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -2295,7 +2295,7 @@ joined automatically.`,
 		RunE: func(_ *cobra.Command, args []string) error {
 			mode, err := parseNudgeDeliveryMode(delivery)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, prog()+" session nudge"+": %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			if cmdSessionNudge(args, mode, jsonOutput, stdout, stderr) != 0 {
@@ -2338,7 +2338,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session submit"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -2348,31 +2348,31 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 			return emitSessionSubmitResult(stdout, stderr, target, intent, resp.Queued, jsonOutput)
 		}
 		if !api.ShouldFallback(err) {
-			fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+" session submit"+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
 
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session submit"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	store, code := openCityStore(stderr, "gc session submit")
+	store, code := openCityStore(stderr, prog()+" session submit")
 	if store == nil {
 		return code
 	}
 
 	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, target)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session submit"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	sp := newSessionProvider()
 	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session submit"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	outcome, err := handle.Message(context.Background(), worker.MessageRequest{
@@ -2380,7 +2380,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		Delivery: workerDeliveryIntentForSubmitIntent(intent),
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session submit"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return emitSessionSubmitResult(stdout, stderr, target, intent, outcome.Queued, jsonOutput)
@@ -2434,7 +2434,7 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, jsonOutput bool,
 
 	targetInfo, err := resolveNudgeTarget(target)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" session nudge"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return deliverSessionNudge(targetInfo, message, delivery, jsonOutput, stdout, stderr)

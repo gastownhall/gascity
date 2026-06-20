@@ -25,7 +25,7 @@ fallback to direct bd reads.`,
 			if len(args) == 0 {
 				fmt.Fprintln(stderr, "gc beads: missing subcommand (city, health, list, show)") //nolint:errcheck // best-effort stderr
 			} else {
-				fmt.Fprintf(stderr, "gc beads: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, prog()+" beads"+": unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
 			return errExit
 		},
@@ -340,12 +340,12 @@ type beadsHealthJSONResult struct {
 func doBeadsHealth(quiet, jsonOut bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc beads health: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "beads health", err)
 		return 1
 	}
 
 	if err := healthBeadsProvider(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc beads health: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "beads health", err)
 		return 1
 	}
 	if jsonOut {

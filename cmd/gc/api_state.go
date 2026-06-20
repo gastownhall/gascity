@@ -1489,6 +1489,7 @@ func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, er
 			return nil, err
 		}
 	}
+	snapshot.agentTree = agentTree
 
 	return snapshot, nil
 }

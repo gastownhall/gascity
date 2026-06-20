@@ -61,6 +61,14 @@ you don't know how to locate a formula, recipe, bead, mail, or Dolt
 state, the answer is a `gc` / `bd` introspection command, not a
 filesystem search. If no command exists for what you need, file a bead.
 
+**Never use wide filesystem searches when a CLI command exists.** Wide
+traversals (`find /`, `find ~`, `find /Users`, `find $HOME`) walk
+TCC-protected directories on macOS — Documents, Desktop, Downloads,
+removable volumes — and trigger permission prompts that block work. If
+you don't know how to locate a formula, recipe, bead, mail, or Dolt
+state, the answer is a `gc` / `bd` introspection command, not a
+filesystem search. If no command exists for what you need, file a bead.
+
 ## Continuation Group — Session Affinity
 
 `gc hook --claim` handles `gc.continuation_group` for you. After it claims a

@@ -83,23 +83,23 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cityPath == "" {
-				fmt.Fprintln(stderr, "gc dolt-config normalize-scope: missing --city") //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: missing --city\n", cmdName("dolt-config normalize-scope")) //nolint:errcheck
 				return errExit
 			}
 			if scopeDir == "" {
-				fmt.Fprintln(stderr, "gc dolt-config normalize-scope: missing --dir") //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: missing --dir\n", cmdName("dolt-config normalize-scope")) //nolint:errcheck
 				return errExit
 			}
 			if issuePrefix == "" {
-				fmt.Fprintln(stderr, "gc dolt-config normalize-scope: missing --prefix") //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: missing --prefix\n", cmdName("dolt-config normalize-scope")) //nolint:errcheck
 				return errExit
 			}
 			if err := normalizeCanonicalBdScopeFilesForInit(cityPath, scopeDir, issuePrefix, doltDatabase); err != nil {
-				fmt.Fprintf(stderr, "gc dolt-config normalize-scope: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("dolt-config normalize-scope")+": %v\n", err) //nolint:errcheck
 				return errExit
 			}
 			if err := removeScopeLocalDoltServerArtifacts(scopeDir); err != nil {
-				fmt.Fprintf(stderr, "gc dolt-config normalize-scope: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("dolt-config normalize-scope")+": %v\n", err) //nolint:errcheck
 				return errExit
 			}
 			return nil

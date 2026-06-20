@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/progname"
 )
 
 // ImplicitImportCacheCheck verifies that bootstrap-managed implicit imports
@@ -75,13 +76,13 @@ func (c *ImplicitImportCacheCheck) Run(_ *CheckContext) *CheckResult {
 	if errors > 0 {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("%d bootstrap implicit import cache issue(s)", len(issues))
-		r.FixHint = `run "gc doctor --fix" to backfill bootstrap implicit import caches`
+		r.FixHint = fmt.Sprintf("run %q to backfill bootstrap implicit import caches", progname.Get()+" doctor --fix")
 		return r
 	}
 
 	r.Status = StatusWarning
 	r.Message = fmt.Sprintf("%d stale bootstrap implicit cache %s", len(issues), pluralEntry(len(issues)))
-	r.FixHint = `run "gc doctor --fix" to prune stale legacy bootstrap implicit caches`
+	r.FixHint = fmt.Sprintf("run %q to prune stale legacy bootstrap implicit caches", progname.Get()+" doctor --fix")
 	return r
 }
 

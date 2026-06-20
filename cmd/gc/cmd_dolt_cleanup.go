@@ -605,7 +605,7 @@ func emitReport(report CleanupReport, resolution PortResolution, opts cleanupOpt
 	if opts.JSON {
 		data, err := json.Marshal(report)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc dolt-cleanup: marshal report: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, cmdName("dolt-cleanup")+": marshal report: %v\n", err) //nolint:errcheck
 			return
 		}
 		fmt.Fprintln(stdout, string(data)) //nolint:errcheck
@@ -872,18 +872,18 @@ can still return successfully after emitting the report.`,
 					recordCleanupErrorKind(&report, "options", cleanupErrorKindInvalidMaxOrphanDBs, "", err)
 					emitReport(report, PortResolution{}, cleanupOptions{JSON: true}, stdout, stderr)
 				} else {
-					fmt.Fprintf(stderr, "gc dolt-cleanup: %v\n", err) //nolint:errcheck
+					fmt.Fprintf(stderr, cmdName("dolt-cleanup")+": %v\n", err) //nolint:errcheck
 				}
 				return errExit
 			}
 			cityPath, err := resolveCity()
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-cleanup: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("dolt-cleanup")+": %v\n", err) //nolint:errcheck
 				return errExit
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-cleanup: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, cmdName("dolt-cleanup")+": %v\n", err) //nolint:errcheck
 				return errExit
 			}
 			rigs := loadResolverRigs(cityPath, cfg)

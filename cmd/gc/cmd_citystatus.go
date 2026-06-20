@@ -148,9 +148,9 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 	cityPath, err := resolveCommandCity(args)
 	if err != nil {
 		if jsonOutput {
-			return writeJSONError(stdout, stderr, "city_resolve_failed", fmt.Sprintf("gc status: %v", err), 1)
+			return writeJSONError(stdout, stderr, "city_resolve_failed", fmt.Sprintf(prog()+" status"+": %v", err), 1)
 		}
-		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" status"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -161,9 +161,9 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 	cfg, err := loadCityConfig(cityPath, configStderr)
 	if err != nil {
 		if jsonOutput {
-			return writeJSONError(stdout, stderr, "config_load_failed", fmt.Sprintf("gc status: %v", err), 1)
+			return writeJSONError(stdout, stderr, "config_load_failed", fmt.Sprintf(prog()+" status"+": %v", err), 1)
 		}
-		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" status"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -174,7 +174,7 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 	store, _, code := openCityStatusStore(cityPath, storeStderr)
 	if code != 0 {
 		if jsonOutput {
-			return writeJSONError(stdout, stderr, "store_open_failed", "gc status: opening bead store failed", code)
+			return writeJSONError(stdout, stderr, "store_open_failed", prog()+" status"+": opening bead store failed", code)
 		}
 		return code
 	}
@@ -404,7 +404,7 @@ func loadStatusSessionSnapshot(store beads.Store, stderr io.Writer) *sessionBead
 	case result := <-done:
 		if result.err != nil {
 			if stderr != nil {
-				fmt.Fprintf(stderr, "gc status: loading session snapshot: %v\n", result.err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, prog()+" status"+": loading session snapshot: %v\n", result.err) //nolint:errcheck // best-effort stderr
 			}
 			return newSessionBeadSnapshotWithError(fmt.Errorf("loading session snapshot: %w", result.err))
 		}
@@ -414,7 +414,7 @@ func loadStatusSessionSnapshot(store beads.Store, stderr io.Writer) *sessionBead
 		return result.snapshot
 	case <-time.After(statusSessionSnapshotTimeout):
 		if stderr != nil {
-			fmt.Fprintf(stderr, "gc status: loading session snapshot timed out after %s; continuing with runtime-only status\n", statusSessionSnapshotTimeout) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+" status"+": loading session snapshot timed out after %s; continuing with runtime-only status\n", statusSessionSnapshotTimeout) //nolint:errcheck // best-effort stderr
 		}
 		return newSessionBeadSnapshotWithError(fmt.Errorf("loading session snapshot timed out after %s", statusSessionSnapshotTimeout))
 	}
@@ -500,7 +500,7 @@ func doCityStatusWithStoreAndSnapshot(
 	if store != nil {
 		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg, statusSnapshot)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc status: building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+" status"+": building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if sessions.ActiveSessions > 0 || sessions.SuspendedSessions > 0 {
@@ -548,7 +548,7 @@ func doCityStatusJSONWithDiagnosticAndSnapshot(
 	if store != nil {
 		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg, statusSnapshot)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc status: building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+" status"+": building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		snapshot.Summary.ActiveSessions = sessions.ActiveSessions
@@ -558,7 +558,7 @@ func doCityStatusJSONWithDiagnosticAndSnapshot(
 	status := cityStatusJSONFromSnapshot(snapshot, snapshot.Summary)
 	data, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
-		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+" status"+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
@@ -658,7 +658,7 @@ func controllerStatusLine(ctrl ControllerJSON) string {
 
 func controllerStatusGuidance(ctrl ControllerJSON, cityPath string) []string {
 	quotedPath := shellQuotePath(cityPath)
-	startCommand := "gc start " + quotedPath
+	startCommand := cmdName("start") + " " + quotedPath
 
 	switch ctrl.Mode {
 	case "standalone":

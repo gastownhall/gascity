@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/gastownhall/gascity/internal/progname"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -231,14 +232,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// Initialize the city inside the pod.
 		if ctrlCity != "" {
 			if err := initCityInPod(ctx, p.ops, podName, ctrlCity); err != nil {
-				fmt.Fprintf(p.stderr, "gc: warning: initCityInPod for %s: %v\n", podName, err) //nolint:errcheck
+				fmt.Fprintf(p.stderr, "%s: warning: initCityInPod for %s: %v\n", progname.Get(), podName, err) //nolint:errcheck
 			}
 		}
 
 		// Signal entrypoint to proceed.
 		if _, err := p.ops.execInPod(ctx, podName, "agent",
 			[]string{"touch", "/workspace/.gc-workspace-ready"}, nil); err != nil {
-			fmt.Fprintf(p.stderr, "gc: warning: touch .gc-workspace-ready in %s: %v\n", podName, err) //nolint:errcheck
+			fmt.Fprintf(p.stderr, "%s: warning: touch .gc-workspace-ready in %s: %v\n", progname.Get(), podName, err) //nolint:errcheck
 		}
 	}
 
@@ -246,7 +247,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// or prebaked workspaces can self-heal instead of failing session startup.
 	podWorkDir := projectedPodWorkDir(cfg)
 	if err := initBeadsInPod(ctx, p.ops, podName, cfg, podWorkDir, p.managedServiceHost, p.managedServicePort); err != nil {
-		fmt.Fprintf(p.stderr, "gc: warning: initBeadsInPod for %s: %v\n", podName, err) //nolint:errcheck
+		fmt.Fprintf(p.stderr, "%s: warning: initBeadsInPod for %s: %v\n", progname.Get(), podName, err) //nolint:errcheck
 	}
 
 	// Wait for tmux session.
@@ -272,7 +273,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if cfg.SessionSetupScript != "" {
 		script, err := os.ReadFile(cfg.SessionSetupScript)
 		if err != nil {
-			fmt.Fprintf(p.stderr, "gc: warning: reading session_setup_script %q for %s: %v\n", cfg.SessionSetupScript, podName, err) //nolint:errcheck
+			fmt.Fprintf(p.stderr, "%s: warning: reading session_setup_script %q for %s: %v\n", progname.Get(), cfg.SessionSetupScript, podName, err) //nolint:errcheck
 		} else {
 			_, _ = p.ops.execInPod(ctx, podName, "agent",
 				[]string{"sh"}, strings.NewReader(string(script)))

@@ -16,6 +16,7 @@
 # Environment: GC_CITY_PATH (also GC_DOLT_PORT, GC_DOLT_HOST, GC_DOLT_USER,
 # GC_DOLT_PASSWORD when probing the running server)
 set -e
+GC_BIN="${GC_BIN:-gc}"
 
 force=false
 max_orphans=50
@@ -60,8 +61,8 @@ fi
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
 
-  if command -v gc >/dev/null 2>&1; then
-    rig_paths=$(gc rig list --json 2>/dev/null \
+  if command -v "$GC_BIN" >/dev/null 2>&1; then
+    rig_paths=$("$GC_BIN" rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else
@@ -135,8 +136,8 @@ fi
 # with exit 1 if the pipeline can't be completed.
 compute_allowlist_file() {
   _out=$1
-  if ! command -v gc >/dev/null 2>&1; then
-    echo "gc dolt cleanup: gc not found on PATH; cannot evaluate rig overlap allowlist" >&2
+  if ! command -v "$GC_BIN" >/dev/null 2>&1; then
+    echo "$GC_BIN dolt cleanup: $GC_BIN not found on PATH; cannot evaluate rig overlap allowlist" >&2
     return 1
   fi
   if ! command -v jq >/dev/null 2>&1; then
@@ -144,12 +145,12 @@ compute_allowlist_file() {
     echo "install jq or remove orphans manually" >&2
     return 1
   fi
-  _list=$(gc rig list --json 2>/dev/null) || {
-    echo "gc dolt cleanup: gc rig list --json failed; refusing to run overlap allowlist unverified" >&2
+  _list=$("$GC_BIN" rig list --json 2>/dev/null) || {
+    echo "$GC_BIN dolt cleanup: $GC_BIN rig list --json failed; refusing to run overlap allowlist unverified" >&2
     return 1
   }
   if ! printf '%s\n' "$_list" | jq -e '.rigs' >/dev/null 2>&1; then
-    echo "gc dolt cleanup: gc rig list --json produced unparseable output; refusing to run overlap allowlist unverified" >&2
+    echo "gc dolt cleanup: ${GC_BIN:-gc} rig list --json produced unparseable output; refusing to run overlap allowlist unverified" >&2
     return 1
   fi
   printf '%s\n' "$_list" | jq -r '.rigs[] | select(.hq != true) | .path' > "$_out" || return 1

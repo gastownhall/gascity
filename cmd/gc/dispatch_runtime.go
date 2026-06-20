@@ -51,7 +51,7 @@ var (
 	workflowServeList               = nextWorkflowServeBeads
 	controlDispatcherServe          = runControlDispatcherInStore
 	workflowServeOpenEventsProvider = func(stderr io.Writer) (events.Provider, error) {
-		ep, code := openCityEventsProvider(stderr, "gc convoy control --serve")
+		ep, code := openCityEventsProvider(stderr, cmdName("convoy control --serve"))
 		if ep == nil {
 			return nil, fmt.Errorf("opening events provider (exit %d)", code)
 		}
@@ -124,7 +124,7 @@ func runConvoyControlServe(args []string, stdout, stderr io.Writer) error {
 		agentName = args[0]
 	}
 	if err := runWorkflowServe(agentName, true, stdout, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc convoy control --serve: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "convoy control --serve", err) //nolint:errcheck
 		return errExit
 	}
 	return nil
@@ -189,7 +189,7 @@ func workflowTraceWarnOpenFailure(path string, err error) {
 	workflowTraceWarnings.mu.Lock()
 	writer := workflowTraceWarnings.writer
 	workflowTraceWarnings.mu.Unlock()
-	workflowTraceWarnf(writer, "trace-open:"+normalizePathForCompare(path), "gc convoy control --serve: warning: opening workflow trace %q: %v\n", path, err)
+	workflowTraceWarnf(writer, "trace-open:"+normalizePathForCompare(path), cmdName("convoy control --serve")+": warning: opening workflow trace %q: %v\n", path, err)
 }
 
 func workflowTraceWarnf(writer io.Writer, dedupeKey, format string, args ...any) {
@@ -385,7 +385,7 @@ func warnLegacyWorkflowTracePath(cityPath string, rigs []config.Rig, stderr io.W
 				workflowTraceWarnf(
 					stderr,
 					"legacy-trace-path:"+normalizePathForCompare(current),
-					"gc convoy control --serve: warning: legacy control-dispatcher trace path %q matches a watcher-visible legacy location; change or unset GC_WORKFLOW_TRACE so this session adopts %q, or restart/recycle the session if this value was inherited before the upgrade\n",
+					cmdName("convoy control --serve")+": warning: legacy control-dispatcher trace path %q matches a watcher-visible legacy location; change or unset GC_WORKFLOW_TRACE so this session adopts %q, or restart/recycle the session if this value was inherited before the upgrade\n",
 					current,
 					nextTracePath,
 				)
@@ -408,7 +408,7 @@ func warnLegacyWorkflowTracePath(cityPath string, rigs []config.Rig, stderr io.W
 		workflowTraceWarnf(
 			stderr,
 			"legacy-trace-file:"+normalizePathForCompare(legacyTracePath),
-			"gc convoy control --serve: warning: legacy control-dispatcher trace file %q still exists; writes to it can wake the city watcher. If it is still growing, restart or recycle the control-dispatcher session so it adopts %q.\n",
+			cmdName("convoy control --serve")+": warning: legacy control-dispatcher trace file %q still exists; writes to it can wake the city watcher. If it is still growing, restart or recycle the control-dispatcher session so it adopts %q.\n",
 			legacyTracePath,
 			nextTracePath,
 		)

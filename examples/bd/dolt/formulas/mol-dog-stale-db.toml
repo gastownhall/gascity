@@ -17,14 +17,14 @@ The drain-ack tells the controller this session is done.
 
 This formula shells out to `gc dolt-cleanup --json`, parses the
 `gc.dolt.cleanup.v1` envelope, and emits one summary line per stage
-to `gc events` so operators skimming a long scrollback can spot
+to `{{binary}} events` so operators skimming a long scrollback can spot
 trends. The full JSON report is appended to the work bead so a
 follow-up reader can `bd show <id>` to see details.
 
 ## Dog Contract
 
 This is infrastructure work. You:
-1. Run a dry-run `gc dolt-cleanup --json --probe` scan.
+1. Run a dry-run `{{binary}} dolt-cleanup --json --probe` scan.
 2. Decide: no work -> report, at/below stale-DB threshold -> apply, above threshold -> escalate.
 3. Apply with `gc dolt-cleanup --json --probe --force` only when safe.
 4. Report findings, send optional maintenance notices if configured, exit.
@@ -54,7 +54,7 @@ contain only ASCII letters, digits, underscores, and non-leading
 hyphens; rigs with other `dolt_database` names should be renamed or
 handled manually so the cleanup can stay SQL-injection safe.
 
-The apply branch treats a non-zero `gc dolt-cleanup --probe --force`
+The apply branch treats a non-zero `{{binary}} dolt-cleanup --probe --force`
 exit as an operator escalation. Do not retry from this formula with
 the separate `gc dolt cleanup --server-down-ok` fallback; that is a
 TTY-only human action after independently verifying the dolt server
@@ -92,7 +92,7 @@ DRAIN_ACKED=0
 cleanup() {
   rm -rf "$TMP_DIR"
   if [ "$DRAIN_ACKED" -ne 1 ]; then
-    gc runtime drain-ack || true
+    {{binary}} runtime drain-ack || true
   fi
 }
 trap cleanup EXIT
@@ -158,7 +158,7 @@ maintenance_notice() {
 
 drain_ack_once() {
   if [ "$DRAIN_ACKED" -ne 1 ]; then
-    gc runtime drain-ack
+    {{binary}} runtime drain-ack
     DRAIN_ACKED=1
   fi
 }
@@ -170,17 +170,17 @@ fail_open_after_drain() {
   exit 1
 }
 
-if ! gc dolt-cleanup --json --probe > "$SCAN_FILE"; then
+if ! {{binary}} dolt-cleanup --json --probe > "$SCAN_FILE"; then
   append_report_note "scan (dry-run failed)" "$SCAN_FILE"
-  run_or_warn "emit dry-run failure escalation" gc event emit mol-dog-stale-db.escalate \
+  run_or_warn "emit dry-run failure escalation" {{binary}} event emit mol-dog-stale-db.escalate \
     --message "dry-run failed before a valid cleanup decision; leaving work bead open"
-  fail_open_after_drain "gc dolt-cleanup dry-run failed; leaving work bead open"
+  fail_open_after_drain "{{binary}} dolt-cleanup dry-run failed; leaving work bead open"
 fi
 if ! jq -e '.schema == "gc.dolt.cleanup.v1"' "$SCAN_FILE" >/dev/null; then
   append_report_note "scan (invalid JSON)" "$SCAN_FILE"
-  run_or_warn "emit invalid dry-run JSON escalation" gc event emit mol-dog-stale-db.escalate \
+  run_or_warn "emit invalid dry-run JSON escalation" {{binary}} event emit mol-dog-stale-db.escalate \
     --message "dry-run returned invalid JSON; leaving work bead open"
-  fail_open_after_drain "gc dolt-cleanup dry-run returned invalid JSON; leaving work bead open"
+  fail_open_after_drain "{{binary}} dolt-cleanup dry-run returned invalid JSON; leaving work bead open"
 fi
 
 ORPHAN_DBS=$(jq -r '.dropped.count // 0' "$SCAN_FILE")
@@ -192,7 +192,7 @@ SCAN_ERRS=$(jq -r '.summary.errors_total // 0' "$SCAN_FILE")
 INVALID_DROP_SKIPS=$(jq -r '[.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length' "$SCAN_FILE")
 SCAN_FORCE_BLOCKERS=$(jq -r '[.force_blockers[]?] | length' "$SCAN_FILE")
 
-run_or_warn "emit scan event" gc event emit mol-dog-stale-db.scan \
+run_or_warn "emit scan event" {{binary}} event emit mol-dog-stale-db.scan \
   --message "$ORPHAN_DBS orphans (${DISK_BYTES} bytes), $ORPHAN_PROCS procs (${RSS_BYTES} bytes)" \
   --payload "$(jq -c '{dropped: .dropped.count, purge_bytes: .purge.bytes_reclaimed, procs: (.reaped.targets | length), rss_bytes: .summary.bytes_freed_rss, errors: .summary.errors_total, invalid_identifier_skips: ([.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length), force_blockers: ([.force_blockers[]?] | length)}' "$SCAN_FILE")"
 
@@ -214,9 +214,9 @@ if [ "$SCAN_ERRS" -gt 0 ] || [ "$INVALID_DROP_SKIPS" -gt 0 ] || [ "$SCAN_FORCE_B
   run_or_warn "send dry-run error escalation" send_escalation \
     "ESCALATION: Dolt cleanup dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s), ${SCAN_FORCE_BLOCKERS} force blocker(s)" \
     "Dry-run report attached to work bead. Operator review required before forcing cleanup."
-  run_or_warn "emit dry-run error escalation" gc event emit mol-dog-stale-db.escalate \
+  run_or_warn "emit dry-run error escalation" {{binary}} event emit mol-dog-stale-db.escalate \
     --message "dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s), ${SCAN_FORCE_BLOCKERS} force blocker(s); leaving work bead open"
-  fail_open_after_drain "gc dolt-cleanup dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s), ${SCAN_FORCE_BLOCKERS} force blocker(s); leaving work bead open"
+  fail_open_after_drain "{{binary}} dolt-cleanup dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s), ${SCAN_FORCE_BLOCKERS} force blocker(s); leaving work bead open"
 elif [ "$ORPHAN_TOTAL" -eq 0 ] && [ "$DISK_BYTES" -le 0 ]; then
   :
 elif [ "$ORPHAN_DBS" -gt "{{max_orphans_for_sql}}" ]; then
@@ -228,7 +228,7 @@ elif [ "$ORPHAN_DBS" -gt "{{max_orphans_for_sql}}" ]; then
   run_or_warn "emit max-orphan escalation" gc event emit mol-dog-stale-db.escalate \
     --message "$ORPHAN_DBS stale databases > max_orphans_for_sql={{max_orphans_for_sql}} -> escalation sent"
 else
-  if ! gc dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"; then
+  if ! {{binary}} dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"; then
     ESCALATED=1
     append_report_note "apply (--force, failed)" "$APPLY_FILE"
     run_or_warn "send apply refusal escalation" send_escalation \
@@ -236,13 +236,13 @@ else
       "gc dolt-cleanup --probe --force refused. Do not retry from an agent. Operator must confirm dolt is stopped (process gone AND port closed), then use the separate gc dolt cleanup --server-down-ok fallback if appropriate."
     run_or_warn "emit apply refusal escalation" gc event emit mol-dog-stale-db.escalate \
       --message "apply refused; operator must verify dolt stopped before using gc dolt cleanup --server-down-ok"
-    fail_open_after_drain "gc dolt-cleanup apply failed; leaving work bead open"
+    fail_open_after_drain "{{binary}} dolt-cleanup apply failed; leaving work bead open"
   fi
   if ! jq -e '.schema == "gc.dolt.cleanup.v1"' "$APPLY_FILE" >/dev/null; then
     append_report_note "apply (--force, invalid JSON)" "$APPLY_FILE"
-    run_or_warn "emit invalid apply JSON escalation" gc event emit mol-dog-stale-db.escalate \
+    run_or_warn "emit invalid apply JSON escalation" {{binary}} event emit mol-dog-stale-db.escalate \
       --message "apply returned invalid JSON; leaving work bead open"
-    fail_open_after_drain "gc dolt-cleanup apply returned invalid JSON; leaving work bead open"
+    fail_open_after_drain "{{binary}} dolt-cleanup apply returned invalid JSON; leaving work bead open"
   fi
 
   APPLY_ERRS=$(jq -r '.summary.errors_total // 0' "$APPLY_FILE")
@@ -259,7 +259,7 @@ else
       "gc dolt-cleanup --probe --force refused or reported ${APPLY_ERRS} error(s). Do not retry from an agent. Operator must inspect the attached apply report before deciding whether any manual cleanup is appropriate."
     run_or_warn "emit apply refusal escalation" gc event emit mol-dog-stale-db.escalate \
       --message "$APPLY_REFUSAL_MESSAGE"
-    fail_open_after_drain "gc dolt-cleanup ${APPLY_REFUSAL_MESSAGE}"
+    fail_open_after_drain "{{binary}} dolt-cleanup ${APPLY_REFUSAL_MESSAGE}"
   fi
 
   DROP_OK=$(jq -r '.dropped.count // 0' "$APPLY_FILE")
@@ -275,17 +275,17 @@ else
   fi
   APPLIED=1
 
-  run_or_warn "emit drop event" gc event emit mol-dog-stale-db.drop \
+  run_or_warn "emit drop event" {{binary}} event emit mol-dog-stale-db.drop \
     --message "${DROP_OK}/${ORPHAN_DBS} ok, ${DROP_FAIL} failed"
 
   PURGE_MESSAGE="${PURGE_BYTES} bytes reclaimed"
   if [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
     PURGE_MESSAGE="${PURGE_MESSAGE} (${MISSED_PURGE_BYTES} bytes missed)"
   fi
-  run_or_warn "emit purge event" gc event emit mol-dog-stale-db.purge \
+  run_or_warn "emit purge event" {{binary}} event emit mol-dog-stale-db.purge \
     --message "$PURGE_MESSAGE"
 
-  run_or_warn "emit reap event" gc event emit mol-dog-stale-db.reap \
+  run_or_warn "emit reap event" {{binary}} event emit mol-dog-stale-db.reap \
     --message "${REAP_KILLED}/${REAP_TOTAL} procs killed"
 
   append_report_note "apply (--force)" "$APPLY_FILE"
@@ -297,12 +297,12 @@ else
   DONE_MESSAGE="${DONE_BYTES} bytes reclaimable; ${DONE_ERRS} errors"
 fi
 
-run_or_warn "emit done event" gc event emit mol-dog-stale-db.done \
+run_or_warn "emit done event" {{binary}} event emit mol-dog-stale-db.done \
   --message "$DONE_MESSAGE"
 
 if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
   ESCALATED=1
-  run_or_warn "emit missed purge escalation" gc event emit mol-dog-stale-db.escalate \
+  run_or_warn "emit missed purge escalation" {{binary}} event emit mol-dog-stale-db.escalate \
     --message "apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
 fi
 
@@ -313,7 +313,7 @@ fi
 maintenance_notice "MAINTENANCE_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}"
 
 if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
-  fail_open_after_drain "gc dolt-cleanup apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
+  fail_open_after_drain "{{binary}} dolt-cleanup apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
 fi
 
 bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"

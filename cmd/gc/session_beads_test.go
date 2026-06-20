@@ -412,6 +412,13 @@ workspace_name = "import-regression"
 name = "repo"
 path = "./repo"
 `,
+		filepath.Join(cityPath, ".gc", "site.toml"): `
+workspace_name = "import-regression"
+
+[[rig]]
+name = "repo"
+path = "./repo"
+`,
 		filepath.Join(cityPath, "assets", "sidecar", "pack.toml"): `
 [pack]
 name = "sidecar"

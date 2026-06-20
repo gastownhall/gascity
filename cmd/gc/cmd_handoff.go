@@ -130,7 +130,7 @@ func handoffJSONSubject(args []string, auto bool) string {
 func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdout, stderr io.Writer) int {
 	if target != "" {
 		if auto {
-			fmt.Fprintln(stderr, "gc handoff: --auto cannot be used with --target") //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: --auto cannot be used with --target\n", cmdName("handoff")) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		return cmdHandoffRemote(args, target, stdout, stderr)
@@ -138,14 +138,14 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 
 	current, err := currentSessionRuntimeTarget()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	store, err := openCityStoreAt(current.cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: %v\n", err)                    //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff", err)                                           //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", cmdName("doctor")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	rec := openCityRecorderAt(current.cityPath, stderr)
@@ -168,7 +168,7 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return waitForControllerRestart(sigCtx, dops, current.sessionName, "gc handoff",
+	return waitForControllerRestart(sigCtx, dops, current.sessionName, cmdName("handoff"),
 		controllerRestartPollInterval, controllerRestartTimeout(cfg), stderr)
 }
 
@@ -177,21 +177,21 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) int {
 	targetInfo, err := resolveSessionRuntimeTarget(target, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	store, code := openCityStore(stderr, "gc handoff")
+	store, code := openCityStore(stderr, cmdName("handoff"))
 	if store == nil {
 		return code
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cfg, _ := loadCityConfig(cityPath, stderr)
-	sender, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc handoff")
+	sender, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, cmdName("handoff"))
 	if !ok {
 		return 1
 	}
@@ -237,12 +237,12 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 
 	restartable, err := sessionRestartableByController(store, sessionName)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: checking session type: %v\n", cmdName("handoff"), err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
 	}
 	if !restartable {
 		if err := clearRestartRequest(store, dops, sessionName); err != nil {
-			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: clearing stale restart request: %v\n", cmdName("handoff"), err) //nolint:errcheck // best-effort stderr
 			return handoffOutcome{code: 1}
 		}
 		fmt.Fprintf(stdout, "Handoff: sent mail %s (named session; restart skipped).\n", b.ID) //nolint:errcheck // best-effort stdout
@@ -250,14 +250,14 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 	}
 
 	if err := dops.setRestartRequested(sessionName); err != nil {
-		fmt.Fprintf(stderr, "gc handoff: setting restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: setting restart flag: %v\n", cmdName("handoff"), err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
 	}
 	// Also persist the request through the worker boundary so it survives
 	// tmux session death. Non-fatal: the runtime flag above is primary.
 	if persistRestart != nil {
 		if err := persistRestart(); err != nil {
-			fmt.Fprintf(stderr, "gc handoff: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: setting bead restart flag: %v\n", cmdName("handoff"), err) //nolint:errcheck // best-effort stderr
 		}
 	}
 	rec.Record(events.Event{
@@ -282,7 +282,7 @@ func doHandoffAuto(store beads.Store, rec events.Recorder, sessionAddress string
 	}
 	message := fmt.Sprintf("Handoff: sent auto mail %s (restart skipped).\n", b.ID)
 	if err := writeProviderHookContextForEvent(stdout, hookFormat, "PreCompact", message); err != nil {
-		fmt.Fprintf(stderr, "gc handoff: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("handoff")+": writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0
@@ -299,7 +299,7 @@ func createHandoffMail(store beads.Store, rec events.Recorder, senderAddress, re
 	}
 	metadata, err := mailSenderRouteMetadata(store, senderAddress)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: resolving sender route: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: resolving sender route: %v\n", cmdName("handoff"), err) //nolint:errcheck // best-effort stderr
 		return beads.Bead{}, false
 	}
 	senderDisplay := mailSenderDisplayFromMetadata(senderAddress, metadata)
@@ -317,7 +317,7 @@ func createHandoffMail(store beads.Store, rec events.Recorder, senderAddress, re
 		Ephemeral:   true,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: creating mail: %v\n", cmdName("handoff"), err) //nolint:errcheck // best-effort stderr
 		return beads.Bead{}, false
 	}
 	rec.Record(events.Event{
@@ -393,12 +393,12 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 
 	restartable, err := sessionRestartableByController(store, sessionName)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: checking session type: %v\n", cmdName("handoff"), err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !restartable {
 		if err := clearRestartRequest(store, newDrainOps(sp), sessionName); err != nil {
-			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: clearing stale restart request: %v\n", cmdName("handoff"), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		fmt.Fprintf(stdout, "Handoff: sent mail %s to %s (named session; kill skipped because the controller cannot restart it)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout
@@ -408,7 +408,7 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 	// Kill target session (reconciler restarts it).
 	running, err := workerSessionTargetRunningWithConfig("", store, sp, nil, sessionName)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: observing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: observing %s: %v\n", cmdName("handoff"), targetAddress, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !running {
@@ -420,7 +420,7 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 	// runtime session name) so handoff stops join the start/crash/kill counters.
 	agentIdentity := sessionAgentMetricIdentityByName(store, sessionName)
 	if err := workerKillSessionTargetWithConfig("", store, sp, nil, sessionName); err != nil {
-		fmt.Fprintf(stderr, "gc handoff: killing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: killing %s: %v\n", cmdName("handoff"), targetAddress, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	sessionID, resolveErr := resolveSessionID(store, sessionName)

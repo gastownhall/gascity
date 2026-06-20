@@ -16,6 +16,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/progname"
 )
 
 const implicitImportSchema = 1
@@ -105,7 +106,8 @@ func EnsureBootstrapForCity(gcHome string, userImports map[string]config.Import)
 			quoted[i] = fmt.Sprintf("%q", name)
 		}
 		return fmt.Errorf(
-			"gc init: cannot add implicit import(s) %s - conflicts with city's [imports.<name>] of the same name; rename one side",
+			"%s init: cannot add implicit import(s) %s - conflicts with city's [imports.<name>] of the same name; rename one side",
+			progname.Get(),
 			strings.Join(quoted, ", "),
 		)
 	}

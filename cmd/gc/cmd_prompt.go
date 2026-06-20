@@ -96,7 +96,7 @@ provider in one-shot mode to generate a prompt template for a given role.`,
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			fmt.Fprintf(stderr, "gc prompt: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("prompt")+": unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			return errExit
 		},
 	}
@@ -169,7 +169,7 @@ date for traceability.`,
 				if errors.Is(err, errExit) {
 					return err
 				}
-				fmt.Fprintf(stderr, "gc prompt synth: %v\n", err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, cmdName("prompt synth")+": %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			return nil
@@ -307,7 +307,7 @@ func runDirectSynth(ctx context.Context, opts promptSynthOpts, cityPath, role, r
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stderr, "gc prompt synth: wrote %s — review before use\n", dst) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("prompt synth")+": wrote %s — review before use\n", dst) //nolint:errcheck // best-effort stderr
 		return nil
 	}
 	_, err = fmt.Fprintln(stdout, out)
@@ -456,7 +456,7 @@ func waitForSynthBeadClose(ctx context.Context, store beads.Store, beadID, destP
 		timeout = 10 * time.Minute
 	}
 	deadline := deps.now().Add(timeout)
-	fmt.Fprintf(stderr, "gc prompt synth: waiting for %s to close (timeout %s)...\n", beadID, timeout) //nolint:errcheck
+	fmt.Fprintf(stderr, cmdName("prompt synth")+": waiting for %s to close (timeout %s)...\n", beadID, timeout) //nolint:errcheck
 
 	for {
 		if ctx.Err() != nil {

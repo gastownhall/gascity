@@ -21,7 +21,9 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/progname"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
@@ -132,6 +134,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		rigFlag = prevRigFlag
 	}()
 
+	// Publish the runtime binary name so internal/ packages can reference it
+	// in error messages and log output without importing cmd/gc.
+	progname.Set(prog())
+
+	// Register built-in formula variables so {{binary}} resolves everywhere.
+	formula.RegisterBuiltInVars(map[string]string{"binary": prog()})
+
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
 	provider, err := telemetry.Init(context.Background(), "gascity", version)
 	if err != nil {
@@ -207,7 +216,7 @@ func commandFailureMessage(err error) string {
 // newRootCmd creates the root cobra command with all subcommands.
 func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	root := &cobra.Command{
-		Use:           "gc",
+		Use:           prog(),
 		Short:         "Gas City CLI — orchestration-builder for multi-agent workflows",
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -221,7 +230,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 			if tryPackCommandFallback(args, stdout, stderr) {
 				return nil
 			}
-			fmt.Fprintf(stderr, "gc: unknown command %q\n\n", args[0]) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: unknown command %q\n\n", prog(), args[0]) //nolint:errcheck // best-effort stderr
 			printCommandUsage(stderr, cmd)
 			return errExit
 		},
@@ -354,7 +363,7 @@ func installFlagGroupUsageErrors(cmd *cobra.Command, stderr io.Writer) {
 
 func printCommandUsageError(stderr io.Writer, cmd *cobra.Command, err error) {
 	if err != nil {
-		fmt.Fprintf(stderr, "gc: %v\n\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v\n\n", prog(), err) //nolint:errcheck // best-effort stderr
 	}
 	printCommandUsage(stderr, cmd)
 }
@@ -991,9 +1000,10 @@ func resolveRigBindingMatches(value string, matches []registeredRigBinding) (res
 		return resolvedContext{CityPath: matches[0].City.Path, RigName: matches[0].Rig.Name}, nil
 	}
 	return resolvedContext{}, fmt.Errorf(
-		"rig %q is registered in multiple cities: %s\n  Specify now:  gc --city <name> <command>",
+		"rig %q is registered in multiple cities: %s\n  Specify now:  %s --city <name> <command>",
 		value,
-		strings.Join(registeredRigBindingCityNames(matches), ", "))
+		strings.Join(registeredRigBindingCityNames(matches), ", "),
+		prog())
 }
 
 func registeredRigBindingCityNames(matches []registeredRigBinding) []string {
@@ -1084,8 +1094,8 @@ func openCityStoreWithPath(stderr io.Writer, cmdName string) (beads.Store, strin
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                           //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", prog()+" doctor") //nolint:errcheck // best-effort stderr
 		return nil, "", 1
 	}
 	return store, cityPath, 0

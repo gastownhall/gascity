@@ -64,7 +64,7 @@ Initialize your session and understand your assignment.
 
 **1. Prime your environment:**
 ```bash
-gc prime                    # Load role context
+{{binary}} prime                    # Load role context
 bd prime                    # Load beads context
 ```
 
@@ -97,9 +97,9 @@ You will use it in workspace-setup instead of creating a new one.
 
 **4. Check inbox for additional context:**
 ```bash
-gc mail inbox
+{{binary}} mail inbox
 # Read any HANDOFF or assignment messages, then archive after absorbing context
-# gc mail read <id> → process → gc mail archive <id>
+# {{binary}} mail read <id> → process → {{binary}} mail archive <id>
 ```
 
 **5. Understand the requirements:**
@@ -242,7 +242,7 @@ Tried: <what you've attempted>"
 
 **If context filling up:**
 ```bash
-gc runtime request-restart
+{{binary}} runtime request-restart
 ```
 This blocks until the controller kills your session. The next session
 resumes from context (re-reads formula steps, checks git/bead state).

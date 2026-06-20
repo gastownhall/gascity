@@ -249,6 +249,12 @@
             ]
           }
         ]
+      },
+      {
+        "group": "Specifications",
+        "pages": [
+          "specs/pack-spec"
+        ]
       }
     ]
   }

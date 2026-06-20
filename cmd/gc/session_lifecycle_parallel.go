@@ -2616,7 +2616,7 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 				}
 			}
 		} else if stderr != nil {
-			fmt.Fprintf(stderr, "gc lifecycle: session bead lookup degraded to legacy session-name resolution: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "lifecycle: session bead lookup degraded to legacy session-name resolution", err)
 		}
 	}
 	targets := make([]stopTarget, 0, len(names))
@@ -2756,7 +2756,7 @@ func markCityStopSessionAsAsleep(store beads.Store, sessionID string, stderr io.
 	}
 	batch := sessionpkg.SleepPatch(time.Now().UTC(), sleepReasonCityStop)
 	if err := store.SetMetadataBatch(sessionID, batch); err != nil && stderr != nil {
-		fmt.Fprintf(stderr, "gc stop: marking session %s asleep: %v\n", sessionID, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: marking session %s asleep: %v\n", cmdName("stop"), sessionID, err) //nolint:errcheck
 	}
 }
 
@@ -2862,7 +2862,7 @@ func stopTargetsBounded(
 						logLifecycleOutcome(stderr, "stop", wave, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
 					}
 					if result.err != nil {
-						fmt.Fprintf(stderr, "gc stop: stopping %s: %s\n", result.target.name, formatLifecycleError(result.err)) //nolint:errcheck
+						fmt.Fprintf(stderr, "%s: stopping %s: %s\n", cmdName("stop"), result.target.name, formatLifecycleError(result.err)) //nolint:errcheck
 						continue
 					}
 					fmt.Fprintf(stdout, "Stopped agent '%s'\n", result.target.name) //nolint:errcheck
@@ -2906,7 +2906,7 @@ func stopTargetsBounded(
 				logLifecycleOutcome(stderr, "stop", wave, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
 			}
 			if result.err != nil {
-				fmt.Fprintf(stderr, "gc stop: stopping %s: %s\n", result.target.name, formatLifecycleError(result.err)) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: stopping %s: %s\n", cmdName("stop"), result.target.name, formatLifecycleError(result.err)) //nolint:errcheck
 				continue
 			}
 			fmt.Fprintf(stdout, "Stopped agent '%s'\n", result.target.name) //nolint:errcheck

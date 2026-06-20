@@ -93,7 +93,7 @@ func cmdGraph(args []string, opts graphOpts, stdout, stderr io.Writer) int {
 func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc graph: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "graph", err)
 		return nil, 1
 	}
 
@@ -104,8 +104,8 @@ func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
 			if storeDir := slingDirForBead(cfg, cityPath, args[0]); storeDir != cityPath {
 				store, err := openStoreAtForCity(storeDir, cityPath)
 				if err != nil {
-					fmt.Fprintf(stderr, "gc graph: %v\n", err)                      //nolint:errcheck // best-effort stderr
-					fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+					cmdErr(stderr, "graph", err)
+					fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", cmdName("doctor")) //nolint:errcheck // best-effort stderr
 					return nil, 1
 				}
 				return store, 0
@@ -115,8 +115,8 @@ func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
 
 	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc graph: %v\n", err)                      //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "graph", err)
+		fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", cmdName("doctor")) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
 	return store, 0
@@ -144,14 +144,14 @@ func isBlockingDep(depType string) bool {
 // doGraph resolves beads and their dependencies, then prints the graph.
 func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc graph: missing bead IDs") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing bead IDs\n", cmdName("graph")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	// Resolve input — expand containers, returning beads directly.
 	resolved, err := resolveGraphInput(store, args, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc graph: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "graph", err)
 		return 1
 	}
 	if len(resolved) == 0 {
@@ -179,7 +179,7 @@ func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io
 	for _, b := range resolved {
 		deps, err := store.DepList(b.ID, "down")
 		if err != nil {
-			fmt.Fprintf(stderr, "gc graph: listing deps for %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: listing deps for %s: %v\n", cmdName("graph"), b.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		var blockedBy []string
@@ -270,7 +270,7 @@ func resolveGraphInput(store beads.Store, args []string, stderr io.Writer) ([]be
 			return nil, err
 		}
 		if b.Type == "epic" {
-			fmt.Fprintf(stderr, "gc graph: epic %s is treated as an ordinary bead; convoy expansion is first-class\n", b.ID) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: epic %s is treated as an ordinary bead; convoy expansion is first-class\n", cmdName("graph"), b.ID) //nolint:errcheck // best-effort stderr
 		}
 		if beads.IsContainerType(b.Type) {
 			children, err := convoycore.Members(store, b.ID, false)

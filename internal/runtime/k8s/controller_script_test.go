@@ -149,7 +149,7 @@ func TestControllerScriptDeployBootstrapsAfterStartSignalAndLogProbe(t *testing.
 	}
 	startIdx := lineIndexContaining(result.callLog, "exec gc-controller -- touch /city/.gc-start")
 	logIdx := lineIndexContaining(result.callLog, "logs gc-controller --tail=50")
-	initIdx := lineIndexContaining(result.callLog, "exec gc-controller -- sh -c cd /city && gc bd init -p 'gc' --skip-hooks")
+	initIdx := lineIndexContaining(result.callLog, "bd init -p 'gc' --skip-hooks")
 	if startIdx == -1 || logIdx == -1 || initIdx == -1 {
 		t.Fatalf("missing expected startup calls in log:\n%s", result.callLog)
 	}

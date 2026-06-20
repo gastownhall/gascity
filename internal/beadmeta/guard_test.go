@@ -54,6 +54,14 @@ var allowedNonMetadata = map[string]string{
 	// Bead LABEL value (not a Metadata key) and a test-binary name marker.
 	"gc.session": "bead Label value, not a Metadata key (internal/agentutil/pool.go)",
 	"gc.test":    "go test binary name marker (cmd/gc/test_guard.go)",
+
+	// Benchmark-only session state approximations (internal/benchmarks/coordstore/runner.go).
+	// These keys simulate real session metadata for load testing but are not declared
+	// production keys; the benchmarks own their own key surface.
+	"gc.session_state":  "benchmark approximation of session state (internal/benchmarks/coordstore)",
+	"gc.session_pid":    "benchmark approximation of session pid (internal/benchmarks/coordstore)",
+	"gc.session_pane":   "benchmark approximation of session pane (internal/benchmarks/coordstore)",
+	"gc.last_heartbeat": "benchmark approximation of heartbeat (internal/benchmarks/coordstore; production uses gc.last_heartbeat_at)",
 }
 
 // excludedDirs are package directories whose gc.* literals belong to a different

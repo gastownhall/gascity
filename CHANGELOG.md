@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-06-20 — session a7ef4fbc
+
+Files: internal/extmsg/labels.go, internal/doctor/autofix_skills.go, internal/api/huma_handlers_sessions_query.go, internal/api/handler_sling.go, internal/api/handler_status.go, cmd/gc/cmd_suspend.go, cmd/gc/session_reconciler.go, cmd/gc/hooks.go, cmd/gc/cmd_doctor.go, cmd/gc/cmd_hook.go
+
+> AI summary pending — check ProjectDocs Handover in next session.
 All notable changes to Gas City will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),

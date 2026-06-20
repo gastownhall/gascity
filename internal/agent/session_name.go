@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"text/template"
+
+	"github.com/gastownhall/gascity/internal/progname"
 )
 
 var sessionNameQualifiedReplacer = strings.NewReplacer(
@@ -70,7 +72,7 @@ func SessionNameFor(cityName, agentName, sessionTemplate string) string {
 
 	tmpl, err := template.New("session").Parse(sessionTemplate)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gc: session_template parse error: %v (using default)\n", err)
+		fmt.Fprintf(os.Stderr, "%s: session_template parse error: %v (using default)\n", progname.Get(), err)
 		return sanitized
 	}
 
@@ -82,7 +84,7 @@ func SessionNameFor(cityName, agentName, sessionTemplate string) string {
 		Name:  name,
 	}
 	if err := tmpl.Execute(&buf, data); err != nil {
-		fmt.Fprintf(os.Stderr, "gc: session_template execute error: %v (using default)\n", err)
+		fmt.Fprintf(os.Stderr, "%s: session_template execute error: %v (using default)\n", progname.Get(), err)
 		return sanitized
 	}
 	return buf.String()

@@ -126,7 +126,7 @@ fi
 
 If you get stuck or need clarification, check your inbox:
 ```bash
-gc mail inbox
+{{binary}} mail inbox
 ```
 
 **Exit criteria:** The work described in the bead is complete, relevant changes
@@ -145,7 +145,7 @@ session:
 if [ -n "${GC_BEAD_ID:-}" ]; then
   bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Drain acknowledged."
 fi
-gc runtime drain-ack
+{{binary}} runtime drain-ack
 ```
 
 Run exactly these commands and nothing else."""

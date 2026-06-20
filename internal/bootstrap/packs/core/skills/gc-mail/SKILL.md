@@ -11,28 +11,28 @@ type=message, stored in the bead store.
 ## Sending
 
 ```
-gc mail send <to> -m "message body"                    # Send a message
-gc mail send <to> -s "Subject" -m "message body"       # Send with subject
-gc mail reply <id> -m "reply body"                     # Reply to a message
-gc mail reply <id> -s "Re: topic" -m "reply body"      # Reply with subject
+{{binary}} mail send <to> -m "message body"                    # Send a message
+{{binary}} mail send <to> -s "Subject" -m "message body"       # Send with subject
+{{binary}} mail reply <id> -m "reply body"                     # Reply to a message
+{{binary}} mail reply <id> -s "Re: topic" -m "reply body"      # Reply with subject
 ```
 
 ## Reading
 
 ```
-gc mail inbox                          # List unread messages
-gc mail count                          # Count unread messages
-gc mail peek <id>                      # Preview a message without marking read
-gc mail read <id>                      # Read a message (marks as read)
-gc mail thread <id>                    # Show full conversation thread
+{{binary}} mail inbox                          # List unread messages
+{{binary}} mail count                          # Count unread messages
+{{binary}} mail peek <id>                      # Preview a message without marking read
+{{binary}} mail read <id>                      # Read a message (marks as read)
+{{binary}} mail thread <id>                    # Show full conversation thread
 ```
 
 ## Managing
 
 ```
-gc mail archive <id>                   # Archive a message
-gc mail mark-read <id>                 # Mark as read without displaying
-gc mail mark-unread <id>              # Mark as unread
-gc mail delete <id>                    # Delete a message
-gc mail check                          # Check for new mail (used in hooks)
+{{binary}} mail archive <id>                   # Archive a message
+{{binary}} mail mark-read <id>                 # Mark as read without displaying
+{{binary}} mail mark-unread <id>              # Mark as unread
+{{binary}} mail delete <id>                    # Delete a message
+{{binary}} mail check                          # Check for new mail (used in hooks)
 ```

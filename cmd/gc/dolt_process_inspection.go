@@ -86,7 +86,7 @@ func findPortHolderPID(port string) int {
 }
 
 func findPortHolderPIDFromLsof(port string) int {
-	if _, err := exec.LookPath("lsof"); err != nil {
+	if _, err := findLsofBinary(); err != nil {
 		return 0
 	}
 	out, err := lsofOutput("-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-t")
@@ -236,7 +236,7 @@ func normalizeLsofReportedPath(path string) string {
 }
 
 func processCWDFromLsof(pid int) (string, bool) {
-	if _, err := exec.LookPath("lsof"); err != nil {
+	if _, err := findLsofBinary(); err != nil {
 		return "", false
 	}
 	out, err := lsofOutput("-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn")
@@ -303,7 +303,7 @@ func pathWithinOrSame(path, root string) bool {
 }
 
 func deletedDataInodeTargetsFromLsof(pid int) []string {
-	if _, err := exec.LookPath("lsof"); err != nil {
+	if _, err := findLsofBinary(); err != nil {
 		return nil
 	}
 	targets := deletedDataInodeTargetsFromFormattedLsof(pid)
@@ -325,10 +325,29 @@ func deletedDataInodeTargetsFromFormattedLsof(pid int) []string {
 	return deletedDataInodeTargetsFromFormattedLsofOutput(string(out))
 }
 
+// findLsofBinary locates the lsof binary via PATH and common system locations.
+// On macOS, lsof lives in /usr/sbin which is often absent from PATH.
+func findLsofBinary() (string, error) {
+	if path, err := exec.LookPath("lsof"); err == nil {
+		return path, nil
+	}
+	// Fallback: check well-known system locations not always in PATH.
+	for _, candidate := range []string{"/usr/sbin/lsof", "/sbin/lsof"} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("lsof not found")
+}
+
 func lsofOutput(args ...string) ([]byte, error) {
+	lsof, err := findLsofBinary()
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), lsofCommandTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "lsof", args...)
+	cmd := exec.CommandContext(ctx, lsof, args...)
 	cmd.WaitDelay = 100 * time.Millisecond
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

@@ -536,7 +536,7 @@ func resolvePoolSessionRefs(
 	var refs []poolSessionRef
 	poolSessions, err := lookupPoolSessionNameCandidates(store, template, cfg, a)
 	if err != nil && stderr != nil {
-		fmt.Fprintf(stderr, "gc lifecycle: pool bead lookup for %s returned error (legacy discovery also runs): %v\n", template, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: pool bead lookup for %s returned error (legacy discovery also runs): %v\n", cmdName("lifecycle"), template, err) //nolint:errcheck
 	}
 	poolInstances := make([]string, 0, len(poolSessions))
 	for qualifiedInstance := range poolSessions {

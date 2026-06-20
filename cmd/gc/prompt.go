@@ -354,9 +354,15 @@ func findRigPrefix(rigName string, rigs []config.Rig) string {
 }
 
 // defaultBranchFor returns the default branch for the repo at dir.
-// Returns "main" on any error (best-effort).
+// Returns "main" on any error (best-effort). Skips the git subprocess
+// entirely when dir is not inside a git working tree — probing git for a
+// non-repo directory spawns a subprocess that always fails, adding ~30ms of
+// latency per call on macOS (process startup overhead) with no benefit.
 func defaultBranchFor(dir string) string {
 	if dir == "" {
+		return "main"
+	}
+	if !git.InsideWorkTree(dir) {
 		return "main"
 	}
 	g := git.New(dir)

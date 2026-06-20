@@ -9,13 +9,14 @@
 #   PATH     — must include gc binary
 
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 cd "$GC_CITY"
 ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
     # Check if we're being drained
-    if gc runtime drain-check 2>/dev/null; then
-        gc runtime drain-ack 2>/dev/null || true
+    if "$GC_BIN" runtime drain-check 2>/dev/null; then
+        "$GC_BIN" runtime drain-ack 2>/dev/null || true
         exit 0
     fi
 

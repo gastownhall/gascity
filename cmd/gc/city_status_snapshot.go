@@ -49,7 +49,7 @@ func observeStatusTargetsParallel(
 		go func(i int, t statusObservationTarget) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			out[i] = observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, t, safeStderr)
+			out[i] = observeSessionTargetWithWarning(cmdName("status"), cityPath, store, sp, cfg, t, safeStderr)
 		}(i, t)
 	}
 	wg.Wait()

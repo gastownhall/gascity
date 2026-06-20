@@ -35,11 +35,11 @@ func newPackFetchCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "fetch",
 		Short: "Clone missing and update existing remote packs",
-		Long: `Clone missing and update existing remote pack caches.
+		Long: fmt.Sprintf(`Clone missing and update existing remote pack caches.
 
 Fetches all configured pack sources from their git repositories,
 updates the local cache, and writes a lockfile with commit hashes
-for reproducibility. Automatically called during "gc start".`,
+for reproducibility. Automatically called during "%s start".`, prog()),
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doPackFetch(stdout, stderr) != 0 {
@@ -54,13 +54,13 @@ for reproducibility. Automatically called during "gc start".`,
 func doPackFetch(stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc pack fetch: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack fetch", err)
 		return 1
 	}
 
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc pack fetch: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack fetch", err)
 		return 1
 	}
 
@@ -71,18 +71,18 @@ func doPackFetch(stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "Fetching %d pack source(s)...\n", len(cfg.Packs)) //nolint:errcheck
 	if err := config.FetchPacks(cfg.Packs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc pack fetch: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack fetch", err)
 		return 1
 	}
 
 	// Write lockfile.
 	lock, err := config.LockFromCache(cfg.Packs, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc pack fetch: building lock: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack fetch: building lock", err)
 		return 1
 	}
 	if err := config.WriteLock(cityPath, lock); err != nil {
-		fmt.Fprintf(stderr, "gc pack fetch: writing lock: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack fetch: writing lock", err)
 		return 1
 	}
 
@@ -120,13 +120,13 @@ and locked commit hash (if available).`,
 func doPackList(stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack list", err)
 		return 1
 	}
 
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack list", err)
 		return 1
 	}
 

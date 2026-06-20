@@ -221,7 +221,7 @@ func loadOrdersForCompletion() []orders.Order {
 			return
 		}
 		var code int
-		aa, code = loadAllOrders(cityPath, cfg, io.Discard, "gc completion")
+		aa, code = loadAllOrders(cityPath, cfg, io.Discard, cmdName("completion"))
 		if code != 0 {
 			aa = nil
 		}

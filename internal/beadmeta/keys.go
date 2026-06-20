@@ -171,6 +171,9 @@ const (
 	WorkOutcomeMetadataKey               = "gc.work_outcome"
 	WorkVerificationMetadataKey          = "gc.work_verification"
 	WorkflowIDMetadataKey                = "gc.workflow_id"
+	ExpiresAtMetadataKey                 = "gc.expires_at"
+	HQStoreClosedAtMetadataKey           = "gc.hqstore.closed_at"
+	PoolDemandMetadataKey                = "gc.pool_demand"
 )
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
@@ -357,6 +360,9 @@ var KnownMetadataKeys = []string{
 	WorkOutcomeMetadataKey,
 	WorkVerificationMetadataKey,
 	WorkflowIDMetadataKey,
+	ExpiresAtMetadataKey,
+	HQStoreClosedAtMetadataKey,
+	PoolDemandMetadataKey,
 }
 
 // KnownMetadataPrefixes lists declared open-world key prefixes. A literal that

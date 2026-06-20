@@ -208,14 +208,14 @@ init_controller_beads() {
     hq_prefix=$(derive_prefix "$ws_name")
   fi
   echo "  HQ (prefix: $hq_prefix)..."
-  bootstrap_controller_scope "HQ" "cd /city && gc bd init -p '$hq_prefix' --skip-hooks"
+  bootstrap_controller_scope "HQ" "cd /city && $GC_BIN bd init -p '$hq_prefix' --skip-hooks"
 
   local in_rig=false rig_name="" rig_prefix=""
   flush_rig() {
     [ -z "$rig_name" ] && return
     [ -z "$rig_prefix" ] && rig_prefix=$(derive_prefix "$rig_name")
     echo "  rig '$rig_name' (prefix: $rig_prefix)..."
-    bootstrap_controller_scope "rig '$rig_name'" "cd /city && gc bd --rig '$rig_name' init -p '$rig_prefix' --skip-hooks"
+    bootstrap_controller_scope "rig '$rig_name'" "cd /city && $GC_BIN bd --rig '$rig_name' init -p '$rig_prefix' --skip-hooks"
     rig_name="" rig_prefix=""
   }
 

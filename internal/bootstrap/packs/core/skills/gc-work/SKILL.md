@@ -17,7 +17,7 @@ to a rig-scoped agent, sling operates on the agent's rig database — so
 the bead must already exist there. The bead ID prefix tells you which
 rig it belongs to.
 
-Use `gc rig list` to see rig names, paths, and prefixes.
+Use `{{binary}} rig list` to see rig names, paths, and prefixes.
 
 ## Creating work
 
@@ -61,6 +61,6 @@ gc bd close <id> --reason "done"          # Close with reason
 ## Hooks
 
 ```
-gc hook show <agent>                   # Show what's on an agent's hook
-gc agent claim <agent> <id>            # Put a bead on an agent's hook
+{{binary}} hook show <agent>                   # Show what's on an agent's hook
+{{binary}} agent claim <agent> <id>            # Put a bead on an agent's hook
 ```

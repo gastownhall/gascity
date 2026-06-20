@@ -26,7 +26,7 @@ designed to be called from within running agent sessions, not by humans.`,
 				return cmd.Help()
 			}
 			known := []string{"drain", "undrain", "drain-check", "drain-ack", "request-restart"}
-			fmt.Fprintf(stderr, "gc runtime: unknown subcommand %q\nAvailable subcommands: %v\n", args[0], known) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: unknown subcommand %q\nAvailable subcommands: %v\n", cmdName("runtime"), args[0], known) //nolint:errcheck // best-effort stderr
 			return errExit
 		},
 	}

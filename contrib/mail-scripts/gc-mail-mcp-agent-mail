@@ -15,6 +15,16 @@
 #
 # Dependencies: curl, jq, bash
 
+# --- Portability helpers ---
+
+# _gc_hash: portable hash — md5sum (Linux) → shasum (macOS) → openssl fallback.
+_gc_hash() {
+  if command -v md5sum >/dev/null 2>&1; then md5sum | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -d' ' -f1
+  else openssl dgst -sha256 | awk '{print $2}'
+  fi
+}
+
 # --- Configuration ---
 #
 # _init_config reads environment variables and creates cache directories.
@@ -62,7 +72,7 @@ _init_config() {
   MCP_URL="${GC_MCP_MAIL_URL:-http://127.0.0.1:8765}"
   MCP_TOKEN="${GC_MCP_MAIL_TOKEN:-}"
   PROJECT="${GC_MCP_MAIL_PROJECT:-$(pwd)}"
-  PROJECT_HASH="$(printf '%s' "$PROJECT" | md5sum | cut -d' ' -f1)"
+  PROJECT_HASH="$(printf '%s' "$PROJECT" | _gc_hash)"
   CACHE_DIR="/tmp/gc-mcp-mail-cache/${PROJECT_HASH}"
   if [ -n "${GC_CITY:-}" ]; then
     NAME_MAP_DIR="${GC_CITY}/.gc/mail-cache/${PROJECT_HASH}/name-map"
@@ -113,7 +123,7 @@ gc_to_mcp_name() {
   fi
   # Hash-based deterministic selection.
   local hash
-  hash=$(printf '%s' "$gc_name" | md5sum | cut -d' ' -f1)
+  hash=$(printf '%s' "$gc_name" | _gc_hash)
   local adj_idx noun_idx
   adj_idx=$(( 16#${hash:0:8} % ${#ADJECTIVES[@]} ))
   noun_idx=$(( 16#${hash:8:8} % ${#NOUNS[@]} ))
@@ -380,7 +390,7 @@ case "$op" in
     cache_recipient "$msg_id" "$to"
 
     # Generate local thread ID and cache it.
-    thread_id="thread-$(printf '%s' "$msg_id-$from-$to" | md5sum | cut -c1-12)"
+    thread_id="thread-$(printf '%s' "$msg_id-$from-$to" | _gc_hash | cut -c1-12)"
     mkdir -p "$CACHE_DIR/msg-thread"
     printf '%s' "$thread_id" > "$CACHE_DIR/msg-thread/$msg_id"
 
@@ -729,7 +739,7 @@ case "$op" in
     # Inherit thread ID from original message; cache thread and reply-to.
     orig_thread_id=$(get_cached_thread_id "$id")
     if [ -z "$orig_thread_id" ]; then
-      orig_thread_id="thread-$(printf '%s' "$msg_id-$from-$gc_reply_to" | md5sum | cut -c1-12)"
+      orig_thread_id="thread-$(printf '%s' "$msg_id-$from-$gc_reply_to" | _gc_hash | cut -c1-12)"
     fi
     printf '%s' "$orig_thread_id" > "$CACHE_DIR/msg-thread/$msg_id"
     mkdir -p "$CACHE_DIR/msg-reply-to"

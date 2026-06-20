@@ -261,6 +261,7 @@ func driftCheckEnv(t *testing.T, supervisorBuildID string) (cityPath string, res
 	})
 
 	supervisorAliveHook = os.Getpid
+	readSupervisorExePathHook = func(_ int) (string, error) { return os.Executable() }
 	supervisorAPIBaseURLHook = func() (string, error) { return srv.URL, nil }
 	supervisorSystemctlActive = func(string) bool { return false }
 	readSupervisorExePathHook = func(int) (string, error) { return "/tmp/gc-test-supervisor", nil }

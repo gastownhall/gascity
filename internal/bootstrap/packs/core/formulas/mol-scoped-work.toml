@@ -49,7 +49,7 @@ Prime the workspace, inspect the assigned work, and understand the current bead
 metadata before doing anything destructive.
 
 ```bash
-gc prime
+{{binary}} prime
 bd prime
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')

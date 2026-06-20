@@ -129,7 +129,11 @@ func defaultMCPBranch(dir string) string {
 	if dir == "" {
 		return "main"
 	}
-	g := git.New(filepath.Clean(dir))
+	dir = filepath.Clean(dir)
+	if !git.InsideWorkTree(dir) {
+		return "main"
+	}
+	g := git.New(dir)
 	branch, _ := g.DefaultBranch()
 	if branch == "" {
 		return "main"

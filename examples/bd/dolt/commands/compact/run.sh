@@ -355,7 +355,7 @@ metadata_files() {
       if [ "$rig_status" -eq 124 ]; then
         printf 'compact: gc rig list timed out after %ss; falling back to local filesystem metadata scan\n' "$rig_list_timeout" >&2
       else
-        printf 'compact: gc rig list failed rc=%s; falling back to local filesystem metadata scan\n' "$rig_status" >&2
+        printf 'compact: ${GC_BIN:-gc} rig list failed rc=%s; falling back to local filesystem metadata scan\n' "$rig_status" >&2
       fi
     fi
   fi

@@ -562,6 +562,18 @@ func boundRigAgent(rigName, binding, agent string) string {
 	return rigName + "/" + binding + "." + agent
 }
 
+func swarmRigAgent(rigName, agent string) string {
+	return boundRigAgent(rigName, "swarm", agent)
+}
+
+func gastownRigAgent(rigName, agent string) string {
+	return boundRigAgent(rigName, "gastown", agent)
+}
+
+func boundRigAgent(rigName, binding, agent string) string {
+	return rigName + "/" + binding + "." + agent
+}
+
 func gitCmd(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)

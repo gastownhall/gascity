@@ -38,11 +38,11 @@ func newShellInstallCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "install [bash|zsh|fish]",
 		Short: "Install or update shell integration",
-		Long: `Install or update the gc shell completion hook.
+		Long: fmt.Sprintf(`Install or update the %s shell completion hook.
 
 If no shell is specified, the shell is detected from $SHELL.
 The completion script is written to ~/.gc/completions/ and a source line
-is added to your shell RC file.`,
+is added to your shell RC file.`, prog()),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmdShellInstall(cmd.Root(), args, stdout, stderr) != 0 {
@@ -57,7 +57,7 @@ func newShellRemoveCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "remove",
 		Short: "Remove shell integration",
-		Long:  `Remove the gc shell completion hook from your shell RC file and delete the completion script.`,
+		Long:  fmt.Sprintf("Remove the %s shell completion hook from your shell RC file and delete the completion script.", prog()),
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdShellRemove(stdout, stderr) != 0 {
@@ -220,29 +220,29 @@ func hookBlock(sh, compFile string) string {
 func cmdShellInstall(root *cobra.Command, args []string, stdout, stderr io.Writer) int {
 	sh, err := resolveShellArg(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc shell install: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install", err)
 		return 1
 	}
 
 	// Generate completion script.
 	script, err := generateCompletion(root, sh)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc shell install: generating completion: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install: generating completion", err)
 		return 1
 	}
 
 	// Write completion script to file.
 	compFile, err := completionFile(sh)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc shell install: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install", err)
 		return 1
 	}
 	if err := os.MkdirAll(filepath.Dir(compFile), 0o755); err != nil {
-		fmt.Fprintf(stderr, "gc shell install: creating directory: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install: creating directory", err)
 		return 1
 	}
 	if err := atomicWriteFile(compFile, script); err != nil {
-		fmt.Fprintf(stderr, "gc shell install: writing completion script: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install: writing completion script", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Wrote completion script to %s\n", compFile) //nolint:errcheck // best-effort stdout
@@ -250,31 +250,31 @@ func cmdShellInstall(root *cobra.Command, args []string, stdout, stderr io.Write
 	// Add source line to RC file.
 	rcFile, err := shellRCFile(sh)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc shell install: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install", err)
 		return 1
 	}
 	if existingRC, err := installedShellRCFile(sh); err == nil {
 		rcFile = existingRC
 	}
 	if err := os.MkdirAll(filepath.Dir(rcFile), 0o755); err != nil {
-		fmt.Fprintf(stderr, "gc shell install: creating directory: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install: creating directory", err)
 		return 1
 	}
 	installed, err := rcFileHasHook(rcFile)
 	if err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(stderr, "gc shell install: reading %s: %v\n", rcFile, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: reading %s: %v\n", cmdName("shell install"), rcFile, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if installed {
 		// Update in place — the completion script is already refreshed on disk.
 		if err := rcFileReplaceHook(rcFile, hookBlock(sh, compFile)); err != nil {
-			fmt.Fprintf(stderr, "gc shell install: updating %s: %v\n", rcFile, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: updating %s: %v\n", cmdName("shell install"), rcFile, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		fmt.Fprintf(stdout, "Updated hook in %s\n", rcFile) //nolint:errcheck // best-effort stdout
 	} else {
 		if err := rcFileAppendHook(rcFile, hookBlock(sh, compFile)); err != nil {
-			fmt.Fprintf(stderr, "gc shell install: updating %s: %v\n", rcFile, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: updating %s: %v\n", cmdName("shell install"), rcFile, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		fmt.Fprintf(stdout, "Added hook to %s\n", rcFile) //nolint:errcheck // best-effort stdout
@@ -294,7 +294,7 @@ func cmdShellRemove(stdout, stderr io.Writer) int {
 		}
 		if _, err := os.Stat(compFile); err == nil {
 			if err := os.Remove(compFile); err != nil {
-				fmt.Fprintf(stderr, "gc shell remove: removing %s: %v\n", compFile, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: removing %s: %v\n", cmdName("shell remove"), compFile, err) //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stdout, "Removed %s\n", compFile) //nolint:errcheck // best-effort stdout
 				removed = true
@@ -311,7 +311,7 @@ func cmdShellRemove(stdout, stderr io.Writer) int {
 				continue
 			}
 			if err := rcFileRemoveHook(rcFile); err != nil {
-				fmt.Fprintf(stderr, "gc shell remove: updating %s: %v\n", rcFile, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: updating %s: %v\n", cmdName("shell remove"), rcFile, err) //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stdout, "Removed hook from %s\n", rcFile) //nolint:errcheck // best-effort stdout
 				removed = true

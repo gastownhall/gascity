@@ -183,14 +183,14 @@ func newWaitReadyCmd(stdout, stderr io.Writer) *cobra.Command {
 
 func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep bool, stdout, stderr io.Writer) int {
 	if len(depIDs) == 0 {
-		fmt.Fprintln(stderr, "gc session wait: at least one --on-beads value is required") //nolint:errcheck
+		fmt.Fprintln(stderr, prog()+" session wait"+": at least one --on-beads value is required") //nolint:errcheck
 		return 1
 	}
 	if strings.TrimSpace(note) == "" {
-		fmt.Fprintln(stderr, "gc session wait: --note is required") //nolint:errcheck
+		fmt.Fprintln(stderr, prog()+" session wait"+": --note is required") //nolint:errcheck
 		return 1
 	}
-	store, code := openCityStore(stderr, "gc session wait")
+	store, code := openCityStore(stderr, prog()+" session wait")
 	if store == nil {
 		return code
 	}
@@ -201,17 +201,17 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 		target = os.Getenv("GC_SESSION_ID")
 	}
 	if target == "" {
-		fmt.Fprintln(stderr, "gc session wait: session not specified (pass an ID/name or set $GC_SESSION_ID)") //nolint:errcheck
+		fmt.Fprintln(stderr, prog()+" session wait"+": session not specified (pass an ID/name or set $GC_SESSION_ID)") //nolint:errcheck
 		return 1
 	}
 	if err := waitLifecycleEnabled(); err != nil {
-		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, prog()+" session wait"+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if sleep {
 		cityPath, err := resolveCity()
 		if err != nil || !cityUsesManagedReconciler(cityPath) {
-			fmt.Fprintln(stderr, "gc session wait: a managed controller must be running when --sleep is used") //nolint:errcheck
+			fmt.Fprintln(stderr, prog()+" session wait"+": a managed controller must be running when --sleep is used") //nolint:errcheck
 			return 1
 		}
 	}
@@ -222,17 +222,17 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, target)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, prog()+" session wait"+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	sb, err := store.Get(sessionID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, prog()+" session wait"+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	for _, depID := range depIDs {
 		if _, err := loadWaitDependencyBead(cityPath, store, depID); err != nil {
-			fmt.Fprintf(stderr, "gc session wait: dependency %s: %v\n", depID, err) //nolint:errcheck
+			fmt.Fprintf(stderr, prog()+" session wait"+": dependency %s: %v\n", depID, err) //nolint:errcheck
 			return 1
 		}
 	}
@@ -264,7 +264,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 		Metadata: meta,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session wait: creating wait: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, prog()+" session wait"+": creating wait: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	ready, depErr := depsWaitReadyDetailedForCity(cityPath, store, waitBead)
@@ -274,9 +274,9 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 			"failed_at":  now.Format(time.RFC3339),
 			"last_error": depErr.Error(),
 		}); err != nil {
-			fmt.Fprintf(stderr, "gc session wait: setting failed state: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, prog()+" session wait"+": setting failed state: %v\n", err) //nolint:errcheck
 		}
-		fmt.Fprintf(stderr, "gc session wait: dependency state check: %v\n", depErr) //nolint:errcheck
+		fmt.Fprintf(stderr, prog()+" session wait"+": dependency state check: %v\n", depErr) //nolint:errcheck
 		return 1
 	}
 	if ready {
@@ -284,7 +284,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 			"state":    waitStateReady,
 			"ready_at": now.Format(time.RFC3339),
 		}); err != nil {
-			fmt.Fprintf(stderr, "gc session wait: setting ready state: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, prog()+" session wait"+": setting ready state: %v\n", err) //nolint:errcheck
 			return 1
 		}
 		fmt.Fprintf(stdout, "Registered wait %s for session %s (already ready).\n", waitBead.ID, sessionID) //nolint:errcheck
@@ -295,12 +295,12 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 			"wait_hold":    "true",
 			"sleep_intent": "wait-hold",
 		}); err != nil {
-			fmt.Fprintf(stderr, "gc session wait: setting wait hold: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, prog()+" session wait"+": setting wait hold: %v\n", err) //nolint:errcheck
 			return 1
 		}
 		if cityPath, err := resolveCity(); err == nil {
 			if err := pokeController(cityPath); err != nil {
-				fmt.Fprintf(stderr, "gc session wait: poking controller: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(stderr, prog()+" session wait"+": poking controller: %v\n", err) //nolint:errcheck
 				return 1
 			}
 		}
@@ -407,10 +407,10 @@ func doWaitListFallback(cityPath, stateFilter, sessionFilter string, jsonOutput 
 	}
 	if err != nil {
 		if !isWaitLookupLimitError(err) {
-			fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, prog()+" wait list"+": %v\n", err) //nolint:errcheck
 			return 1
 		}
-		fmt.Fprintf(stderr, "gc wait list: %v; showing capped results\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, prog()+" wait list"+": %v; showing capped results\n", err) //nolint:errcheck
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
 	filtered := filterWaitListItems(items, stateFilter, "")
@@ -516,11 +516,11 @@ func doWaitInspectFallback(cityPath, waitID string, jsonOutput bool, stdout, std
 	}
 	b, err := store.Get(waitID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, prog()+" wait inspect"+": %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if !sessionpkg.IsWaitBead(b) {
-		fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
+		fmt.Fprintf(stderr, prog()+" wait inspect"+": %s is not a wait\n", waitID) //nolint:errcheck
 		return 1
 	}
 	if jsonOutput {
@@ -613,7 +613,7 @@ func writeWaitListJSON(stdout, stderr io.Writer, cityPath string, waits []beads.
 		Waits:         rows,
 	}
 	if err := writeCLIJSONLine(stdout, payload); err != nil {
-		fmt.Fprintf(stderr, "gc wait list: encode JSON: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, prog()+" wait list"+": encode JSON: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	return 0
@@ -626,7 +626,7 @@ func writeWaitInspectJSON(stdout, stderr io.Writer, cityPath string, wait beads.
 		Wait:          waitJSONFromBead(wait),
 	}
 	if err := writeCLIJSONLine(stdout, payload); err != nil {
-		fmt.Fprintf(stderr, "gc wait inspect: encode JSON: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, prog()+" wait inspect"+": encode JSON: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	return 0
@@ -755,7 +755,7 @@ func stampWaitLookupCapDiagnostic(store beads.Store, sessionID string, err error
 	batch := map[string]string{}
 	sessionpkg.StampWaitLookupCapMetadata(batch, label, limitErr.Limit, now, source)
 	if err := store.SetMetadataBatch(sessionID, batch); err != nil {
-		log.Printf("gc wait: recording lookup cap diagnostic for session %s failed: %v", sessionID, err)
+		log.Printf(prog()+" wait"+": recording lookup cap diagnostic for session %s failed: %v", sessionID, err)
 	}
 }
 
@@ -808,7 +808,7 @@ func loadWaitBeadsForWakeState(store beads.Store, sessionBeads *sessionBeadSnaps
 			return nil, err
 		}
 		stampGlobalWaitLookupCapDiagnostics(store, sessionBeads, err, time.Now().UTC())
-		log.Printf("gc wait: global wake-state wait lookup failed; continuing with open-session waits: %v", err)
+		log.Printf(prog()+" wait"+": global wake-state wait lookup failed; continuing with open-session waits: %v", err)
 	}
 	for _, wait := range globalWaits {
 		if seen[wait.ID] {
@@ -838,7 +838,7 @@ func loadWaitBeadsForOpenSessionsWithSeen(store beads.Store, sessionBeads *sessi
 				return nil, seen, err
 			}
 			stampWaitLookupCapDiagnostic(store, sessionBead.ID, err, time.Now().UTC(), "wake-state-session")
-			log.Printf("gc wait: session %s wait lookup capped; continuing with filtered partial waits: %v", sessionBead.ID, err)
+			log.Printf(prog()+" wait"+": session %s wait lookup capped; continuing with filtered partial waits: %v", sessionBead.ID, err)
 		}
 		for _, wait := range sessionWaits {
 			if seen[wait.ID] {
@@ -1316,7 +1316,7 @@ func hasNonTerminalWaits(store beads.Store, sessionID string) (bool, error) {
 		}
 	}
 	if capped {
-		log.Printf("gc wait: session %s wait-hold lookup capped; preserving wait hold: %v", sessionID, err)
+		log.Printf(prog()+" wait"+": session %s wait-hold lookup capped; preserving wait hold: %v", sessionID, err)
 		return true, nil
 	}
 	return false, nil

@@ -1,0 +1,1 @@
+/Users/trilliumsmith/city-test/packs/gastown/scripts/checks/adopt-pr-review-approved.sh

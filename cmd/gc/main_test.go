@@ -4838,20 +4838,20 @@ schema = 2
 	var stdout, stderr bytes.Buffer
 	code := doInitFromDirWithOptions(srcDir, cityPath, "", &stdout, &stderr, true)
 	if code != 0 {
-		t.Fatalf("doInitFromDirWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+		t.Fatalf("cmdInitFromTOMLFileWithOptions = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	cityData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatalf("reading city.toml: %v", err)
+	cityText := string(mustReadFile(t, filepath.Join(cityPath, "city.toml")))
+	for _, want := range []string{
+		"[defaults.rig.imports.alpha]",
+		`source = "./packs/alpha"`,
+		"[defaults.rig.imports.zeta]",
+		`source = "./packs/zeta"`,
+	} {
+		if !strings.Contains(cityText, want) {
+			t.Fatalf("city.toml missing default-rig import %q:\n%s", want, cityText)
+		}
 	}
-	cityText := string(cityData)
-	zetaIdx := strings.Index(cityText, "[defaults.rig.imports.zeta]")
-	alphaIdx := strings.Index(cityText, "[defaults.rig.imports.alpha]")
-	if zetaIdx == -1 || alphaIdx == -1 {
-		t.Fatalf("city.toml missing copied default rig imports:\n%s", cityText)
-	}
-
 	defaultRigImports, err := config.LoadRootPackDefaultRigImports(fsys.OSFS{}, cityPath)
 	if err != nil {
 		t.Fatalf("LoadRootPackDefaultRigImports: %v", err)

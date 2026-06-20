@@ -55,17 +55,17 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	}
 	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "session wake", err)
 		return 1
 	}
 
 	b, err := store.Get(id)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "session wake", err)
 		return 1
 	}
 	if !session.IsSessionBeadOrRepairable(b) {
-		fmt.Fprintf(stderr, "gc session wake: %s is not a session\n", id) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %s is not a session\n", cmdName("session wake"), id) //nolint:errcheck
 		return 1
 	}
 	hasRunnableTemplate := sessionWakeHasRunnableTemplate(b, cfg)
@@ -73,10 +73,10 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
 	if err != nil {
 		if state, conflict := session.WakeConflictState(err); conflict {
-			fmt.Fprintf(stderr, "gc session wake: session %s is %s\n", id, state) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: session %s is %s\n", cmdName("session wake"), id, state) //nolint:errcheck
 			return 1
 		}
-		fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "session wake: updating metadata", err)
 		return 1
 	}
 	if !hasRunnableTemplate && sessionWakeRequestedCreate(b) {
@@ -88,17 +88,17 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 			"wake_request":              "",
 			"wake_requested_at":         "",
 		}); err != nil {
-			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: updating metadata: %v\n", cmdName("session wake"), err) //nolint:errcheck
 			return 1
 		}
 	}
 	if cityErr == nil {
 		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
-			fmt.Fprintf(stderr, "gc session wake: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "session wake: warning: withdrawing queued wait nudges", err)
 		}
 		if cityUsesManagedReconciler(cityPath) {
 			if err := pokeController(cityPath); err != nil {
-				fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "session wake: warning: poke failed", err)
 			}
 		}
 	}

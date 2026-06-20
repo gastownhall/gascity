@@ -35,7 +35,7 @@ func TestDoImportMigrateDryRunUsesSameGuidance(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), `gc doctor --fix`) {
+	if !strings.Contains(stderr.String(), cmdName("doctor --fix")) {
 		t.Fatalf("stderr missing gc doctor guidance:\n%s", stderr.String())
 	}
 }

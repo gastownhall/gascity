@@ -21,28 +21,28 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if strings.TrimSpace(agentName) == "" {
-				fmt.Fprintln(stderr, "gc internal project-mcp: --agent is required") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --agent is required\n", cmdName("internal project-mcp")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			if strings.TrimSpace(workdir) == "" {
-				fmt.Fprintln(stderr, "gc internal project-mcp: --workdir is required") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --workdir is required\n", cmdName("internal project-mcp")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 
 			cityPath, err := resolveCity()
 			if err != nil {
-				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal project-mcp", err)
 				return errExit
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal project-mcp", err)
 				return errExit
 			}
 
 			agent, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 			if !ok {
-				fmt.Fprintf(stderr, "gc internal project-mcp: unknown agent %q\n", agentName) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: unknown agent %q\n", cmdName("internal project-mcp"), agentName) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			if strings.TrimSpace(identity) == "" {
@@ -50,7 +50,7 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			absWorkdir, err := filepath.Abs(workdir)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc internal project-mcp: resolving workdir %q: %v\n", workdir, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: resolving workdir %q: %v\n", cmdName("internal project-mcp"), workdir, err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 
@@ -61,30 +61,30 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 				// no-op so unsupported/absent providers can be ignored there.
 				catalog, lerr := loadEffectiveMCPForAgent(cityPath, cfg, &agent, identity, absWorkdir)
 				if lerr != nil {
-					fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", lerr) //nolint:errcheck // best-effort stderr
+					cmdErr(stderr, "internal project-mcp", lerr)
 					return errExit
 				}
 				if len(catalog.Servers) == 0 {
 					return nil
 				}
-				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal project-mcp", err)
 				return errExit
 			}
 
 			catalog, projection, err := resolveAgentMCPProjection(cityPath, cfg, &agent, identity, absWorkdir, resolvedProviderLaunchFamily(resolved))
 			if err != nil {
-				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal project-mcp", err)
 				return errExit
 			}
 			if projection.Provider == "" {
 				return nil
 			}
 			if err := validateStage2TargetClaimants(cityPath, cfg, &agent, projection, exec.LookPath); err != nil {
-				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal project-mcp", err)
 				return errExit
 			}
 			if err := projection.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
-				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal project-mcp", err)
 				return errExit
 			}
 			if len(catalog.Servers) > 0 {

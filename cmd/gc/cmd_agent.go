@@ -386,16 +386,16 @@ func newAgentCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agent",
 		Short: "Manage agent configuration",
-		Long: `Manage agent configuration in city.toml.
+		Long: fmt.Sprintf(`Manage agent configuration in city.toml.
 
 Runtime operations (attach, list, peek, nudge, kill, start, stop, destroy)
-have moved to "gc session" and "gc runtime".`,
+have moved to "%s session" and "%s runtime".`, prog(), prog()),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				fmt.Fprintln(stderr, "gc agent: missing subcommand (add, list, suspend, resume)") //nolint:errcheck // best-effort stderr
 			} else {
-				fmt.Fprintf(stderr, "gc agent: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, cmdName("agent")+": unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
 			return errExit
 		},
@@ -581,12 +581,12 @@ Use --suspended to scaffold the agent in a suspended state.`,
 // the city root and delegates to doAgentAdd.
 func cmdAgentAdd(name, promptTemplate, dir string, suspended bool, stdout, stderr io.Writer) int {
 	if name == "" {
-		fmt.Fprintln(stderr, "gc agent add: missing --name flag") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, cmdName("agent add")+": missing --name flag") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("agent add")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return doAgentAdd(fsys.OSFS{}, cityPath, name, promptTemplate, dir, suspended, stdout, stderr)
@@ -599,13 +599,13 @@ func doAgentAdd(fs fsys.FS, cityPath, name, promptTemplate, dir string, suspende
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	packPath := filepath.Join(cityPath, "pack.toml")
 	if _, err := fs.Stat(packPath); err != nil {
-		fmt.Fprintln(stderr, "gc agent add: this command requires a city directory with pack.toml; run \"gc doctor\" or \"gc doctor --fix\" to migrate this city first") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: this command requires a city directory with pack.toml; run %q or \"%s\" to migrate this city first\n", cmdName("agent add"), cmdName("doctor"), cmdName("doctor")+" --fix") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	cfg, err := loadCityConfigFS(fs, tomlPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("agent add")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -708,11 +708,11 @@ func newAgentSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "suspend <name>",
 		Short: "Suspend an agent (reconciler will skip it)",
-		Long: `Suspend an agent by setting suspended=true in its durable config.
+		Long: fmt.Sprintf(`Suspend an agent by setting suspended=true in its durable config.
 
 Suspended agents are skipped by the reconciler — their sessions are not
 started or restarted. Existing sessions continue running but won't be
-replaced if they exit. Use "gc agent resume" to restore.`,
+replaced if they exit. Use "%s agent resume" to restore.`, prog()),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if jsonOutput {
@@ -750,12 +750,12 @@ replaced if they exit. Use "gc agent resume" to restore.`,
 // cmdAgentSuspend is the CLI entry point for suspending an agent.
 func cmdAgentSuspend(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc agent suspend: missing agent name") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, cmdName("agent suspend")+": missing agent name") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("agent suspend")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if c := apiClient(cityPath); c != nil {
@@ -766,7 +766,7 @@ func cmdAgentSuspend(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		if !api.ShouldFallback(err) {
-			fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("agent suspend")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		// Connection error — fall through to direct mutation.
@@ -828,12 +828,12 @@ names (resolved via rig context) and qualified names (e.g. "myrig/worker").`,
 // cmdAgentResume is the CLI entry point for resuming a suspended agent.
 func cmdAgentResume(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc agent resume: missing agent name") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, cmdName("agent resume")+": missing agent name") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("agent resume")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if c := apiClient(cityPath); c != nil {
@@ -844,7 +844,7 @@ func cmdAgentResume(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		if !api.ShouldFallback(err) {
-			fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("agent resume")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		// Connection error — fall through to direct mutation.
@@ -880,7 +880,7 @@ func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, s
 	// Phase 1: load raw config (no expansion) for safe write-back.
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc agent %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName("agent "+verb), err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -894,14 +894,14 @@ func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, s
 			}
 		}
 		if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
-			fmt.Fprintf(stderr, "gc agent %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: %v\n", cmdName("agent "+verb), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		fmt.Fprintf(stdout, "%s agent '%s'\n", past, name) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	if updated, err := updateRootPackAgentSuspended(fs, cityPath, cfg, name, suspended); err != nil {
-		fmt.Fprintf(stderr, "gc agent %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName("agent "+verb), err) //nolint:errcheck // best-effort stderr
 		return 1
 	} else if updated {
 		fmt.Fprintf(stdout, "%s agent '%s'\n", past, name) //nolint:errcheck // best-effort stdout
@@ -911,12 +911,12 @@ func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, s
 	// Phase 2: not in raw config — check expanded config for provenance.
 	expanded, err := loadCityConfigFS(fs, tomlPath, stderr)
 	if err != nil {
-		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent "+verb, name, cfg)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg(cmdName("agent")+" "+verb, name, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	resolved, ok := resolveAgentIdentity(expanded, name, currentRigContext(expanded))
 	if !ok {
-		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent "+verb, name, expanded)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg(cmdName("agent")+" "+verb, name, expanded)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	localDiscovered, err := configedit.LocalDiscoveredAgent(fs, cityPath, resolved)
@@ -926,7 +926,7 @@ func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, s
 	}
 	if localDiscovered {
 		if err := configedit.WriteLocalDiscoveredAgentSuspended(fs, cityPath, resolved, suspended); err != nil {
-			fmt.Fprintf(stderr, "gc agent %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: %v\n", cmdName("agent "+verb), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		// Also strip any pre-existing [[patches.agent]] suspended override
@@ -936,13 +936,13 @@ func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, s
 		// patch.
 		if configedit.StripAgentPatchSuspended(cfg, resolved.QualifiedName()) {
 			if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
-				fmt.Fprintf(stderr, "gc agent %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: %v\n", cmdName("agent "+verb), err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 		}
 		fmt.Fprintf(stdout, "%s agent '%s'\n", past, name) //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	fmt.Fprintf(stderr, "gc agent %s: agent %q is defined by a pack — use [[patches]] to override\n", verb, name) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: agent %q is defined by a pack — use [[patches]] to override\n", cmdName("agent "+verb), name) //nolint:errcheck // best-effort stderr
 	return 1
 }

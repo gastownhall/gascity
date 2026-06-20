@@ -121,16 +121,24 @@ func TestExecCommandRunnerStopsBDSlowTimerForFastBDCommand(t *testing.T) {
 		t.Skip("sh unavailable")
 	}
 
-	oldThreshold := bdSlowTelemetryThreshold
-	bdSlowTelemetryThreshold = 30 * time.Millisecond
-	t.Cleanup(func() { bdSlowTelemetryThreshold = oldThreshold })
-
 	exp := installBeadsRecordingLogExporter(t)
 	binDir := t.TempDir()
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 printf '[]\n'
 `)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Pre-warm the script before starting the threshold timer. macOS
+	// pays a ~150ms first-exec validation tax on new script files;
+	// without this warm-up, that startup cost fires the 30ms threshold
+	// before the fast script even returns.
+	if _, err := exec.Command(filepath.Join(binDir, "bd"), "list").Output(); err != nil {
+		t.Skipf("bd pre-warm failed (%v); skipping timing-sensitive test", err)
+	}
+
+	oldThreshold := bdSlowTelemetryThreshold
+	bdSlowTelemetryThreshold = 30 * time.Millisecond
+	t.Cleanup(func() { bdSlowTelemetryThreshold = oldThreshold })
 
 	if _, err := ExecCommandRunner()(t.TempDir(), "bd", "list"); err != nil {
 		t.Fatalf("ExecCommandRunner bd: %v", err)

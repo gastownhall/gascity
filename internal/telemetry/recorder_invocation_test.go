@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel"
@@ -12,8 +13,8 @@ import (
 
 func resetInvocationInstruments(t *testing.T) {
 	t.Helper()
-	ResetInstrumentsForTest()
-	t.Cleanup(ResetInstrumentsForTest)
+	invInstOnce = sync.Once{}
+	t.Cleanup(func() { invInstOnce = sync.Once{} })
 }
 
 func TestInvocationLabels_OTelAttributes(t *testing.T) {

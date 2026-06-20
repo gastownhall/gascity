@@ -1,0 +1,1 @@
+/Users/trilliumsmith/city-test/packs/maintenance/scripts/prune-branches.sh

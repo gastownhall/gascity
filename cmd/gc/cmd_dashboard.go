@@ -28,7 +28,7 @@ city tabs. From a city directory or with --city, city-specific panels and action
 forms are enabled for that city.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if runDashboardServe("gc dashboard", port, apiURL, stderr) != nil {
+			if runDashboardServe(cmdName("dashboard"), port, apiURL, stderr) != nil {
 				return errExit
 			}
 			return nil
@@ -53,7 +53,7 @@ city tabs. From a city directory or with --city, city-specific panels and action
 forms are enabled for that city.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if runDashboardServe("gc dashboard serve", port, apiURL, stderr) != nil {
+			if runDashboardServe(cmdName("dashboard serve"), port, apiURL, stderr) != nil {
 				return errExit
 			}
 			return nil
@@ -117,7 +117,7 @@ func resolveDashboardAPI(cityPath string, cfg *config.City, apiURLOverride strin
 	}
 
 	if cityPath == "" {
-		return "", fmt.Errorf("could not auto-discover the supervisor API; start the supervisor with %q or pass --api explicitly", "gc supervisor start")
+		return "", fmt.Errorf("could not auto-discover the supervisor API; start the supervisor with %q or pass --api explicitly", cmdName("supervisor start"))
 	}
 	// Standalone-controller mode: the controller's API (cfg.API.Port)
 	// now serves the same /v0/city/{cityName}/... surface as the
@@ -128,7 +128,7 @@ func resolveDashboardAPI(cityPath string, cfg *config.City, apiURLOverride strin
 	if hasStandaloneDashboardAPI(cfg) {
 		return standaloneAPIBaseURL(cfg), nil
 	}
-	return "", fmt.Errorf("could not auto-discover the supervisor API for %q; start the supervisor with %q or pass --api explicitly", cityPath, "gc supervisor start")
+	return "", fmt.Errorf("could not auto-discover the supervisor API for %q; start the supervisor with %q or pass --api explicitly", cityPath, cmdName("supervisor start"))
 }
 
 func hasStandaloneDashboardAPI(cfg *config.City) bool {

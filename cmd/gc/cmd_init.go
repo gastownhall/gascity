@@ -306,7 +306,7 @@ func logInitProgress(stdout io.Writer, step int, msg string) {
 }
 
 func initAlreadyInitialized(stderr io.Writer) int {
-	fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: already initialized\n", cmdName("init")) //nolint:errcheck // best-effort stderr
 	return initExitAlreadyInitialized
 }
 
@@ -487,14 +487,14 @@ func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, pre
 		var err error
 		cityPath, err = filepath.Abs(args[0])
 		if err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	} else {
 		var err error
 		cityPath, err = os.Getwd()
 		if err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -1050,14 +1050,14 @@ func cmdInitFromFileWithOptionsInternal(fileArg string, args []string, nameOverr
 		var err error
 		cityPath, err = filepath.Abs(args[0])
 		if err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	} else {
 		var err error
 		cityPath, err = os.Getwd()
 		if err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -1079,12 +1079,16 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 	// Validate the source file parses as a valid city config.
 	data, err := os.ReadFile(tomlSrc)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc init: reading %q: %v\n", tomlSrc, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: reading %q: %v\n", cmdName("init"), tomlSrc, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cfg, err := config.Parse(data)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if cfg.Formulas.Dir != "" {
+		fmt.Fprintln(stderr, cmdName("init")+": [formulas].dir is no longer supported; use the well-known formulas/ directory") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if cfg.Formulas.Dir != "" {
@@ -1097,7 +1101,7 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
 	templatePack, err := decodeInitPackTemplate(data, cityName)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cfg.Workspace.Name = cityName
@@ -1114,11 +1118,11 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 		return initAlreadyInitialized(stderr)
 	}
 	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := ensureInitConventionDirs(fs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	// Install Claude Code hooks (settings.json).
@@ -1152,7 +1156,7 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 	}
 	wrotePack, err := writeInitPackTomlOpts(fs, cityPath, packCfg, preserveExisting)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !wrotePack {
@@ -1206,18 +1210,18 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 		}
 	}
 	if err := persistInitWorkspaceIdentity(fs, cityPath, filepath.Join(cityPath, "city.toml"), &cityCfg, cityName, cityPrefix); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	// Write .gitignore entries for city-managed directories.
 	if err := ensureGitignoreEntries(fs, cityPath, cityGitignoreEntries); err != nil {
-		fmt.Fprintf(stderr, "gc init: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if shouldBootstrapScopedFileStore(cfg) {
 		if err := bootstrapScopedFileProviderCityFS(fs, cityPath); err != nil {
-			fmt.Fprintf(stderr, "gc init: bootstrapping file bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": bootstrapping file bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -1255,7 +1259,7 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 			return initAlreadyInitialized(stderr)
 		}
 		if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if code := installClaudeHooks(fs, cityPath, stderr); code != 0 {
@@ -1275,11 +1279,11 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// Create directory structure.
 	logInitProgress(stdout, 1, "Creating runtime scaffold")
 	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := ensureInitConventionDirs(fs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	// Install Claude Code hooks (settings.json).
@@ -1320,7 +1324,7 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 
 	formulasDir := filepath.Join(cityPath, citylayout.FormulasRoot)
 	if err := ResolveFormulas(cityPath, []string{formulasDir}); err != nil {
-		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": resolving formulas: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 
 	// Write city.toml — wizard path gets one agent + provider/startCommand;
@@ -1343,14 +1347,14 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	addBuiltinImportsToInitPack(&packCfg, cityCfg.Beads.Provider)
 	content, err := cityCfg.Marshal()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	content = withInitMailRetentionExample(content)
 	logInitProgress(stdout, 4, "Writing pack.toml")
 	wrotePack, err := writeInitPackTomlOpts(fs, cityPath, packCfg, preserveExisting)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !wrotePack {
@@ -1359,25 +1363,25 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	logInitProgress(stdout, 5, "Writing city configuration")
 	wroteCity, err := writeInitFile(fs, tomlPath, content, preserveExisting)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !wroteCity {
 		fmt.Fprintln(stdout, "Preserved existing city.toml.") //nolint:errcheck // best-effort stdout
 	}
 	if err := persistInitWorkspaceIdentity(fs, cityPath, tomlPath, &cityCfg, cityName, cityPrefix); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	// Write .gitignore entries for city-managed directories.
 	if err := ensureGitignoreEntries(fs, cityPath, cityGitignoreEntries); err != nil {
-		fmt.Fprintf(stderr, "gc init: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if shouldBootstrapScopedFileStore(&cfg) {
 		if err := bootstrapScopedFileProviderCityFS(fs, cityPath); err != nil {
-			fmt.Fprintf(stderr, "gc init: bootstrapping file bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": bootstrapping file bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -1434,7 +1438,7 @@ func applyBootstrapProfile(cfg *config.City, profile string) {
 func installClaudeHooks(fs fsys.FS, cityPath string, stderr io.Writer) int {
 	materializeCityRootPackOverlays(fs, cityPath, stderr)
 	if err := hooks.Install(fs, cityPath, cityPath, []string{"claude"}); err != nil {
-		fmt.Fprintf(stderr, "gc init: installing claude hooks: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": installing claude hooks: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0
@@ -1462,7 +1466,7 @@ func materializeCityRootPackOverlays(fs fsys.FS, cityPath string, stderr io.Writ
 	}
 	for _, od := range cfg.PackOverlayDirs {
 		if err := overlay.CopyDirForProviders(od, cityPath, nil, stderr); err != nil {
-			fmt.Fprintf(stderr, "gc init: materializing pack overlay %s: %v\n", od, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": materializing pack overlay %s: %v\n", od, err) //nolint:errcheck // best-effort stderr
 		}
 	}
 }
@@ -1497,7 +1501,7 @@ func bootstrapScopedFileProviderCityFS(fs fsys.FS, cityPath string) error {
 // instead of silently creating additional convention-discoverable agents.
 func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, preserveExisting bool) int {
 	if err := fs.MkdirAll(filepath.Join(cityPath, "agents"), 0o755); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if cfg == nil {
@@ -1512,16 +1516,16 @@ func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr
 		seen[dst] = true
 		data, err := defaultPrompts.ReadFile(agent.PromptTemplate)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc init: reading embedded %s: %v\n", agent.PromptTemplate, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: reading embedded %s: %v\n", cmdName("init"), agent.PromptTemplate, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		dst = filepath.Join(cityPath, dst)
 		if err := fs.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if _, err := writeInitFile(fs, dst, data, preserveExisting); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -1610,12 +1614,12 @@ func sourceTemplatePackSchemaFS(srcFS fsys.FS, srcDir string) int {
 func overrideCityName(f fsys.FS, tomlPath, name string, stderr io.Writer) int {
 	cfg, err := loadCityConfigForEditFS(f, tomlPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cfg.Workspace.Name = name
 	if err := writeCityConfigForEditFS(f, tomlPath, cfg); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0
@@ -1634,21 +1638,21 @@ func cmdInitFromDirWithOptionsInternal(fromDir string, args []string, nameOverri
 		var err error
 		cityPath, err = filepath.Abs(args[0])
 		if err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	} else {
 		var err error
 		cityPath, err = os.Getwd()
 		if err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
 
 	srcDir, err := filepath.Abs(fromDir)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1669,41 +1673,41 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool) int {
 	srcToml := filepath.Join(srcDir, "city.toml")
 	if _, err := os.Stat(srcToml); err != nil {
-		fmt.Fprintf(stderr, "gc init --from: source %q has no city.toml\n", srcDir) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: source %q has no city.toml\n", cmdName("init --from"), srcDir) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if cityAlreadyInitializedFS(fs, cityPath) {
 		return initAlreadyInitialized(stderr)
 	}
 	if err := fs.MkdirAll(cityPath, 0o755); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := overlay.CopyDirWithSkip(srcDir, cityPath, initFromSkipForSourceFS(fs, srcDir), stderr); err != nil {
-		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init --from")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	copiedToml := filepath.Join(cityPath, "city.toml")
 	cfg, cityName, cityPrefix, persistSiteIdentity, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if persistSiteIdentity {
 		if err := persistInitWorkspaceIdentity(fs, cityPath, copiedToml, cfg, cityName, cityPrefix); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
 
 	// Create runtime scaffold.
 	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := ensureInitConventionDirs(fs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1714,12 +1718,12 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 
 	// Write .gitignore entries for city-managed directories.
 	if err := ensureGitignoreEntries(fs, cityPath, cityGitignoreEntries); err != nil {
-		fmt.Fprintf(stderr, "gc init: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, cmdName("init")+": writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if shouldBootstrapScopedFileStore(cfg) {
 		if err := bootstrapScopedFileProviderCityFS(fs, cityPath); err != nil {
-			fmt.Fprintf(stderr, "gc init: bootstrapping file bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": bootstrapping file bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -1728,12 +1732,12 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	expandedCfg, _, loadErr := config.LoadWithIncludes(fsys.OSFS{}, copiedToml)
 	if loadErr == nil && len(expandedCfg.FormulaLayers.City) > 0 {
 		if rfErr := ResolveFormulas(cityPath, expandedCfg.FormulaLayers.City); rfErr != nil {
-			fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, cmdName("init")+": resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
 		}
 	}
 	if loadErr == nil {
 		pruneLegacyConfiguredScripts(cityPath, expandedCfg, func(scope string, err error) {
-			fmt.Fprintf(stderr, "gc init: pruning legacy %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: pruning legacy %s scripts: %v\n", cmdName("init"), scope, err) //nolint:errcheck // best-effort stderr
 		})
 	}
 

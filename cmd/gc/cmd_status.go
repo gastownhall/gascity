@@ -41,7 +41,7 @@ func newRigStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 func cmdRigStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	ctx, err := resolveContext()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig status", err)
 		return 1
 	}
 	rigName := ctx.RigName
@@ -49,13 +49,13 @@ func cmdRigStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int 
 		rigName = args[0]
 	}
 	if rigName == "" {
-		fmt.Fprintln(stderr, "gc rig status: missing rig name") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing rig name\n", cmdName("rig status")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cityPath := ctx.CityPath
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig status", err)
 		return 1
 	}
 
@@ -70,7 +70,7 @@ func cmdRigStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int 
 		}
 	}
 	if !found {
-		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig status", rigName, cfg)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, rigNotFoundMsg(cmdName("rig status"), rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -305,13 +305,13 @@ func doRigStatusWithStoreAndSnapshot(
 		sp0 := scaleParamsFor(&a)
 		if !a.SupportsInstanceExpansion() {
 			target := statusObservationTargetForIdentity(statusSnapshot, cityName, a.QualifiedName(), sessionTemplate)
-			obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, cfg, target, stderr)
+			obs := observeSessionTargetWithWarning(prog()+" rig status", cityPath, store, sp, cfg, target, stderr)
 			status := agentStatusLine(obs.Running, dops, target.runtimeSessionName, a.Suspended || obs.Suspended)
 			fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName(), status) //nolint:errcheck // best-effort stdout
 		} else {
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp) {
 				target := statusObservationTargetForIdentity(statusSnapshot, cityName, qualifiedInstance, sessionTemplate)
-				obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, cfg, target, stderr)
+				obs := observeSessionTargetWithWarning(prog()+" rig status", cityPath, store, sp, cfg, target, stderr)
 				status := agentStatusLine(obs.Running, dops, target.runtimeSessionName, a.Suspended || obs.Suspended)
 				fmt.Fprintf(stdout, "    %-12s%s\n", qualifiedInstance, status) //nolint:errcheck // best-effort stdout
 			}

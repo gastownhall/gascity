@@ -34,12 +34,13 @@ POOL="$RIG_NAME/claude"
 # Isolate from other gc processes (tests, other cities) that pollute
 # the shared ~/.gc registry. All demo state lives under GC_HOME.
 export GC_HOME="${GC_HOME:-$HOME/.gc-demo}"
+GC_BIN="${GC_BIN:-gc}"
 
 # ── Preflight checks ─────────────────────────────────────────────────────
 
 preflight() {
     local missing=()
-    for cmd in gc bd jq tmux; do
+    for cmd in "$GC_BIN" bd jq tmux; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
     if [ ${#missing[@]} -gt 0 ]; then
@@ -52,7 +53,7 @@ preflight() {
 
 cleanup() {
     if [ -d "$DEMO_CITY" ]; then
-        (cd "$DEMO_CITY" && gc stop 2>/dev/null) || true
+        (cd "$DEMO_CITY" && "$GC_BIN" stop 2>/dev/null) || true
     fi
     # Kill all non-system dolt servers (system dolt runs on port 3307).
     ps aux | grep "dolt sql-server" | grep -v grep | grep -v "port=3307" \
@@ -60,14 +61,14 @@ cleanup() {
     rm -rf "$DEMO_CITY"
     # Restart supervisor under isolated GC_HOME with current binary.
     local pid
-    pid=$(gc supervisor status 2>&1 | grep -oP 'PID \K\d+' || true)
+    pid=$("$GC_BIN" supervisor status 2>&1 | grep -oP 'PID \K\d+' || true)
     if [ -n "$pid" ]; then
         kill -9 "$pid" 2>/dev/null || true
     fi
     rm -rf "$GC_HOME"
     mkdir -p "$GC_HOME"
     sleep 1
-    gc supervisor start 2>/dev/null || true
+    "$GC_BIN" supervisor start 2>/dev/null || true
 }
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -118,7 +119,7 @@ wait_for_pool_agent() {
     local elapsed=0
     while [ "$elapsed" -lt "$timeout" ]; do
         local status_output
-        status_output=$(cd "$DEMO_CITY" && gc rig status "$RIG_NAME" 2>/dev/null || true)
+        status_output=$(cd "$DEMO_CITY" && "$GC_BIN" rig status "$RIG_NAME" 2>/dev/null || true)
         if echo "$status_output" | grep -q "running"; then
             echo ""
             echo "$status_output"
@@ -147,7 +148,7 @@ part1() {
     narrate "Part 1: Zero to Working" --sub "Init city, add rig, sling inline text"
 
     step "Initialize a new city"
-    run_show gc init "$DEMO_CITY"
+    run_show "$GC_BIN" init "$DEMO_CITY"
 
     step "Default city.toml"
     echo -e "  ${NARR_DIM}\$ cat $DEMO_CITY/city.toml${NARR_NC}"
@@ -157,7 +158,7 @@ part1() {
     step "Add a rig (project directory)"
     mkdir -p "$RIG_DIR"
     echo -e "  ${NARR_DIM}\$ gc rig add $RIG_NAME${NARR_NC}"
-    (cd "$DEMO_CITY" && gc rig add "$RIG_NAME")
+    (cd "$DEMO_CITY" && "$GC_BIN" rig add "$RIG_NAME")
     echo ""
 
     step "Rig directory is empty — no code yet"
@@ -166,12 +167,12 @@ part1() {
     echo ""
 
     # Ensure reconciler picks up the new rig's implicit pool agents.
-    gc supervisor reload 2>/dev/null || true
+    "$GC_BIN" supervisor reload 2>/dev/null || true
 
     step "Sling inline text — creates a bead and routes it to the pool"
     echo -e "  ${NARR_DIM}\$ gc sling $POOL \"Write a README.md for this project\" ${NARR_NC}"
     local sling_output
-    sling_output=$(cd "$DEMO_CITY" && gc sling "$POOL" "Write a README.md for this project" 2>&1) || true
+    sling_output=$(cd "$DEMO_CITY" && "$GC_BIN" sling "$POOL" "Write a README.md for this project" 2>&1) || true
     echo "$sling_output"
     echo ""
 
@@ -223,7 +224,7 @@ part2() {
 
     step "Sling the bead to the pool"
     echo -e "  ${NARR_DIM}\$ gc sling $POOL $bead_id${NARR_NC}"
-    (cd "$DEMO_CITY" && gc sling "$POOL" "$bead_id")
+    (cd "$DEMO_CITY" && "$GC_BIN" sling "$POOL" "$bead_id")
     echo ""
 
     step "Watch the bead get picked up (Ctrl+C to stop)"
@@ -272,14 +273,14 @@ part3() {
     step "Group them in a convoy"
     echo -e "  ${NARR_DIM}\$ gc convoy create \"Hello World Variants\" $id1 $id2 $id3${NARR_NC}"
     local convoy_output convoy_id
-    convoy_output=$(cd "$DEMO_CITY" && gc convoy create "Hello World Variants" "$id1" "$id2" "$id3" 2>&1) || true
+    convoy_output=$(cd "$DEMO_CITY" && "$GC_BIN" convoy create "Hello World Variants" "$id1" "$id2" "$id3" 2>&1) || true
     echo "$convoy_output"
     convoy_id=$(echo "$convoy_output" | grep -oP 'convoy \K\S+')
     echo ""
 
     step "Sling the convoy — expands to 3 parallel pool agents"
     echo -e "  ${NARR_DIM}\$ gc sling $POOL $convoy_id${NARR_NC}"
-    (cd "$DEMO_CITY" && gc sling "$POOL" "$convoy_id")
+    (cd "$DEMO_CITY" && "$GC_BIN" sling "$POOL" "$convoy_id")
     echo ""
 
     step "Watch 3 pool agents spin up"
@@ -335,7 +336,7 @@ finale() {
     step "Final state"
     show_rig_files
     echo -e "  ${NARR_DIM}\$ gc rig status $RIG_NAME${NARR_NC}"
-    (cd "$DEMO_CITY" && gc rig status "$RIG_NAME" 2>/dev/null) || true
+    (cd "$DEMO_CITY" && "$GC_BIN" rig status "$RIG_NAME" 2>/dev/null) || true
     echo ""
 }
 
