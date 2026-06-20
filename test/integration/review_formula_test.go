@@ -363,9 +363,19 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
 	startCommand := workflowAgentStartCommand(mode, extraEnv)
-	polecatScaleCheck := `ready_json=$(bd ready --include-ephemeral --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=0) && printf '%s\n' "$ready_json" | jq 'length'`
+	// The scale_check only needs to know whether routed polecat work exists up
+	// to the pool ceiling (max_active_sessions=3), so bound it with --limit=8
+	// instead of an unbounded --limit=0 scan. patrol_interval is 1s (not a
+	// sub-second cadence) so patrol-driven store reads — including this
+	// metadata-filtered probe, which scale_check excludes from the
+	// demand-snapshot cache — stay at ~1/s rather than ~10/s. Together these
+	// keep the single managed Dolt server from saturating under the
+	// design-review fan-out. Polecat work created by the fan-out is discovered
+	// by the next patrol scale_check (~1s here), well within the workflow's time
+	// budget.
+	polecatScaleCheck := `ready_json=$(bd ready --include-ephemeral --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=8) && printf '%s\n' "$ready_json" | jq 'length'`
 	cityToml := fmt.Sprintf(
-		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n"+
+		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"1s\"\n\n"+
 			"[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n"+
 			"[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n\n"+
 			"[[agent]]\nname = \"polecat\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\nscale_check = %q\n",

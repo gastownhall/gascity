@@ -134,6 +134,19 @@ type CityRuntime struct {
 
 const runtimeDemandSnapshotMaxAge = 30 * time.Second
 
+// scaleCheckDemandMinInterval floors how often a patrol tick re-runs an agent
+// scale_check probe. scale_check demand cannot ride the event-backed
+// demand-snapshot cache because its result is captured neither by the session
+// fingerprint nor by the event stream, so demandSnapshotsEnabled reports false
+// whenever any agent configures a scale_check. Without a floor, a sub-second
+// patrol_interval re-runs the probe subprocess every tick — driving a full,
+// metadata-filtered List against the managed Dolt store per tick. Flooring the
+// patrol re-eval cadence collapses that storm. It is a no-op for the default
+// patrol_interval (30s) and only bites pathologically fast patrol cadences,
+// where it bounds scale_check-routed pool-work discovery latency to this floor
+// (see demandSnapshotPatrolMaxAge).
+const scaleCheckDemandMinInterval = 1 * time.Second
+
 type runtimeDemandSnapshot struct {
 	createdAt          time.Time
 	sessionFingerprint string
@@ -2965,9 +2978,9 @@ func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 	configChanged bool,
 	sessionFingerprint string,
 ) bool {
-	if !cr.demandSnapshotsEnabled() {
-		return true
-	}
+	// Non-patrol triggers (config reloads and controller pokes — e.g. from
+	// sling-dispatched work) always rebuild immediately; only patrol-cadence
+	// re-evaluation is throttled below.
 	if configChanged || trigger != "patrol" {
 		return true
 	}
@@ -2977,7 +2990,36 @@ func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 	if cr.demandSnapshot.sessionFingerprint != sessionFingerprint {
 		return true
 	}
-	return time.Since(cr.demandSnapshot.createdAt) >= runtimeDemandSnapshotMaxAge
+	maxAge := cr.demandSnapshotPatrolMaxAge()
+	if maxAge <= 0 {
+		return true
+	}
+	return time.Since(cr.demandSnapshot.createdAt) >= maxAge
+}
+
+// demandSnapshotPatrolMaxAge reports how long a cached demand snapshot may be
+// reused across consecutive patrol ticks, or 0 when patrol must rebuild every
+// tick. Non-patrol triggers bypass this entirely (see shouldRefreshDemandSnapshot).
+func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
+	if cr.demandSnapshotsEnabled() {
+		return runtimeDemandSnapshotMaxAge
+	}
+	// Snapshots are not event-backed. Without an event provider the cache
+	// cannot be invalidated by routed-work events, so patrol must rebuild every
+	// tick to stay responsive.
+	if cr.cs == nil || cr.cs.EventProvider() == nil {
+		return 0
+	}
+	// An event provider exists but a configured scale_check makes demand
+	// non-event-backed, so it cannot ride the 30s cache. The control-dispatcher
+	// does not poke the controller for scale_check-routed pool work (only sling
+	// does), so that work is discovered by the next patrol scale_check rather
+	// than by an immediate poke. Flooring the patrol re-eval cadence therefore
+	// bounds discovery latency to scaleCheckDemandMinInterval and is a no-op
+	// whenever patrol_interval >= that floor (e.g. the 30s default); it only
+	// bites sub-second patrol_intervals, where it stops the probe subprocess
+	// from running on every tick.
+	return scaleCheckDemandMinInterval
 }
 
 func (cr *CityRuntime) demandSnapshotsEnabled() bool {

@@ -7910,7 +7910,7 @@ listener:
   port: $port
   host: $host
   max_connections: 256
-  read_timeout_millis: 30000
+  read_timeout_millis: 15000
   write_timeout_millis: 300000
 
 data_dir: "$data_dir"
@@ -8172,7 +8172,7 @@ listener:
   port: $port
   host: $host
   max_connections: 256
-  read_timeout_millis: 30000
+  read_timeout_millis: 15000
   write_timeout_millis: 300000
 
 data_dir: "$data_dir"

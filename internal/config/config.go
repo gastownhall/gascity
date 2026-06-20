@@ -1724,7 +1724,21 @@ const (
 	// DefaultDoltMaxConnections is the managed Dolt listener connection cap.
 	DefaultDoltMaxConnections = 256
 	// DefaultDoltReadTimeoutMillis is the managed Dolt listener read timeout.
-	DefaultDoltReadTimeoutMillis = 30000
+	// Managed multi-agent cities open a short-lived bd/dolt-sql client
+	// connection per operation and frequently SIGKILL it on a client-side
+	// deadline (e.g. agents wrap `gc hook` in `timeout 10`), so the server
+	// orphans the socket in Sleep until read_timeout fires. Lowering this from
+	// the former 30s reaps those dead per-call connections sooner, before they
+	// accumulate into a store-wide read collapse under load. read_timeout is the
+	// listener socket idle/produce timeout: it reaps idle (Sleep) connections
+	// and bounds the inter-row produce gap (go-mysql-server ErrRowTimeout
+	// re-arms per row), not total query wall-clock — so it does not cut a long
+	// but steadily-producing query. Do NOT drop it to/below the client kill
+	// budget (`timeout 10`) on the assumption it is purely idle-reaping. Cities
+	// with slower live operations raise it via city.toml [dolt]
+	// read_timeout_millis. See #3022 (5m->30s) and the scale_check storm RCA
+	// (30s->15s).
+	DefaultDoltReadTimeoutMillis = 15000
 	// DefaultDoltWriteTimeoutMillis is the managed Dolt listener write timeout.
 	DefaultDoltWriteTimeoutMillis = 300000
 )
@@ -1752,7 +1766,7 @@ type DoltConfig struct {
 	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
 	// ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.
 	// 0 means use the managed default.
-	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=30000"`
+	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=15000"`
 	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
 	// 0 means use the managed default.
 	WriteTimeoutMillis int `toml:"write_timeout_millis,omitempty" jsonschema:"default=300000"`

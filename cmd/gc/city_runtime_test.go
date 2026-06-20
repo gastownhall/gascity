@@ -1893,19 +1893,23 @@ func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
 	}
 }
 
-func TestCityRuntimeDemandSnapshotRefreshesWhenDemandCommandsAreCustom(t *testing.T) {
+func TestCityRuntimeDemandSnapshotCachesCustomDemandCommands(t *testing.T) {
 	cases := []struct {
 		name       string
 		agent      config.Agent
 		wantBuilds int
 	}{
 		{
+			// scale_check disables the event-backed cache, but consecutive
+			// patrol ticks within scaleCheckDemandMinInterval are throttled to
+			// a single rebuild. See TestCityRuntimeDemandSnapshotThrottlesScaleCheckPatrolReeval
+			// for the full cadence (interval elapse + poke) semantics.
 			name: "custom scale_check",
 			agent: config.Agent{
 				Name:       "worker",
 				ScaleCheck: "test -f external-queue && echo 1 || echo 0",
 			},
-			wantBuilds: 2,
+			wantBuilds: 1,
 		},
 		{
 			name: "custom work_query",
@@ -1945,6 +1949,68 @@ func TestCityRuntimeDemandSnapshotRefreshesWhenDemandCommandsAreCustom(t *testin
 				t.Fatalf("buildDesiredState call count = %d, want %d", buildCalls, tc.wantBuilds)
 			}
 		})
+	}
+}
+
+func TestCityRuntimeDemandSnapshotThrottlesScaleCheckPatrolReeval(t *testing.T) {
+	buildCalls := 0
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Agents: []config.Agent{{
+				Name:       "polecat",
+				ScaleCheck: "printf 0",
+			}},
+		},
+		cs: &controllerState{
+			eventProv: events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	// Sanity: scale_check disables the event-backed cache.
+	if cr.demandSnapshotsEnabled() {
+		t.Fatal("demand snapshots must be disabled when an agent configures scale_check")
+	}
+
+	sessionBeads := newSessionBeadSnapshot(nil)
+
+	// First patrol builds; a second immediate patrol is throttled.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState calls after two immediate patrols = %d, want 1 (throttled)", buildCalls)
+	}
+
+	// Once the floor elapses, the next patrol re-runs the probe.
+	cr.demandSnapshot.createdAt = time.Now().Add(-2 * scaleCheckDemandMinInterval)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState calls after interval elapsed = %d, want 2", buildCalls)
+	}
+
+	// Non-patrol triggers (routed-work pokes/events) bypass the floor so pools
+	// wake immediately, even within the throttle window.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "poke", false)
+	if buildCalls != 3 {
+		t.Fatalf("buildDesiredState calls after poke = %d, want 3 (event-driven wake must bypass throttle)", buildCalls)
+	}
+
+	// A session change within the window also forces an immediate rebuild.
+	changed := newSessionBeadSnapshot([]beads.Bead{{
+		ID:       "bead-1",
+		Status:   "open",
+		Metadata: map[string]string{"session_name": "polecat-1", "template": "polecat", "state": "active"},
+	}})
+	_ = cr.loadDemandSnapshot(changed, nil, "patrol", false)
+	if buildCalls != 4 {
+		t.Fatalf("buildDesiredState calls after session change = %d, want 4", buildCalls)
 	}
 }
 

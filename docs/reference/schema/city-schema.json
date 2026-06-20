@@ -1364,7 +1364,7 @@
         "read_timeout_millis": {
           "type": "integer",
           "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
-          "default": 30000
+          "default": 15000
         },
         "write_timeout_millis": {
           "type": "integer",
