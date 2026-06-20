@@ -1920,7 +1920,7 @@ func TestReleaseOrphanedPoolAssignments_ReleasesNamedIdentityForUnreachableStore
 // A live, cross-store-eligible (city-scoped, Scope="city") NAMED session
 // legitimately owns rig-routed work whose bead lives in a rig store (vp-kvp).
 // assigneePreservesNamedSessionRoute must preserve that claim instead of letting
-// the bead be released — the named-route analogue of the pool-worker
+// the bead be released — the named-route analog of the pool-worker
 // openSessionOwnsWork cross-store fix (#3453). Without it a backup worker is
 // minted on the same in_progress bead. Contrast
 // ReleasesNamedIdentityForUnreachableStore, where the named agent is rig-scoped

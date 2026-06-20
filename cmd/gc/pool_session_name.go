@@ -467,7 +467,7 @@ func assigneePreservesNamedSessionRoute(cfg *config.City, cityPath, template, as
 	// City-scoped named sessions federate across every store (vp-kvp), exactly
 	// as filterAssignedWorkBeadsForSessionWake already treats them. Without this
 	// a live city-scoped named holder's rig-routed claim is released and a backup
-	// worker is minted on the same bead — the named-route analogue of the
+	// worker is minted on the same bead — the named-route analog of the
 	// pool-worker openSessionOwnsWork cross-store fix (#3453).
 	if agentIsCrossStoreEligible(spec.Agent) {
 		return true
