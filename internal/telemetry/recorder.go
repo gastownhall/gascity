@@ -290,18 +290,25 @@ func RecordAgentStart(ctx context.Context, sessionName, agentName string, err er
 }
 
 // RecordAgentStop records an agent session stop (metrics + log event).
-func RecordAgentStop(ctx context.Context, sessionName, reason string, err error) {
+// agentName is the stable agent identity (the pool instance name or qualified
+// agent name) and is used for the agent metric label so gc.agent.stops.total
+// joins gc.agent.starts.total and the crash/idle-kill/max-age-kill siblings on
+// one value space. sessionName is the runtime session name; it stays a
+// log-only field because it lives in a sanitized value space (/ -> --, . -> __)
+// that cannot be joined against the agent identity.
+func RecordAgentStop(ctx context.Context, sessionName, agentName, reason string, err error) {
 	initInstruments()
 	status := statusStr(err)
 	inst.agentStopTotal.Add(ctx, 1,
 		metric.WithAttributes(
-			attribute.String("agent", sessionName),
+			attribute.String("agent", agentName),
 			attribute.String("reason", reason),
 			attribute.String("status", status),
 		),
 	)
 	emit(ctx, "agent.stop", severity(err),
 		otellog.String("session", sessionName),
+		otellog.String("agent", agentName),
 		otellog.String("reason", reason),
 		otellog.String("status", status),
 		errKV(err),

@@ -197,21 +197,28 @@ func TestCommitStartResult_RecordsAgentStartMetric(t *testing.T) {
 
 // TestStopTargetsBounded_RecordsAgentStopMetric verifies both emission
 // branches of stopTargetsBounded (the parallel wave and the unresolved
-// serial fallback) increment gc.agent.stops.total with reason "stopped".
+// serial fallback) increment gc.agent.stops.total with reason "stopped" and
+// label the agent with the agent identity, not the sanitized runtime session
+// name. The fixtures use a qualified identity that differs from the session
+// name so the value-space drift cannot hide behind look-alike fixtures.
 func TestStopTargetsBounded_RecordsAgentStopMetric(t *testing.T) {
+	const sessionName = "gascity--gc__worker" // sanitized runtime session name
+	const identity = "gascity/gc.worker"      // qualified agent identity
+
 	t.Run("wave path", func(t *testing.T) {
 		reader := installManualMetricReader(t)
 		store := beads.NewMemStore()
 		rec := events.NewFake()
 		sp := runtime.NewFake()
-		if err := sp.Start(context.Background(), "worker-1", runtime.Config{Command: "echo"}); err != nil {
+		if err := sp.Start(context.Background(), sessionName, runtime.Config{Command: "echo"}); err != nil {
 			t.Fatal(err)
 		}
 		targets := []stopTarget{{
-			sessionID: "sess-worker-1",
-			name:      "worker-1",
-			template:  "worker",
-			subject:   "worker-1",
+			sessionID: "sess-stop-wave",
+			name:      sessionName,
+			template:  identity,
+			agentName: identity,
+			subject:   identity,
 			resolved:  true,
 		}}
 		var stdout, stderr bytes.Buffer
@@ -219,8 +226,11 @@ func TestStopTargetsBounded_RecordsAgentStopMetric(t *testing.T) {
 			t.Fatalf("stopped = %d, want 1", stopped)
 		}
 		points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
-		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "worker-1", "reason": "stopped", "status": "ok"}) {
-			t.Fatalf("gc.agent.stops.total has no datapoint with agent=worker-1 reason=stopped status=ok: %+v", points)
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": identity, "reason": "stopped", "status": "ok"}) {
+			t.Fatalf("gc.agent.stops.total has no datapoint with agent=%s reason=stopped status=ok: %+v", identity, points)
+		}
+		if hasDataPointWithStringAttrs(points, map[string]string{"agent": sessionName}) {
+			t.Fatalf("gc.agent.stops.total must not label agent with the sanitized session name %q: %+v", sessionName, points)
 		}
 	})
 
@@ -229,22 +239,23 @@ func TestStopTargetsBounded_RecordsAgentStopMetric(t *testing.T) {
 		store := beads.NewMemStore()
 		rec := events.NewFake()
 		sp := runtime.NewFake()
-		if err := sp.Start(context.Background(), "worker-1", runtime.Config{Command: "echo"}); err != nil {
+		if err := sp.Start(context.Background(), sessionName, runtime.Config{Command: "echo"}); err != nil {
 			t.Fatal(err)
 		}
 		targets := []stopTarget{{
-			name:     "worker-1",
-			template: "worker",
-			subject:  "worker-1",
-			resolved: false,
+			name:      sessionName,
+			template:  identity,
+			agentName: identity,
+			subject:   identity,
+			resolved:  false,
 		}}
 		var stdout, stderr bytes.Buffer
 		if stopped := stopTargetsBounded(targets, &config.City{}, store, sp, rec, "gc", &stdout, &stderr); stopped != 1 {
 			t.Fatalf("stopped = %d, want 1\nstderr: %s", stopped, stderr.String())
 		}
 		points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
-		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "worker-1", "reason": "stopped", "status": "ok"}) {
-			t.Fatalf("gc.agent.stops.total has no datapoint with agent=worker-1 reason=stopped status=ok: %+v", points)
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": identity, "reason": "stopped", "status": "ok"}) {
+			t.Fatalf("gc.agent.stops.total has no datapoint with agent=%s reason=stopped status=ok: %+v", identity, points)
 		}
 	})
 }
@@ -255,13 +266,19 @@ func TestStopTargetsBounded_RecordsAgentStopMetric(t *testing.T) {
 // no event recorder is wired, because the metric reflects the stop itself,
 // not the event-bus wiring.
 func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
+	const sessionName = "gascity--gc__worker" // sanitized runtime session name
+	const identity = "gascity/gc.worker"      // qualified agent identity
 	finalize := func(t *testing.T, rec events.Recorder) *sdkmetric.ManualReader {
 		t.Helper()
 		reader := installManualMetricReader(t)
 		env := newReconcilerTestEnv()
 		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 
-		session := env.createSessionBead("worker", "worker")
+		// createSessionBead ties agent_name to the session name; override it so
+		// the agent identity differs from the sanitized session name and the
+		// metric label cannot silently fall back to the session-name space.
+		session := env.createSessionBead(sessionName, identity)
+		env.setSessionMetadata(&session, map[string]string{"agent_name": identity})
 		patch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
 		if err := env.store.SetMetadataBatch(session.ID, patch); err != nil {
 			t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
@@ -269,7 +286,7 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 		session.Metadata = patch.Apply(session.Metadata)
 
 		finalizeDrainAckStoppedSession(
-			"", env.cfg, env.store, nil, &session, "worker", true,
+			"", env.cfg, env.store, nil, &session, identity, true,
 			newFakeDrainOps(), env.dt, env.clk, rec, &env.stderr,
 		)
 
@@ -281,8 +298,11 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 	assertStopRecorded := func(t *testing.T, reader *sdkmetric.ManualReader) {
 		t.Helper()
 		points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
-		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "worker", "reason": "drain-ack", "status": "ok"}) {
-			t.Fatalf("gc.agent.stops.total has no datapoint with agent=worker reason=drain-ack status=ok: %+v", points)
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": identity, "reason": "drain-ack", "status": "ok"}) {
+			t.Fatalf("gc.agent.stops.total has no datapoint with agent=%s reason=drain-ack status=ok: %+v", identity, points)
+		}
+		if hasDataPointWithStringAttrs(points, map[string]string{"agent": sessionName}) {
+			t.Fatalf("gc.agent.stops.total must not label agent with the sanitized session name %q: %+v", sessionName, points)
 		}
 	}
 
@@ -296,64 +316,94 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 }
 
 // TestDoHandoffRemote_RecordsAgentStopMetric verifies the handoff kill path
-// increments gc.agent.stops.total with the bounded runtime session name and
-// reason "handoff", matching its SessionStopped emission.
+// increments gc.agent.stops.total with reason "handoff" and labels the agent
+// with the qualified agent identity resolved from the session bead, not the
+// sanitized runtime session name.
 func TestDoHandoffRemote_RecordsAgentStopMetric(t *testing.T) {
+	const sessionName = "gascity--gc__worker" // sanitized runtime session name
+	const identity = "gascity/gc.worker"      // qualified agent identity
 	reader := installManualMetricReader(t)
 	store := beads.NewMemStore()
 	rec := events.NewFake()
 	sp := runtime.NewFake()
-	if err := sp.Start(context.Background(), "worker-7", runtime.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Create(beads.Bead{
-		Title:    "worker-7 session",
-		Type:     "session",
-		Assignee: "worker-7",
-		Metadata: map[string]string{"session_name": "worker-7"},
+		Title:  "worker session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": sessionName,
+			"agent_name":   identity,
+			"template":     identity,
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, rec, sp, "worker-7", "worker-7", "sender",
+	code := doHandoffRemote(store, rec, sp, sessionName, sessionName, "sender",
 		[]string{"Context refresh", "body"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
 	points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
-	if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "worker-7", "reason": "handoff", "status": "ok"}) {
-		t.Fatalf("gc.agent.stops.total has no datapoint with agent=worker-7 reason=handoff status=ok: %+v", points)
+	if !hasDataPointWithStringAttrs(points, map[string]string{"agent": identity, "reason": "handoff", "status": "ok"}) {
+		t.Fatalf("gc.agent.stops.total has no datapoint with agent=%s reason=handoff status=ok: %+v", identity, points)
+	}
+	if hasDataPointWithStringAttrs(points, map[string]string{"agent": sessionName}) {
+		t.Fatalf("gc.agent.stops.total must not label agent with the sanitized session name %q: %+v", sessionName, points)
 	}
 }
 
 // TestGracefulStopAll_RecordsGracefulExitStopMetric verifies the pass-2
 // "exited gracefully" branch of the controller's graceful stop increments
-// gc.agent.stops.total with reason "graceful-exit".
+// gc.agent.stops.total with reason "graceful-exit" and labels the agent with
+// the identity resolved from the session bead, not the runtime session name.
 func TestGracefulStopAll_RecordsGracefulExitStopMetric(t *testing.T) {
+	const sessionName = "custom-worker"  // runtime session name
+	const identity = "gascity/gc.custom" // qualified agent identity
 	reader := installManualMetricReader(t)
 	sp := newExitedArtifactAfterInterruptProvider()
-	if err := sp.Start(context.Background(), "custom-worker", runtime.Config{}); err != nil {
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "custom session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": sessionName,
+			"agent_name":   identity,
+			"template":     identity,
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 
 	rec := events.NewFake()
 	var stdout, stderr bytes.Buffer
-	gracefulStopAll([]string{"custom-worker"}, sp, 20*time.Millisecond, rec, nil, nil, &stdout, &stderr)
+	gracefulStopAll([]string{sessionName}, sp, 20*time.Millisecond, rec, nil, store, &stdout, &stderr)
 
 	if !strings.Contains(stdout.String(), "Agent 'custom-worker' exited gracefully") {
 		t.Fatalf("stdout = %q, want graceful exit message (fixture must reach pass 2)", stdout.String())
 	}
 	points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
-	if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "custom-worker", "reason": "graceful-exit", "status": "ok"}) {
-		t.Fatalf("gc.agent.stops.total has no datapoint with agent=custom-worker reason=graceful-exit status=ok: %+v", points)
+	if !hasDataPointWithStringAttrs(points, map[string]string{"agent": identity, "reason": "graceful-exit", "status": "ok"}) {
+		t.Fatalf("gc.agent.stops.total has no datapoint with agent=%s reason=graceful-exit status=ok: %+v", identity, points)
+	}
+	if hasDataPointWithStringAttrs(points, map[string]string{"agent": sessionName}) {
+		t.Fatalf("gc.agent.stops.total must not label agent with the runtime session name %q: %+v", sessionName, points)
 	}
 }
 
 // TestRecordWakeFailure_QuarantineRecordsMetric verifies the wake-failure
 // accrual path increments gc.agent.quarantines.total only when the
-// quarantine batch is actually applied, labeled with the agent identity.
+// quarantine batch is actually applied, labeled with the agent identity and
+// never the sanitized session name.
 func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 
@@ -362,7 +412,8 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 		store := newTestStore()
 		session := makeBead("b1", map[string]string{
 			"wake_attempts": "4", // one below threshold (defaultMaxWakeAttempts=5)
-			"session_name":  "worker-1",
+			"agent_name":    "gascity/gc.worker",
+			"session_name":  "gascity--gc__worker",
 		})
 
 		recordWakeFailure(&session, store, clk)
@@ -371,8 +422,11 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			t.Fatal("fixture must quarantine at max attempts")
 		}
 		points := collectCounterDataPoints(t, reader, "gc.agent.quarantines.total")
-		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "worker-1"}) {
-			t.Fatalf("gc.agent.quarantines.total has no datapoint with agent=worker-1: %+v", points)
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity/gc.worker"}) {
+			t.Fatalf("gc.agent.quarantines.total has no datapoint with agent=gascity/gc.worker: %+v", points)
+		}
+		if hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity--gc__worker"}) {
+			t.Fatalf("gc.agent.quarantines.total must not label agent with the sanitized session name: %+v", points)
 		}
 	})
 
@@ -394,7 +448,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 		}
 	})
 
-	t.Run("agent_name takes precedence over session_name", func(t *testing.T) {
+	t.Run("labels with agent identity, never the session name", func(t *testing.T) {
 		reader := installManualMetricReader(t)
 		store := newTestStore()
 		session := makeBead("b1", map[string]string{
@@ -409,6 +463,9 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "dog-1"}) {
 			t.Fatalf("gc.agent.quarantines.total has no datapoint with agent=dog-1: %+v", points)
 		}
+		if hasDataPointWithStringAttrs(points, map[string]string{"agent": "gc-city-dog-1"}) {
+			t.Fatalf("gc.agent.quarantines.total must not label agent with the session name: %+v", points)
+		}
 	})
 }
 
@@ -421,7 +478,8 @@ func TestRecordChurn_QuarantineRecordsMetric(t *testing.T) {
 	store := newTestStore()
 	session := makeBead("b1", map[string]string{
 		"churn_count":  "2", // one below threshold (defaultMaxChurnCycles=3)
-		"session_name": "worker-1",
+		"agent_name":   "gascity/gc.worker",
+		"session_name": "gascity--gc__worker",
 	})
 
 	recordChurn(&session, store, clk)
@@ -430,15 +488,19 @@ func TestRecordChurn_QuarantineRecordsMetric(t *testing.T) {
 		t.Fatal("fixture must quarantine at max churn cycles")
 	}
 	points := collectCounterDataPoints(t, reader, "gc.agent.quarantines.total")
-	if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "worker-1"}) {
-		t.Fatalf("gc.agent.quarantines.total has no datapoint with agent=worker-1: %+v", points)
+	if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity/gc.worker"}) {
+		t.Fatalf("gc.agent.quarantines.total has no datapoint with agent=gascity/gc.worker: %+v", points)
+	}
+	if hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity--gc__worker"}) {
+		t.Fatalf("gc.agent.quarantines.total must not label agent with the sanitized session name: %+v", points)
 	}
 }
 
 // TestCmdSessionKill_RecordsAgentStopMetric verifies a successful
 // `gc session kill` increments gc.agent.stops.total exactly once with the
-// bounded runtime session name from the session bead, reason "stopped", and
-// status "ok" — beside its SessionStopped emission (ga-rjk4or).
+// agent identity from the session bead, reason "stopped", and status "ok" —
+// beside its SessionStopped emission (ga-rjk4or). The session name differs
+// from the agent identity so the metric cannot silently use the session name.
 func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
@@ -460,6 +522,7 @@ func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 	}
 	const identity = "session-a"
 	const sessionName = "s-gc-kill-stop-metric"
+	const agentIdentity = "gascity/gc.worker"
 	bead, err := store.Create(beads.Bead{
 		Title:  "named session",
 		Type:   sessionpkg.BeadType,
@@ -467,6 +530,7 @@ func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 		Metadata: map[string]string{
 			"alias":                      identity,
 			"template":                   "worker",
+			"agent_name":                 agentIdentity,
 			"session_name":               sessionName,
 			"state":                      "awake",
 			namedSessionMetadataKey:      "true",
@@ -507,9 +571,12 @@ func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 	}
 
 	points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
-	want := map[string]string{"agent": sessionName, "reason": "stopped", "status": "ok"}
+	want := map[string]string{"agent": agentIdentity, "reason": "stopped", "status": "ok"}
 	if !hasDataPointWithStringAttrs(points, want) {
-		t.Fatalf("gc.agent.stops.total has no datapoint with agent=%s reason=stopped status=ok: %+v", sessionName, points)
+		t.Fatalf("gc.agent.stops.total has no datapoint with agent=%s reason=stopped status=ok: %+v", agentIdentity, points)
+	}
+	if hasDataPointWithStringAttrs(points, map[string]string{"agent": sessionName}) {
+		t.Fatalf("gc.agent.stops.total must not label agent with the session name %q: %+v", sessionName, points)
 	}
 	for _, dp := range points {
 		matched := true
@@ -557,11 +624,17 @@ func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
 	t.Run("loaded bead records the stop", func(t *testing.T) {
 		reader := installManualMetricReader(t)
 
-		recordSessionKillStop(beads.Bead{Metadata: map[string]string{"session_name": "worker-9"}}, nil)
+		recordSessionKillStop(beads.Bead{Metadata: map[string]string{
+			"session_name": "gascity--gc__worker",
+			"agent_name":   "gascity/gc.worker",
+		}}, nil)
 
 		points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
-		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "worker-9", "reason": "stopped", "status": "ok"}) {
-			t.Fatalf("gc.agent.stops.total has no datapoint with agent=worker-9 reason=stopped status=ok: %+v", points)
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity/gc.worker", "reason": "stopped", "status": "ok"}) {
+			t.Fatalf("gc.agent.stops.total has no datapoint with agent=gascity/gc.worker reason=stopped status=ok: %+v", points)
+		}
+		if hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity--gc__worker"}) {
+			t.Fatalf("gc.agent.stops.total must not label agent with the session name: %+v", points)
 		}
 	})
 }

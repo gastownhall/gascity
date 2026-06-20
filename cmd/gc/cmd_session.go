@@ -2264,7 +2264,7 @@ func recordSessionKillStop(bead beads.Bead, beadErr error) {
 	if sessionName == "" {
 		return
 	}
-	telemetry.RecordAgentStop(context.Background(), sessionName, "stopped", nil)
+	telemetry.RecordAgentStop(context.Background(), sessionName, sessionAgentMetricIdentity(bead.Metadata), "stopped", nil)
 }
 
 func sessionKillRuntimeAlreadyInactive(bead beads.Bead, sp runtime.Provider) bool {

@@ -718,7 +718,6 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 			}
 			telemetry.RecordAgentQuarantine(context.Background(), firstNonEmptyGCString(
 				session.Metadata["agent_name"],
-				session.Metadata["session_name"],
 				session.Metadata["template"],
 			))
 		}
@@ -811,7 +810,6 @@ func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock) {
 			}
 			telemetry.RecordAgentQuarantine(context.Background(), firstNonEmptyGCString(
 				session.Metadata["agent_name"],
-				session.Metadata["session_name"],
 				session.Metadata["template"],
 			))
 		}

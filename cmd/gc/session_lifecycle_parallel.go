@@ -430,9 +430,14 @@ type asyncPreparedStart struct {
 }
 
 type stopTarget struct {
-	sessionID   string
-	name        string
-	template    string
+	sessionID string
+	name      string
+	template  string
+	// agentName is the stable agent identity (pool instance name or qualified
+	// agent name) used for the gc.agent.stops.total metric label. It is kept
+	// separate from subject (the event subject) because the metric must never
+	// fall back to the sanitized runtime session name, whereas subject may.
+	agentName   string
 	subject     string
 	order       int
 	resolved    bool
@@ -2555,6 +2560,7 @@ func lifecycleStopRequested(stopCh <-chan struct{}) bool {
 
 func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, stderr io.Writer) []stopTarget {
 	sessionTemplates := make(map[string]string)
+	sessionAgentNames := make(map[string]string)
 	sessionSubjects := make(map[string]string)
 	sessionPoolManaged := make(map[string]bool)
 	sessionIDs := make(map[string]string)
@@ -2568,6 +2574,9 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 				}
 				if name != "" {
 					sessionIDs[name] = bead.ID
+					if agentName := sessionAgentMetricIdentity(bead.Metadata); agentName != "" {
+						sessionAgentNames[name] = agentName
+					}
 					subject := sessionBeadAgentName(bead)
 					if subject == "" && template != "" && bead.Metadata["pool_slot"] != "" {
 						subject = template + "-" + bead.Metadata["pool_slot"]
@@ -2613,6 +2622,7 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 			sessionID:   sessionIDs[name],
 			name:        name,
 			template:    template,
+			agentName:   firstNonEmptyGCString(sessionAgentNames[name], template),
 			subject:     subject,
 			order:       idx,
 			resolved:    resolved,
@@ -2673,6 +2683,9 @@ func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Stor
 			}
 			if strings.TrimSpace(target.template) == "" {
 				target.template = hydratedTarget.template
+			}
+			if strings.TrimSpace(target.agentName) == "" {
+				target.agentName = hydratedTarget.agentName
 			}
 			if strings.TrimSpace(target.subject) == "" {
 				target.subject = hydratedTarget.subject
@@ -2836,7 +2849,7 @@ func stopTargetsBounded(
 						Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
 						Payload: api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 					})
-					telemetry.RecordAgentStop(context.Background(), result.target.name, "stopped", nil)
+					telemetry.RecordAgentStop(context.Background(), result.target.name, firstNonEmptyGCString(result.target.agentName, result.target.template), "stopped", nil)
 				}
 				logLifecycleWave(stderr, "stop", wave, waveStarted, 1)
 			}
@@ -2880,7 +2893,7 @@ func stopTargetsBounded(
 				Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
 				Payload: api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 			})
-			telemetry.RecordAgentStop(context.Background(), result.target.name, "stopped", nil)
+			telemetry.RecordAgentStop(context.Background(), result.target.name, firstNonEmptyGCString(result.target.agentName, result.target.template), "stopped", nil)
 		}
 		logLifecycleWave(stderr, "stop", wave, waveStarted, len(waveTargets))
 	}

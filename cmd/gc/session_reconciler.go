@@ -292,7 +292,7 @@ func finalizeDrainAckStoppedSession(
 	recordStopped := func() {
 		// The metric reflects the stop itself, so it is recorded even when
 		// no event recorder is wired (matching every other stop call site).
-		telemetry.RecordAgentStop(context.Background(), name, "drain-ack", nil)
+		telemetry.RecordAgentStop(context.Background(), name, firstNonEmptyGCString(session.Metadata["agent_name"], template), "drain-ack", nil)
 		if rec == nil {
 			return
 		}

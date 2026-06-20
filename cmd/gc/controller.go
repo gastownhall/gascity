@@ -1064,7 +1064,7 @@ func gracefulStopAllWithForceSignal(
 			// variable, which is the session_name. ResolveSessionID
 			// canonicalizes session_name → bead ID for any consumer.
 			sessionID := name
-			var template string
+			var template, agentIdentity string
 			if target, ok := targetByName[name]; ok {
 				if target.subject != "" {
 					subject = target.subject
@@ -1073,6 +1073,7 @@ func gracefulStopAllWithForceSignal(
 					sessionID = target.sessionID
 				}
 				template = target.template
+				agentIdentity = target.agentName
 				if cityStopSessionMarked(store, target.sessionID) {
 					markCityStopSessionAsAsleep(store, target.sessionID, stderr)
 				}
@@ -1081,7 +1082,7 @@ func gracefulStopAllWithForceSignal(
 				Type: events.SessionStopped, Actor: "gc", Subject: subject,
 				Payload: api.SessionLifecyclePayloadJSON(sessionID, template, "exited gracefully"),
 			})
-			telemetry.RecordAgentStop(context.Background(), name, "graceful-exit", nil)
+			telemetry.RecordAgentStop(context.Background(), name, firstNonEmptyGCString(agentIdentity, template), "graceful-exit", nil)
 			continue
 		}
 		survivors = append(survivors, name)

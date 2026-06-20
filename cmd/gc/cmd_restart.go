@@ -177,11 +177,12 @@ func doRigRestart(
 			}
 			if running {
 				targets = append(targets, stopTarget{
-					name:     sn,
-					template: a.QualifiedName(),
-					subject:  a.QualifiedName(),
-					order:    len(targets),
-					resolved: true,
+					name:      sn,
+					template:  a.QualifiedName(),
+					agentName: a.QualifiedName(),
+					subject:   a.QualifiedName(),
+					order:     len(targets),
+					resolved:  true,
 				})
 			}
 		} else {
@@ -193,11 +194,12 @@ func doRigRestart(
 			}
 			for _, ref := range refs {
 				targets = append(targets, stopTarget{
-					name:     ref.sessionName,
-					template: a.QualifiedName(),
-					subject:  ref.qualifiedInstance,
-					order:    len(targets),
-					resolved: true,
+					name:      ref.sessionName,
+					template:  a.QualifiedName(),
+					agentName: ref.qualifiedInstance,
+					subject:   ref.qualifiedInstance,
+					order:     len(targets),
+					resolved:  true,
 				})
 			}
 		}

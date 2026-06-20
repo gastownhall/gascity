@@ -371,6 +371,39 @@ func sessionBeadAgentName(bead beads.Bead) string {
 	return ""
 }
 
+// sessionAgentMetricIdentity resolves the stable agent-identity label for the
+// gc.agent.* lifecycle counters from a session bead's metadata. It prefers
+// agent_name (the pool instance name or qualified agent identity, matching the
+// start path's tp.DisplayName()) and falls back to the template name. The
+// runtime session_name is intentionally excluded: it lives in a sanitized
+// value space (/ -> --, . -> __) that cannot be joined against the agent
+// identity used by starts, crashes, idle kills, and max-age kills.
+func sessionAgentMetricIdentity(meta map[string]string) string {
+	if meta == nil {
+		return ""
+	}
+	return firstNonEmptyGCString(meta["agent_name"], meta["template"])
+}
+
+// sessionAgentMetricIdentityByName resolves the gc.agent.* identity label for a
+// session referenced by its runtime session name, loading the session bead to
+// read its identity metadata. Returns "" when the store is unavailable or the
+// bead cannot be resolved.
+func sessionAgentMetricIdentityByName(store beads.Store, sessionName string) string {
+	if store == nil {
+		return ""
+	}
+	id, err := resolveSessionID(store, sessionName)
+	if err != nil {
+		return ""
+	}
+	bead, err := store.Get(id)
+	if err != nil {
+		return ""
+	}
+	return sessionAgentMetricIdentity(bead.Metadata)
+}
+
 func normalizedSessionTemplate(bead beads.Bead, cfg *config.City) string {
 	template := bead.Metadata["template"]
 	if cfg == nil {

@@ -97,8 +97,8 @@ func TestRecordAgentStop(t *testing.T) {
 	resetInstruments(t)
 	ctx := context.Background()
 
-	RecordAgentStop(ctx, "gc-test-agent1", "orphan", nil)
-	RecordAgentStop(ctx, "gc-test-agent2", "drift", errors.New("stop error"))
+	RecordAgentStop(ctx, "gc-test-session1", "gc-test-agent1", "orphan", nil)
+	RecordAgentStop(ctx, "gc-test-session2", "gc-test-agent2", "drift", errors.New("stop error"))
 }
 
 func TestRecordAgentCrash(t *testing.T) {
