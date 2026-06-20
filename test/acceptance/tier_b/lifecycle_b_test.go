@@ -429,13 +429,11 @@ func TestLifecycle_PackCacheSelfHealsOnStart(t *testing.T) {
 	c := helpers.NewCity(t, testEnvB)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
-	// gc init --from now completes startup registration, so stop and
-	// unregister before exercising the explicit gc start path below.
+	// gc init --from completes startup registration and starts a controller.
+	// gc stop both stops that controller and unregisters the city, leaving an
+	// empty registry before the explicit gc start path is exercised below.
 	if out, err := c.GC("stop", c.Dir); err != nil {
 		t.Fatalf("gc stop after init-from failed: %v\n%s", err, out)
-	}
-	if out, err := c.GC("unregister", c.Dir); err != nil {
-		t.Fatalf("gc unregister after init-from failed: %v\n%s", err, out)
 	}
 
 	cacheRoot := filepath.Join(testEnvB.Get("GC_HOME"), "cache", "repos")

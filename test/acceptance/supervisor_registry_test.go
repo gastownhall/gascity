@@ -33,9 +33,17 @@ func TestRegisterUnregister(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 	c.Init("claude")
 
-	// gc init starts a standalone controller. Stop it first so register
-	// can hand management to the supervisor.
+	// gc init registers the city and starts its controller; gc stop both
+	// stops that controller and unregisters the city. Stop here so the
+	// register/unregister lifecycle below starts from an empty registry.
 	c.GC("stop", c.Dir) //nolint:errcheck
+
+	t.Run("Register", func(t *testing.T) {
+		out, err := c.GC("register", c.Dir)
+		if err != nil {
+			t.Fatalf("gc register failed: %v\n%s", err, out)
+		}
+	})
 
 	t.Run("Unregister", func(t *testing.T) {
 		out, err := c.GC("unregister", c.Dir)
@@ -44,10 +52,18 @@ func TestRegisterUnregister(t *testing.T) {
 		}
 	})
 
-	t.Run("RegisterAfterUnregister", func(t *testing.T) {
-		out, err := c.GC("register", c.Dir)
-		if err != nil {
-			t.Fatalf("gc register after unregister failed: %v\n%s", err, out)
+	t.Run("UnregisterNotRegisteredFailsLoudly", func(t *testing.T) {
+		// The previous subtest unregistered the city, so the path no longer
+		// resolves to a registered city. gc unregister must fail loudly
+		// instead of reporting a false success (ga-m3ev9r) — otherwise a
+		// mistyped path, or a name passed where a path belongs, looks like it
+		// worked while the city stays registered.
+		out, err := c.GC("unregister", c.Dir)
+		if err == nil {
+			t.Fatalf("gc unregister on a not-registered city succeeded; want failure\n%s", out)
+		}
+		if !strings.Contains(out, "no registered city") {
+			t.Fatalf("gc unregister output = %q, want a 'no registered city' diagnostic", out)
 		}
 	})
 
