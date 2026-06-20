@@ -318,7 +318,7 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		}
 		if body.Status != "closed" {
 			if err := tracePhaseErr(opts, bead.ID, "close-body-fail", func() error {
-				return setOutcomeAndClose(store, body.ID, "fail")
+				return setOutcomeAndCloseWithReason(store, body.ID, "fail", scopeAbortReason(subject))
 			}); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
 			}
@@ -1106,7 +1106,7 @@ func reconcileTerminalScopedMemberWithOptions(store beads.Store, bead beads.Bead
 			if err := snapshot.propagateScopeMemberMetadata(store, body.ID); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
 			}
-			if err := setOutcomeAndClose(store, body.ID, "fail"); err != nil {
+			if err := setOutcomeAndCloseWithReason(store, body.ID, "fail", scopeAbortReason(bead)); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
 			}
 		}
@@ -1398,6 +1398,34 @@ func findScopeBody(all []beads.Bead, rootID, scopeRef string) (beads.Bead, bool)
 
 func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
 	return updateMetadataAndClose(store, beadID, map[string]string{beadmeta.OutcomeMetadataKey: outcome})
+}
+
+// setOutcomeAndCloseWithReason closes a bead with an outcome and, when reason is
+// non-empty, a gc.failure_reason. Scope bodies are force-closed "fail" when a
+// member aborts the scope; without a reason that close is an undiagnosable dead
+// end (an empty gc.failure_reason on an otherwise-healthy run). Recording a
+// concrete reason keeps drain/`gc list` triagable.
+func setOutcomeAndCloseWithReason(store beads.Store, beadID, outcome, reason string) error {
+	md := map[string]string{beadmeta.OutcomeMetadataKey: outcome}
+	if reason != "" {
+		md[beadmeta.FailureReasonMetadataKey] = reason
+	}
+	return updateMetadataAndClose(store, beadID, md)
+}
+
+// scopeAbortReason derives a concrete failure reason for a scope body that is
+// being force-closed because a member aborted the scope. It prefers the member's
+// own gc.failure_reason; otherwise it names the aborting member and distinguishes
+// a genuine fail from a member that closed with no outcome (the abort_scope
+// bare-close path), so the body never inherits an empty reason.
+func scopeAbortReason(member beads.Bead) string {
+	if reason := member.Metadata[beadmeta.FailureReasonMetadataKey]; reason != "" {
+		return reason
+	}
+	if member.Metadata[beadmeta.OutcomeMetadataKey] == "fail" {
+		return "scope_aborted_by:" + member.ID
+	}
+	return "member_closed_without_outcome:" + member.ID
 }
 
 // ReconcileClosedScopeMember re-reads a just-closed bead and delegates to

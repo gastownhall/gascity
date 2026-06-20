@@ -419,6 +419,11 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	if got := bodyAfter.Metadata["gc.outcome"]; got != "fail" {
 		t.Fatalf("body outcome = %q, want fail", got)
 	}
+	// The body must record a concrete reason naming the aborting member, not an
+	// empty gc.failure_reason that strands the run undiagnosable.
+	if got := bodyAfter.Metadata["gc.failure_reason"]; got != "scope_aborted_by:"+failed.ID {
+		t.Fatalf("body failure_reason = %q, want scope_aborted_by:%s", got, failed.ID)
+	}
 
 	for _, beadID := range []string{futureMember.ID, futureControl.ID} {
 		member, err := store.Get(beadID)
@@ -1682,9 +1687,44 @@ func TestReconcileTerminalScopedMemberAbortScopeBareCloseAbortsScope(t *testing.
 	if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "fail" {
 		t.Fatalf("body = status %q outcome %q, want closed/fail", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
 	}
+	// A bare-close (abort_scope, no gc.outcome) must still leave a concrete,
+	// member-naming reason on the body rather than an empty one.
+	if got := bodyAfter.Metadata["gc.failure_reason"]; got != "member_closed_without_outcome:"+failed.ID {
+		t.Fatalf("body failure_reason = %q, want member_closed_without_outcome:%s", got, failed.ID)
+	}
 	openAfter := mustGetBead(t, store, openStep.ID)
 	if openAfter.Status != "closed" || openAfter.Metadata["gc.outcome"] != "skipped" {
 		t.Fatalf("open step = status %q outcome %q, want closed/skipped", openAfter.Status, openAfter.Metadata["gc.outcome"])
+	}
+}
+
+func TestScopeAbortReason(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		member beads.Bead
+		want   string
+	}{
+		{
+			name:   "member's own failure_reason wins",
+			member: beads.Bead{ID: "m1", Metadata: map[string]string{"gc.failure_reason": "post_refresh_ci_unrepairable", "gc.outcome": "fail"}},
+			want:   "post_refresh_ci_unrepairable",
+		},
+		{
+			name:   "fail outcome names the aborting member",
+			member: beads.Bead{ID: "m2", Metadata: map[string]string{"gc.outcome": "fail"}},
+			want:   "scope_aborted_by:m2",
+		},
+		{
+			name:   "bare close names the aborting member",
+			member: beads.Bead{ID: "m3", Metadata: map[string]string{"gc.on_fail": "abort_scope"}},
+			want:   "member_closed_without_outcome:m3",
+		},
+	}
+	for _, tc := range cases {
+		if got := scopeAbortReason(tc.member); got != tc.want {
+			t.Errorf("%s: scopeAbortReason = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
