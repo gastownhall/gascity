@@ -14,6 +14,7 @@ import (
 
 	workerpkg "github.com/gastownhall/gascity/internal/worker"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -48,7 +49,7 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", tmpRoot); err != nil {
 		panic("worker-inference: setting TMPDIR: " + err.Error())
 	}
-	tmpDir, err := os.MkdirTemp(tmpRoot, "gcwi-*")
+	tmpDir, err := os.MkdirTemp(tmpRoot, fmt.Sprintf("gcwi-%d-*", os.Getpid()))
 	if err != nil {
 		panic("worker-inference: creating temp dir: " + err.Error())
 	}
@@ -87,10 +88,16 @@ func TestMain(m *testing.M) {
 		With("DOLT_ROOT_PATH", gcHome)
 	liveSetup = prepareProviderSetup(gcHome, liveEnv)
 
+	// Reap dolt orphans left by prior crashed runs, then guard this run so an
+	// interrupt / timeout / OOM does not leak a dolt sql-server (issue #3640).
+	dolttest.SweepStale(tmpRoot, "gcwi-")
+	stopGuard := dolttest.Guard(tmpDir)
+
 	code := m.Run()
 	if liveEnv != nil {
 		helpers.RunGC(liveEnv, "", "supervisor", "stop") //nolint:errcheck
 	}
+	stopGuard()
 	os.Exit(code)
 }
 

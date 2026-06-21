@@ -16,6 +16,7 @@ import (
 	"time"
 
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 const canonicalTutorialRoot = "docs/tutorials"
@@ -42,7 +43,7 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", tmpRoot); err != nil {
 		panic("tutorial-goldens: setting TMPDIR: " + err.Error())
 	}
-	tmpDir, err := os.MkdirTemp(tmpRoot, "gctutorial-*")
+	tmpDir, err := os.MkdirTemp(tmpRoot, fmt.Sprintf("gctutorial-%d-*", os.Getpid()))
 	if err != nil {
 		panic("tutorial-goldens: creating temp dir: " + err.Error())
 	}
@@ -60,7 +61,14 @@ func TestMain(m *testing.M) {
 		panic("tutorial-goldens: bd not found")
 	}
 
-	os.Exit(m.Run())
+	// Reap dolt orphans left by prior crashed runs, then guard this run so an
+	// interrupt / timeout / OOM does not leak a dolt sql-server (issue #3640).
+	dolttest.SweepStale(tmpRoot, "gctutorial-")
+	stopGuard := dolttest.Guard(tmpDir)
+
+	code := m.Run()
+	stopGuard()
+	os.Exit(code)
 }
 
 type tutorialEnv struct {

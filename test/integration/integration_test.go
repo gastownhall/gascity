@@ -36,6 +36,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -91,8 +92,9 @@ func TestMain(m *testing.M) {
 
 	subprocess := os.Getenv("GC_SESSION") == "subprocess"
 
-	// Build gc binary to a temp directory.
-	tmpDir, err := os.MkdirTemp("", "gc-integration-*")
+	// Build gc binary to a temp directory. The pid in the dir name lets a later
+	// run reap this run's dolt orphans if it dies abnormally (issue #3640).
+	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("gc-integration-%d-*", os.Getpid()))
 	if err != nil {
 		panic("integration: creating temp dir: " + err.Error())
 	}
@@ -134,6 +136,10 @@ func TestMain(m *testing.M) {
 		// their descendant pollers from prior interrupted runs.
 		sweepSubprocessTestProcesses()
 	}
+	// Reap dolt sql-server orphans left by prior crashed runs (SIGKILL /
+	// timeout bypasses in-process cleanup); scoped by owner-pid liveness so
+	// concurrent runs are spared (issue #3640).
+	dolttest.SweepStale(filepath.Dir(tmpDir), "gc-integration-")
 	stopSignalSweeper := installIntegrationSignalSweeper(subprocess)
 	defer stopSignalSweeper()
 
@@ -246,7 +252,9 @@ func TestMain(m *testing.M) {
 func installIntegrationSignalSweeper(subprocess bool) func() {
 	signals := make(chan os.Signal, 2)
 	done := make(chan struct{})
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	// SIGQUIT is what `go test -timeout` raises; without it a timed-out run
+	// would leak its dolt sql-server (issue #3640).
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	go func() {
 		select {
 		case sig := <-signals:
@@ -267,6 +275,11 @@ func installIntegrationSignalSweeper(subprocess bool) func() {
 
 func sweepIntegrationProcesses(subprocess bool) {
 	stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
+	// Reap dolt orphans under this run's home too — the per-test t.Cleanup that
+	// normally does this is bypassed on a signal (issue #3640).
+	if testGCHome != "" {
+		cleanupIntegrationDoltSQLServersUnderRoot(testGCHome)
+	}
 	if !subprocess {
 		tmuxtest.KillAllTestSessions(&mainTB{})
 		return

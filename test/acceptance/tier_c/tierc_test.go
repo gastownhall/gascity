@@ -33,6 +33,7 @@ import (
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -66,7 +67,7 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", tmpRoot); err != nil {
 		panic("acceptance-c: setting TMPDIR: " + err.Error())
 	}
-	tmpDir, err := os.MkdirTemp(tmpRoot, "gcac-*")
+	tmpDir, err := os.MkdirTemp(tmpRoot, fmt.Sprintf("gcac-%d-*", os.Getpid()))
 	if err != nil {
 		panic("acceptance-c: creating temp dir: " + err.Error())
 	}
@@ -166,9 +167,15 @@ func TestMain(m *testing.M) {
 		panic("acceptance-c: tmux not found")
 	}
 
+	// Reap dolt orphans left by prior crashed runs, then guard this run so an
+	// interrupt / timeout / OOM does not leak a dolt sql-server (issue #3640).
+	dolttest.SweepStale(tmpRoot, "gcac-")
+	stopGuard := dolttest.Guard(tmpDir)
+
 	code := m.Run()
 
 	helpers.RunGC(testEnvC, "", "supervisor", "stop", "--wait") //nolint:errcheck
+	stopGuard()
 	os.Exit(code)
 }
 
