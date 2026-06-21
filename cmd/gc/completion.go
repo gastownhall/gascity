@@ -159,7 +159,7 @@ func resolveCityForCompletion() (string, error) {
 
 func resolveCityForCompletionContext(honorRigFlag bool) (string, error) {
 	if city := strings.TrimSpace(cityFlag); city != "" {
-		return validateCityPath(city)
+		return resolveCityFlagValue(city)
 	}
 	if honorRigFlag {
 		if rig := strings.TrimSpace(rigFlag); rig != "" {

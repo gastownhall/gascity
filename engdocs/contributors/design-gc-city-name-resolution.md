@@ -1,9 +1,28 @@
 # Design: accept a bare city NAME (not just a path) across gc city-targeting commands
 
-- **Status:** Draft (proposal for review — not yet implemented)
+- **Status:** Implemented (shipped in PR #3625; the code and tests cited below are canonical where the draft prose disagrees)
 - **Issue:** ga-m3ev9r
 - **Follows:** PR #3623 (gc unregister fails loudly on unknown name/path)
 - **Produced by:** multi-agent design workflow (explore → 3 proposals → adversarial review → synthesis)
+
+> **Implementation note (shipped via PR #3625):** This design is implemented;
+> the shipped helper names differ from the draft prose below, and the code in
+> `cmd/gc/city_arg_resolve.go`, its tests in `cmd/gc/city_arg_resolve_test.go`,
+> and `internal/supervisor/registry.go` are canonical when they disagree with
+> this document. Draft → shipped renames: `classifyCityArg` →
+> `classifyCityRef`; `cityArgKind`/`cityArgEmpty`/`cityArgPath`/`cityArgName` →
+> `cityRefKind`/`cityRefEmpty`/`cityRefPath`/`cityRefName`; `cityArgOpts` →
+> `cityRefOpts`; `resolveCityArg` → `resolveCityRef`; `resolveCityContextArg` →
+> `resolveCityNameContext` (plus the path-returning `resolveCityNameRef` and the
+> shared fact-gatherer `lookupCityNameFacts`); `cityArgNotFoundErr` →
+> `cityRefNotFoundErr`. Per Decision 1, the single genuine ambiguity is a **loud
+> failure** (`cityRefAmbiguousErr`, and `cityRefRigVsRegisteredErr` when a local
+> rig directory shadows a different registered city), not the draft §3
+> "path-wins + breadcrumb". `resolveCityNameContext` also runs a rig-path probe
+> so a slashless local rig directory (e.g. `frontend`) resolves to its owning
+> city across the positional `stop`/`start`/`restart`/`reload`/`suspend`/
+> `resume`/`status` seams; the `--city <name>` flag is resolved by
+> `resolveCityFlagValue`.
 
 > **Critical insight from adversarial review (do not skip):**
 > All three proposals share a fatal flaw the break-testers exposed: they frame name resolution as run-the-path-resolver-first then fall-back-to-registry-on-error. But every existing path resolver ends in findCity(cwd/token), which WALKS UP the directory tree (verified in city_discovery.go:19-49: from inside any city, findCity returns the ambient ancestor city with err=nil). So a bare name run from inside a city resolves to the AMBIENT city, the path resolver succeeds, the name fallback never fires, and stop/suspend/reload/restart silently mis-target; under --json this reports ok:true for the wrong city. The fix is to classify by arg SHAPE up front and ROUTE accordingly: a name-shaped token that is NOT an existing directory in cwd must skip the path resolver entirely and go straight to Registry.LookupCityByName. This is the only synthesis that resolves every blocking issue. I drop proposal 3's --as-name/--as-path escape-hatch flags (YAGNI; the single ambiguous case is handled deterministically with a stderr breadcrumb).

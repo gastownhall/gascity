@@ -30,6 +30,17 @@ func mkTestCity(t *testing.T, path string) {
 	}
 }
 
+// mkRuntimeRootOnlyCity creates a legacy runtime-root-only city: a directory
+// with a .gc/ runtime root but no city.toml. validateCityPath accepts this
+// shape via HasRuntimeRoot, so bare-name resolution must recognize it as a
+// local city too.
+func mkRuntimeRootOnlyCity(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(path, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestClassifyCityRef(t *testing.T) {
 	tests := []struct {
 		in   string
@@ -138,6 +149,50 @@ func TestResolveCityRefAmbiguousLoudError(t *testing.T) {
 	_, err := resolveCityRef("dup", cityRefOpts{allowNameFallback: true}, failingPathResolve(t))
 	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("expected ambiguity error, got %v", err)
+	}
+}
+
+// A legacy runtime-root-only (.gc/-only, no city.toml) local city must win for a
+// bare name, matching validateCityPath's HasRuntimeRoot acceptance, instead of
+// falling through to the registry and failing as "not registered".
+func TestResolveCityRefRuntimeRootOnlyLocalCityWins(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	local := filepath.Join(cwd, "rtcity")
+	mkRuntimeRootOnlyCity(t, local) // ./rtcity has only .gc/, not registered
+
+	called := ""
+	pathResolve := func(ref string) (string, error) { called = ref; return local, nil }
+	got, err := resolveCityRef("rtcity", cityRefOpts{allowNameFallback: true}, pathResolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called != "rtcity" {
+		t.Fatalf("a .gc/-only local city must route through pathResolve; called=%q", called)
+	}
+	if !samePath(got, local) {
+		t.Fatalf("got %q, want local city %q", got, local)
+	}
+}
+
+// A runtime-root-only local city whose name conflicts with a different
+// registered city is ambiguous, exactly like the city.toml case.
+func TestResolveCityRefRuntimeRootOnlyLocalCityAmbiguousWithRegistered(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	mkRuntimeRootOnlyCity(t, filepath.Join(cwd, "dup")) // local ./dup with only .gc/
+
+	elsewhere := filepath.Join(t.TempDir(), "dup")
+	mkTestCity(t, elsewhere)
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(elsewhere, "dup"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolveCityRef("dup", cityRefOpts{allowNameFallback: true}, failingPathResolve(t))
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("expected ambiguity error for a .gc/-only local city conflicting with a registration, got %v", err)
 	}
 }
 
@@ -357,6 +412,158 @@ func TestResolveStopCityPathByNameFromInsideAnotherCity(t *testing.T) {
 	}
 }
 
+// Regression (PR #3625 review, Contract & Interface Fidelity): a slashless
+// local rig directory with no city.toml and no .gc/ must still resolve to its
+// owning city+rig through the positional-arg seam. The name-first branch must
+// probe the rig-path resolver before failing, instead of rejecting "frontend"
+// as an unknown city name.
+func TestResolveCommandContextSlashlessRigDirResolvesToCity(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	resetFlags(t)
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+
+	cityPath := setupCity(t, "demo-city")
+	parent := t.TempDir()
+	rigDir := filepath.Join(parent, "frontend") // plain dir: no city.toml, no .gc/
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[workspace]\nname = \"demo-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"" + rigDir + "\"\n"
+	writeRigAnywhereCityToml(t, cityPath, toml)
+	registerCityForRigResolution(t, os.Getenv("GC_HOME"), cityPath, "demo-city")
+
+	setCwd(t, parent) // cwd/frontend == rigDir, but "frontend" classifies as a name
+
+	ctx, err := resolveCommandContext([]string{"frontend"})
+	if err != nil {
+		t.Fatalf("resolveCommandContext(frontend) error: %v", err)
+	}
+	assertSameTestPath(t, ctx.CityPath, cityPath)
+	if ctx.RigName != "frontend" {
+		t.Fatalf("RigName = %q, want frontend", ctx.RigName)
+	}
+}
+
+// Regression companion for the stop seam: resolveStopCityPath must resolve a
+// slashless local rig directory to its owning city, not reject it as an unknown
+// city name.
+func TestResolveStopCityPathSlashlessRigDirResolvesToCity(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	resetFlags(t)
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+
+	cityPath := setupCity(t, "stop-demo-city")
+	parent := t.TempDir()
+	rigDir := filepath.Join(parent, "frontend") // plain dir: no city.toml, no .gc/
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[workspace]\nname = \"stop-demo-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"" + rigDir + "\"\n"
+	writeRigAnywhereCityToml(t, cityPath, toml)
+	registerCityForRigResolution(t, os.Getenv("GC_HOME"), cityPath, "stop-demo-city")
+
+	setCwd(t, parent)
+
+	got, err := resolveStopCityPath([]string{"frontend"})
+	if err != nil {
+		t.Fatalf("resolveStopCityPath(frontend) error: %v", err)
+	}
+	assertSameTestPath(t, got, cityPath)
+}
+
+// Regression companion for the start seam (PR #3625 review F1): resolveStartDir
+// must resolve a slashless local rig directory to its owning city, not reject it
+// as an unknown city name. Without the rig-path probe, gc start <rig-name>
+// regressed to a hard error where the sibling stop/command-context seams resolve.
+func TestResolveStartDirSlashlessRigDirResolvesToCity(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	resetFlags(t)
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+
+	cityPath := setupCity(t, "start-demo-city")
+	parent := t.TempDir()
+	rigDir := filepath.Join(parent, "frontend") // plain dir: no city.toml, no .gc/
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[workspace]\nname = \"start-demo-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"" + rigDir + "\"\n"
+	writeRigAnywhereCityToml(t, cityPath, toml)
+	registerCityForRigResolution(t, os.Getenv("GC_HOME"), cityPath, "start-demo-city")
+
+	setCwd(t, parent)
+
+	got, err := resolveStartDir([]string{"frontend"})
+	if err != nil {
+		t.Fatalf("resolveStartDir(frontend) error: %v", err)
+	}
+	assertSameTestPath(t, got, cityPath)
+}
+
+// Regression companion for the restart seam (PR #3625 review F1): restartTarget
+// delegates to resolveStartDir, so gc restart <rig-name> must resolve a slashless
+// local rig directory to its owning city just like gc stop <rig-name>. The
+// documented "stop then start" contract breaks if restart rejects a rig name the
+// stop leg accepts.
+func TestRestartTargetSlashlessRigDirResolvesToCity(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	resetFlags(t)
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+
+	cityPath := setupCity(t, "restart-demo-city")
+	parent := t.TempDir()
+	rigDir := filepath.Join(parent, "frontend") // plain dir: no city.toml, no .gc/
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[workspace]\nname = \"restart-demo-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"" + rigDir + "\"\n"
+	writeRigAnywhereCityToml(t, cityPath, toml)
+	registerCityForRigResolution(t, os.Getenv("GC_HOME"), cityPath, "restart-demo-city")
+
+	setCwd(t, parent)
+
+	gotPath, _, err := restartTarget([]string{"frontend"})
+	if err != nil {
+		t.Fatalf("restartTarget(frontend) error: %v", err)
+	}
+	assertSameTestPath(t, gotPath, cityPath)
+}
+
+// Guard: the rig-path probe must NOT reopen the walk-up footgun. A slashless
+// name that is neither a registered city, a local city, nor a local rig must
+// still fail loudly from inside an ambient city instead of silently targeting
+// it.
+func TestResolveCommandContextSlashlessUnknownFromInsideCityFailsLoud(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	resetFlags(t)
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+
+	ambient := setupCity(t, "ambient-city")
+	setCwd(t, ambient) // inside a city; the old footgun would walk up to here
+
+	_, err := resolveCommandContext([]string{"ghost-rig"})
+	if err == nil {
+		t.Fatal("expected a loud error for an unknown slashless name from inside a city")
+	}
+	if !strings.Contains(err.Error(), "not a registered city name") {
+		t.Fatalf("err = %v, want a name-aware not-found error", err)
+	}
+}
+
 func TestResolveStartDirByName(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Chdir(t.TempDir())
@@ -421,5 +628,162 @@ func TestCityNameCandidatesFiltersByPrefix(t *testing.T) {
 		if !strings.Contains(c, "\t") {
 			t.Fatalf("candidate %q missing tab-separated path description", c)
 		}
+	}
+}
+
+// setupSlashlessRigDirCollision builds the "cwd/<name> is a local rig dir AND
+// <name> is a registered city" scenario shared by the ambiguity regressions:
+// city "demo-city" owns a slashless rig directory cwd/frontend, and a DIFFERENT
+// city is registered under the bare name "frontend". Returns the parent dir the
+// caller should cd into so that cwd/frontend is the rig directory.
+func setupSlashlessRigDirCollision(t *testing.T) string {
+	t.Helper()
+	gcHome := os.Getenv("GC_HOME")
+
+	cityA := setupCity(t, "demo-city")
+	parent := t.TempDir()
+	rigDir := filepath.Join(parent, "frontend") // plain dir: no city.toml, no .gc/
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[workspace]\nname = \"demo-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"" + rigDir + "\"\n"
+	writeRigAnywhereCityToml(t, cityA, toml)
+	registerCityForRigResolution(t, gcHome, cityA, "demo-city")
+
+	cityB := setupCity(t, "frontend") // a different city, registered under the same bare name
+	registerCityForRigResolution(t, gcHome, cityB, "frontend")
+	return parent
+}
+
+// Regression (PR #3625 review, Behavioral Correctness, major): when cwd/<name>
+// is a real local rig directory AND <name> is ALSO a registered city pointing
+// to a different city, the positional seam must reject the collision loudly
+// instead of silently preferring the registered city over the local rig dir.
+// The old path behavior targeted the rig's owning city; the new name resolution
+// must not silently shadow it. Mirrors the local-city-vs-registration guard.
+func TestResolveCommandContextSlashlessRigDirVsRegisteredCityIsAmbiguous(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	resetFlags(t)
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+
+	parent := setupSlashlessRigDirCollision(t)
+	setCwd(t, parent) // cwd/frontend == rig dir, and "frontend" is also registered
+
+	_, err := resolveCommandContext([]string{"frontend"})
+	if err == nil {
+		t.Fatal("expected a loud ambiguity error: cwd/frontend is a local rig dir AND frontend is a registered city")
+	}
+	if !strings.Contains(err.Error(), "ambiguous") || !strings.Contains(err.Error(), "rig") {
+		t.Fatalf("err = %v, want an ambiguity error naming the local rig directory", err)
+	}
+}
+
+// Regression companion for the stop seam: resolveStopCityPath must reject the
+// same rig-dir/registered-city collision loudly, not silently stop a different
+// city than the local rig the operator pointed at.
+func TestResolveStopCityPathSlashlessRigDirVsRegisteredCityIsAmbiguous(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	resetFlags(t)
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+
+	parent := setupSlashlessRigDirCollision(t)
+	setCwd(t, parent)
+
+	_, err := resolveStopCityPath([]string{"frontend"})
+	if err == nil {
+		t.Fatal("expected a loud ambiguity error from the stop seam for a rig-dir/registered-city collision")
+	}
+	if !strings.Contains(err.Error(), "ambiguous") || !strings.Contains(err.Error(), "rig") {
+		t.Fatalf("err = %v, want an ambiguity error naming the local rig directory", err)
+	}
+}
+
+// Guard: when cwd/<name> is a local rig dir whose OWNING city is the very same
+// city registered under <name>, the two interpretations agree, so resolution
+// must succeed instead of raising a false-positive ambiguity error.
+func TestResolveCommandContextSlashlessRigDirSameRegisteredCityResolves(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	resetFlags(t)
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+
+	gcHome := os.Getenv("GC_HOME")
+	city := setupCity(t, "frontend")
+	parent := t.TempDir()
+	rigDir := filepath.Join(parent, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[workspace]\nname = \"frontend\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"" + rigDir + "\"\n"
+	writeRigAnywhereCityToml(t, city, toml)
+	registerCityForRigResolution(t, gcHome, city, "frontend")
+
+	setCwd(t, parent)
+
+	ctx, err := resolveCommandContext([]string{"frontend"})
+	if err != nil {
+		t.Fatalf("resolveCommandContext(frontend) where the rig's owning city IS the registered city: %v", err)
+	}
+	assertSameTestPath(t, ctx.CityPath, city)
+}
+
+// Regression (PR #3625 review, Test Evidence Quality): an unknown slashless name
+// run from INSIDE a registered rig directory resolves to that rig's owning city
+// — parity with the historical path-arg behavior — rather than failing loud.
+// Pins the documented outcome for the ancestor-rig-scope match; the fail-loud
+// guard above only covers a city root with no rigs in scope.
+func TestResolveCommandContextSlashlessUnknownFromInsideRigResolvesToOwningCity(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	resetFlags(t)
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+
+	gcHome := os.Getenv("GC_HOME")
+	cityPath := setupCity(t, "demo-city")
+	rigDir := t.TempDir()
+	toml := "[workspace]\nname = \"demo-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"" + rigDir + "\"\n"
+	writeRigAnywhereCityToml(t, cityPath, toml)
+	registerCityForRigResolution(t, gcHome, cityPath, "demo-city")
+
+	setCwd(t, rigDir) // cwd lies INSIDE the registered rig's scope
+
+	ctx, err := resolveCommandContext([]string{"ghost"}) // unknown name; rigDir/ghost does not exist
+	if err != nil {
+		t.Fatalf("resolveCommandContext(ghost) from inside a registered rig: %v", err)
+	}
+	assertSameTestPath(t, ctx.CityPath, cityPath)
+	if ctx.RigName != "frontend" {
+		t.Fatalf("RigName = %q, want frontend", ctx.RigName)
+	}
+}
+
+// Regression (PR #3625 review, Error Handling & Resilience): the GC_CITY=<name>
+// env lookup is intentionally best-effort. A corrupt/unreadable registry must
+// NOT hard-error the ambient env path; it falls through (ok=false) so later
+// GC_DIR/cwd discovery still runs. This deliberately differs from the loud
+// corrupt-registry behavior of the positional arg and --city flag.
+func TestResolveExplicitCityPathEnvNameBestEffortOnCorruptRegistry(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	// Corrupt registry: malformed TOML so the registry load fails to parse.
+	if err := os.WriteFile(supervisor.RegistryPath(), []byte("[[city]\nname = \"broken\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", "broken")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+
+	if got, ok := resolveExplicitCityPathEnv(); ok {
+		t.Fatalf("resolveExplicitCityPathEnv() = (%q, true) on a corrupt registry; want (\"\", false) best-effort fall-through", got)
 	}
 }

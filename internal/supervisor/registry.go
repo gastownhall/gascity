@@ -195,21 +195,32 @@ func (r *Registry) Unregister(cityPath string) error {
 // that name (or on a registry read error). The match is exact and
 // case-sensitive, mirroring the uniqueness Register enforces on names and the
 // LookupRigByName behavior; because Register rejects duplicate names, at most
-// one entry can match.
+// one entry can match. Callers that must distinguish an unreadable registry
+// from a genuine miss should use LookupCityByNameE.
 func (r *Registry) LookupCityByName(name string) (CityEntry, bool) {
+	entry, ok, _ := r.LookupCityByNameE(name)
+	return entry, ok
+}
+
+// LookupCityByNameE is like LookupCityByName but also returns any registry read
+// error, so callers can surface a corrupt or unreadable registry instead of
+// silently collapsing it into a "not registered" miss. The bool is true only on
+// an exact, case-sensitive name match; on a read error it is false and the
+// error is non-nil.
+func (r *Registry) LookupCityByNameE(name string) (CityEntry, bool, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	entries, err := r.loadLocked()
 	if err != nil {
-		return CityEntry{}, false
+		return CityEntry{}, false, err
 	}
 	for _, e := range entries {
 		if e.EffectiveName() == name {
-			return e, true
+			return e, true, nil
 		}
 	}
-	return CityEntry{}, false
+	return CityEntry{}, false, nil
 }
 
 // IsValidCityName reports whether s is shaped like a registered city name and

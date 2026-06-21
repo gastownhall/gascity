@@ -26,6 +26,15 @@ func resolveExplicitCityPathEnv() (string, bool) {
 		// reaches the registry lookup here. The interactive positional and
 		// --city forms instead raise a loud ambiguity error when a local city
 		// and a different registration collide (see resolveCityNameRef).
+		//
+		// Registry-error note (intentional): this uses the lenient bool
+		// LookupCityByName, not LookupCityByNameE, so a corrupt/unreadable
+		// registry collapses to a miss and this ambient env path falls through
+		// to GC_DIR/cwd discovery rather than hard-erroring. The interactive
+		// positional/--city paths use LookupCityByNameE to surface that error
+		// because the user named a city explicitly there; the env path is
+		// best-effort by design (pinned by
+		// TestResolveExplicitCityPathEnvNameBestEffortOnCorruptRegistry).
 		if key == "GC_CITY" && supervisor.IsValidCityName(raw) {
 			if entry, ok := supervisor.NewRegistry(supervisor.RegistryPath()).LookupCityByName(raw); ok {
 				return entry.Path, true

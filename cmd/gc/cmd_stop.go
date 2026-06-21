@@ -156,7 +156,21 @@ func resolveStopCityPath(args []string) (string, error) {
 	if len(args) == 0 {
 		return resolveCommandCity(nil)
 	}
-	return resolveCityRef(args[0], cityRefOpts{allowNameFallback: true}, stopCityPathFromArg)
+	// A name-shaped positional may be a registered city name or a local rig
+	// directory; route it through the shared name resolver so a slashless rig
+	// dir still resolves to its owning city without reopening the bare-name
+	// walk-up footgun. Path-shaped args keep the exact stop path resolver.
+	if classifyCityRef(args[0]) == cityRefName {
+		ctx, err := resolveCityNameContext(args[0], func(name string) (resolvedContext, error) {
+			cp, perr := stopCityPathFromArg(name)
+			return resolvedContext{CityPath: cp}, perr
+		})
+		if err != nil {
+			return "", err
+		}
+		return ctx.CityPath, nil
+	}
+	return stopCityPathFromArg(args[0])
 }
 
 // stopCityPathFromArg resolves a path-shaped stop argument (or a local city) to

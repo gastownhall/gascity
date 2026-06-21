@@ -567,12 +567,31 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 func resolveStartDir(args []string) (string, error) {
 	switch {
 	case len(args) > 0:
-		return resolveCityRef(args[0], cityRefOpts{allowNameFallback: true}, filepath.Abs)
+		return resolveStartDirRef(args[0])
 	case cityFlag != "":
-		return resolveCityRef(cityFlag, cityRefOpts{allowNameFallback: true}, filepath.Abs)
+		return resolveStartDirRef(cityFlag)
 	default:
 		return os.Getwd()
 	}
+}
+
+// resolveStartDirRef resolves a name-or-path start/restart reference to a
+// directory that requireBootstrappedCity can turn into a bootstrapped city. A
+// name-shaped reference is routed through the shared name resolver (the same
+// rig-aware path used by resolveCommandContext and resolveStopCityPath) so a
+// slashless local rig directory such as "frontend" resolves to its owning city
+// instead of failing as an unknown city name. Path-shaped references keep the
+// original filepath.Abs behavior, leaving city validation to
+// requireBootstrappedCity.
+func resolveStartDirRef(ref string) (string, error) {
+	if classifyCityRef(ref) == cityRefName {
+		ctx, err := resolveCityNameContext(ref, resolveContextFromPath)
+		if err != nil {
+			return "", err
+		}
+		return ctx.CityPath, nil
+	}
+	return filepath.Abs(ref)
 }
 
 func requireBootstrappedCity(dir string) (string, error) {

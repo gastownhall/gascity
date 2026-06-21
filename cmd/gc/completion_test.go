@@ -179,6 +179,35 @@ func TestRigNameCandidates_LoadsAndFilters(t *testing.T) {
 	}
 }
 
+// Regression (PR #3625 review F2): a registered city NAME supplied via --city
+// must drive rig-name completion the same way a city PATH does. Before the fix
+// the completion resolver validated --city as a filesystem path only, so
+// `gc --city <name> --rig <TAB>` returned no candidates even though
+// `gc --city <name> --rig <rig> ...` is a supported invocation.
+func TestRigNameCandidates_ResolvesRegisteredCityNameFlag(t *testing.T) {
+	gcHome := t.TempDir()
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(cityPath, "rigs", "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_HOME", gcHome)
+	registerRigBindingForResolution(t, gcHome, cityPath, "completion-city", "frontend", rigDir)
+
+	isolateCompletionContext(t, "") // no GC_CITY; resets cityFlag to ""
+	cityFlag = "completion-city"    // a registered NAME, not a path
+	t.Chdir(t.TempDir())            // outside the city: only the name can resolve it
+
+	got := rigNameCandidates("")
+	names := make([]string, len(got))
+	for i, c := range got {
+		names[i] = strings.SplitN(c, "\t", 2)[0]
+	}
+	if !slicesContains(names, "frontend") {
+		t.Fatalf("rigNameCandidates(--city=registered name) = %v, want it to include the city's rig %q", names, "frontend")
+	}
+}
+
 func TestCompleteRigFlagNames_IgnoresPositionalArgs(t *testing.T) {
 	cityPath := t.TempDir()
 	writeCompletionCity(t, cityPath, "[workspace]\nname = \"my-city\"\n\n[[rigs]]\nname = \"alpha\"\npath = \"/tmp/alpha\"\n\n[[rigs]]\nname = \"beta\"\npath = \"/tmp/beta\"\n")

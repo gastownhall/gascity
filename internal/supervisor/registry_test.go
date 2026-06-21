@@ -815,6 +815,26 @@ func TestLookupCityByNameEmptyRegistry(t *testing.T) {
 	}
 }
 
+func TestLookupCityByNameESurfacesLoadError(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "cities.toml")
+	// Corrupt registry: malformed TOML so loadLocked fails to parse it.
+	if err := os.WriteFile(regPath, []byte("[[city]\nname = \"broken\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry(regPath)
+
+	// The bool API collapses the read error into a plain miss.
+	if _, ok := r.LookupCityByName("broken"); ok {
+		t.Fatal("expected no match from a corrupt registry")
+	}
+	// The error-returning variant surfaces the underlying load failure so the
+	// caller can distinguish a corrupt registry from a genuine miss.
+	if _, ok, err := r.LookupCityByNameE("broken"); ok || err == nil {
+		t.Fatalf("LookupCityByNameE on corrupt registry = (ok=%v, err=%v), want (false, non-nil)", ok, err)
+	}
+}
+
 func TestIsValidCityName(t *testing.T) {
 	tests := []struct {
 		in   string
