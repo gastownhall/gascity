@@ -419,10 +419,19 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	if got := bodyAfter.Metadata["gc.outcome"]; got != "fail" {
 		t.Fatalf("body outcome = %q, want fail", got)
 	}
-	// The body must record a concrete reason naming the aborting member, not an
-	// empty gc.failure_reason that strands the run undiagnosable.
-	if got := bodyAfter.Metadata["gc.failure_reason"]; got != "scope_aborted_by:"+failed.ID {
-		t.Fatalf("body failure_reason = %q, want scope_aborted_by:%s", got, failed.ID)
+	// The body must record the structured failure metadata the rest of dispatch
+	// uses (class + category reason + named subject), not an empty
+	// gc.failure_reason that strands the run undiagnosable. The aborting member
+	// closed with gc.outcome=fail, so the body reports the scope_aborted_by_member
+	// category with the member named in gc.failure_subject.
+	if got := bodyAfter.Metadata["gc.failure_reason"]; got != "scope_aborted_by_member" {
+		t.Fatalf("body failure_reason = %q, want scope_aborted_by_member", got)
+	}
+	if got := bodyAfter.Metadata["gc.failure_subject"]; got != failed.ID {
+		t.Fatalf("body failure_subject = %q, want %s", got, failed.ID)
+	}
+	if got := bodyAfter.Metadata["gc.failure_class"]; got != "hard" {
+		t.Fatalf("body failure_class = %q, want hard", got)
 	}
 
 	for _, beadID := range []string{futureMember.ID, futureControl.ID} {
@@ -1687,10 +1696,18 @@ func TestReconcileTerminalScopedMemberAbortScopeBareCloseAbortsScope(t *testing.
 	if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "fail" {
 		t.Fatalf("body = status %q outcome %q, want closed/fail", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
 	}
-	// A bare-close (abort_scope, no gc.outcome) must still leave a concrete,
-	// member-naming reason on the body rather than an empty one.
-	if got := bodyAfter.Metadata["gc.failure_reason"]; got != "member_closed_without_outcome:"+failed.ID {
-		t.Fatalf("body failure_reason = %q, want member_closed_without_outcome:%s", got, failed.ID)
+	// A bare-close (abort_scope, no gc.outcome) must still leave structured
+	// failure metadata on the body: the member_closed_without_outcome category,
+	// the aborting member in gc.failure_subject, and a class — never an empty
+	// reason.
+	if got := bodyAfter.Metadata["gc.failure_reason"]; got != "member_closed_without_outcome" {
+		t.Fatalf("body failure_reason = %q, want member_closed_without_outcome", got)
+	}
+	if got := bodyAfter.Metadata["gc.failure_subject"]; got != failed.ID {
+		t.Fatalf("body failure_subject = %q, want %s", got, failed.ID)
+	}
+	if got := bodyAfter.Metadata["gc.failure_class"]; got != "hard" {
+		t.Fatalf("body failure_class = %q, want hard", got)
 	}
 	openAfter := mustGetBead(t, store, openStep.ID)
 	if openAfter.Status != "closed" || openAfter.Metadata["gc.outcome"] != "skipped" {
@@ -1698,33 +1715,164 @@ func TestReconcileTerminalScopedMemberAbortScopeBareCloseAbortsScope(t *testing.
 	}
 }
 
-func TestScopeAbortReason(t *testing.T) {
+func TestScopeAbortFailureMetadata(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name   string
-		member beads.Bead
-		want   string
+		name        string
+		member      beads.Bead
+		wantReason  string
+		wantSubject string
+		wantClass   string
 	}{
 		{
-			name:   "member's own failure_reason wins",
-			member: beads.Bead{ID: "m1", Metadata: map[string]string{"gc.failure_reason": "post_refresh_ci_unrepairable", "gc.outcome": "fail"}},
-			want:   "post_refresh_ci_unrepairable",
+			name:        "member's own failure_reason and class win",
+			member:      beads.Bead{ID: "m1", Metadata: map[string]string{"gc.failure_reason": "post_refresh_ci_unrepairable", "gc.failure_class": "transient", "gc.outcome": "fail"}},
+			wantReason:  "post_refresh_ci_unrepairable",
+			wantSubject: "m1",
+			wantClass:   "transient",
 		},
 		{
-			name:   "fail outcome names the aborting member",
-			member: beads.Bead{ID: "m2", Metadata: map[string]string{"gc.outcome": "fail"}},
-			want:   "scope_aborted_by:m2",
+			// Nested scope-abort: the aborting "member" is itself an already-aborted
+			// child scope body carrying scope_aborted_by_member / transient / fail.
+			// Its reason and class must bubble up to the parent body, and the parent
+			// must record the child body in gc.failure_subject so the subject chain
+			// stays walkable. This pins that transient propagates up the scope chain
+			// as a diagnostic (never a retry signal — see scopeAbortFailureMetadata's
+			// doc comment), which is the compositional case the comment justifies.
+			name:        "nested aborted child scope body propagates reason and class",
+			member:      beads.Bead{ID: "child-body", Metadata: map[string]string{"gc.kind": "scope", "gc.scope_role": "body", "gc.failure_reason": "scope_aborted_by_member", "gc.failure_class": "transient", "gc.outcome": "fail"}},
+			wantReason:  "scope_aborted_by_member",
+			wantSubject: "child-body",
+			wantClass:   "transient",
 		},
 		{
-			name:   "bare close names the aborting member",
-			member: beads.Bead{ID: "m3", Metadata: map[string]string{"gc.on_fail": "abort_scope"}},
-			want:   "member_closed_without_outcome:m3",
+			name:        "fail outcome reports the category and names the subject",
+			member:      beads.Bead{ID: "m2", Metadata: map[string]string{"gc.outcome": "fail"}},
+			wantReason:  "scope_aborted_by_member",
+			wantSubject: "m2",
+			wantClass:   "hard",
+		},
+		{
+			name:        "bare close (no outcome) reports member_closed_without_outcome",
+			member:      beads.Bead{ID: "m3", Metadata: map[string]string{"gc.on_fail": "abort_scope"}},
+			wantReason:  "member_closed_without_outcome",
+			wantSubject: "m3",
+			wantClass:   "hard",
+		},
+		{
+			// An abort_scope member that closed with a non-empty, non-fail outcome
+			// (e.g. "missing_root") is a failure per beadOutcomeFailed; the reason
+			// must say a member aborted the scope, not that it closed without an
+			// outcome, since it did close with one.
+			name:        "unknown non-fail outcome is not labeled without-outcome",
+			member:      beads.Bead{ID: "m4", Metadata: map[string]string{"gc.on_fail": "abort_scope", "gc.outcome": "missing_root"}},
+			wantReason:  "scope_aborted_by_member",
+			wantSubject: "m4",
+			wantClass:   "hard",
+		},
+		{
+			// A member whose gc.failure_reason is only whitespace must not strand
+			// the body with an effectively empty reason: the trimmed reason is
+			// empty, so it falls back to the stable category. A whitespace-only
+			// gc.failure_class likewise falls back to "hard".
+			name:        "whitespace-only member reason and class fall back to stable values",
+			member:      beads.Bead{ID: "m5", Metadata: map[string]string{"gc.failure_reason": "   ", "gc.failure_class": "  ", "gc.outcome": "fail"}},
+			wantReason:  "scope_aborted_by_member",
+			wantSubject: "m5",
+			wantClass:   "hard",
 		},
 	}
 	for _, tc := range cases {
-		if got := scopeAbortReason(tc.member); got != tc.want {
-			t.Errorf("%s: scopeAbortReason = %q, want %q", tc.name, got, tc.want)
+		md := scopeAbortFailureMetadata(tc.member)
+		if got := md["gc.outcome"]; got != "fail" {
+			t.Errorf("%s: outcome = %q, want fail", tc.name, got)
 		}
+		if got := md["gc.failure_reason"]; got != tc.wantReason {
+			t.Errorf("%s: failure_reason = %q, want %q", tc.name, got, tc.wantReason)
+		}
+		if got := md["gc.failure_subject"]; got != tc.wantSubject {
+			t.Errorf("%s: failure_subject = %q, want %q", tc.name, got, tc.wantSubject)
+		}
+		if got := md["gc.failure_class"]; got != tc.wantClass {
+			t.Errorf("%s: failure_class = %q, want %q", tc.name, got, tc.wantClass)
+		}
+	}
+}
+
+func TestScopeAbortBodyNotResolvedAsRetrySubject(t *testing.T) {
+	t.Parallel()
+	// A scope body force-closed by an abort inherits the aborting member's
+	// gc.failure_class, which may be "transient". The real guard against that
+	// class re-driving a retry is the retry-run graph wiring, NOT
+	// isRetryAttemptSubject: processRetryEval only ever classifies the subject
+	// that resolveRetryRunSubject returns, and that resolver matches a
+	// gc.kind=retry-run attempt (or the eval's own blocking subject), never a
+	// gc.kind=scope body. A real Ralph retry scope body even carries
+	// gc.logical_bead_id and gc.attempt, so isRetryAttemptSubject reports true
+	// for it — which is exactly why a guard built on isRetryAttemptSubject would
+	// be a latent bug. Pin the resolver so a regression that resolves a
+	// transient-carrying scope body as the retry subject is caught here.
+	store := beads.NewMemStore()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "workflow",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+	})
+	const logicalID = "logical-step"
+	const attempt = 2
+	attemptStr := strconv.Itoa(attempt)
+
+	// The genuine retry-run attempt the eval must classify.
+	run := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "retry run attempt",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-run",
+			"gc.root_bead_id":    root.ID,
+			"gc.logical_bead_id": logicalID,
+			"gc.attempt":         attemptStr,
+			"gc.outcome":         "pass",
+		},
+	})
+
+	// A force-closed scope body carrying transient failure metadata AND the same
+	// retry-shaped metadata, to prove even this body is never picked as the
+	// subject.
+	scopeBody := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "aborted scope body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "scope",
+			"gc.scope_role":      "body",
+			"gc.root_bead_id":    root.ID,
+			"gc.logical_bead_id": logicalID,
+			"gc.attempt":         attemptStr,
+			"gc.outcome":         "fail",
+			"gc.failure_class":   "transient",
+		},
+	})
+
+	// isRetryAttemptSubject is not the guard: it reports true for the
+	// retry-shaped scope body, so relying on it would let the body through.
+	if !isRetryAttemptSubject(mustGetBead(t, store, scopeBody.ID)) {
+		t.Fatal("precondition: a retry-shaped scope body satisfies isRetryAttemptSubject; the real guard must be the retry-run resolver")
+	}
+
+	eval := beads.Bead{
+		ID: "retry-eval",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-eval",
+			"gc.root_bead_id":    root.ID,
+			"gc.logical_bead_id": logicalID,
+			"gc.attempt":         attemptStr,
+		},
+	}
+	subject, err := resolveRetryRunSubject(store, eval, logicalID, attempt)
+	if err != nil {
+		t.Fatalf("resolveRetryRunSubject: %v", err)
+	}
+	if subject.ID != run.ID {
+		t.Fatalf("retry subject = %q, want the retry-run attempt %q (never the aborted scope body %q)", subject.ID, run.ID, scopeBody.ID)
 	}
 }
 
