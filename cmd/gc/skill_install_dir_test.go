@@ -90,6 +90,7 @@ func TestSkillInstallDirsPerProviderAcrossScopes(t *testing.T) {
 		{"out-of-tree-rig", outOfTreeRig},
 	}
 
+	wantSource := filepath.Join(cityPath, "skills", "mayor")
 	for _, sc := range scopes {
 		for provider, sink := range canonicalSink {
 			link := filepath.Join(sc.root, filepath.FromSlash(sink), "mayor")
@@ -101,6 +102,18 @@ func TestSkillInstallDirsPerProviderAcrossScopes(t *testing.T) {
 			}
 			if info.Mode()&os.ModeSymlink == 0 {
 				t.Errorf("%s / %s: %s is not a symlink", sc.label, provider, link)
+				continue
+			}
+			// The provider CLI follows the symlink target, so a dangling
+			// or mis-targeted link delivers zero skills even though the
+			// link exists. Assert it resolves to the shared mayor source.
+			tgt, err := os.Readlink(link)
+			if err != nil {
+				t.Errorf("%s / %s: readlink %s: %v", sc.label, provider, link, err)
+				continue
+			}
+			if tgt != wantSource {
+				t.Errorf("%s / %s: symlink target = %q, want %q", sc.label, provider, tgt, wantSource)
 			}
 		}
 	}
