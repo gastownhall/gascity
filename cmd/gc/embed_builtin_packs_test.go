@@ -460,9 +460,11 @@ func TestRequiredBuiltinPackNames(t *testing.T) {
 			t.Fatalf("requiredBuiltinImports order = %v, want [core bd]", ordered)
 		}
 		for _, name := range ordered {
-			source, ok := builtinpacks.Source(name)
+			// requiredBuiltinImports authors the dereferenceable tree-URL
+			// form (issue #3644), not the internal //subpath form.
+			source, ok := builtinpacks.CanonicalImportSource(name)
 			if !ok {
-				t.Fatalf("builtinpacks.Source(%q) not registered", name)
+				t.Fatalf("builtinpacks.CanonicalImportSource(%q) not registered", name)
 			}
 			imp, ok := imports[name]
 			if !ok {
@@ -470,6 +472,9 @@ func TestRequiredBuiltinPackNames(t *testing.T) {
 			}
 			if imp.Source != source {
 				t.Errorf("imports[%q].Source = %q, want %q", name, imp.Source, source)
+			}
+			if !strings.Contains(imp.Source, "/tree/") || strings.Contains(imp.Source, ".git//") {
+				t.Errorf("imports[%q].Source = %q, want a resolvable tree URL, not the .git//subpath form", name, imp.Source)
 			}
 			if imp.Version != config.BundledPackImportVersion {
 				t.Errorf("imports[%q].Version = %q, want %q", name, imp.Version, config.BundledPackImportVersion)
@@ -534,13 +539,21 @@ func TestBuiltinImportsForNames(t *testing.T) {
 		t.Fatalf("builtinImportsForNames imports = %#v, want 3 entries", imports)
 	}
 	for _, name := range ordered {
-		source, ok := builtinpacks.Source(name)
+		// gc init authors the dereferenceable tree-URL form, not the
+		// internal //subpath recognition form returned by Source.
+		source, ok := builtinpacks.CanonicalImportSource(name)
 		if !ok {
-			t.Fatalf("builtinpacks.Source(%q) not registered", name)
+			t.Fatalf("builtinpacks.CanonicalImportSource(%q) not registered", name)
 		}
 		imp := imports[name]
 		if imp.Source != source {
 			t.Errorf("imports[%q].Source = %q, want %q", name, imp.Source, source)
+		}
+		if !strings.Contains(imp.Source, "/tree/") {
+			t.Errorf("imports[%q].Source = %q, want a dereferenceable GitHub tree URL", name, imp.Source)
+		}
+		if strings.Contains(imp.Source, ".git//") {
+			t.Errorf("imports[%q].Source = %q, must not author the legacy .git//subpath form", name, imp.Source)
 		}
 		if imp.Version != config.BundledPackImportVersion {
 			t.Errorf("imports[%q].Version = %q, want %q", name, imp.Version, config.BundledPackImportVersion)
@@ -576,6 +589,53 @@ func TestBuiltinImportsForInit(t *testing.T) {
 			t.Errorf("builtinImportsForInit with GC_BEADS=file = %v, want core only", ordered)
 		}
 	})
+}
+
+// TestCanonicalImportSourcePublicPacksMatchConstants asserts the public-pack
+// branch of CanonicalImportSource produces exactly the durable source
+// constants gc init and the wave-1 doctor migration write for the public
+// gascity-packs packs, so the bundled generator and the init/doctor paths
+// never diverge on spelling.
+func TestCanonicalImportSourcePublicPacksMatchConstants(t *testing.T) {
+	cases := map[string]string{
+		"gastown": config.PublicGastownPackSource,
+		"gascity": config.PublicGascityPackSource,
+	}
+	for name, want := range cases {
+		got, ok := builtinpacks.CanonicalImportSource(name)
+		if !ok {
+			t.Fatalf("CanonicalImportSource(%q) ok = false, want true", name)
+		}
+		if got != want {
+			t.Errorf("CanonicalImportSource(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// TestCanonicalImportSourceCacheKeyParity is the safety property the whole
+// "change generation, leave recognition unchanged" strategy rests on: the
+// authored tree-URL spelling and the internal //subpath spelling must resolve
+// to the same repo cache slot at the canonical pin. If this ever diverges, a
+// freshly-initialized city and an old-form city would fight over (or miss)
+// the same bundled synthetic cache.
+func TestCanonicalImportSourceCacheKeyParity(t *testing.T) {
+	commit := strings.TrimPrefix(config.BundledPackImportVersion, "sha:")
+	for _, name := range []string{"core", "bd", "dolt"} {
+		legacy, ok := builtinpacks.Source(name)
+		if !ok {
+			t.Fatalf("Source(%q) not registered", name)
+		}
+		canonical, ok := builtinpacks.CanonicalImportSource(name)
+		if !ok {
+			t.Fatalf("CanonicalImportSource(%q) not registered", name)
+		}
+		if legacy == canonical {
+			t.Fatalf("Source(%q) and CanonicalImportSource(%q) are the same spelling %q; parity test is vacuous", name, name, legacy)
+		}
+		if packman.RepoCacheKey(legacy, commit) != packman.RepoCacheKey(canonical, commit) {
+			t.Errorf("RepoCacheKey diverges for %q: legacy %q vs canonical %q", name, legacy, canonical)
+		}
+	}
 }
 
 func TestNoMaintenanceBuiltinPack(t *testing.T) {

@@ -2806,10 +2806,10 @@ schema = 2
 
 [imports]
 [imports.bd]
-source = "https://github.com/gastownhall/gascity.git//examples/bd"
+source = "https://github.com/gastownhall/gascity/tree/main/examples/bd"
 version = "` + config.BundledPackImportVersion + `"
 [imports.core]
-source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+source = "https://github.com/gastownhall/gascity/tree/main/internal/bootstrap/packs/core"
 version = "` + config.BundledPackImportVersion + `"
 [imports.gascity]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
