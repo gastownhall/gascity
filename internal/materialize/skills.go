@@ -50,13 +50,25 @@ import (
 // vendorSinks maps an agent provider to the relative directory under the
 // agent's scope-root or session WorkDir where skills are materialized.
 //
-// Only the providers with verified skill-reading behavior are included.
+// Each path is the project-scoped skills directory that the provider's own
+// CLI actually scans (a directory of <name>/SKILL.md), verified against
+// vendor docs (2026-06):
+//
+//	claude   → .claude/skills   (code.claude.com/docs/en/skills)
+//	codex    → .agents/skills   (developers.openai.com/codex/skills — Codex
+//	                             scans .agents/skills from cwd up to the repo
+//	                             root; it does NOT read a project-scoped
+//	                             .codex/skills, only ~/.codex for user state)
+//	gemini   → .gemini/skills   (github.com/google-gemini/gemini-cli docs/cli/skills.md)
+//	opencode → .opencode/skills (opencode.ai/docs/skills)
+//	mimocode → .mimocode/skills (mimo.xiaomi.com/mimocode/skills)
+//
 // The other providers recognized by hooks.go (copilot, cursor, pi, omp)
 // intentionally have no entry — VendorSink returns ok=false so the caller
 // can log a single skip line per session.
 var vendorSinks = map[string]string{
 	"claude":   ".claude/skills",
-	"codex":    ".codex/skills",
+	"codex":    ".agents/skills",
 	"gemini":   ".gemini/skills",
 	"opencode": ".opencode/skills",
 	"mimocode": ".mimocode/skills",

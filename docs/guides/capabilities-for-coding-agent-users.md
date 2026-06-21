@@ -74,7 +74,7 @@ The rest of this page is one short answer per capability.
     skill wins.
 - At startup Gas City **symlinks** the pack level and role level skill directories into
   each agent's provider-specific skill sink — `.claude/skills/`,
-  `.codex/skills/`, `.gemini/skills/`, `.opencode/skills/`. List with
+  `.agents/skills/` (codex), `.gemini/skills/`, `.opencode/skills/`. List with
   `gc skill list`.
 - It *places* the files into each provider's own convention; it doesn't
   translate them. Providers whose convention isn't confirmed (copilot, cursor,

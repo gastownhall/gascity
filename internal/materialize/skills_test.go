@@ -97,7 +97,7 @@ func TestVendorSink(t *testing.T) {
 		wantOK   bool
 	}{
 		{"claude", ".claude/skills", true},
-		{"codex", ".codex/skills", true},
+		{"codex", ".agents/skills", true},
 		{"gemini", ".gemini/skills", true},
 		{"opencode", ".opencode/skills", true},
 		{"mimocode", ".mimocode/skills", true},
