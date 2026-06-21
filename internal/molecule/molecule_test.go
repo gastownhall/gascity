@@ -695,10 +695,10 @@ func TestInstantiateFallsBackWhenGraphApplyDoltConnectionTimesOut(t *testing.T) 
 	}
 }
 
-func TestInstantiateFallsBackWhenNativeGraphApplyCycleCheckTimesOut(t *testing.T) {
+func TestInstantiateFallsBackWhenGraphApplyUnsupported(t *testing.T) {
 	store := &graphApplySpyStore{
 		MemStore: beads.NewMemStore(),
-		err:      fmt.Errorf("adding edge ga-wisp-f5tz43->ga-wisp-oog3my: failed to check for dependency cycle: context deadline exceeded"),
+		err:      fmt.Errorf("bd create --graph: exit status 1: Error: unknown flag: --graph"),
 	}
 	prev := IsGraphApplyEnabled()
 	SetGraphApplyEnabled(true)
@@ -718,8 +718,8 @@ func TestInstantiateFallsBackWhenNativeGraphApplyCycleCheckTimesOut(t *testing.T
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
-	if store.calls != 2 {
-		t.Fatalf("ApplyGraphPlan calls = %d, want 2", store.calls)
+	if store.calls != 1 {
+		t.Fatalf("ApplyGraphPlan calls = %d, want 1", store.calls)
 	}
 	if result.Created != 2 {
 		t.Fatalf("Created = %d, want 2", result.Created)
@@ -764,6 +764,50 @@ func TestInstantiateDoesNotFallbackForNonTransientGraphApplyError(t *testing.T) 
 	}
 	if len(beads) != 0 {
 		t.Fatalf("fallback created %d beads for non-transient graph apply error", len(beads))
+	}
+}
+
+func TestInstantiateFragmentFallsBackWhenGraphApplyUnsupported(t *testing.T) {
+	store := &graphApplySpyStore{
+		MemStore: beads.NewMemStore(),
+		err:      fmt.Errorf("bd create --graph: exit status 1: Error: unknown flag: --graph"),
+	}
+	root, err := store.Create(beads.Bead{
+		Title:    "Workflow root",
+		Type:     "task",
+		Priority: priorityPtr(1),
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+	recipe := &formula.FragmentRecipe{
+		Steps: []formula.RecipeStep{
+			{ID: "frag.scope", Title: "Scope", Type: "task"},
+			{ID: "frag.work", Title: "Work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "frag.work", DependsOnID: "frag.scope", Type: "parent-child"},
+		},
+	}
+
+	result, err := InstantiateFragment(context.Background(), store, recipe, FragmentOptions{RootID: root.ID})
+	if err != nil {
+		t.Fatalf("InstantiateFragment: %v", err)
+	}
+	if store.calls != 1 {
+		t.Fatalf("ApplyGraphPlan calls = %d, want 1", store.calls)
+	}
+	if result.Created != 2 {
+		t.Fatalf("Created = %d, want 2", result.Created)
+	}
+	if _, err := store.Get(result.IDMapping["frag.scope"]); err != nil {
+		t.Fatalf("fallback fragment scope missing from store: %v", err)
 	}
 }
 

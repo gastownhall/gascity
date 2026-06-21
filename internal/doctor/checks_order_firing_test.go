@@ -207,6 +207,39 @@ func TestOrderFiringCurrent_UsesNewestOrderRunHistory(t *testing.T) {
 	}
 }
 
+func TestOrderFiringCurrent_OpenOrderRunIsInFlight(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-doctor", "cooldown", "5m")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-doctor", Ts: now.Add(-45 * time.Minute)},
+	)
+
+	check := NewOrderFiringCurrentCheck(
+		cfg,
+		cityPath,
+		WithOrderFiringCurrentLastRunFunc(func(order orders.Order) (time.Time, error) {
+			if order.ScopedName() != "mol-dog-doctor" {
+				return time.Time{}, nil
+			}
+			return now.Add(-45 * time.Minute), nil
+		}),
+		WithOrderFiringCurrentOpenRunFunc(func(order orders.Order) (bool, error) {
+			return order.ScopedName() == "mol-dog-doctor", nil
+		}),
+	)
+	check.clock = func() time.Time { return now }
+	result := check.Run(&CheckContext{CityPath: cityPath})
+
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK while order run is in flight; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "in flight") {
+		t.Fatalf("details = %v, want in-flight detail", result.Details)
+	}
+}
+
 func TestOrderFiringCurrent_SkipsSuspendedRigOrders(t *testing.T) {
 	// The dispatcher intentionally skips suspended rigs. Doctor should not turn
 	// their paused recurring orders into blocking stale-order failures.
@@ -376,6 +409,24 @@ func TestOrderFiringCurrent_Stale(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), "(CRITICAL: stale)") {
 		t.Fatalf("details = %v, want stale detail", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_ShortIntervalStaleBeforeGraceFloorIsWarning(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "gate-sweep", "cooldown", "30s")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "gate-sweep", Ts: now.Add(-2 * time.Minute)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want warning for short-interval lag before grace floor; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if strings.Contains(strings.Join(result.Details, "\n"), "(CRITICAL: stale)") {
+		t.Fatalf("details = %v, short-interval lag before grace floor should not be critical", result.Details)
 	}
 }
 

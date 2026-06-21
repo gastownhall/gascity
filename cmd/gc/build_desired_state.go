@@ -1319,6 +1319,8 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 	}
 
 	for key, group := range groups {
+		counted := make(map[string]struct{})
+		readyMatchedTemplates := make(map[string]struct{})
 		// Ready()/CachedReady() iteration surfaces actionable work
 		// matched against gc.routed_to/gc.run_target. Formula orders that
 		// should wake pools must create an actionable root, such as a
@@ -1340,10 +1342,86 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
+			if _, dup := counted[b.ID]; dup {
+				continue
+			}
+			counted[b.ID] = struct{}{}
+			readyMatchedTemplates[template] = struct{}{}
+			counts[template]++
+		}
+
+		// Cron-fired pool orders can land as molecule roots, which Ready()
+		// intentionally hides. Only pay the fallback cost when at least one
+		// template still has no Ready-visible demand; otherwise Ready already
+		// proved the store has actionable routed work for every template here.
+		needsHiddenDemandProbe := len(readyMatchedTemplates) < len(group.templates)
+		if !needsHiddenDemandProbe {
+			continue
+		}
+
+		// Count only the explicit gc.pool_demand path.
+		demand, demandErr := listPoolOrderDemand(group.store)
+		if demandErr != nil {
+			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: List(%s): %w", key, strings.Join(sortedStringSet(group.templates), ","), poolDemandMetadataKey, demandErr))
+			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
+			if !beads.IsPartialResult(demandErr) {
+				demand = nil
+			}
+		}
+		now := time.Now().UTC()
+		for _, b := range demand {
+			if strings.TrimSpace(b.Assignee) != "" {
+				continue
+			}
+			if beads.IsDeferred(b, now) {
+				continue
+			}
+			template := controllerDemandRouteTarget(b, group.templates)
+			if _, ok := group.templates[template]; !ok {
+				continue
+			}
+			if _, dup := counted[b.ID]; dup {
+				continue
+			}
+			counted[b.ID] = struct{}{}
 			counts[template]++
 		}
 	}
 	return counts, partialTemplates, errs
+}
+
+func listPoolOrderDemand(store beads.Store) ([]beads.Bead, error) {
+	demand, err := store.List(beads.ListQuery{
+		Status:   "open",
+		Metadata: poolDemandMetadataPair(),
+		Live:     true,
+		TierMode: beads.TierBoth,
+	})
+	if err != nil || len(demand) > 0 {
+		return demand, err
+	}
+
+	// Some backends miss dotted metadata equality filters on live indexed
+	// queries. Fall back to a live scan and filter in-process so pool demand
+	// still wakes the pool.
+	demand, err = store.List(beads.ListQuery{
+		Status:    "open",
+		Type:      "molecule",
+		Live:      true,
+		TierMode:  beads.TierBoth,
+		AllowScan: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	filtered := demand[:0]
+	for _, b := range demand {
+		if b.Metadata[poolDemandMetadataKey] != poolDemandMetadataValue {
+			continue
+		}
+		filtered = append(filtered, b)
+	}
+	return filtered, nil
 }
 
 func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.City, cityName string) (map[string]bool, map[string]bool, []error) {

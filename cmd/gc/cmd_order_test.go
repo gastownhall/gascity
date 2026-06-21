@@ -1751,7 +1751,7 @@ func TestOrderRunResolvesPackBindingForPool(t *testing.T) {
 	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
 		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
 	}
-	assertNoDeprecatedPoolDemandMetadata(t, results[0].Metadata)
+	assertPoolDemandMetadata(t, results[0].Metadata, "maintenance.dog")
 	if !strings.Contains(stdout.String(), "gc.routed_to=maintenance.dog") {
 		t.Fatalf("stdout = %q, want binding-qualified route", stdout.String())
 	}
@@ -1814,7 +1814,7 @@ description = "Do the cleanup."
 	if got := wisp.Metadata["gc.routed_to"]; got != "dog" {
 		t.Fatalf("gc.routed_to = %q, want dog", got)
 	}
-	assertNoDeprecatedPoolDemandMetadata(t, wisp.Metadata)
+	assertPoolDemandMetadata(t, wisp.Metadata, "dog")
 	if !strings.Contains(wisp.Description, "Dog cleanup recipe.") {
 		t.Fatalf("wisp description missing formula description:\n%s", wisp.Description)
 	}
@@ -1899,13 +1899,22 @@ func TestOrderRunNonPoolDoesNotSetRouteMetadata(t *testing.T) {
 	if got := results[0].Metadata["gc.routed_to"]; got != "" {
 		t.Fatalf("gc.routed_to = %q, want empty for unrouted order", got)
 	}
-	assertNoDeprecatedPoolDemandMetadata(t, results[0].Metadata)
+	assertPoolDemandMetadata(t, results[0].Metadata, "")
 }
 
-func assertNoDeprecatedPoolDemandMetadata(t *testing.T, metadata map[string]string) {
+func assertPoolDemandMetadata(t *testing.T, metadata map[string]string, routedTo string) {
 	t.Helper()
-	if got := metadata["gc.pool_demand"]; got != "" {
-		t.Fatalf("gc.pool_demand = %q, want empty", got)
+	if routedTo == "" {
+		if got := metadata["gc.pool_demand"]; got != "" {
+			t.Fatalf("gc.pool_demand = %q, want empty", got)
+		}
+		return
+	}
+	if got := metadata["gc.pool_demand"]; got != "order" {
+		t.Fatalf("gc.pool_demand = %q, want order", got)
+	}
+	if got := metadata["gc.routed_to"]; got != routedTo {
+		t.Fatalf("gc.routed_to = %q, want %q", got, routedTo)
 	}
 }
 

@@ -130,7 +130,10 @@ type demandListCountingStore struct {
 	liveInProgressIssueLists int
 	liveInProgressWispLists  int
 	liveOpenMolecules        int
+	livePoolDemand           int
+	livePoolDemandFallback   int
 	fullPrimeLists           int
+	hideIndexedPoolDemand    bool
 }
 
 func (s *demandListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -147,6 +150,15 @@ func (s *demandListCountingStore) List(query beads.ListQuery) ([]beads.Bead, err
 	}
 	if query.Live && query.Status == "open" && query.Type == "molecule" {
 		s.liveOpenMolecules++
+	}
+	if query.Live && query.Status == "open" && query.Metadata[poolDemandMetadataKey] == poolDemandMetadataValue {
+		s.livePoolDemand++
+		if s.hideIndexedPoolDemand {
+			return nil, nil
+		}
+	}
+	if query.Live && query.Status == "open" && query.AllowScan && len(query.Metadata) == 0 && query.TierMode == beads.TierBoth {
+		s.livePoolDemandFallback++
 	}
 	return s.Store.List(query)
 }
@@ -1182,9 +1194,154 @@ func TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers(t *testing.T) {
 	if got := counts["gascity/workflows.codex-min"]; got != 0 {
 		t.Fatalf("defaultScaleCheckCounts = %d, want molecule container ignored", got)
 	}
-	if backing.liveOpenMolecules != 0 {
-		t.Fatalf("live open molecule list calls = %d, want no molecule demand query", backing.liveOpenMolecules)
+	if backing.liveOpenMolecules == 0 {
+		t.Fatalf("live open molecule list calls = 0, want fallback scan to verify no gc.pool_demand roots")
 	}
+}
+
+func TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:     "pool-order root",
+		Type:      "molecule",
+		Status:    "open",
+		Metadata:  poolWispMetadata("dog"),
+		Ephemeral: true,
+	}); err != nil {
+		t.Fatalf("create pool-order root: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "dog",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", "dog", got)
+	}
+	if backing.livePoolDemand == 0 {
+		t.Fatalf("livePoolDemand list calls = 0, want >0")
+	}
+}
+
+func TestDefaultScaleCheckCountsFallsBackWhenIndexedPoolDemandMissesDottedMetadata(t *testing.T) {
+	backing := &demandListCountingStore{
+		Store:                 beads.NewMemStore(),
+		hideIndexedPoolDemand: true,
+	}
+	if _, err := backing.Create(beads.Bead{
+		Title:    "pool-order root",
+		Type:     "molecule",
+		Status:   "open",
+		Metadata: poolWispMetadata("gastown-override.dog"),
+	}); err != nil {
+		t.Fatalf("create pool-order root: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "gastown-override.dog",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["gastown-override.dog"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", "gastown-override.dog", got)
+	}
+	if backing.livePoolDemand == 0 {
+		t.Fatalf("livePoolDemand list calls = 0, want indexed lookup attempted first")
+	}
+	if backing.livePoolDemandFallback == 0 {
+		t.Fatalf("livePoolDemandFallback list calls = 0, want fallback scan after empty indexed lookup")
+	}
+}
+
+func TestDefaultScaleCheckCountsPoolDemandUsesRoutedToBeforeRunTarget(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	metadata := map[string]string{
+		"gc.run_target": "dog",
+		"gc.routed_to":  "cat",
+	}
+	for k, v := range poolDemandMetadataPair() {
+		metadata[k] = v
+	}
+	if _, err := backing.Create(beads.Bead{
+		Title:     "pool demand with canonical route",
+		Type:      "molecule",
+		Status:    "open",
+		Metadata:  metadata,
+		Ephemeral: true,
+	}); err != nil {
+		t.Fatalf("create pool-order root: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		{template: "dog", storeKey: "city", store: cache},
+		{template: "cat", storeKey: "city", store: cache},
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0", "dog", got)
+	}
+	if got := counts["cat"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", "cat", got)
+	}
+}
+
+func TestDefaultScaleCheckCountsIgnoresFutureDeferredCronPoolDemand(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	future := time.Now().UTC().Add(time.Hour)
+	if _, err := backing.Create(beads.Bead{
+		Title:      "deferred pool-order root",
+		Type:       "molecule",
+		Status:     "open",
+		Metadata:   poolWispMetadata("cat"),
+		DeferUntil: &future,
+	}); err != nil {
+		t.Fatalf("create deferred pool-order root: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "cat",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["cat"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0", "cat", got)
+	}
+}
+
+func poolWispMetadata(pool string) map[string]string {
+	m := map[string]string{"gc.routed_to": pool}
+	for k, v := range poolDemandMetadataPair() {
+		m[k] = v
+	}
+	return m
 }
 
 // TestDefaultScaleCheckCountsIgnoresGraphV2StepRoutedToPool pins the

@@ -184,6 +184,20 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 	}
 }
 
+func doctorOrderFiringCurrentOpenRunFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderFiringCurrentOpenRunFunc {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
+	return func(order orders.Order) (bool, error) {
+		stores, err := resolveStores(order)
+		if err != nil {
+			return false, err
+		}
+		return orders.HasOpenRunAcrossStores(stores...)(order.ScopedName())
+	}
+}
+
 func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts buildDoctorChecksOpts) []doctor.Check {
 	var checks []doctor.Check
 	register := func(c doctor.Check) {
@@ -229,7 +243,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewInstructionsFileCheck(cfg, cityPath))
 		register(doctor.NewServiceSecretsPermsCheck(cfg, cityPath))
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
-		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))))
+		register(doctor.NewOrderFiringCurrentCheck(
+			cfg,
+			cityPath,
+			doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr)),
+			doctor.WithOrderFiringCurrentOpenRunFunc(doctorOrderFiringCurrentOpenRunFunc(cityPath, cfg, opts.Stderr)),
+		))
 		register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))

@@ -104,6 +104,18 @@ func isGraphApplyErrorText(text string) bool {
 		strings.Contains(text, "adding edge ")
 }
 
+func isUnsupportedGraphApplyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	if !strings.Contains(text, "bd create --graph") {
+		return false
+	}
+	return strings.Contains(text, "unknown flag: --graph") ||
+		strings.Contains(text, "unknown shorthand flag")
+}
+
 func instantiateFragmentViaGraphApply(ctx context.Context, store beads.Store, applier beads.GraphApplyStore, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {
 	graphApplyTracef("graph-apply fragment-enter root=%s applier=%T", opts.RootID, applier)
 	plan, err := buildFragmentApplyPlan(store, recipe, opts)

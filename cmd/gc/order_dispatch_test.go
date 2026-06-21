@@ -380,7 +380,7 @@ func TestOrderDispatchResolvesPackBindingForPool(t *testing.T) {
 	if got := work.Metadata["gc.routed_to"]; got != "maintenance.dog" {
 		t.Errorf("gc.routed_to = %q, want %q (pack binding must qualify pool target)", got, "maintenance.dog")
 	}
-	assertNoDeprecatedPoolDemandMetadata(t, work.Metadata)
+	assertPoolDemandMetadata(t, work.Metadata, "maintenance.dog")
 }
 
 func TestOrderDispatchPoolLegacyFormulaWarnsWhenRootIsNotReadyVisible(t *testing.T) {
@@ -1380,6 +1380,33 @@ func TestOrderDispatchRespectsMaxDispatchesPerTick(t *testing.T) {
 	ad.drain(context.Background())
 	if got := countOrderTrackingRuns(t, store); got != 4 {
 		t.Fatalf("tracking runs after second tick = %d, want 4", got)
+	}
+}
+
+func TestOrderDispatchDefaultBudgetCoversMaintenanceBurst(t *testing.T) {
+	store := beads.NewMemStore()
+	var aa []orders.Order
+	for i := 0; i < 12; i++ {
+		aa = append(aa, orders.Order{
+			Name:     fmt.Sprintf("maintenance-%d", i),
+			Trigger:  "cooldown",
+			Interval: "1m",
+			Exec:     "true",
+		})
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, func(context.Context, string, string, []string) ([]byte, error) {
+		return []byte("ok\n"), nil
+	}, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	now := time.Date(2026, 5, 19, 2, 30, 0, 0, time.UTC)
+	ad.dispatch(context.Background(), t.TempDir(), now)
+	ad.drain(context.Background())
+
+	if got := countOrderTrackingRuns(t, store); got != len(aa) {
+		t.Fatalf("tracking runs after default-budget tick = %d, want %d", got, len(aa))
 	}
 }
 

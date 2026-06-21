@@ -75,12 +75,14 @@ type CityRuntime struct {
 	it                      idleTracker
 	mat                     maxSessionAgeTracker
 	wg                      wispGC
+	orderDispatchMu         sync.Mutex
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
 	orderSet                []orders.Order
 	orderSetSignature       string
 	orderRescanEnabled      bool
 	orderRescanLast         time.Time
+	orderDispatchLast       time.Time
 	trace                   *sessionReconcilerTraceManager
 
 	orderSweepWatchdogLast             time.Time
@@ -661,6 +663,8 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	interval := cr.cfg.Daemon.PatrolIntervalDuration()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	stopOrderDispatchLoop := cr.startOrderDispatchLoop(ctx, cityRoot, interval)
+	defer stopOrderDispatchLoop()
 
 	// Start the supervisor nudge dispatcher when configured. The wake-socket
 	// listener feeds nudgeWakeCh on every producer enqueue, giving sub-second
@@ -751,6 +755,37 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+func (cr *CityRuntime) startOrderDispatchLoop(ctx context.Context, cityRoot string, interval time.Duration) func() {
+	if interval <= 0 {
+		return func() {}
+	}
+	loopCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				func() {
+					prev := beads.SetReconcilerTickTrigger("orders")
+					defer beads.RestoreReconcilerTickTrigger(prev)
+					cr.safeTick(func() {
+						cr.dispatchOrdersWithMinGap(loopCtx, cityRoot, interval/2)
+					}, "orders")
+				}()
+			case <-loopCtx.Done():
+				return
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
 	}
 }
 
@@ -1271,15 +1306,32 @@ func (cr *CityRuntime) tick(
 }
 
 func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
+	cr.dispatchOrdersWithMinGap(ctx, cityRoot, 0)
+}
+
+func (cr *CityRuntime) dispatchOrdersWithMinGap(ctx context.Context, cityRoot string, minGap time.Duration) {
+	cr.orderDispatchMu.Lock()
+	defer cr.orderDispatchMu.Unlock()
 	if ctx.Err() != nil {
 		return
 	}
 	now := time.Now()
+	if minGap > 0 && !cr.orderDispatchLast.IsZero() && now.Sub(cr.orderDispatchLast) < minGap {
+		return
+	}
+	cr.orderDispatchLast = now
+	cr.dispatchOrdersLocked(ctx, cityRoot, now)
+}
+
+func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string, now time.Time) {
+	if ctx.Err() != nil {
+		return
+	}
 	if !cr.wispIndexMigrationApplied {
 		cr.wispIndexMigrationApplied = true
 		cr.applyWispQueryIndexes(ctx)
 	}
-	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, now)
+	cr.rescanOrderDispatcherIfDueLocked(ctx, cityRoot, now)
 	cr.runOrderTrackingSweepWatchdog(now)
 	cr.runOrderTrackingRetentionWatchdog(now)
 	cr.runNudgeMailSweepWatchdog(now)
@@ -1288,7 +1340,7 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 	}
 }
 
-func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot string, now time.Time) {
+func (cr *CityRuntime) rescanOrderDispatcherIfDueLocked(ctx context.Context, cityRoot string, now time.Time) {
 	if !cr.orderRescanEnabled || cr.tomlPath == "" || strings.TrimSpace(cityRoot) == "" {
 		return
 	}
@@ -1315,6 +1367,12 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 }
 
 func (cr *CityRuntime) rescanOrderDispatcher(ctx context.Context, cityRoot string, cfg *config.City, cmdName string, now time.Time) (bool, string, error) {
+	cr.orderDispatchMu.Lock()
+	defer cr.orderDispatchMu.Unlock()
+	return cr.rescanOrderDispatcherLocked(ctx, cityRoot, cfg, cmdName, now)
+}
+
+func (cr *CityRuntime) rescanOrderDispatcherLocked(ctx context.Context, cityRoot string, cfg *config.City, cmdName string, now time.Time) (bool, string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1928,17 +1986,22 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// and drained again during shutdown.
 	// Deriving from ctx (the tick ctx) lets a shutdown racing with reload
 	// short-circuit the drain instead of waiting the full 1s.
-	if cr.od != nil {
-		drainCtx, drainCancel := context.WithTimeout(ctx, reloadOrderDrainTimeout)
-		cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
-		drainCancel()
-	}
-	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
-	orderSummary := orderSetChangeSummary(cr.orderSet, orderSnapshot.Orders)
-	cr.replaceOrderDispatcher(nextOD)
-	cr.orderSet = orderSnapshot.Orders
-	cr.orderSetSignature = orderSnapshot.Signature
-	cr.orderRescanLast = time.Now()
+	var orderSummary string
+	func() {
+		cr.orderDispatchMu.Lock()
+		defer cr.orderDispatchMu.Unlock()
+		if cr.od != nil {
+			drainCtx, drainCancel := context.WithTimeout(ctx, reloadOrderDrainTimeout)
+			cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
+			drainCancel()
+		}
+		nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
+		orderSummary = orderSetChangeSummary(cr.orderSet, orderSnapshot.Orders)
+		cr.replaceOrderDispatcher(nextOD)
+		cr.orderSet = orderSnapshot.Orders
+		cr.orderSetSignature = orderSnapshot.Signature
+		cr.orderRescanLast = time.Now()
+	}()
 	if orderSummary != "unchanged" {
 		fmt.Fprintf(cr.stderr, "%s: orders reloaded: %s\n", cr.logPrefix, orderSummary) //nolint:errcheck // best-effort stderr
 	}

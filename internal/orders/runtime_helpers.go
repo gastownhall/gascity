@@ -2,6 +2,7 @@ package orders
 
 import (
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -57,6 +58,50 @@ func LastRunAcrossStores(stores ...beads.Store) LastRunFunc {
 			}
 		}
 		return latest, nil
+	}
+}
+
+type openOrderRunStore interface {
+	HasOpenOrderRun(name string) (bool, error)
+}
+
+// HasOpenRunFuncForStore returns true when a store has any non-closed
+// order-run bead for the named order.
+func HasOpenRunFuncForStore(store beads.Store) func(string) (bool, error) {
+	return func(name string) (bool, error) {
+		name = strings.TrimSpace(name)
+		if store == nil || name == "" {
+			return false, nil
+		}
+		if fastStore, ok := store.(openOrderRunStore); ok {
+			return fastStore.HasOpenOrderRun(name)
+		}
+		results, err := store.List(beads.ListQuery{
+			Label:    "order-run:" + name,
+			Limit:    1,
+			Live:     true,
+			TierMode: beads.TierBoth,
+		})
+		if err != nil {
+			return false, err
+		}
+		return len(results) > 0, nil
+	}
+}
+
+// HasOpenRunAcrossStores returns true if any store has a non-closed order run.
+func HasOpenRunAcrossStores(stores ...beads.Store) func(string) (bool, error) {
+	return func(name string) (bool, error) {
+		for _, store := range stores {
+			open, err := HasOpenRunFuncForStore(store)(name)
+			if err != nil {
+				return false, err
+			}
+			if open {
+				return true, nil
+			}
+		}
+		return false, nil
 	}
 }
 

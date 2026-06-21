@@ -722,6 +722,9 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	}
 	if a.Pool != "" {
 		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
+		for k, v := range poolDemandMetadataPair() {
+			update.Metadata[k] = v
+		}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr

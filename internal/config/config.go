@@ -3433,6 +3433,22 @@ func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool
 	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + `; } || printf "[]"`
 }
 
+func poolDemandRouteFilterJQ(limit int) string {
+	filter := `[.[] | select((.metadata["gc.routed_to"] // "") == $target)]`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return `jq --arg target "$target" ` + shellquote.Join([]string{filter})
+}
+
+func poolDemandOrderMoleculeFilterJQ(limit int) string {
+	filter := `[.[] | select((.metadata["gc.routed_to"] // "") == $target and (.metadata["gc.pool_demand"] // "") == "order")]`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return `jq --arg target "$target" ` + shellquote.Join([]string{filter})
+}
+
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
 // reads the first ready, unassigned, routed bead for the supplied target,
 // prints it, and exits 0. The caller appends a terminal fallthrough
@@ -3446,6 +3462,9 @@ func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", includeEphemeralReady) + ` 2>/dev/null); ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`pool_order_candidates=$(bd list --status=open --type=molecule --no-assignee --json --limit=0 2>/dev/null); ` +
+		`r=$(printf "%s" "$pool_order_candidates" | ` + poolDemandOrderMoleculeFilterJQ(1) + ` 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, includeEphemeralReady, true) + `); ` +
 		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
@@ -3456,7 +3475,7 @@ func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
 func routedReadyTierCommand(includeEphemeralReady bool) string {
 	// The shared predicate stays order-free so the count-form does no wasted
 	// sorting; the worker first-row path asks bd for the oldest candidate.
-	return bdReadyPoolDemandShell("--sort oldest --limit=1", includeEphemeralReady) + ` 2>/dev/null`
+	return bdReadyPoolDemandShell("--sort oldest --limit=20", includeEphemeralReady) + ` 2>/dev/null | ` + poolDemandRouteFilterJQ(1)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -3593,8 +3612,9 @@ func routedPoolWorkQueryCommand(includeEphemeralReady bool, targets ...string) s
 // ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
 // Executable formula roots can be epic-typed; the bead storage policy decides
 // whether those roots are history-backed, no-history, or ephemeral for the
-// configured bd compatibility mode. Molecule containers are not routable
-// demand.
+// configured bd compatibility mode. Order-created pool-demand molecule roots
+// are the narrow exception: they are routable only when marked with
+// gc.pool_demand=order and a matching gc.routed_to.
 //
 // Parent epics are excluded from the routed (pool) tier only
 // (--exclude-type=epic). An unassigned parent epic has no executable spec —

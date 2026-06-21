@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1798,8 +1800,11 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 	if strings.Contains(got, `--include-ephemeral`) {
 		t.Errorf("EffectiveWorkQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=1`) {
+	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=20`) {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 pool-demand probe: %q", got)
+	}
+	if !strings.Contains(got, `jq --arg target "$target"`) {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to safety filter: %q", got)
 	}
 	if !strings.Contains(got, "-- mayor") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
@@ -1812,6 +1817,12 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 			t.Errorf("EffectiveWorkQuery() missing run_target migration filter fragment %q: %q", want, got)
 		}
 	}
+	if !strings.Contains(got, `bd list --status=open --type=molecule --no-assignee --json --limit=0`) {
+		t.Errorf("EffectiveWorkQuery() missing pool-order molecule root fallback: %q", got)
+	}
+	if !strings.Contains(got, `gc.pool_demand`) {
+		t.Errorf("EffectiveWorkQuery() missing pool-order molecule root filter: %q", got)
+	}
 	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
 		t.Errorf("EffectiveWorkQuery() missing multi-identifier resolution: %q", got)
 	}
@@ -1820,7 +1831,7 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQueryForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105})
-	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=1`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=20`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral routed probe: %q", got)
 	}
 	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
@@ -2193,21 +2204,18 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyUnassignedRoute(t *testi
 	out := runEffectiveWorkQuery(t, a, nil, `#!/bin/sh
 set -eu
 case "$*" in
-  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+  *"ready --metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
     printf '[]'
     ;;
-  *"ready --metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
-    printf '[]'
-    ;;
-  *"ready --metadata-field gc.routed_to=gascity/workflow-control"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
-    printf '[{"id":"ga-legacy-route"}]'
+  *"ready --metadata-field gc.routed_to=gascity/workflow-control"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
+    printf '[{"id":"ga-legacy-route","metadata":{"gc.routed_to":"gascity/workflow-control"}}]'
     ;;
   *)
     printf '[]'
     ;;
 esac
 `)
-	if got, want := strings.TrimSpace(out), `[{"id":"ga-legacy-route"}]`; got != want {
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-legacy-route","metadata":{"gc.routed_to":"gascity/workflow-control"}}]`; compactJSONForTest(t, got) != compactJSONForTest(t, want) {
 		t.Fatalf("legacy routed work query output = %q, want %q", got, want)
 	}
 }
@@ -2228,8 +2236,8 @@ func TestEffectiveWorkQueryRoutedQueueUsesNativeOldestSortAcrossReadyTiers(t *te
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --json --sort oldest --limit=1")
-    printf '[{"id":"older-no-history","priority":2,"created_at":"2026-05-20T06:09:30Z","no_history":true}]'
+  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --json --sort oldest --limit=20")
+    printf '[{"id":"older-no-history","priority":2,"created_at":"2026-05-20T06:09:30Z","no_history":true,"metadata":{"gc.routed_to":"hello-world/worker"}}]'
     ;;
   *)
     printf '[]'
@@ -2273,8 +2281,8 @@ func TestEffectiveWorkQueryRoutedQueueUsesOldestBeforePriority(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  *"ready --metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
-    printf '[{"id":"older-p2","priority":2,"created_at":"2026-05-20T06:09:30Z"}]'
+  *"ready --metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
+    printf '[{"id":"older-p2","priority":2,"created_at":"2026-05-20T06:09:30Z","metadata":{"gc.routed_to":"hello-world/worker"}}]'
     ;;
   *)
     printf '[]'
@@ -2296,7 +2304,7 @@ func TestEffectiveWorkQueryRoutedFallbackUsesNativeOldestSort(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  *"ready --metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+  *"ready --metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
     printf '[]'
     ;;
   *"ready --metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
@@ -2693,9 +2701,18 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			wq := tt.agent.EffectiveWorkQuery()
 			demand := tt.agent.EffectivePoolDemandQuery()
-			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=1", false)
+			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=20", false)
 			if !strings.Contains(wq, workPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", workPredicate, wq)
+			}
+			if !strings.Contains(wq, `jq --arg target "$target"`) ||
+				!strings.Contains(wq, `.metadata["gc.routed_to"]`) ||
+				!strings.Contains(wq, `.[:1]`) {
+				t.Errorf("EffectiveWorkQuery() missing routed_to safety filter in %q", wq)
+			}
+			if !strings.Contains(wq, `bd list --status=open --type=molecule --no-assignee --json --limit=0`) ||
+				!strings.Contains(wq, `gc.pool_demand`) {
+				t.Errorf("EffectiveWorkQuery() missing pool-order molecule fallback filter in %q", wq)
 			}
 			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", false)
 			if !strings.Contains(wq, migrationWorkPredicate) {
@@ -2780,6 +2797,15 @@ func TestEffectivePoolDemandQueryRespectsOverride(t *testing.T) {
 	}
 }
 
+func compactJSONForTest(t *testing.T, raw string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, []byte(raw)); err != nil {
+		t.Fatalf("compact JSON %q: %v", raw, err)
+	}
+	return buf.String()
+}
+
 // TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics is the behavioral
 // counterpart to TestPoolDemandPredicateSharedWithWorkQuery. Given a
 // fake bd that returns the same routed-and-claimable signal to either
@@ -2839,10 +2865,17 @@ func TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			metadataSuffix := `,"metadata":{"gc.routed_to":"` + tc.target + `"}`
+			bdReadyOutput := strings.ReplaceAll(tc.bdReadyOutput, `}`, metadataSuffix+`}`)
+			wantWorkQuery := strings.ReplaceAll(tc.wantWorkQuery, `}`, metadataSuffix+`}`)
+			if tc.bdReadyOutput == `[]` {
+				bdReadyOutput = tc.bdReadyOutput
+				wantWorkQuery = tc.wantWorkQuery
+			}
 			bdScript := `#!/bin/sh
 case "$*" in
   *"ready --metadata-field gc.routed_to=` + tc.target + `"*"--unassigned"*"--exclude-type=epic"*)
-    printf '%s' '` + tc.bdReadyOutput + `'
+    printf '%s' '` + bdReadyOutput + `'
     ;;
   *)
     printf '[]'
@@ -2850,8 +2883,8 @@ case "$*" in
 esac
 `
 			wqOut := strings.TrimSpace(runEffectiveWorkQuery(t, tc.agent, nil, bdScript))
-			if wqOut != tc.wantWorkQuery {
-				t.Errorf("EffectiveWorkQuery output = %q, want %q", wqOut, tc.wantWorkQuery)
+			if compactJSONForTest(t, wqOut) != compactJSONForTest(t, wantWorkQuery) {
+				t.Errorf("EffectiveWorkQuery output = %q, want %q", wqOut, wantWorkQuery)
 			}
 			demandOut := strings.TrimSpace(runShellWithFakeBd(t, tc.agent.EffectivePoolDemandQuery(), nil, bdScript))
 			if tc.wantDemandZero {

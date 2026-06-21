@@ -74,7 +74,7 @@ const (
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 
 	orderTrackingHistoryIndexLimit   = 2048
-	defaultMaxOrderDispatchesPerTick = 4
+	defaultMaxOrderDispatchesPerTick = 64
 	orderTrackingSweepCloseBudget    = 4
 
 	// orderTrackingRetentionWatchdogInterval is the minimum time between
@@ -1389,6 +1389,9 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	}
 	if a.Pool != "" {
 		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
+		for k, v := range poolDemandMetadataPair() {
+			update.Metadata[k] = v
+		}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		// Label failure is critical for duplicate-dispatch prevention.

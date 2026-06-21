@@ -1584,6 +1584,85 @@ func TestCityRuntimeRunStartupOrderDispatchPanicIsRecovered(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeRunDispatchesOrdersWhileReconcileTickIsBlocked(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Daemon.PatrolInterval = "10ms"
+
+	sp := runtime.NewFake()
+	od := &recordingOrderDispatcher{}
+	blockedTickStarted := make(chan struct{})
+	releaseBlockedTick := make(chan struct{})
+	var buildCalls atomic.Int32
+	var blockedOnce sync.Once
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			if buildCalls.Add(1) >= 2 {
+				blockedOnce.Do(func() { close(blockedTickStarted) })
+				<-releaseBlockedTick
+			}
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cr.od = od
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	done := make(chan struct{})
+	go func() {
+		cr.run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-blockedTickStarted:
+	case <-time.After(time.Second):
+		cancel()
+		close(releaseBlockedTick)
+		t.Fatal("steady-state reconcile tick did not block")
+	}
+
+	deadline := time.After(250 * time.Millisecond)
+	for od.calls.Load() < 3 {
+		select {
+		case <-deadline:
+			cancel()
+			close(releaseBlockedTick)
+			t.Fatalf("order dispatch calls = %d, want at least 3 while reconcile tick is blocked", od.calls.Load())
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	cancel()
+	close(releaseBlockedTick)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not stop after releasing blocked tick")
+	}
+}
+
 func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	// #2168: the watchdog must clear stale tracking beads for EVERY order, not
 	// just order-tracking-sweep's own. The old narrow scope only swept the
