@@ -58,8 +58,10 @@ func TestCleanInstallTutorialPath(t *testing.T) {
 		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
 	})
 
-	// --- Step 2: gc rig add (simulate `gc rig add ~/my-project`) ---
-	rigName := "my-project"
+	// --- Step 2: gc rig add (simulate `gc rig add ~/tutorial-rig-alpha`) ---
+	// Three-part name so DeriveBeadsPrefix produces a 3-char prefix ("tra") that
+	// can never equal the 2-char prefix derived from the random city name.
+	rigName := "tutorial-rig-alpha"
 	rigDir := filepath.Join(t.TempDir(), rigName)
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("creating rig dir: %v", err)
@@ -69,7 +71,7 @@ func TestCleanInstallTutorialPath(t *testing.T) {
 		t.Fatalf("gc rig add failed: %v\noutput: %s", err, out)
 	}
 
-	wantPrefix := config.DeriveBeadsPrefix(rigName) // "mp"
+	wantPrefix := config.DeriveBeadsPrefix(rigName) // "tra"
 
 	// --- Assertion 1: bd config get issue_prefix returns the derived prefix ---
 	// Regression: rig Dolt DB was never seeded so this returned "" before the fix.
