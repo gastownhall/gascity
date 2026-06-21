@@ -219,6 +219,92 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 	}
 }
 
+// TestCmdSessionKill_SyncsBeadToAsleep is the regression guard for #3629:
+// `gc session kill` must sync the bead to asleep + refresh synced_at at the
+// CLI layer (cmdSessionKill), otherwise the bead retains its prior live state
+// ("awake") and a later `gc session wake` short-circuits on the stale
+// metadata and never starts a fresh runtime. The write lives in cmdSessionKill
+// (not Manager.Kill) so the drain-ack async-stop path is unaffected.
+func TestCmdSessionKill_SyncsBeadToAsleep(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := shortSocketTempDir(t, "gc-session-kill-asleep-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+
+	fakeProvider := runtime.NewFake()
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fakeProvider, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	const identity = "session-a"
+	const sessionName = "s-gc-kill-asleep-test"
+	bead, err := store.Create(beads.Bead{
+		Title:  "named session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"alias":                      identity,
+			"template":                   "worker",
+			"session_name":               sessionName,
+			"state":                      "awake",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+	if err := fakeProvider.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("fakeProvider.Start: %v", err)
+	}
+	if err := fakeProvider.SetMeta(sessionName, "GC_SESSION_ID", bead.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	lis, err := startControllerSocket(
+		cityDir,
+		func() {},
+		nil,
+		nil,
+		make(chan reloadRequest),
+		make(chan convergenceRequest, 1),
+		make(chan struct{}, 1),
+		make(chan struct{}, 1),
+	)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	defer lis.Close()                              //nolint:errcheck
+	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{identity}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionKill = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	updated, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(session bead): %v", err)
+	}
+	if got := updated.Metadata["state"]; got != string(session.StateAsleep) {
+		t.Errorf("post-kill state = %q, want %q", got, session.StateAsleep)
+	}
+	if got := updated.Metadata["synced_at"]; got == "" {
+		t.Error("post-kill synced_at is empty, want a refreshed timestamp")
+	}
+}
+
 func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
