@@ -58,23 +58,31 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 	if input.Body.Message != nil {
 		result, handleErr := extmsg.HandleInboundNormalized(ctx, deps, *input.Body.Message)
 		if handleErr != nil {
-			// HandleInboundNormalized fails either on a deterministic input
-			// rejection (malformed/unroutable conversation — permanent, so a
-			// 4xx the adapter should drop) or on a transient binding/route/
-			// transcript store fault (retryable, so a 5xx the adapter should
-			// hold and redeliver). Out-of-process adapters treat 4xx as a
-			// permanent drop and 5xx as retryable, so a transient storage fault
-			// must not be reported as a permanent-looking 422. Mirrors the
-			// bind handler's error split.
+			// HandleInboundNormalized fails in one of two classes. Permanent
+			// rejections (a malformed/unroutable conversation, or an invariant
+			// violation such as duplicate active bindings) are a 4xx the adapter
+			// should drop: retrying re-resolves the same corrupt state and fails
+			// identically, so reporting 5xx would pin the adapter's ordered poll
+			// offset behind one poison message and wedge the whole account stream.
+			// Transient binding/route/transcript store faults are retryable, so a
+			// 5xx the adapter should hold and redeliver. Out-of-process adapters
+			// treat 4xx as a permanent drop and 5xx as retryable, so a transient
+			// fault must never surface as a permanent 4xx and a permanent fault
+			// must never surface as a retryable 5xx. This is a subset of the bind
+			// handler's split below: no ErrBindingConflict (409) arm, because the
+			// inbound path resolves existing bindings rather than creating them.
 			switch {
-			// ErrInvalidConversation is the only permanent error
-			// HandleInboundNormalized can actually surface today (a
-			// malformed/unroutable conversation). The ErrInvalidInput arm mirrors
-			// the bind handler's switch below for symmetry and future-proofing —
-			// the normalized path hard-codes Kind/Provenance so it has no live
-			// ErrInvalidInput source — and keeps the two switches identical if a
-			// later validation starts returning it.
-			case errors.Is(handleErr, extmsg.ErrInvalidInput), errors.Is(handleErr, extmsg.ErrInvalidConversation):
+			// Permanent conditions the normalized path can surface: an
+			// unroutable/malformed conversation (ErrInvalidConversation), and an
+			// invariant violation (ErrInvariantViolation) from binding, group-route,
+			// or transcript resolution — corrupt state that retrying cannot repair,
+			// so it is dropped rather than allowed to wedge the stream. The
+			// ErrInvalidInput arm is the bind switch's input-validation arm carried
+			// over for symmetry; the normalized path hard-codes Kind/Provenance so
+			// it has no live ErrInvalidInput source today.
+			case errors.Is(handleErr, extmsg.ErrInvalidInput),
+				errors.Is(handleErr, extmsg.ErrInvalidConversation),
+				errors.Is(handleErr, extmsg.ErrInvariantViolation):
 				return nil, huma.Error400BadRequest(handleErr.Error())
 			default:
 				return nil, huma.Error500InternalServerError(handleErr.Error())

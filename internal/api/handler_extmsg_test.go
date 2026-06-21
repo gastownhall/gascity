@@ -487,6 +487,33 @@ func TestHandleExtMsgInboundNormalizedInvalidConversationReturns400(t *testing.T
 	}
 }
 
+// TestHandleExtMsgInboundNormalizedInvariantViolationReturns400 pins the third
+// arm of the contract: an invariant violation (e.g. duplicate active bindings
+// surfaced by ResolveByConversation, or duplicate groups/participants/transcript
+// state surfaced by the group-route and transcript steps) is permanent — the
+// same inbound message re-resolves the same corrupt state and fails identically
+// until it is repaired out-of-band. It must stay 4xx so adapters drop the poison
+// message instead of retrying a 5xx forever and wedging the account's ordered
+// inbound stream behind it.
+func TestHandleExtMsgInboundNormalizedInvariantViolationReturns400(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	services := extmsg.NewServices(fs.cityBeadStore)
+	services.Bindings = faultBindingService{err: fmt.Errorf("%w: multiple active bindings for telegram/acct-1/chat-1", extmsg.ErrInvariantViolation)}
+	fs.extmsgSvc = &services
+	fs.adapterReg = extmsg.NewAdapterRegistry()
+
+	req := newPostRequest(cityURL(fs, "/extmsg/inbound"), strings.NewReader(inboundNormalizedBody(t)))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invariant violation: status = %d, want %d; body: %s",
+			rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
 func TestTitleCaseProvider(t *testing.T) {
 	cases := []struct {
 		in, want string
