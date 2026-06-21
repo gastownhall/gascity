@@ -131,6 +131,17 @@ Run `make help` for the full list. The most useful targets are:
 | `make dashboard-check` | Typecheck + build + test the dashboard |
 | `make cover` | Coverage run |
 
+> **`make install` writes to the shared `$(go env GOPATH)/bin`.** It (and
+> `go install ./cmd/gc`) install `gc` there, and `make install` also re-points
+> an existing `~/.local/bin/gc` at the result — so when that path is the binary
+> a running deployment uses (commonly `~/.local/bin/gc` → `~/go/bin/gc`),
+> installing from any checkout silently replaces the live `gc`, and every later
+> `gc` exec runs the just-installed build. To redirect when that isn't
+> intended, run `make install INSTALL_DIR=<dir>` (the `install` target writes
+> `$(go env GOPATH)/bin` and ignores `GOBIN`), or for a plain
+> `go install ./cmd/gc` set `GOBIN=<dir>`. `make build` (→ `./bin/gc`) is
+> unaffected.
+
 ## macOS Local Development
 
 On macOS, `make build` signs `gc` with a stable local codesigning identity
