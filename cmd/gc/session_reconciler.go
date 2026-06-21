@@ -1142,6 +1142,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if _, _, pending := resetPendingCommittedAt(*session); !pending && dt != nil {
 			dt.clearResetStall(session.ID)
 		}
+		// #3630: the session is in the desired set this tick, so its spec is
+		// present — reset any suspend-drain confirmation window accrued during a
+		// transient spec-enumeration collapse.
+		if desired {
+			dt.clearSuspendDeferral(session.ID)
+		}
 
 		if reconcileDrainAckStopPending(cityPath, cfg, sp, store, rigStores, session, tp, desired, dops, dt, asyncStopTracker, clk, rec, stderr) {
 			continue
@@ -1193,6 +1199,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 			}
 			preserveNamed := preserveConfiguredNamedSessionBead(*session, cfg, cityName)
+			// #3630: the configured spec is present this tick — reset any
+			// suspend-drain confirmation window so a later genuine removal still
+			// gets the full confirmation buffer.
+			if preserveNamed {
+				dt.clearSuspendDeferral(session.ID)
+			}
 			var (
 				preservedTP  TemplateParams
 				preserveErr  error
@@ -1390,6 +1402,34 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						fmt.Fprintf(stdout, "Skipping drain for '%s': live assigned work found\n", name) //nolint:errcheck
 						continue
+					}
+					// #3630: a LIVE named session reaches this drain only because
+					// its configured spec is absent this tick (preserve did not fire
+					// above) and it has no live assigned work. A namedSessionSpecs
+					// enumeration collapse during boot can drop a spec for a single
+					// tick and restore it on the next; draining the live runtime
+					// respawns it fresh and loses in-session context. Suspend-class
+					// drains are revertible, so require namedSuspendConfirmTicks
+					// consecutive confirming ticks before draining. The counter is
+					// cleared above once the spec reappears. Scoped to live sessions:
+					// a dead bead with no spec still releases its alias immediately
+					// (ga-ue1r).
+					if isNamedSessionBead(*session) {
+						if n := dt.bumpSuspendDeferral(session.ID); n < namedSuspendConfirmTicks {
+							if trace != nil {
+								template := normalizedSessionTemplate(*session, cfg)
+								if template == "" {
+									template = session.Metadata["template"]
+								}
+								trace.recordDecision("reconciler.session.orphan_or_suspended", template, name, reason, "deferred_confirm", traceRecordPayload{
+									"confirm_ticks":    n,
+									"confirm_required": namedSuspendConfirmTicks,
+									"provider_alive":   providerAlive,
+								}, nil, "")
+							}
+							fmt.Fprintf(stdout, "Deferring drain for named session '%s': awaiting spec-absence confirmation (%d/%d) — transient enumeration-collapse guard (#3630)\n", name, n, namedSuspendConfirmTicks) //nolint:errcheck
+							continue
+						}
 					}
 					if beginSessionDrain(*session, sp, dt, reason, clk, defaultDrainTimeout) {
 						if trace != nil {
