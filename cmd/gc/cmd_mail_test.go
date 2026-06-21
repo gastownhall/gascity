@@ -974,6 +974,52 @@ func TestResolveMailTargets_BareRigScopedNamedUsesUniqueLiveConfiguredNamedSessi
 	}
 }
 
+func TestResolveMailTargetsWithConfig_RuntimeNameUsesLiveConfiguredNamedSessionMailbox(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:            "gas-city-wbern",
+			SessionTemplate: "{{.City}}/{{.Name}}",
+		},
+		Agents: []config.Agent{{
+			Name:         "gas-city-architect",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "gas-city-architect",
+			Mode:     "always",
+		}},
+	}
+	runtimeName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "gas-city-architect")
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":                     "gcw/gas-city-architect",
+			"alias_history":             "gas-city-architect",
+			"session_name":              runtimeName,
+			"configured_named_session":  "true",
+			"configured_named_identity": "gas-city-architect",
+			"configured_named_mode":     "always",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	target, err := resolveMailTargetsWithConfigCached(t.TempDir(), cfg, store, runtimeName, nil)
+	if err != nil {
+		t.Fatalf("resolveMailTargetsWithConfigCached: %v", err)
+	}
+	if target.display != "gcw/gas-city-architect" {
+		t.Fatalf("display = %q, want gcw/gas-city-architect", target.display)
+	}
+	want := []string{"gcw/gas-city-architect", b.ID, "gas-city-architect"}
+	if strings.Join(target.recipients, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients = %#v, want %#v", target.recipients, want)
+	}
+}
+
 func TestResolveMailTargetsForCommand_FakeProviderDoesNotResolveHistoricalAlias(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_MAIL", "fake")
@@ -1011,6 +1057,68 @@ func TestResolveMailTargetsForCommand_FakeProviderDoesNotResolveHistoricalAlias(
 		t.Fatalf("display = %q, want mayor", target.display)
 	}
 	want := []string{"mayor"}
+	if strings.Join(target.recipients, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients = %#v, want %#v", target.recipients, want)
+	}
+}
+
+func TestResolveMailTargetsForCommand_RuntimeNameUsesLiveConfiguredNamedSessionMailbox(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "fake")
+
+	cityPath := t.TempDir()
+	cityToml := `[workspace]
+name = "gas-city-wbern"
+session_template = "{{.City}}/{{.Name}}"
+
+[[agent]]
+name = "gas-city-architect"
+provider = "missing-provider"
+
+[providers.missing-provider]
+command = "missing-provider"
+
+[[named_session]]
+template = "gas-city-architect"
+mode = "always"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	runtimeName := config.NamedSessionRuntimeName("gas-city-wbern", config.Workspace{SessionTemplate: "{{.City}}/{{.Name}}"}, "gas-city-architect")
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":                     "gcw/gas-city-architect",
+			"alias_history":             "gas-city-architect",
+			"session_name":              runtimeName,
+			"configured_named_session":  "true",
+			"configured_named_identity": "gas-city-architect",
+			"configured_named_mode":     "always",
+		},
+	}); err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	var stderr bytes.Buffer
+	target, ok := resolveMailTargetsForCommand(runtimeName, &stderr, "gc mail inbox")
+	if !ok {
+		t.Fatal("resolveMailTargetsForCommand() = not ok, want ok")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if target.display != "gcw/gas-city-architect" {
+		t.Fatalf("display = %q, want gcw/gas-city-architect", target.display)
+	}
+	want := []string{"gcw/gas-city-architect", "gc-1", "gas-city-architect"}
 	if strings.Join(target.recipients, ",") != strings.Join(want, ",") {
 		t.Fatalf("recipients = %#v, want %#v", target.recipients, want)
 	}
