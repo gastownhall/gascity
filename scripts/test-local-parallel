@@ -161,6 +161,20 @@ export TEST_LOCAL_GOMODCACHE="$gomodcache_val"
 export TEST_LOCAL_GOTMPDIR="$gotmpdir_val"
 export TEST_LOCAL_GOROOT="${GOROOT:-$goroot_val}"
 
+# Lower each shard's CPU and I/O priority (best-effort) so the parallel fan-out
+# yields to interactive work and does not livelock constrained hosts during the
+# heavy test-binary compiles (#3628). Both tools are optional: ionice is
+# Linux-only and nice may be absent in minimal images, so each is added only
+# when present and the runner works unchanged without them.
+nice_prefix=""
+if command -v nice >/dev/null 2>&1; then
+  nice_prefix="nice -n 10"
+fi
+if command -v ionice >/dev/null 2>&1; then
+  nice_prefix="ionice -c 3 ${nice_prefix}"
+fi
+export TEST_LOCAL_NICE="$nice_prefix"
+
 echo "Running ${#jobspecs[@]} ${mode} job(s) with LOCAL_TEST_JOBS=${local_jobs}"
 
 set +e
@@ -173,7 +187,7 @@ printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
   log="$LOCAL_TEST_LOG_DIR/${safe_label}.log"
 
   echo "[$label] start"
-  if env -i \
+  if ${TEST_LOCAL_NICE:-} env -i \
     PATH="${PATH}" \
     HOME="${HOME:-}" \
     USER="${USER:-}" \
