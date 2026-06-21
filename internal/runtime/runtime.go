@@ -48,6 +48,14 @@ var ErrSessionNotFound = errors.New("session not found")
 // exit 2). Carriers treat this as "fall back to the legacy driving op".
 var ErrExecUnsupported = errors.New("runtime does not implement the exec op")
 
+// ErrStreamUnsupported reports that a provider implements [OutputStreamer] but
+// the underlying runtime did not declare the proc.stream capability in its
+// handshake. Unlike the exec op there is no exit-2 fallback to disambiguate (a
+// persistent stream cannot be carried over the request/response exec
+// connection), so the gate is the capability, not a wire response. Callers
+// treat this as "fall back to polling Peek / the transcript log".
+var ErrStreamUnsupported = errors.New("runtime does not implement the stream op")
+
 // ErrRelaunchUnsupported reports that the underlying runtime cannot relaunch the
 // agent in a warm box (it is not a [RelaunchProvider], or is conjoined like
 // subprocess/acp/t3bridge). Composite/wrapping providers return it from their
@@ -266,6 +274,52 @@ type IdleWaitProvider interface {
 // [ErrExecUnsupported] — distinct from a non-zero exit code.
 type ExecProvider interface {
 	Exec(ctx context.Context, name string, argv []string) (output []byte, code int, err error)
+}
+
+// StreamFrame is one frame of an [OutputStreamer] stream. Exactly one field is
+// set per frame: a data frame carries Stdout XOR Stderr (a chunk of the
+// command's output, verbatim); the single terminal frame carries Exit (a clean
+// exit, with the command's code) XOR Err (a transport failure). The channel is
+// closed after the terminal frame.
+//
+// Frames carry raw bytes, not parsed events: the transport moves output, it
+// does not interpret it. Turning a transcript byte-stream into typed,
+// provider-specific entries stays in the dialect readers (internal/sessionlog),
+// the same place a polled read is parsed today.
+type StreamFrame struct {
+	// Stdout is a chunk of the command's standard output, verbatim. Set only on
+	// a stdout data frame.
+	Stdout []byte
+	// Stderr is a chunk of the command's standard error, verbatim. Set only on a
+	// stderr data frame.
+	Stderr []byte
+	// Exit, when non-nil, is the terminal frame: the command's own exit code (a
+	// non-zero code is the command's result, not a failure). No frames follow.
+	Exit *int
+	// Err, when non-nil, is the terminal frame: the stream failed mid-flight
+	// (the runtime/transport died, distinct from a clean non-zero Exit). No
+	// frames follow.
+	Err error
+}
+
+// OutputStreamer is an optional extension for runtimes that expose the RPP
+// proc.stream op: run a (typically long-lived, read-only) command inside the box
+// and stream its stdout/stderr out frame-for-frame until the command exits or
+// ctx is canceled. It is the read-only sibling of [ExecProvider.Exec] — where
+// Exec buffers a one-shot command and returns when it finishes, StreamOutput
+// pushes output continuously, which is what tailing a live transcript
+// (`tail -F`) or an agent's `--stream-json` needs without polling.
+//
+// argv is the command and its arguments (no shell interpretation by the
+// caller); the op is read-only, so the command's own stdin is not wired. On
+// success StreamOutput returns a channel that yields [StreamFrame]s and is
+// closed once the stream ends. A non-nil err means the stream could not be
+// started at all — a spawn failure, or [ErrStreamUnsupported] when the runtime
+// did not declare proc.stream. Once a channel is returned, a mid-stream failure
+// arrives as a terminal [StreamFrame.Err]; caller cancellation simply closes the
+// channel.
+type OutputStreamer interface {
+	StreamOutput(ctx context.Context, name string, argv []string) (<-chan StreamFrame, error)
 }
 
 // DialogProvider is an optional extension for runtimes that can detect and
