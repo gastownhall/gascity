@@ -41,6 +41,56 @@ func TestProvider_ForwardsRelaunchToRoutedBackend(t *testing.T) {
 	}
 }
 
+// noStreamProvider embeds the runtime.Provider INTERFACE, so the concrete type
+// does NOT satisfy runtime.OutputStreamer (the embedded interface exposes no
+// StreamOutput to promote). It stands in for a backend without the proc.stream op.
+type noStreamProvider struct{ runtime.Provider }
+
+// StreamOutput must reach the routed backend (default vs ACP), or a consumer's
+// OutputStreamer type-assert would be masked by the auto router and silently stay
+// on the poll path.
+func TestProvider_ForwardsStreamOutputToRoutedBackend(t *testing.T) {
+	def, acp := runtime.NewFake(), runtime.NewFake()
+	def.StreamCapable, acp.StreamCapable = true, true
+	acp.StreamFrames = map[string][]runtime.StreamFrame{"acpsess": {{Stdout: []byte("ACP-SENTINEL")}}}
+	p := New(def, acp)
+	p.RouteACP("acpsess")
+
+	frames, err := p.StreamOutput(context.Background(), "acpsess", []string{"tail", "-F", "x"})
+	if err != nil {
+		t.Fatalf("StreamOutput(acpsess): %v", err)
+	}
+	// Drain: the channel handed back must be the routed (ACP) backend's, carrying
+	// its sentinel frame — not just any channel.
+	var got []byte
+	for f := range frames {
+		got = append(got, f.Stdout...)
+	}
+	if string(got) != "ACP-SENTINEL" {
+		t.Errorf("streamed stdout = %q, want %q (channel must be the routed backend's)", got, "ACP-SENTINEL")
+	}
+	if c := acp.CountCalls("StreamOutput", "acpsess"); c != 1 {
+		t.Errorf("acp backend StreamOutput calls = %d, want 1", c)
+	}
+	if c := def.CountCalls("StreamOutput", "acpsess"); c != 0 {
+		t.Errorf("default backend StreamOutput calls = %d, want 0 (routed to acp)", c)
+	}
+
+	// An unregistered session routes to the default backend.
+	if _, err := p.StreamOutput(context.Background(), "plain", []string{"tail", "-F", "x"}); err != nil {
+		t.Fatalf("StreamOutput(plain): %v", err)
+	}
+	if c := def.CountCalls("StreamOutput", "plain"); c != 1 {
+		t.Errorf("default backend StreamOutput calls = %d, want 1", c)
+	}
+
+	// A backend that does not implement OutputStreamer degrades to ErrStreamUnsupported.
+	noStream := New(noStreamProvider{Provider: runtime.NewFake()}, runtime.NewFake())
+	if _, err := noStream.StreamOutput(context.Background(), "plain", nil); !errors.Is(err, runtime.ErrStreamUnsupported) {
+		t.Errorf("StreamOutput err = %v, want runtime.ErrStreamUnsupported", err)
+	}
+}
+
 type falseNegativeStopProvider struct {
 	*runtime.Fake
 	stopErr error

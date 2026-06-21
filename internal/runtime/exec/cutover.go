@@ -17,6 +17,11 @@ import (
 // connection the carrier drives over INTERNALLY (no production caller
 // type-asserts it), so seam-backed driving reaches it through the provider's own
 // carrier-backed Nudge/Peek/SendKeys/Interrupt/ClearScrollback.
+//
+// OutputStreamer, by contrast, IS passed through: the read-only proc.stream op
+// (RUNTIME-RPP-015) is meant to be type-asserted by a CONSUMER (an output reader
+// that streams instead of polling), so the seam must not mask it the way it
+// masks Exec.
 type seamBackedProvider struct {
 	runtime.Provider
 	raw *Provider
@@ -27,6 +32,7 @@ var (
 	_ runtime.DialogProvider          = (*seamBackedProvider)(nil)
 	_ runtime.SleepCapabilityProvider = (*seamBackedProvider)(nil)
 	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
+	_ runtime.OutputStreamer          = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
@@ -57,4 +63,13 @@ func (s *seamBackedProvider) CheckImage(image string) error {
 // for a welded pack it degrades to a reprovision.
 func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	return s.raw.Relaunch(ctx, name, cfg)
+}
+
+// StreamOutput passes through to the underlying provider's read-only proc.stream
+// op ([runtime.OutputStreamer], RUNTIME-RPP-015). The seam does not carry it, so
+// like the other optional connection interfaces it is re-promoted explicitly;
+// the raw provider gates it on the proc.stream handshake capability and returns
+// [runtime.ErrStreamUnsupported] when it is absent.
+func (s *seamBackedProvider) StreamOutput(ctx context.Context, name string, argv []string) (<-chan runtime.StreamFrame, error) {
+	return s.raw.StreamOutput(ctx, name, argv)
 }

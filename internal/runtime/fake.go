@@ -53,11 +53,24 @@ type Fake struct {
 	// RelaunchErrors configures Fake.Relaunch errors per session name; an absent
 	// entry relaunches successfully (records the call, updates the live config).
 	RelaunchErrors map[string]error
+	// StreamCapable makes the fake advertise the proc.stream capability
+	// (Capabilities.CanStream) and serve StreamOutput. The zero value keeps every
+	// existing test on the poll path: StreamOutput returns ErrStreamUnsupported,
+	// exactly as a provider that does not declare proc.stream would.
+	StreamCapable bool
+	// StreamFrames are the frames StreamOutput replays for a session, in order,
+	// before closing the channel. With no entry a StreamCapable fake emits a
+	// single clean Exit(0).
+	StreamFrames map[string][]StreamFrame
+	// StreamErrors configures a synchronous StreamOutput error per session name
+	// (e.g. a spawn failure), returned instead of a channel.
+	StreamErrors map[string]error
 }
 
 var (
 	_ ProcessTableScanner = (*Fake)(nil)
 	_ RelaunchProvider    = (*Fake)(nil)
+	_ OutputStreamer      = (*Fake)(nil)
 )
 
 // Call records a single method invocation on [Fake].
@@ -726,12 +739,54 @@ func (f *Fake) Exec(_ context.Context, name string, argv []string) ([]byte, int,
 }
 
 // Capabilities returns the fake provider's capabilities.
-// By default, reports both attachment and activity as available.
+// By default, reports both attachment and activity as available. CanStream
+// follows StreamCapable, so the default fake reports no streaming and stays on
+// the poll path.
 func (f *Fake) Capabilities() ProviderCapabilities {
+	f.mu.Lock()
+	capable := f.StreamCapable
+	f.mu.Unlock()
 	return ProviderCapabilities{
 		CanReportAttachment: true,
 		CanReportActivity:   true,
+		CanStream:           capable,
 	}
+}
+
+// StreamOutput records the call and, for a StreamCapable fake, replays the
+// scripted StreamFrames[name] (then a clean Exit(0) if none were scripted) over
+// a closed buffered channel. Implements [OutputStreamer]. A fake that is not
+// StreamCapable returns [ErrStreamUnsupported] — the default — so every existing
+// test exercises the poll fallback unchanged. A configured StreamErrors[name] or
+// a broken fake returns synchronously without a channel.
+func (f *Fake) StreamOutput(_ context.Context, name string, argv []string) (<-chan StreamFrame, error) {
+	f.mu.Lock()
+	f.Calls = append(f.Calls, Call{Method: "StreamOutput", Name: name, Message: strings.Join(argv, " ")})
+	broken := f.broken
+	capable := f.StreamCapable
+	if err, ok := f.StreamErrors[name]; ok {
+		f.mu.Unlock()
+		return nil, err
+	}
+	frames := f.StreamFrames[name]
+	f.mu.Unlock()
+
+	if broken {
+		return nil, fmt.Errorf("session unavailable")
+	}
+	if !capable {
+		return nil, ErrStreamUnsupported
+	}
+	ch := make(chan StreamFrame, len(frames)+1)
+	for _, fr := range frames {
+		ch <- fr
+	}
+	if len(frames) == 0 {
+		code := 0
+		ch <- StreamFrame{Exit: &code}
+	}
+	close(ch)
+	return ch, nil
 }
 
 // SleepCapability returns the configured idle sleep capability.

@@ -24,6 +24,7 @@ var (
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
+	_ runtime.OutputStreamer                = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -124,6 +125,18 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		return rp.Relaunch(ctx, name, cfg)
 	}
 	return runtime.ErrRelaunchUnsupported
+}
+
+// StreamOutput forwards the read-only proc.stream op to the routed backend when
+// it implements [runtime.OutputStreamer], so a consumer's OutputStreamer
+// type-assert is not masked by the hybrid router (mirrors Relaunch). A backend
+// without the op yields [runtime.ErrStreamUnsupported], so the consumer falls
+// back to polling.
+func (p *Provider) StreamOutput(ctx context.Context, name string, argv []string) (<-chan runtime.StreamFrame, error) {
+	if streamer, ok := p.route(name).(runtime.OutputStreamer); ok {
+		return streamer.StreamOutput(ctx, name, argv)
+	}
+	return nil, runtime.ErrStreamUnsupported
 }
 
 // WaitForInterruptBoundary delegates to the routed backend when it can confirm

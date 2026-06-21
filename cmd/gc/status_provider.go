@@ -22,7 +22,10 @@ type statusProvider struct {
 	warnOnce sync.Once
 }
 
-var _ runtime.RelaunchProvider = (*statusProvider)(nil)
+var (
+	_ runtime.RelaunchProvider = (*statusProvider)(nil)
+	_ runtime.OutputStreamer   = (*statusProvider)(nil)
+)
 
 func newBoundedStatusProvider(base runtime.Provider) runtime.Provider {
 	if sp, ok := base.(*statusProvider); ok {
@@ -198,6 +201,17 @@ func (p *statusProvider) Relaunch(ctx context.Context, name string, cfg runtime.
 		return rp.Relaunch(ctx, name, cfg)
 	}
 	return runtime.ErrRelaunchUnsupported
+}
+
+// StreamOutput forwards the read-only proc.stream op to the wrapped provider so
+// a consumer's OutputStreamer type-assert is not masked by the status wrapper
+// (mirrors Relaunch). Not bounded by statusProviderCallTimeout: the op is a
+// long-lived stream, not a status snapshot.
+func (p *statusProvider) StreamOutput(ctx context.Context, name string, argv []string) (<-chan runtime.StreamFrame, error) {
+	if streamer, ok := p.base.(runtime.OutputStreamer); ok {
+		return streamer.StreamOutput(ctx, name, argv)
+	}
+	return nil, runtime.ErrStreamUnsupported
 }
 
 func (p *statusProvider) Capabilities() runtime.ProviderCapabilities {

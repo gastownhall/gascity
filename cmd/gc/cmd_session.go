@@ -1183,6 +1183,16 @@ func (p *attachmentCachingProvider) Relaunch(ctx context.Context, name string, c
 	return runtime.ErrRelaunchUnsupported
 }
 
+// StreamOutput forwards the read-only proc.stream op to the wrapped provider so
+// a consumer's OutputStreamer type-assert is not masked by the attachment cache
+// (mirrors Relaunch).
+func (p *attachmentCachingProvider) StreamOutput(ctx context.Context, name string, argv []string) (<-chan runtime.StreamFrame, error) {
+	if streamer, ok := p.Provider.(runtime.OutputStreamer); ok {
+		return streamer.StreamOutput(ctx, name, argv)
+	}
+	return nil, runtime.ErrStreamUnsupported
+}
+
 func (p *attachmentCachingProvider) Pending(name string) (*runtime.PendingInteraction, error) {
 	if ip, ok := p.Provider.(runtime.InteractionProvider); ok {
 		return ip.Pending(name)

@@ -39,6 +39,52 @@ func TestProvider_ForwardsRelaunchToRoutedBackend(t *testing.T) {
 	}
 }
 
+// noStreamProvider embeds the runtime.Provider INTERFACE, so the concrete type
+// does NOT satisfy runtime.OutputStreamer — a backend without the proc.stream op.
+type noStreamProvider struct{ runtime.Provider }
+
+// StreamOutput must reach the routed backend (local vs remote), or a consumer's
+// OutputStreamer type-assert would be masked by the hybrid router and silently
+// stay on the poll path.
+func TestProvider_ForwardsStreamOutputToRoutedBackend(t *testing.T) {
+	local, remote := runtime.NewFake(), runtime.NewFake()
+	local.StreamCapable, remote.StreamCapable = true, true
+	remote.StreamFrames = map[string][]runtime.StreamFrame{"polecat-1": {{Stdout: []byte("REMOTE-SENTINEL")}}}
+	h := New(local, remote, isRemote)
+
+	frames, err := h.StreamOutput(context.Background(), "polecat-1", []string{"tail", "-F", "x"})
+	if err != nil {
+		t.Fatalf("StreamOutput(remote): %v", err)
+	}
+	// Drain: the channel handed back must be the routed (remote) backend's.
+	var got []byte
+	for f := range frames {
+		got = append(got, f.Stdout...)
+	}
+	if string(got) != "REMOTE-SENTINEL" {
+		t.Errorf("streamed stdout = %q, want %q (channel must be the routed backend's)", got, "REMOTE-SENTINEL")
+	}
+	if c := remote.CountCalls("StreamOutput", "polecat-1"); c != 1 {
+		t.Errorf("remote backend StreamOutput calls = %d, want 1", c)
+	}
+	if c := local.CountCalls("StreamOutput", "polecat-1"); c != 0 {
+		t.Errorf("local backend StreamOutput calls = %d, want 0 (routed remote)", c)
+	}
+
+	// A local-routed session reaches the local backend.
+	if _, err := h.StreamOutput(context.Background(), "refinery", []string{"tail", "-F", "x"}); err != nil {
+		t.Fatalf("StreamOutput(local): %v", err)
+	}
+	if c := local.CountCalls("StreamOutput", "refinery"); c != 1 {
+		t.Errorf("local backend StreamOutput calls = %d, want 1", c)
+	}
+
+	noStream := New(noStreamProvider{Provider: runtime.NewFake()}, runtime.NewFake(), isRemote)
+	if _, err := noStream.StreamOutput(context.Background(), "refinery", nil); !errors.Is(err, runtime.ErrStreamUnsupported) {
+		t.Errorf("StreamOutput err = %v, want runtime.ErrStreamUnsupported", err)
+	}
+}
+
 func TestStart_RoutesToLocal(t *testing.T) {
 	local, remote := runtime.NewFake(), runtime.NewFake()
 	h := New(local, remote, isRemote)
