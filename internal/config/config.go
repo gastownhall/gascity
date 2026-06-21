@@ -2521,6 +2521,41 @@ type DaemonConfig struct {
 	// accumulate without bound across pool recycles. Set to false to
 	// retain worktrees for post-session diagnostics.
 	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
+
+	// SessionLivenessChecks configures per-session freshness monitoring.
+	// The controller checks each entry on every patrol tick: if any listed
+	// session has had no activity within FreshnessWindow, it emits a
+	// session.liveness_stale event exactly once per stale episode and
+	// optionally nudges EscalateTo. Escalation clears when the session
+	// becomes active again. This gives the controller-supervised, tight-cadence
+	// patrol required by the health monitoring architecture without hardcoding
+	// role names in Go (the session names come from operator-supplied config).
+	SessionLivenessChecks []SessionLivenessCheck `toml:"session_liveness_checks,omitempty"`
+}
+
+// SessionLivenessCheck is one entry in DaemonConfig.SessionLivenessChecks.
+type SessionLivenessCheck struct {
+	// Sessions lists the runtime session names to monitor for freshness.
+	Sessions []string `toml:"sessions"`
+	// FreshnessWindow is the maximum allowed gap since last session activity.
+	// Duration string (e.g., "2h", "30m"). Required; empty entries are skipped.
+	FreshnessWindow string `toml:"freshness_window"`
+	// EscalateTo is an optional session name to nudge when any listed session
+	// is stale. If empty, only the event is emitted (no nudge).
+	EscalateTo string `toml:"escalate_to,omitempty"`
+}
+
+// FreshnessWindowDuration parses and returns FreshnessWindow as a
+// time.Duration. Returns 0 if the field is empty or unparseable.
+func (c *SessionLivenessCheck) FreshnessWindowDuration() time.Duration {
+	if c.FreshnessWindow == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(c.FreshnessWindow)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // AutoRestartOnDriftEnabled reports whether the supervisor should be

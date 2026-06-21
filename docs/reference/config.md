@@ -331,6 +331,7 @@ DaemonConfig holds controller daemon settings.
 | `start_ready_timeout` | string |  | `5m` | StartReadyTimeout is how long `gc start` and `gc register` wait for the supervisor to report the city as Running. Cities with many registered or adopted sessions take longer to start because the per-tick wake budget (max_wakes_per_tick) throttles startup: wall time to wake N sessions is roughly ceil(N / max_wakes_per_tick) * patrol_interval. At the defaults (5 wakes / 30s), ~40 sessions need ~4 minutes. Duration string (e.g., "5m", "10m"). Defaults to DefaultStartReadyTimeout (5m). When set, this value replaces the default start/register budget; [session].startup_timeout may still extend the effective wait for a slow single session. |
 | `tick_debounce` | string |  |  | TickDebounce coalesces bursty event-driven ticks (pokeCh, controlDispatcherCh) within this window. A first event in a quiet period arms a timer; subsequent events arriving before the timer fires are dropped (the single delayed tick re-reads authoritative state covering all collapsed events). Zero (the default) disables debouncing — each event fires its own tick, matching pre-existing behavior. Duration string (e.g., "250ms", "500ms"). Trade-off: adds tick latency up to this value when set. |
 | `auto_prune_worker_dir` | boolean |  | `true` | AutoPruneWorkerDir controls whether the reconciler removes a pool-managed session's worker_dir (agent worktree) after the session bead is closed. Removal is gated on: path lives under the city's .gc/worktrees/ tree, clean working tree, no unpushed commits, no stashed work. Nil (unset) defaults to true so pool worktrees do not accumulate without bound across pool recycles. Set to false to retain worktrees for post-session diagnostics. |
+| `session_liveness_checks` | []SessionLivenessCheck |  |  | SessionLivenessChecks configures per-session freshness monitoring. The controller checks each entry on every patrol tick: if any listed session has had no activity within FreshnessWindow, it emits a session.liveness_stale event exactly once per stale episode and optionally nudges EscalateTo. Escalation clears when the session becomes active again. This gives the controller-supervised, tight-cadence patrol required by the health monitoring architecture without hardcoding role names in Go (the session names come from operator-supplied config). |
 
 ## DoctorConfig
 
@@ -799,6 +800,16 @@ SessionConfig holds session provider settings.
 | `progress_stall_timeout` | string |  |  | ProgressStallTimeout, when set, enables progress-aware session recycling: a desired, alive, claim-less session on a healthy provider whose last provider-reported activity is older than this duration is restarted fresh. Such a session has likely parked (e.g. its turn ended on a provider auth error) and will not self-recover. Set this above the longest legitimate alive-idle period for the city; values below 5m are clamped to 5m. Duration string (e.g. "30m"). Unset/zero disables it. |
 | `socket` | string |  |  | Socket specifies the tmux socket name for per-city isolation. When set, all tmux commands use "tmux -L &lt;socket&gt;" to connect to a dedicated server. When empty, defaults to the city name (workspace.name) — giving every city its own tmux server automatically. Set explicitly to override. |
 | `remote_match` | string |  |  | RemoteMatch is a substring pattern for the hybrid provider to route sessions to the remote (K8s) backend. Sessions whose names contain this pattern go to K8s; all others stay local (tmux). Overridden by the GC_HYBRID_REMOTE_MATCH env var if set. |
+
+## SessionLivenessCheck
+
+SessionLivenessCheck is one entry in DaemonConfig.SessionLivenessChecks.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `sessions` | []string | **yes** |  | Sessions lists the runtime session names to monitor for freshness. |
+| `freshness_window` | string | **yes** |  | FreshnessWindow is the maximum allowed gap since last session activity. Duration string (e.g., "2h", "30m"). Required; empty entries are skipped. |
+| `escalate_to` | string |  |  | EscalateTo is an optional session name to nudge when any listed session is stale. If empty, only the event is emitted (no nudge). |
 
 ## SessionSleepConfig
 

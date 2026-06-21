@@ -85,10 +85,19 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
-	ConvoyCreated           = "convoy.created"
-	ConvoyClosed            = "convoy.closed"
-	ControllerStarted       = "controller.started"
-	ControllerStopped       = "controller.stopped"
+	// SessionLivenessStale fires when a session configured in
+	// [daemon.session_liveness_checks] has had no activity within its
+	// freshness_window. Fires exactly once per stale episode (green→stale
+	// transition); subsequent patrol ticks that find the same session still
+	// stale do not re-fire. Clears when the session becomes active again.
+	// Operators use this event to detect monitoring-chain gaps (e.g., a
+	// dead refinery or witness that a deacon-equivalent patrol agent would
+	// normally detect, but missed because of a self-scheduling failure).
+	SessionLivenessStale = "session.liveness_stale"
+	ConvoyCreated        = "convoy.created"
+	ConvoyClosed         = "convoy.closed"
+	ControllerStarted    = "controller.started"
+	ControllerStopped    = "controller.stopped"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous
 	// supervisor instance exited (clean, crash, or unknown), derived from
@@ -218,6 +227,7 @@ var KnownEventTypes = []string{
 	SessionResetStalled,
 	SessionWorkQueryFailed,
 	SessionColdStartTimeout,
+	SessionLivenessStale,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected,

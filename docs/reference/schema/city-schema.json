@@ -1349,6 +1349,13 @@
           "type": "boolean",
           "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, clean working tree, no unpushed commits, no\nstashed work. Nil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
           "default": true
+        },
+        "session_liveness_checks": {
+          "items": {
+            "$ref": "#/$defs/SessionLivenessCheck"
+          },
+          "type": "array",
+          "description": "SessionLivenessChecks configures per-session freshness monitoring.\nThe controller checks each entry on every patrol tick: if any listed\nsession has had no activity within FreshnessWindow, it emits a\nsession.liveness_stale event exactly once per stale episode and\noptionally nudges EscalateTo. Escalation clears when the session\nbecomes active again. This gives the controller-supervised, tight-cadence\npatrol required by the health monitoring architecture without hardcoding\nrole names in Go (the session names come from operator-supplied config)."
         }
       },
       "additionalProperties": false,
@@ -2750,6 +2757,32 @@
       "additionalProperties": false,
       "type": "object",
       "description": "SessionConfig holds session provider settings."
+    },
+    "SessionLivenessCheck": {
+      "properties": {
+        "sessions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Sessions lists the runtime session names to monitor for freshness."
+        },
+        "freshness_window": {
+          "type": "string",
+          "description": "FreshnessWindow is the maximum allowed gap since last session activity.\nDuration string (e.g., \"2h\", \"30m\"). Required; empty entries are skipped."
+        },
+        "escalate_to": {
+          "type": "string",
+          "description": "EscalateTo is an optional session name to nudge when any listed session\nis stale. If empty, only the event is emitted (no nudge)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "sessions",
+        "freshness_window"
+      ],
+      "description": "SessionLivenessCheck is one entry in DaemonConfig.SessionLivenessChecks."
     },
     "SessionSleepConfig": {
       "properties": {
