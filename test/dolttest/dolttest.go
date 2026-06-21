@@ -105,17 +105,32 @@ func scanDoltSQLServers() map[int]string {
 		if err != nil {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
-		if err != nil || len(raw) == 0 {
-			continue
-		}
-		cmd := strings.TrimSpace(strings.ReplaceAll(string(raw), "\x00", " "))
-		if cmd == "" || !looksLikeDoltSQLServer(strings.Fields(cmd)) {
+		cmd, ok := readProcCmdline(pid)
+		if !ok || !looksLikeDoltSQLServer(strings.Fields(cmd)) {
 			continue
 		}
 		out[pid] = cmd
 	}
 	return out
+}
+
+// readProcCmdline returns the space-joined argv of pid from /proc.
+func readProcCmdline(pid int) (string, bool) {
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil || len(raw) == 0 {
+		return "", false
+	}
+	cmd := strings.TrimSpace(strings.ReplaceAll(string(raw), "\x00", " "))
+	if cmd == "" {
+		return "", false
+	}
+	return cmd, true
+}
+
+// pidIsDoltSQLServer reports whether pid is, right now, a dolt sql-server.
+func pidIsDoltSQLServer(pid int) bool {
+	cmd, ok := readProcCmdline(pid)
+	return ok && looksLikeDoltSQLServer(strings.Fields(cmd))
 }
 
 func looksLikeDoltSQLServer(fields []string) bool {
@@ -209,9 +224,12 @@ func reapPIDs(pids []int) {
 	for _, pid := range pids {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 	}
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(250 * time.Millisecond)
 	for _, pid := range pids {
-		if syscall.Kill(pid, 0) == nil {
+		// Re-confirm the pid is STILL a dolt sql-server before escalating to
+		// SIGKILL: a process that exited during the grace period may have had
+		// its pid reused by something unrelated (likelier on a loaded host).
+		if pidIsDoltSQLServer(pid) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
