@@ -33,13 +33,14 @@ const (
 	ProtocolCapabilityConnectionExec = "proc.exec"
 	// The proc.* / tty.* tokens below form the connection-plane capability
 	// family — a dotted namespace parallel to the env.* family, distinct from
-	// the flat session-control tokens above. They are reserved now and gain
-	// their ops + capability-gated conformance entries with the connection
-	// rewrite; nothing consumes them yet.
+	// the flat session-control tokens above. proc.stream has landed (see below);
+	// tty.attach is still reserved, gaining its op + capability-gated conformance
+	// entry with the connection rewrite.
 	//
 	// ProtocolCapabilityProcStream declares that the executable implements the
-	// persistent bidirectional `stream` connection op (ACP over a stream, or
-	// tmux pipe-pane output), enabling ProviderCapabilities.CanStream.
+	// read-only `proc-stream` output-streaming op (RUNTIME-RPP-015): it runs a
+	// command in the box and streams its stdout/stderr out frame-for-frame until
+	// the command exits, enabling ProviderCapabilities.CanStream.
 	ProtocolCapabilityProcStream = "proc.stream"
 	// ProtocolCapabilityTTYAttach declares that the executable implements an
 	// interactive PTY `attach` connection op, enabling

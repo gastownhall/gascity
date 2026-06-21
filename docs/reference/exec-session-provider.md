@@ -97,6 +97,7 @@ care about.
 | `protocol` | `script protocol` | — | handshake JSON (see below) |
 | `is-attached` | `script is-attached <name>` | — | `true` or `false` |
 | `exec` | `script exec <name>` | command | combined output (op exit == command exit) |
+| `proc-stream` | `script proc-stream <name>` | command | streamed output until the command exits (op exit == command exit) |
 | `provision` | `script provision <name>` | JSON config | — |
 
 **Box without agent (the un-weld).** `provision` is `start` MINUS the agent
@@ -151,7 +152,7 @@ Capabilities:
 | `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. |
 | `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). |
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
-| `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
+| `proc.stream` | Declares the read-only `proc-stream` op (see Operations): the runtime runs a command in the box and streams its stdout/stderr out frame-for-frame until the command exits — the transport for tailing a live transcript (`tail -F`) or an agent's `--stream-json` without polling, where the one-shot `exec` op cannot. Sets `CanStream`. Gated purely by this capability (no exit-2 fallback — a persistent stream cannot ride the request/response `exec` connection); without it, a consumer falls back to polling. Its capability-gated golden conformance entry (`RPP-CONN-002`) is a tracked follow-on. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
 
 The handshake runs once per provider instance and is cached.

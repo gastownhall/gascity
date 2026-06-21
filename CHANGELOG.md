@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Runtime providers can declare a read-only `proc.stream` capability** to
+  expose a `proc-stream` op that streams a command's stdout/stderr out
+  frame-for-frame until it exits — the transport for tailing a live transcript
+  or an agent's `--stream-json` without polling, where the one-shot `exec` op
+  cannot. The op is gated purely by the handshake capability and is plumbed
+  through the provider wrappers that can front a streaming backend, but has no
+  output-reader consumer yet, so providers that do not declare `proc.stream`
+  are unaffected. See `docs/reference/exec-session-provider.md` and the runtime
+  ledger (`internal/runtime/REQUIREMENTS.md`, RUNTIME-RPP-015).
+
 ### Changed
 
 - **Version pins on builtin packs are honored: the binary only pre-seeds

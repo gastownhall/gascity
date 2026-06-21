@@ -20,8 +20,8 @@ type ProviderCapabilities struct {
 	CanReportAttachment bool
 	// CanReportActivity is true if GetLastActivity returns meaningful results.
 	CanReportActivity bool
-	// CanStream is true if the provider exposes the persistent `stream`
-	// connection op (declared via the proc.stream protocol capability).
+	// CanStream is true if the provider exposes the read-only `proc-stream`
+	// output-streaming op (declared via the proc.stream protocol capability).
 	CanStream bool
 	// CanAttachTTY is true if the provider exposes an interactive PTY `attach`
 	// connection op (declared via the tty.attach protocol capability).
