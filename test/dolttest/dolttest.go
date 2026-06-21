@@ -18,13 +18,20 @@ import (
 	"time"
 )
 
-// Reap sends SIGTERM, then SIGKILL to survivors, to every `dolt sql-server`
+// reap sends SIGTERM, then SIGKILL to survivors, to every `dolt sql-server`
 // whose --config path is within root.
-func Reap(root string) {
+func reap(root string) {
 	if root == "" {
 		return
 	}
-	reapPIDs(doltPIDsUnderRoot(root))
+	root = filepath.Clean(root)
+	var pids []int
+	for pid, cmd := range scanDoltSQLServers() {
+		if pathWithin(root, doltConfigPath(cmd)) {
+			pids = append(pids, pid)
+		}
+	}
+	reapPIDs(pids)
 }
 
 // SweepStale reaps `dolt sql-server` orphans left by *prior* runs whose per-run
@@ -65,7 +72,7 @@ func Guard(runDir string) (stop func()) {
 	go func() {
 		select {
 		case s := <-sig:
-			Reap(runDir)
+			reap(runDir)
 			signal.Stop(sig)
 			if ss, ok := s.(syscall.Signal); ok {
 				signal.Reset(ss)
@@ -77,19 +84,8 @@ func Guard(runDir string) (stop func()) {
 	return func() {
 		signal.Stop(sig)
 		close(done)
-		Reap(runDir)
+		reap(runDir)
 	}
-}
-
-func doltPIDsUnderRoot(root string) []int {
-	root = filepath.Clean(root)
-	var pids []int
-	for pid, cmd := range scanDoltSQLServers() {
-		if pathWithin(root, doltConfigPath(cmd)) {
-			pids = append(pids, pid)
-		}
-	}
-	return pids
 }
 
 // scanDoltSQLServers returns pid->cmdline for every running `dolt sql-server`.
