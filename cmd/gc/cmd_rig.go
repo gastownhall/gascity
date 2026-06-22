@@ -180,7 +180,35 @@ func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride, d
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, includes, nameOverride, prefixOverride, defaultBranchOverride, startSuspended, adopt, stdout, stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, includes, nameOverride, prefixOverride, defaultBranchOverride, startSuspended, adopt, stdout, stderr)
+	if code == 0 {
+		// Materialize skills now so the new rig's provider skill sinks
+		// (codex's .agents/skills, claude's .claude/skills, …) exist as soon
+		// as `gc rig add` returns — without waiting for the next supervisor
+		// tick, even for an out-of-tree rig, and even when no supervisor is
+		// running. Best-effort; never undoes a successful add.
+		materializeSkillsForCity(cityPath, stderr)
+	}
+	return code
+}
+
+// materializeSkillsForCity runs one best-effort stage-1 skill materialization
+// pass for the whole city, using the same compose+materialize path the
+// supervisor runs each tick. It exists so `gc rig add` delivers a rig's skill
+// sinks immediately rather than leaving a window until the next reconcile —
+// the difference that makes skills available in a freshly added rig's
+// directory, including an out-of-tree rig.
+//
+// Idempotent: a converged city creates nothing new. Non-fatal by design: a
+// config-load error here must not fail an already-persisted rig add, and
+// runStage1SkillMaterialization logs per-agent issues inline and returns nil.
+func materializeSkillsForCity(cityPath string, stderr io.Writer) {
+	cfg, _, err := loadCityConfigWithBuiltinPacks(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig add: skipping immediate skill materialization (rig added; the supervisor will materialize on its next tick): %v\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	_ = runStage1SkillMaterialization(cityPath, cfg, stderr)
 }
 
 func resolveRigAddPath(cityPath, rigArg string) (string, error) {

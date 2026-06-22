@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -119,6 +120,61 @@ func TestSkillInstallDirsPerProviderAcrossScopes(t *testing.T) {
 	}
 
 	if stderr.Len() > 0 {
+		t.Logf("stderr:\n%s", stderr.String())
+	}
+}
+
+// TestRigAddMaterializesSkillsIntoOutOfTreeRig is the issue #3643 lifecycle
+// guard. `gc rig add` must make pack skills available in the new rig's own
+// directory immediately — not only after the next supervisor tick — including
+// for an out-of-tree rig, so a coding CLI started there resolves the skill
+// right away (codex reads `.agents/skills` from cwd up to the repo root, so
+// the co-located rig sink is what carries it). This exercises the real
+// load+compose+materialize path that `gc rig add` now invokes via
+// materializeSkillsForCity, with a rig whose path is outside the city tree.
+func TestRigAddMaterializesSkillsIntoOutOfTreeRig(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_HOME", t.TempDir())
+
+	// Out-of-tree rig: a sibling temp dir, not under cityPath.
+	outOfTreeRig := filepath.Join(t.TempDir(), "temp-rig")
+	if err := os.MkdirAll(outOfTreeRig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Minimal city-as-pack: a shared "mayor" skill, claude+codex providers
+	// (so InjectImplicitAgents creates per-rig agents), and the out-of-tree
+	// rig registered — the on-disk state `gc rig add` leaves behind (the rig
+	// path is a .gc/site.toml binding, not a city.toml rig.path).
+	cityTOML := "[workspace]\nname = \"test-city\"\n\n" +
+		"[beads]\nprovider = \"file\"\n\n" +
+		"[session]\nprovider = \"tmux\"\n\n" +
+		"[providers.claude]\ncommand = \"claude\"\n\n" +
+		"[providers.codex]\ncommand = \"codex\"\n\n" +
+		"[[rigs]]\nname = \"temp-rig\"\n"
+	writeMaterializeTestCityFile(t, cityPath, "city.toml", cityTOML)
+	writeMaterializeTestCityFile(t, cityPath, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
+	writeBuiltinImportsFixture(t, cityPath, "core")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeMaterializeTestCityFile(t, filepath.Join(cityPath, ".gc"), "site.toml",
+		fmt.Sprintf("[[rig]]\nname = \"temp-rig\"\npath = %q\n", outOfTreeRig))
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "mayor"))
+
+	// The behavior under test: gc rig add materializes synchronously.
+	var stderr bytes.Buffer
+	materializeSkillsForCity(cityPath, &stderr)
+
+	for _, sink := range []string{".agents/skills", ".claude/skills"} {
+		link := filepath.Join(outOfTreeRig, filepath.FromSlash(sink), "mayor")
+		if _, err := os.Lstat(link); err != nil {
+			t.Errorf("out-of-tree rig missing skill right after add: %s (%v)", link, err)
+		}
+	}
+	if t.Failed() {
 		t.Logf("stderr:\n%s", stderr.String())
 	}
 }
