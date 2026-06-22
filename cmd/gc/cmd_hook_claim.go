@@ -43,7 +43,9 @@ type hookClaimOps struct {
 	ResolveWorkBranch hookResolveWorkBranchFunc
 	// StampWorkBranch writes gc.work_branch onto the claimed bead. Best-effort.
 	StampWorkBranch hookStampWorkBranchFunc
-	Now             func() time.Time
+	// RecordRunID writes gc.current_run_id onto the session bead. Best-effort.
+	RecordRunID hookRecordRunIDFunc
+	Now         func() time.Time
 }
 
 type (
@@ -54,6 +56,7 @@ type (
 	hookEmitClaimRejectedFunc  func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc  func(dir string) string
 	hookStampWorkBranchFunc    func(ctx context.Context, dir string, env []string, beadID, assignee, branch string) error
+	hookRecordRunIDFunc        func(ctx context.Context, dir string, env []string, sessionBeadID, runID string) error
 )
 
 type hookClaimJSONResult struct {
@@ -101,6 +104,9 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 	}
 	if ops.StampWorkBranch == nil {
 		ops.StampWorkBranch = hookStampWorkBranchWithBdStore
+	}
+	if ops.RecordRunID == nil {
+		ops.RecordRunID = hookRecordRunIDWithBdStore
 	}
 	now := time.Now
 	if ops.Now != nil {
@@ -220,6 +226,7 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
 	stampHookWorkBranch(bead, opts, ops, dir, stderr)
+	recordHookClaimRunID(bead, opts, ops, dir, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: preassigning continuation group for %s: %v\n", bead.ID, err) //nolint:errcheck
@@ -341,6 +348,45 @@ func stampHookWorkBranch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 func hookStampWorkBranchWithBdStore(_ context.Context, dir string, env []string, beadID, assignee, branch string) error {
 	store := hookClaimBdStore(dir, env, assignee)
 	return store.Update(beadID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.WorkBranchMetadataKey: branch}})
+}
+
+// recordHookClaimRunID records, on the session bead named by GC_SESSION_ID, the
+// run this session is now working: beadmeta.ResolveRunID of the just-claimed
+// bead, the same resolver the usage-fact emitters use (internal/worker), so a
+// per-request reader of the session bead resolves the same run id its model and
+// compute facts carry. A bead with no run chain resolves to its own id, so a
+// standalone unit is its own run and is never misattributed to a previous run on
+// this reused session bead. Best-effort:
+// a non-session run (no GC_SESSION_ID) or a write error never blocks the claim.
+func recordHookClaimRunID(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) {
+	sessionBeadID := hookClaimSessionID(opts.Env)
+	if sessionBeadID == "" {
+		return
+	}
+	runID := beadmeta.ResolveRunID(bead.Metadata, bead.ID, sessionBeadID)
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	if err := ops.RecordRunID(ctx, dir, opts.Env, sessionBeadID, runID); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: recording run_id on session bead %s: %v\n", sessionBeadID, err) //nolint:errcheck
+	}
+}
+
+func hookRecordRunIDWithBdStore(_ context.Context, dir string, env []string, sessionBeadID, runID string) error {
+	store := hookClaimBdStore(dir, env, "")
+	return store.Update(sessionBeadID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.CurrentRunIDMetadataKey: runID}})
+}
+
+// hookClaimSessionID returns the session bead id (GC_SESSION_ID) from the claim
+// env, the override-sanitized value the rest of the claim path uses; it is empty
+// for a non-session run (cmd_hook.go blanks GC_SESSION_ID outside a session).
+func hookClaimSessionID(env []string) string {
+	sessionID := ""
+	for _, entry := range env {
+		if k, v, ok := strings.Cut(entry, "="); ok && k == "GC_SESSION_ID" {
+			sessionID = v
+		}
+	}
+	return strings.TrimSpace(sessionID)
 }
 
 // hookResolveWorkBranch returns the current git branch of dir, or "" when dir

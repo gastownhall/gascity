@@ -57,6 +57,7 @@ const (
 	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
+	CurrentRunIDMetadataKey              = "gc.current_run_id"
 	DeferredAssigneeMetadataKey          = "gc.deferred_assignee"
 	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
@@ -243,6 +244,7 @@ var KnownMetadataKeys = []string{
 	ControllerErrorClassMetadataKey,
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
+	CurrentRunIDMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
