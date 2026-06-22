@@ -20,8 +20,17 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// Compile-time interface check.
-var _ runtime.Provider = (*Provider)(nil)
+// Compile-time interface checks.
+var (
+	_ runtime.Provider       = (*Provider)(nil)
+	_ runtime.DialogProvider = (*Provider)(nil)
+)
+
+const (
+	k8sStartupDialogPeekLines    = 120
+	k8sStartupDialogPollInterval = 100 * time.Millisecond
+	k8sStartupDialogContentQuiet = 300 * time.Millisecond
+)
 
 // Provider is a native Kubernetes session provider using client-go.
 // Eliminates subprocess overhead by making direct API calls over reused
@@ -259,6 +268,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	_, _ = p.ops.execInPod(ctx, podName, "agent",
 		[]string{"tmux", "pipe-pane", "-t", tmuxSession, "-o", "cat >> /tmp/agent-output.log"}, nil)
 
+	if k8sShouldAcceptStartupDialogs(cfg) {
+		_ = p.dismissStartupDialogs(ctx, name)
+		if err := ctx.Err(); err != nil {
+			cleanup("startup dialog dismissal canceled")
+			return fmt.Errorf("dismissing startup dialogs for session %q: %w", name, err)
+		}
+	}
+
 	// Run session_setup commands inside the pod.
 	for _, cmd := range cfg.SessionSetup {
 		if cmd == "" {
@@ -276,6 +293,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		} else {
 			_, _ = p.ops.execInPod(ctx, podName, "agent",
 				[]string{"sh"}, strings.NewReader(string(script)))
+		}
+	}
+
+	if k8sShouldAcceptStartupDialogs(cfg) {
+		_ = p.dismissStartupDialogs(ctx, name)
+		if err := ctx.Err(); err != nil {
+			cleanup("startup dialog dismissal canceled")
+			return fmt.Errorf("dismissing startup dialogs for session %q: %w", name, err)
 		}
 	}
 
@@ -311,6 +336,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 	}
 
+	if k8sShouldAcceptStartupDialogs(cfg) {
+		_ = p.dismissStartupDialogs(ctx, name)
+		if err := ctx.Err(); err != nil {
+			cleanup("startup dialog dismissal canceled")
+			return fmt.Errorf("dismissing startup dialogs for session %q: %w", name, err)
+		}
+	}
+
 	// Send initial nudge if configured (matches tmux adapter step 6).
 	if cfg.Nudge != "" {
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
@@ -324,6 +357,45 @@ func k8sRequiresPostStartLiveness(cfg runtime.Config) bool {
 		return false
 	}
 	return runtime.HasManagedStartupHints(cfg)
+}
+
+func k8sShouldAcceptStartupDialogs(cfg runtime.Config) bool {
+	if cfg.AcceptStartupDialogs != nil {
+		return *cfg.AcceptStartupDialogs
+	}
+	if k8sProviderMayPromptForStartupDialog(cfg.ProviderName) ||
+		k8sProviderMayPromptForStartupDialog(cfg.ProviderOverlayName) ||
+		k8sCommandMayPromptForStartupDialog(cfg.Command) {
+		return true
+	}
+	for _, provider := range cfg.InstallAgentHooks {
+		if k8sProviderMayPromptForStartupDialog(provider) {
+			return true
+		}
+	}
+	if len(cfg.ProcessNames) == 0 && !cfg.EmitsPermissionWarning {
+		return false
+	}
+	return true
+}
+
+func k8sProviderMayPromptForStartupDialog(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude", "codex", "gemini", "kimi":
+		return true
+	default:
+		return false
+	}
+}
+
+func k8sCommandMayPromptForStartupDialog(command string) bool {
+	command = strings.ToLower(command)
+	for _, token := range []string{"claude", "codex", "gemini", "kimi"} {
+		if strings.Contains(command, token) {
+			return true
+		}
+	}
+	return false
 }
 
 // Stop deletes the pod for the named session. Idempotent.
@@ -467,6 +539,74 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 	args = append(args, keys...)
 	_, _ = p.ops.execInPod(ctx, podName, "agent", args, nil)
 	return nil
+}
+
+func (p *Provider) dismissStartupDialogs(ctx context.Context, name string) error {
+	return p.DismissKnownDialogs(ctx, name, runtime.StartupDialogTimeout())
+}
+
+// DismissKnownDialogs best-effort clears known startup dialogs on a Kubernetes
+// hosted tmux session using the same shared dialog rules as local providers.
+func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	if timeout <= 0 {
+		return nil
+	}
+
+	streamCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	snapshots := make(chan string, 8)
+	go p.streamStartupSnapshots(streamCtx, name, snapshots)
+
+	_, err := runtime.AcceptStartupDialogsFromStreamWithStatus(ctx, timeout, snapshots,
+		func(keys ...string) error { return p.SendKeys(name, keys...) },
+	)
+	return err
+}
+
+func (p *Provider) streamStartupSnapshots(ctx context.Context, name string, snapshots chan<- string) {
+	defer close(snapshots)
+
+	ticker := time.NewTicker(k8sStartupDialogPollInterval)
+	defer ticker.Stop()
+
+	var last string
+	observedContent := false
+	lastChange := time.Now()
+	for {
+		content, err := p.Peek(name, k8sStartupDialogPeekLines)
+		if err != nil {
+			return
+		}
+		if content != last {
+			last = content
+			if strings.TrimSpace(content) != "" {
+				observedContent = true
+				lastChange = time.Now()
+				select {
+				case snapshots <- content:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+		if !observedContent {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				continue
+			}
+		}
+		if time.Since(lastChange) >= k8sStartupDialogContentQuiet {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // RunLive re-applies session_live commands. Not yet supported for K8s.

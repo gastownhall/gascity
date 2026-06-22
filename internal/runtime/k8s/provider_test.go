@@ -1864,6 +1864,233 @@ func TestStartSucceedsWhenSessionStaysAlive(t *testing.T) {
 	}
 }
 
+func TestStartDismissesCodexTrustDialogBeforeNudge(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	trustAccepted := false
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+			return "", nil
+		}
+		if len(cmd) >= 2 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			if trustAccepted {
+				return "codex >\n", nil
+			}
+			return "Do you trust the contents of this directory?\n1. Yes, continue\n2. No, quit\nPress enter to continue\n", nil
+		}
+		if len(cmd) == 5 && cmd[0] == "tmux" && cmd[1] == "send-keys" && cmd[4] == "Enter" && !trustAccepted {
+			trustAccepted = true
+		}
+		return "", nil
+	}
+
+	cfg := runtime.Config{
+		Command:      "codex --dangerously-bypass-approvals-and-sandbox",
+		Env:          map[string]string{"GC_AGENT": "gastown.dog", "GC_CITY": "/workspace/cities/demo"},
+		ProcessNames: []string{"codex"},
+		Nudge:        "Check for assigned work.",
+	}
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !trustAccepted {
+		t.Fatal("Start did not accept the Codex workspace trust dialog")
+	}
+
+	firstDialogEnter := -1
+	firstNudgeText := -1
+	for i, c := range fake.calls {
+		if c.method != "execInPod" || len(c.cmd) < 5 || c.cmd[0] != "tmux" || c.cmd[1] != "send-keys" {
+			continue
+		}
+		if len(c.cmd) == 5 && c.cmd[4] == "Enter" && firstDialogEnter == -1 {
+			firstDialogEnter = i
+		}
+		if len(c.cmd) >= 6 && c.cmd[4] == "-l" && c.cmd[5] == cfg.Nudge && firstNudgeText == -1 {
+			firstNudgeText = i
+		}
+	}
+	if firstDialogEnter == -1 {
+		t.Fatal("Start did not send Enter to dismiss the trust dialog")
+	}
+	if firstNudgeText == -1 {
+		t.Fatal("Start did not send the configured nudge")
+	}
+	if firstDialogEnter > firstNudgeText {
+		t.Fatalf("trust dialog Enter call index %d occurred after nudge text index %d", firstDialogEnter, firstNudgeText)
+	}
+}
+
+func TestStartDismissesCodexDialogsForProviderWithoutStartupHints(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	state := "trust"
+	var keys [][]string
+	hookDownSent := false
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+			return "", nil
+		}
+		if len(cmd) >= 2 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			switch state {
+			case "trust":
+				return "Do you trust the contents of this directory?\n1. Yes, continue\n2. No, quit\nPress enter to continue\n", nil
+			case "hooks":
+				return "Hooks need review\n1. Review hooks\n2. Trust all and continue\n3. Continue without trusting\nPress enter to confirm or esc to go back\n", nil
+			default:
+				return "codex >\n", nil
+			}
+		}
+		if len(cmd) >= 4 && cmd[0] == "tmux" && cmd[1] == "send-keys" {
+			sent := append([]string(nil), cmd[4:]...)
+			keys = append(keys, sent)
+			switch {
+			case state == "trust" && len(sent) == 1 && sent[0] == "Enter":
+				state = "hooks"
+			case state == "hooks" && len(sent) == 1 && sent[0] == "Down":
+				hookDownSent = true
+			case state == "hooks" && hookDownSent && len(sent) == 1 && sent[0] == "Enter":
+				state = "ready"
+			}
+		}
+		return "", nil
+	}
+
+	cfg := runtime.Config{
+		Command:      "codex --dangerously-bypass-approvals-and-sandbox",
+		ProviderName: "codex",
+		Env:          map[string]string{"GC_AGENT": "gastown.dog", "GC_CITY": "/workspace/cities/demo"},
+	}
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if state != "ready" {
+		t.Fatalf("dialog state = %q, want ready; sent keys = %#v", state, keys)
+	}
+	if len(keys) < 2 {
+		t.Fatalf("sent keys = %#v, want trust and hook-review dismissal", keys)
+	}
+}
+
+func TestStartWaitsForDelayedCodexTrustDialog(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	blankCaptures := 0
+	trustAccepted := false
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+			return "", nil
+		}
+		if len(cmd) >= 2 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			if trustAccepted {
+				return "codex >\n", nil
+			}
+			if blankCaptures < 5 {
+				blankCaptures++
+				return "\n", nil
+			}
+			return "Do you trust the contents of this directory?\n1. Yes, continue\n2. No, quit\nPress enter to continue\n", nil
+		}
+		if len(cmd) == 5 && cmd[0] == "tmux" && cmd[1] == "send-keys" && cmd[4] == "Enter" {
+			trustAccepted = true
+		}
+		return "", nil
+	}
+
+	cfg := runtime.Config{
+		Command:      "codex --dangerously-bypass-approvals-and-sandbox",
+		ProviderName: "codex",
+		Env:          map[string]string{"GC_AGENT": "gastown.dog", "GC_CITY": "/workspace/cities/demo"},
+	}
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if blankCaptures < 5 {
+		t.Fatalf("blank captures = %d, want delayed trust dialog after initial blank pane", blankCaptures)
+	}
+	if !trustAccepted {
+		t.Fatal("Start returned before accepting the delayed Codex workspace trust dialog")
+	}
+}
+
+func TestStartHonorsAcceptStartupDialogsFalse(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+			return "", nil
+		}
+		if len(cmd) >= 2 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			return "Do you trust the contents of this directory?\nPress enter to continue\n", nil
+		}
+		return "", nil
+	}
+
+	accept := false
+	cfg := runtime.Config{
+		Command:              "codex --dangerously-bypass-approvals-and-sandbox",
+		Env:                  map[string]string{"GC_AGENT": "gastown.dog", "GC_CITY": "/workspace/cities/demo"},
+		ProcessNames:         []string{"codex"},
+		AcceptStartupDialogs: &accept,
+	}
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 2 && c.cmd[0] == "tmux" && c.cmd[1] == "capture-pane" {
+			t.Fatalf("Start captured pane despite AcceptStartupDialogs=false: %#v", c.cmd)
+		}
+		if c.method == "execInPod" && len(c.cmd) >= 2 && c.cmd[0] == "tmux" && c.cmd[1] == "send-keys" {
+			t.Fatalf("Start sent keys despite AcceptStartupDialogs=false: %#v", c.cmd)
+		}
+	}
+}
+
+func TestK8sShouldAcceptStartupDialogsUsesProviderDefaults(t *testing.T) {
+	accept := false
+	tests := []struct {
+		name string
+		cfg  runtime.Config
+		want bool
+	}{
+		{
+			name: "codex provider without other startup hints",
+			cfg:  runtime.Config{ProviderName: "codex", Command: "codex"},
+			want: true,
+		},
+		{
+			name: "codex command without provider name",
+			cfg:  runtime.Config{Command: "codex --dangerously-bypass-approvals-and-sandbox"},
+			want: true,
+		},
+		{
+			name: "explicit false remains opt out",
+			cfg:  runtime.Config{ProviderName: "codex", Command: "codex", AcceptStartupDialogs: &accept},
+			want: false,
+		},
+		{
+			name: "plain shell command remains fire and forget",
+			cfg:  runtime.Config{Command: "sh -c 'echo done'"},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := k8sShouldAcceptStartupDialogs(tt.cfg); got != tt.want {
+				t.Fatalf("k8sShouldAcceptStartupDialogs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStartHonorsCancellationDuringPostStartSettle(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
