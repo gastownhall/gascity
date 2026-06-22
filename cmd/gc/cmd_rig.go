@@ -122,6 +122,12 @@ check remains informational.`,
 				if code != 0 {
 					return errExit
 				}
+				// Same immediate materialization as the human path (see
+				// cmdRigAdd) so `gc rig add --json` — the programmatic entry
+				// point most likely to drive out-of-tree codex rigs — also
+				// delivers skill sinks now, not on the next supervisor tick.
+				// Logs go to stderr so the JSONL on stdout stays clean.
+				materializeSkillsForCity(cityPath, stderr)
 				return writeManagementActionJSON(stdout, rigAddJSONSummary(rigPath, rig))
 			}
 			if cmdRigAdd(args, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, stdout, stderr) != 0 {
@@ -206,6 +212,15 @@ func materializeSkillsForCity(cityPath string, stderr io.Writer) {
 	cfg, _, err := loadCityConfigWithBuiltinPacks(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: skipping immediate skill materialization (rig added; the supervisor will materialize on its next tick): %v\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	// Honor the same collision gate gc start and the supervisor run before
+	// materializing: a (scope-root, vendor) collision would otherwise let this
+	// pass write conflicting symlinks. On collision, skip — the supervisor
+	// surfaces the error on its next tick — rather than materialize a
+	// half-resolved sink.
+	if cerr := checkSkillCollisions(cfg, cityPath); cerr != nil {
+		fmt.Fprintf(stderr, "gc rig add: skipping immediate skill materialization due to a skill collision (the supervisor reports this on its next tick):\n%v\n", cerr) //nolint:errcheck // best-effort stderr
 		return
 	}
 	_ = runStage1SkillMaterialization(cityPath, cfg, stderr)
