@@ -1297,6 +1297,12 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	}()
 	fmt.Fprintf(stdout, "Supervisor API listening on http://%s\n", addr) //nolint:errcheck
 
+	// Redacted event export (opt-in via [events.export]). No-op unless an
+	// endpoint is configured.
+	if supCfg.Events.Export.Enabled() {
+		startEventExport(ctx, supCfg.Events.Export, apiMux.EventProviders, supervisor.DefaultHome(), stderr)
+	}
+
 	// Control socket — uses supervisor-specific path, not the per-city controller socket.
 	sockPath := supervisorSocketPath()
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {

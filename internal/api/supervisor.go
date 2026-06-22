@@ -353,28 +353,8 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 // exists from Scaffold onward, but the city isn't in Running=true yet.
 func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 	mux := events.NewMultiplexer()
-	cities := sm.resolver.ListCities()
-	for _, c := range cities {
-		if !c.Running {
-			continue
-		}
-		state := sm.resolver.CityState(c.Name)
-		if state == nil {
-			continue
-		}
-		ep := state.EventProvider()
-		if ep == nil {
-			continue
-		}
-		mux.Add(c.Name, ep)
-	}
-	if transient, ok := sm.resolver.(TransientCityEventSource); ok {
-		for name, ep := range transient.TransientCityEventProviders() {
-			if ep == nil {
-				continue
-			}
-			mux.Add(name, ep)
-		}
+	for name, ep := range sm.EventProviders() {
+		mux.Add(name, ep)
 	}
 	if supSrc, ok := sm.resolver.(SupervisorEventSource); ok {
 		if rec := supSrc.SupervisorEventRecorder(); rec != nil {
@@ -384,6 +364,35 @@ func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 		}
 	}
 	return mux
+}
+
+// EventProviders returns the live per-city event providers (running cities plus
+// any transient-city providers), keyed by city name. It is the city-scoped
+// enumeration buildMultiplexer uses, exposed so an in-process consumer (e.g. the
+// event exporter) can watch the same providers without the supervisor-scope
+// recorder.
+func (sm *SupervisorMux) EventProviders() map[string]events.Provider {
+	out := make(map[string]events.Provider)
+	for _, c := range sm.resolver.ListCities() {
+		if !c.Running {
+			continue
+		}
+		state := sm.resolver.CityState(c.Name)
+		if state == nil {
+			continue
+		}
+		if ep := state.EventProvider(); ep != nil {
+			out[c.Name] = ep
+		}
+	}
+	if transient, ok := sm.resolver.(TransientCityEventSource); ok {
+		for name, ep := range transient.TransientCityEventProviders() {
+			if ep != nil {
+				out[name] = ep
+			}
+		}
+	}
+	return out
 }
 
 // allStartupPhases returns the ordered list of all startup phases.
