@@ -92,11 +92,29 @@ now_ms() {
   esac
 }
 
-# Find dolt PID by port.
-pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
-if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
-  server_running=true
-  [ -n "$pid" ] && server_pid="$pid"
+is_local_probe_host() {
+  case "$1" in
+    ""|0.0.0.0|127.*|localhost|::1|"[::1]") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Find dolt PID by port for local managed servers. External Dolt endpoints do
+# not listen on 127.0.0.1, so do not let the local TCP precheck suppress the
+# real SQL ping to GC_DOLT_HOST:GC_DOLT_PORT.
+should_probe_sql=false
+if is_local_probe_host "$host"; then
+  pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
+  if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
+    server_running=true
+    [ -n "$pid" ] && server_pid="$pid"
+    should_probe_sql=true
+  fi
+else
+  should_probe_sql=true
+fi
+
+if [ "$should_probe_sql" = true ]; then
   # Measure query latency.
   start_ms=$(now_ms)
   conn_args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"

@@ -982,6 +982,77 @@ func writeExecutable(t *testing.T, path, contents string) {
 	}
 }
 
+func TestHealthScriptProbesConfiguredExternalHost(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	root := repoRoot(t)
+	fakeBin := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "dolt.args")
+
+	// Force the local managed-server precheck to fail. External hosts must still
+	// be probed via SQL against GC_DOLT_HOST:GC_DOLT_PORT.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+printf '%s\n' "$@" > "$FAKE_DOLT_ARGS"
+exit 0
+`)
+
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "FAKE_DOLT_ARGS"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=superlzy-dolt",
+		"GC_DOLT_PORT=3306",
+		"GC_DOLT_USER=superlzy",
+		"GC_DOLT_PASSWORD=secret",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"FAKE_DOLT_ARGS="+argsFile,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running   bool `json:"running"`
+			Reachable bool `json:"reachable"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if report.Server.Running {
+		t.Fatalf("server.running = true for external host; want false local-managed signal\n%s", out)
+	}
+	if !report.Server.Reachable {
+		t.Fatalf("server.reachable = false; want configured external host SQL probe to succeed\n%s", out)
+	}
+
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("fake dolt was not invoked: %v\nhealth output:\n%s", err, out)
+	}
+	gotArgs := "\n" + string(args)
+	for _, want := range []string{"\n--host\nsuperlzy-dolt\n", "\n--port\n3306\n", "\n--user\nsuperlzy\n", "\nsql\n", "\n-q\n", "\nSELECT 1\n"} {
+		if !strings.Contains(gotArgs, want) {
+			t.Fatalf("fake dolt args missing %q; got:\n%s\nhealth output:\n%s", want, args, out)
+		}
+	}
+}
+
 // TestHealthScriptZombieScanExcludesRigLocalServers verifies that
 // Dolt processes on rig-configured ports are not flagged as zombies.
 // Regression guard for the bug where deacon patrol killed rig-local
