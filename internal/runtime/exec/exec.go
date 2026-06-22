@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -26,6 +27,14 @@ type Provider struct {
 	script       string
 	timeout      time.Duration
 	startTimeout time.Duration // used only for Start(); includes readiness polling
+
+	// RPP handshake result, resolved lazily once per instance (see
+	// handshake.go). The error is cached alongside the info so a broken
+	// `protocol` op degrades probes to the zero-capability floor instead
+	// of re-running on every call.
+	handshakeOnce sync.Once
+	handshakeInfo runtime.ProtocolInfo
+	handshakeErr  error
 }
 
 type startupWatchEvent struct {
@@ -140,6 +149,77 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	return nil
+}
+
+// supportsSeparableLaunch reports whether the pack un-welds provisioning from the
+// agent launch: it must implement the box-without-agent `provision` op
+// (proc.provision) AND the `exec` op (proc.exec) the controller drives the launch
+// over. Otherwise the welded `start` op provisions and launches in one shot
+// (compat). Gates [runtime.TransportCapabilities.SeparableLaunch]. (Un-weld B3b.)
+func (p *Provider) supportsSeparableLaunch() bool {
+	return p.handshakeCapability(runtime.ProtocolCapabilityProvision) &&
+		p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec)
+}
+
+// provisionBox creates the box for name. When the pack supports a separable
+// launch it runs the `provision` op (box + staging + pre_start, NO agent); the
+// agent is launched separately by launchAgent. Otherwise it falls back to the
+// welded Start (which both provisions and launches). (Un-weld B3b.)
+func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
+	if !p.supportsSeparableLaunch() {
+		return p.Start(ctx, name, cfg)
+	}
+	data, err := marshalStartConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("exec provider: marshaling provision config: %w", err)
+	}
+	_, err = p.runWithContext(ctx, p.startTimeout, data, "provision", name)
+	return err
+}
+
+// launchAgent starts the agent in the in-box tmux session over the `exec` op, for
+// a pack with a separable launch; for a welded pack it is a no-op (provisionBox /
+// Start already launched). The launch is idempotent: it respawns the pane if the
+// session already exists (relaunch into a warm box) and otherwise creates it
+// (first launch after provision), then dismisses startup dialogs — the same
+// Go-side orchestration the welded Start runs. The `exec` op runs in the box's
+// working directory and the box env is set at provision time, so neither an
+// explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
+func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
+	if !p.supportsSeparableLaunch() {
+		return nil
+	}
+	command := cfg.Command
+	if command == "" {
+		command = defaultLaunchShell
+	}
+	var argv []string
+	if _, code, _ := p.Exec(ctx, name, []string{"tmux", "has-session", "-t", execTmuxSession}); code == 0 {
+		argv = []string{"tmux", "respawn-pane", "-k", "-t", execTmuxSession, command}
+	} else {
+		argv = []string{"tmux", "new-session", "-d", "-s", execTmuxSession, command}
+	}
+	if _, code, err := p.Exec(ctx, name, argv); err != nil {
+		return fmt.Errorf("exec provider: launching agent in %q: %w", name, err)
+	} else if code != 0 {
+		return fmt.Errorf("exec provider: launching agent in %q: tmux exited %d", name, code)
+	}
+	return p.dismissStartupDialogs(ctx, name, cfg)
+}
+
+// Relaunch re-launches the agent for the reconciler's launch-only-drift path
+// ([runtime.RelaunchProvider]). For a separable pack (proc.provision) it respawns
+// the agent in the warm box over the exec op (launchAgent) — no reprovision. A
+// welded pack has no in-place relaunch (the agent is welded into `start`), so it
+// degrades to a full reprovision (Stop+Start), which is still correct.
+func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.supportsSeparableLaunch() {
+		return p.launchAgent(ctx, name, cfg)
+	}
+	if err := p.Stop(name); err != nil {
+		return err
+	}
+	return p.Start(ctx, name, cfg)
 }
 
 func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg runtime.Config) error {
@@ -371,10 +451,68 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt sends an interrupt to the session: script interrupt <name>
-func (p *Provider) Interrupt(name string) error {
+// execTmuxSession is the in-box tmux session the carrier addresses. An exec-pack
+// runtime runs one agent per box in a tmux session named "main" (the tmux-in-box
+// convention shared with the Kubernetes provider), so the driving verbs are
+// reproduced as tmux commands over the exec op rather than dedicated
+// nudge/peek/send-keys/interrupt/clear-scrollback wire ops.
+const execTmuxSession = "main"
+
+// defaultLaunchShell is the in-box command launchAgent runs when the config
+// carries no Command (a holding shell, matching the welded packs' default).
+const defaultLaunchShell = "/bin/sh"
+
+// carrier drives the in-box tmux session over this provider's own exec op.
+func (p *Provider) carrier() runtime.Carrier {
+	return runtime.NewTmuxCarrier(p, execTmuxSession)
+}
+
+// The dedicated-wire-op driving helpers. The public driving methods
+// (Nudge/Peek/SendKeys/Interrupt/ClearScrollback) try the tmux carrier over the
+// exec op first and fall back to these when the runtime does not implement exec
+// (ErrExecUnsupported): a pack that ships exec + tmux-in-box is
+// driven over the carrier, while a pack that only implements the older dedicated
+// driving ops (the gc-session-k8s reference) keeps working unchanged. The
+// startup readiness + dialog-dismissal subsystem calls the same public methods,
+// so it inherits the same carrier-then-fallback behavior. (watch-startup, a
+// streaming op the request/response exec connection cannot carry, remains a
+// direct wire op.)
+func (p *Provider) nudgeOp(name string, content []runtime.ContentBlock) error {
+	message := runtime.FlattenText(content)
+	if message == "" {
+		return nil
+	}
+	_, err := p.run([]byte(message), "nudge", name)
+	return err
+}
+
+func (p *Provider) peekOp(name string, lines int) (string, error) {
+	return p.run(nil, "peek", name, strconv.Itoa(lines))
+}
+
+func (p *Provider) sendKeysOp(name string, keys ...string) error {
+	_, err := p.run(nil, append([]string{"send-keys", name}, keys...)...)
+	return err
+}
+
+func (p *Provider) interruptOp(name string) error {
 	_, err := p.run(nil, "interrupt", name)
 	return err
+}
+
+func (p *Provider) clearScrollbackOp(name string) error {
+	_, err := p.run(nil, "clear-scrollback", name)
+	return err
+}
+
+// Interrupt sends a soft interrupt (Ctrl-C) to the in-box tmux session over the
+// exec connection, falling back to the dedicated interrupt op when the runtime
+// does not implement exec.
+func (p *Provider) Interrupt(name string) error {
+	if err := p.carrier().Interrupt(context.Background(), name); !errors.Is(err, runtime.ErrExecUnsupported) {
+		return err
+	}
+	return p.interruptOp(name)
 }
 
 // IsRunning checks if the session is alive: script is-running <name>
@@ -387,9 +525,20 @@ func (p *Provider) IsRunning(name string) bool {
 	return strings.TrimSpace(out) == "true"
 }
 
-// IsAttached always returns false — the exec provider does not support
-// attach detection.
-func (p *Provider) IsAttached(_ string) bool { return false }
+// IsAttached reports terminal attachment via `script is-attached <name>`
+// when the executable declared the report-attachment capability in its
+// protocol handshake; otherwise it is always false. Op errors read as
+// not attached.
+func (p *Provider) IsAttached(name string) bool {
+	if !p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment) {
+		return false
+	}
+	out, err := p.run(nil, "is-attached", name)
+	if err != nil {
+		return false
+	}
+	return out == "true"
+}
 
 // Attach connects the terminal to the session: script attach <name>
 func (p *Provider) Attach(name string) error {
@@ -408,18 +557,23 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(out) == "true"
+	// A runtime that does not implement process-alive answers exit 2, which run
+	// maps to empty output. Treat unimplemented/unknown as ALIVE (liveness for
+	// such runtimes is gated by IsRunning) — never as a spurious "dead" that
+	// would make ObserveLiveness reap a live session. Only an explicit "false"
+	// reports a dead agent.
+	s := strings.TrimSpace(out)
+	return s == "" || s == "true"
 }
 
-// Nudge sends a message to the session: script nudge <name>
-// The message is sent on stdin. Content blocks are flattened to text.
+// Nudge delivers content as input to the in-box tmux session (typed, then
+// submitted) over the exec connection, falling back to the dedicated nudge op
+// when the runtime does not implement exec. Empty content is a no-op.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	message := runtime.FlattenText(content)
-	if message == "" {
-		return nil
+	if err := p.carrier().Nudge(context.Background(), name, content); !errors.Is(err, runtime.ErrExecUnsupported) {
+		return err
 	}
-	_, err := p.run([]byte(message), "nudge", name)
-	return err
+	return p.nudgeOp(name, content)
 }
 
 // SetMeta stores a key-value pair: script set-meta <name> <key>
@@ -441,9 +595,15 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return err
 }
 
-// Peek captures output from the session: script peek <name> <lines>
+// Peek captures the last `lines` of the in-box tmux pane (all scrollback when
+// lines <= 0) over the exec connection, falling back to the dedicated peek op
+// when the runtime does not implement exec.
 func (p *Provider) Peek(name string, lines int) (string, error) {
-	return p.run(nil, "peek", name, strconv.Itoa(lines))
+	out, err := p.carrier().Peek(context.Background(), name, lines)
+	if errors.Is(err, runtime.ErrExecUnsupported) {
+		return p.peekOp(name, lines)
+	}
+	return out, err
 }
 
 // ListRunning returns sessions matching a prefix: script list-running <prefix>
@@ -459,10 +619,14 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return strings.Split(out, "\n"), nil
 }
 
-// ClearScrollback clears the scrollback: script clear-scrollback <name>
+// ClearScrollback clears the in-box tmux session's scrollback over the exec
+// connection, falling back to the dedicated clear-scrollback op when the runtime
+// does not implement exec.
 func (p *Provider) ClearScrollback(name string) error {
-	_, err := p.run(nil, "clear-scrollback", name)
-	return err
+	if err := p.carrier().ClearScrollback(context.Background(), name); !errors.Is(err, runtime.ErrExecUnsupported) {
+		return err
+	}
+	return p.clearScrollbackOp(name)
 }
 
 // CheckImage verifies that a container image exists locally by invoking:
@@ -481,13 +645,15 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	return err
 }
 
-// SendKeys sends bare tmux-style keystrokes (e.g., "Enter", "Down") to the
-// named session: script send-keys <name> <key1> [key2 ...]
-// Used for dialog dismissal and other non-text input.
+// SendKeys sends bare tmux-style keystrokes (e.g. "Enter", "Down") to the in-box
+// tmux session over the exec connection; used for dialog dismissal and other
+// non-text input. Falls back to the dedicated send-keys op when the runtime does
+// not implement exec.
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	args := append([]string{"send-keys", name}, keys...)
-	_, err := p.run(nil, args...)
-	return err
+	if err := p.carrier().SendKeys(context.Background(), name, keys...); !errors.Is(err, runtime.ErrExecUnsupported) {
+		return err
+	}
+	return p.sendKeysOp(name, keys...)
 }
 
 // RunLive re-applies session_live commands. For exec providers, runs
@@ -496,11 +662,17 @@ func (p *Provider) RunLive(_ string, _ runtime.Config) error {
 	return nil // exec providers don't support live re-apply yet
 }
 
-// Capabilities reports exec provider capabilities. The exec provider
-// delegates everything to a user-supplied script and does not natively
-// support attachment or activity detection.
+// Capabilities reports exec provider capabilities as declared by the
+// executable's protocol handshake (zero capabilities for scripts without
+// a `protocol` op, or when the handshake failed — the failure stays
+// observable via Protocol).
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
-	return runtime.ProviderCapabilities{}
+	return runtime.ProviderCapabilities{
+		CanReportAttachment: p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment),
+		CanReportActivity:   p.handshakeCapability(runtime.ProtocolCapabilityReportActivity),
+		CanStream:           p.handshakeCapability(runtime.ProtocolCapabilityProcStream),
+		CanAttachTTY:        p.handshakeCapability(runtime.ProtocolCapabilityTTYAttach),
+	}
 }
 
 // SleepCapability reports that exec-backed sessions support timed-only idle
@@ -525,4 +697,80 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	return t, nil
+}
+
+// Provider implements the optional connection primitive.
+var (
+	_ runtime.ExecProvider     = (*Provider)(nil)
+	_ runtime.RelaunchProvider = (*Provider)(nil)
+)
+
+// Exec runs argv inside the session via the RPP `exec` op and implements
+// [runtime.ExecProvider]. argv is POSIX shell-quoted onto the op's stdin (the
+// v0 wire op carries the command on stdin and the runtime runs it, e.g. via
+// `sh -c "$(cat)"`), and the op's exit code is the command's exit code. A
+// runtime whose script does not implement exec (exit 2) yields
+// [runtime.ErrExecUnsupported]; the driving methods then fall back to the
+// dedicated nudge/peek/send-keys/interrupt/clear-scrollback wire ops.
+//
+// Because the v0 `exec` op uses stdin for the command itself, the command's
+// own stdin is not separately available; the driving ops reproduced over Exec
+// (tmux send-keys / capture-pane / …) do not need it.
+func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte, int, error) {
+	command := shellQuote(argv)
+	cmdCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
+	cmd.WaitDelay = 2 * time.Second
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.Stdin = strings.NewReader(command)
+
+	err := cmd.Run()
+	if err != nil {
+		// A context timeout/cancellation kills the process, so cmd.Run reports
+		// an *ExitError (signal: killed) with a -1 code. Classify that as a
+		// transport failure BEFORE reading any exit code, so a timed-out op is
+		// never misreported as a clean command result.
+		if cmdCtx.Err() != nil {
+			return nil, -1, fmt.Errorf("exec provider %s exec %s: %w", p.script, name, cmdCtx.Err())
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if exitErr.ExitCode() == 2 {
+				// Exit 2 is overloaded: the RPP "unknown op" sentinel AND a
+				// possible in-box command exit (the exec op forwards the command's
+				// exit code). A runtime that DECLARES the exec connection in its
+				// handshake implements the op, so exit 2 is the command's own exit
+				// code; only an UNDECLARED runtime means "op unimplemented" — fall
+				// back to the dedicated driving ops.
+				if p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec) {
+					return stdout.Bytes(), 2, nil
+				}
+				return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
+			}
+			// A non-zero (non-2) exit is the command's own result, not a
+			// transport failure: return the output and the code, no error.
+			return stdout.Bytes(), exitErr.ExitCode(), nil
+		}
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, -1, fmt.Errorf("exec provider %s exec %s: %s", p.script, name, msg)
+	}
+	return stdout.Bytes(), 0, nil
+}
+
+// shellQuote renders argv as a single POSIX shell command string (each
+// argument single-quoted, embedded single quotes escaped as '\”), so a
+// runtime's `exec` handler can run it verbatim via `sh -c`.
+func shellQuote(argv []string) string {
+	quoted := make([]string, len(argv))
+	for i, a := range argv {
+		quoted[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+	}
+	return strings.Join(quoted, " ")
 }

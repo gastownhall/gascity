@@ -32,6 +32,9 @@ func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*confi
 		return nil, nil, err
 	}
 	warnMissingRequiredBuiltinImports(fsys.OSFS{}, cfg, tomlPath, resolveLoadCityConfigWarningWriter())
+	if err := validatePackRuntimeRegistrations(cfg); err != nil {
+		return nil, nil, err
+	}
 	return cfg, prov, nil
 }
 

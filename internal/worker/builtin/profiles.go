@@ -59,6 +59,14 @@ type BuiltinProviderSpec struct {
 	TitleModel             string
 	ACPCommand             string
 	ACPArgs                []string
+	// Upstream serving-env binding (Phase C — the Upstream axis): the env-var
+	// NAMES this harness reads for the model-serving base URL and credential, so
+	// an abstract [upstreams.<name>] renders onto the right names for this CLI.
+	// Empty = no built-in binding (the operator declares one, or uses the raw env
+	// escape hatch). Kept as plain strings (this package cannot import config).
+	UpstreamBaseURLEnv   string
+	UpstreamAPIKeyEnv    string
+	UpstreamAuthTokenEnv string
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -90,6 +98,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"claude": {
 		DisplayName: "Claude Code",
 		Command:     "claude",
+		// Anthropic serving-env binding (Claude Code reads these for a custom
+		// endpoint + credential).
+		UpstreamBaseURLEnv:   "ANTHROPIC_BASE_URL",
+		UpstreamAPIKeyEnv:    "ANTHROPIC_API_KEY",
+		UpstreamAuthTokenEnv: "ANTHROPIC_AUTH_TOKEN",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
 			"effort":          "max",
@@ -156,6 +169,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"codex": {
 		DisplayName: "Codex CLI",
 		Command:     "codex",
+		// OpenAI serving-env binding (Codex reads these for a custom endpoint +
+		// API key). Codex auth is the API key; no separate auth-token var.
+		UpstreamBaseURLEnv: "OPENAI_BASE_URL",
+		UpstreamAPIKeyEnv:  "OPENAI_API_KEY",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
 			"model":           "gpt-5.5",
@@ -227,6 +244,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"gemini": {
 		DisplayName: "Gemini CLI",
 		Command:     "gemini",
+		// Gemini API key path (GEMINI_API_KEY canonical; GOOGLE_API_KEY is
+		// Vertex-only). GOOGLE_GEMINI_BASE_URL overrides the endpoint.
+		UpstreamBaseURLEnv: "GOOGLE_GEMINI_BASE_URL",
+		UpstreamAPIKeyEnv:  "GEMINI_API_KEY",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
 		},
@@ -274,6 +295,9 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"grok": {
 		DisplayName: "Grok Build",
 		Command:     "grok",
+		// xAI Grok Build: XAI_API_KEY for headless (login is the default). No
+		// documented base-URL override env (per-model base_url in config.toml).
+		UpstreamAPIKeyEnv: "XAI_API_KEY",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
 			"model":           "grok-composer-2.5-fast",
@@ -348,8 +372,12 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		},
 	},
 	"kimi": {
-		DisplayName:          "Kimi Code CLI",
-		Command:              "kimi",
+		DisplayName: "Kimi Code CLI",
+		Command:     "kimi",
+		// Moonshot Kimi CLI: KIMI_API_KEY / KIMI_BASE_URL (NOT MOONSHOT_API_KEY,
+		// which is the raw Moonshot SDK var, nor OPENAI_* which is openai-type only).
+		UpstreamBaseURLEnv:   "KIMI_BASE_URL",
+		UpstreamAPIKeyEnv:    "KIMI_API_KEY",
 		Args:                 []string{"--yolo", "--no-thinking"},
 		PromptMode:           "none",
 		ReadyDelayMs:         5000,
@@ -377,12 +405,15 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		},
 	},
 	"kiro": {
-		DisplayName:  "Kiro",
-		Command:      "kiro-cli",
-		Args:         []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
-		PromptMode:   "arg",
-		ReadyDelayMs: 5000,
-		ProcessNames: []string{"kiro-cli", "kiro", "node"},
+		DisplayName: "Kiro",
+		Command:     "kiro-cli",
+		// AWS Kiro: KIRO_API_KEY for headless (ksk_…; login is the default). No
+		// documented serving base-URL override env.
+		UpstreamAPIKeyEnv: "KIRO_API_KEY",
+		Args:              []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+		PromptMode:        "arg",
+		ReadyDelayMs:      5000,
+		ProcessNames:      []string{"kiro-cli", "kiro", "node"},
 		// kiro launches with --trust-all-tools and never shows trust/permission
 		// dialogs, so skip the 7-dialog startup polling (~56s/call, run twice).
 		AcceptStartupDialogs: boolPtr(false),
@@ -392,8 +423,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ACPArgs:              []string{"acp", "--agent", "gascity"},
 	},
 	"cursor": {
-		DisplayName:       "Cursor Agent",
-		Command:           "cursor-agent",
+		DisplayName: "Cursor Agent",
+		Command:     "cursor-agent",
+		// Cursor: CURSOR_API_KEY for headless (login is the default). Serving is
+		// Cursor's own backend — no base-URL override env.
+		UpstreamAPIKeyEnv: "CURSOR_API_KEY",
 		Args:              []string{"-f"},
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u2192 ",
@@ -419,7 +453,13 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"copilot": {
 		DisplayName: "GitHub Copilot",
 		Command:     "copilot",
-		Args:        []string{"--yolo"},
+		// Custom model serving (COPILOT_PROVIDER_BASE_URL/_API_KEY; a custom
+		// upstream may also need COPILOT_PROVIDER_TYPE/COPILOT_MODEL via raw env).
+		// auth_token = the GitHub-account bearer for the default GitHub-hosted path.
+		UpstreamBaseURLEnv:   "COPILOT_PROVIDER_BASE_URL",
+		UpstreamAPIKeyEnv:    "COPILOT_PROVIDER_API_KEY",
+		UpstreamAuthTokenEnv: "COPILOT_GITHUB_TOKEN",
+		Args:                 []string{"--yolo"},
 		// PromptMode "none" delivers the prompt via tmux send-keys after the
 		// ready prefix is detected (Step 6 in doStartSession), instead of
 		// appending to argv. Required for copilot CLI 1.0.x which rejects
@@ -446,14 +486,18 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// without requiring provider hooks; the remaining work is
 		// event-driven coordination (session-start priming,
 		// pre-compaction handoff).
-		DisplayName:      "Sourcegraph AMP",
-		Command:          "amp",
-		Args:             []string{"--dangerously-allow-all", "--no-ide"},
-		PromptMode:       "arg",
-		ProcessNames:     []string{"amp"},
-		InstructionsFile: "AGENTS.md",
-		ResumeFlag:       "threads continue",
-		ResumeStyle:      "subcommand",
+		DisplayName: "Sourcegraph AMP",
+		Command:     "amp",
+		// Amp connected mode: AMP_API_KEY credential, AMP_URL server/base-URL
+		// override (verified in the compiled CLI). Login is the interactive default.
+		UpstreamBaseURLEnv: "AMP_URL",
+		UpstreamAPIKeyEnv:  "AMP_API_KEY",
+		Args:               []string{"--dangerously-allow-all", "--no-ide"},
+		PromptMode:         "arg",
+		ProcessNames:       []string{"amp"},
+		InstructionsFile:   "AGENTS.md",
+		ResumeFlag:         "threads continue",
+		ResumeStyle:        "subcommand",
 	},
 	"opencode": {
 		DisplayName:      "OpenCode",

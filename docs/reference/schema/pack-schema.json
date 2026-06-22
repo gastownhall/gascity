@@ -63,6 +63,10 @@
           "type": "string",
           "description": "Provider names the provider preset to use for this agent."
         },
+        "upstream": {
+          "type": "string",
+          "description": "Upstream selects the model-serving endpoint (a key in [upstreams]) for\nthis agent — WHO serves the model. \"\" (default) falls back to\nagent_defaults.upstream; if still empty, no upstream env is injected\n(ambient behavior). Switching it relaunches the agent in the warm box."
+        },
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the provider's command for this agent."
@@ -300,6 +304,10 @@
           "type": "string",
           "description": "Model is the parsed/composed default model name for agents\n(e.g., \"claude-sonnet-4-6\"), but it is not yet auto-applied at\nruntime. Agents with their own model override would take precedence."
         },
+        "upstream": {
+          "type": "string",
+          "description": "Upstream is the default model-serving endpoint (a key in [upstreams])\nfor agents that do not set their own upstream (Phase C — the Upstream\naxis). Applied to agents with an empty Upstream by ApplyAgentDefaults."
+        },
         "wake_mode": {
           "type": "string",
           "enum": [
@@ -414,6 +422,10 @@
         "provider": {
           "type": "string",
           "description": "Provider overrides the provider name."
+        },
+        "upstream": {
+          "type": "string",
+          "description": "Upstream overrides the model-serving endpoint selection (Phase C)."
         },
         "args": {
           "items": {
@@ -718,10 +730,12 @@
     "OptionChoice": {
       "properties": {
         "value": {
-          "type": "string"
+          "type": "string",
+          "description": "Value is the choice identifier matched against ProviderOption.Default and\nthe user's selection (e.g. \"opus-4.8\")."
         },
         "label": {
-          "type": "string"
+          "type": "string",
+          "description": "Label is the human-readable choice name shown in tooling."
         },
         "flag_args": {
           "items": {
@@ -815,6 +829,12 @@
         "providers": {
           "additionalProperties": {
             "$ref": "#/$defs/ProviderSpec"
+          },
+          "type": "object"
+        },
+        "runtimes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PackRuntimeEntry"
           },
           "type": "object"
         },
@@ -976,6 +996,24 @@
       ],
       "description": "PackRequirement declares an agent that must exist in the expanded config for this pack's formulas/orders to function."
     },
+    "PackRuntimeEntry": {
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Command is the runtime executable: a path relative to the pack\ndirectory (anything containing a path separator) or a bare name\nresolved on PATH at session start."
+        },
+        "protocol": {
+          "type": "integer",
+          "description": "Protocol is the RPP version the executable speaks. Version 0 is\nthe only version today; the declaration exists so future protocol\nbumps fail at composition instead of at session start."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "command"
+      ],
+      "description": "PackRuntimeEntry declares a pack-shipped runtime provider executable under [runtimes.\u003cname\u003e] in pack.toml."
+    },
     "PoolOverride": {
       "properties": {
         "min": {
@@ -1012,23 +1050,27 @@
     "ProviderOption": {
       "properties": {
         "key": {
-          "type": "string"
+          "type": "string",
+          "description": "Key is the option identifier (e.g. \"model\"); also the merge key for\noptions_schema_merge = \"by_key\"."
         },
         "label": {
-          "type": "string"
+          "type": "string",
+          "description": "Label is the human-readable option name shown in tooling."
         },
         "type": {
           "type": "string",
           "description": "\"select\" only (v1)"
         },
         "default": {
-          "type": "string"
+          "type": "string",
+          "description": "Default is the Value of the choice selected when the user makes none."
         },
         "choices": {
           "items": {
             "$ref": "#/$defs/OptionChoice"
           },
-          "type": "array"
+          "type": "array",
+          "description": "Choices are the allowed values; selecting one injects its FlagArgs into the\nagent command line (how the Model axis renders to a harness CLI flag)."
         },
         "omit": {
           "type": "boolean",
@@ -1180,6 +1222,10 @@
           "type": "array",
           "description": "OptionsSchema declares the configurable options this provider supports.\nEach option maps to CLI args via its Choices[].FlagArgs field.\nSerialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side."
         },
+        "upstream_env": {
+          "$ref": "#/$defs/UpstreamEnvBinding",
+          "description": "UpstreamEnv is this harness's serving-env contract (Phase C — the Upstream\naxis): the env-var NAMES this CLI reads for the model-serving base URL and\ncredential. It lets the resolver render an abstract [upstreams.\u003cname\u003e] onto\nthe right names for this harness, so an upstream preset is portable across\nharnesses (claude → ANTHROPIC_*, codex → OPENAI_*)."
+        },
         "print_args": {
           "items": {
             "type": "string"
@@ -1330,6 +1376,25 @@
         "cache_creation_usd_per_1m"
       ],
       "description": "Tier defines per-token-type rates in USD per 1 million tokens."
+    },
+    "UpstreamEnvBinding": {
+      "properties": {
+        "base_url": {
+          "type": "string",
+          "description": "BaseURL is the env var name the harness reads for the serving base URL."
+        },
+        "api_key": {
+          "type": "string",
+          "description": "APIKey is the env var name the harness reads for the API key."
+        },
+        "auth_token": {
+          "type": "string",
+          "description": "AuthToken is the env var name the harness reads for a bearer auth token."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "UpstreamEnvBinding is a harness's serving-env contract: the env-var NAMES this CLI reads for the model-serving endpoint and credential."
     }
   },
   "title": "Gas City Pack Manifest",

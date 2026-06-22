@@ -183,6 +183,8 @@
           {
             "group": "How-to",
             "pages": [
+              "guides/configuring-an-agent",
+              "guides/harness-recipes",
               "guides/shareable-packs",
               "guides/registry-showcase",
               "guides/gastown-config-recipes",

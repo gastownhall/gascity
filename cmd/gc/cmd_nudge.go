@@ -40,8 +40,7 @@ const (
 	defaultNudgePollQuiescence      = 3 * time.Second
 	// A controller wake can legitimately take a couple of minutes when the
 	// session has to rematerialize a worktree and complete startup dialog.
-	defaultNudgePollStartGrace  = 5 * time.Minute
-	defaultNudgeWaitIdleTimeout = 30 * time.Second
+	defaultNudgePollStartGrace = 5 * time.Minute
 )
 
 var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
@@ -615,6 +614,28 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	if queueManagedWake {
 		return queueManagedSessionNudgeWake(target, store, message, mode, jsonOutput, stdout, stderr)
 	}
+	// A wait-idle nudge to a RUNNING-but-busy target must not block the caller in
+	// the worker's synchronous WaitForIdle (runtimeHandleWaitIdleTimeout, 30s):
+	// the session never reports idle for the whole window, so the caller stalls
+	// ~30s while the city store's Dolt connection sits idle in scope and gets
+	// reaped server-side ("[mysql] unexpected EOF"). Detect "busy" without
+	// blocking (LastActivity, the same quiescence signal the nudge poller uses)
+	// and queue immediately instead — the supervisor dispatcher (or the
+	// per-session poller in legacy mode) delivers at the next idle boundary, off
+	// the caller's critical path. An idle target still delivers live below (its
+	// WaitForIdle returns promptly); an unknown LastActivity is treated as
+	// not-busy so untracked sessions keep the existing behavior.
+	//
+	// Restrict this to the claude, non-ACP transport — the ONLY case
+	// RuntimeHandle.nudgeWaitIdle actually blocks on WaitForIdle. ACP delivers
+	// live in-process and non-claude returns immediately (see
+	// internal/worker/runtime_handle.go nudgeWaitIdle), so short-circuiting
+	// those would needlessly downgrade live delivery to queued. (gco-90ui)
+	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerName() == "claude" {
+		if obs, obsErr := nudgeObserveTarget(target, store, sp); obsErr == nil && obs.Running && nudgeObservationBusy(obs) {
+			return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
+		}
+	}
 	delivery, ok := workerNudgeDeliveryForMode(mode)
 	if !ok {
 		fmt.Fprintf(stderr, "gc session nudge: unknown delivery mode %q\n", mode) //nolint:errcheck
@@ -671,6 +692,25 @@ func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runti
 		return false, fmt.Errorf("observing managed session before wake routing: %w", err)
 	}
 	return !obs.Running, nil
+}
+
+// nudgeObservationBusy reports, WITHOUT blocking, whether the observed session
+// is actively busy right now. It uses the LastActivity timestamp — the same
+// quiescence signal the nudge poller relies on (defaultNudgePollQuiescence). An
+// unknown (nil/zero) LastActivity returns false (treat as not-busy) so callers
+// fall back to the existing wait-idle path rather than queue a session whose
+// activity cannot be observed.
+//
+// This is the near-inverse of pollerSessionIdleEnough's LastActivity branch
+// (idle when time-since >= quiescence); they intentionally differ on the
+// unknown-LastActivity case — the poller falls back to a blocking WaitForIdle,
+// whereas this non-blocking caller-side check must not, so it defaults to
+// not-busy.
+func nudgeObservationBusy(obs worker.LiveObservation) bool {
+	if obs.LastActivity == nil || obs.LastActivity.IsZero() {
+		return false
+	}
+	return time.Since(*obs.LastActivity) < defaultNudgePollQuiescence
 }
 
 func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {

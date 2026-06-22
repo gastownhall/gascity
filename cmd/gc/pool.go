@@ -255,6 +255,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		Scope:             src.Scope,
 		Session:           src.Session,
 		Provider:          src.Provider,
+		Upstream:          src.Upstream,
 		InheritedProvider: src.InheritedProvider,
 		PromptTemplate:    src.PromptTemplate,
 		Nudge:             src.Nudge,

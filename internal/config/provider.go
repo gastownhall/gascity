@@ -10,10 +10,16 @@ import (
 // ProviderOption declares a single configurable option for a provider.
 // Options are rendered as UI controls in a dashboard's session creation form.
 type ProviderOption struct {
-	Key     string         `toml:"key"     json:"key"`
-	Label   string         `toml:"label"   json:"label"`
-	Type    string         `toml:"type"    json:"type"` // "select" only (v1)
-	Default string         `toml:"default" json:"default"`
+	// Key is the option identifier (e.g. "model"); also the merge key for
+	// options_schema_merge = "by_key".
+	Key string `toml:"key"     json:"key"`
+	// Label is the human-readable option name shown in tooling.
+	Label string `toml:"label"   json:"label"`
+	Type  string `toml:"type"    json:"type"` // "select" only (v1)
+	// Default is the Value of the choice selected when the user makes none.
+	Default string `toml:"default" json:"default"`
+	// Choices are the allowed values; selecting one injects its FlagArgs into the
+	// agent command line (how the Model axis renders to a harness CLI flag).
 	Choices []OptionChoice `toml:"choices" json:"choices"`
 	// Omit is the removal sentinel for options_schema_merge = "by_key".
 	// When set on a child layer's entry, the matching Key inherited from
@@ -23,7 +29,10 @@ type ProviderOption struct {
 
 // OptionChoice is one allowed value for a "select" option.
 type OptionChoice struct {
+	// Value is the choice identifier matched against ProviderOption.Default and
+	// the user's selection (e.g. "opus-4.8").
 	Value string `toml:"value"     json:"value"`
+	// Label is the human-readable choice name shown in tooling.
 	Label string `toml:"label"     json:"label"`
 	// FlagArgs are the CLI arguments injected when this choice is selected.
 	// json:"-" is intentional: FlagArgs must never appear in the public API DTO
@@ -135,6 +144,12 @@ type ProviderSpec struct {
 	// Each option maps to CLI args via its Choices[].FlagArgs field.
 	// Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side.
 	OptionsSchema []ProviderOption `toml:"options_schema,omitempty" json:"-"`
+	// UpstreamEnv is this harness's serving-env contract (Phase C — the Upstream
+	// axis): the env-var NAMES this CLI reads for the model-serving base URL and
+	// credential. It lets the resolver render an abstract [upstreams.<name>] onto
+	// the right names for this harness, so an upstream preset is portable across
+	// harnesses (claude → ANTHROPIC_*, codex → OPENAI_*).
+	UpstreamEnv UpstreamEnvBinding `toml:"upstream_env,omitempty"`
 	// PrintArgs are CLI arguments that enable one-shot non-interactive mode.
 	// The provider prints its response to stdout and exits. When empty, the
 	// provider does not support one-shot invocation.
@@ -211,6 +226,7 @@ type ResolvedProvider struct {
 	SessionIDFlag          string
 	PermissionModes        map[string]string
 	OptionsSchema          []ProviderOption
+	UpstreamEnv            UpstreamEnvBinding
 	PrintArgs              []string
 	TitleModel             string
 	ACPCommand             string
@@ -449,10 +465,15 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		PermissionModes:        cloneStringMap(spec.PermissionModes),
 		OptionDefaults:         cloneStringMap(spec.OptionDefaults),
 		OptionsSchema:          providerOptionsFromWorker(spec.OptionsSchema),
-		PrintArgs:              cloneStrings(spec.PrintArgs),
-		TitleModel:             spec.TitleModel,
-		ACPCommand:             spec.ACPCommand,
-		ACPArgs:                cloneStrings(spec.ACPArgs),
+		UpstreamEnv: UpstreamEnvBinding{
+			BaseURL:   spec.UpstreamBaseURLEnv,
+			APIKey:    spec.UpstreamAPIKeyEnv,
+			AuthToken: spec.UpstreamAuthTokenEnv,
+		},
+		PrintArgs:  cloneStrings(spec.PrintArgs),
+		TitleModel: spec.TitleModel,
+		ACPCommand: spec.ACPCommand,
+		ACPArgs:    cloneStrings(spec.ACPArgs),
 	}
 }
 

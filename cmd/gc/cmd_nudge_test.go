@@ -4780,3 +4780,96 @@ func TestRecordQueuedNudgeFailureDetailedClosesOnlyOwnedStore(t *testing.T) {
 		t.Fatalf("caller-owned store closed %d times, want 0 (helper must not close a passed-in store)", passedCloses)
 	}
 }
+
+func TestNudgeObservationBusy(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-1 * time.Second)
+	stale := now.Add(-1 * time.Hour)
+	var zero time.Time
+
+	tests := []struct {
+		name string
+		obs  worker.LiveObservation
+		want bool
+	}{
+		{"nil LastActivity is not busy", worker.LiveObservation{Running: true}, false},
+		{"zero LastActivity is not busy", worker.LiveObservation{Running: true, LastActivity: &zero}, false},
+		{"activity within quiescence is busy", worker.LiveObservation{Running: true, LastActivity: &recent}, true},
+		{"activity past quiescence is not busy", worker.LiveObservation{Running: true, LastActivity: &stale}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nudgeObservationBusy(tc.obs); got != tc.want {
+				t.Fatalf("nudgeObservationBusy(%+v) = %v, want %v", tc.obs, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDeliverSessionNudgeWaitIdleBusyTargetQueuesWithoutBlocking(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.SetActivity("sess-worker", time.Now()) // busy: activity within quiescence
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "claude"},
+		sessionName: "sess-worker",
+	}
+
+	prev := startNudgePoller
+	startNudgePoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliver = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Queued nudge for worker") {
+		t.Fatalf("stdout = %q, want queued (busy claude target short-circuits)", stdout.String())
+	}
+	for _, call := range fake.Calls {
+		if call.Method == "WaitForIdle" {
+			t.Fatalf("busy target must not block in WaitForIdle; calls = %#v", fake.Calls)
+		}
+	}
+}
+
+func TestDeliverSessionNudgeWaitIdleIdleTargetNotShortCircuited(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.SetActivity("sess-worker", time.Now().Add(-time.Hour)) // idle: activity past quiescence
+	fake.WaitForIdleErrors["sess-worker"] = nil
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "claude"},
+		sessionName: "sess-worker",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliver = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	sawWait := false
+	for _, call := range fake.Calls {
+		if call.Method == "WaitForIdle" {
+			sawWait = true
+		}
+	}
+	if !sawWait {
+		t.Fatalf("idle target should consult WaitForIdle (not short-circuited); calls = %#v", fake.Calls)
+	}
+}

@@ -1177,6 +1177,13 @@ func (p *attachmentCachingProvider) SleepCapability(name string) runtime.Session
 	return runtime.SessionSleepCapabilityDisabled
 }
 
+func (p *attachmentCachingProvider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if rp, ok := p.Provider.(runtime.RelaunchProvider); ok {
+		return rp.Relaunch(ctx, name, cfg)
+	}
+	return runtime.ErrRelaunchUnsupported
+}
+
 func (p *attachmentCachingProvider) Pending(name string) (*runtime.PendingInteraction, error) {
 	if ip, ok := p.Provider.(runtime.InteractionProvider); ok {
 		return ip.Pending(name)

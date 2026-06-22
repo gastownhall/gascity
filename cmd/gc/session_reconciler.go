@@ -1877,6 +1877,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// Diagnostic: log per-field breakdown to identify the drifting field.
 						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(session.Metadata["core_hash_breakdown"], agentCfg)
 						runtime.LogCoreFingerprintDrift(stderr, name, session.Metadata["core_hash_breakdown"], agentCfg)
+						// Launch-only drift (B2.3): the box (provision half) is
+						// unchanged but the agent (launch half) moved. When the
+						// provider can relaunch the agent in the existing warm box,
+						// the named/ordinary branches below relaunch instead of a
+						// full re-provision restart — but only AFTER the same
+						// attached/active/pending/open-work deferral guards, because
+						// a respawn is just as disruptive mid-turn. Empty sub-hashes
+						// (a session started before B2.2) are treated as "not
+						// launch-only" → full restart, which re-stamps the sub-hashes
+						// and self-heals.
+						storedProvision := session.Metadata["started_provision_hash"]
+						storedLaunch := session.Metadata["started_launch_hash"]
+						launchOnlyDrift := storedProvision != "" && storedLaunch != "" &&
+							storedProvision == runtime.ProvisionFingerprint(agentCfg) &&
+							storedLaunch != runtime.LaunchFingerprint(agentCfg)
 						restartedInPlace := false
 						// Attached sessions never get config-drift restarts.
 						// The human will restart when ready; drift applies
@@ -1927,6 +1942,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 										"active_reason": activeReason,
 									}), nil, "")
 								}
+								continue
+							}
+							if launchOnlyDrift && relaunchAgentForLaunchDrift(ctx, sp, store, session, name, agentCfg, tp, storedHash, currentHash, driftedFields, rec, trace, stdout, stderr) {
 								continue
 							}
 							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, string(sessionpkg.StateStartPending), clk.Now().UTC(), stderr)
@@ -1983,6 +2001,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									}), nil, "")
 								}
 								fmt.Fprintf(stdout, "Skipping config-drift drain for '%s': live assigned work found\n", name) //nolint:errcheck
+								continue
+							}
+							if launchOnlyDrift && relaunchAgentForLaunchDrift(ctx, sp, store, session, name, agentCfg, tp, storedHash, currentHash, driftedFields, rec, trace, stdout, stderr) {
 								continue
 							}
 							ddt := driftDrainTimeout
@@ -2685,18 +2706,16 @@ func sessionHasOpenAssignedWorkForReachableStore(
 	session beads.Bead,
 ) (bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
-	storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, session)
-	if !ok {
-		return sessionHasOpenAssignedWorkInStores(store, rigStores, identifiers)
+	stores, err := reachableStoresForSession(cityPath, cfg, store, rigStores, session)
+	if err != nil {
+		return false, err
 	}
-	if storeRef == "" {
-		return sessionHasOpenAssignedWorkInStoreByIdentifiers(store, identifiers)
+	for _, s := range stores {
+		if has, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(s, identifiers); err != nil || has {
+			return has, err
+		}
 	}
-	rigStore, ok := rigStores[storeRef]
-	if !ok || rigStore == nil {
-		return false, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
-	}
-	return sessionHasOpenAssignedWorkInStoreByIdentifiers(rigStore, identifiers)
+	return false, nil
 }
 
 // sessionHasAwakeAssignedWorkForReachableStore reports whether assigned work
@@ -2710,26 +2729,45 @@ func sessionHasAwakeAssignedWorkForReachableStore(
 	session beads.Bead,
 ) (bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
-	storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, session)
-	if !ok {
-		return sessionHasAwakeAssignedWorkInStores(store, rigStores, identifiers)
+	stores, err := reachableStoresForSession(cityPath, cfg, store, rigStores, session)
+	if err != nil {
+		return false, err
 	}
+	for _, s := range stores {
+		if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(s, identifiers); err != nil || has {
+			return has, err
+		}
+	}
+	return false, nil
+}
+
+// reachableStoresForSession returns the store(s) in which the session's assigned
+// work can live, applying the same cross-store model as openSessionReachableStoreRef.
+// A cross-store-eligible (city-scoped) session federates across the primary store
+// and every rig store (vp-kvp); a session whose template/agent can't be resolved
+// falls back to the same fan-out (legacy keep-on-match fail-safe); a rig-bound
+// session routes to its one rig store; every other session routes to the primary
+// store. The slice is ordered primary-first so "first match" callers keep their
+// historical ordering. Returns an error only when a resolved rig store is missing.
+func reachableStoresForSession(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, session beads.Bead) ([]beads.Store, error) {
+	agentCfg := sessionAgentConfig(cfg, session)
+	if agentCfg == nil || agentIsCrossStoreEligible(agentCfg) {
+		stores := make([]beads.Store, 0, 1+len(rigStores))
+		stores = append(stores, store)
+		for _, rs := range rigStores {
+			stores = append(stores, rs)
+		}
+		return stores, nil
+	}
+	storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 	if storeRef == "" {
-		return sessionHasAwakeAssignedWorkInStoreByIdentifiers(store, identifiers)
+		return []beads.Store{store}, nil
 	}
 	rigStore, ok := rigStores[storeRef]
 	if !ok || rigStore == nil {
-		return false, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
+		return nil, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
 	}
-	return sessionHasAwakeAssignedWorkInStoreByIdentifiers(rigStore, identifiers)
-}
-
-func assignedWorkStoreRefForSession(cityPath string, cfg *config.City, session beads.Bead) (string, bool) {
-	agentCfg := sessionAgentConfig(cfg, session)
-	if agentCfg == nil {
-		return "", false
-	}
-	return assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg), true
+	return []beads.Store{rigStore}, nil
 }
 
 // firstOpenAssignedWorkBeadForReachableStore returns the first open or
@@ -2753,26 +2791,16 @@ func firstOpenAssignedWorkBeadForReachableStore(
 	session beads.Bead,
 ) (beads.Bead, bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
-	storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, session)
-	if !ok {
-		if bead, found, err := firstOpenAssignedWorkBeadInStoreByIdentifiers(store, identifiers); err != nil || found {
+	stores, err := reachableStoresForSession(cityPath, cfg, store, rigStores, session)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	for _, s := range stores {
+		if bead, found, err := firstOpenAssignedWorkBeadInStoreByIdentifiers(s, identifiers); err != nil || found {
 			return bead, found, err
 		}
-		for _, rs := range rigStores {
-			if bead, found, err := firstOpenAssignedWorkBeadInStoreByIdentifiers(rs, identifiers); err != nil || found {
-				return bead, found, err
-			}
-		}
-		return beads.Bead{}, false, nil
 	}
-	if storeRef == "" {
-		return firstOpenAssignedWorkBeadInStoreByIdentifiers(store, identifiers)
-	}
-	rigStore, ok := rigStores[storeRef]
-	if !ok || rigStore == nil {
-		return beads.Bead{}, false, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
-	}
-	return firstOpenAssignedWorkBeadInStoreByIdentifiers(rigStore, identifiers)
+	return beads.Bead{}, false, nil
 }
 
 func firstOpenAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifiers []string) (beads.Bead, bool, error) {
@@ -2974,32 +3002,13 @@ func collectSessionAssignedWork(cityPath string, cfg *config.City, store beads.S
 		}
 		return nil
 	}
-	// Route to the same store the gate routed to.
-	storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, session)
-	switch {
-	case !ok:
-		// No agent template resolvable: gate fans out across the
-		// primary store + all rig stores. Mirror that.
-		if err := collect(store); err != nil {
-			return out, err
-		}
-		for _, rs := range rigStores {
-			if err := collect(rs); err != nil {
-				return out, err
-			}
-		}
-	case storeRef == "":
-		// Agent template resolvable but no rig store binding: gate
-		// queries only the primary store.
-		if err := collect(store); err != nil {
-			return out, err
-		}
-	default:
-		rigStore, found := rigStores[storeRef]
-		if !found || rigStore == nil {
-			return out, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
-		}
-		if err := collect(rigStore); err != nil {
+	// Route to the same store(s) the gate routed to.
+	stores, err := reachableStoresForSession(cityPath, cfg, store, rigStores, session)
+	if err != nil {
+		return out, err
+	}
+	for _, s := range stores {
+		if err := collect(s); err != nil {
 			return out, err
 		}
 	}
@@ -3028,18 +3037,6 @@ func sessionHasAssignedWorkInStoresForStatuses(store beads.Store, rigStores map[
 	}
 	for _, rs := range rigStores {
 		if has, err := sessionHasAssignedWorkInStoreByIdentifiersForStatuses(rs, identifiers, statuses); err != nil || has {
-			return has, err
-		}
-	}
-	return false, nil
-}
-
-func sessionHasAwakeAssignedWorkInStores(store beads.Store, rigStores map[string]beads.Store, identifiers []string) (bool, error) {
-	if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(store, identifiers); err != nil || has {
-		return has, err
-	}
-	for _, rs := range rigStores {
-		if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(rs, identifiers); err != nil || has {
 			return has, err
 		}
 	}
@@ -3899,10 +3896,13 @@ func rebaselineLegacyHashOutcome(stored string) TraceOutcomeCode {
 	return TraceOutcomeRebaselinedUnversioned
 }
 
-// sessionHashRebaselineMetadata builds the four fingerprint metadata fields
-// — started_config_hash, started_live_hash, live_hash, core_hash_breakdown —
-// from a resolved agent config. Callers merge the result into a session
-// bead's metadata batch to move its config-drift baseline to agentCfg.
+// sessionHashRebaselineMetadata builds the fingerprint metadata fields
+// — started_config_hash, started_live_hash, live_hash, started_provision_hash,
+// started_launch_hash, core_hash_breakdown — from a resolved agent config.
+// Callers merge the result into a session bead's metadata batch to move its
+// config-drift baseline to agentCfg. This is the full-rebaseline form (legacy/
+// version-artifact rebaseline): the config did not actually change, so every
+// baseline — including the live half — moves to the current binary's hashes.
 func sessionHashRebaselineMetadata(agentCfg runtime.Config) (map[string]string, error) {
 	breakdownJSON, err := json.Marshal(runtime.CoreFingerprintBreakdown(agentCfg))
 	if err != nil {
@@ -3910,10 +3910,12 @@ func sessionHashRebaselineMetadata(agentCfg runtime.Config) (map[string]string, 
 	}
 	liveHash := runtime.LiveFingerprint(agentCfg)
 	return map[string]string{
-		"started_config_hash": runtime.CoreFingerprint(agentCfg),
-		"started_live_hash":   liveHash,
-		"live_hash":           liveHash,
-		"core_hash_breakdown": string(breakdownJSON),
+		"started_config_hash":    runtime.CoreFingerprint(agentCfg),
+		"started_live_hash":      liveHash,
+		"live_hash":              liveHash,
+		"started_provision_hash": runtime.ProvisionFingerprint(agentCfg),
+		"started_launch_hash":    runtime.LaunchFingerprint(agentCfg),
+		"core_hash_breakdown":    string(breakdownJSON),
 	}, nil
 }
 
@@ -3934,6 +3936,114 @@ func silentRebaselineSessionHashes(session *beads.Bead, store beads.Store, agent
 	}
 	if err := store.SetMetadataBatch(session.ID, patch); err != nil {
 		return fmt.Errorf("rebaselining hashes: %w", err)
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, len(patch))
+	}
+	for k, v := range patch {
+		session.Metadata[k] = v
+	}
+	return nil
+}
+
+// relaunchAgentForLaunchDrift handles a launch-only config-drift (B2.3): the
+// LaunchFingerprint moved while the ProvisionFingerprint held, so the agent can
+// be re-launched in the existing warm box instead of a full re-provision
+// restart. It mirrors the live-drift→RunLive clause: act, and on success
+// rebaseline the Core/provision/launch baselines so the next tick sees no drift.
+//
+// Returns true iff the agent was relaunched (the caller should `continue` and
+// skip the full-restart path); false means the provider cannot relaunch (the
+// type-assert failed, or it answered ErrRelaunchUnsupported) or the relaunch
+// failed — in either case the caller falls through to the existing full restart
+// (drain / reset-in-place → Stop+Start), so the change still lands.
+//
+// The deferral guards (attached / named-active / pending-interaction / open
+// assigned work) are honored by the CALLER: this is invoked only after those
+// guards have passed at each restart site, exactly where the full restart would
+// otherwise fire — a respawn is as disruptive as a restart, so it earns the same
+// protection.
+func relaunchAgentForLaunchDrift(
+	ctx context.Context,
+	sp runtime.Provider,
+	store beads.Store,
+	session *beads.Bead,
+	name string,
+	agentCfg runtime.Config,
+	tp TemplateParams,
+	storedHash, currentHash string,
+	driftedFields []string,
+	rec events.Recorder,
+	trace *sessionReconcilerTraceCycle,
+	stdout, stderr io.Writer,
+) bool {
+	r, ok := sp.(runtime.RelaunchProvider)
+	if !ok {
+		// Conjoined runtimes (subprocess/acp/t3bridge) do not implement
+		// RelaunchProvider; fall through to the full restart.
+		return false
+	}
+	if err := r.Relaunch(ctx, name, agentCfg); err != nil {
+		// ErrRelaunchUnsupported (a wrapper whose backend cannot relaunch) or a
+		// genuine failure (e.g. the warm box vanished → ErrSessionNotFound). Fall
+		// back to the full restart so the launch change is still applied.
+		if !errors.Is(err, runtime.ErrRelaunchUnsupported) {
+			fmt.Fprintf(stderr, "session reconciler: relaunch %s: %v; falling back to full restart\n", name, err) //nolint:errcheck
+		}
+		return false
+	}
+	fmt.Fprintf(stdout, "Launch-only config change for '%s', relaunched agent in warm box\n", tp.DisplayName()) //nolint:errcheck
+	// Rebaseline the Core baseline (started_config_hash) and the partition
+	// sub-hashes so the next tick sees no Core drift. started_live_hash is
+	// DELIBERATELY left untouched: a relaunch MAY re-run SessionLive via the
+	// shared orchestration tail (tmux and ssh do; k8s does not), so the live
+	// half is not reliably re-applied here. Leaving the live hash alone keeps
+	// this provider-independent — any concurrent live drift is re-applied
+	// idempotently by the live-drift clause on the next tick (a redundant
+	// SessionLive re-apply is harmless; a missed one self-heals).
+	if err := rebaselineLaunchDriftHashes(session, store, agentCfg); err != nil {
+		// The agent is already relaunched; do not trigger a second restart. The
+		// stale Core baseline self-corrects on a later rebaseline tick.
+		fmt.Fprintf(stderr, "session reconciler: rebaselining launch-drift hashes for %s: %v\n", name, err) //nolint:errcheck
+	}
+	if trace != nil {
+		trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "relaunch", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
+	}
+	rec.Record(events.Event{
+		Type:    events.SessionUpdated,
+		Actor:   "gc",
+		Subject: tp.DisplayName(),
+		Message: "agent relaunched (launch-only config change)",
+	})
+	return true
+}
+
+// rebaselineLaunchDriftHashes moves a session's Core drift baseline to agentCfg
+// after a successful warm-box relaunch — started_config_hash + the provision/
+// launch sub-hashes + core_hash_breakdown — WITHOUT touching started_live_hash/
+// live_hash. The relaunch re-applied the launch half (the agent now runs
+// agentCfg); the provision half was unchanged by definition. The live hash is
+// left untouched because relaunch does not reliably re-apply the live half
+// (tmux/ssh re-run SessionLive via the shared orchestration tail; k8s does
+// not), so a concurrent SessionLive change is re-applied idempotently by the
+// live-drift clause on the next tick. Contrast sessionHashRebaselineMetadata,
+// which rebaselines every field (used when the config did not actually change).
+func rebaselineLaunchDriftHashes(session *beads.Bead, store beads.Store, agentCfg runtime.Config) error {
+	if session == nil || store == nil {
+		return nil
+	}
+	breakdownJSON, err := json.Marshal(runtime.CoreFingerprintBreakdown(agentCfg))
+	if err != nil {
+		return fmt.Errorf("marshaling core_hash_breakdown: %w", err)
+	}
+	patch := map[string]string{
+		"started_config_hash":    runtime.CoreFingerprint(agentCfg),
+		"started_provision_hash": runtime.ProvisionFingerprint(agentCfg),
+		"started_launch_hash":    runtime.LaunchFingerprint(agentCfg),
+		"core_hash_breakdown":    string(breakdownJSON),
+	}
+	if err := store.SetMetadataBatch(session.ID, patch); err != nil {
+		return fmt.Errorf("rebaselining launch-drift hashes: %w", err)
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(patch))

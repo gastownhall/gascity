@@ -509,6 +509,8 @@ func TestCommitStartedPatchBuildsAtomicStartMetadata(t *testing.T) {
 	patch := CommitStartedPatch(CommitStartedPatchInput{
 		CoreHash:                "core-hash",
 		LiveHash:                "live-hash",
+		ProvisionHash:           "provision-hash",
+		LaunchHash:              "launch-hash",
 		CoreBreakdown:           `{"command":"core-hash"}`,
 		ConfirmState:            true,
 		ClearSleepReason:        true,
@@ -520,6 +522,8 @@ func TestCommitStartedPatchBuildsAtomicStartMetadata(t *testing.T) {
 		"started_config_hash":        "core-hash",
 		"live_hash":                  "live-hash",
 		"started_live_hash":          "live-hash",
+		"started_provision_hash":     "provision-hash",
+		"started_launch_hash":        "launch-hash",
 		"continuation_reset_pending": "",
 		"core_hash_breakdown":        `{"command":"core-hash"}`,
 		"state":                      string(StateActive),
@@ -581,6 +585,8 @@ func TestCommitStartedPatchCanPersistHashesWithoutRestampingState(t *testing.T) 
 	patch := CommitStartedPatch(CommitStartedPatchInput{
 		CoreHash:         "core-hash",
 		LiveHash:         "live-hash",
+		ProvisionHash:    "provision-hash",
+		LaunchHash:       "launch-hash",
 		ClearSleepReason: true,
 	})
 
@@ -588,6 +594,8 @@ func TestCommitStartedPatchCanPersistHashesWithoutRestampingState(t *testing.T) 
 		"started_config_hash":        "core-hash",
 		"live_hash":                  "live-hash",
 		"started_live_hash":          "live-hash",
+		"started_provision_hash":     "provision-hash",
+		"started_launch_hash":        "launch-hash",
 		"continuation_reset_pending": "",
 		"sleep_reason":               "",
 	}

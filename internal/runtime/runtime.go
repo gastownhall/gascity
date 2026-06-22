@@ -43,6 +43,18 @@ var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrExecUnsupported reports that a provider implements [ExecProvider] but the
+// underlying runtime does not implement the RPP `exec` wire op (it answered
+// exit 2). Carriers treat this as "fall back to the legacy driving op".
+var ErrExecUnsupported = errors.New("runtime does not implement the exec op")
+
+// ErrRelaunchUnsupported reports that the underlying runtime cannot relaunch the
+// agent in a warm box (it is not a [RelaunchProvider], or is conjoined like
+// subprocess/acp/t3bridge). Composite/wrapping providers return it from their
+// own [RelaunchProvider.Relaunch] when the routed/wrapped backend does not
+// support relaunch; the reconciler treats it as "fall back to full Stop+Start".
+var ErrRelaunchUnsupported = errors.New("runtime does not support warm-box relaunch")
+
 // IsSessionGone reports whether err represents a "the session is not
 // there" condition — either ErrSessionNotFound or the legacy provider
 // phrasings that predate the sentinel (tmux/subprocess providers may
@@ -235,6 +247,27 @@ type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// ExecProvider is an optional extension for runtimes that expose the RPP
+// connection primitive: run a command inside the box and return its standard
+// output and exit code. It is the op a [Carrier] drives the session-interaction
+// verbs (Nudge / Peek / SendKeys / Interrupt / ClearScrollback) through. The
+// exec Provider drives over it via the tmux carrier and falls back to the
+// dedicated wire ops when Exec returns [ErrExecUnsupported]. A caller using an
+// ExecProvider directly must likewise handle a provider that does not implement
+// ExecProvider, or an Exec that returns [ErrExecUnsupported] (the provider type
+// supports Exec but the underlying runtime does not implement the wire op).
+//
+// argv is the command and its arguments (no shell interpretation by the
+// caller). output is the command's standard output, verbatim. code is the
+// command's exit code: 0 on success, non-zero is the command's own result and
+// is NOT an error; providers whose transport cannot observe the numeric code
+// report 1 for any non-zero exit. A non-nil err signals the op could not run
+// at all (transport/spawn failure, including context cancellation/timeout) or
+// [ErrExecUnsupported] — distinct from a non-zero exit code.
+type ExecProvider interface {
+	Exec(ctx context.Context, name string, argv []string) (output []byte, code int, err error)
+}
+
 // DialogProvider is an optional extension for runtimes that can detect and
 // dismiss known startup-style dialogs (workspace trust, bypass permissions,
 // rate-limit prompts) on an already-running session.
@@ -277,6 +310,22 @@ type InterruptedTurnResetProvider interface {
 // prompt into a session that still intends to finish the interrupted turn.
 type InterruptBoundaryWaitProvider interface {
 	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
+}
+
+// RelaunchProvider is an optional extension for runtimes that can re-launch the
+// agent inside an already-provisioned (warm) box WITHOUT re-provisioning it — the
+// runtime/transport un-weld payoff. The reconciler calls Relaunch on a launch-only
+// config change (LaunchFingerprint moved, ProvisionFingerprint unchanged) instead
+// of a full Stop+Start. A missing box yields ErrSessionNotFound; the box, its env,
+// and any staged files are reused. Runtimes whose agent IS the box (subprocess /
+// acp / t3bridge) do NOT implement this — the reconciler falls back to Stop+Start
+// for them.
+//
+// tmux / ssh / k8s implement it directly (respawn-pane in the warm box); the exec
+// provider relaunches the agent over the exec op for a separable pack and falls
+// back to Stop+Start for a welded pack. See worker-runtime-transport-unweld-v0.md.
+type RelaunchProvider interface {
+	Relaunch(ctx context.Context, name string, cfg Config) error
 }
 
 // LiveRuntime identifies a single agent runtime process discovered via
@@ -468,6 +517,15 @@ type Config struct {
 	// Lifecycle describes whether the command is long-lived or expected to
 	// exit after one turn. Empty means the default long-lived session lifecycle.
 	Lifecycle Lifecycle
+
+	// Upstream is the model-serving selection identity ("anthropic", "bedrock",
+	// "proxy:<name>") — WHO serves+resolves the model. It is hashed into the
+	// LAUNCH half of the fingerprint (Phase C), so switching upstream relaunches
+	// the agent in the warm box (B2.3) rather than reprovisioning; the resolved
+	// serving env (ANTHROPIC_BASE_URL/_API_KEY, injected into Env) is deliberately
+	// NOT hashed, so a credential rotation never moves a fingerprint. Empty = no
+	// upstream selected (behavior-identical; contributes nothing to the hash).
+	Upstream string
 
 	// Env is additional environment variables set in the session.
 	Env map[string]string

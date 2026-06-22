@@ -457,6 +457,7 @@ type AgentPatch struct {
 	StartCommand            *string           `json:"StartCommand"`
 	Suspended               *bool             `json:"Suspended"`
 	TmuxAlias               *string           `json:"TmuxAlias"`
+	Upstream                *string           `json:"Upstream"`
 	WakeMode                *string           `json:"WakeMode"`
 	WorkDir                 *string           `json:"WorkDir"`
 }

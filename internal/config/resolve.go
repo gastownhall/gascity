@@ -301,6 +301,17 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.SessionIDFlag != "" {
 		result.SessionIDFlag = city.SessionIDFlag
 	}
+	// Upstream serving-env binding inherits per-field: a child harness keeps the
+	// base's env-var names unless it overrides a specific one.
+	if city.UpstreamEnv.BaseURL != "" {
+		result.UpstreamEnv.BaseURL = city.UpstreamEnv.BaseURL
+	}
+	if city.UpstreamEnv.APIKey != "" {
+		result.UpstreamEnv.APIKey = city.UpstreamEnv.APIKey
+	}
+	if city.UpstreamEnv.AuthToken != "" {
+		result.UpstreamEnv.AuthToken = city.UpstreamEnv.AuthToken
+	}
 
 	if city.TitleModel != "" {
 		result.TitleModel = city.TitleModel
@@ -621,6 +632,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		SessionIDFlag:          spec.SessionIDFlag,
 		TitleModel:             spec.TitleModel,
 		ACPCommand:             spec.ACPCommand,
+		UpstreamEnv:            spec.UpstreamEnv,
 	}
 	// Deep-copy OptionsSchema to avoid aliasing the spec's slice.
 	if len(spec.OptionsSchema) > 0 {

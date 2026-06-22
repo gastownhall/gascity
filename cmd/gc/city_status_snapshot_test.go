@@ -431,7 +431,7 @@ func TestCityStatusUsesStatusSnapshotToRouteACPDrainMetadata(t *testing.T) {
 
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	buildSessionProviderByName = func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(_ *config.City, name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
 		if name == "acp" {
 			return acpSP, nil
 		}

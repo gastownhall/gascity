@@ -61,6 +61,65 @@ func TestConfigFingerprintIgnoresNonGCEnv(t *testing.T) {
 	}
 }
 
+// TestFingerprintExcludesUpstreamServingEnv is the Phase C (Upstream axis)
+// safety net — the PR0-style guard the un-weld design calls for. The
+// model-serving env a future Upstream resolver injects (ANTHROPIC_BASE_URL /
+// ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / bedrock token / proxy) must
+// contribute to NONE of CoreFingerprint, ProvisionFingerprint, or
+// LaunchFingerprint. Two guarantees ride on this:
+//  1. Secrets never enter the bead metadata — the fingerprints are persisted.
+//  2. Rotating a key or repointing the base URL never triggers a spurious
+//     config-drift restart. The Upstream axis is meant to be selected by NAME
+//     (which a later Phase C slice can hash into LaunchFingerprint to drive a
+//     warm-box relaunch), NOT by its resolved credential VALUES.
+//
+// If a serving-env key is ever added to envFingerprintAllow, this fails loudly.
+func TestFingerprintExcludesUpstreamServingEnv(t *testing.T) {
+	base := map[string]string{"GC_CITY": "c", "GC_RIG": "r"}
+	withEnv := func(extra map[string]string) Config {
+		env := map[string]string{}
+		for k, v := range base {
+			env[k] = v
+		}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return Config{Command: "claude --model opus", Env: env}
+	}
+	a := withEnv(map[string]string{
+		"ANTHROPIC_BASE_URL":       "https://api.anthropic.com",
+		"ANTHROPIC_API_KEY":        "sk-ant-secret-A",
+		"ANTHROPIC_AUTH_TOKEN":     "tok-A",
+		"AWS_BEARER_TOKEN_BEDROCK": "bedrock-A",
+		"HTTPS_PROXY":              "http://proxy-a:8080",
+	})
+	b := withEnv(map[string]string{
+		"ANTHROPIC_BASE_URL":       "https://bedrock.example.com/anthropic",
+		"ANTHROPIC_API_KEY":        "sk-ant-secret-B",
+		"ANTHROPIC_AUTH_TOKEN":     "tok-B",
+		"AWS_BEARER_TOKEN_BEDROCK": "bedrock-B",
+		"HTTPS_PROXY":              "http://proxy-b:8080",
+	})
+	none := withEnv(nil)
+	for _, tc := range []struct {
+		name string
+		fn   func(Config) string
+	}{
+		{"Core", CoreFingerprint},
+		{"Provision", ProvisionFingerprint},
+		{"Launch", LaunchFingerprint},
+	} {
+		// Rotating only the serving-env values must not move the hash...
+		if tc.fn(a) != tc.fn(b) {
+			t.Errorf("%sFingerprint moved when only serving env changed — an upstream credential/value is leaking into the hash (Phase C invariant broken)", tc.name)
+		}
+		// ...and the keys must be wholly absent, not merely value-stable.
+		if tc.fn(a) != tc.fn(none) {
+			t.Errorf("%sFingerprint differs between serving-env-present and absent — serving env is contributing to the hash", tc.name)
+		}
+	}
+}
+
 func TestConfigFingerprintIgnoresReadyDelayMs(t *testing.T) {
 	a := Config{Command: "claude", ReadyDelayMs: 0}
 	b := Config{Command: "claude", ReadyDelayMs: 5000}

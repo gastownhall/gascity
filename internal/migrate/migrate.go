@@ -65,6 +65,7 @@ type agentFile struct {
 	Nudge                  string            `toml:"nudge,omitempty"`
 	Session                string            `toml:"session,omitempty"`
 	Provider               string            `toml:"provider,omitempty"`
+	Upstream               string            `toml:"upstream,omitempty"`
 	StartCommand           string            `toml:"start_command,omitempty"`
 	Lifecycle              string            `toml:"lifecycle,omitempty"`
 	Args                   []string          `toml:"args,omitempty"`
@@ -436,6 +437,9 @@ func mergeAgentDefaultsAliasForMigration(dst *config.AgentDefaults, src config.A
 	if !meta.IsDefined("agent_defaults", "model") {
 		dst.Model = src.Model
 	}
+	if !meta.IsDefined("agent_defaults", "upstream") {
+		dst.Upstream = src.Upstream
+	}
 	if !meta.IsDefined("agent_defaults", "wake_mode") {
 		dst.WakeMode = src.WakeMode
 	}
@@ -466,6 +470,9 @@ func mergeMigratedAgentDefaults(dst *config.AgentDefaults, src config.AgentDefau
 	if dst.Model == "" {
 		dst.Model = src.Model
 	}
+	if dst.Upstream == "" {
+		dst.Upstream = src.Upstream
+	}
 	if dst.WakeMode == "" {
 		dst.WakeMode = src.WakeMode
 	}
@@ -482,6 +489,7 @@ func mergeMigratedAgentDefaults(dst *config.AgentDefaults, src config.AgentDefau
 func isZeroAgentDefaults(defaults config.AgentDefaults) bool {
 	return defaults.Provider == "" &&
 		defaults.Model == "" &&
+		defaults.Upstream == "" &&
 		defaults.WakeMode == "" &&
 		defaults.DefaultSlingFormula == "" &&
 		len(defaults.AllowOverlay) == 0 &&
@@ -912,6 +920,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		Nudge:                  agent.Nudge,
 		Session:                agent.Session,
 		Provider:               agent.Provider,
+		Upstream:               agent.Upstream,
 		StartCommand:           agent.StartCommand,
 		Lifecycle:              agent.Lifecycle,
 		Args:                   agent.Args,
@@ -963,6 +972,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.Nudge == "" &&
 		cfg.Session == "" &&
 		cfg.Provider == "" &&
+		cfg.Upstream == "" &&
 		cfg.StartCommand == "" &&
 		cfg.Lifecycle == "" &&
 		len(cfg.Args) == 0 &&

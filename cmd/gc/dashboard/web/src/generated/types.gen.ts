@@ -109,6 +109,7 @@ export type AgentPatch = {
     StartCommand: string | null;
     Suspended: boolean | null;
     TmuxAlias: string | null;
+    Upstream: string | null;
     WakeMode: string | null;
     WorkDir: string | null;
 };

@@ -180,6 +180,10 @@ type City struct {
 	Workspace Workspace `toml:"workspace"`
 	// Providers defines named provider presets for agent startup.
 	Providers map[string]ProviderSpec `toml:"providers,omitempty"`
+	// Upstreams defines named model-serving endpoint presets selectable per
+	// agent via the Upstream axis (Phase C). Each maps a name → serving env
+	// (base URL + credential refs); see UpstreamSpec.
+	Upstreams map[string]UpstreamSpec `toml:"upstreams,omitempty"`
 	// Packs defines named remote pack sources fetched via git (V1 mechanism).
 	//
 	// Legacy pack source map, accepted for migration and fetch/list
@@ -323,6 +327,12 @@ type City struct {
 	// PackDoctors holds convention-discovered pack doctor checks composed
 	// during city and rig expansion. Runtime-only.
 	PackDoctors []DiscoveredDoctor `toml:"-" json:"-"`
+	// Runtimes maps pack-declared runtime selection names ([runtimes.<name>]
+	// in pack.toml) to their resolved declarations, composed during city and
+	// rig expansion. Selection is city-wide, so rig-imported runtime packs
+	// land here too; conflicting re-declarations are composition errors.
+	// Runtime-only.
+	Runtimes map[string]DiscoveredRuntime `toml:"-" json:"-"`
 	// PackSkills holds binding-qualified shared skill catalogs composed
 	// from city-level imported packs. Runtime-only.
 	PackSkills []DiscoveredSkillCatalog `toml:"-" json:"-"`
@@ -620,6 +630,8 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Upstream overrides the model-serving endpoint selection (Phase C).
+	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
 	// the pack-defined args; set to an empty list to clear them; set to a
 	// populated list to replace them entirely (full replace, not append).
@@ -1025,6 +1037,24 @@ type PackDoctorEntry struct {
 	// scan. Default false. The check still runs on demand via `gc doctor`
 	// regardless of this flag.
 	Warmup bool `toml:"warmup,omitempty"`
+}
+
+// PackRuntimeEntry declares a pack-shipped runtime provider executable
+// under [runtimes.<name>] in pack.toml. The executable speaks the Runtime
+// Provider Protocol (docs/reference/exec-session-provider.md); city
+// composition registers the name into the runtime selection registry so
+// `[session] provider = "<name>"` resolves to it. Name collisions with
+// builtin runtimes (or other packs) are composition errors — see the
+// RUNTIME-SEL rows in internal/runtime/REQUIREMENTS.md.
+type PackRuntimeEntry struct {
+	// Command is the runtime executable: a path relative to the pack
+	// directory (anything containing a path separator) or a bare name
+	// resolved on PATH at session start.
+	Command string `toml:"command" jsonschema:"required"`
+	// Protocol is the RPP version the executable speaks. Version 0 is
+	// the only version today; the declaration exists so future protocol
+	// bumps fail at composition instead of at session start.
+	Protocol int `toml:"protocol,omitempty"`
 }
 
 // PackCommandEntry declares a CLI subcommand provided by a pack.
@@ -2817,6 +2847,10 @@ type AgentDefaults struct {
 	// (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at
 	// runtime. Agents with their own model override would take precedence.
 	Model string `toml:"model,omitempty"`
+	// Upstream is the default model-serving endpoint (a key in [upstreams])
+	// for agents that do not set their own upstream (Phase C — the Upstream
+	// axis). Applied to agents with an empty Upstream by ApplyAgentDefaults.
+	Upstream string `toml:"upstream,omitempty"`
 	// WakeMode is the parsed/composed default wake mode ("resume" or
 	// "fresh"), but it is not yet auto-applied at runtime.
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
@@ -2856,6 +2890,9 @@ func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefault
 	}
 	if !meta.IsDefined("agent_defaults", "model") {
 		dst.Model = src.Model
+	}
+	if !meta.IsDefined("agent_defaults", "upstream") {
+		dst.Upstream = src.Upstream
 	}
 	if !meta.IsDefined("agent_defaults", "wake_mode") {
 		dst.WakeMode = src.WakeMode
@@ -2964,6 +3001,11 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// Upstream selects the model-serving endpoint (a key in [upstreams]) for
+	// this agent — WHO serves the model. "" (default) falls back to
+	// agent_defaults.upstream; if still empty, no upstream env is injected
+	// (ambient behavior). Switching it relaunches the agent in the warm box.
+	Upstream string `toml:"upstream,omitempty"`
 	// InheritedProvider records the pack-scoped default provider for agents
 	// loaded from imported packs. Runtime-only.
 	InheritedProvider string `toml:"-" json:"-"`
@@ -4208,6 +4250,19 @@ func ApplyAgentDefaults(cfg *City) {
 			}
 		}
 	}
+
+	// Upstream axis (Phase C): agents with no explicit upstream inherit the
+	// city-level default so model-serving selection can be set once city-wide.
+	if upstream := cfg.AgentDefaults.Upstream; upstream != "" {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].Upstream == "" {
+				cfg.Agents[i].Upstream = upstream
+			}
+		}
+	}
 }
 
 // DefaultOrderTrackingDeleteAfterClose is the canonical default closed-bead
@@ -4321,6 +4376,12 @@ func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, pro
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.model redefined by %q", label))
 		}
 		dst.Model = src.Model
+	}
+	if src.Upstream != "" {
+		if prov != nil && dst.Upstream != "" && dst.Upstream != src.Upstream {
+			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.upstream redefined by %q", label))
+		}
+		dst.Upstream = src.Upstream
 	}
 	if src.WakeMode != "" {
 		if prov != nil && dst.WakeMode != "" && dst.WakeMode != src.WakeMode {

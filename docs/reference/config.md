@@ -18,6 +18,7 @@ City is the top-level configuration for a Gas City instance.
 | `include` | []string |  |  | Include lists config fragment files to merge into this config. Processed by LoadWithIncludes; not recursive (fragments cannot include). |
 | `workspace` | Workspace | **yes** |  | Workspace holds city-level metadata (name, default provider). |
 | `providers` | map[string]ProviderSpec |  |  | Providers defines named provider presets for agent startup. |
+| `upstreams` | map[string]UpstreamSpec |  |  | Upstreams defines named model-serving endpoint presets selectable per agent via the Upstream axis (Phase C). Each maps a name → serving env (base URL + credential refs); see UpstreamSpec. |
 | `imports` | map[string]Import |  |  | Imports defines named pack imports. Each key is a local binding name; the authored public contract stores a durable source plus optional version. Processed during ExpandCityPacks. |
 | `defaults` | PackDefaults |  |  | Defaults holds city-level defaults that seed generated config. The canonical default-rig import table is [defaults.rig.imports]. |
 | `agent` | []Agent |  |  | Agents lists all configured agents in this city. Pack-composed cities can compose agents through [imports.*] and ship without any [[agent]] block. |
@@ -82,6 +83,7 @@ Agent defines a configured agent in the city.
 | `nudge` | string |  |  | Nudge is text typed into the agent's tmux session after startup. Used for CLI agents that don't accept command-line prompts. |
 | `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
+| `upstream` | string |  |  | Upstream selects the model-serving endpoint (a key in [upstreams]) for this agent — WHO serves the model. "" (default) falls back to agent_defaults.upstream; if still empty, no upstream env is injected (ambient behavior). Switching it relaunches the agent in the warm box. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for this agent. |
 | `lifecycle` | string |  |  | Lifecycle controls runtime lifetime semantics. Empty uses the default long-lived session lifecycle; "one_shot" means the command is expected to do bounded work and exit cleanly. Enum: `one_shot` |
 | `args` | []string |  |  | Args overrides the provider's default arguments. |
@@ -132,6 +134,7 @@ AgentDefaults provides agent defaults declared via [agent_defaults] in city.toml
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider is the default provider name for agents that do not set their own provider. It also counts as a configured provider for implicit agent injection. |
 | `model` | string |  |  | Model is the parsed/composed default model name for agents (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at runtime. Agents with their own model override would take precedence. |
+| `upstream` | string |  |  | Upstream is the default model-serving endpoint (a key in [upstreams]) for agents that do not set their own upstream (Phase C — the Upstream axis). Applied to agents with an empty Upstream by ApplyAgentDefaults. |
 | `wake_mode` | string |  |  | WakeMode is the parsed/composed default wake mode ("resume" or "fresh"), but it is not yet auto-applied at runtime. Enum: `resume`, `fresh` |
 | `default_sling_formula` | string |  |  | DefaultSlingFormula is the default formula used for agents that inherit [agent_defaults]. Explicit agents only receive this value when agent_defaults.default_sling_formula is set; implicit multi-session configs are seeded with "mol-do-work" elsewhere when no explicit default is set. |
 | `allow_overlay` | []string |  |  | AllowOverlay is parsed and composed as a config-level allowlist for session overlays, but it is not yet inherited onto agents automatically at runtime. |
@@ -159,6 +162,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `upstream` | string |  |  | Upstream overrides the model-serving endpoint selection (Phase C). |
 | `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
 | `lifecycle` | string |  |  | Lifecycle overrides the runtime lifecycle ("one_shot" or empty). Enum: `one_shot` |
@@ -215,6 +219,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp" or "tmux"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `upstream` | string |  |  | Upstream overrides the model-serving endpoint selection (Phase C). |
 | `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
 | `lifecycle` | string |  |  | Lifecycle overrides the runtime lifecycle ("one_shot" or empty). Enum: `one_shot` |
@@ -523,8 +528,8 @@ OptionChoice is one allowed value for a "select" option.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `value` | string | **yes** |  |  |
-| `label` | string | **yes** |  |  |
+| `value` | string | **yes** |  | Value is the choice identifier matched against ProviderOption.Default and the user's selection (e.g. "opus-4.8"). |
+| `label` | string | **yes** |  | Label is the human-readable choice name shown in tooling. |
 | `flag_args` | []string | **yes** |  | FlagArgs are the CLI arguments injected when this choice is selected. json:"-" is intentional: FlagArgs must never appear in the public API DTO (security boundary — prevents clients from seeing internal CLI flags). |
 | `flag_aliases` | []array |  |  | FlagAliases are equivalent CLI argument sequences stripped from legacy provider args. Like FlagArgs, they stay server-side only. |
 
@@ -605,11 +610,11 @@ ProviderOption declares a single configurable option for a provider.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `key` | string | **yes** |  |  |
-| `label` | string | **yes** |  |  |
+| `key` | string | **yes** |  | Key is the option identifier (e.g. "model"); also the merge key for options_schema_merge = "by_key". |
+| `label` | string | **yes** |  | Label is the human-readable option name shown in tooling. |
 | `type` | string | **yes** |  | "select" only (v1) |
-| `default` | string | **yes** |  |  |
-| `choices` | []OptionChoice | **yes** |  |  |
+| `default` | string | **yes** |  | Default is the Value of the choice selected when the user makes none. |
+| `choices` | []OptionChoice | **yes** |  | Choices are the allowed values; selecting one injects its FlagArgs into the agent command line (how the Model axis renders to a harness CLI flag). |
 | `omit` | boolean |  |  | Omit is the removal sentinel for options_schema_merge = "by_key". When set on a child layer's entry, the matching Key inherited from a parent layer is pruned from the resolved schema. |
 
 ## ProviderPatch
@@ -665,6 +670,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `permission_modes` | map[string]string |  |  | PermissionModes maps permission mode names to CLI flags. Example: &#123;"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"&#125; This is a config-only lookup table consumed by external clients (e.g., real-world app) to populate permission mode dropdowns. Launch-time flag substitution is planned for a follow-up PR — currently no runtime code reads this field. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults overrides the Default value in OptionsSchema entries without redefining the schema itself. Keys are option keys (e.g., "permission_mode"), values are choice values (e.g., "unrestricted"). city.toml users set this to customize provider behavior without touching Args or OptionsSchema. |
 | `options_schema` | []ProviderOption |  |  | OptionsSchema declares the configurable options this provider supports. Each option maps to CLI args via its Choices[].FlagArgs field. Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side. |
+| `upstream_env` | UpstreamEnvBinding |  |  | UpstreamEnv is this harness's serving-env contract (Phase C — the Upstream axis): the env-var NAMES this CLI reads for the model-serving base URL and credential. It lets the resolver render an abstract [upstreams.&lt;name&gt;] onto the right names for this harness, so an upstream preset is portable across harnesses (claude → ANTHROPIC_*, codex → OPENAI_*). |
 | `print_args` | []string |  |  | PrintArgs are CLI arguments that enable one-shot non-interactive mode. The provider prints its response to stdout and exits. When empty, the provider does not support one-shot invocation. Examples: ["-p"] (claude, gemini), ["exec"] (codex), ["--quiet", "--prompt"] (kimi) |
 | `title_model` | string |  |  | TitleModel is the OptionsSchema model key used for title generation. Resolved via the "model" option in OptionsSchema to get FlagArgs. Defaults to the cheapest/fastest model for each provider. Examples: "haiku" (claude), "o4-mini" (codex), "gemini-2.5-flash" (gemini) |
 | `acp_command` | string |  |  | ACPCommand overrides Command when the session transport is ACP. When empty, Command is used for both tmux and ACP transports. |
@@ -789,6 +795,31 @@ Tier defines per-token-type rates in USD per 1 million tokens.
 | `completion_usd_per_1m` | number | **yes** |  |  |
 | `cache_read_usd_per_1m` | number | **yes** |  |  |
 | `cache_creation_usd_per_1m` | number | **yes** |  |  |
+
+## UpstreamEnvBinding
+
+UpstreamEnvBinding is a harness's serving-env contract: the env-var NAMES this CLI reads for the model-serving endpoint and credential.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `base_url` | string |  |  | BaseURL is the env var name the harness reads for the serving base URL. |
+| `api_key` | string |  |  | APIKey is the env var name the harness reads for the API key. |
+| `auth_token` | string |  |  | AuthToken is the env var name the harness reads for a bearer auth token. |
+
+## UpstreamSpec
+
+UpstreamSpec is a named model-serving endpoint preset (Phase C — the Upstream axis: WHO serves+resolves the model).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `description` | string |  |  | Description is a human-readable summary shown in tooling. |
+| `base_url` | string |  |  | BaseURL is the abstract serving endpoint, rendered onto the harness's base_url env var name (UpstreamEnvBinding.BaseURL). |
+| `api_key` | string |  |  | APIKey is the abstract credential, rendered onto the harness's api_key env var name. May be a $VAR ref so the secret stays out of config. |
+| `auth_token` | string |  |  | AuthToken is an abstract bearer-token credential (an alternative to APIKey for harnesses/upstreams that use a token), rendered onto the harness's auth_token env var name. |
+| `base_url_env` | string |  |  | BaseURLEnv/APIKeyEnv/AuthTokenEnv override the HARNESS binding's env-var name for the corresponding abstract field. Needed for GATEWAY harnesses — one CLI (e.g. opencode) fronting many upstreams where the credential env var is upstream-dependent (GROQ_API_KEY, CEREBRAS_API_KEY, …), so the HARNESS has no single binding and the UPSTREAM names its own target. Precedence per field: this override &gt; the harness binding &gt; error. |
+| `api_key_env` | string |  |  | APIKeyEnv overrides the harness binding's api_key env-var name for this upstream (see BaseURLEnv for when this is needed). |
+| `auth_token_env` | string |  |  | AuthTokenEnv overrides the harness binding's auth_token env-var name for this upstream (see BaseURLEnv). |
+| `env` | map[string]string |  |  | Env is a harness-specific escape hatch: raw env keys merged AFTER the abstract fields render. Values may use $VAR refs. |
 
 ## UsageConfig
 

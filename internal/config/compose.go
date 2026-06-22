@@ -977,6 +977,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	// Providers: deep-merge per-field.
 	mergeProviders(base, fragment, fragMeta, fragPath, prov)
 
+	// Upstreams: additive merge with collision warnings.
+	mergeUpstreams(base, fragment, fragPath, prov)
+
 	// Workspace: per-field merge.
 	mergeWorkspace(base, fragment, fragMeta, fragPath, prov)
 
@@ -1100,6 +1103,28 @@ func mergePacks(base, fragment *City, fragPath string, prov *Provenance) {
 	}
 }
 
+// mergeUpstreams additively merges fragment upstream presets into base.
+// New upstream names are added. Duplicate names replace the base entry and
+// generate a collision warning. Upstreams are city-level config (declared in
+// city.toml or a city fragment), so fragment composition is the only layering
+// path they take; a [upstreams.<name>] block in a fragment must reach the
+// composed City so later session resolution can find it.
+func mergeUpstreams(base, fragment *City, fragPath string, prov *Provenance) {
+	if len(fragment.Upstreams) == 0 {
+		return
+	}
+	if base.Upstreams == nil {
+		base.Upstreams = make(map[string]UpstreamSpec)
+	}
+	for name, spec := range fragment.Upstreams {
+		if _, exists := base.Upstreams[name]; exists {
+			prov.Warnings = append(prov.Warnings,
+				fmt.Sprintf("upstream %q redefined by %q", name, fragPath))
+		}
+		base.Upstreams[name] = spec
+	}
+}
+
 // mergeProviders deep-merges fragment providers into base providers.
 // New providers are added. Existing providers are merged per-field with
 // collision warnings.
@@ -1218,6 +1243,39 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 			cloned[k] = v
 		}
 		result.Env = cloned
+	}
+
+	// upstream_env (the harness serving-env binding) merges per sub-field so a
+	// fragment can override a single env-var name without dropping the others.
+	// Each defined sub-field overrides the base and warns on a redefine, matching
+	// the scalar provider-field behavior above.
+	if fragMeta.IsDefined("providers", name, "upstream_env") {
+		bindingFields := []scalarField{
+			{
+				"base_url",
+				func() bool { return base.UpstreamEnv.BaseURL != "" },
+				func() { result.UpstreamEnv.BaseURL = frag.UpstreamEnv.BaseURL },
+			},
+			{
+				"api_key",
+				func() bool { return base.UpstreamEnv.APIKey != "" },
+				func() { result.UpstreamEnv.APIKey = frag.UpstreamEnv.APIKey },
+			},
+			{
+				"auth_token",
+				func() bool { return base.UpstreamEnv.AuthToken != "" },
+				func() { result.UpstreamEnv.AuthToken = frag.UpstreamEnv.AuthToken },
+			},
+		}
+		for _, bf := range bindingFields {
+			if fragMeta.IsDefined("providers", name, "upstream_env", bf.key) {
+				if bf.hasBase() {
+					prov.Warnings = append(prov.Warnings,
+						fmt.Sprintf("provider %q.upstream_env.%s redefined by %q", name, bf.key, fragPath))
+				}
+				bf.apply()
+			}
+		}
 	}
 
 	return result

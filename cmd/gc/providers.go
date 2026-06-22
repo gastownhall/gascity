@@ -22,14 +22,9 @@ import (
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
-	sessioncloudflare "github.com/gastownhall/gascity/internal/runtime/cloudflare"
-	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
-	sessionsubprocess "github.com/gastownhall/gascity/internal/runtime/subprocess"
-	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -79,7 +74,7 @@ func sessionProviderContextForCity(cfg *config.City, cityPath, providerOverride 
 
 var (
 	openSessionProviderStore   = openCityStoreAt
-	buildSessionProviderByName = newSessionProviderByName
+	buildSessionProviderByName = newSessionProviderForCityByName
 )
 
 // tmuxConfigFromSession converts a config.SessionConfig into a
@@ -115,10 +110,16 @@ func providerStateDir(providerName, cityPath string) string {
 	return filepath.Join(supervisor.RuntimeDir(), providerName, hex.EncodeToString(sum[:4]))
 }
 
-// newSessionProviderByName constructs a runtime.Provider from a provider name.
-// cityName is used to auto-default the tmux socket when none is configured.
-// cityPath is used to isolate socket-based providers per city.
-// Returns error instead of os.Exit, making it safe for the hot-reload path.
+// newSessionProviderForCityByName resolves a selection name through the
+// city's runtime registry: the builtins plus any pack-declared runtimes
+// from cfg (RUNTIME-SEL-011). cfg may be nil (no city context), in which
+// case only builtin names resolve. A pack runtime colliding with a builtin
+// name surfaces here as a construction error.
+// See cmd/gc/runtime_registry.go for the builtin registrations and
+// internal/runtime/REQUIREMENTS.md for the selection contract:
+// cityName auto-defaults the tmux socket when none is configured,
+// cityPath isolates socket-based providers per city, and errors return
+// instead of os.Exit, making this safe for the hot-reload path.
 //
 //   - "fake" → in-memory fake (all ops succeed)
 //   - "fail" → broken fake (all ops return errors)
@@ -126,46 +127,47 @@ func providerStateDir(providerName, cityPath string) string {
 //   - "acp" → ACP (Agent Client Protocol) JSON-RPC over stdio
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - "k8s" → native Kubernetes provider (client-go)
+//   - "<pack runtime>" → exec proxy bound to the pack's declared command
 //   - default → real tmux provider
-func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-	if strings.HasPrefix(name, "exec:") {
-		script := strings.TrimPrefix(name, "exec:")
-		if isLegacyT3BridgeExecScript(script) {
-			return sessiont3bridge.NewProvider(), nil
-		}
-		return sessionexec.NewProvider(script), nil
-	}
-	switch name {
-	case "fake":
-		return runtime.NewFake(), nil
-	case "fail":
-		return runtime.NewFailFake(), nil
-	case "subprocess":
-		if cityPath != "" {
-			return sessionsubprocess.NewProviderWithDir(providerStateDir("subprocess", cityPath)), nil
-		}
-		return sessionsubprocess.NewProvider(), nil
-	case "acp":
-		cfg := sessionacp.Config{
-			HandshakeTimeout:  sc.ACP.HandshakeTimeoutDuration(),
-			NudgeBusyTimeout:  sc.ACP.NudgeBusyTimeoutDuration(),
-			OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
-		}
-		if cityPath != "" {
-			return sessionacp.NewProviderWithDir(providerStateDir("acp", cityPath), cfg), nil
-		}
-		return sessionacp.NewProvider(cfg), nil
-	case "t3bridge":
-		return sessiont3bridge.NewProvider(), nil
-	case "cloudflare":
-		return sessioncloudflare.NewProvider()
-	case "k8s":
-		return sessionk8s.NewProvider()
-	case "hybrid":
-		return newHybridProvider(sc, cityName, cityPath)
+func newSessionProviderForCityByName(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	// Selection flows through the de-conflated WorkerSpec atom and the Resolver.
+	// The Runtime axis is the selection name; Transport is populated from it
+	// (transport is bundled with the runtime today — "acp" is a whole provider,
+	// not a transport over a box — so the name determines it). Per-session
+	// Transport composition (tmux↔acp routing) lives in resolveSessionTransportProvider.
+	// Model/Upstream/Harness are carried by the session config, not this seam.
+	return resolveWorkerSpec(cfg, runtime.WorkerSpec{Runtime: name, Transport: transportForRuntimeName(name)}, sc, cityName, cityPath)
+}
+
+// transportForRuntimeName reports the Transport axis value bundled with a Runtime
+// selection name. Transport (HOW gc drives the agent: tmux vs acp) is coupled to
+// the runtime today — acp is its own provider — so the name fixes it: "acp" → acp,
+// "t3bridge" → its bespoke turn transport, everything else (tmux/exec/ssh/k8s/…)
+// → the tmux carrier. This makes WorkerSpec.Transport explicit at the Resolver
+// seam (where per-spec Transport honoring would land when runtime↔transport are
+// genuinely decoupled).
+func transportForRuntimeName(name string) string {
+	switch {
+	case name == "acp":
+		return config.SessionTransportACP
+	case name == "t3bridge" || (strings.HasPrefix(name, "exec:") && isLegacyT3BridgeExecScript(strings.TrimPrefix(name, "exec:"))):
+		return "t3"
 	default:
-		return sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
+		return config.SessionTransportTmux
 	}
+}
+
+// resolveWorkerSpec resolves a [runtime.WorkerSpec] to a session provider. It is
+// the seam where axis-based selection lives: today only the Runtime axis drives
+// selection (mapping to the registry's seam-backed construction), but it is the
+// single place the Transport/Upstream axes will be honored as the de-conflation
+// completes.
+func resolveWorkerSpec(cfg *config.City, spec runtime.WorkerSpec, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	reg, err := runtimeRegistryForCity(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return reg.New(spec.Runtime, sc, cityName, cityPath)
 }
 
 func isLegacyT3BridgeExecScript(script string) bool {
@@ -233,30 +235,43 @@ func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *ses
 }
 
 func newSessionProviderFromContextWithError(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	sp, err := buildSessionProviderByName(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
+	return resolveSessionTransportProvider(ctx, sessionBeads)
+}
+
+// resolveSessionTransportProvider is the single Resolver seam that composes the
+// session Transport axis (tmux vs acp). It builds the base provider for the
+// city's session-provider name (the Runtime axis, via buildSessionProviderByName
+// → resolveWorkerSpec) and — when the base is not acp but some agents select the
+// acp transport — composes an auto.Provider that routes those sessions to an acp
+// backend. Per-session transport is the auto router's job; this is where the
+// composition is owned (construction time). Dynamically-created sessions are
+// routed at start via the same auto.Provider (build_desired_state RouteACP).
+// Behavior is identical to the prior inline composition.
+func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
+	base, err := buildSessionProviderByName(ctx.cfg, ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
 	if err != nil {
 		return nil, err
 	}
-	// If the city-level provider is not ACP but some agents need ACP,
-	// wrap in an auto provider that routes per-session.
-	// NOTE: agents comes from loadCityConfig which applies pack overrides,
-	// so the Session field from overrides is already resolved here.
+	// If the city-level provider is not ACP but some agents need ACP, wrap in an
+	// auto provider that routes per-session.
+	// NOTE: agents comes from loadCityConfig which applies pack overrides, so the
+	// Session field from overrides is already resolved here.
 	requireACPWrapper := requiresACPProviderWrapper(sessionBeads, ctx.cityName, ctx.cfg)
 	if ctx.providerName != "acp" && needsACPProviderWrapper(sessionBeads, ctx.cityName, ctx.cfg) {
-		acpSP, acpErr := buildSessionProviderByName("acp", ctx.sc, ctx.cityName, ctx.cityPath)
+		acpSP, acpErr := buildSessionProviderByName(ctx.cfg, "acp", ctx.sc, ctx.cityName, ctx.cityPath)
 		if acpErr != nil {
 			if requireACPWrapper {
 				return nil, fmt.Errorf("acp provider: %w", acpErr)
 			}
-			return sp, nil
+			return base, nil
 		}
-		autoSP := sessionauto.New(sp, acpSP)
+		autoSP := sessionauto.New(base, acpSP)
 		for _, sessName := range configuredACPRouteNames(sessionBeads, ctx.cityName, ctx.cfg) {
 			autoSP.RouteACP(sessName)
 		}
 		return autoSP, nil
 	}
-	return sp, nil
+	return base, nil
 }
 
 func agentSessionCreateTransport(cfg *config.City, agentCfg config.Agent) string {
@@ -993,8 +1008,10 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 // env var controls which sessions go to k8s. If unset, all sessions route to
 // local tmux.
 func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-	local := sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewProvider()
+	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
+	// hybrid-routed sessions flow through the seams like every other path.
+	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
+	remote, err := sessionk8s.NewSeamBacked()
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
 	}

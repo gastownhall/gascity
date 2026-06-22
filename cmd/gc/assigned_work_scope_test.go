@@ -260,6 +260,86 @@ func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 	}
 }
 
+// TestSessionAssignedWorkGuardsFederateForCityScopedSession is the cross-store
+// regression for the reconciler guard path. A city-scoped (cross-store-eligible)
+// session legitimately owns rig-store-routed work (vp-kvp), so every reachable-store
+// guard the drain/close/recycle/stranded paths consult — the open-work check, the
+// awake check, the stranded-bead lookup, and the stranded-work collector — must
+// federate across the city store AND every rig store for it, exactly like
+// openSessionReachableStoreRef's cross-store wildcard. Before the fix these guards
+// resolved the city-scoped session to a single configured store and missed its
+// rig-store work, so a live holder could be closed/drained/recycled or
+// under-reported (#3453 re-regression). Rig-scoped sessions stay single-store
+// (covered by TestSessionHasOpenAssignedWorkUsesOnlyReachableStore).
+func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:  "auditor",
+			Scope: "city",
+		}},
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{"riga": rigStore}
+	session := beads.Bead{
+		ID:     "session-1",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "auditor",
+			"session_name": "auditor-session",
+		},
+	}
+	// Work lives ONLY in the rig store, assigned to the city-scoped session.
+	rigWork, err := rigStore.Create(beads.Bead{
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create rig work: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := rigStore.Update(rigWork.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark rig work in progress: %v", err)
+	}
+
+	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, rigStores, session)
+	if err != nil {
+		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
+	}
+	if !has {
+		t.Fatal("city-scoped session must see its rig-store work across stores (close/drain guard)")
+	}
+
+	awake, err := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, cityStore, rigStores, session)
+	if err != nil {
+		t.Fatalf("sessionHasAwakeAssignedWorkForReachableStore: %v", err)
+	}
+	if !awake {
+		t.Fatal("city-scoped session's in-progress rig-store work must keep it awake (recycle guard)")
+	}
+
+	bead, found, err := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, cityStore, rigStores, session)
+	if err != nil {
+		t.Fatalf("firstOpenAssignedWorkBeadForReachableStore: %v", err)
+	}
+	if !found || bead.ID != rigWork.ID {
+		t.Fatalf("stranded-bead lookup must find rig-store work for a city-scoped session; found=%v bead=%q want=%q", found, bead.ID, rigWork.ID)
+	}
+
+	stranded, err := collectSessionAssignedWork(cityPath, cfg, cityStore, rigStores, session)
+	if err != nil {
+		t.Fatalf("collectSessionAssignedWork: %v", err)
+	}
+	if len(stranded) != 1 || stranded[0].bead.ID != rigWork.ID {
+		t.Fatalf("stranded-work collector must include rig-store work for a city-scoped session; got %#v", stranded)
+	}
+}
+
 func TestSessionHasOpenAssignedWorkMatchesConfiguredNamedSessionRuntimeFallback(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
