@@ -995,6 +995,7 @@ func TestHealthScriptProbesConfiguredExternalHost(t *testing.T) {
 	root := repoRoot(t)
 	fakeBin := t.TempDir()
 	argsFile := filepath.Join(t.TempDir(), "dolt.args")
+	emptyDataDir := t.TempDir()
 
 	// Force the local managed-server precheck to fail. External hosts must still
 	// be probed via SQL against GC_DOLT_HOST:GC_DOLT_PORT.
@@ -1008,9 +1009,11 @@ exit 0
 
 	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
 	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
-		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "FAKE_DOLT_ARGS"),
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "FAKE_DOLT_ARGS",
+		"GC_DOLT_DATA_DIR"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+emptyDataDir,
 		"GC_DOLT_HOST=superlzy-dolt",
 		"GC_DOLT_PORT=3306",
 		"GC_DOLT_USER=superlzy",
