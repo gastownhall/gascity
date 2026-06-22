@@ -1,6 +1,14 @@
 [order]
 description = "Generate daily code digest across all rigs"
 formula = "mol-digest-generate"
+# scope="city" registers this order exactly once for the whole town, no matter
+# how many rigs import the gastown pack. Without it the order is rig-scoped (the
+# default) and instantiates once PER RIG: a single daily pour fans out to one
+# digest molecule per rig, and each rig instance keeps its own independent 24h
+# cooldown clock in its own bead store — so the same UTC window gets re-digested
+# (co-ktkqt). The digest formula already iterates every rig (`gc rig list`), so
+# one townwide run covers the whole town.
+scope = "city"
 trigger = "cooldown"
 interval = "24h"
 pool = "dog"

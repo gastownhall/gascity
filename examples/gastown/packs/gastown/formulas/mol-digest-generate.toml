@@ -15,21 +15,24 @@ gc runtime drain-ack
 
 The drain-ack tells the controller this session is done.
 
-This is a **periodic formula** — dispatched by the deacon's
-`periodic-formulas` step when the cooldown trigger elapses. Configured
-in `city.toml` under `[formulas]`:
+This formula is dispatched by the `digest-generate` order
+(`orders/digest-generate.toml`), a city-scoped cooldown order:
 
 ```toml
-[[formulas.periodic]]
+[order]
 formula = "mol-digest-generate"
+scope = "city"      # exactly one townwide run/day, never one per rig
 trigger = "cooldown"
 interval = "24h"
 pool = "dog"
 ```
 
-The deacon checks if enough time has passed since the last run
-(tracked via `type:order-run` beads), pours a wisp, and labels it
-for the dog pool. A dog picks it up and runs this formula.
+When the 24h cooldown elapses, the controller's order dispatcher records
+the run via a `type:order-run` bead (the same bead the cooldown check
+reads), pours a wisp, and labels it for the dog pool. A dog picks it up
+and runs this formula. There is exactly ONE townwide digest per day — the
+order is `scope = "city"`, so it is not instantiated per rig, and the
+single cooldown clock prevents re-pours of the same window (co-ktkqt).
 
 ## What it produces
 
@@ -79,7 +82,15 @@ UNTIL=$(date -u -d 'today 00:00' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
         date -u -j -f '%H:%M' '00:00' +%Y-%m-%dT%H:%M:%SZ)
 ```
 
-Note the timestamps for the digest header.
+**3. Derive a stable window key** — the start date of the window, used to
+label the digest bead and to detect a duplicate run of the same window:
+
+```bash
+# daily: the SINCE date, e.g. 2026-06-20 -> window:2026-06-20
+WINDOW=${SINCE%%T*}
+```
+
+Note the timestamps and $WINDOW for the digest header and dedup check.
 
 Continue to data collection when the time range is established."""
 
@@ -137,6 +148,20 @@ title = "Generate digest, send to mayor, archive"
 description = """
 Transform data into a formatted digest and deliver it.
 
+**0. Dedup guard — never mail two digests for the same window.**
+The city-scoped order + 24h cooldown make a same-window re-pour unlikely,
+but a manual `gc order run`, a cross-midnight retry, or clock skew can
+still produce one. Before generating, check for an existing digest bead
+for this $WINDOW:
+
+```bash
+gc bd list --label=digest,window:$WINDOW --json --limit=1
+```
+
+If one already exists, this window is already delivered. Do NOT mail or
+create a second digest bead — skip to step 4 (close the work bead, augment
+the existing digest bead if you have new data, drain-ack, exit).
+
 **1. Generate digest markdown:**
 
 ```markdown
@@ -171,10 +196,12 @@ gc mail send mayor/ -s "Gas Town Digest: $DATE" -m "$DIGEST"
 ```
 
 **3. Archive as bead:**
+The `window:$WINDOW` label is what the step-0 dedup guard matches on, so it
+MUST be present and MUST be the start date of the window (not today's date):
 ```bash
 gc bd create --type=task \
   --title="Digest: $DATE" \
-  --label=digest,{{period}}
+  --label=digest,{{period}},window:$WINDOW
 ```
 
 **4. Close work bead, signal reconciler, and exit:**
@@ -184,5 +211,5 @@ gc runtime drain-ack
 exit
 ```
 
-The deacon records this run via a `type:order-run` bead for cooldown
-tracking on the next patrol cycle."""
+The controller's order dispatcher records this run via a `type:order-run`
+bead for cooldown tracking; the next tick honors the 24h interval."""

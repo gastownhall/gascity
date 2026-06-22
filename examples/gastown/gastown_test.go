@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -324,6 +325,64 @@ func TestCityPackTomlParses(t *testing.T) {
 	}
 	if gastownDefault.Source != "packs/gastown" {
 		t.Errorf("city.toml defaults.rig.imports[\"gastown\"].Source = %q, want %q", gastownDefault.Source, "packs/gastown")
+	}
+}
+
+// TestDigestGenerateOrderIsCityScoped locks the fix for the townwide digest
+// re-pour storm (gastownhall/gascity#co-ktkqt). digest-generate is imported by
+// every rig (it lives in packs/gastown/orders and the gastown pack is stamped
+// per-rig). Without scope="city" it instantiates once PER RIG, so a single
+// daily pour fans out to one digest molecule per rig, and each rig instance
+// keeps its own independent 24h cooldown clock in its own bead store — which is
+// how the same UTC window got re-digested ~16.5h after the first run. It must
+// be city-scoped so orderdiscovery.ScanAll registers it exactly once townwide
+// (one instance, one cooldown series). The generic scope mechanism is covered
+// by orderdiscovery.TestScanAllCityScopedOrderRegistersOnceAcrossRigs; this
+// asserts the gastown pack order actually opts in.
+func TestDigestGenerateOrderIsCityScoped(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "orders", "digest-generate.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	order, err := orders.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing digest-generate order: %v", err)
+	}
+	if !order.IsCityScoped() {
+		t.Fatalf("digest-generate order Scope = %q, want \"city\" — without it the order fans out per-rig (re-pour storm, co-ktkqt)", order.Scope)
+	}
+	if err := orders.Validate(orders.Order{
+		Name:     "digest-generate",
+		Formula:  order.Formula,
+		Trigger:  order.Trigger,
+		Interval: order.Interval,
+		Pool:     order.Pool,
+		Scope:    order.Scope,
+	}); err != nil {
+		t.Fatalf("digest-generate order does not validate: %v", err)
+	}
+}
+
+// TestDigestFormulaDocsDropStalePeriodicFormulasPath guards against the stale
+// documentation that described digest dispatch via a deacon "periodic-formulas"
+// step configured under city.toml [[formulas.periodic]]. No such config path or
+// deacon step exists in the codebase: the live dispatch path is the controller
+// order dispatcher driven by [order] trigger="cooldown". Keeping the stale prose
+// misleads operators debugging the cooldown (co-ktkqt).
+func TestDigestFormulaDocsDropStalePeriodicFormulasPath(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-digest-generate.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	body := string(data)
+	for _, stale := range []string{"formulas.periodic", "periodic-formulas"} {
+		if strings.Contains(body, stale) {
+			t.Errorf("mol-digest-generate.toml still references %q — no such dispatch path exists (co-ktkqt); document the [order] trigger=\"cooldown\" controller path instead", stale)
+		}
 	}
 }
 
