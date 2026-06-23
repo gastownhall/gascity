@@ -7,15 +7,19 @@ import (
 	"time"
 )
 
-var fixedTS = time.Date(2026, 6, 21, 10, 3, 27, 0, time.UTC)
+var (
+	fixedTS = time.Date(2026, 6, 21, 10, 3, 27, 0, time.UTC)
+	// testSalt is >= minSaltLen so ProjectEvent does not fail closed on it.
+	testSalt = []byte("sixteen-byte-salt-xx")
+)
 
-// proj is a test shorthand for ProjectFields at the fixed test time.
+// proj is a test shorthand for ProjectEvent at the fixed test time.
 func proj(seq uint64, typ, actor, subject, runID, sessionID string, opt Options) (Envelope, bool) {
-	return ProjectFields(seq, typ, fixedTS, actor, subject, runID, sessionID, opt)
+	return ProjectEvent(TaggedEvent{Seq: seq, Type: typ, Ts: fixedTS, Actor: actor, Subject: subject, RunID: runID, SessionID: sessionID}, opt)
 }
 
-func TestProjectFields_AllowlistAndExclusions(t *testing.T) {
-	opt := Options{Salt: []byte("salt"), ExportRef: true}
+func TestProjectEvent_AllowlistAndExclusions(t *testing.T) {
+	opt := Options{Salt: testSalt, ExportRef: true}
 
 	if _, ok := proj(1, "bead.updated", "cache-reconcile", "mc-6c9w", "", "", opt); ok {
 		t.Fatal("bead.updated must be excluded (not allowlisted)")
@@ -70,32 +74,51 @@ func TestProjectFields_AllowlistAndExclusions(t *testing.T) {
 	if _, ok := proj(0, "bead.closed", "gc", "mc-1", "", "", opt); ok {
 		t.Fatal("seq==0 must be dropped")
 	}
-	if _, ok := ProjectFields(7, "bead.closed", time.Time{}, "gc", "mc-1", "", "", opt); ok {
+	if _, ok := ProjectEvent(TaggedEvent{Seq: 7, Type: "bead.closed", Ts: time.Time{}, Actor: "gc", Subject: "mc-1"}, opt); ok {
 		t.Fatal("zero timestamp must be dropped")
 	}
 }
 
-func TestProjectFields_RunSessionGating(t *testing.T) {
-	opt := Options{Salt: []byte("s"), ExportRef: true}
+// TestProjectEvent_RejectsShortSalt proves the fail-closed salt guard: a salt
+// shorter than 16 bytes drops the event rather than emit a brute-forceable hash.
+func TestProjectEvent_RejectsShortSalt(t *testing.T) {
+	for _, salt := range [][]byte{nil, {}, []byte("short"), []byte("fifteen-bytes!!")} {
+		if _, ok := proj(1, "bead.closed", "gc", "mc-1", "", "", Options{Salt: salt, ExportRef: true}); ok {
+			t.Fatalf("salt of %d bytes must fail closed (require >= %d)", len(salt), minSaltLen)
+		}
+	}
+	// exactly 16 bytes is accepted.
+	if _, ok := proj(1, "bead.closed", "gc", "mc-1", "", "", Options{Salt: []byte("0123456789abcdef"), ExportRef: true}); !ok {
+		t.Fatal("16-byte salt must be accepted")
+	}
+}
 
-	// opaque ids round-trip into the envelope.
-	got, ok := proj(1, "bead.closed", "gc", "mc-1", "wf-root-abc", "sess-9f2a", opt)
-	if !ok || got.RunID != "wf-root-abc" || got.SessionID != "sess-9f2a" {
-		t.Fatalf("opaque run/session must round-trip, got run=%q session=%q", got.RunID, got.SessionID)
+func TestProjectEvent_RunSessionGating(t *testing.T) {
+	// EmitCorrelation must be set for run_id/session_id to appear at all (the
+	// fail-closed M1 default: they ship empty in v0).
+	off := Options{Salt: testSalt, ExportRef: true}
+	got, _ := proj(1, "bead.closed", "gc", "mc-1", "wf-root-abc", "sess-9f2a", off)
+	if got.RunID != "" || got.SessionID != "" {
+		t.Fatalf("EmitCorrelation=false must drop run/session, got run=%q session=%q", got.RunID, got.SessionID)
 	}
 
-	// non-opaque values are dropped to "" by safeRef, never emitted — exercise a
-	// path, an address, an uppercase, and a space through BOTH the run and session
-	// slots (not just the ref path).
+	on := Options{Salt: testSalt, ExportRef: true, EmitCorrelation: true}
+	got, ok := proj(1, "bead.closed", "gc", "mc-1", "wf-root-abc", "sess-9f2a", on)
+	if !ok || got.RunID != "wf-root-abc" || got.SessionID != "sess-9f2a" {
+		t.Fatalf("opaque run/session must round-trip when emitted, got run=%q session=%q", got.RunID, got.SessionID)
+	}
+
+	// non-opaque values dropped to "" by safeRef even with emission enabled —
+	// exercise a path, an address, an uppercase, and a space through BOTH slots.
 	for _, bad := range []string{"gascity/codex", "user@host", "My Run", "UPPER", "a b"} {
-		g, _ := proj(2, "bead.closed", "gc", "mc-2", bad, bad, opt)
+		g, _ := proj(2, "bead.closed", "gc", "mc-2", bad, bad, on)
 		if g.RunID != "" || g.SessionID != "" {
 			t.Fatalf("non-opaque %q must drop to empty, got run=%q session=%q", bad, g.RunID, g.SessionID)
 		}
 	}
 
 	// mail.sent stays {type,ts} only — never carries run/session.
-	got, _ = proj(3, "mail.sent", "gc", "mc-3", "wf-root-abc", "sess-9f2a", opt)
+	got, _ = proj(3, "mail.sent", "gc", "mc-3", "wf-root-abc", "sess-9f2a", on)
 	if got.RunID != "" || got.SessionID != "" {
 		t.Fatalf("mail.sent must not carry run/session, got %+v", got)
 	}
@@ -107,7 +130,7 @@ func TestProjectFields_RunSessionGating(t *testing.T) {
 // counterpart (internal/eventfeed) proves the events.Event payload/message are
 // never copied INTO these fields in the first place.
 func TestProject_NoLeak(t *testing.T) {
-	opt := Options{Salt: []byte("org-salt"), ExportRef: true}
+	opt := Options{Salt: testSalt, ExportRef: true}
 	type in struct {
 		seq                            uint64
 		typ, actor, subject, run, sess string
@@ -171,5 +194,18 @@ func TestActorHash(t *testing.T) {
 	}
 	if ActorHash([]byte("s"), "") != "" {
 		t.Fatal("empty actor -> empty hash")
+	}
+}
+
+func TestIsOpaqueRef(t *testing.T) {
+	for _, ok := range []string{"mc-wisp-i6vz0e", "gcg-4216", "wf-root-abc", "a.b_c-1"} {
+		if !IsOpaqueRef(ok) {
+			t.Errorf("IsOpaqueRef(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", "gascity/codex", "user@host", "My Run", "UPPER", "a b", strings.Repeat("a", maxRefLen+1)} {
+		if IsOpaqueRef(bad) {
+			t.Errorf("IsOpaqueRef(%q) = true, want false", bad)
+		}
 	}
 }

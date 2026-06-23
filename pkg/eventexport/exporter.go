@@ -27,6 +27,7 @@ type TaggedEvent struct {
 	Subject   string
 	RunID     string
 	SessionID string
+	_         struct{} // force keyed literals; blocks positional field transposition
 }
 
 // Source yields tagged events in per-city seq order. The real Source wraps the
@@ -174,13 +175,15 @@ func (e *Exporter) ingest(te TaggedEvent) {
 		return // already processed (resume overlap)
 	}
 	e.high[te.City] = te.Seq
+	// EmitCorrelation stays false in v0: run_id/session_id ship empty until the
+	// typed-at-record-site follow-up lands (then Config gains the toggle).
 	opt := Options{Salt: e.cfg.Salt, ExportRef: e.cfg.ExportRef, Profile: e.cfg.Profile}
-	env, ok := ProjectFields(te.Seq, te.Type, te.Ts, te.Actor, te.Subject, te.RunID, te.SessionID, opt)
+	env, ok := ProjectEvent(te, opt)
 	if !ok {
 		return
 	}
 	// Defense-in-depth at the trust boundary: never ship an envelope that fails
-	// the redaction invariants. ProjectFields builds a valid envelope by
+	// the redaction invariants. ProjectEvent builds a valid envelope by
 	// construction, so a failure here is a projection bug — drop it loudly rather
 	// than egress something unexpected.
 	if err := Validate(env, opt); err != nil {

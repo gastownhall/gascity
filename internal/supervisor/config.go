@@ -73,7 +73,10 @@ type ExportConfig struct {
 	// re-read on each POST so the token can be rotated out of band, and takes
 	// precedence over Token.
 	TokenFile string `toml:"token_file,omitempty"`
-	// ActorSalt salts the actor hash so it is stable yet non-reversible.
+	// ActorSalt salts the actor hash so it is stable yet non-reversible. It must
+	// be at least 16 bytes: a shorter salt makes the hash brute-forceable, so the
+	// projection fails closed and drops every event (the supervisor warns at
+	// startup). Leave empty to use a random per-install salt.
 	ActorSalt string `toml:"actor_salt,omitempty"`
 	// BatchMaxEvents caps events per POST (default 1000).
 	BatchMaxEvents int `toml:"batch_max_events,omitempty"`

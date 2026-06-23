@@ -226,6 +226,12 @@ func skipRepoLintDir(name string) bool {
 	if name == "vendor" || name == "node_modules" {
 		return true
 	}
+	// pkg/ is the public, OSS-consumable tree: its tests must stay testenv-free
+	// so an external module can run them (cross-module conformance replay). Do
+	// not require the internal/testenv blank-import there.
+	if name == "pkg" {
+		return true
+	}
 	if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
 		return true
 	}
