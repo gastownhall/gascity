@@ -68,27 +68,45 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 	})
 
 	cursorPath := filepath.Join(homeDir, "events-export-cursor.json")
-	exp.SetCursors(eventexport.LoadCursors(cursorPath))
+	cursors, err := eventexport.LoadCursors(cursorPath)
+	if err != nil {
+		// Fail closed: a corrupt or unreadable cursor file would otherwise floor
+		// each city at its current head and silently skip every event accumulated
+		// since the last durable cursor. Refuse to start and surface it so an
+		// operator can repair the file (or remove it to deliberately start fresh)
+		// rather than lose exports.
+		logf("ERROR: cannot read durable export cursor %s (refusing to start; remove it to start fresh): %v", cursorPath, err)
+		return
+	}
+	exp.SetCursors(cursors)
 
 	src := eventfeed.NewMuxSource(providers, exp.Cursors, muxRebuildInterval, logf)
 	go func() { _ = exp.Run(ctx, src) }()
-	go persistExportCursors(ctx, exp, cursorPath)
+	go persistExportCursors(ctx, exp, cursorPath, logf)
 
 	logf("enabled -> %s (envelope-only metadata; no payloads leave the box)", ec.Endpoint)
 }
 
 // persistExportCursors snapshots the exporter cursor to disk periodically and on
-// shutdown so a restart resumes without re-reading the whole history.
-func persistExportCursors(ctx context.Context, exp *eventexport.Exporter, path string) {
+// shutdown so a restart resumes without re-reading the whole history. A save
+// failure is logged rather than swallowed: a full disk or bad permissions means
+// a restart would resume from a stale cursor (re-exporting or skipping events),
+// which an operator needs to see.
+func persistExportCursors(ctx context.Context, exp *eventexport.Exporter, path string, logf func(string, ...any)) {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
+	save := func() {
+		if err := eventexport.SaveCursors(path, exp.Cursors()); err != nil {
+			logf("WARNING: failed to persist export cursor %s (a restart may re-export or skip events): %v", path, err)
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
-			_ = eventexport.SaveCursors(path, exp.Cursors()) //nolint:errcheck
+			save()
 			return
 		case <-t.C:
-			_ = eventexport.SaveCursors(path, exp.Cursors()) //nolint:errcheck
+			save()
 		}
 	}
 }
@@ -110,7 +128,16 @@ func resolveExportCredentials(ec supervisor.ExportConfig, homeDir string, stderr
 			if err != nil {
 				return "", err
 			}
-			return strings.TrimSpace(string(b)), nil
+			tok := strings.TrimSpace(string(b))
+			if tok == "" {
+				// A configured token source that resolves empty is a config/auth
+				// error, not the deliberately-anonymous opt-out (which is the nil
+				// provider). Fail closed so the cursor holds and the empty
+				// credential surfaces, rather than silently downgrading to an
+				// unauthenticated POST.
+				return "", fmt.Errorf("token_file %s resolved to an empty token", tokenFile)
+			}
+			return tok, nil
 		}
 	case ec.Token != "":
 		token := ec.Token

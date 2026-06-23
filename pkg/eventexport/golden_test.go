@@ -10,8 +10,8 @@ import (
 // TestGoldenWireBytes pins the exact JSON for representative envelopes so any
 // change that alters the wire bytes is caught — and, per the SchemaVersion
 // contract, must bump SchemaVersion. Crucially it proves that empty
-// run_id/session_id are OMITTED (byte-identical to the pre-spine wire), which is
-// what lets this restructure stay at SchemaVersion 1.
+// run_id/session_id are OMITTED (byte-identical to the pre-spine wire), so
+// adding that correlation spine did not by itself change the envelope bytes.
 func TestGoldenWireBytes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -50,16 +50,17 @@ func TestGoldenWireBytes(t *testing.T) {
 	}
 }
 
-// TestBatchGoldenBytes pins the batch envelope shape.
+// TestBatchGoldenBytes pins the batch envelope shape: an opaque city_hash (never
+// a cleartext city name) and schema_version 2.
 func TestBatchGoldenBytes(t *testing.T) {
-	b := Batch{CityID: "maintainer-city", SchemaVersion: SchemaVersion, Events: []Envelope{
+	b := Batch{CityHash: "7f3a9c1e5b2d4068", SchemaVersion: SchemaVersion, Events: []Envelope{
 		{Seq: 1, Type: "convoy.closed", TS: "2026-06-21T10:03:27Z", ActorHash: "0123456789abcdef", Ref: "gcg-4216"},
 	}}
 	out, err := json.Marshal(b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"city_id":"maintainer-city","schema_version":1,"events":[{"seq":1,"type":"convoy.closed","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","ref":"gcg-4216"}]}`
+	want := `{"city_hash":"7f3a9c1e5b2d4068","schema_version":2,"events":[{"seq":1,"type":"convoy.closed","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","ref":"gcg-4216"}]}`
 	if string(out) != want {
 		t.Fatalf("batch golden:\n got %s\nwant %s", out, want)
 	}

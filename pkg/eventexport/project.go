@@ -36,7 +36,11 @@ import (
 // golden test), so a downstream consumer pinned to an older version rejects the
 // batch loudly (ValidateBatch -> ErrSchemaMismatch) instead of mis-handling it.
 // A pure refactor that leaves bytes and policy identical does NOT bump.
-const SchemaVersion = 1
+//
+// v2 replaced the cleartext city_id with a salted, non-reversible city_hash so
+// an operator-chosen city name (which can itself embed a customer/org
+// identifier) no longer leaves the box.
+const SchemaVersion = 2
 
 // Profile selects the redaction profile. There is exactly one today; it is part
 // of the public API so Validate can stay profile-aware as profiles are added
@@ -129,9 +133,11 @@ type Envelope struct {
 	SessionID string `json:"session_id,omitempty"` // opaque session correlation id (safeRef-gated)
 }
 
-// Batch is one POST body: the events for a single city.
+// Batch is one POST body: the events for a single city. CityHash is a salted,
+// non-reversible partition key (see CityHash); the cleartext city name never
+// crosses the wire.
 type Batch struct {
-	CityID        string     `json:"city_id"`
+	CityHash      string     `json:"city_hash"`
 	SchemaVersion int        `json:"schema_version"`
 	Events        []Envelope `json:"events"`
 }
@@ -157,6 +163,22 @@ func ActorHash(salt []byte, actor string) string {
 	h.Write(salt)
 	h.Write([]byte(":"))
 	h.Write([]byte(actor))
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// CityHash returns a salted, non-reversible, 16-hex partition key for a city
+// name. Like ActorHash, it lets the receiver group batches per city without the
+// cleartext city name — operator-chosen, and able to embed a customer/org
+// identifier — ever leaving the box. It is domain-separated from ActorHash so a
+// city and an actor that share a name do not hash alike.
+func CityHash(salt []byte, city string) string {
+	if city == "" {
+		return ""
+	}
+	h := sha256.New()
+	h.Write(salt)
+	h.Write([]byte(":city:"))
+	h.Write([]byte(city))
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 

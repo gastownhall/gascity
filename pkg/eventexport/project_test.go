@@ -147,7 +147,10 @@ func TestProject_NoLeak(t *testing.T) {
 		{9, "order.completed", "controller", "deploy-to-clientco-prod", "", ""}, // author slug
 	}
 	var batch Batch
-	batch.CityID = "maintainer-city"
+	// A customer-identifying city name (claude's "acme-prod" example) must be
+	// reduced to an opaque hash; the cleartext must never reach the wire.
+	const cityName = "acme-prod"
+	batch.CityHash = CityHash(opt.Salt, cityName)
 	batch.SchemaVersion = SchemaVersion
 	for _, e := range corpus {
 		if env, ok := proj(e.seq, e.typ, e.actor, e.subject, e.run, e.sess, opt); ok {
@@ -163,6 +166,7 @@ func TestProject_NoLeak(t *testing.T) {
 		"/data/projects", "gascity/", "gascity-packs/",
 		"acme-client-repo", "clientco", "deploy-to-clientco-prod",
 		"orphan-sweep", "@", "payload", "message",
+		cityName, // the cleartext city name must never appear; only its hash ships
 	}
 	for _, f := range forbidden {
 		if strings.Contains(blob, f) {
@@ -194,6 +198,26 @@ func TestActorHash(t *testing.T) {
 	}
 	if ActorHash([]byte("s"), "") != "" {
 		t.Fatal("empty actor -> empty hash")
+	}
+}
+
+func TestCityHash(t *testing.T) {
+	c := CityHash([]byte("s1"), "acme-prod")
+	if c != CityHash([]byte("s1"), "acme-prod") {
+		t.Fatal("same salt+city must be deterministic")
+	}
+	if c == CityHash([]byte("s2"), "acme-prod") {
+		t.Fatal("different salt must change the hash")
+	}
+	if !isHex16(c) {
+		t.Fatalf("hash %q not 16-hex", c)
+	}
+	if CityHash([]byte("s"), "") != "" {
+		t.Fatal("empty city -> empty hash")
+	}
+	// Domain separation: a city and an actor that share a name must not collide.
+	if CityHash([]byte("s"), "shared-name") == ActorHash([]byte("s"), "shared-name") {
+		t.Fatal("CityHash must be domain-separated from ActorHash")
 	}
 }
 

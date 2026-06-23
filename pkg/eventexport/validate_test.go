@@ -74,20 +74,20 @@ func TestValidate_ProducerPolicy(t *testing.T) {
 }
 
 func TestValidateBatch(t *testing.T) {
-	good := Batch{CityID: "c", SchemaVersion: SchemaVersion, Events: []Envelope{refEnv(t)}}
+	good := Batch{CityHash: "c", SchemaVersion: SchemaVersion, Events: []Envelope{refEnv(t)}}
 	if err := ValidateBatch(good); err != nil {
 		t.Fatalf("valid batch rejected: %v", err)
 	}
 
 	// schema skew -> typed ErrSchemaMismatch (so ingest can errors.Is it).
-	skew := Batch{CityID: "c", SchemaVersion: SchemaVersion + 1, Events: nil}
+	skew := Batch{CityHash: "c", SchemaVersion: SchemaVersion + 1, Events: nil}
 	err := ValidateBatch(skew)
 	if err == nil || !errors.Is(err, ErrSchemaMismatch) {
 		t.Fatalf("schema skew must wrap ErrSchemaMismatch, got %v", err)
 	}
 
 	// a bad row fails with its index.
-	bad := Batch{CityID: "c", SchemaVersion: SchemaVersion, Events: []Envelope{
+	bad := Batch{CityHash: "c", SchemaVersion: SchemaVersion, Events: []Envelope{
 		refEnv(t),
 		{Seq: 0, Type: "bead.closed", TS: rfc(t)}, // row 1: seq 0
 	}}

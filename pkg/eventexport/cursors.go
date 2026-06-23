@@ -2,19 +2,31 @@ package eventexport
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 )
 
-// LoadCursors reads persisted per-city resume cursors. A missing or unreadable
-// file yields an empty map (a fresh exporter floors each city at its head).
-func LoadCursors(path string) map[string]uint64 {
+// LoadCursors reads persisted per-city resume cursors. A missing file is the
+// expected first-run case and yields an empty map with no error (a fresh
+// exporter then floors each city at its head). An existing-but-unreadable or
+// corrupt file is reported as an error instead of being silently reset: doing
+// so would floor every tracked city at its current head and skip every event
+// accumulated since the last durable cursor, so the caller must decide (it
+// fails closed) rather than lose exports.
+func LoadCursors(path string) (map[string]uint64, error) {
 	out := map[string]uint64{}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return out
+		if errors.Is(err, os.ErrNotExist) {
+			return out, nil // first run: no durable cursor yet
+		}
+		return nil, fmt.Errorf("eventexport: read cursor file %s: %w", path, err)
 	}
-	_ = json.Unmarshal(b, &out) //nolint:errcheck // a corrupt cursor file resets to empty
-	return out
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, fmt.Errorf("eventexport: parse cursor file %s: %w", path, err)
+	}
+	return out, nil
 }
 
 // SaveCursors atomically persists per-city resume cursors.

@@ -126,7 +126,7 @@ func TestAdapter_NoLeakFromPayload(t *testing.T) {
 		{Seq: 7, Type: "convoy.closed", Ts: ts, Actor: "human", Subject: "gcg-4216"},
 	}
 	var batch eventexport.Batch
-	batch.CityID = "c"
+	batch.CityHash = eventexport.CityHash([]byte("salt"), "c")
 	batch.SchemaVersion = eventexport.SchemaVersion
 	for _, e := range corpus {
 		te := events.TaggedEvent{Event: e, City: "c"}

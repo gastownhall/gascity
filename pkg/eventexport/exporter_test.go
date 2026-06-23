@@ -106,8 +106,9 @@ func TestExporter_BatchesRedactsAdvancesCursor(t *testing.T) {
 
 	var types []string
 	var blob strings.Builder
+	wantCity := CityHash(testSalt, "c1")
 	for _, b := range cp.all() {
-		if b.CityID != "c1" || b.SchemaVersion != SchemaVersion {
+		if b.CityHash != wantCity || b.SchemaVersion != SchemaVersion {
 			t.Fatalf("bad batch envelope: %+v", b)
 		}
 		for _, e := range b.Events {
@@ -125,6 +126,45 @@ func TestExporter_BatchesRedactsAdvancesCursor(t *testing.T) {
 	for _, f := range []string{"nightly-sweep", "payload"} {
 		if strings.Contains(blob.String(), f) {
 			t.Fatalf("LEAK: %q in exported batches", f)
+		}
+	}
+}
+
+// TestExporter_HashesCityName proves the cleartext city name never reaches the
+// wire: the batch carries only a salted, opaque city_hash partition key.
+func TestExporter_HashesCityName(t *testing.T) {
+	cp := &capture{}
+	srv := httptest.NewServer(http.HandlerFunc(cp.handler))
+	defer srv.Close()
+
+	const city = "acme-prod" // operator-chosen, customer-identifying
+	src := &chanSource{ch: make(chan TaggedEvent, 4)}
+	exp := New(Config{
+		Endpoint: srv.URL, Salt: testSalt, ExportRef: true,
+		BatchMax: 100, BatchInterval: 10 * time.Millisecond, MaxPendingPerCity: 1000,
+		Client: srv.Client(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = exp.Run(ctx, src); close(done) }()
+
+	src.ch <- tev(city, 1, "bead.closed", "controller", "mc-1")
+	waitFor(t, 2*time.Second, func() bool { return exp.Cursors()[city] == 1 })
+	cancel()
+	<-done
+
+	batches := cp.all()
+	if len(batches) == 0 {
+		t.Fatal("no batch captured")
+	}
+	want := CityHash(testSalt, city)
+	for _, b := range batches {
+		if b.CityHash != want {
+			t.Fatalf("city_hash = %q, want %q (salted hash of %q)", b.CityHash, want, city)
+		}
+		j, _ := json.Marshal(b)
+		if strings.Contains(string(j), city) {
+			t.Fatalf("LEAK: cleartext city %q on the wire: %s", city, j)
 		}
 	}
 }

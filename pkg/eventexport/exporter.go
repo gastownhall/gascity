@@ -252,7 +252,7 @@ func (e *Exporter) flushCity(ctx context.Context, city string) {
 }
 
 func (e *Exporter) post(ctx context.Context, city string, batch []Envelope) error {
-	body, err := json.Marshal(Batch{CityID: city, SchemaVersion: SchemaVersion, Events: batch})
+	body, err := json.Marshal(Batch{CityHash: CityHash(e.cfg.Salt, city), SchemaVersion: SchemaVersion, Events: batch})
 	if err != nil {
 		return err
 	}
