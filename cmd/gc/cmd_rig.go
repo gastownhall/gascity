@@ -1652,6 +1652,25 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	}
 	cfg.Rigs = filtered
 
+	// Drop config blocks that reference the removed rig; left dangling they
+	// break a later load of the city (#3666). The three [[patches.*]] kinds and
+	// a [[github.pr_monitor]] hard-fail config.LoadWithIncludes once their
+	// now-absent rig can no longer be resolved (ApplyPatches "not found in
+	// merged config" / ValidateGitHubPRMonitors "rig is not declared"); an
+	// [[orders.overrides]] instead dangles at order-scan time. The issue named
+	// [[patches.agent]] and [[orders.overrides]]; the rest fail the same way on
+	// rig removal, so sweep them all.
+	cfg.Patches.Agents = slices.DeleteFunc(cfg.Patches.Agents,
+		func(p config.AgentPatch) bool { return p.Dir == rigName })
+	cfg.Patches.NamedSessions = slices.DeleteFunc(cfg.Patches.NamedSessions,
+		func(p config.NamedSessionPatch) bool { return p.Dir == rigName })
+	cfg.Patches.Rigs = slices.DeleteFunc(cfg.Patches.Rigs,
+		func(p config.RigPatch) bool { return p.Name == rigName })
+	cfg.GitHub.PRMonitors = slices.DeleteFunc(cfg.GitHub.PRMonitors,
+		func(m config.GitHubPRMonitor) bool { return m.Rig == rigName })
+	cfg.Orders.Overrides = slices.DeleteFunc(cfg.Orders.Overrides,
+		func(o config.OrderOverride) bool { return o.Rig == rigName })
+
 	// Write updated config.
 	if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
