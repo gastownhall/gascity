@@ -243,7 +243,7 @@ func TestAgentProcessNamesResolvesExplicitProvider(t *testing.T) {
 	}
 
 	got := AgentProcessNames(cfg, Agent{Name: "worker"}, lookPathOnly("codex"))
-	want := []string{"codex"}
+	want := []string{"codex", "codex-raw"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("AgentProcessNames() = %v, want %v", got, want)
 	}
