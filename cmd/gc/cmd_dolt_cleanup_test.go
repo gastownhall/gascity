@@ -1248,6 +1248,65 @@ func TestRunDoltCleanup_RigsProtectedReadsDoltDatabaseFromMetadata(t *testing.T)
 	}
 }
 
+func TestRunDoltCleanup_SkipsNonDoltBackedRig(t *testing.T) {
+	// az-374: a rig whose metadata.json declares a non-dolt backend (e.g.
+	// mysql) has no dolt database for dolt-cleanup to verify, drop, or purge.
+	// It MUST be skipped — excluded from rigs_protected and never counted as a
+	// rig-protection force_blocker — rather than being treated as one for
+	// lacking dolt_database. A dolt-backed rig in the same city is unaffected.
+	fs := fsys.NewFake()
+	fs.Files["/city/.beads/metadata.json"] = []byte(`{"backend":"mysql","database":"anthony_beads"}`)
+	fs.Files["/rigs/doltrig/.beads/metadata.json"] = []byte(`{"dolt_database":"doltrig_db"}`)
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs: []resolverRig{
+			{Name: "city", Path: "/city", HQ: true},
+			{Name: "doltrig", Path: "/rigs/doltrig"},
+		},
+		FS:                fs,
+		JSON:              true,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+
+	// The mysql-backed rig must not trip rig-protection.
+	if len(r.ForceBlockers) != 0 {
+		t.Fatalf("ForceBlockers = %+v, want none (mysql-backed rig must be skipped)", r.ForceBlockers)
+	}
+	if hasRigProtectionError(&r) {
+		t.Fatalf("unexpected rig-protection error; mysql-backed rig must be skipped: %+v", r.Errors)
+	}
+	if r.Summary.ErrorsTotal != 0 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 0; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+
+	// The mysql-backed rig is skipped (absent from rigs_protected); the
+	// dolt-backed rig is still protected with its metadata dolt_database.
+	for _, rp := range r.RigsProtected {
+		if rp.Rig == "city" {
+			t.Errorf("mysql-backed rig 'city' must be skipped, but found in RigsProtected: %+v", rp)
+		}
+	}
+	want := CleanupRigProtection{Rig: "doltrig", DB: "doltrig_db"}
+	found := false
+	for _, rp := range r.RigsProtected {
+		if rp == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("dolt-backed rig %+v missing from RigsProtected; got %+v", want, r.RigsProtected)
+	}
+}
+
 func TestRunDoltCleanup_DryRunReportsUnsafeRigDatabaseName(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/rigs/foo/.beads/metadata.json"] = []byte(`{"dolt_database":"foo db"}`)
