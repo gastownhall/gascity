@@ -173,13 +173,15 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	if ep != nil {
 		recorder = ep
 	}
-	onChange := func(eventType, beadID string, payload json.RawMessage) {
+	onChange := func(eventType, beadID, runID, sessionID string, payload json.RawMessage) {
 		if recorder != nil {
 			recorder.Record(events.Event{
-				Type:    eventType,
-				Actor:   "cache-reconcile",
-				Subject: beadID,
-				Payload: payload,
+				Type:      eventType,
+				Actor:     "cache-reconcile",
+				Subject:   beadID,
+				RunID:     runID,
+				SessionID: sessionID,
+				Payload:   payload,
 			})
 		}
 	}

@@ -95,7 +95,7 @@ func TestProjectEvent_RejectsShortSalt(t *testing.T) {
 
 func TestProjectEvent_RunSessionGating(t *testing.T) {
 	// EmitCorrelation must be set for run_id/session_id to appear at all (the
-	// fail-closed M1 default: they ship empty in v0).
+	// fail-closed default; the production export sets it true).
 	off := Options{Salt: testSalt, ExportRef: true}
 	got, _ := proj(1, "bead.closed", "gc", "mc-1", "wf-root-abc", "sess-9f2a", off)
 	if got.RunID != "" || got.SessionID != "" {

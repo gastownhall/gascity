@@ -48,19 +48,21 @@ func NewMuxSource(providers func() map[string]events.Provider, cursors func() ma
 }
 
 // toExport projects a tagged event down to the exporter's closed primitive set.
-// It forwards only envelope-safe fields (seq/type/time/actor/subject); it never
-// reads Payload or Message. RunID/SessionID are left empty here: the event has
-// no typed run/session field yet, and decoding the payload to recover one would
-// reintroduce the free-form content this boundary exists to keep out. Populating
-// them is a separate, typed-at-the-record-site change.
+// It forwards only envelope-safe fields (seq/type/time/actor/subject) plus the
+// two opaque correlation ids (run_id/session_id) the record site stamped onto
+// the typed Event fields; it never reads Payload or Message, so a payload-decode
+// can never reintroduce free-form content. The ids are safeRef-gated again in
+// ProjectEvent before egress.
 func toExport(te events.TaggedEvent) eventexport.TaggedEvent {
 	return eventexport.TaggedEvent{
-		City:    te.City,
-		Seq:     te.Seq,
-		Type:    te.Type,
-		Ts:      te.Ts,
-		Actor:   te.Actor,
-		Subject: te.Subject,
+		City:      te.City,
+		Seq:       te.Seq,
+		Type:      te.Type,
+		Ts:        te.Ts,
+		Actor:     te.Actor,
+		Subject:   te.Subject,
+		RunID:     te.RunID,
+		SessionID: te.SessionID,
 	}
 }
 

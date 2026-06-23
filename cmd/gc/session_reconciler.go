@@ -155,11 +155,12 @@ func recordResetStallIfDue(
 
 	if rec != nil {
 		rec.Record(events.Event{
-			Type:    events.SessionResetStalled,
-			Actor:   "gc",
-			Subject: name,
-			Message: msg,
-			Payload: events.SessionResetStalledPayloadJSON(name, template, resetCommittedAt, elapsedSeconds),
+			Type:      events.SessionResetStalled,
+			Actor:     "gc",
+			Subject:   name,
+			Message:   msg,
+			SessionID: session.ID,
+			Payload:   events.SessionResetStalledPayloadJSON(name, template, resetCommittedAt, elapsedSeconds),
 		})
 	}
 	if trace != nil {
@@ -251,10 +252,11 @@ func recordDrainAckAssignedWorkEvent(
 		return
 	}
 	rec.Record(events.Event{
-		Type:    events.SessionDrainAckedWithAssignedWork,
-		Actor:   "gc",
-		Subject: subject,
-		Message: "session drain-acked while still assigned to work bead",
+		Type:      events.SessionDrainAckedWithAssignedWork,
+		Actor:     "gc",
+		Subject:   subject,
+		Message:   "session drain-acked while still assigned to work bead",
+		SessionID: session.ID,
 		Payload: api.SessionDrainAckedWithAssignedWorkPayloadJSON(
 			session.ID,
 			strandedBead.ID,
@@ -304,11 +306,12 @@ func finalizeDrainAckStoppedSession(
 			return
 		}
 		rec.Record(events.Event{
-			Type:    events.SessionStopped,
-			Actor:   "gc",
-			Subject: template,
-			Message: "drain acknowledged by agent",
-			Payload: api.SessionLifecyclePayloadJSON(session.ID, template, "drain acknowledged"),
+			Type:      events.SessionStopped,
+			Actor:     "gc",
+			Subject:   template,
+			Message:   "drain acknowledged by agent",
+			SessionID: session.ID,
+			Payload:   api.SessionLifecyclePayloadJSON(session.ID, template, "drain acknowledged"),
 		})
 	}
 	hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
@@ -1952,10 +1955,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "restart_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
 							}
 							rec.Record(events.Event{
-								Type:    events.SessionDraining,
-								Actor:   "gc",
-								Subject: tp.DisplayName(),
-								Message: "config drift detected",
+								Type:      events.SessionDraining,
+								Actor:     "gc",
+								Subject:   tp.DisplayName(),
+								Message:   "config drift detected",
+								SessionID: session.ID,
 							})
 							alive = false
 							restartedInPlace = true
@@ -2016,10 +2020,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "drain", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
 								}
 								rec.Record(events.Event{
-									Type:    events.SessionDraining,
-									Actor:   "gc",
-									Subject: tp.DisplayName(),
-									Message: "config drift detected",
+									Type:      events.SessionDraining,
+									Actor:     "gc",
+									Subject:   tp.DisplayName(),
+									Message:   "config drift detected",
+									SessionID: session.ID,
 								})
 							}
 							continue
@@ -2889,12 +2894,13 @@ func emitSessionStrandedDiagnostic(
 	ids := strandedAssignedWorkIDs(diagnosticWork)
 	now := clk.Now().UTC()
 	rec.Record(events.Event{
-		Type:    events.SessionStranded,
-		Ts:      now,
-		Actor:   "gc",
-		Subject: session.ID,
-		Message: formatStrandedMessage(template, session.Metadata["session_name"], ids),
-		Payload: api.SessionStrandedPayloadJSON(session.ID, session.Metadata["session_name"], template, ids),
+		Type:      events.SessionStranded,
+		Ts:        now,
+		Actor:     "gc",
+		Subject:   session.ID,
+		Message:   formatStrandedMessage(template, session.Metadata["session_name"], ids),
+		SessionID: session.ID,
+		Payload:   api.SessionStrandedPayloadJSON(session.ID, session.Metadata["session_name"], template, ids),
 	})
 	// Set the in-memory marker first so a SetMetadata failure below
 	// can't cause the next tick (still seeing this same *Bead value or

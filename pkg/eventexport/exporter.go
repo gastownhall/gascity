@@ -47,6 +47,7 @@ type Config struct {
 	Salt              []byte
 	ExportRef         bool
 	Profile           Profile
+	EmitCorrelation   bool          // emit opaque run_id/session_id (default false)
 	BatchMax          int           // max events per POST (default 1000)
 	BatchInterval     time.Duration // max time between POSTs (default 5s)
 	MaxPendingPerCity int           // backpressure threshold (default 50000)
@@ -175,9 +176,7 @@ func (e *Exporter) ingest(te TaggedEvent) {
 		return // already processed (resume overlap)
 	}
 	e.high[te.City] = te.Seq
-	// EmitCorrelation stays false in v0: run_id/session_id ship empty until the
-	// typed-at-record-site follow-up lands (then Config gains the toggle).
-	opt := Options{Salt: e.cfg.Salt, ExportRef: e.cfg.ExportRef, Profile: e.cfg.Profile}
+	opt := Options{Salt: e.cfg.Salt, ExportRef: e.cfg.ExportRef, Profile: e.cfg.Profile, EmitCorrelation: e.cfg.EmitCorrelation}
 	env, ok := ProjectEvent(te, opt)
 	if !ok {
 		return

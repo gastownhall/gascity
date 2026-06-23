@@ -201,6 +201,54 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// TestExporter_EmitCorrelation proves the end-to-end exported batch carries
+// run_id/session_id only when Config.EmitCorrelation is true (the v1-compatible
+// opt-in; SchemaVersion stays 1 since the envelope already defines the fields).
+func TestExporter_EmitCorrelation(t *testing.T) {
+	run := func(emit bool) Batch {
+		cp := &capture{}
+		srv := httptest.NewServer(http.HandlerFunc(cp.handler))
+		defer srv.Close()
+		src := &chanSource{ch: make(chan TaggedEvent, 4)}
+		exp := New(Config{
+			Endpoint: srv.URL, Salt: testSalt, ExportRef: true, EmitCorrelation: emit,
+			BatchMax: 100, BatchInterval: 10 * time.Millisecond, MaxPendingPerCity: 1000,
+			Client: srv.Client(),
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { _ = exp.Run(ctx, src); close(done) }()
+		src.ch <- TaggedEvent{City: "c1", Seq: 1, Type: "bead.closed", Ts: fixedTS, Actor: "ctl", Subject: "mc-1", RunID: "wf-root-abc", SessionID: "sess-9f2a"}
+		waitFor(t, 2*time.Second, func() bool { return exp.Cursors()["c1"] == 1 })
+		cancel()
+		<-done
+		all := cp.all()
+		if len(all) == 0 || len(all[0].Events) == 0 {
+			t.Fatalf("expected at least one exported event")
+		}
+		// schema_version must stay 1 regardless of correlation emission.
+		if all[0].SchemaVersion != 1 {
+			t.Fatalf("schema_version = %d, want 1 (emitting run/session is v1-compatible)", all[0].SchemaVersion)
+		}
+		return all[0]
+	}
+
+	on := run(true)
+	if on.Events[0].RunID != "wf-root-abc" || on.Events[0].SessionID != "sess-9f2a" {
+		t.Fatalf("EmitCorrelation=true must carry run/session, got %+v", on.Events[0])
+	}
+	// Headline invariant: a v1-pinned receiver accepts the populated batch with no
+	// schema mismatch — emitting run/session is v1-compatible (no flag day).
+	if err := ValidateBatch(on); err != nil {
+		t.Fatalf("v1 receiver must accept a populated batch: %v", err)
+	}
+
+	off := run(false)
+	if off.Events[0].RunID != "" || off.Events[0].SessionID != "" {
+		t.Fatalf("EmitCorrelation=false must drop run/session, got %+v", off.Events[0])
+	}
+}
+
 // TestExporter_NoTokenProviderNoAuthHeader proves a nil TokenProvider sends no
 // Authorization header (the unauthenticated opt-out), mirroring the old empty-
 // token behavior.

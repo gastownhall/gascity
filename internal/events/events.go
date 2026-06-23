@@ -229,14 +229,23 @@ var KnownEventTypes = []string{
 }
 
 // Event is a single recorded occurrence in the system.
+//
+// RunID/SessionID are opaque correlation ids stamped at the record site (run
+// root via the bead metadata run-chain; session bead id), used by downstream
+// consumers to join an event to its run/session. They are additive and
+// omitempty: old records lack them and unmarshal as "". They are NOT derived
+// from Payload — the redacted export forwards them as typed primitives, never by
+// decoding the free-form payload.
 type Event struct {
-	Seq     uint64          `json:"seq"`
-	Type    string          `json:"type"`
-	Ts      time.Time       `json:"ts"`
-	Actor   string          `json:"actor"`
-	Subject string          `json:"subject,omitempty"`
-	Message string          `json:"message,omitempty"`
-	Payload json.RawMessage `json:"payload,omitempty"`
+	Seq       uint64          `json:"seq"`
+	Type      string          `json:"type"`
+	Ts        time.Time       `json:"ts"`
+	Actor     string          `json:"actor"`
+	Subject   string          `json:"subject,omitempty"`
+	Message   string          `json:"message,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	RunID     string          `json:"run_id,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
 }
 
 // Recorder records events. Safe for concurrent use. Best-effort.

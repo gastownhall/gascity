@@ -62,9 +62,14 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 		TokenProvider: tokenProvider,
 		Salt:          salt,
 		ExportRef:     ec.ExportRefEnabled(),
-		BatchMax:      ec.BatchMaxEvents,
-		BatchInterval: ec.BatchIntervalDuration(),
-		Logf:          logf,
+		// Events now carry typed run_id/session_id stamped at the record site, so
+		// emit the opaque correlation ids. They are safeRef-gated and remain
+		// within the v1 wire schema (the envelope already defines both as optional
+		// omitempty fields), so this does not bump SchemaVersion.
+		EmitCorrelation: true,
+		BatchMax:        ec.BatchMaxEvents,
+		BatchInterval:   ec.BatchIntervalDuration(),
+		Logf:            logf,
 	})
 
 	cursorPath := filepath.Join(homeDir, "events-export-cursor.json")

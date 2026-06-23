@@ -108,7 +108,10 @@ func TestMuxSource_YieldsAndPicksUpNewCity(t *testing.T) {
 // never sees an events.Event). It also confirms #3654 does NOT resolve run_id by
 // decoding the payload: the run-root id buried in metadata must NOT appear.
 func TestAdapter_NoLeakFromPayload(t *testing.T) {
-	opt := eventexport.Options{Salt: []byte("sixteen-byte-salt-xx"), ExportRef: true}
+	// EmitCorrelation:true so emission is ON — proving the gc.root_bead_id buried
+	// in Payload metadata is STILL not promoted to run_id (toExport reads only the
+	// typed Event fields, which this corpus leaves empty).
+	opt := eventexport.Options{Salt: []byte("sixteen-byte-salt-xx"), ExportRef: true, EmitCorrelation: true}
 	ts := time.Date(2026, 6, 21, 10, 3, 27, 0, time.UTC)
 	corpus := []events.Event{
 		{
@@ -150,13 +153,36 @@ func TestAdapter_NoLeakFromPayload(t *testing.T) {
 			t.Fatalf("LEAK: adapter batch contains %q\n%s", f, blob)
 		}
 	}
-	// run_id/session_id must be ABSENT (the adapter does not resolve them in #3654).
+	// run_id/session_id must be ABSENT: the corpus carries them only inside Payload
+	// metadata, and toExport never decodes Payload — it forwards only the typed
+	// Event fields, which are empty here.
 	for _, en := range batch.Events {
 		if en.RunID != "" || en.SessionID != "" {
-			t.Fatalf("adapter must not populate run/session yet, got %+v", en)
+			t.Fatalf("adapter must not extract run/session from payload, got %+v", en)
 		}
 	}
 	if len(batch.Events) < 3 {
 		t.Fatalf("expected allowlisted events to survive, got %d", len(batch.Events))
+	}
+}
+
+// TestToExport_ForwardsTypedRunSession proves the adapter forwards the typed
+// Event.RunID/SessionID (stamped at the record site) through to the projected
+// envelope when EmitCorrelation is on.
+func TestToExport_ForwardsTypedRunSession(t *testing.T) {
+	te := events.TaggedEvent{
+		Event: events.Event{
+			Seq: 1, Type: "bead.closed", Ts: time.Date(2026, 6, 21, 10, 3, 27, 0, time.UTC),
+			Actor: "cache-reconcile", Subject: "mc-1", RunID: "wf-root-abc", SessionID: "sess-9f2a",
+		},
+		City: "c",
+	}
+	ex := toExport(te)
+	if ex.RunID != "wf-root-abc" || ex.SessionID != "sess-9f2a" {
+		t.Fatalf("toExport must forward typed run/session, got run=%q session=%q", ex.RunID, ex.SessionID)
+	}
+	env, ok := eventexport.ProjectEvent(ex, eventexport.Options{Salt: []byte("sixteen-byte-salt-xx"), ExportRef: true, EmitCorrelation: true})
+	if !ok || env.RunID != "wf-root-abc" || env.SessionID != "sess-9f2a" {
+		t.Fatalf("projected envelope must carry forwarded run/session, got %+v", env)
 	}
 }

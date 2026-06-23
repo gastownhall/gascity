@@ -45,7 +45,7 @@ type CachingStore struct {
 	reconciling  atomic.Bool
 	syncFailures int
 	stats        CacheStats
-	onChange     func(eventType, beadID string, payload json.RawMessage)
+	onChange     func(eventType, beadID, runID, sessionID string, payload json.RawMessage)
 	problemf     func(string)
 	problemLog   map[string]cacheProblemLogState
 
@@ -223,7 +223,12 @@ func computeAutoStagger(agentID string) time.Duration {
 //
 // BdStore-backed caches filter hook events by issue prefix. Other Store
 // implementations are valid backings, but run without foreign-event filtering.
-func NewCachingStore(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
+//
+// onChange receives the opaque run/session correlation ids resolved from the
+// changed bead's metadata at the record site (see notifyChange); the wiring
+// stamps them onto the recorded event so the redacted export can forward them
+// as typed primitives without ever decoding the payload.
+func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sessionID string, payload json.RawMessage)) *CachingStore {
 	prefix := ""
 	bdBacking := false
 	nilBdBacking := false
@@ -250,15 +255,28 @@ func NewCachingStore(backing Store, onChange func(eventType, beadID string, payl
 }
 
 // NewCachingStoreForTest wraps any Store for testing without production prefix
-// validation.
+// validation. It keeps the legacy 3-param onChange (tests do not exercise the
+// run/session ids); adaptLegacyOnChange bridges it to the production 5-param form.
 func NewCachingStoreForTest(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
-	return newCachingStore(backing, "", onChange)
+	return newCachingStore(backing, "", adaptLegacyOnChange(onChange))
 }
 
 // NewCachingStoreForTestWithPrefix wraps any Store for tests that need
 // production-style bead ID ownership filtering.
 func NewCachingStoreForTestWithPrefix(backing Store, idPrefix string, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
-	return newCachingStore(backing, idPrefix, onChange)
+	return newCachingStore(backing, idPrefix, adaptLegacyOnChange(onChange))
+}
+
+// adaptLegacyOnChange bridges the legacy 3-param onChange used by the test
+// constructors to the production 5-param form, dropping the run/session ids the
+// tests do not exercise. Nil-safe.
+func adaptLegacyOnChange(fn func(eventType, beadID string, payload json.RawMessage)) func(eventType, beadID, runID, sessionID string, payload json.RawMessage) {
+	if fn == nil {
+		return nil
+	}
+	return func(eventType, beadID string, _, _ string, payload json.RawMessage) {
+		fn(eventType, beadID, payload)
+	}
 }
 
 // SetPrimeRetryDelayForTest overrides the inter-attempt backoff Prime
@@ -268,7 +286,7 @@ func (c *CachingStore) SetPrimeRetryDelayForTest(fn func(attempt int) time.Durat
 	c.primeRetryDelay = fn
 }
 
-func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
+func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID, runID, sessionID string, payload json.RawMessage)) *CachingStore {
 	return &CachingStore{
 		backing:     backing,
 		idPrefix:    normalizeIDPrefix(idPrefix),

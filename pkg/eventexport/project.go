@@ -141,7 +141,7 @@ type Options struct {
 	Salt            []byte  // actor-hash salt; must be >= 16 bytes (ProjectEvent fails closed otherwise)
 	ExportRef       bool    // include the id-gated ref (opaque ids/slugs only)
 	Profile         Profile // redaction profile (default ProfileRedactedEnvelope)
-	EmitCorrelation bool    // emit opaque run_id/session_id; default false (they ship empty in v0)
+	EmitCorrelation bool    // emit opaque run_id/session_id; default false (the production export sets it true)
 }
 
 // ActorHash returns a salted, non-reversible, 16-hex fingerprint of an actor.
@@ -167,8 +167,8 @@ func ActorHash(salt []byte, actor string) string {
 //
 // It fails closed (ok=false) for a non-allowlisted type, seq==0, a zero
 // timestamp, or a salt shorter than 16 bytes. run_id/session_id are emitted only
-// when opt.EmitCorrelation is set (they ship empty in v0) and only if opaque;
-// like ref, an opaque id over 64 bytes is DROPPED, not truncated.
+// when opt.EmitCorrelation is set and only if opaque; like ref, an opaque id over
+// 64 bytes is DROPPED, not truncated.
 func ProjectEvent(te TaggedEvent, opt Options) (Envelope, bool) {
 	if !allowedTypes[te.Type] {
 		return Envelope{}, false
