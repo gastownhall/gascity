@@ -773,6 +773,7 @@ while IFS= read -r DB; do
     get_sql_count "$DB" "stale non-closed wisp" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
+        AND issue_type NOT IN ('message')
         AND created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
     "
     STALE_WISP_COUNT=$SQL_COUNT_RESULT
