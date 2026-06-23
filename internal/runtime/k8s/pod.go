@@ -367,17 +367,57 @@ func cloneTolerations(in []corev1.Toleration) []corev1.Toleration {
 	return out
 }
 
-// agentSecurityContext returns a container security context.
-// When a dynamic linux username is configured, the container starts as root
-// (UID 0) so it can create the user at runtime before dropping privileges.
-// When no dynamic user is set, returns nil (uses Dockerfile default: gcagent).
+// gcagentUID is the UID/GID of the baked-in gcagent user in the agent base
+// image (contrib/k8s/Dockerfile.base). Ubuntu 24.04 ships a default "ubuntu"
+// user at UID 1000, so `useradd gcagent` lands on UID 1001. This matches the
+// runAsUser/runAsGroup hardening already applied to the controller and the
+// beads/session helper-script manifests.
+const gcagentUID int64 = 1001
+
+// agentSecurityContext returns a container security context for the agent pod.
+//
+// Two distinct cases:
+//
+//   - Dynamic-user path (LINUX_USERNAME set): the container must start as root
+//     (UID 0) so the entrypoint can `useradd` the dynamic user, fix workspace
+//     ownership, and then drop privileges via `su`. Hardening that forbids root
+//     would break this path, so we only set the minimal RunAsUser:0 here and
+//     leave the rest of the dynamic-user flow untouched. This preserves the
+//     existing behavior for rigs that rely on LINUX_USERNAME.
+//
+//   - Default (hardened) path (LINUX_USERNAME unset): run as the non-root
+//     gcagent user with a locked-down context — no privilege escalation, all
+//     capabilities dropped, and the RuntimeDefault seccomp profile. This is the
+//     burst/agent-pod posture: treat agent code as hostile after startup.
+//
+// readOnlyRootFilesystem is intentionally NOT set. Agent pods write outside
+// /workspace and /tmp: credCopy copies into $HOME/.claude (gcagent's home,
+// part of the root fs, not a mounted volume), git writes global config, and
+// tool caches (npm, pip, claude state) land under $HOME. A read-only root fs
+// would break these without first adding writable emptyDir mounts for $HOME
+// and other cache paths, which is a larger, separately-verifiable change.
 func agentSecurityContext(linuxUsername string) *corev1.SecurityContext {
-	if linuxUsername == "" {
-		return nil
+	if linuxUsername != "" {
+		// Dynamic-user path: must start as root to create the user at runtime.
+		var rootUID int64
+		return &corev1.SecurityContext{
+			RunAsUser: &rootUID,
+		}
 	}
-	var rootUID int64
+
+	uid := gcagentUID
+	gid := gcagentUID
 	return &corev1.SecurityContext{
-		RunAsUser: &rootUID,
+		RunAsNonRoot:             boolPtr(true),
+		RunAsUser:                &uid,
+		RunAsGroup:               &gid,
+		AllowPrivilegeEscalation: boolPtr(false),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
 	}
 }
 
@@ -387,6 +427,16 @@ func agentSecurityContext(linuxUsername string) *corev1.SecurityContext {
 func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, managedServicePort string) ([]corev1.EnvVar, error) {
 	// Start with cfg.Env, removing controller-only vars.
 	// Auth creds (GC_DOLT_USER, GC_DOLT_PASSWORD, BEADS_DOLT_*_USER/PASSWORD) intentionally pass through.
+	//
+	// Deny-list rationale (R3 #4, secret blast radius): agent pods run untrusted
+	// AI-generated code, so the controller's cloud/infra credentials must not be
+	// projected into them. We use a conservative deny-list (not an allowlist):
+	// agents legitimately need a wide and growing set of vars — all GC_*,
+	// CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_*, per-provider auth (DEEPSEEK_API_KEY
+	// etc.), HTTPS_PROXY/NO_PROXY, and arbitrary user-defined config — so an
+	// allowlist would be brittle and risk silently breaking agents/burst. The
+	// deny-list names only the infra secrets that must never reach an agent pod;
+	// everything else (including provider auth and proxy config) passes through.
 	skip := map[string]bool{
 		"GC_BEADS":               true,
 		"GC_SESSION":             true,
@@ -397,6 +447,22 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 		"GC_DOLT_PORT":           true,
 		"BEADS_DOLT_SERVER_HOST": true,
 		"BEADS_DOLT_SERVER_PORT": true,
+
+		// Infra/cloud credentials — never project into agent pods. These grant
+		// node-fleet control (Hetzner), cluster-admin (kubeconfig), or
+		// infra-service auth that agents do not need to do their work. A
+		// compromised agent must not be able to read these from its own env.
+		"HCLOUD_TOKEN":          true, // Hetzner Cloud API: create/destroy nodes.
+		"KUBECONFIG":            true, // path/inline cluster-admin credentials.
+		"KUBE_CONFIG":           true, // alternate spelling some tooling reads.
+		"KUBECONFIG_DATA":       true, // inline base64 kubeconfig.
+		"JSM_API_KEY":           true, // Jira Service Management infra integration.
+		"HETZNER_API_TOKEN":     true, // alternate Hetzner token name.
+		"HCLOUD_API_TOKEN":      true, // alternate Hetzner token name.
+		"DO_API_TOKEN":          true, // DigitalOcean infra token (if present).
+		"AWS_SECRET_ACCESS_KEY": true,
+		"AWS_ACCESS_KEY_ID":     true,
+		"AWS_SESSION_TOKEN":     true,
 	}
 
 	ctrlCity := controllerCityPath(cfgEnv)

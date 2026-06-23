@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     jq \
+    lsof \
     procps \
     python3 \
     sudo \
@@ -49,9 +50,18 @@ RUN /tmp/install-dolt-archive.sh "${DOLT_VERSION}" \
 # Default non-root user for Claude Code (--dangerously-skip-permissions rejects root).
 # When LINUX_USERNAME is set at runtime, the pod entrypoint creates a dynamic
 # user via useradd and drops privileges via su. gcagent is kept as fallback.
+#
+# Passwordless sudo (NOPASSWD) is granted by default to preserve existing
+# behavior for all consumers. For hardened/burst builds where agent code is
+# treated as hostile, pass --build-arg BURST_HARDENED=true to OMIT the sudo
+# grant entirely (the gcagent user is created either way). Removing sudo is
+# opt-in so it cannot silently break other consumers.
+ARG BURST_HARDENED=false
 RUN useradd -m -s /bin/bash gcagent \
-    && echo "gcagent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/gcagent \
-    && chmod 0440 /etc/sudoers.d/gcagent
+    && if [ "$BURST_HARDENED" != "true" ]; then \
+         echo "gcagent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/gcagent \
+         && chmod 0440 /etc/sudoers.d/gcagent; \
+       fi
 ENV HOME=/home/gcagent
 
 USER gcagent
