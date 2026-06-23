@@ -64,10 +64,16 @@ the session bead misattributes every later run to the first. Resolve
 4. plain work bead → its own id
 5. manual chat (no work bead) → `session.Info.ID`
 
-The worker learns the acting work bead via a **mutable** `gc.active_work_bead`
-pointer written on the session bead at dispatch (updated on every claim) plus
-`operationEventPayload.BeadID`; resolve at `operation_events.go:136` via the
-existing `GetWithBead` (`manager.go:1356`) or the dispatch-set `BeadID`. The
+v0 ships a **resolved-value** form of this. `gc hook --claim` resolves the run id
+from the just-claimed work bead (the order above) and writes it onto the session
+bead as `gc.current_run_id`, updated on **every** claim so a reused pool session
+follows its current run instead of staying frozen on its first. A per-operation
+reader then reads `gc.current_run_id` straight off the already-loaded session bead
+— no extra `GetWithBead`. The tradeoff: a resolved id, unlike a `gc.active_work_bead`
+*pointer*, cannot be re-resolved back to the acting work bead, so per-work-bead
+`step_id` attribution (`UsageFact.StepID`) is **not** preserved by this form; the
+pointer (resolve at `operation_events.go:136` via `GetWithBead`, `manager.go:1356`)
+stays the future option if `step_id` segmentation is wanted (open question 1). The
 session bead is a *current-pointer*, never a frozen id.
 
 ## Emission seams
@@ -155,8 +161,10 @@ rollup, else cost sums silently omit unpriced models.
 ## Decisions
 
 - `run_id` is **layered, resolved per-operation** from the acting work bead
-  (graph → poured → nested → self → session-id for manual chat), via a **mutable
-  `gc.active_work_bead` pointer** — never frozen on the session bead.
+  (graph → poured → nested → self → session-id for manual chat). v0 records the
+  resolved id on the session bead as `gc.current_run_id` at claim time (updated on
+  every claim, never frozen); a `gc.active_work_bead` pointer that would also keep
+  `step_id` stays a future option (run-identity section; open question 1).
 - Usage attaches to the **event-log** path (`WorkerOperation` payload) + the
   `Sink`, **not** OTel metric labels (which are cardinality-bounded by design).
 - Sink injection is the proven **`exec:<script>`** seam; the `usage.Sink`
@@ -179,14 +187,18 @@ above. Each keeps cost insight as decision-support (lossy by construction, per
 *Honest limits*) while avoiding larger changes the open questions below have not
 yet settled.
 
-- **Run identity is per-session for pooled sessions.** The mutable
-  `gc.active_work_bead` pointer is not yet written by any dispatch/claim path, so
-  per-work-bead (`step_id`) attribution is deferred and that metadata key is not
-  declared until a writer exists. RunID resolves per-operation off the session
-  bead's own run chain (`workflow_id || molecule_id || gc.root_bead_id-or-self ||
-  bead id || session id`), so a reused pool session rolls its facts up
-  per-session rather than per-run. Wiring the pointer at dispatch/claim is
-  tracked as follow-up (ga-2m8abf); see open question 1.
+- **Run identity is recorded per-run at claim; the reader is the remaining gap.**
+  `gc hook --claim` writes the resolved run id onto the session bead as
+  `gc.current_run_id` on every claim (`cmd/gc/cmd_hook_claim.go`), so a reused pool
+  session is stamped with its current run, not its first, and the key is declared
+  in `KnownMetadataKeys`. This value form intentionally drops per-work-bead
+  (`step_id`) attribution; a `gc.active_work_bead` pointer remains the future option
+  for it. The consumer side is staged behind the writer: `ResolveRunID` still
+  resolves per-operation off the session bead's own run chain (`workflow_id ||
+  molecule_id || gc.root_bead_id-or-self || bead id || session id`) and does **not**
+  yet read `gc.current_run_id`, so cost facts still roll up per-session until a
+  reader that consumes the recorded value lands (tracked as follow-up ga-2m8abf;
+  see open question 1).
 - **Compute facts emit from a reconcile scan, not a transactional outbox.** The
   reconcile tick scans the open session-bead snapshot it already loaded, emits a
   fact for any bead in a terminal state lacking its

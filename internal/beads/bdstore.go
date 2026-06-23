@@ -62,46 +62,37 @@ func ExecCommandRunner() CommandRunner {
 // applies the provided environment overrides. Explicit keys replace any
 // inherited values from the parent process.
 func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
+	return execCommandRunnerWithEnv(context.Background(), env)
+}
+
+// ExecCommandRunnerWithEnvContext is like ExecCommandRunnerWithEnv but binds
+// every command it runs to ctx, so each command exits at the sooner of ctx's
+// deadline and the per-command bd timeout. Callers with a short best-effort
+// budget (for example the claim-time gc.current_run_id decoration) use this so a
+// slow or stuck bd child cannot outlast that budget.
+func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string) CommandRunner {
+	return execCommandRunnerWithEnv(ctx, env)
+}
+
+func execCommandRunnerWithEnv(parent context.Context, env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		start := time.Now()
-		trace := func(status string, err error) {
-			// GC_BD_TRACE_JSON wins: when the structured JSONL trace
-			// (via TraceBDCall in bdtrace.go) is enabled, suppress the
-			// legacy line-format trace so the two don't interleave
-			// incompatible records in the same file when an operator
-			// points both env vars at the same path.
-			if strings.TrimSpace(os.Getenv("GC_BD_TRACE_JSON")) != "" {
-				return
-			}
-			path := strings.TrimSpace(os.Getenv("GC_BD_TRACE"))
-			if path == "" {
-				return
-			}
-			f, openErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-			if openErr != nil {
-				return
-			}
-			defer f.Close() //nolint:errcheck // best-effort trace log
-			msg := ""
-			if err != nil {
-				msg = err.Error()
-			}
-			fmt.Fprintf(f, "%s status=%s dur=%s dir=%s cmd=%s args=%q err=%q\n", //nolint:errcheck // best-effort trace log
-				time.Now().UTC().Format(time.RFC3339Nano), status, time.Since(start), dir, name, args, msg)
-		}
+		trace := newBDExecTrace(start, dir, name, args)
 		trace("start", nil)
+
 		timeout := bdCommandTimeoutFor(name, args)
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
-		var slowTimer *time.Timer
+
 		if name == "bd" {
 			bdArgs := append([]string(nil), args...)
 			agentID := bdTelemetryAgentID(env)
-			slowTimer = time.AfterFunc(bdSlowTelemetryThreshold, func() {
+			slowTimer := time.AfterFunc(bdSlowTelemetryThreshold, func() {
 				telemetry.RecordBDSlow(ctx, bdArgs, dir, agentID)
 			})
 			defer slowTimer.Stop()
 		}
+
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.WaitDelay = 2 * time.Second
 		prepareCommandForTimeout(cmd)
@@ -113,53 +104,118 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
-		if name == "bd" {
-			// Structured JSONL trace — independent of the legacy line-format
-			// trace above (gated by GC_BD_TRACE_JSON, not GC_BD_TRACE).
-			traceExit := 0
-			if err != nil {
-				var exitErr *exec.ExitError
-				if errors.As(err, &exitErr) {
-					traceExit = exitErr.ExitCode()
-				} else {
-					traceExit = -1
-				}
-			}
-			TraceBDCall("go:bdstore.runner", dir, args, start, traceExit, err)
-			telemetry.RecordBDCall(context.Background(),
-				args, float64(time.Since(start).Milliseconds()),
-				err, out, stderr.String())
-		}
-		if err == nil && name == "bd" && bdOutputIndicatesSilentFallback(stderr.String()) {
-			fallbackErr := fmt.Errorf("%w: %s", ErrBDSilentFallback, strings.TrimSpace(stderr.String()))
-			trace("error", fallbackErr)
-			return out, fallbackErr
-		}
-		if ctx.Err() == context.DeadlineExceeded {
-			timeoutErr := fmt.Errorf("timed out after %s", timeout)
-			trace("timeout", timeoutErr)
-			if stderr.Len() > 0 {
-				return out, fmt.Errorf("%w: %s", timeoutErr, stderr.String())
-			}
-			return out, timeoutErr
-		}
-		if err != nil {
-			// bd writes structured errors to stdout (JSON envelope) when
-			// invoked with --json, while stderr is often empty. Surface
-			// whichever stream has content so supervisor logs become
-			// actionable instead of bare "exit status 1".
-			detail := strings.TrimSpace(stderr.String())
-			if detail == "" && name == "bd" {
-				detail = bdStdoutErrorDetail(out)
-			}
-			if detail != "" {
-				trace("error", err)
-				return out, fmt.Errorf("%w: %s", err, detail)
-			}
-		}
-		trace("done", err)
-		return out, err
+
+		recordBDExecTelemetry(name, dir, args, start, out, stderr.String(), err)
+
+		status, traceErr, resultErr := classifyBDExecResult(
+			parent, ctx, name, timeout, start, out, stderr.String(), err)
+		trace(status, traceErr)
+		return out, resultErr
 	}
+}
+
+// newBDExecTrace returns the legacy line-format trace callback for one command
+// invocation. It is a no-op when GC_BD_TRACE is unset, or when GC_BD_TRACE_JSON
+// has claimed tracing (the structured JSONL trace in bdtrace.go) so the two
+// formats never interleave incompatible records when an operator points both
+// env vars at the same file. The returned callback appends one
+// "status=… dur=… cmd=… err=…" line per call.
+func newBDExecTrace(start time.Time, dir, name string, args []string) func(status string, err error) {
+	if strings.TrimSpace(os.Getenv("GC_BD_TRACE_JSON")) != "" {
+		return func(string, error) {}
+	}
+	path := strings.TrimSpace(os.Getenv("GC_BD_TRACE"))
+	if path == "" {
+		return func(string, error) {}
+	}
+	return func(status string, err error) {
+		f, openErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if openErr != nil {
+			return
+		}
+		defer f.Close() //nolint:errcheck // best-effort trace log
+		msg := ""
+		if err != nil {
+			msg = err.Error()
+		}
+		fmt.Fprintf(f, "%s status=%s dur=%s dir=%s cmd=%s args=%q err=%q\n", //nolint:errcheck // best-effort trace log
+			time.Now().UTC().Format(time.RFC3339Nano), status, time.Since(start), dir, name, args, msg)
+	}
+}
+
+// recordBDExecTelemetry emits the structured JSONL trace (bdtrace.go) and the
+// telemetry RecordBDCall for a completed "bd" invocation; it is a no-op for any
+// other command. The trace exit code is the child's exit status, or -1 when the
+// failure was not an *exec.ExitError (for example a context kill or a spawn
+// failure). It is independent of the legacy line-format trace (gated by
+// GC_BD_TRACE_JSON, not GC_BD_TRACE).
+func recordBDExecTelemetry(name, dir string, args []string, start time.Time, out []byte, stderr string, err error) {
+	if name != "bd" {
+		return
+	}
+	traceExit := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			traceExit = exitErr.ExitCode()
+		} else {
+			traceExit = -1
+		}
+	}
+	TraceBDCall("go:bdstore.runner", dir, args, start, traceExit, err)
+	telemetry.RecordBDCall(context.Background(),
+		args, float64(time.Since(start).Milliseconds()),
+		err, out, stderr)
+}
+
+// classifyBDExecResult maps a finished invocation to its legacy trace status,
+// the error to trace, and the error to return to the caller. The trace error
+// and the returned error differ only where the returned error is enriched with
+// stderr/stdout detail that the historical status-level trace line omits, so
+// the line-format trace stays compatible with prior releases. bd writes
+// structured errors to stdout (JSON envelope) under --json while stderr is
+// often empty, so the generic-error path surfaces whichever stream has content
+// rather than a bare "exit status 1".
+func classifyBDExecResult(parent, ctx context.Context, name string, timeout time.Duration, start time.Time, out []byte, stderr string, runErr error) (status string, traceErr, resultErr error) {
+	if runErr == nil && name == "bd" && bdOutputIndicatesSilentFallback(stderr) {
+		fallbackErr := fmt.Errorf("%w: %s", ErrBDSilentFallback, strings.TrimSpace(stderr))
+		return "error", fallbackErr, fallbackErr
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		timeoutErr := bdExecTimeoutError(parent, timeout, start)
+		if stderr != "" {
+			return "timeout", timeoutErr, fmt.Errorf("%w: %s", timeoutErr, stderr)
+		}
+		return "timeout", timeoutErr, timeoutErr
+	}
+	if runErr != nil {
+		detail := strings.TrimSpace(stderr)
+		if detail == "" && name == "bd" {
+			detail = bdStdoutErrorDetail(out)
+		}
+		if detail != "" {
+			return "error", runErr, fmt.Errorf("%w: %s", runErr, detail)
+		}
+	}
+	return "done", runErr, runErr
+}
+
+// bdExecTimeoutError formats the deadline error after the per-command context
+// expired, attributed to whichever budget actually won the race. ctx's
+// effective deadline is min(parent deadline, start+timeout): when the caller's
+// parent deadline is the binding one (for example the short claim-time
+// gc.current_run_id write budget), it reports that effective budget so the
+// failure is not misreported as the much larger per-command bd timeout; when
+// the per-command timer wins, it reports that timeout unchanged.
+func bdExecTimeoutError(parent context.Context, timeout time.Duration, start time.Time) error {
+	if deadline, ok := parent.Deadline(); ok && deadline.Before(start.Add(timeout)) {
+		budget := deadline.Sub(start)
+		if budget < 0 {
+			budget = 0
+		}
+		return fmt.Errorf("timed out after %s (caller deadline)", budget.Round(time.Millisecond))
+	}
+	return fmt.Errorf("timed out after %s", timeout)
 }
 
 func bdTelemetryAgentID(env map[string]string) string {
