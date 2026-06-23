@@ -54,6 +54,26 @@ func TestLoadCursors_CorruptFileErrors(t *testing.T) {
 	}
 }
 
+// TestLoadCursors_NullFileErrors proves a cursor file containing JSON null fails
+// closed. json.Unmarshal accepts null for a map[string]uint64 and sets it to nil
+// without an error, which would otherwise reach MuxSource as no durable cursors
+// and floor every tracked city at head, skipping events accumulated since the
+// last durable save.
+func TestLoadCursors_NullFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "null.json")
+	if err := os.WriteFile(path, []byte("null"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadCursors(path)
+	if err == nil {
+		t.Fatalf("null cursor file must error, got map %v", got)
+	}
+	if got != nil {
+		t.Fatalf("null cursor file must return a nil map with the error, got %v", got)
+	}
+}
+
 // TestLoadCursors_UnreadableFileErrors proves an existing-but-unreadable cursor
 // file errors (permission), rather than being treated as a fresh start.
 func TestLoadCursors_UnreadableFileErrors(t *testing.T) {

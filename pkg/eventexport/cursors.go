@@ -26,6 +26,14 @@ func LoadCursors(path string) (map[string]uint64, error) {
 	if err := json.Unmarshal(b, &out); err != nil {
 		return nil, fmt.Errorf("eventexport: parse cursor file %s: %w", path, err)
 	}
+	if out == nil {
+		// A cursor file containing JSON null unmarshals to a nil map without an
+		// error. Treat it as corrupt and fail closed: a nil map reaching
+		// MuxSource reads as no durable cursors and floors every tracked city at
+		// head, skipping events accumulated since the last durable save. A
+		// legitimate empty object ("{}") stays a non-nil empty map and is kept.
+		return nil, fmt.Errorf("eventexport: cursor file %s contains null instead of a cursor object", path)
+	}
 	return out, nil
 }
 
