@@ -1666,8 +1666,20 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		func(p config.NamedSessionPatch) bool { return p.Dir == rigName })
 	cfg.Patches.Rigs = slices.DeleteFunc(cfg.Patches.Rigs,
 		func(p config.RigPatch) bool { return p.Name == rigName })
+	// Capture rig-scoped PR monitor names before deleting them so we can also
+	// drop any [[patches.github_pr_monitor]] that targets them by name —
+	// otherwise the patch dangles and ApplyPatches fails ("github pr monitor
+	// %q not found in merged config") on the next compose, the same #3666 class.
+	removedMonitors := map[string]bool{}
+	for _, m := range cfg.GitHub.PRMonitors {
+		if m.Rig == rigName {
+			removedMonitors[m.Name] = true
+		}
+	}
 	cfg.GitHub.PRMonitors = slices.DeleteFunc(cfg.GitHub.PRMonitors,
 		func(m config.GitHubPRMonitor) bool { return m.Rig == rigName })
+	cfg.Patches.GitHubPRMonitors = slices.DeleteFunc(cfg.Patches.GitHubPRMonitors,
+		func(p config.GitHubPRMonitorPatch) bool { return removedMonitors[p.Name] })
 	cfg.Orders.Overrides = slices.DeleteFunc(cfg.Orders.Overrides,
 		func(o config.OrderOverride) bool { return o.Rig == rigName })
 

@@ -1054,6 +1054,10 @@ base_branches = ["main"]
 rig = "patch-rig"
 repair_route = "patch-rig/coder"
 
+[[patches.github_pr_monitor]]
+name = "patch-rig-monitor"
+poll_interval = "5m"
+
 [[patches.agent]]
 name = "claude"
 suspended = true
@@ -1114,6 +1118,9 @@ enabled = false
 		}
 		if len(parsed.GitHub.PRMonitors) != 0 {
 			t.Errorf("github.pr_monitor for removed rig survived: %#v", parsed.GitHub.PRMonitors)
+		}
+		if len(parsed.Patches.GitHubPRMonitors) != 0 {
+			t.Errorf("patches.github_pr_monitor for removed rig's monitor survived: %#v", parsed.Patches.GitHubPRMonitors)
 		}
 		for _, o := range parsed.Orders.Overrides {
 			if o.Rig == "patch-rig" {
