@@ -162,7 +162,14 @@ func defaultGCHome() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), ".gc")
+		// Home unresolved. Never fall back to a fixed os.TempDir()/.gc: that
+		// path is shared and world-writable, so concurrent processes clobber
+		// each other's state (#3506, #3650). Hand out a process-unique
+		// directory instead, mirroring gchome.Default().
+		if dir, err := os.MkdirTemp("", "gc-home-*"); err == nil {
+			return dir
+		}
+		return filepath.Join(os.TempDir(), fmt.Sprintf("gc-home-%d", os.Getpid()))
 	}
 	return filepath.Join(home, ".gc")
 }
