@@ -290,12 +290,18 @@ func Validate(env Envelope, opt Options) error {
 var ErrSchemaMismatch = errors.New("eventexport: batch schema_version mismatch")
 
 // ValidateBatch checks a received batch end to end: its schema_version must equal
-// SchemaVersion (else it returns an error wrapping ErrSchemaMismatch), then every
+// SchemaVersion (else it returns an error wrapping ErrSchemaMismatch), its
+// city_hash must be the opaque 16-hex partition-key shape that schema v2 promises
+// (rejecting empty, cleartext, or otherwise malformed values at the receiver trust
+// boundary, the same shape gate ValidateEnvelope applies to actor_hash), then every
 // envelope must pass ValidateEnvelope. Validation is fail-fast: it returns the
 // FIRST failure with its row index, not an aggregate of all failures.
 func ValidateBatch(b Batch) error {
 	if b.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("eventexport: batch schema_version %d != %d: %w", b.SchemaVersion, SchemaVersion, ErrSchemaMismatch)
+	}
+	if !isHex16(b.CityHash) {
+		return fmt.Errorf("eventexport: city_hash %q must be 16 hex chars", b.CityHash)
 	}
 	for i, env := range b.Events {
 		if err := ValidateEnvelope(env); err != nil {
@@ -336,7 +342,7 @@ func safeRef(s string) string {
 }
 
 // isHex16 reports whether s is exactly 16 lowercase hex characters (the
-// ActorHash shape).
+// ActorHash and CityHash shape).
 func isHex16(s string) bool {
 	if len(s) != 16 {
 		return false

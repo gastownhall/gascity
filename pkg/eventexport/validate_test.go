@@ -74,20 +74,44 @@ func TestValidate_ProducerPolicy(t *testing.T) {
 }
 
 func TestValidateBatch(t *testing.T) {
-	good := Batch{CityHash: "c", SchemaVersion: SchemaVersion, Events: []Envelope{refEnv(t)}}
+	const cityHash = "0123456789abcdef" // a valid opaque 16-hex partition key
+
+	good := Batch{CityHash: cityHash, SchemaVersion: SchemaVersion, Events: []Envelope{refEnv(t)}}
 	if err := ValidateBatch(good); err != nil {
 		t.Fatalf("valid batch rejected: %v", err)
 	}
 
 	// schema skew -> typed ErrSchemaMismatch (so ingest can errors.Is it).
-	skew := Batch{CityHash: "c", SchemaVersion: SchemaVersion + 1, Events: nil}
+	skew := Batch{CityHash: cityHash, SchemaVersion: SchemaVersion + 1, Events: nil}
 	err := ValidateBatch(skew)
 	if err == nil || !errors.Is(err, ErrSchemaMismatch) {
 		t.Fatalf("schema skew must wrap ErrSchemaMismatch, got %v", err)
 	}
 
+	// Receiver trust boundary: city_hash must be the opaque 16-hex partition-key
+	// shape schema v2 promises. An empty, too-short, cleartext-shaped, uppercase,
+	// or over-length value is rejected before any row is processed — the receiver
+	// cannot assume the producer redacted the operator-chosen city name.
+	for name, ch := range map[string]string{
+		"empty":          "",
+		"too short":      "c",
+		"cleartext city": "acme-prod",
+		"uppercase hex":  "0123456789ABCDEF",
+		"too long":       "0123456789abcdef0",
+	} {
+		b := Batch{CityHash: ch, SchemaVersion: SchemaVersion, Events: []Envelope{refEnv(t)}}
+		if err := ValidateBatch(b); err == nil {
+			t.Errorf("%s city_hash %q must be rejected", name, ch)
+		}
+	}
+
+	// a producer-computed city_hash is accepted (the positive end of the gate).
+	if err := ValidateBatch(Batch{CityHash: CityHash(testSalt, "acme-prod"), SchemaVersion: SchemaVersion, Events: []Envelope{refEnv(t)}}); err != nil {
+		t.Fatalf("producer-computed city_hash rejected: %v", err)
+	}
+
 	// a bad row fails with its index.
-	bad := Batch{CityHash: "c", SchemaVersion: SchemaVersion, Events: []Envelope{
+	bad := Batch{CityHash: cityHash, SchemaVersion: SchemaVersion, Events: []Envelope{
 		refEnv(t),
 		{Seq: 0, Type: "bead.closed", TS: rfc(t)}, // row 1: seq 0
 	}}
