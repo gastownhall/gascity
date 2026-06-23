@@ -21,6 +21,11 @@ import (
 // cities that start or stop after launch are picked up.
 const muxRebuildInterval = 60 * time.Second
 
+// minActorSaltLen mirrors the projection's fail-closed salt floor: a shorter
+// salt makes the actor hash brute-forceable, so eventexport.ProjectEvent drops
+// every event. Used only to warn loudly at startup.
+const minActorSaltLen = 16
+
 // startEventExport launches the redacted event exporter when [events.export] is
 // configured. It is opt-in: with no endpoint the supervisor ships nothing.
 //
@@ -42,6 +47,14 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 		if _, err := tokenProvider(); err != nil {
 			logf("WARNING: token unreadable at startup (will retry on each POST): %v", err)
 		}
+	}
+	// The projection fails closed on a salt shorter than 16 bytes (a short salt
+	// makes the actor hash brute-forceable), which silently drops every event. A
+	// loud startup warning turns that into an operator-visible misconfiguration
+	// instead of a dark exporter. loadOrCreateSalt always yields a 32-hex salt, so
+	// this only fires on a too-short inline actor_salt.
+	if len(salt) < minActorSaltLen {
+		logf("WARNING: actor salt is %d bytes (< %d); the exporter will DROP ALL events — set a longer [events.export] actor_salt", len(salt), minActorSaltLen)
 	}
 
 	exp := eventexport.New(eventexport.Config{
@@ -124,9 +137,10 @@ func loadOrCreateSalt(homeDir string, stderr io.Writer) string {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		// Extremely unlikely; fall back to a non-empty constant so hashing still
-		// works, and warn that the salt is not random.
+		// works, and warn that the salt is not random. Must be >= minActorSaltLen
+		// bytes or the projection would fail closed and drop every event.
 		fmt.Fprintf(stderr, "gc events-export: WARNING: could not generate a random salt: %v\n", err) //nolint:errcheck
-		return "events-export"
+		return "events-export-fallback-salt"
 	}
 	salt := hex.EncodeToString(buf)
 	if err := os.WriteFile(path, []byte(salt+"\n"), 0o600); err != nil {

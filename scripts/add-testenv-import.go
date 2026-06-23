@@ -43,7 +43,10 @@ func main() {
 	}
 	dirInfos := map[string]*dirInfo{}
 
-	skipDirs := map[string]bool{"vendor": true, "node_modules": true, ".git": true}
+	// pkg/ is the public, OSS-consumable tree: its tests must NOT blank-import
+	// internal/testenv, or an external module importing the package (cross-module
+	// conformance replay) cannot compile them. Keep pkg/ packages testenv-free.
+	skipDirs := map[string]bool{"vendor": true, "node_modules": true, ".git": true, "pkg": true}
 
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {

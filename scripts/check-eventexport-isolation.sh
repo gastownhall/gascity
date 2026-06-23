@@ -45,7 +45,7 @@ fi
 
 # 2. One source of truth: each projection primitive defined exactly once in
 # non-test code across the surface.
-for sym in 'AllowedTypes = map' 'func ActorHash' 'func safeRef'; do
+for sym in 'allowedTypes = map' 'func ActorHash' 'func safeRef'; do
   files=$(grep -rl "$sym" pkg/eventexport internal/eventfeed cmd/gc/event_export.go 2>/dev/null || true)
   n=$(printf '%s\n' "$files" | grep -v '_test.go' | grep -c . || true)
   [ "$n" = "1" ] || fail "expected exactly one definition of '$sym' in the surface, found $n"

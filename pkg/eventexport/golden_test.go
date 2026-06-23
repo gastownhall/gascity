@@ -2,6 +2,8 @@ package eventexport
 
 import (
 	"encoding/json"
+	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -61,4 +63,38 @@ func TestBatchGoldenBytes(t *testing.T) {
 	if string(out) != want {
 		t.Fatalf("batch golden:\n got %s\nwant %s", out, want)
 	}
+}
+
+// TestAllowlistPolicyGolden pins the redaction POLICY (the allowed-type set, which
+// types may carry a ref, which reduce to {type,ts}). Golden bytes + the field
+// count pin the wire SHAPE, but widening the allowlist changes what may EGRESS
+// without changing bytes or field count — no other guard fires. Changing this set
+// is a redaction-policy change: update the golden AND bump SchemaVersion.
+func TestAllowlistPolicyGolden(t *testing.T) {
+	wantAllowed := []string{
+		"bead.closed", "bead.created", "controller.started", "convoy.closed",
+		"events.rotated", "gc.store.maintenance.done", "mail.sent",
+		"order.completed", "order.failed", "order.fired",
+		"project.identity.stamped", "session.drain_acked_with_assigned_work",
+		"session.draining", "session.reset_stalled", "session.stopped",
+		"session.stranded", "session.woke",
+	}
+	if got := AllowedTypeList(); !reflect.DeepEqual(got, wantAllowed) {
+		t.Fatalf("allowlist policy changed:\n got  %v\n want %v\n-> update this golden AND bump SchemaVersion", got, wantAllowed)
+	}
+	if got := sortedKeys(refTypes); !reflect.DeepEqual(got, []string{"bead.closed", "bead.created", "convoy.closed"}) {
+		t.Fatalf("refTypes policy changed: got %v -> bump SchemaVersion", got)
+	}
+	if got := sortedKeys(mailReduced); !reflect.DeepEqual(got, []string{"mail.sent"}) {
+		t.Fatalf("mailReduced policy changed: got %v -> bump SchemaVersion", got)
+	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

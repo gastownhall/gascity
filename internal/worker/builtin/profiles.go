@@ -181,7 +181,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u203a ",
 		ReadyDelayMs:      3000,
-		ProcessNames:      []string{"codex"},
+		ProcessNames:      []string{"codex", "codex-raw"},
 		SupportsHooks:     true,
 		InstructionsFile:  "AGENTS.md",
 		ResumeFlag:        "resume",

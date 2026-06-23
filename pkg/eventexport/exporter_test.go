@@ -85,7 +85,7 @@ func TestExporter_BatchesRedactsAdvancesCursor(t *testing.T) {
 	src := &chanSource{ch: make(chan TaggedEvent, 8)}
 	exp := New(Config{
 		Endpoint: srv.URL, TokenProvider: func() (string, error) { return "tok-123", nil },
-		Salt: []byte("s"), ExportRef: true,
+		Salt: testSalt, ExportRef: true,
 		BatchMax: 100, BatchInterval: 15 * time.Millisecond, MaxPendingPerCity: 1000,
 		Client: srv.Client(),
 	})
@@ -137,7 +137,7 @@ func TestExporter_HoldsCursorOnSinkFailure(t *testing.T) {
 	src := &chanSource{ch: make(chan TaggedEvent, 8)}
 	exp := New(Config{
 		Endpoint: srv.URL, TokenProvider: func() (string, error) { return "t", nil },
-		Salt: []byte("s"), ExportRef: true,
+		Salt: testSalt, ExportRef: true,
 		BatchMax: 100, BatchInterval: 10 * time.Millisecond, MaxPendingPerCity: 1000,
 		Client: srv.Client(),
 	})
@@ -174,7 +174,7 @@ func TestExporter_TokenProviderErrorHoldsCursor(t *testing.T) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(""))}, nil
 	})
 	exp := New(Config{
-		Endpoint: "https://example.invalid/ingest", Salt: []byte("s"), ExportRef: true,
+		Endpoint: "https://example.invalid/ingest", Salt: testSalt, ExportRef: true,
 		TokenProvider: func() (string, error) { return "", errors.New("boom") },
 		BatchInterval: 10 * time.Millisecond, MaxPendingPerCity: 1000,
 		Client: &http.Client{Transport: rt},
@@ -211,7 +211,7 @@ func TestExporter_NoTokenProviderNoAuthHeader(t *testing.T) {
 
 	src := &chanSource{ch: make(chan TaggedEvent, 4)}
 	exp := New(Config{
-		Endpoint: srv.URL, Salt: []byte("s"), ExportRef: true,
+		Endpoint: srv.URL, Salt: testSalt, ExportRef: true,
 		BatchMax: 100, BatchInterval: 10 * time.Millisecond, MaxPendingPerCity: 1000,
 		Client: srv.Client(),
 	})

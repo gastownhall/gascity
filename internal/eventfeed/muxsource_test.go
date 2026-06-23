@@ -108,7 +108,7 @@ func TestMuxSource_YieldsAndPicksUpNewCity(t *testing.T) {
 // never sees an events.Event). It also confirms #3654 does NOT resolve run_id by
 // decoding the payload: the run-root id buried in metadata must NOT appear.
 func TestAdapter_NoLeakFromPayload(t *testing.T) {
-	opt := eventexport.Options{Salt: []byte("s"), ExportRef: true}
+	opt := eventexport.Options{Salt: []byte("sixteen-byte-salt-xx"), ExportRef: true}
 	ts := time.Date(2026, 6, 21, 10, 3, 27, 0, time.UTC)
 	corpus := []events.Event{
 		{
@@ -131,7 +131,7 @@ func TestAdapter_NoLeakFromPayload(t *testing.T) {
 	for _, e := range corpus {
 		te := events.TaggedEvent{Event: e, City: "c"}
 		ex := toExport(te)
-		if env, ok := eventexport.ProjectFields(ex.Seq, ex.Type, ex.Ts, ex.Actor, ex.Subject, ex.RunID, ex.SessionID, opt); ok {
+		if env, ok := eventexport.ProjectEvent(ex, opt); ok {
 			batch.Events = append(batch.Events, env)
 		}
 	}
