@@ -89,7 +89,7 @@ type defaultScaleCheckTarget struct {
 
 var (
 	errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
-	errPoolScaleCheckPartialCreate      = errors.New("pool session create blocked: scale_check partial")
+	errPoolSessionCreatePartial         = errors.New("pool session create skipped: demand read partial")
 )
 
 // poolSessionCreateFairShareCounter rotates scarce create tokens across
@@ -2194,8 +2194,8 @@ func realizePoolDesiredSessions(
 				switch {
 				case errors.Is(err, errPoolSessionCreateBudgetExhausted):
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (fresh create deferred)\n", qualifiedName, err) //nolint:errcheck
-				case errors.Is(err, errPoolScaleCheckPartialCreate):
-					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: scale_check partial — new create skipped\n", qualifiedName) //nolint:errcheck
+				case errors.Is(err, errPoolSessionCreatePartial):
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (partial demand read, fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
 				default:
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 				}
@@ -2953,7 +2953,7 @@ func selectOrPlanPoolSessionBead(
 
 	if bp.poolScaleCheckPartialTemplates[template] {
 		delete(usedSlots, slot)
-		return beads.Bead{}, 0, nil, errPoolScaleCheckPartialCreate
+		return beads.Bead{}, 0, nil, errPoolSessionCreatePartial
 	}
 
 	if !bp.tryClaimPoolSessionCreate(template) {
