@@ -13,7 +13,7 @@
 #   GC_PACK_STATE_DIR — canonical pack runtime root for dolt (optional)
 #   GC_DOLT       — set to "skip" to no-op all operations (exit 2)
 #   GC_BEADS_BACKEND — "dolt" (default) or "doltlite"
-#   GC_DOLT_HOST  — dolt server host (empty = local server)
+#   GC_DOLT_HOST  — dolt server host (empty = local loopback server)
 #   GC_DOLT_PORT  — dolt server port (default: ephemeral, hashed from city path)
 #   GC_DOLT_USER  — dolt user (default: root)
 #   GC_DOLT_PASSWORD — dolt password (default: empty)
@@ -33,7 +33,7 @@ set -e
 # --- Configuration ---
 
 # DOLT_PORT is set after derived paths are resolved (see allocate_port below).
-DOLT_HOST="${GC_DOLT_HOST:-0.0.0.0}"
+DOLT_HOST="${GC_DOLT_HOST:-127.0.0.1}"
 DOLT_USER="${GC_DOLT_USER:-root}"
 DOLT_PASSWORD="${GC_DOLT_PASSWORD:-}"
 DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
