@@ -28,6 +28,7 @@ func isTestBinary() bool {
 type Config struct {
 	Supervisor  Section           `toml:"supervisor"`
 	Publication PublicationConfig `toml:"publication,omitempty"`
+	Events      EventsSection     `toml:"events,omitempty"`
 }
 
 // Section holds the [supervisor] table fields.
@@ -53,6 +54,51 @@ type PublicationConfig struct {
 // PublicationTenantAuthConfig configures tenant-route auth policy.
 type PublicationTenantAuthConfig struct {
 	PolicyRef string `toml:"policy_ref,omitempty"`
+}
+
+// EventsSection holds the [events] table of supervisor.toml.
+type EventsSection struct {
+	Export ExportConfig `toml:"export,omitempty"`
+}
+
+// ExportConfig configures the redacted event export ([events.export]). Export is
+// off unless Endpoint is set: that absence is the opt-in gate, so configuring a
+// supervisor never starts shipping events without an explicit endpoint.
+type ExportConfig struct {
+	// Endpoint is the HTTP URL that receives batched, envelope-only events.
+	Endpoint string `toml:"endpoint,omitempty"`
+	// Token, when set, is sent as an Authorization: Bearer header.
+	Token string `toml:"token,omitempty"`
+	// TokenFile, when set, is a path to a file holding the bearer token. It is
+	// re-read on each POST so the token can be rotated out of band, and takes
+	// precedence over Token.
+	TokenFile string `toml:"token_file,omitempty"`
+	// ActorSalt salts the actor hash so it is stable yet non-reversible.
+	ActorSalt string `toml:"actor_salt,omitempty"`
+	// BatchMaxEvents caps events per POST (default 1000).
+	BatchMaxEvents int `toml:"batch_max_events,omitempty"`
+	// BatchInterval caps the time between POSTs (default 5s).
+	BatchInterval string `toml:"batch_interval,omitempty"`
+	// ExportRef toggles the id-gated ref field (default true).
+	ExportRef *bool `toml:"export_ref,omitempty"`
+}
+
+// Enabled reports whether event export is configured.
+func (x ExportConfig) Enabled() bool { return strings.TrimSpace(x.Endpoint) != "" }
+
+// ExportRefEnabled reports whether the id-gated ref is exported (default true).
+func (x ExportConfig) ExportRefEnabled() bool { return x.ExportRef == nil || *x.ExportRef }
+
+// BatchIntervalDuration parses BatchInterval, defaulting to 5s.
+func (x ExportConfig) BatchIntervalDuration() time.Duration {
+	if x.BatchInterval == "" {
+		return 5 * time.Second
+	}
+	d, err := time.ParseDuration(x.BatchInterval)
+	if err != nil || d <= 0 {
+		return 5 * time.Second
+	}
+	return d
 }
 
 // BindOrDefault returns the bind address, defaulting to "127.0.0.1".
