@@ -55,6 +55,12 @@ type agentBuildParams struct {
 	// may still be reused, and dependency-floor prerequisites are exempt.
 	poolSessionCreateBudget *poolSessionCreateBudget
 
+	// poolScaleCheckPartialTemplates holds pool templates whose scale_check
+	// returned a partial result this build cycle. selectOrPlanPoolSessionBead
+	// refuses new creates for these templates; existing-session reuse is
+	// unaffected.
+	poolScaleCheckPartialTemplates map[string]bool
+
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
 	beadNames map[string]string

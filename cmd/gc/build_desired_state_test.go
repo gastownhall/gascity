@@ -10453,3 +10453,152 @@ func TestOpenControlDispatcherDemandHonorsBareLegacyRoute(t *testing.T) {
 		t.Fatalf("openControlDispatcherDemand = %v, want demand keyed by qualified name from bare route", demand)
 	}
 }
+
+// TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates verifies that
+// when the demand store returns a partial result for a pool agent:
+//   - poolScaleCheckPartialTemplates is set for the affected template
+//   - existing active/awake session beads are retained in desired state
+//   - no new session creates are added beyond the existing beads
+//   - retainScaleCheckPartialPoolDesired counts only active/awake beads (not creating)
+//
+// This exercises Changes 1+2 from ga-0xljyj.
+func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "echo",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+		}},
+	}
+
+	makeSessionBead := func(id, sessionName, state, slot string) beads.Bead {
+		return beads.Bead{
+			ID:     id,
+			Title:  "worker",
+			Type:   sessionBeadType,
+			Status: "open",
+			Labels: []string{sessionBeadLabel, "template:worker"},
+			Metadata: map[string]string{
+				"session_name":         sessionName,
+				"template":             "worker",
+				"agent_name":           "worker",
+				"pool_slot":            slot,
+				poolManagedMetadataKey: boolMetadata(true),
+				"state":                state,
+			},
+		}
+	}
+
+	t.Run("one active bead retained, no new creates", func(t *testing.T) {
+		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		activeSession := makeSessionBead("session-worker-active", "worker-active-1", "active", "1")
+
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot([]beads.Bead{activeSession}),
+			nil, &stderr,
+		)
+
+		if !result.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true; stderr=%s", stderr.String())
+		}
+		if _, ok := result.State["worker-active-1"]; !ok {
+			t.Fatalf("active session not retained in desired state: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+		}
+		workerEntries := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerEntries++
+			}
+		}
+		if workerEntries != 1 {
+			t.Fatalf("desired state has %d worker entries, want exactly 1; keys=%v", workerEntries, mapKeys(result.State))
+		}
+
+		snapshot := newSessionBeadSnapshot([]beads.Bead{activeSession})
+		poolDesired := retainScaleCheckPartialPoolDesired(
+			cfg,
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			snapshot,
+			result.PoolScaleCheckPartialTemplates,
+		)
+		if got := poolDesired["worker"]; got != 1 {
+			t.Fatalf("poolDesired[worker] = %d, want 1 (confirmed-alive active bead)", got)
+		}
+	})
+
+	t.Run("zero existing beads yields zero creates", func(t *testing.T) {
+		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot([]beads.Bead{}),
+			nil, &stderr,
+		)
+
+		if !result.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true; stderr=%s", stderr.String())
+		}
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				t.Fatalf("unexpected worker entry in desired state during partial read with no existing sessions: keys=%v", mapKeys(result.State))
+			}
+		}
+
+		snapshot := newSessionBeadSnapshot([]beads.Bead{})
+		poolDesired := retainScaleCheckPartialPoolDesired(
+			cfg,
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			snapshot,
+			result.PoolScaleCheckPartialTemplates,
+		)
+		if got := poolDesired["worker"]; got != 0 {
+			t.Fatalf("poolDesired[worker] = %d, want 0 with no existing sessions", got)
+		}
+	})
+
+	// Change 2 regression: creating beads must be preserved in desired (not
+	// drained) but must NOT inflate poolDesired — only active/awake count.
+	t.Run("creating bead preserved but not counted in poolDesired", func(t *testing.T) {
+		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		activeSession := makeSessionBead("session-worker-active", "worker-active-1", "active", "1")
+		creatingSession := makeSessionBead("session-worker-creating", "worker-creating-2", "creating", "2")
+
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot([]beads.Bead{activeSession, creatingSession}),
+			nil, &stderr,
+		)
+
+		if !result.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true; stderr=%s", stderr.String())
+		}
+		if _, ok := result.State["worker-active-1"]; !ok {
+			t.Fatalf("active session not retained: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+		}
+		if _, ok := result.State["worker-creating-2"]; !ok {
+			t.Fatalf("creating session not preserved in desired state (would allow premature drain): keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+		}
+
+		snapshot := newSessionBeadSnapshot([]beads.Bead{activeSession, creatingSession})
+		poolDesired := retainScaleCheckPartialPoolDesired(
+			cfg,
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			snapshot,
+			result.PoolScaleCheckPartialTemplates,
+		)
+		// Only the active bead counts; creating must not inflate poolDesired.
+		if got := poolDesired["worker"]; got != 1 {
+			t.Fatalf("poolDesired[worker] = %d, want 1 (creating bead must not be counted as wake demand)", got)
+		}
+	})
+}
