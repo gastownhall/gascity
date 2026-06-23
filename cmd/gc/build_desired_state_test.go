@@ -10601,4 +10601,39 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 			t.Fatalf("poolDesired[worker] = %d, want 1 (creating bead must not be counted as wake demand)", got)
 		}
 	})
+
+	// Criterion #5 (ga-4qbgqf.1): stale creating beads are shielded from drain
+	// during a partial tick by scaleCheckPartial, but roll back within one
+	// reconciler tick once the partial resolves.
+	t.Run("stale creating bead rolls back on next non-partial tick", func(t *testing.T) {
+		partialStore := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		staleSession := makeSessionBead("session-worker-stale", "worker-stale-4", "creating", "4")
+		snapshot := newSessionBeadSnapshot([]beads.Bead{staleSession})
+
+		// Partial tick: scaleCheckPartial shields the pool-managed creating bead from drain.
+		var pStderr strings.Builder
+		partialResult := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), partialStore, nil,
+			snapshot, nil, &pStderr,
+		)
+		if !partialResult.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("partial tick: PoolScaleCheckPartialTemplates[worker] = false; stderr=%s", pStderr.String())
+		}
+		if _, ok := partialResult.State["worker-stale-4"]; !ok {
+			t.Fatalf("partial tick: stale creating bead absent from State (scaleCheckPartialSessionPreservable must retain it); keys=%v stderr=%s", mapKeys(partialResult.State), pStderr.String())
+		}
+
+		// Normal tick: partial resolves; scaleCheckPartial is false.
+		// The pool bead is not desired (poolDesired=0 with no demand), so
+		// the controllerManagedPool guard at build_desired_state.go:1903 drains it.
+		normalResult := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), beads.NewMemStore(), nil,
+			snapshot, nil, io.Discard,
+		)
+		if _, ok := normalResult.State["worker-stale-4"]; ok {
+			t.Fatalf("normal tick: stale creating bead still in State after partial resolved; keys=%v", mapKeys(normalResult.State))
+		}
+	})
 }
