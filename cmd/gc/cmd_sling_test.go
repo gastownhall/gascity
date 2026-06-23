@@ -8632,3 +8632,161 @@ func TestSlingStdinWithExtraArg(t *testing.T) {
 		t.Errorf("stderr = %q, want to contain '--stdin requires exactly 1 argument'", stderr.String())
 	}
 }
+
+// setupCmdSlingMultiDefaultTargetsFixture creates a city with two worker agents
+// in the "foundations" rig and optionally configures default_sling_targets with
+// both. The bead fo-multi-work is pre-seeded in the rig store.
+func setupCmdSlingMultiDefaultTargetsFixture(t *testing.T, targets []string) (cityDir, rigDir string) {
+	t.Helper()
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir = t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	rigDir = filepath.Join(cityDir, "foundations")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatalf("ensurePersistedScopeLocalFileStore(%s): %v", dir, err)
+		}
+	}
+	writeTestFileStoreBeads(t, rigDir, []beads.Bead{{
+		ID:       "fo-multi-work",
+		Title:    "multi-target work bead",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{},
+	}})
+
+	targetsLine := ""
+	if len(targets) > 0 {
+		quoted := make([]string, len(targets))
+		for i, tgt := range targets {
+			quoted[i] = fmt.Sprintf("%q", tgt)
+		}
+		targetsLine = "default_sling_targets = [" + strings.Join(quoted, ", ") + "]\n"
+	}
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "foundations"
+path = "foundations"
+prefix = "fo"
+` + targetsLine + `
+[[agent]]
+name = "worker-a"
+dir = "foundations"
+
+[[agent]]
+name = "worker-b"
+dir = "foundations"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Chdir(cityDir)
+	return cityDir, rigDir
+}
+
+// TestCmdSlingMultiDefaultTargetsPicksFromList verifies that when
+// default_sling_targets lists two agents, targetless gc sling routes the bead
+// to one of them (the exact pick is random, so we accept either).
+func TestCmdSlingMultiDefaultTargetsPicksFromList(t *testing.T) {
+	cityDir, rigDir := setupCmdSlingMultiDefaultTargetsFixture(t,
+		[]string{"foundations/worker-a", "foundations/worker-b"},
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"fo-multi-work"},
+		false, false, false,
+		"", nil, "",
+		true, false, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	routed, err := rigStore.Get("fo-multi-work")
+	if err != nil {
+		t.Fatalf("rigStore.Get(fo-multi-work): %v", err)
+	}
+	got := routed.Metadata["gc.routed_to"]
+	if got != "foundations/worker-a" && got != "foundations/worker-b" {
+		t.Fatalf("gc.routed_to = %q, want one of [foundations/worker-a, foundations/worker-b]", got)
+	}
+}
+
+// TestCmdSlingMultiDefaultTargetsSingleEntry verifies that a single-entry
+// default_sling_targets list behaves identically to default_sling_target.
+func TestCmdSlingMultiDefaultTargetsSingleEntry(t *testing.T) {
+	cityDir, rigDir := setupCmdSlingMultiDefaultTargetsFixture(t,
+		[]string{"foundations/worker-a"},
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"fo-multi-work"},
+		false, false, false,
+		"", nil, "",
+		true, false, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	routed, err := rigStore.Get("fo-multi-work")
+	if err != nil {
+		t.Fatalf("rigStore.Get(fo-multi-work): %v", err)
+	}
+	if routed.Metadata["gc.routed_to"] != "foundations/worker-a" {
+		t.Fatalf("gc.routed_to = %q, want foundations/worker-a", routed.Metadata["gc.routed_to"])
+	}
+}
+
+// TestCmdSlingMultiDefaultTargetsEmptyEntryRejected verifies that an empty
+// string inside default_sling_targets is rejected with a clear error.
+func TestCmdSlingMultiDefaultTargetsEmptyEntryRejected(t *testing.T) {
+	setupCmdSlingMultiDefaultTargetsFixture(t, []string{"foundations/worker-a", ""})
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"fo-multi-work"},
+		false, false, false,
+		"", nil, "",
+		true, false, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code == 0 {
+		t.Fatalf("cmdSling returned 0, want non-zero for empty entry in default_sling_targets")
+	}
+	if !strings.Contains(stderr.String(), "empty entry") {
+		t.Errorf("stderr = %q, want to mention 'empty entry'", stderr.String())
+	}
+}
