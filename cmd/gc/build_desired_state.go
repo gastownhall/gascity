@@ -1568,7 +1568,10 @@ func scaleCheckPartialSessionRetainable(b beads.Bead) bool {
 	case "active", "awake":
 		return true
 	default:
-		return false
+		// A fresh in-flight create that still holds an active pending_create_claim
+		// lease counts as retained capacity. Stale creates (lease expired/cleared)
+		// return false so they stop inflating the desired count.
+		return isPendingPoolCreate(b)
 	}
 }
 
