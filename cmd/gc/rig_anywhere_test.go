@@ -1001,6 +1001,136 @@ path = "packs/missing"
 		assertSameTestPath(t, bindingB.Rigs[0].Path, rigDir)
 		assertNoGlobalRigEntries(t, gcHome)
 	})
+
+	t.Run("drops_dangling_patches_and_order_overrides_for_removed_rig", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		resetFlags(t)
+
+		cityPath := setupCity(t, "patch-city")
+		rigDir := filepath.Join(t.TempDir(), "patch-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Every config block that references the rig goes stale when it is
+		// removed. The rig-scoped [[patches.agent]] (targeting the implicit
+		// claude agent), [[patches.named_session]], [[patches.rigs]], and the
+		// [[github.pr_monitor]] all hard-fail a later LoadWithIncludes (#3666);
+		// the [[orders.overrides]] rig="patch-rig" dangles at order-scan time.
+		// City-scoped siblings (dir/rig empty) must survive untouched.
+		toml := `[workspace]
+name = "patch-city"
+
+[[agent]]
+name = "mayor"
+
+[providers.claude]
+base = "builtin:claude"
+
+[[rigs]]
+name = "patch-rig"
+path = "` + rigDir + `"
+
+[[patches.agent]]
+dir = "patch-rig"
+name = "claude"
+suspended = true
+
+[[patches.named_session]]
+dir = "patch-rig"
+name = "patch-rig/worker"
+mode = "always"
+
+[[patches.rigs]]
+name = "patch-rig"
+suspended_on_start = true
+
+[[github.pr_monitor]]
+name = "patch-rig-monitor"
+owner = "acme"
+repo = "widget"
+base_branches = ["main"]
+rig = "patch-rig"
+repair_route = "patch-rig/coder"
+
+[[patches.github_pr_monitor]]
+name = "patch-rig-monitor"
+poll_interval = "5m"
+
+[[patches.agent]]
+name = "claude"
+suspended = true
+
+[[orders.overrides]]
+name = "rig-order"
+rig = "patch-rig"
+enabled = false
+
+[[orders.overrides]]
+name = "city-order"
+enabled = false
+`
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		registerCityForRigResolution(t, gcHome, cityPath, "patch-city")
+
+		cityFlag = cityPath
+		var stdout, stderr bytes.Buffer
+		code := cmdRigRemove("patch-rig", &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
+		}
+
+		// The city must stay loadable: gc reload / gc rig list compose via
+		// LoadWithIncludes, which applies [[patches.agent]]. A patch left
+		// targeting the removed rig's agent hard-fails there with
+		// "not found in merged config" (#3666).
+		if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err != nil {
+			t.Fatalf("LoadWithIncludes after rig remove failed (#3666): %v", err)
+		}
+
+		// The rig-scoped patch + override must be gone; the city-scoped ones
+		// must remain.
+		raw, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := config.Parse(raw)
+		if err != nil {
+			t.Fatalf("Parse(rewritten city.toml): %v", err)
+		}
+		for _, p := range parsed.Patches.Agents {
+			if p.Dir == "patch-rig" {
+				t.Errorf("patches.agent for removed rig survived: %+v", p)
+			}
+		}
+		if len(parsed.Patches.Agents) != 1 || parsed.Patches.Agents[0].Dir != "" {
+			t.Errorf("city-scoped patches.agent not preserved: %#v", parsed.Patches.Agents)
+		}
+		// named_session / rigs / pr_monitor had only the one rig-targeting entry
+		// each, so the removal must leave each list empty — nothing survives and
+		// nothing spurious is introduced.
+		if len(parsed.Patches.NamedSessions) != 0 {
+			t.Errorf("patches.named_session for removed rig survived: %#v", parsed.Patches.NamedSessions)
+		}
+		if len(parsed.Patches.Rigs) != 0 {
+			t.Errorf("patches.rigs for removed rig survived: %#v", parsed.Patches.Rigs)
+		}
+		if len(parsed.GitHub.PRMonitors) != 0 {
+			t.Errorf("github.pr_monitor for removed rig survived: %#v", parsed.GitHub.PRMonitors)
+		}
+		if len(parsed.Patches.GitHubPRMonitors) != 0 {
+			t.Errorf("patches.github_pr_monitor for removed rig's monitor survived: %#v", parsed.Patches.GitHubPRMonitors)
+		}
+		for _, o := range parsed.Orders.Overrides {
+			if o.Rig == "patch-rig" {
+				t.Errorf("orders.overrides for removed rig survived: %+v", o)
+			}
+		}
+		if len(parsed.Orders.Overrides) != 1 || parsed.Orders.Overrides[0].Rig != "" {
+			t.Errorf("city-scoped orders.overrides not preserved: %#v", parsed.Orders.Overrides)
+		}
+	})
 }
 
 // ===========================================================================
