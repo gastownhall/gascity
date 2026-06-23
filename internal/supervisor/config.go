@@ -69,9 +69,10 @@ type ExportConfig struct {
 	Endpoint string `toml:"endpoint,omitempty"`
 	// Token, when set, is sent as an Authorization: Bearer header.
 	Token string `toml:"token,omitempty"`
-	// CredentialsPath, when set, is a JSON file {"token","org_salt"} that
-	// overrides Token/ActorSalt (so a credential can be rotated out of band).
-	CredentialsPath string `toml:"credentials,omitempty"`
+	// TokenFile, when set, is a path to a file holding the bearer token. It is
+	// re-read on each POST so the token can be rotated out of band, and takes
+	// precedence over Token.
+	TokenFile string `toml:"token_file,omitempty"`
 	// ActorSalt salts the actor hash so it is stable yet non-reversible.
 	ActorSalt string `toml:"actor_salt,omitempty"`
 	// BatchMaxEvents caps events per POST (default 1000).

@@ -10,23 +10,42 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/events"
 )
 
+// TaggedEvent is the closed set of primitive fields the exporter consumes for
+// one event: the source city plus the projectable fields. A Source yields these
+// in per-city seq order; the supervisor-coupled adapter builds them from its
+// event stream so this package never depends on the event backend. RunID and
+// SessionID are opaque correlation ids (empty unless a typed source populates
+// them) and are gated through safeRef during projection.
+type TaggedEvent struct {
+	City      string
+	Seq       uint64
+	Type      string
+	Ts        time.Time
+	Actor     string
+	Subject   string
+	RunID     string
+	SessionID string
+}
+
 // Source yields tagged events in per-city seq order. The real Source wraps the
-// supervisor event multiplexer; tests use a fake.
+// supervisor event multiplexer (internal/eventfeed); tests use a fake.
 type Source interface {
-	Next(ctx context.Context) (events.TaggedEvent, error)
+	Next(ctx context.Context) (TaggedEvent, error)
 }
 
 // Config configures an Exporter. Endpoint must be non-empty for the exporter to
 // do anything — that is the opt-in: absent config means no export.
 type Config struct {
-	Endpoint          string
-	Token             string
+	Endpoint string
+	// TokenProvider, when non-nil, supplies the bearer sent as
+	// Authorization: Bearer on each POST. It is called per POST so a file-backed
+	// token can be rotated out of band; an error holds the cursor and retries.
+	TokenProvider     func() (string, error)
 	Salt              []byte
 	ExportRef         bool
+	Profile           Profile
 	BatchMax          int           // max events per POST (default 1000)
 	BatchInterval     time.Duration // max time between POSTs (default 5s)
 	MaxPendingPerCity int           // backpressure threshold (default 50000)
@@ -101,7 +120,7 @@ func (e *Exporter) Cursors() map[string]uint64 {
 func (e *Exporter) Run(ctx context.Context, src Source) error {
 	// Decouple the blocking Next from the flush timer via a bounded hand-off
 	// channel; when it (and pending) fill, the puller blocks => backpressure.
-	in := make(chan events.TaggedEvent, 256)
+	in := make(chan TaggedEvent, 256)
 	go func() {
 		for {
 			te, err := src.Next(ctx)
@@ -121,7 +140,7 @@ func (e *Exporter) Run(ctx context.Context, src Source) error {
 	defer ticker.Stop()
 	for {
 		// Disable ingest while any city is over its pending cap (backpressure).
-		var inCh <-chan events.TaggedEvent = in
+		var inCh <-chan TaggedEvent = in
 		if e.overCap() {
 			inCh = nil
 		}
@@ -148,16 +167,27 @@ func (e *Exporter) Run(ctx context.Context, src Source) error {
 	}
 }
 
-func (e *Exporter) ingest(te events.TaggedEvent) {
+func (e *Exporter) ingest(te TaggedEvent) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if te.Seq <= e.high[te.City] {
 		return // already processed (resume overlap)
 	}
 	e.high[te.City] = te.Seq
-	if env, ok := Project(te.Event, Options{Salt: e.cfg.Salt, ExportRef: e.cfg.ExportRef}); ok {
-		e.pending[te.City] = append(e.pending[te.City], env)
+	opt := Options{Salt: e.cfg.Salt, ExportRef: e.cfg.ExportRef, Profile: e.cfg.Profile}
+	env, ok := ProjectFields(te.Seq, te.Type, te.Ts, te.Actor, te.Subject, te.RunID, te.SessionID, opt)
+	if !ok {
+		return
 	}
+	// Defense-in-depth at the trust boundary: never ship an envelope that fails
+	// the redaction invariants. ProjectFields builds a valid envelope by
+	// construction, so a failure here is a projection bug — drop it loudly rather
+	// than egress something unexpected.
+	if err := Validate(env, opt); err != nil {
+		e.cfg.Logf("eventexport: dropped envelope failing self-validation (seq=%d type=%s): %v", te.Seq, te.Type, err)
+		return
+	}
+	e.pending[te.City] = append(e.pending[te.City], env)
 }
 
 func (e *Exporter) cityLen(city string) int {
@@ -228,8 +258,14 @@ func (e *Exporter) post(ctx context.Context, city string, batch []Envelope) erro
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if e.cfg.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+e.cfg.Token)
+	if e.cfg.TokenProvider != nil {
+		token, terr := e.cfg.TokenProvider()
+		if terr != nil {
+			return fmt.Errorf("eventexport: resolve token: %w", terr)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
 	}
 	resp, err := e.cfg.Client.Do(req)
 	if err != nil {

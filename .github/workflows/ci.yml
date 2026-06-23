@@ -179,6 +179,8 @@ jobs:
         run: make check-gomod-replace
       - name: Native dependency surface guard
         run: make check-native-dependency-surface
+      - name: Event-export isolation guard
+        run: make check-eventexport-isolation
       - name: Native DoltLite beads tests
         run: make test-native-doltlite-beads
       - name: Get golangci-lint version for cache key

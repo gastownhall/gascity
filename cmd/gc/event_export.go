@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -12,9 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/eventexport"
+	"github.com/gastownhall/gascity/internal/eventfeed"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/pkg/eventexport"
 )
 
 // muxRebuildInterval is how often the exporter re-enumerates city providers so
@@ -24,19 +24,29 @@ const muxRebuildInterval = 60 * time.Second
 // startEventExport launches the redacted event exporter when [events.export] is
 // configured. It is opt-in: with no endpoint the supervisor ships nothing.
 //
-// The exporter watches the same per-city providers the API serves, projects each
-// event to an envelope-only shell, and POSTs batches to the configured endpoint.
-// It runs in its own goroutine, holds its cursor on sink failure, and applies
-// backpressure rather than blocking event recording.
+// The exporter watches the same per-city providers the API serves (via the
+// eventfeed adapter), projects each event to an envelope-only shell, and POSTs
+// batches to the configured endpoint. It runs in its own goroutine, holds its
+// cursor on sink failure, and applies backpressure rather than blocking event
+// recording.
 func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers func() map[string]events.Provider, homeDir string, stderr io.Writer) {
 	logf := func(format string, args ...any) {
 		fmt.Fprintf(stderr, "gc events-export: "+format+"\n", args...) //nolint:errcheck
 	}
-	token, salt := resolveExportCredentials(ec, homeDir, stderr)
+	tokenProvider, salt := resolveExportCredentials(ec, homeDir, stderr)
+
+	// One-shot startup probe so a fat-fingered token_file surfaces a clear
+	// warning instead of only a silent per-POST cursor stall. Non-fatal: the
+	// token may legitimately be rotated in after launch.
+	if tokenProvider != nil {
+		if _, err := tokenProvider(); err != nil {
+			logf("WARNING: token unreadable at startup (will retry on each POST): %v", err)
+		}
+	}
 
 	exp := eventexport.New(eventexport.Config{
 		Endpoint:      ec.Endpoint,
-		Token:         token,
+		TokenProvider: tokenProvider,
 		Salt:          salt,
 		ExportRef:     ec.ExportRefEnabled(),
 		BatchMax:      ec.BatchMaxEvents,
@@ -47,7 +57,7 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 	cursorPath := filepath.Join(homeDir, "events-export-cursor.json")
 	exp.SetCursors(eventexport.LoadCursors(cursorPath))
 
-	src := eventexport.NewMuxSource(providers, exp.Cursors, muxRebuildInterval, logf)
+	src := eventfeed.NewMuxSource(providers, exp.Cursors, muxRebuildInterval, logf)
 	go func() { _ = exp.Run(ctx, src) }()
 	go persistExportCursors(ctx, exp, cursorPath)
 
@@ -70,37 +80,35 @@ func persistExportCursors(ctx context.Context, exp *eventexport.Exporter, path s
 	}
 }
 
-// resolveExportCredentials reads the token + actor salt from the credentials
-// file (if any) or the inline config. When no salt is configured it falls back
-// to a random per-install secret persisted locally — never to the token or
-// endpoint, which the receiver knows and could use to reverse the actor hash.
-func resolveExportCredentials(ec supervisor.ExportConfig, homeDir string, stderr io.Writer) (string, []byte) {
-	token, salt := ec.Token, ec.ActorSalt
-	if ec.CredentialsPath != "" {
-		if b, err := os.ReadFile(ec.CredentialsPath); err == nil {
-			var c struct {
-				Token     string `json:"token"`
-				ActorSalt string `json:"actor_salt"`
-				OrgSalt   string `json:"org_salt"` // accepted for back-compat
+// resolveExportCredentials builds the bearer-token provider and the actor-hash
+// salt. The token is read from token_file (re-read on each POST so it can be
+// rotated out of band) when set, otherwise from the inline token; with neither,
+// the provider is nil and no Authorization header is sent. The salt is the
+// inline actor_salt or, absent that, a random per-install secret persisted
+// locally — never the token or endpoint, which the receiver knows and could use
+// to reverse the actor hash.
+func resolveExportCredentials(ec supervisor.ExportConfig, homeDir string, stderr io.Writer) (func() (string, error), []byte) {
+	var tokenProvider func() (string, error)
+	switch {
+	case strings.TrimSpace(ec.TokenFile) != "":
+		tokenFile := strings.TrimSpace(ec.TokenFile)
+		tokenProvider = func() (string, error) {
+			b, err := os.ReadFile(tokenFile)
+			if err != nil {
+				return "", err
 			}
-			if json.Unmarshal(b, &c) == nil {
-				if c.Token != "" {
-					token = c.Token
-				}
-				if c.ActorSalt != "" {
-					salt = c.ActorSalt
-				} else if c.OrgSalt != "" {
-					salt = c.OrgSalt
-				}
-			}
-		} else {
-			fmt.Fprintf(stderr, "gc events-export: credentials %s: %v\n", ec.CredentialsPath, err) //nolint:errcheck
+			return strings.TrimSpace(string(b)), nil
 		}
+	case ec.Token != "":
+		token := ec.Token
+		tokenProvider = func() (string, error) { return token, nil }
 	}
+
+	salt := ec.ActorSalt
 	if salt == "" {
 		salt = loadOrCreateSalt(homeDir, stderr)
 	}
-	return token, []byte(salt)
+	return tokenProvider, []byte(salt)
 }
 
 // loadOrCreateSalt returns a stable random per-install actor-hash salt, creating
