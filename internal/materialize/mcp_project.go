@@ -33,6 +33,11 @@ const (
 	MCPProviderMimoCode = "mimocode"
 	// MCPProviderCursor projects to Cursor Agent's project-native MCP file.
 	MCPProviderCursor = "cursor"
+	// MCPProviderPi projects to the Claude-native .mcp.json file. The de-facto
+	// pi MCP client (the community pi-mcp-adapter) reads .mcp.json using the
+	// Claude-compatible mcpServers schema, so pi reuses the Claude projection
+	// target and format verbatim.
+	MCPProviderPi = "pi"
 )
 
 // MCPProjection is one provider-native MCP payload for a single target file.
@@ -55,6 +60,7 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 	case MCPProviderOpenCode:
 	case MCPProviderMimoCode:
 	case MCPProviderCursor:
+	case MCPProviderPi:
 	default:
 		return MCPProjection{}, fmt.Errorf("unsupported MCP provider %q", providerKind)
 	}
@@ -67,7 +73,7 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 	sort.Slice(out.Servers, func(i, j int) bool { return out.Servers[i].Name < out.Servers[j].Name })
 
 	switch providerKind {
-	case MCPProviderClaude:
+	case MCPProviderClaude, MCPProviderPi:
 		out.Target = filepath.Join(workdir, ".mcp.json")
 	case MCPProviderCodex:
 		out.Target = filepath.Join(workdir, ".codex", "config.toml")
@@ -163,6 +169,10 @@ func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
 			return p.applyOpenCode(fs)
 		case MCPProviderCursor:
 			return p.applyCursor(fs)
+		case MCPProviderPi:
+			// pi reuses Claude's .mcp.json target + mcpServers schema
+			// (read by the pi-mcp-adapter), so it shares applyClaude.
+			return p.applyClaude(fs)
 		default:
 			return fmt.Errorf("unsupported MCP provider %q", p.Provider)
 		}

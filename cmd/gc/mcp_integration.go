@@ -48,7 +48,8 @@ func supportsMCPProviderKind(kind string) bool {
 		materialize.MCPProviderGemini,
 		materialize.MCPProviderOpenCode,
 		materialize.MCPProviderMimoCode,
-		materialize.MCPProviderCursor:
+		materialize.MCPProviderCursor,
+		materialize.MCPProviderPi:
 		return true
 	default:
 		return false

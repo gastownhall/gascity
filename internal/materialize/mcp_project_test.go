@@ -98,6 +98,14 @@ func TestBuildMCPProjectionTargetsAndStableHash(t *testing.T) {
 	if got, want := cursor.Target, filepath.Join("/work", ".cursor", "mcp.json"); got != want {
 		t.Fatalf("cursor target = %q, want %q", got, want)
 	}
+
+	pi, err := BuildMCPProjection(MCPProviderPi, "/work", nil)
+	if err != nil {
+		t.Fatalf("BuildMCPProjection(pi): %v", err)
+	}
+	if got, want := pi.Target, filepath.Join("/work", ".mcp.json"); got != want {
+		t.Fatalf("pi target = %q, want %q", got, want)
+	}
 }
 
 func TestBuildMCPProjectionRejectsUnsupportedProvider(t *testing.T) {
@@ -169,6 +177,68 @@ func TestApplyMCPProjectionClaudeWritesManagedFile(t *testing.T) {
 		t.Fatalf(".mcp.json should be removed, stat err = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".gc", "mcp-managed", "claude.json")); !os.IsNotExist(err) {
+		t.Fatalf("managed marker should be removed, stat err = %v", err)
+	}
+}
+
+func TestApplyMCPProjectionPiWritesManagedFile(t *testing.T) {
+	dir := t.TempDir()
+	proj, err := BuildMCPProjection(MCPProviderPi, dir, []MCPServer{
+		{
+			Name:      "alpha",
+			Transport: MCPTransportStdio,
+			Command:   "uvx",
+			Args:      []string{"pkg"},
+			Env:       map[string]string{"TOKEN": "secret"},
+		},
+		{
+			Name:      "remote",
+			Transport: MCPTransportHTTP,
+			URL:       "https://mcp.example.com",
+			Headers:   map[string]string{"Authorization": "Bearer token"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildMCPProjection: %v", err)
+	}
+	if err := proj.Apply(fsys.OSFS{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// pi reuses the Claude `.mcp.json` target + `mcpServers` schema, so the
+	// pi-mcp-adapter reads it like Claude Code.
+	data, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var doc struct {
+		MCPServers map[string]map[string]any `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal .mcp.json: %v", err)
+	}
+	if _, ok := doc.MCPServers["alpha"]["command"]; !ok {
+		t.Fatalf("stdio server missing command: %+v", doc.MCPServers["alpha"])
+	}
+	if got := doc.MCPServers["remote"]["type"]; got != "http" {
+		t.Fatalf("remote type = %v, want http", got)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, ".gc", "mcp-managed", "pi.json")); err != nil {
+		t.Fatalf("managed marker missing: %v", err)
+	}
+
+	empty, err := BuildMCPProjection(MCPProviderPi, dir, nil)
+	if err != nil {
+		t.Fatalf("BuildMCPProjection(empty): %v", err)
+	}
+	if err := empty.Apply(fsys.OSFS{}); err != nil {
+		t.Fatalf("Apply(empty): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf(".mcp.json should be removed, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gc", "mcp-managed", "pi.json")); !os.IsNotExist(err) {
 		t.Fatalf("managed marker should be removed, stat err = %v", err)
 	}
 }
