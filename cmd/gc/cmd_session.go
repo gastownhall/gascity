@@ -112,6 +112,7 @@ func newSessionNewCmd(stdout, stderr io.Writer) *cobra.Command {
 	var titleHint string
 	var noAttach bool
 	var jsonOutput bool
+	var waitTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "new <template>",
 		Short: "Create a new chat session from an agent template",
@@ -132,7 +133,7 @@ session_name. --alias still sets the public command and mail alias.`,
   gc session new helper --no-attach`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionNew(args, alias, title, titleHint, noAttach, jsonOutput, stdout, stderr) != 0 {
+			if cmdSessionNew(args, alias, title, titleHint, noAttach, jsonOutput, waitTimeout, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -143,15 +144,26 @@ session_name. --alias still sets the public command and mail alias.`,
 	cmd.Flags().StringVar(&titleHint, "title-hint", "", "text to auto-generate a session title from")
 	cmd.Flags().BoolVar(&noAttach, "no-attach", false, "create session without attaching")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", defaultSessionNewWaitTimeout, "max time to wait for the reconciler to start the session before attaching")
 	return cmd
 }
+
+// defaultSessionNewWaitTimeout bounds how long "gc session new" waits for the
+// reconciler to start the session before attaching. The session is created
+// asynchronously, so this only bounds the attach step; a fresh-wake session on
+// a busy controller can take longer than the previous 30s. Override per
+// invocation with --wait-timeout.
+const defaultSessionNewWaitTimeout = 120 * time.Second
 
 // cmdSessionNew is the CLI entry point for "gc session new".
 //
 // Phase 2: creates a session bead and pokes the controller. The reconciler
 // handles process lifecycle (start). If the controller is not running,
 // falls back to direct process start via the session manager.
-func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, jsonOutput bool, stdout, stderr io.Writer) int {
+func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, jsonOutput bool, waitTimeout time.Duration, stdout, stderr io.Writer) int {
+	if waitTimeout <= 0 {
+		waitTimeout = defaultSessionNewWaitTimeout
+	}
 	templateName := args[0]
 	if jsonOutput && !noAttach {
 		fmt.Fprintln(stderr, "gc session new: --json requires --no-attach because attaching is interactive") //nolint:errcheck // best-effort stderr
@@ -355,7 +367,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 
 			// Wait for the reconciler to start the session before attaching.
 			fmt.Fprintln(stdout, "Waiting for session to start...") //nolint:errcheck // best-effort stdout
-			if waitErr := waitForSession(sp, info.SessionName, 30*time.Second, store, info.ID, stderr); waitErr != nil {
+			if waitErr := waitForSession(sp, info.SessionName, waitTimeout, store, info.ID, stderr); waitErr != nil {
 				fmt.Fprintf(stderr, "gc session new: %v\n", waitErr) //nolint:errcheck // best-effort stderr
 				return 1
 			}

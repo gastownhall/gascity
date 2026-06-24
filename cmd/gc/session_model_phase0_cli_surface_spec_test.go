@@ -571,7 +571,7 @@ mode = "on_demand"
 	t.Setenv("GC_DIR", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNew([]string{"worker"}, "", "", "", true, false, &stdout, &stderr)
+	code := cmdSessionNew([]string{"worker"}, "", "", "", true, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNew(worker) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
