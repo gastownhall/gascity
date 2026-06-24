@@ -607,6 +607,10 @@ type AgentOverride struct {
 	// WorkDir overrides the agent's working directory without changing
 	// its qualified identity or rig association.
 	WorkDir *string `toml:"work_dir,omitempty"`
+	// Pack overrides the pack/workspace route key exposed as {{.Pack}}.
+	Pack *string `toml:"pack,omitempty"`
+	// PackRoot overrides the target pack directory exposed as {{.PackRoot}}.
+	PackRoot *string `toml:"pack_root,omitempty"`
 	// TmuxAlias overrides the tmux session name template
 	// (see Agent.TmuxAlias for semantics).
 	TmuxAlias *string `toml:"tmux_alias,omitempty"`
@@ -2959,12 +2963,25 @@ type Agent struct {
 	// agent's qualified identity. Relative paths resolve against city root
 	// and may use the same template placeholders as session_setup.
 	WorkDir string `toml:"work_dir,omitempty"`
+	// Pack is the pack/workspace route key exposed to work_dir, pre_start,
+	// session_setup, and tmux_alias templates as {{.Pack}}. This lets a
+	// monorepo pack maintainer route agents by pack instead of by agent type.
+	// For example, gascity-packs can put pack-maintenance agents in jj
+	// workspaces whose sparse checkout includes only the target pack folder
+	// plus shared registry/test files, not every pack in the repository. When
+	// unset, the template context falls back to AgentBase for
+	// backward-compatible routing.
+	Pack string `toml:"pack,omitempty"`
+	// PackRoot overrides the resolved target pack directory exposed as
+	// {{.PackRoot}}. When unset, the template context uses RigRoot/Pack.
+	// Relative paths resolve against RigRoot when available, otherwise CityRoot.
+	PackRoot string `toml:"pack_root,omitempty"`
 	// TmuxAlias overrides the tmux session_name for pool and factory-created
 	// manual sessions of this agent. When unset, sessions fall back to the
 	// universal derivation ("s-<beadID>" for ad-hoc sessions,
 	// "<basename>-<beadID>" for pool sessions). When set, it is expanded as a
 	// Go text/template using the same PathContext fields as work_dir /
-	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),
+	// session_setup (Agent, AgentBase, Pack, Rig, RigRoot, CityRoot, CityName),
 	// sanitized for tmux, and validated as an explicit session name. For pool
 	// sessions, a live-name collision appends the bead ID as a deterministic
 	// suffix. For manual `gc session new` sessions, tmux_alias becomes the
@@ -3053,7 +3070,7 @@ type Agent struct {
 	// levels. Legacy no-store evaluation continues to treat the output as
 	// the desired session count. If it contains Go template placeholders, gc
 	// expands them using the same PathContext fields as work_dir and
-	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
+	// session_setup (Agent, AgentBase, Pack, PackRoot, Rig, RigRoot, CityRoot, CityName)
 	// before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
@@ -3063,13 +3080,13 @@ type Agent struct {
 	// OnBoot is a shell command template run once at controller startup for
 	// this agent. If it contains Go template placeholders, gc expands them
 	// using the same PathContext fields as work_dir and session_setup
-	// (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running
+	// (Agent, AgentBase, Pack, PackRoot, Rig, RigRoot, CityRoot, CityName) before running
 	// the command.
 	OnBoot string `toml:"on_boot,omitempty"`
 	// OnDeath is a shell command template run when a session dies unexpectedly.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,
-	// Rig, RigRoot, CityRoot, CityName) before running the command.
+	// Pack, PackRoot, Rig, RigRoot, CityRoot, CityName) before running the command.
 	OnDeath string `toml:"on_death,omitempty"`
 	// Namepool is the path to a plain text file with one name per line.
 	// When set, sessions use names from the file as display aliases.
@@ -3080,7 +3097,7 @@ type Agent struct {
 	// WorkQuery is the shell command template to find available work for this
 	// agent. If it contains Go template placeholders, gc expands them using
 	// the same PathContext fields as work_dir and session_setup (Agent,
-	// AgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and
+	// AgentBase, Pack, PackRoot, Rig, RigRoot, CityRoot, CityName) before probe, hook, and
 	// prompt-context execution. Used by gc hook and available in prompt
 	// templates as {{.WorkQuery}}.
 	// If unset, Gas City uses a three-tier default query:
@@ -3093,7 +3110,7 @@ type Agent struct {
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,
-	// Rig, RigRoot, CityRoot, CityName) before replacing {} with the bead
+	// Pack, PackRoot, Rig, RigRoot, CityRoot, CityName) before replacing {} with the bead
 	// ID. Used by gc sling to make a bead visible to the target's work_query.
 	// The placeholder {} is replaced with the bead ID at runtime.
 	// Default for all agents:

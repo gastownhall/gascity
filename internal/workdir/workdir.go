@@ -18,6 +18,8 @@ import (
 type PathContext struct {
 	Agent         string
 	AgentBase     string
+	Pack          string
+	PackRoot      string
 	Rig           string
 	RigRoot       string
 	CityRoot      string
@@ -116,15 +118,49 @@ func rigNameForQualifiedAgent(cityPath, qualifiedName string, a config.Agent, ri
 func PathContextForQualifiedName(cityPath, cityName, qualifiedName string, a config.Agent, rigs []config.Rig) PathContext {
 	rigName := rigNameForQualifiedAgent(cityPath, qualifiedName, a, rigs)
 	_, agentBase := config.ParseQualifiedName(qualifiedName)
+	packName := strings.TrimSpace(a.Pack)
+	if packName == "" {
+		packName = agentBase
+	}
+	rigRoot := RigRootForName(rigName, rigs)
+	packRoot := resolvePackRoot(cityPath, cityName, rigName, rigRoot, packName, qualifiedName, agentBase, a)
 	return PathContext{
 		Agent:         qualifiedName,
 		AgentBase:     agentBase,
+		Pack:          packName,
+		PackRoot:      packRoot,
 		Rig:           rigName,
-		RigRoot:       RigRootForName(rigName, rigs),
+		RigRoot:       rigRoot,
 		CityRoot:      cityPath,
 		CityName:      cityName,
 		WorktreesRoot: WorktreesRoot(cityPath),
 	}
+}
+
+func resolvePackRoot(cityPath, cityName, rigName, rigRoot, packName, qualifiedName, agentBase string, a config.Agent) string {
+	base := rigRoot
+	if base == "" {
+		base = cityPath
+	}
+	spec := strings.TrimSpace(a.PackRoot)
+	if spec == "" {
+		return filepath.Join(base, packName)
+	}
+	ctx := PathContext{
+		Agent:         qualifiedName,
+		AgentBase:     agentBase,
+		Pack:          packName,
+		Rig:           rigName,
+		RigRoot:       rigRoot,
+		CityRoot:      cityPath,
+		CityName:      cityName,
+		WorktreesRoot: WorktreesRoot(cityPath),
+	}
+	expanded := ExpandTemplate(spec, ctx)
+	if filepath.IsAbs(expanded) {
+		return expanded
+	}
+	return filepath.Join(base, expanded)
 }
 
 // ExpandCommandTemplate renders command using the same PathContext surface as

@@ -28,6 +28,10 @@ type AgentPatch struct {
 	Name string `toml:"name" jsonschema:"required"`
 	// WorkDir overrides the agent's session working directory.
 	WorkDir *string `toml:"work_dir,omitempty"`
+	// Pack overrides the pack/workspace route key exposed as {{.Pack}}.
+	Pack *string `toml:"pack,omitempty"`
+	// PackRoot overrides the target pack directory exposed as {{.PackRoot}}.
+	PackRoot *string `toml:"pack_root,omitempty"`
 	// TmuxAlias overrides the tmux session name template
 	// (see Agent.TmuxAlias for semantics).
 	TmuxAlias *string `toml:"tmux_alias,omitempty"`
@@ -430,6 +434,12 @@ func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.WorkDir != nil {
 		a.WorkDir = *p.WorkDir
+	}
+	if p.Pack != nil {
+		a.Pack = *p.Pack
+	}
+	if p.PackRoot != nil {
+		a.PackRoot = *p.PackRoot
 	}
 	if p.TmuxAlias != nil {
 		a.TmuxAlias = *p.TmuxAlias

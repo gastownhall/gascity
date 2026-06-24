@@ -79,6 +79,62 @@ func TestResolveWorkDirPathUsesPoolInstanceBase(t *testing.T) {
 	}
 }
 
+func TestResolveWorkDirPathUsesPackTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	got := ResolveWorkDirPath(cityPath, "gastown", "demo/packsmith-1", config.Agent{
+		Name:    "packsmith",
+		Dir:     "demo",
+		Pack:    "jj-hunk",
+		WorkDir: ".gc/workspaces/{{.Rig}}/packs/{{.Pack}}",
+	}, []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}})
+	want := filepath.Join(cityPath, ".gc", "workspaces", "demo", "packs", "jj-hunk")
+	if got != want {
+		t.Fatalf("ResolveWorkDirPath() = %q, want %q", got, want)
+	}
+}
+
+func TestPathContextUsesDefaultPackRoot(t *testing.T) {
+	cityPath := t.TempDir()
+	rigRoot := filepath.Join(cityPath, "repos", "demo")
+	ctx := PathContextForQualifiedName(cityPath, "gastown", "demo/packsmith-1", config.Agent{
+		Name: "packsmith",
+		Dir:  "demo",
+		Pack: "jj-hunk",
+	}, []config.Rig{{Name: "demo", Path: rigRoot}})
+	want := filepath.Join(rigRoot, "jj-hunk")
+	if ctx.PackRoot != want {
+		t.Fatalf("PackRoot = %q, want %q", ctx.PackRoot, want)
+	}
+}
+
+func TestPathContextUsesPackRootTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	rigRoot := filepath.Join(cityPath, "repos", "demo")
+	ctx := PathContextForQualifiedName(cityPath, "gastown", "demo/packsmith-1", config.Agent{
+		Name:     "packsmith",
+		Dir:      "demo",
+		Pack:     "jj-hunk",
+		PackRoot: "packs/{{.Pack}}",
+	}, []config.Rig{{Name: "demo", Path: rigRoot}})
+	want := filepath.Join(rigRoot, "packs", "jj-hunk")
+	if ctx.PackRoot != want {
+		t.Fatalf("PackRoot = %q, want %q", ctx.PackRoot, want)
+	}
+}
+
+func TestResolveWorkDirPathPackTemplateFallsBackToAgentBase(t *testing.T) {
+	cityPath := t.TempDir()
+	got := ResolveWorkDirPath(cityPath, "gastown", "demo/packsmith-1", config.Agent{
+		Name:    "packsmith",
+		Dir:     "demo",
+		WorkDir: ".gc/workspaces/{{.Rig}}/packs/{{.Pack}}",
+	}, []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}})
+	want := filepath.Join(cityPath, ".gc", "workspaces", "demo", "packs", "packsmith-1")
+	if got != want {
+		t.Fatalf("ResolveWorkDirPath() = %q, want %q", got, want)
+	}
+}
+
 // TestResolveWorkDirPathGivesEachPoolSlotUniqueWorktree is the #774 regression
 // guard: N pool workers sharing one template must each resolve to a distinct
 // worktree path derived from their namepool slot, not the template base.
@@ -210,6 +266,22 @@ func TestExpandCommandTemplateFallsBackToCityDirBase(t *testing.T) {
 	}
 	if got != "echo demo-city" {
 		t.Fatalf("ExpandCommandTemplate() = %q, want %q", got, "echo demo-city")
+	}
+}
+
+func TestExpandCommandTemplateUsesPackTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	rigRoot := filepath.Join(cityPath, "repos", "demo")
+	agent := config.Agent{Name: "packsmith", Dir: "demo", Pack: "jj-hunk", PackRoot: "packs/{{.Pack}}"}
+	rigs := []config.Rig{{Name: "demo", Path: rigRoot}}
+
+	got, err := ExpandCommandTemplate("GC_PACKER_PACK={{.Pack}} setup {{.Rig}} {{.AgentBase}} {{.PackRoot}}", cityPath, "gastown", agent, rigs)
+	if err != nil {
+		t.Fatalf("ExpandCommandTemplate() error = %v, want nil", err)
+	}
+	want := "GC_PACKER_PACK=jj-hunk setup demo packsmith " + filepath.Join(rigRoot, "packs", "jj-hunk")
+	if got != want {
+		t.Fatalf("ExpandCommandTemplate() = %q, want %q", got, want)
 	}
 }
 
