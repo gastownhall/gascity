@@ -16,10 +16,11 @@ A new package `internal/usage` exposing a usage fact and a narrow write-only sin
 
 ```go
 type UsageFact struct {
-	RunID  string // groups facts of one execution (see Run identity). A bead id, never frozen on the session.
-	StepID string // the acting work bead id. omitempty.
-	Worker string // session name
-	City   string
+	RunID     string // groups facts of one execution (see Run identity). A bead id, never frozen on the session.
+	SessionID string // the session bead id. Join key to manifold spend (EIA session_id) + recall transcripts. omitempty.
+	StepID    string // the acting work bead id. omitempty (the future gc.active_work_bead option; unset today).
+	Worker    string // session name
+	City      string
 
 	Kind string // "model" | "compute"
 

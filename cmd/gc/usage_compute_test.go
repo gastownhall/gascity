@@ -64,6 +64,11 @@ func TestEmitComputeFactForBead(t *testing.T) {
 	if f.RunID != "mol-7" {
 		t.Fatalf("runID = %q, want mol-7", f.RunID)
 	}
+	// SessionID is the session bead id (distinct from RunID mol-7 here), so a
+	// session-keyed rollup joins compute facts symmetrically with model facts.
+	if f.SessionID != b.ID {
+		t.Fatalf("SessionID = %q, want the session bead id %q", f.SessionID, b.ID)
+	}
 	if f.Runtime != "fake" || f.City != "demo" || f.Worker != "s-x" {
 		t.Fatalf("unexpected fact fields: %+v", f)
 	}

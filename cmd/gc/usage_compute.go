@@ -83,7 +83,14 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 	}
 	runID := beadmeta.ResolveRunID(bead.Metadata, bead.ID, "")
 	fact := usage.Fact{
-		RunID:          runID,
+		RunID: runID,
+		// The reconcile snapshot hands us the session bead directly, so bead.ID IS
+		// the session bead id — the same value RunID resolution and the idempotency
+		// key already consume below. Stamp it so compute facts carry the session
+		// join key symmetrically with model facts (a session-keyed cost rollup must
+		// union both Kinds; an unset SessionID here would silently drop compute/wall
+		// cost from the join).
+		SessionID:      strings.TrimSpace(bead.ID),
 		Worker:         strings.TrimSpace(meta["session_name"]),
 		City:           city,
 		Kind:           usage.KindCompute,

@@ -92,6 +92,11 @@ func TestMessageEmitsModelUsageFactToSink(t *testing.T) {
 	if f.RunID != handle.sessionID {
 		t.Fatalf("RunID = %q, want session run root %q", f.RunID, handle.sessionID)
 	}
+	// SessionID must carry the session bead id end to end (here it equals the run
+	// root because a manual chat has no work bead, but it is a distinct field).
+	if f.SessionID != handle.sessionID {
+		t.Fatalf("SessionID = %q, want the session bead id %q", f.SessionID, handle.sessionID)
+	}
 	if f.Worker == "" {
 		t.Fatalf("worker (session name) must be set: %+v", f)
 	}
@@ -195,6 +200,14 @@ func TestModelUsageFact(t *testing.T) {
 	if priced.RunID != "mol-7" {
 		t.Fatalf("RunID = %q, want mol-7 (resolved through the shared run-id chain)", priced.RunID)
 	}
+	// SessionID is the session bead id (the sessionID arg), distinct from RunID
+	// (the resolved run root) and from Worker (the session NAME). It is the join
+	// key to the spend plane (EIA session_id) and recall transcripts.
+	if priced.SessionID != "session-1" {
+		t.Fatalf("SessionID = %q, want the session bead id session-1", priced.SessionID)
+	}
+	// StepID is the session's gc.active_work_bead (the bare logical step), distinct
+	// from RunID — the exact-join key to the events plane and per-step spend rollup.
 	if priced.StepID != "mol.finalize" {
 		t.Fatalf("StepID = %q, want mol.finalize (the session's gc.active_work_bead), distinct from RunID", priced.StepID)
 	}
