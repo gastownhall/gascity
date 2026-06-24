@@ -1003,3 +1003,53 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	}
 	return workertranscript.DiscoverPath(searchPaths, provider, workDir, ""), nil
 }
+
+// KeyedTranscriptPath returns the transcript path only when it resolves to a
+// single session's file by a stable per-session key — never by the ambiguous
+// workdir/newest-mtime fallback. Callers that must attribute a file to exactly
+// one session (e.g. writing a session-id sidecar next to it) use this instead
+// of TranscriptPath, which additionally serves that workdir fallback for
+// history rendering.
+//
+// Coverage is whatever has both a captured per-session id and a 1:1 lookup:
+// claude/kimi/pi/antigravity (keyed-path construction) and codex (its rollout
+// filename carries the session-id suffix; the id is captured by the SessionStart
+// hook). It returns "" for gemini/opencode/mimocode, which have a session id but
+// no 1:1 by-id lookup, so only the unsafe workdir fallback would be available.
+func (m *Manager) KeyedTranscriptPath(id string, searchPaths []string) (string, error) {
+	b, _, err := m.loadSessionBead(id, true)
+	if err != nil {
+		return "", err
+	}
+	workDir := b.Metadata["work_dir"]
+	if workDir == "" {
+		return "", nil
+	}
+	provider := strings.TrimSpace(b.Metadata["provider_kind"])
+	if provider == "" {
+		provider = strings.TrimSpace(b.Metadata["provider"])
+	}
+	if len(searchPaths) == 0 {
+		searchPaths = sessionlog.DefaultSearchPaths()
+	}
+	sessionKey := strings.TrimSpace(b.Metadata["session_key"])
+	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey); path != "" {
+		return path, nil
+	}
+	// Codex rollouts are keyed by the session-id suffix in the filename, but
+	// gc's general discovery resolves codex by workdir. For a 1:1 sidecar we use
+	// the identity lookup directly when the session_key (the rollout uuid,
+	// captured by the SessionStart hook) is known, exactly as invocation
+	// telemetry does. A keyed miss returns "" with NO window fallback — a
+	// different-suffix rollout would be a misattribution. The [CreatedAt, anchor]
+	// window bounds the scan; the anchor is the latest wake, falling back to
+	// bead creation.
+	if sessionKey != "" && sessionlog.ProviderFamily(provider) == "codex" {
+		anchor := b.CreatedAt
+		if woke, err := time.Parse(time.RFC3339, strings.TrimSpace(b.Metadata["last_woke_at"])); err == nil {
+			anchor = woke
+		}
+		return sessionlog.FindCodexSessionFileByID(searchPaths, workDir, sessionKey, b.CreatedAt, anchor), nil
+	}
+	return "", nil
+}

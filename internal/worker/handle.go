@@ -269,6 +269,11 @@ type SessionHandle struct {
 	historyRaw     historyGeneration
 	pricing        *pricing.Registry
 	invTelemetryMu sync.Mutex
+	// sidecarLast is the last (transcriptPath\x00sessionID) for which the
+	// transcript-session sidecar was written, guarded by sidecarMu, so repeated
+	// turn/poll calls skip the resolve+write once the sidecar is current.
+	sidecarMu   sync.Mutex
+	sidecarLast string
 }
 
 var (
