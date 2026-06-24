@@ -2381,10 +2381,11 @@ func piVllmRigCity(t *testing.T) (cityDir, overlayDir string, cfg *config.City) 
 	cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
-			Name:     "polecat",
-			Provider: "pi-vllm",
-			Scope:    "rig",
-			Dir:      "myrig",
+			Name:              "polecat",
+			Provider:          "pi-vllm",
+			Scope:             "rig",
+			Dir:               "myrig",
+			InstallAgentHooks: []string{"pi"}, // declares the per-provider/pi/ overlay slot
 		}},
 		Providers: map[string]config.ProviderSpec{
 			// Explicit command so resolution does not depend on a real `pi`
@@ -2447,6 +2448,19 @@ func TestResolvedWorkerRuntimeStagesProviderOverlayForRigBasePiProvider(t *testi
 	slots := runtime.OverlayProviderNames(runtimeCfg.Hints)
 	if len(slots) == 0 {
 		t.Fatal("runtime.OverlayProviderNames(resume Hints) is empty; per-provider overlay would never stage")
+	}
+
+	// End-to-end proof of the gc-6bw8o regression: actually stage the workdir
+	// and confirm the per-provider/pi/ hook lands. Stage into a fresh temp
+	// workdir rather than the city dir so the assertion is unambiguous.
+	stageCfg := runtimeCfg.Hints
+	stageCfg.WorkDir = t.TempDir()
+	if err := runtime.StageSessionWorkDir(stageCfg); err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+	hookPath := filepath.Join(stageCfg.WorkDir, ".pi", "extensions", "gc-hooks.js")
+	if _, err := os.Stat(hookPath); err != nil {
+		t.Fatalf("per-provider/pi hook not staged at %s: %v", hookPath, err)
 	}
 }
 
