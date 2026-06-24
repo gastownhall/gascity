@@ -266,9 +266,12 @@ func TestExporter_EmitCorrelation(t *testing.T) {
 		if len(all) == 0 || len(all[0].Events) == 0 {
 			t.Fatalf("expected at least one exported event")
 		}
-		// schema_version must stay 1 regardless of correlation emission.
-		if all[0].SchemaVersion != 1 {
-			t.Fatalf("schema_version = %d, want 1 (emitting run/session is v1-compatible)", all[0].SchemaVersion)
+		// Emitting run/session correlation is version-neutral: it must not change
+		// the batch schema_version away from the package's current SchemaVersion.
+		// Assert the const, not a literal, so a legitimate wire bump (e.g. the v2
+		// city_id->city_hash change in #3678) doesn't falsely fail this guard.
+		if all[0].SchemaVersion != SchemaVersion {
+			t.Fatalf("schema_version = %d, want %d (emitting run/session is version-neutral)", all[0].SchemaVersion, SchemaVersion)
 		}
 		return all[0]
 	}
