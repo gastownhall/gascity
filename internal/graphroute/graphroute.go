@@ -309,7 +309,7 @@ func ControlDispatcherBinding(store beads.Store, cityName string, cfg *config.Ci
 
 // resolveControlDispatcherBinding resolves the control-dispatcher binding for a
 // rig context without the health fallback (the raw resolution).
-func resolveControlDispatcherBinding(store beads.Store, cityName string, cfg *config.City, rigContext string, deps Deps) (GraphRouteBinding, error) {
+func resolveControlDispatcherBinding(_ beads.Store, _ string, cfg *config.City, rigContext string, deps Deps) (GraphRouteBinding, error) {
 	if cfg == nil {
 		return GraphRouteBinding{}, fmt.Errorf("control-dispatcher route requires config")
 	}
