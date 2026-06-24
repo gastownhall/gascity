@@ -11,20 +11,22 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// recordRunIDSpy captures the (assignee, sessionBeadID, runID) a claim records,
-// and lets a test inject a write error to prove the decoration never fails the
-// claim. assignee is captured to pin actor parity with the work_branch stamp.
+// recordRunIDSpy captures the (assignee, sessionBeadID, runID, stepID) a claim
+// records in one update, and lets a test inject a write error to prove the
+// decoration never fails the claim. assignee is captured to pin actor parity with
+// the work_branch stamp.
 type recordRunIDSpy struct {
 	calls    int
 	assignee string
 	session  string
 	runID    string
+	stepID   string
 	err      error
 }
 
-func (s *recordRunIDSpy) fn(_ context.Context, _ string, _ []string, assignee, sessionBeadID, runID string) error {
+func (s *recordRunIDSpy) fn(_ context.Context, _ string, _ []string, assignee, sessionBeadID, runID, stepID string) error {
 	s.calls++
-	s.assignee, s.session, s.runID = assignee, sessionBeadID, runID
+	s.assignee, s.session, s.runID, s.stepID = assignee, sessionBeadID, runID, stepID
 	return s.err
 }
 
@@ -39,8 +41,8 @@ func claimOpsForRunID(beadID string, claimedMeta map[string]string, spy *recordR
 		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
 			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: claimedMeta}, true, nil
 		},
-		ResolveWorkBranch: func(string) string { return "" }, // suppress work_branch stamp
-		RecordRunID:       spy.fn,
+		ResolveWorkBranch:     func(string) string { return "" }, // suppress work_branch stamp
+		RecordSessionPointers: spy.fn,
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
@@ -132,7 +134,7 @@ func TestDoHookClaimRunIDRecordFailureDoesNotFailClaim(t *testing.T) {
 	if result.BeadID != "hw-err" || result.Reason != "claimed" {
 		t.Fatalf("claim result = %+v, want bead hw-err reason claimed", result)
 	}
-	if !strings.Contains(stderr.String(), "recording run_id on session bead sess-1") {
+	if !strings.Contains(stderr.String(), "recording session pointers on session bead sess-1") {
 		t.Fatalf("stderr missing best-effort log line; got: %s", stderr.String())
 	}
 }
@@ -153,8 +155,8 @@ func TestDoHookClaimRecordsRunIDOnExistingAssignment(t *testing.T) {
 			t.Error("Claim must not be called on the existing-assignment path")
 			return beads.Bead{}, false, nil
 		},
-		ResolveWorkBranch: func(string) string { return "" }, // suppress work_branch stamp
-		RecordRunID:       spy.fn,
+		ResolveWorkBranch:     func(string) string { return "" }, // suppress work_branch stamp
+		RecordSessionPointers: spy.fn,
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
@@ -173,5 +175,54 @@ func TestDoHookClaimRecordsRunIDOnExistingAssignment(t *testing.T) {
 	}
 	if spy.assignee != "worker-1" {
 		t.Fatalf("record assignee = %q, want worker-1 (actor parity with the work_branch stamp)", spy.assignee)
+	}
+}
+
+// TestDoHookClaimRecordsActiveWorkBeadAsStepID: the active-work-bead pointer is the
+// work bead's BARE gc.step_id, NOT its namespaced bead id — the cross-plane join key
+// the events plane also uses. The fixture makes them differ (bead id
+// "mol.finalize.attempt.1" vs gc.step_id "mol.finalize") so a bead.ID regression
+// can't pass. The (run, step) tuple is recorded in one consistent call.
+func TestDoHookClaimRecordsActiveWorkBeadAsStepID(t *testing.T) {
+	spy := &recordRunIDSpy{}
+	ops, opts := claimOpsForRunID("mol.finalize.attempt.1", map[string]string{
+		"gc.routed_to":    "worker",
+		"gc.root_bead_id": "root-R",
+		"gc.step_id":      "mol.finalize", // the bare logical step, != the bead id
+	}, spy)
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if spy.calls != 1 {
+		t.Fatalf("record calls = %d, want 1 (run+step in ONE update)", spy.calls)
+	}
+	if spy.stepID != "mol.finalize" {
+		t.Fatalf("stepID = %q, want the bare gc.step_id mol.finalize (NOT the bead id)", spy.stepID)
+	}
+	if spy.stepID == "mol.finalize.attempt.1" {
+		t.Fatalf("stepID must NOT be the namespaced bead id — that never joins with events")
+	}
+	if spy.runID != "root-R" {
+		t.Fatalf("runID = %q, want root-R — the step must be recorded under its own run (tuple consistency)", spy.runID)
+	}
+}
+
+// TestDoHookClaimActiveWorkBeadEmptyForNonFormulaWork: a non-formula work bead has no
+// gc.step_id, so the pointer is written EMPTY — clearing any prior step on a reused
+// session so an ad-hoc unit attributes at run level, matching the events plane.
+func TestDoHookClaimActiveWorkBeadEmptyForNonFormulaWork(t *testing.T) {
+	spy := &recordRunIDSpy{}
+	ops, opts := claimOpsForRunID("hw-adhoc", map[string]string{
+		"gc.routed_to": "worker", // no gc.step_id
+	}, spy)
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if spy.calls != 1 || spy.stepID != "" {
+		t.Fatalf("record = {calls:%d stepID:%q}, want {1 \"\"} (non-formula clears the step)", spy.calls, spy.stepID)
 	}
 }

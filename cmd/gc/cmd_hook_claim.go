@@ -43,20 +43,22 @@ type hookClaimOps struct {
 	ResolveWorkBranch hookResolveWorkBranchFunc
 	// StampWorkBranch writes gc.work_branch onto the claimed bead. Best-effort.
 	StampWorkBranch hookStampWorkBranchFunc
-	// RecordRunID writes gc.current_run_id onto the session bead. Best-effort.
-	RecordRunID hookRecordRunIDFunc
-	Now         func() time.Time
+	// RecordSessionPointers writes the session bead's current-pointers — gc.current_run_id
+	// AND gc.active_work_bead (the claimed work bead's gc.step_id) — in ONE update, so
+	// the (run, step) tuple stays atomically consistent. Best-effort.
+	RecordSessionPointers hookRecordSessionPointersFunc
+	Now                   func() time.Time
 }
 
 type (
-	hookClaimFunc              func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
-	hookListContinuationFunc   func(context.Context, string, []string, string, string) ([]beads.Bead, error)
-	hookAssignContinuationFunc func(context.Context, string, []string, string, string) error
-	hookDrainAckFunc           func(io.Writer) error
-	hookEmitClaimRejectedFunc  func(beadID, existingClaimant, attemptedClaimant string)
-	hookResolveWorkBranchFunc  func(dir string) string
-	hookStampWorkBranchFunc    func(ctx context.Context, dir string, env []string, beadID, assignee, branch string) error
-	hookRecordRunIDFunc        func(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID string) error
+	hookClaimFunc                 func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
+	hookListContinuationFunc      func(context.Context, string, []string, string, string) ([]beads.Bead, error)
+	hookAssignContinuationFunc    func(context.Context, string, []string, string, string) error
+	hookDrainAckFunc              func(io.Writer) error
+	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
+	hookResolveWorkBranchFunc     func(dir string) string
+	hookStampWorkBranchFunc       func(ctx context.Context, dir string, env []string, beadID, assignee, branch string) error
+	hookRecordSessionPointersFunc func(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error
 )
 
 type hookClaimJSONResult struct {
@@ -142,8 +144,8 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.StampWorkBranch == nil {
 		ops.StampWorkBranch = hookStampWorkBranchWithBdStore
 	}
-	if ops.RecordRunID == nil {
-		ops.RecordRunID = hookRecordRunIDWithBdStore
+	if ops.RecordSessionPointers == nil {
+		ops.RecordSessionPointers = hookRecordSessionPointersWithBdStore
 	}
 }
 
@@ -250,7 +252,7 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
 	stampHookWorkBranch(bead, opts, ops, dir, stderr)
-	recordHookClaimRunID(bead, opts, ops, dir, stderr)
+	recordHookClaimSessionPointers(bead, opts, ops, dir, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: preassigning continuation group for %s: %v\n", bead.ID, err) //nolint:errcheck
@@ -397,22 +399,30 @@ func hookStampWorkBranchWithBdStore(_ context.Context, dir string, env []string,
 // the bd write is bound to ctx, so a slow or stuck update cannot outlast
 // hookClaimMutationTimeout, and a non-session run (no GC_SESSION_ID), a timeout,
 // or a write error never blocks the claim.
-func recordHookClaimRunID(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) {
+func recordHookClaimSessionPointers(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) {
 	sessionBeadID := hookClaimSessionID(opts.Env)
 	if sessionBeadID == "" {
 		return
 	}
+	// Both pointers are derived from the SAME just-claimed work bead so the (run, step)
+	// tuple is consistent: run_id is the bead's resolved run root; step_id is its bare
+	// gc.step_id (the cross-plane join key the events plane also uses), empty when the
+	// work has no formula step (ad-hoc/manual) — which clears any prior step.
 	runID := beadmeta.ResolveRunID(bead.Metadata, bead.ID, sessionBeadID)
+	stepID := strings.TrimSpace(bead.Metadata[beadmeta.StepIDMetadataKey])
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
-	if err := ops.RecordRunID(ctx, dir, opts.Env, opts.Assignee, sessionBeadID, runID); err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: recording run_id on session bead %s: %v\n", sessionBeadID, err) //nolint:errcheck
+	if err := ops.RecordSessionPointers(ctx, dir, opts.Env, opts.Assignee, sessionBeadID, runID, stepID); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: recording session pointers on session bead %s: %v\n", sessionBeadID, err) //nolint:errcheck
 	}
 }
 
-func hookRecordRunIDWithBdStore(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID string) error {
+func hookRecordSessionPointersWithBdStore(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error {
 	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
-	return store.Update(sessionBeadID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.CurrentRunIDMetadataKey: runID}})
+	return store.Update(sessionBeadID, beads.UpdateOpts{Metadata: map[string]string{
+		beadmeta.CurrentRunIDMetadataKey:   runID,
+		beadmeta.ActiveWorkBeadMetadataKey: stepID,
+	}})
 }
 
 // hookClaimSessionID returns the session bead id (GC_SESSION_ID) from the claim

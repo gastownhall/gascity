@@ -193,12 +193,18 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // read as "not measured", never as a free invocation.
 func modelUsageFact(u sessionlog.TailUsage, bead beads.Bead, sessionID, worker, providerFamily string, cost float64, priced bool, now time.Time) usage.Fact {
 	runID := beadmeta.ResolveRunID(bead.Metadata, bead.ID, sessionID)
+	// The run STEP: the session's current work bead's gc.step_id, stamped at the claim
+	// hook (gc.active_work_bead). Read from the SAME session-bead snapshot as runID so
+	// StepID always names a step under this RunID. Empty when the session isn't on a
+	// formula work bead (ad-hoc/manual/idle) — run-level attribution, matching events.
+	stepID := strings.TrimSpace(bead.Metadata[beadmeta.ActiveWorkBeadMetadataKey])
 	reqID := usageIdentity(u)
 	if !priced {
 		cost = 0
 	}
 	return usage.Fact{
 		RunID:               runID,
+		StepID:              stepID,
 		Worker:              strings.TrimSpace(worker),
 		Kind:                usage.KindModel,
 		Model:               strings.TrimSpace(u.Model),

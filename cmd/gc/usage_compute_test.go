@@ -34,11 +34,12 @@ func TestEmitComputeFactForBead(t *testing.T) {
 	b, err := store.Create(beads.Bead{
 		Title: "session",
 		Metadata: map[string]string{
-			"state":            "asleep",
-			"session_name":     "s-x",
-			"awake_started_at": start.Format(time.RFC3339),
-			"slept_at":         slept.Format(time.RFC3339),
-			"molecule_id":      "mol-7",
+			"state":               "asleep",
+			"session_name":        "s-x",
+			"awake_started_at":    start.Format(time.RFC3339),
+			"slept_at":            slept.Format(time.RFC3339),
+			"molecule_id":         "mol-7",
+			"gc.active_work_bead": "mol.finalize", // the step the session was on; cleared at this terminal pass
 		},
 	})
 	if err != nil {
@@ -74,6 +75,11 @@ func TestEmitComputeFactForBead(t *testing.T) {
 	refreshed, err := store.Get(b.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The terminal pass also CLEARS the active-work-bead pointer, so an idle
+	// invocation after this work attributes at run level (StepID="") not the old step.
+	if got := refreshed.Metadata["gc.active_work_bead"]; got != "" {
+		t.Fatalf("gc.active_work_bead = %q, want cleared (\"\") at the terminal pass", got)
 	}
 	if emitComputeFactForBead(context.Background(), sink, store, refreshed, "fake", "demo", now, nil) {
 		t.Fatal("second emit on same interval must no-op (marker set)")

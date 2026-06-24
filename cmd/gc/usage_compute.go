@@ -110,6 +110,15 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 			logf("usage: marking compute fact emitted for session %s failed; may re-emit (deduped by idempotency key): %v", bead.ID, err)
 		}
 	}
+	// Clear the session's active-work-bead pointer at this terminal/sleep transition,
+	// so a model invocation made while idle (between this work and the next claim) is
+	// attributed at run level (StepID="") rather than to the step that just ended.
+	// Best-effort: a stale pointer is overwritten by the next claim regardless.
+	if err := store.SetMetadata(bead.ID, beadmeta.ActiveWorkBeadMetadataKey, ""); err != nil {
+		if logf != nil {
+			logf("usage: clearing active_work_bead for session %s failed (overwritten by next claim): %v", bead.ID, err)
+		}
+	}
 	return true
 }
 
