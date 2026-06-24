@@ -1285,7 +1285,7 @@ func TestApplyNestedCaps_DedupsConcreteSessionRequestsAcrossTiers(t *testing.T) 
 		{Template: "claude", Tier: "new", SessionBeadID: "sess-2"},
 	}
 
-	result := applyNestedCaps(cfg, requests, nil)
+	result := applyNestedCaps(cfg, requests, nil, nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
