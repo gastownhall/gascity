@@ -387,6 +387,29 @@ func TestTmuxKeybindingsScrollWheel(t *testing.T) {
 	}
 }
 
+// TestTmuxKeybindingsAlternateScreenPassthrough locks the fix for the ga-c4w
+// alternate-screen regression: WheelUpPane must pass the wheel through to
+// full-screen apps (Claude Code, pagers) rather than forcing copy-mode over an
+// empty scrollback buffer (alternate-screen content never lands in the tmux
+// scrollback). Depends on gastownhall/gascity-packs#136; skips until go.mod is
+// bumped to a version that includes that change.
+func TestTmuxKeybindingsAlternateScreenPassthrough(t *testing.T) {
+	path := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "tmux-keybindings.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading tmux-keybindings.sh: %v", err)
+	}
+	script := string(data)
+	if !strings.Contains(script, "alternate_on") {
+		t.Skip("embedded gascity-packs does not yet include #{alternate_on} in WheelUpPane " +
+			"(gastownhall/gascity-packs#136); test activates once go.mod is bumped to that release")
+	}
+	if !strings.Contains(script, "#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}") {
+		t.Error("WheelUpPane binding has #{alternate_on} but not the full passthrough condition " +
+			"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}")
+	}
+}
+
 func TestOverlayDirsExist(t *testing.T) {
 	dir := exampleDir()
 	cfg := loadExpanded(t)
