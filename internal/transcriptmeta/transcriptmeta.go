@@ -14,6 +14,8 @@
 package transcriptmeta
 
 import (
+	"errors"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -46,7 +48,9 @@ func Enabled() bool { return enabled.Load() }
 // there was nothing to do yet (writing disabled, blank argument, or the
 // transcript not yet on disk). A false/nil result invites the caller to retry
 // on a later turn once the provider has written the transcript; a non-nil err
-// is a real write failure (e.g. a read-only or full filesystem).
+// is a real fault — a symlink resolution that failed for a reason other than the
+// transcript not existing yet, or a write failure (e.g. a read-only or full
+// filesystem).
 //
 // The transcript path is symlink-resolved before the suffix is appended so the
 // sidecar lands beside the real file, matching a reader that resolves symlinks
@@ -63,9 +67,15 @@ func Write(transcriptPath, gcSessionID string) (ok bool, err error) {
 	}
 	resolved, err := filepath.EvalSymlinks(transcriptPath)
 	if err != nil {
-		// The transcript is not present yet (or is unreadable). There is
-		// nothing to correlate; the caller retries once it exists.
-		return false, nil
+		if errors.Is(err, fs.ErrNotExist) {
+			// The transcript is not on disk yet. There is nothing to
+			// correlate; the caller retries once the provider writes it.
+			return false, nil
+		}
+		// A genuine fault — a permission error on an ancestor, a symlink loop,
+		// or an I/O error. Surface it so the caller's debug log can expose a
+		// persistent filesystem fault instead of retrying silently forever.
+		return false, err
 	}
 	if err := fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, resolved+Suffix, []byte(gcSessionID+"\n"), perm); err != nil {
 		return false, err

@@ -96,6 +96,15 @@ func defaultPricingRegistry() *pricing.Registry {
 // have no transcript adapter, no session bead for the cursor, and no agent
 // identity, and will not gain bead-backed identity just for telemetry.
 func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
+	// Record the transcript-session correlation sidecar on the same
+	// post-successful-turn beat as the usage telemetry below. Deferred at the top
+	// so it runs on every return path — this function has several early returns
+	// (suppressed events, no transcript, no new usage) that are unrelated to
+	// whether the sidecar should be written, and the Message/Nudge callers expect
+	// the write on every successful turn. Best-effort and a no-op unless
+	// correlation is armed; it uses its own guard, not invTelemetryMu.
+	defer h.writeTranscriptSessionMeta()
+
 	if operationEventsSuppressed(ctx) {
 		return
 	}

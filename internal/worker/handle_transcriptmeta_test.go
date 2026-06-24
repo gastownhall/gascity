@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/transcriptmeta"
+	"github.com/gastownhall/gascity/pkg/eventexport"
 )
 
 // claudeKeyedFixture stands up a claude session whose transcript is resolvable by
@@ -74,6 +75,35 @@ func TestSessionHandleWritesKeyedTranscriptSidecar(t *testing.T) {
 	}
 	if strings.TrimSpace(string(got)) != id {
 		t.Fatalf("sidecar = %q, want session bead id %q", strings.TrimSpace(string(got)), id)
+	}
+}
+
+// TestSessionHandleSidecarIDIsExportableRef locks the cross-rail join contract:
+// the id the worker writes to the sidecar is the SAME value the redacted event
+// exporter emits as session_id only if it survives eventexport's opaque-ref gate
+// unchanged. If a session bead id ever gained uppercase or exceeded the length
+// bound, the sidecar would still carry it but the export would drop/rewrite it,
+// silently breaking the sidecar-to-event-stream correlation with no other guard.
+// This ties the worker-written value to that gate so the join cannot drift apart.
+func TestSessionHandleSidecarIDIsExportableRef(t *testing.T) {
+	transcriptmeta.SetEnabled(true)
+	t.Cleanup(func() { transcriptmeta.SetEnabled(false) })
+
+	handle, id, transcript := claudeKeyedFixture(t)
+
+	handle.writeTranscriptSessionMeta()
+
+	got, err := os.ReadFile(transcript + transcriptmeta.Suffix)
+	if err != nil {
+		t.Fatalf("read sidecar: %v", err)
+	}
+	sidecarID := strings.TrimSpace(string(got))
+	if sidecarID != id {
+		t.Fatalf("sidecar = %q, want session bead id %q", sidecarID, id)
+	}
+	if !eventexport.IsOpaqueRef(sidecarID) {
+		t.Fatalf("sidecar id %q is not an exportable opaque ref; the redacted export "+
+			"would drop or rewrite session_id and the sidecar-to-event-stream join would break", sidecarID)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/eventfeed"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/transcriptmeta"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
 
@@ -28,6 +29,16 @@ const minActorSaltLen = 16
 
 // startEventExport launches the redacted event exporter when [events.export] is
 // configured. It is opt-in: with no endpoint the supervisor ships nothing.
+//
+// Enabling export also arms the transcript-session sidecars
+// (internal/transcriptmeta): the same opt-in that ships correlated events writes
+// a session-id sidecar next to each keyed transcript, since the sidecar is only
+// useful when the correlated event stream is being consumed. Arming is deferred
+// until the exporter clears its fail-closed startup (durable cursor loaded), so a
+// refused start — e.g. a corrupt cursor — leaves sidecars off rather than writing
+// correlation files with no event stream to join. The gate is per-process, so a
+// one-shot CLI that delivers a turn without a supervisor writes no sidecar until
+// the supervisor next touches the transcript.
 //
 // The exporter watches the same per-city providers the API serves (via the
 // eventfeed adapter), projects each event to an envelope-only shell, and POSTs
@@ -84,6 +95,12 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 		return
 	}
 	exp.SetCursors(cursors)
+
+	// Arm transcript-session sidecars only now that the exporter has cleared its
+	// fail-closed startup: the sidecar and the event stream are one correlated
+	// opt-in, so a start that refuses (e.g. the corrupt-cursor return above) must
+	// not leave sidecars writing .gcmeta files that imply an event stream exists.
+	transcriptmeta.SetEnabled(true)
 
 	src := eventfeed.NewMuxSource(providers, exp.Cursors, muxRebuildInterval, logf)
 	go func() { _ = exp.Run(ctx, src) }()

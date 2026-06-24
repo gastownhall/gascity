@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/transcriptmeta"
 )
 
 // TestResolveExportCredentials_EmptyTokenFileErrors proves a configured but
@@ -84,5 +87,58 @@ func TestResolveExportCredentials_InlineToken(t *testing.T) {
 	tok, err := provider()
 	if err != nil || tok != "inline-tok" {
 		t.Fatalf("inline token provider = (%q, %v), want (inline-tok, nil)", tok, err)
+	}
+}
+
+// TestStartEventExport_CorruptCursorLeavesSidecarDisabled is the regression for
+// the release-safety finding: startEventExport must not arm the process-wide
+// transcript sidecar gate when it refuses to start. A corrupt or unreadable
+// durable cursor makes the exporter fail closed; were the sidecar gate armed
+// first, later successful turns would write .gcmeta correlation files with no
+// event stream to join.
+func TestStartEventExport_CorruptCursorLeavesSidecarDisabled(t *testing.T) {
+	transcriptmeta.SetEnabled(false)
+	t.Cleanup(func() { transcriptmeta.SetEnabled(false) })
+
+	home := t.TempDir()
+	// Seed a corrupt cursor so eventexport.LoadCursors errors and
+	// startEventExport returns before launching the exporter.
+	cursorPath := filepath.Join(home, "events-export-cursor.json")
+	if err := os.WriteFile(cursorPath, []byte("{ this is not valid json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ec := supervisor.ExportConfig{Endpoint: "https://example.invalid/ingest", ActorSalt: "test-actor-salt-ok"}
+	providers := func() map[string]events.Provider { return map[string]events.Provider{} }
+
+	startEventExport(ctx, ec, providers, home, io.Discard)
+
+	if transcriptmeta.Enabled() {
+		t.Fatal("sidecar gate must stay disabled when the exporter refuses to start on a corrupt cursor")
+	}
+}
+
+// TestStartEventExport_SuccessfulStartupArmsSidecar proves the gate is still
+// armed on the happy path (no cursor file -> first-run start), so deferring the
+// arm past the fail-closed cursor load did not silently disable the feature.
+func TestStartEventExport_SuccessfulStartupArmsSidecar(t *testing.T) {
+	transcriptmeta.SetEnabled(false)
+	t.Cleanup(func() { transcriptmeta.SetEnabled(false) })
+
+	home := t.TempDir() // no cursor file: LoadCursors returns an empty map, no error
+
+	// A pre-canceled context lets the exporter goroutines exit immediately; the
+	// gate is set synchronously before they launch, so its state is unaffected.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ec := supervisor.ExportConfig{Endpoint: "https://example.invalid/ingest", ActorSalt: "test-actor-salt-ok"}
+	providers := func() map[string]events.Provider { return map[string]events.Provider{} }
+
+	startEventExport(ctx, ec, providers, home, io.Discard)
+
+	if !transcriptmeta.Enabled() {
+		t.Fatal("sidecar gate must be armed once the exporter clears its fail-closed startup")
 	}
 }

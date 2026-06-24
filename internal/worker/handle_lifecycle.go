@@ -259,7 +259,6 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 		event.finish(err)
 		if err == nil {
 			h.recordInvocationTelemetry(ctx)
-			h.writeTranscriptSessionMeta()
 		}
 	}()
 
@@ -304,7 +303,6 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		event.finish(err)
 		if err == nil {
 			h.recordInvocationTelemetry(ctx)
-			h.writeTranscriptSessionMeta()
 		}
 	}()
 

@@ -139,6 +139,31 @@ func TestWrite_ResolvesSymlinkDir(t *testing.T) {
 	}
 }
 
+// TestWrite_ResolveFaultSurfacesError proves a symlink-resolution failure that
+// is NOT the expected "transcript not written yet" case (here a self-referential
+// symlink, which yields ELOOP) is returned as a non-nil error rather than
+// swallowed as a quiet (false, nil) retry, so a persistent filesystem fault
+// becomes diagnosable via the caller's debug log.
+func TestWrite_ResolveFaultSurfacesError(t *testing.T) {
+	withEnabled(t)
+	dir := t.TempDir()
+	loop := filepath.Join(dir, "loop.jsonl")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatalf("seed symlink loop: %v", err)
+	}
+
+	ok, err := Write(loop, "gc-session-1")
+	if err == nil {
+		t.Fatal("Write must surface a non-ENOENT EvalSymlinks fault as a non-nil error")
+	}
+	if ok {
+		t.Fatal("Write must report ok=false on a resolution fault")
+	}
+	if _, statErr := os.Stat(loop + Suffix); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no sidecar on resolution fault, stat err = %v", statErr)
+	}
+}
+
 func TestWrite_IdempotentDoesNotChurn(t *testing.T) {
 	withEnabled(t)
 	dir := t.TempDir()

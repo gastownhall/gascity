@@ -32,7 +32,6 @@ import (
 	"github.com/gastownhall/gascity/internal/sdnotify"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
-	"github.com/gastownhall/gascity/internal/transcriptmeta"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
 )
@@ -1299,15 +1298,8 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Supervisor API listening on http://%s\n", addr) //nolint:errcheck
 
 	// Redacted event export (opt-in via [events.export]). No-op unless an
-	// endpoint is configured. The same opt-in arms the transcript-session
-	// sidecars for turns this supervisor delivers: gc writes a session-id
-	// sidecar next to each keyed transcript only when the install is shipping
-	// correlated events. Installs that never enable export are untouched. (The
-	// gate is per-process — see internal/transcriptmeta — so a one-shot CLI that
-	// delivers a turn without a supervisor does not write a sidecar until the
-	// supervisor next touches the transcript.)
+	// endpoint is configured.
 	if supCfg.Events.Export.Enabled() {
-		transcriptmeta.SetEnabled(true)
 		startEventExport(ctx, supCfg.Events.Export, apiMux.EventProviders, supervisor.DefaultHome(), stderr)
 	}
 
