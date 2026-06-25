@@ -1,0 +1,41 @@
+{
+  "name": "gascity-dashboard-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Vendored Gas City dashboard SPA (shared + frontend workspaces), embedded into the gc supervisor binary.",
+  "workspaces": [
+    "shared",
+    "frontend"
+  ],
+  "scripts": {
+    "build:shared": "npm --workspace gas-city-dashboard-shared run build",
+    "build:frontend": "npm --workspace gas-city-dashboard-frontend run build",
+    "build": "npm run build:shared && npm run build:frontend",
+    "typecheck": "npm --workspace gas-city-dashboard-shared run typecheck && npm run build:shared && npm --workspace gas-city-dashboard-frontend run typecheck",
+    "lint": "eslint . --max-warnings=0",
+    "format:check": "prettier --check . --ignore-path .gitignore --ignore-path .prettierignore"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "license": "MIT",
+  "author": "Charlie Coutts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gastownhall/gascity-dashboard.git"
+  },
+  "homepage": "https://github.com/gastownhall/gascity-dashboard",
+  "bugs": "https://github.com/gastownhall/gascity-dashboard/issues",
+  "devDependencies": {
+    "@eslint/js": "^9.37.0",
+    "@hey-api/openapi-ts": "^0.97.3",
+    "eslint": "^9.37.0",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.6.0",
+    "prettier": "^3.8.3",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.59.4"
+  }
+}

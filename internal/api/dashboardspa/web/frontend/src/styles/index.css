@@ -1,0 +1,287 @@
+@import '@fontsource-variable/inter';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Theme tokens (OKLCH triplets: "L% C H"). Consumed via Tailwind
+     colors as `oklch(var(--token) / <alpha-value>)`. Light is default.
+
+     Lightness gaps between tokens carry contrast. The neutrals are
+     spread across the L range rather than crowded at the extremes:
+     fg-muted clears WCAG AA for body text, rule is visible as a
+     hairline rather than as a notion. */
+  /* Neutrals live at hue 75 (warm amber, not pink). The maroon accent
+     stays at hue 25 (red) so it reads as deliberately warmer-and-redder
+     than the surrounding paper, rather than as "more saturated paper."
+     Chroma stays low on neutrals (≤0.010) so the tint doesn't turn
+     decorative. */
+  /* Default border-color. Tailwind's `border` utility without an
+     explicit color falls back to `currentColor`, which inherits the
+     text color and produces stark white-on-dark borders in dark mode.
+     Pin it to the rule token so every `border` reads as a hairline. */
+  *,
+  ::before,
+  ::after {
+    border-color: oklch(var(--rule));
+  }
+
+  :root {
+    --surface: 96% 0.012 75; /* Warm Paper — committed cream */
+    --surface-tint: 92% 0.014 75; /* hover row */
+    --fg: 18% 0.012 75; /* Warm Graphite — body type */
+    --fg-muted: 42% 0.014 75; /* Tea-Stain — secondary */
+    --fg-faint: 52% 0.014 75; /* Faint Margin — tertiary (WCAG AA on normal text) */
+    --rule: 80% 0.012 75; /* hairline divider */
+    --accent: 40% 0.13 25; /* Maroon Mark */
+    --ok: 50% 0.085 150; /* Healthy Sage */
+    --warn: 60% 0.14 60; /* Caution Ochre */
+
+    color-scheme: light;
+    accent-color: oklch(var(--accent));
+  }
+
+  :root[data-theme='dark'] {
+    --surface: 16% 0.008 75;
+    --surface-tint: 22% 0.012 75;
+    --fg: 92% 0.006 75;
+    --fg-muted: 68% 0.014 75;
+    --fg-faint: 54% 0.012 75;
+    --rule: 28% 0.01 75;
+    --accent: 72% 0.12 25;
+    --ok: 70% 0.085 150;
+    --warn: 76% 0.14 60;
+
+    color-scheme: dark;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']):not([data-theme='dark']) {
+      --surface: 16% 0.008 75;
+      --surface-tint: 22% 0.012 75;
+      --fg: 92% 0.006 75;
+      --fg-muted: 68% 0.014 75;
+      --fg-faint: 54% 0.012 75;
+      --rule: 28% 0.01 75;
+      --accent: 72% 0.12 25;
+      --ok: 70% 0.085 150;
+      --warn: 76% 0.14 60;
+
+      color-scheme: dark;
+    }
+  }
+
+  body {
+    background: oklch(var(--surface));
+    color: oklch(var(--fg));
+    font-family:
+      'Inter Variable',
+      Inter,
+      -apple-system,
+      BlinkMacSystemFont,
+      'Segoe UI',
+      system-ui,
+      sans-serif;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11', 'ss01', 'kern';
+    font-optical-sizing: auto;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  p {
+    text-wrap: pretty;
+  }
+
+  ::selection {
+    background: oklch(var(--accent) / 0.2);
+    color: oklch(var(--fg));
+  }
+}
+
+@layer components {
+  /* Tabular numerals utility — apply to any column of numbers. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .formula-run-diff-view {
+    --diff-background-color: transparent;
+    --diff-text-color: oklch(var(--fg));
+    --diff-font-family:
+      ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+    --diff-selection-background-color: oklch(var(--surface-tint));
+    --diff-selection-text-color: oklch(var(--fg));
+    --diff-gutter-insert-background-color: oklch(var(--ok) / 0.1);
+    --diff-gutter-insert-text-color: oklch(var(--fg-muted));
+    --diff-gutter-delete-background-color: oklch(var(--warn) / 0.1);
+    --diff-gutter-delete-text-color: oklch(var(--fg-muted));
+    --diff-code-insert-background-color: oklch(var(--ok) / 0.1);
+    --diff-code-insert-text-color: oklch(var(--fg));
+    --diff-code-delete-background-color: oklch(var(--warn) / 0.1);
+    --diff-code-delete-text-color: oklch(var(--fg-muted));
+    --diff-code-insert-edit-background-color: oklch(var(--ok) / 0.18);
+    --diff-code-delete-edit-background-color: oklch(var(--warn) / 0.18);
+    --diff-code-selected-background-color: oklch(var(--surface-tint));
+    --diff-omit-gutter-line-color: oklch(var(--rule));
+  }
+
+  .formula-run-diff-view .diff {
+    font-size: 0.8125rem;
+  }
+
+  .formula-run-diff-view .diff-code {
+    word-break: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .formula-run-diff-view .diff-gutter-sign {
+    display: block;
+    color: oklch(var(--fg-faint));
+  }
+
+  /* Focus ring per DESIGN.md: 2px Maroon at 1px offset. */
+  .focus-mark:focus-visible {
+    outline: 2px solid oklch(var(--accent));
+    outline-offset: 1px;
+    border-radius: 2px;
+  }
+
+  .formula-run-node-shape-root {
+    border-width: 3px;
+    border-style: double;
+    border-radius: 3px;
+  }
+
+  .formula-run-node-shape-step {
+    border-width: 1px;
+    border-style: solid;
+    border-radius: 3px;
+  }
+
+  .formula-run-node-shape-retry {
+    border-width: 2px;
+    border-style: double;
+    border-radius: 9999px;
+    outline: 1px solid oklch(var(--rule));
+    outline-offset: 3px;
+  }
+
+  .formula-run-node-shape-check-loop {
+    border-width: 2px;
+    border-style: double;
+    border-radius: 9999px 4px 4px 9999px;
+  }
+
+  .formula-run-node-shape-scope {
+    border-width: 1px;
+    border-style: dashed;
+    border-radius: 3px 10px 10px 3px;
+  }
+
+  .formula-run-node-shape-condition {
+    border-width: 1px;
+    border-style: dashed;
+    border-radius: 18px 4px;
+  }
+
+  .formula-run-node-shape-fanout {
+    border-width: 1px;
+    border-style: dashed;
+    border-radius: 6px;
+    background-image: repeating-linear-gradient(
+      90deg,
+      transparent 0,
+      transparent 0.75rem,
+      oklch(var(--rule) / 0.28) 0.75rem,
+      oklch(var(--rule) / 0.28) 0.8125rem
+    );
+  }
+
+  .formula-run-node-shape-expansion {
+    border-width: 1px;
+    border-style: dashed;
+    border-radius: 6px;
+    outline: 1px dashed oklch(var(--rule));
+    outline-offset: 3px;
+  }
+
+  .formula-run-node-shape-control {
+    border-width: 1px;
+    border-style: dotted;
+    border-radius: 4px;
+  }
+
+  /* ansi_up renders terminal output as <span class="ansi-..."> inside
+     the Peek modal. Kept as terminal-colored so the modal reads as
+     terminal output, deliberately distinct from the dashboard's
+     editorial surface. */
+  .ansi-black {
+    color: oklch(20% 0 0);
+  }
+  .ansi-red {
+    color: oklch(58% 0.18 25);
+  }
+  .ansi-green {
+    color: oklch(60% 0.15 145);
+  }
+  .ansi-yellow {
+    color: oklch(72% 0.15 75);
+  }
+  .ansi-blue {
+    color: oklch(65% 0.13 230);
+  }
+  .ansi-magenta {
+    color: oklch(60% 0.18 320);
+  }
+  .ansi-cyan {
+    color: oklch(70% 0.12 195);
+  }
+  .ansi-white {
+    color: oklch(85% 0.005 25);
+  }
+  .ansi-bright-red {
+    color: oklch(68% 0.2 25);
+    font-weight: 600;
+  }
+  .ansi-bright-green {
+    color: oklch(72% 0.17 145);
+    font-weight: 600;
+  }
+  .ansi-bright-yellow {
+    color: oklch(82% 0.17 75);
+    font-weight: 600;
+  }
+  .ansi-bright-blue {
+    color: oklch(72% 0.14 230);
+    font-weight: 600;
+  }
+  .ansi-bright-magenta {
+    color: oklch(68% 0.2 320);
+    font-weight: 600;
+  }
+  .ansi-bright-cyan {
+    color: oklch(78% 0.13 195);
+    font-weight: 600;
+  }
+  .ansi-bright-white {
+    color: oklch(95% 0.005 25);
+    font-weight: 600;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,4 @@
+backend/openapi/gc-supervisor.openapi.json
+shared/src/generated/
+tmp/
+.claude/worktrees/

@@ -1,0 +1,673 @@
+{
+  "fixtureNotes": [
+    "This fixture intentionally models the current GC graph.v2 producer gap: the supervisor graph-root bead has gc.formula_contract but omits gc.formula/gc.formula_name, even though GC has the formula name in memory during launch. The dashboard must treat formula identity as missing until the GC supervisor persists that metadata on the graph/root."
+  ],
+  "detail": {
+    "runId": "gc-adopt-pr-active",
+    "rootBeadId": "gc-adopt-pr-active",
+    "rootStoreRef": "city:racoon-city",
+    "resolvedRootStore": "city:racoon-city",
+    "scopeKind": "city",
+    "scopeRef": "racoon-city",
+    "title": "Adopt PR #42",
+    "formula": {
+      "kind": "unavailable",
+      "reason": "missing_formula_metadata"
+    },
+    "formulaDetail": {
+      "kind": "unavailable",
+      "reason": "missing_formula_metadata"
+    },
+    "executionPath": {
+      "kind": "known",
+      "path": "/tmp/gascity/adopt-pr-42"
+    },
+    "snapshotVersion": 11,
+    "snapshotEventSeq": {
+      "kind": "known",
+      "seq": 91
+    },
+    "completeness": {
+      "kind": "partial",
+      "reasons": ["formula_detail_missing_formula_metadata"]
+    },
+    "phase": "review",
+    "stages": [
+      { "key": "intake", "label": "Intake", "status": "complete" },
+      { "key": "implementation", "label": "Implementation", "status": "complete" },
+      { "key": "review", "label": "Review round 2", "status": "active" },
+      { "key": "approval", "label": "Approval", "status": "pending" },
+      { "key": "finalization", "label": "Finalization", "status": "pending" }
+    ],
+    "progress": {
+      "snapshotVersion": 11,
+      "snapshotEventSeq": {
+        "kind": "known",
+        "seq": 91
+      },
+      "snapshotPartial": false,
+      "totalNodeCount": 7,
+      "visibleNodeCount": 6,
+      "edgeCount": 4,
+      "executionInstanceCount": 9,
+      "sessionLinkCount": 5,
+      "streamableSessionCount": 1,
+      "streamableSessionIds": ["gc-session-review-i2"],
+      "statusCounts": {
+        "active": 3,
+        "completed": 1,
+        "ready": 1,
+        "skipped": 1
+      },
+      "allStatusCounts": {
+        "active": 3,
+        "completed": 2,
+        "ready": 1,
+        "skipped": 1
+      }
+    },
+    "nodes": [
+      {
+        "id": "gc-adopt-pr-active",
+        "semanticNodeId": "gc-adopt-pr-active",
+        "title": "Adopt PR #42",
+        "kind": "run-root",
+        "constructKind": "run-root",
+        "status": "active",
+        "currentBeadId": "gc-adopt-pr-active",
+        "scope": {
+          "kind": "run"
+        },
+        "visibleInGraph": true,
+        "historicalOnly": false,
+        "iterationSummary": {
+          "kind": "single"
+        },
+        "attemptSummary": {
+          "kind": "none"
+        },
+        "visibleExecutionInstanceId": "gc-adopt-pr-active",
+        "executionInstances": [
+          {
+            "id": "gc-adopt-pr-active",
+            "semanticNodeId": "gc-adopt-pr-active",
+            "beadId": "gc-adopt-pr-active",
+            "iteration": {
+              "kind": "base"
+            },
+            "attempt": {
+              "kind": "untracked"
+            },
+            "label": "base",
+            "status": "active",
+            "session": {
+              "kind": "none",
+              "reason": "session_unresolved"
+            },
+            "currentIteration": true,
+            "historical": false
+          }
+        ],
+        "controlBadges": [
+          {
+            "id": "gc-adopt-finalize",
+            "label": "finalize",
+            "status": "ready"
+          }
+        ]
+      },
+      {
+        "id": "rebase-check",
+        "semanticNodeId": "rebase-check",
+        "title": "Rebase and local validation",
+        "kind": "retry",
+        "constructKind": "retry",
+        "status": "completed",
+        "currentBeadId": "gc-rebase-check",
+        "scope": {
+          "kind": "run"
+        },
+        "visibleInGraph": true,
+        "historicalOnly": false,
+        "iterationSummary": {
+          "kind": "single"
+        },
+        "attemptSummary": {
+          "kind": "tracked",
+          "count": 1,
+          "badge": {
+            "kind": "bounded",
+            "label": "1/3"
+          },
+          "active": {
+            "kind": "idle"
+          }
+        },
+        "visibleExecutionInstanceId": "gc-rebase-check",
+        "executionInstances": [
+          {
+            "id": "gc-rebase-check",
+            "semanticNodeId": "rebase-check",
+            "beadId": "gc-rebase-check",
+            "iteration": {
+              "kind": "base"
+            },
+            "attempt": {
+              "kind": "attempt",
+              "value": 1
+            },
+            "label": "attempt 1",
+            "status": "completed",
+            "session": {
+              "kind": "attached",
+              "link": {
+                "sessionId": "gc-session-rebase",
+                "sessionName": "adopt-pr-rebase-check",
+                "assignee": "gc-session-rebase"
+              },
+              "streamable": false
+            },
+            "currentIteration": true,
+            "historical": false
+          }
+        ],
+        "controlBadges": []
+      },
+      {
+        "id": "review-loop",
+        "semanticNodeId": "review-loop",
+        "title": "Review / fix loop",
+        "kind": "check-loop",
+        "constructKind": "check-loop",
+        "status": "active",
+        "currentBeadId": "gc-review-loop",
+        "scope": {
+          "kind": "scoped",
+          "ref": "body"
+        },
+        "visibleInGraph": true,
+        "historicalOnly": false,
+        "iterationSummary": {
+          "kind": "single"
+        },
+        "attemptSummary": {
+          "kind": "tracked",
+          "count": 1,
+          "badge": {
+            "kind": "bounded",
+            "label": "1/999"
+          },
+          "active": {
+            "kind": "idle"
+          }
+        },
+        "visibleExecutionInstanceId": "gc-review-loop",
+        "executionInstances": [
+          {
+            "id": "gc-review-loop",
+            "semanticNodeId": "review-loop",
+            "beadId": "gc-review-loop",
+            "iteration": {
+              "kind": "base"
+            },
+            "attempt": {
+              "kind": "untracked"
+            },
+            "label": "base",
+            "status": "active",
+            "session": {
+              "kind": "none",
+              "reason": "session_unresolved"
+            },
+            "currentIteration": true,
+            "historical": false
+          }
+        ],
+        "controlBadges": []
+      },
+      {
+        "id": "review-pipeline",
+        "semanticNodeId": "review-pipeline",
+        "title": "Multi-model review pipeline",
+        "kind": "expansion",
+        "constructKind": "expansion",
+        "status": "active",
+        "currentBeadId": "gc-review-pipeline-i2",
+        "scope": {
+          "kind": "scoped",
+          "ref": "body"
+        },
+        "visibleInGraph": true,
+        "historicalOnly": false,
+        "iterationSummary": {
+          "kind": "stacked",
+          "visibleIteration": 2,
+          "iterationCount": 2,
+          "control": {
+            "kind": "known",
+            "id": "review-loop"
+          }
+        },
+        "attemptSummary": {
+          "kind": "tracked",
+          "count": 2,
+          "badge": {
+            "kind": "count-only"
+          },
+          "active": {
+            "kind": "running",
+            "value": 2
+          }
+        },
+        "visibleExecutionInstanceId": "gc-review-pipeline-i2",
+        "executionInstances": [
+          {
+            "id": "gc-review-pipeline-i1",
+            "semanticNodeId": "review-pipeline",
+            "beadId": "gc-review-pipeline-i1",
+            "iteration": {
+              "kind": "loop",
+              "value": 1
+            },
+            "attempt": {
+              "kind": "attempt",
+              "value": 1
+            },
+            "label": "iteration 1, attempt 1",
+            "status": "completed",
+            "session": {
+              "kind": "attached",
+              "link": {
+                "sessionId": "gc-session-review-i1",
+                "sessionName": "adopt-pr-review-pipeline-i1",
+                "assignee": "gc-session-review-i1"
+              },
+              "streamable": false
+            },
+            "currentIteration": false,
+            "historical": true
+          },
+          {
+            "id": "gc-review-pipeline-i2",
+            "semanticNodeId": "review-pipeline",
+            "beadId": "gc-review-pipeline-i2",
+            "iteration": {
+              "kind": "loop",
+              "value": 2
+            },
+            "attempt": {
+              "kind": "attempt",
+              "value": 2
+            },
+            "label": "iteration 2, attempt 2",
+            "status": "active",
+            "session": {
+              "kind": "attached",
+              "link": {
+                "sessionId": "gc-session-review-i2",
+                "sessionName": "adopt-pr-review-pipeline-i2",
+                "assignee": "gc-session-review-i2"
+              },
+              "streamable": true
+            },
+            "currentIteration": true,
+            "historical": false
+          }
+        ],
+        "controlBadges": [
+          {
+            "id": "gc-review-pipeline-scope-check",
+            "label": "scope check",
+            "status": "completed"
+          }
+        ]
+      },
+      {
+        "id": "old-only-review",
+        "semanticNodeId": "old-only-review",
+        "title": "Old-only review",
+        "kind": "task",
+        "constructKind": "step",
+        "status": "completed",
+        "currentBeadId": "gc-old-only-review-i1",
+        "scope": {
+          "kind": "run"
+        },
+        "visibleInGraph": false,
+        "historicalOnly": true,
+        "iterationSummary": {
+          "kind": "stacked",
+          "visibleIteration": 1,
+          "iterationCount": 1,
+          "control": {
+            "kind": "known",
+            "id": "review-loop"
+          }
+        },
+        "attemptSummary": {
+          "kind": "none"
+        },
+        "visibleExecutionInstanceId": "gc-old-only-review-i1",
+        "executionInstances": [
+          {
+            "id": "gc-old-only-review-i1",
+            "semanticNodeId": "old-only-review",
+            "beadId": "gc-old-only-review-i1",
+            "iteration": {
+              "kind": "loop",
+              "value": 1
+            },
+            "attempt": {
+              "kind": "untracked"
+            },
+            "label": "base",
+            "status": "completed",
+            "session": {
+              "kind": "attached",
+              "link": {
+                "sessionId": "gc-session-review-i1",
+                "sessionName": "adopt-pr-review-pipeline-i1",
+                "assignee": "gc-session-review-i1"
+              },
+              "streamable": false
+            },
+            "currentIteration": false,
+            "historical": true
+          }
+        ],
+        "controlBadges": []
+      },
+      {
+        "id": "apply-fixes",
+        "semanticNodeId": "apply-fixes",
+        "title": "Apply review fixes and set verdict",
+        "kind": "task",
+        "constructKind": "step",
+        "status": "ready",
+        "currentBeadId": "gc-apply-fixes-i2",
+        "scope": {
+          "kind": "scoped",
+          "ref": "body"
+        },
+        "visibleInGraph": true,
+        "historicalOnly": false,
+        "iterationSummary": {
+          "kind": "stacked",
+          "visibleIteration": 2,
+          "iterationCount": 2,
+          "control": {
+            "kind": "known",
+            "id": "review-loop"
+          }
+        },
+        "attemptSummary": {
+          "kind": "tracked",
+          "count": 2,
+          "badge": {
+            "kind": "count-only"
+          },
+          "active": {
+            "kind": "idle"
+          }
+        },
+        "visibleExecutionInstanceId": "gc-apply-fixes-i2",
+        "executionInstances": [
+          {
+            "id": "gc-apply-fixes-i1",
+            "semanticNodeId": "apply-fixes",
+            "beadId": "gc-apply-fixes-i1",
+            "iteration": {
+              "kind": "loop",
+              "value": 1
+            },
+            "attempt": {
+              "kind": "attempt",
+              "value": 1
+            },
+            "label": "iteration 1, attempt 1",
+            "status": "completed",
+            "session": {
+              "kind": "attached",
+              "link": {
+                "sessionId": "gc-session-fix-i1",
+                "sessionName": "adopt-pr-apply-fixes-i1",
+                "assignee": "gc-session-fix-i1"
+              },
+              "streamable": false
+            },
+            "currentIteration": false,
+            "historical": true
+          },
+          {
+            "id": "gc-apply-fixes-i2",
+            "semanticNodeId": "apply-fixes",
+            "beadId": "gc-apply-fixes-i2",
+            "iteration": {
+              "kind": "loop",
+              "value": 2
+            },
+            "attempt": {
+              "kind": "attempt",
+              "value": 2
+            },
+            "label": "iteration 2, attempt 2",
+            "status": "ready",
+            "session": {
+              "kind": "none",
+              "reason": "not_started"
+            },
+            "currentIteration": true,
+            "historical": false
+          }
+        ],
+        "controlBadges": []
+      },
+      {
+        "id": "pre-approval-ci",
+        "semanticNodeId": "pre-approval-ci",
+        "title": "Pre-approval CI repair loop",
+        "kind": "condition",
+        "constructKind": "condition",
+        "status": "skipped",
+        "currentBeadId": "gc-pre-approval-ci",
+        "scope": {
+          "kind": "run"
+        },
+        "visibleInGraph": true,
+        "historicalOnly": false,
+        "iterationSummary": {
+          "kind": "single"
+        },
+        "attemptSummary": {
+          "kind": "none"
+        },
+        "visibleExecutionInstanceId": "gc-pre-approval-ci",
+        "executionInstances": [
+          {
+            "id": "gc-pre-approval-ci",
+            "semanticNodeId": "pre-approval-ci",
+            "beadId": "gc-pre-approval-ci",
+            "iteration": {
+              "kind": "base"
+            },
+            "attempt": {
+              "kind": "untracked"
+            },
+            "label": "base",
+            "status": "skipped",
+            "session": {
+              "kind": "none",
+              "reason": "session_unresolved"
+            },
+            "currentIteration": true,
+            "historical": false
+          }
+        ],
+        "controlBadges": []
+      }
+    ],
+    "edges": [
+      {
+        "from": "rebase-check",
+        "to": "review-loop",
+        "kind": "execution"
+      },
+      {
+        "from": "review-loop",
+        "to": "review-pipeline",
+        "kind": "execution"
+      },
+      {
+        "from": "review-pipeline",
+        "to": "apply-fixes",
+        "kind": "execution"
+      },
+      {
+        "from": "review-loop",
+        "to": "pre-approval-ci",
+        "kind": "execution"
+      }
+    ],
+    "lanes": [
+      {
+        "id": "__run",
+        "label": "Run",
+        "nodeIds": [
+          "gc-adopt-pr-active",
+          "rebase-check",
+          "review-loop",
+          "review-pipeline",
+          "old-only-review",
+          "apply-fixes",
+          "pre-approval-ci"
+        ]
+      }
+    ]
+  },
+  "diff": {
+    "kind": "ok",
+    "rootPath": {
+      "kind": "known",
+      "path": "/tmp/gascity/adopt-pr-42"
+    },
+    "comparison": {
+      "kind": "upstream",
+      "ref": "origin/main",
+      "mergeBase": "4c2ebf903c64a368a1043878f6e8a0ee3666633f"
+    },
+    "status": [
+      " M frontend/src/routes/FormulaRunDetail.tsx",
+      " M shared/src/runs/enrich.ts",
+      "?? docs/plan.md"
+    ],
+    "changedFiles": [
+      {
+        "path": "frontend/src/routes/FormulaRunDetail.tsx",
+        "status": "M",
+        "kind": "code"
+      },
+      {
+        "path": "shared/src/runs/enrich.ts",
+        "status": "M",
+        "kind": "code"
+      },
+      {
+        "path": "docs/plan.md",
+        "status": "??",
+        "kind": "docs"
+      }
+    ],
+    "patch": "diff --git a/shared/src/runs/enrich.ts b/shared/src/runs/enrich.ts\nindex 3a4e79a..b6c9d02 100644\n--- a/shared/src/runs/enrich.ts\n+++ b/shared/src/runs/enrich.ts\n@@ -1,4 +1,4 @@\n-old session guard\n+preserve failed attempt transcript links\n context line\n\ndiff --git a/frontend/src/routes/FormulaRunDetail.tsx b/frontend/src/routes/FormulaRunDetail.tsx\nindex 3a4e79a..b6c9d02 100644\n--- a/frontend/src/routes/FormulaRunDetail.tsx\n+++ b/frontend/src/routes/FormulaRunDetail.tsx\n@@ -10,3 +10,4 @@\n <FormulaRunDiagram />\n+<FormulaRunTabs />\n\ndiff --git a/docs/plan.md b/docs/plan.md\nnew file mode 100644\nindex 0000000..b6c9d02\n--- /dev/null\n+++ b/docs/plan.md\n@@ -0,0 +1,3 @@\n+# Plan\n+\n+Preserve failed attempt transcript links before final review.",
+    "truncated": false
+  },
+  "transcripts": {
+    "gc-session-rebase": {
+      "session_id": "gc-session-rebase",
+      "turns": [
+        {
+          "role": "user",
+          "text": "Rebase the branch and run the local validation gate."
+        },
+        {
+          "role": "assistant",
+          "text": "Rebased cleanly. Typecheck and focused tests passed."
+        }
+      ],
+      "total_chars": 101,
+      "captured_at": "2026-05-24T10:00:00.000Z",
+      "truncated": false
+    },
+    "gc-session-review-i1": {
+      "session_id": "gc-session-review-i1",
+      "turns": [
+        {
+          "role": "user",
+          "text": "Review iteration 1 for regressions."
+        },
+        {
+          "role": "assistant",
+          "text": "Found two issues: stale loop labels and a missing failed-attempt transcript link."
+        }
+      ],
+      "total_chars": 111,
+      "captured_at": "2026-05-24T10:30:00.000Z",
+      "truncated": false
+    },
+    "gc-session-review-i2": {
+      "session_id": "gc-session-review-i2",
+      "turns": [
+        {
+          "role": "user",
+          "text": "Review the current iteration after the fixture update."
+        },
+        {
+          "role": "assistant",
+          "text": "Checking graph.v2 node grouping, session links, and hidden control badges."
+        },
+        {
+          "role": "tool_use",
+          "text": "Command: node --import tsx --test backend/test/formula-run-enrich.test.ts"
+        },
+        {
+          "role": "tool_result",
+          "text": "stdout: 5 graph.v2 enrichment tests passed.\nstderr: <empty>"
+        },
+        {
+          "role": "assistant",
+          "text": "The current run keeps semantic nodes stable and preserves hidden control badges."
+        },
+        {
+          "role": "final",
+          "text": "Ready for handoff: no leaked implementation terminology in the formula run detail."
+        }
+      ],
+      "total_chars": 416,
+      "captured_at": "2026-05-24T11:00:00.000Z",
+      "truncated": false
+    },
+    "gc-session-fix-i1": {
+      "session_id": "gc-session-fix-i1",
+      "turns": [
+        {
+          "role": "user",
+          "text": "Apply the iteration 1 review fixes."
+        },
+        {
+          "role": "assistant",
+          "text": "Updated the visual semantics and left the loop ready for another review."
+        }
+      ],
+      "total_chars": 100,
+      "captured_at": "2026-05-24T11:30:00.000Z",
+      "truncated": false
+    }
+  },
+  "streamTurns": {
+    "gc-session-review-i2": [
+      {
+        "role": "assistant",
+        "text": "Streaming: preserving active-session progress while the node remains selected."
+      }
+    ]
+  }
+}

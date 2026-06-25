@@ -225,6 +225,35 @@ func (sm *SupervisorMux) WithAllowedHosts(hosts []string) *SupervisorMux {
 	return sm
 }
 
+// WithStaticHandler registers the embedded dashboard SPA as the "/" catch-all
+// and rebuilds the internal http.Server handler. Go 1.22 mux specificity keeps
+// the typed /v0 operations, /health, the OpenAPI document, and the /svc/ proxy
+// winning over "/", so only unmatched paths reach the SPA. Must be called
+// before Serve. Passing nil is a no-op.
+func (sm *SupervisorMux) WithStaticHandler(h http.Handler) *SupervisorMux {
+	if h == nil {
+		return sm
+	}
+	sm.humaMux.Handle("/", h)
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+// WithAPIPlane registers the host-side dashboard "/api/" plane and rebuilds the
+// internal http.Server handler. Like serveCitySvcProxy, this is a non-Huma
+// registration: it is intentionally excluded from the typed OpenAPI contract,
+// so it adds no operations to the spec. The plane self-enforces CSRF and the
+// read-only posture (it does not inherit Huma's middleware). Must be called
+// before Serve. Passing nil is a no-op.
+func (sm *SupervisorMux) WithAPIPlane(h http.Handler) *SupervisorMux {
+	if h == nil {
+		return sm
+	}
+	sm.humaMux.Handle("/api/", h)
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
 // WithAnyHostAllowed disables Host header validation. This preserves the
 // legacy standalone city API behavior; machine-wide supervisor mode should
 // keep Host validation enabled and use WithAllowedHosts for explicit names.

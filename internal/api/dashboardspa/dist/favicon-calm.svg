@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- gascity-dashboard-kb3 calm-state favicon. Editorial-typographic
+       register: a single tabular figure 0 in warm graphite on warm
+       paper, matching the DESIGN.md surface tokens. Intentionally not
+       glossy/badged; the alarm signal earns its visibility by being
+       absent here and present only in favicon-alert.svg. -->
+  <rect width="32" height="32" rx="6" fill="#fbf7f3" />
+  <text
+    x="16"
+    y="22"
+    text-anchor="middle"
+    font-family="Charter, 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Times New Roman', serif"
+    font-weight="500"
+    font-size="20"
+    fill="#1f1d1c"
+  >0</text>
+</svg>

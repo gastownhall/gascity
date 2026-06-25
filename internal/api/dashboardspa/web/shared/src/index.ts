@@ -1,0 +1,56 @@
+// Package root barrel for dashboard-owned /api DTOs and shared helpers.
+// Keep runtime helper exports as value exports; type-only domain leaves use
+// `export type *` so importing the package root does not pull in dead JS.
+
+export type * from './snapshot/types.js';
+export { resolveSessionForTarget, matchesSessionTarget, lastSegment } from './session-resolve.js';
+export * from './run-detail.js';
+export type * from './run-snapshot.js';
+export * from './run-scope.js';
+export * from './strip-non-printable.js';
+export * from './session-id.js';
+export * from './work-in-flight.js';
+export type * from './viewing-as.js';
+export * from './agents/needsYou.js';
+export * from './runs/bead-fields.js';
+export * from './runs/blocked.js';
+export * from './runs/display-state.js';
+export * from './runs/edges.js';
+export * from './runs/enrich.js';
+export * from './runs/execution-instances.js';
+export * from './runs/execution-path.js';
+export * from './runs/formula-name.js';
+export * from './runs/formula-order.js';
+export * from './runs/formula-run.js';
+export * from './runs/groups.js';
+export * from './runs/health.js';
+export * from './runs/lanes.js';
+export * from './runs/liveness.js';
+export * from './runs/node-shape.js';
+export * from './runs/phaseMapping.js';
+export * from './runs/runtime-state.js';
+export * from './runs/session-link.js';
+export * from './runs/summary.js';
+export * from './runs/status.js';
+export * from './bead-id.js';
+export * from './links.js';
+export * from './links/build-link-view.js';
+export * from './links/instrumentation.js';
+export * from './links/node-ref.js';
+export * from './links/relation-index.js';
+export * from './city.js';
+export * from './operator.js';
+export * from './operator-mail.js';
+export * from './alert.js';
+export * from './pending.js';
+export * from './context-window.js';
+export type * from './lists.js';
+export type * from './transcript.js';
+export type * from './dashboard-beads.js';
+export type * from './activity.js';
+export type * from './dashboard-health.js';
+export type * from './rig-store-health.js';
+export type * from './supervisor-status.js';
+export type * from './api-error.js';
+export type * from './views.js';
+export type * from './dashboard-sessions.js';
