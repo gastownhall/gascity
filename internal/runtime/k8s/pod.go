@@ -210,6 +210,19 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	podWorkDir := projectedPodWorkDir(cfg)
 	ctrlCity := controllerCityPath(cfg.Env)
 
+	// Select the container image. Defaults to the single GC_K8S_IMAGE; when a
+	// per-rig override map is configured (GC_K8S_RIG_IMAGES), a session whose
+	// GC_RIG matches an entry runs on that rig's image instead. Unknown/empty
+	// rig falls back to the default — fully backward compatible when unset.
+	image := p.image
+	if len(p.rigImages) > 0 {
+		if rig := cfg.Env["GC_RIG"]; rig != "" {
+			if img := p.rigImages[rig]; img != "" {
+				image = img
+			}
+		}
+	}
+
 	// Build the agent command (base64-encoded to avoid quoting issues) — shared
 	// with the relaunch path so the entrypoint and a respawn launch identically.
 	cmdB64 := agentCommandB64(cfg)
@@ -333,7 +346,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 			RestartPolicy:      corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
 				Name:            "agent",
-				Image:           p.image,
+				Image:           image,
 				ImagePullPolicy: corev1.PullAlways,
 				WorkingDir:      podWorkDir,
 				Command:         []string{"/bin/sh", "-c"},
@@ -369,7 +382,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		}
 		pod.Spec.InitContainers = []corev1.Container{{
 			Name:            "stage",
-			Image:           p.image,
+			Image:           image,
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			Command:         []string{"sh", "-c", "while [ ! -f /workspace/.gc-ready ]; do sleep 0.5; done"},
 			VolumeMounts:    initVolMounts,

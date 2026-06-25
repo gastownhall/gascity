@@ -36,6 +36,7 @@ type Provider struct {
 	ops                k8sOps
 	namespace          string
 	image              string
+	rigImages          map[string]string // GC_K8S_RIG_IMAGES (JSON {"<rig>":"<image>"}); nil = single-image
 	k8sContext         string
 	managedServiceHost string
 	managedServicePort string
@@ -63,7 +64,8 @@ type schedulingFields struct {
 // NewProvider creates a K8s session provider.
 // Configuration is read from environment variables (matching gc-session-k8s):
 //   - GC_K8S_NAMESPACE — namespace (default: "gc")
-//   - GC_K8S_IMAGE — container image (required for Start)
+//   - GC_K8S_IMAGE — container image (required for Start; default/fallback)
+//   - GC_K8S_RIG_IMAGES — optional JSON {"<rig>":"<image>"} for per-rig images
 //   - GC_K8S_CONTEXT — kubectl context (default: current)
 //   - GC_K8S_SERVICE_ACCOUNT — pod service account name (default: namespace default)
 //   - GC_K8S_CPU_REQUEST, GC_K8S_MEM_REQUEST — resource requests
@@ -101,6 +103,11 @@ func NewProvider() (*Provider, error) {
 		return nil, err
 	}
 
+	rigImages, err := parseRigImagesEnv()
+	if err != nil {
+		return nil, err
+	}
+
 	return &Provider{
 		ops: &realK8sOps{
 			clientset:  clientset,
@@ -109,6 +116,7 @@ func NewProvider() (*Provider, error) {
 		},
 		namespace:          namespace,
 		image:              image,
+		rigImages:          rigImages,
 		k8sContext:         k8sContext,
 		managedServiceHost: managedServiceHost,
 		managedServicePort: managedServicePort,
@@ -146,6 +154,24 @@ func parseSchedulingEnv() (schedulingFields, error) {
 	}
 	scheduling.priorityClassName = os.Getenv("GC_K8S_PRIORITY_CLASS_NAME")
 	return scheduling, nil
+}
+
+// parseRigImagesEnv parses GC_K8S_RIG_IMAGES (a JSON object mapping rig name to
+// container image) into a map. Returns nil when unset/empty so callers fall back
+// to the single GC_K8S_IMAGE for every pod (backward compatible).
+func parseRigImagesEnv() (map[string]string, error) {
+	v := strings.TrimSpace(os.Getenv("GC_K8S_RIG_IMAGES"))
+	if v == "" {
+		return nil, nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(v), &m); err != nil {
+		return nil, fmt.Errorf("parsing GC_K8S_RIG_IMAGES: %w", err)
+	}
+	if len(m) == 0 {
+		return nil, nil
+	}
+	return m, nil
 }
 
 // newProviderWithOps creates a provider with a custom k8sOps (for testing).

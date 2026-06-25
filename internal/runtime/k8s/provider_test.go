@@ -20,6 +20,45 @@ func TestProviderImplementsInterface(_ *testing.T) {
 	var _ runtime.Provider = (*Provider)(nil)
 }
 
+func TestParseRigImagesEnv(t *testing.T) {
+	t.Run("unset returns nil", func(t *testing.T) {
+		t.Setenv("GC_K8S_RIG_IMAGES", "")
+		m, err := parseRigImagesEnv()
+		if err != nil {
+			t.Fatalf("parseRigImagesEnv: %v", err)
+		}
+		if m != nil {
+			t.Errorf("got %v, want nil", m)
+		}
+	})
+	t.Run("empty object returns nil", func(t *testing.T) {
+		t.Setenv("GC_K8S_RIG_IMAGES", "{}")
+		m, err := parseRigImagesEnv()
+		if err != nil {
+			t.Fatalf("parseRigImagesEnv: %v", err)
+		}
+		if m != nil {
+			t.Errorf("got %v, want nil", m)
+		}
+	})
+	t.Run("valid map parses", func(t *testing.T) {
+		t.Setenv("GC_K8S_RIG_IMAGES", `{"backend":"zilly-rig:bash","ios":"ios:img"}`)
+		m, err := parseRigImagesEnv()
+		if err != nil {
+			t.Fatalf("parseRigImagesEnv: %v", err)
+		}
+		if m["backend"] != "zilly-rig:bash" || m["ios"] != "ios:img" {
+			t.Errorf("got %v, want backend+ios entries", m)
+		}
+	})
+	t.Run("invalid JSON errors", func(t *testing.T) {
+		t.Setenv("GC_K8S_RIG_IMAGES", "{not json")
+		if _, err := parseRigImagesEnv(); err == nil {
+			t.Error("expected error for invalid JSON, got nil")
+		}
+	})
+}
+
 func TestManagedServiceAliasDefaults(t *testing.T) {
 	t.Setenv("GC_DOLT_HOST", "canonical-dolt.example.com")
 	t.Setenv("GC_DOLT_PORT", "4407")

@@ -99,6 +99,69 @@ func TestBuildPod_NoSchedulingFields_NoBehaviorChange(t *testing.T) {
 	}
 }
 
+func TestBuildPod_RigImageOverride(t *testing.T) {
+	// A session whose GC_RIG matches the rig-image map runs on the rig image,
+	// for both the main container and the staging init container.
+	p := newProviderWithOps(newFakeK8sOps())
+	p.image = "generic:mvp"
+	p.rigImages = map[string]string{"backend": "zilly-rig:bash"}
+	pod, err := buildPod("test-session", runtime.Config{
+		Command: "/bin/bash",
+		WorkDir: "/workspace/backend", // != ctrlCity ("") → forces a staging init container
+		Env:     map[string]string{"GC_RIG": "backend"},
+	}, p)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	if got := pod.Spec.Containers[0].Image; got != "zilly-rig:bash" {
+		t.Errorf("main container image = %q, want %q", got, "zilly-rig:bash")
+	}
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("len(InitContainers) = %d, want 1", len(pod.Spec.InitContainers))
+	}
+	if got := pod.Spec.InitContainers[0].Image; got != "zilly-rig:bash" {
+		t.Errorf("init container image = %q, want %q", got, "zilly-rig:bash")
+	}
+}
+
+func TestBuildPod_RigImageFallback(t *testing.T) {
+	// Rig not in the map, or no GC_RIG at all → falls back to GC_K8S_IMAGE.
+	p := newProviderWithOps(newFakeK8sOps())
+	p.image = "generic:mvp"
+	p.rigImages = map[string]string{"backend": "zilly-rig:bash"}
+
+	cases := map[string]map[string]string{
+		"unknown rig": {"GC_RIG": "ios"},
+		"empty rig":   {"GC_RIG": ""},
+		"no rig env":  {},
+	}
+	for name, env := range cases {
+		pod, err := buildPod("test-session", runtime.Config{Command: "/bin/bash", Env: env}, p)
+		if err != nil {
+			t.Fatalf("[%s] buildPod: %v", name, err)
+		}
+		if got := pod.Spec.Containers[0].Image; got != "generic:mvp" {
+			t.Errorf("[%s] image = %q, want %q", name, got, "generic:mvp")
+		}
+	}
+}
+
+func TestBuildPod_NoRigImages_UsesDefault(t *testing.T) {
+	// No rig-image map → every pod uses GC_K8S_IMAGE, unchanged from before.
+	p := newProviderWithOps(newFakeK8sOps())
+	p.image = "generic:mvp"
+	pod, err := buildPod("test-session", runtime.Config{
+		Command: "/bin/bash",
+		Env:     map[string]string{"GC_RIG": "backend"},
+	}, p)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	if got := pod.Spec.Containers[0].Image; got != "generic:mvp" {
+		t.Errorf("image = %q, want %q", got, "generic:mvp")
+	}
+}
+
 func TestBuildPod_ClonesSchedulingFields(t *testing.T) {
 	seconds := int64(30)
 	p := newProviderWithOps(newFakeK8sOps())
