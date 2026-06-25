@@ -282,6 +282,48 @@ test-only mechanism — it requires `GC_NATIVE_DOLTLITE_BEADS=true` and is
 not a supported operator path. Use Dolt server mode instead.
 </Note>
 
+## `dolt_mode_safe` Preflight Gate Fails
+
+The native in-process store is unavailable after `gc start`, and the supervisor
+log shows:
+
+```
+native_store_unavailable gate=dolt_mode_safe reason="dolt_mode=embedded requires server mode or native_embedded build tag"
+```
+
+`gc status --json` reports `"preflight_gate":"dolt_mode_safe"` with
+`"native_store_eligible":false`.
+
+Gas City requires `bd` to report Dolt server mode before enabling the native
+in-process store. When gc manages a local Dolt SQL server, it writes
+`dolt.mode: server` to `.beads/config.yaml` automatically on every `gc start`.
+The field may be absent after upgrading from an older gc version — `bd context`
+then reports `dolt_mode: embedded`, failing the gate.
+
+Confirm the current mode:
+
+```bash
+bd context --json | jq .dolt_mode   # should print "server"
+```
+
+Run the automatic repair and restart:
+
+```bash
+gc doctor --fix
+gc restart
+```
+
+If the gate still fails after restart, add the field manually under the `dolt:`
+block in `.beads/config.yaml` and restart:
+
+```yaml
+dolt:
+  mode: server
+```
+
+Do not bypass or disable the `dolt_mode_safe` check — it guards the store-mode
+contract that keeps `bd` and gc in agreement.
+
 ## flock Not Found (macOS)
 
 macOS does not ship `flock`. Install it via Homebrew:
