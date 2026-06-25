@@ -28,10 +28,7 @@ supervisor; it is no longer a separate static server. This command resolves and
 prints the supervisor URL (or tells you how to start the supervisor).`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if runDashboardNotice("gc dashboard", apiURL, stdout, stderr) != nil {
-				return errExit
-			}
-			return nil
+			return runDashboardNotice(apiURL, stdout, stderr)
 		},
 	}
 	bindDashboardFlags(cmd, &apiURL)
@@ -56,10 +53,7 @@ supervisor; "gc dashboard serve" no longer starts a static server. It resolves
 and prints the supervisor URL (or tells you how to start the supervisor).`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if runDashboardNotice("gc dashboard serve", apiURL, stdout, stderr) != nil {
-				return errExit
-			}
-			return nil
+			return runDashboardNotice(apiURL, stdout, stderr)
 		},
 	}
 	bindDashboardFlags(cmd, &apiURL)
@@ -70,21 +64,22 @@ func bindDashboardFlags(cmd *cobra.Command, apiURL *string) {
 	cmd.Flags().StringVar(apiURL, "api", "", "GC API server URL override (auto-discovered by default)")
 }
 
-// runDashboardNotice resolves the supervisor URL and prints where the dashboard
-// is served. If the supervisor URL cannot be resolved (typically because the
-// supervisor is not running), it prints how to start it and returns nil — the
-// command is informational and always exits 0 unless config resolution itself
-// fails.
-func runDashboardNotice(commandName, apiURLOverride string, stdout, stderr io.Writer) error {
+// runDashboardNotice prints where the supervisor serves the dashboard SPA. It
+// is purely informational and always exits 0: city/config resolution only
+// feeds the standalone-controller fallback, so a failure there is non-fatal —
+// the command falls back to live supervisor discovery and still prints a
+// useful answer (the supervisor URL, or how to start it).
+func runDashboardNotice(apiURLOverride string, stdout, stderr io.Writer) error {
+	// A city-resolution error (not in a city, or an unreadable city.toml) must
+	// not abort: the supervisor may be running regardless of the current dir.
 	cityPath, cfg, err := resolveDashboardContext(stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return err
+		cityPath, cfg = "", nil
 	}
 
 	apiURL, err := resolveDashboardAPI(cityPath, cfg, apiURLOverride)
 	if err != nil {
-		fmt.Fprintf(stdout, "The dashboard is served by the gc supervisor; start it with %q, then reopen this command.\n", "gc supervisor start") //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "The dashboard is served by the gc supervisor; start it with %q, then open the printed URL.\n", "gc supervisor start") //nolint:errcheck // best-effort stdout
 		return nil
 	}
 
