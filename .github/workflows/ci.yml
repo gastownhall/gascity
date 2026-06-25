@@ -336,6 +336,42 @@ jobs:
       - name: Acceptance tests (Tier A, bd current)
         run: make test-acceptance
 
+  # NON-REQUIRED HEADxHEAD radar: builds bd from beads MAIN HEAD (live, not the
+  # pinned BD_CURRENT_REF) and runs gc-HEAD's real bd calls (the acceptance
+  # suite) against it — early warning when bd's bleeding edge diverges from what
+  # gc expects, before the next deliberate pin bump. Deliberately NOT wired into
+  # ci-required: a bd-main break must never block a gascity merge (that is the
+  # cross-HEAD deadlock the pinned cells avoid). A red here is an advisory signal
+  # to stage a coordinated change, not a gate. Path-gated on the beads filter.
+  contract-radar-bd-head:
+    name: Contract radar (gc HEAD x bd main HEAD)
+    needs:
+      - runner-policy
+      - changes
+    if: ${{ needs.changes.outputs.beads == 'true' }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    env:
+      DOLT_VERSION: "2.1.7"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: "" # build bd from source below
+          install-claude-cli: "true"
+      - name: Build bd from beads main HEAD
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/beads-src"
+          git clone --depth 1 --filter=blob:none https://github.com/gastownhall/beads "$src"
+          mkdir -p "${HOME}/.local/bin"
+          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      - name: Verify bd on PATH
+        run: bd version
+      - name: Acceptance tests (Tier A, bd main HEAD)
+        run: make test-acceptance
+
   preflight-generated:
     name: Preflight / generated artifacts
     needs:
