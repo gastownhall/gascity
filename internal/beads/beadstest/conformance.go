@@ -13,17 +13,17 @@ import (
 )
 
 // Options controls optional behavior of the Store conformance suite.
-// Each opt-out should reference an external bead/escalation explaining
-// why a conforming implementation cannot pass the affected subtest.
+//
+// Opt-outs are governed by the conformance-skip ledger (conformance_skips.go):
+// a request to skip a subtest is honored ONLY when a matching, unexpired ledger
+// entry exists, naming a tracking bead and an expiry. Without one the subtest
+// hard-fails, so an opt-out can never silently launder a regression.
 type Options struct {
-	// SkipTxApplyConformance skips the TxRunsCallbackAndAppliesWriteSurface
-	// subtest. Use only when the backing implementation has a known defect
-	// outside the Store contract (e.g., an external CLI bug). The other Tx
-	// subtests still run.
+	// SkipTxApplyConformance requests skipping the
+	// TxRunsCallbackAndAppliesWriteSurface subtest. It is honored only when a
+	// valid, unexpired entry for that subtest exists in the skip ledger;
+	// otherwise the subtest fails loudly.
 	SkipTxApplyConformance bool
-	// SkipTxApplyReason is reported via t.Skipf when SkipTxApplyConformance
-	// is true. Should name the escalation bead or upstream issue.
-	SkipTxApplyReason string
 }
 
 // RunStoreTests runs the full conformance suite against a Store implementation.
@@ -677,7 +677,8 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 
 	t.Run("TxRunsCallbackAndAppliesWriteSurface", func(t *testing.T) {
 		if opts.SkipTxApplyConformance {
-			t.Skipf("skipping: %s", opts.SkipTxApplyReason)
+			requireLedgeredSkip(t, "TxRunsCallbackAndAppliesWriteSurface")
+			return
 		}
 		s := newStore()
 		b, err := s.Create(beads.Bead{Title: "before"})
