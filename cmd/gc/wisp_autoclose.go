@@ -46,6 +46,16 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	}
 	storeRoot := convoyAutocloseStoreRoot(cwd)
 	cityPath := autocloseCityPathForStoreRoot(storeRoot)
+
+	// See doConvoyAutoclose: the bd on_close hook inherits the supervisor's
+	// (city) cwd/env, so resolve the store that actually owns the bead across
+	// the city and every rig, so rig-store closes autoclose their attached
+	// wisps instead of silently no-op'ing (#3411).
+	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
+		doWispAutocloseWith(store, beadID, stdout)
+		return
+	}
+
 	store, err := openStoreAtForCity(storeRoot, cityPath)
 	if err != nil {
 		return

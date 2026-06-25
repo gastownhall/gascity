@@ -67,11 +67,22 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	}
 	storeRoot := convoyAutocloseStoreRoot(cwd)
 	cityPath := autocloseCityPathForStoreRoot(storeRoot)
+	rec := openCityRecorderAt(cityPath, stderr)
+
+	// See doConvoyAutoclose: the bd on_close hook inherits the supervisor's
+	// (city) cwd/env, so resolve the store that actually owns the bead across
+	// the city and every rig, and derive the store-ref from that store, so
+	// rig-store closes autoclose their molecule roots instead of silently
+	// no-op'ing (#3411).
+	if store, dir, ok := autocloseOwningStore(beadID, cityPath); ok {
+		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout)
+		return
+	}
+
 	store, err := openStoreAtForCity(storeRoot, cityPath)
 	if err != nil {
 		return
 	}
-	rec := openCityRecorderAt(cityPath, stderr)
 	doMoleculeAutocloseWith(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout)
 }
 

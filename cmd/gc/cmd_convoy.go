@@ -523,30 +523,40 @@ func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(
 }
 
 func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, error) {
-	stores, err := openConvoyStores(cfg, cityPath, convoyID, openStore)
+	store, _, err := resolveOwningStoreDir(convoyID, cfg, cityPath, openStore)
+	return store, err
+}
+
+// resolveOwningStoreDir resolves the store that owns beadID and the candidate
+// store directory it was found in, probing each prefix-aware convoy store
+// candidate rooted at cityPath. It returns an error when beadID resolves in
+// more than one store (ambiguous) and beads.ErrNotFound when no candidate
+// holds it.
+func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, string, error) {
+	stores, err := openConvoyStores(cfg, cityPath, beadID, openStore)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var foundStore beads.Store
 	foundDir := ""
 	for _, candidate := range stores {
 		store := candidate.store
-		if _, err := store.Get(convoyID); err != nil {
+		if _, err := store.Get(beadID); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, err
+			return nil, "", err
 		}
 		if foundStore != nil {
-			return nil, fmt.Errorf("convoy %s exists in multiple stores (%s and %s); direct convoy commands require a uniquely resolvable convoy id", convoyID, foundDir, candidate.path)
+			return nil, "", fmt.Errorf("bead %s exists in multiple stores (%s and %s); resolution requires a uniquely addressable bead id", beadID, foundDir, candidate.path)
 		}
 		foundStore = store
 		foundDir = candidate.path
 	}
 	if foundStore != nil {
-		return foundStore, nil
+		return foundStore, foundDir, nil
 	}
-	return nil, beads.ErrNotFound
+	return nil, "", beads.ErrNotFound
 }
 
 func openAllConvoyStores(stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
@@ -1756,8 +1766,8 @@ func newConvoyAutocloseCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 // doConvoyAutoclose is the CLI entry point for convoy autoclose.
-// It opens the cwd-rooted store through the provider-aware resolver and
-// delegates to the testable core.
+// It resolves the store that owns the closed bead and delegates to the
+// testable core.
 func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -1765,12 +1775,48 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	}
 	storeRoot := convoyAutocloseStoreRoot(cwd)
 	cityPath := autocloseCityPathForStoreRoot(storeRoot)
+	rec := openCityRecorderAt(cityPath, stderr)
+
+	// The bd on_close hook is spawned from the supervisor and inherits its
+	// cwd/env, so storeRoot resolves to the supervisor's (city) store even
+	// when the closed bead lives in a rig store. Resolve the store that
+	// actually owns the bead — prefix-aware, across the city and every rig —
+	// so rig-store closes autoclose their convoys instead of silently
+	// no-op'ing (#3411).
+	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
+		doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
+		return
+	}
+
+	// Fallback: a standalone store reachable only via cwd/BEADS_DIR/
+	// GC_STORE_ROOT (e.g. an external rig checkout with no city.toml), or a
+	// city whose config could not be loaded. Preserve the original
+	// single-store resolution.
 	store, err := openStoreAtForCity(storeRoot, cityPath)
 	if err != nil {
 		return
 	}
-	rec := openCityRecorderAt(cityPath, stderr)
 	doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
+}
+
+// autocloseOwningStore resolves the store that owns beadID, and the store
+// directory it was found in, by probing each prefix-aware convoy store
+// candidate (city + rigs) rooted at cityPath. It returns ok=false when the
+// city config cannot be loaded or no candidate store holds the bead, so the
+// caller can fall back to cwd-rooted resolution. The store directory lets
+// molecule autoclose derive the matching store-ref label.
+func autocloseOwningStore(beadID, cityPath string) (beads.Store, string, bool) {
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return nil, "", false
+	}
+	store, dir, err := resolveOwningStoreDir(beadID, cfg, cityPath, func(storeDir string) (beads.Store, error) {
+		return openStoreAtForCity(storeDir, cityPath)
+	})
+	if err != nil {
+		return nil, "", false
+	}
+	return store, dir, true
 }
 
 func convoyAutocloseStoreRoot(cwd string) string {
