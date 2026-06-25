@@ -91,6 +91,9 @@ jobs:
             beads:
               - 'go.mod'
               - 'internal/beads/**'
+              - 'deps.env'
+              - '.github/scripts/install-bd-archive.sh'
+              - 'cmd/gc/init_provider_readiness.go'
             packs:
               - 'examples/gastown/**'
               - 'internal/config/pack.go'
@@ -289,6 +292,48 @@ jobs:
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "true"
       - name: Acceptance tests (Tier A)
+        run: make test-acceptance
+
+  # Cross-version contract gate: the "current" cell of the bd matrix. The
+  # "prev" cell is preflight-acceptance above (bd v1.0.4, the min-supported
+  # release). This cell builds bd from gastownhall/beads source at
+  # BD_CURRENT_REF (deps.env) — the bleeding-edge rc has no release tarball —
+  # and runs the same live acceptance suite, so a bd change that breaks gc's
+  # decoder/classifier surface against the newer bd is caught before merge.
+  # Path-gated on the beads filter; tolerated as a skip by ci-required.
+  contract-acceptance-current:
+    name: Contract / acceptance A (bd current)
+    needs:
+      - runner-policy
+      - changes
+    if: ${{ needs.changes.outputs.beads == 'true' }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    env:
+      DOLT_VERSION: "2.1.7"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: "" # build bd from source below instead of installing a release
+          install-claude-cli: "true"
+      - name: Resolve bd current pin
+        id: bd
+        run: |
+          echo "ref=$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+          echo "ver=$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+      - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/beads-src"
+          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
+          git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
+          mkdir -p "${HOME}/.local/bin"
+          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      - name: Verify bd on PATH
+        run: bd version
+      - name: Acceptance tests (Tier A, bd current)
         run: make test-acceptance
 
   preflight-generated:
@@ -1237,6 +1282,7 @@ jobs:
       - docker-session
       - k8s-session
       - openclaw-bridge
+      - contract-acceptance-current
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -1256,6 +1302,9 @@ jobs:
               "docker-session",
               "k8s-session",
               "openclaw-bridge",
+              # Path-gated on the beads filter: skips on PRs that touch no
+              # beads/contract path, which is the expected pass case.
+              "contract-acceptance-current",
           }
           failed = {}
           for job, meta in sorted(needs.items()):

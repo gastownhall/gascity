@@ -45,6 +45,9 @@ runs:
       run: ${{ github.action_path }}/../../scripts/install-dolt-archive.sh "${{ inputs.dolt-version }}"
 
     - name: Install released bd v${{ inputs.bd-version }}
+      # Skip when no version is given: the contract cross-version "current" cell
+      # builds bd from source instead of installing a released tarball.
+      if: ${{ inputs.bd-version != '' }}
       shell: bash
       run: ${{ github.action_path }}/../../scripts/install-bd-archive.sh "${{ inputs.bd-version }}"
 
