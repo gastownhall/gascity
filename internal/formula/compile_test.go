@@ -764,6 +764,9 @@ timeout = "30s"
 	if got := root.Metadata["gc.formula_contract"]; got != "graph.v2" {
 		t.Fatalf("root gc.formula_contract = %q, want graph.v2", got)
 	}
+	if got := root.Metadata["gc.formula_name"]; got != "ralph-demo" {
+		t.Fatalf("root gc.formula_name = %q, want ralph-demo (canonical run-recipe identity for city_events.formula / \"Run of <formula>\")", got)
+	}
 	if root.Type != "task" {
 		t.Fatalf("root type = %q, want task", root.Type)
 	}
