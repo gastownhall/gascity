@@ -17,8 +17,13 @@ describe('supervisor client wrapper', () => {
     vi.useRealTimers();
   });
 
-  it('defaults to the standalone transport-only supervisor proxy', () => {
-    expect(createSupervisorApi().baseUrl).toBe(SUPERVISOR_PROXY_BASE_URL);
+  it('defaults to the current origin under the same-origin contract', () => {
+    // Same-origin deploy (gascity-dashboard-soo): the supervisor serves the SPA
+    // and the typed API on one listener, so the default base is location.origin
+    // (the jsdom test origin here), not the retired `/gc-supervisor` proxy
+    // prefix. SUPERVISOR_PROXY_BASE_URL is now the empty SSR/no-DOM fallback.
+    expect(createSupervisorApi().baseUrl).toBe(globalThis.location.origin);
+    expect(SUPERVISOR_PROXY_BASE_URL).toBe('');
   });
 
   it('keeps the default request timeout long enough for slow workflow snapshots', () => {

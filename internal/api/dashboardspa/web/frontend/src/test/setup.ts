@@ -45,7 +45,18 @@ function formatConsoleArgs(args: unknown[]): string {
   return args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' ');
 }
 
+// Node 25 ships an experimental localStorage gated by --localstorage-file; the
+// vitest jsdom environment passes that flag without a path, so Node emits a
+// benign runtime warning the moment a worker touches localStorage. It is
+// infrastructure noise, not a signal from application or test code, so it must
+// not fail the suite — the guard exists to catch our own warnings (deprecations,
+// unhandled rejections), not the runner's flag bookkeeping.
+function isInfrastructureWarning(warning: Error): boolean {
+  return warning.message.includes('--localstorage-file');
+}
+
 function trackProcessWarning(warning: Error): void {
+  if (isInfrastructureWarning(warning)) return;
   processWarnings.push(`${warning.name}: ${warning.message}`);
 }
 

@@ -160,7 +160,7 @@ describe('WorkInFlight (Workers active)', () => {
     // peek must hit the transcript route for THAT exact session id.
     await waitFor(() => {
       expect(transcriptUrls).toContain(
-        '/gc-supervisor/v0/city/test-city/session/gc-335825/transcript?format=conversation',
+        '/v0/city/test-city/session/gc-335825/transcript?format=conversation',
       );
     });
   });
@@ -187,11 +187,11 @@ describe('WorkInFlight (Workers active)', () => {
     // Only the clicked worker's transcript is fetched — the other worker's is not.
     await waitFor(() => {
       expect(transcriptUrls).toContain(
-        '/gc-supervisor/v0/city/test-city/session/gc-200/transcript?format=conversation',
+        '/v0/city/test-city/session/gc-200/transcript?format=conversation',
       );
     });
     expect(transcriptUrls).not.toContain(
-      '/gc-supervisor/v0/city/test-city/session/gc-100/transcript?format=conversation',
+      '/v0/city/test-city/session/gc-100/transcript?format=conversation',
     );
   });
 

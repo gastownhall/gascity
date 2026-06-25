@@ -52,7 +52,7 @@ function stubFetch(options: StubFetchOptions = {}) {
       if (url === '/api/city/test-city/agents') {
         throw new Error('old dashboard agents roster route should not be called');
       }
-      if (url === '/gc-supervisor/v0/city/test-city/agents' && method === 'GET') {
+      if (url === '/v0/city/test-city/agents' && method === 'GET') {
         return jsonResponse(
           options.agentsPayload ?? {
             items: [
@@ -89,7 +89,7 @@ function stubFetch(options: StubFetchOptions = {}) {
           options.agentsStatus === undefined ? undefined : { status: options.agentsStatus },
         );
       }
-      if (url === '/gc-supervisor/v0/city/test-city/sessions' && method === 'GET') {
+      if (url === '/v0/city/test-city/sessions' && method === 'GET') {
         return jsonResponse({
           items: [
             {
@@ -108,7 +108,7 @@ function stubFetch(options: StubFetchOptions = {}) {
           total: 1,
         });
       }
-      if (url === '/gc-supervisor/v0/city/test-city/session/gc-2568/pending' && method === 'GET') {
+      if (url === '/v0/city/test-city/session/gc-2568/pending' && method === 'GET') {
         return jsonResponse({
           supported: true,
           pending: {
@@ -122,14 +122,14 @@ function stubFetch(options: StubFetchOptions = {}) {
       // context). None of the post-ay6 regression cases assert on it; the stub
       // sessions list carries only orchestration, so it renders its calm
       // "No workers active right now." empty state.
-      if (url.startsWith('/gc-supervisor/v0/city/test-city/beads') && method === 'GET') {
+      if (url.startsWith('/v0/city/test-city/beads') && method === 'GET') {
         return jsonResponse({ items: [], total: 0 });
       }
-      if (url === '/gc-supervisor/v0/city/test-city/session/gc-2568/respond' && method === 'POST') {
+      if (url === '/v0/city/test-city/session/gc-2568/respond' && method === 'POST') {
         return jsonResponse({ id: 'gc-2568', status: 'accepted' }, { status: 202 });
       }
       if (
-        url === '/gc-supervisor/v0/city/test-city/session/gc-2568/transcript?format=conversation' &&
+        url === '/v0/city/test-city/session/gc-2568/transcript?format=conversation' &&
         method === 'GET'
       ) {
         return jsonResponse({
@@ -225,7 +225,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     const mayorLink = await screen.findByRole('link', { name: /mayor/i });
     expect(mayorLink).toBeDefined();
     expect(mayorLink.textContent).toBe('mayor');
-    expect(fetchUrls()).toContain('/gc-supervisor/v0/city/test-city/agents');
+    expect(fetchUrls()).toContain('/v0/city/test-city/agents');
     expect(fetchUrls()).not.toContain('/api/city/test-city/agents');
     // display_name appears as secondary muted text — present but not the link.
     expect(screen.getByText('Claude (Account 5)')).toBeDefined();
@@ -342,11 +342,11 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     // because the resolution is async (sessions cache).
     await waitFor(() => {
       expect(fetchUrls()).toContain(
-        '/gc-supervisor/v0/city/test-city/session/gc-2568/transcript?format=conversation',
+        '/v0/city/test-city/session/gc-2568/transcript?format=conversation',
       );
     });
     // Belt-and-suspenders: assert the buggy URL was NEVER attempted.
-    expect(fetchUrls()).toContain('/gc-supervisor/v0/city/test-city/sessions');
+    expect(fetchUrls()).toContain('/v0/city/test-city/sessions');
     expect(fetchUrls()).not.toContain('/api/city/test-city/sessions');
     expect(fetchUrls()).not.toContain('/api/city/test-city/sessions/gc-2568/peek');
     expect(fetchUrls()).not.toContain('/api/city/test-city/sessions/mayor/peek');
@@ -370,7 +370,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     expect(await screen.findByText('needs you')).toBeTruthy();
     // The prompt shows in both the "Needs you" section and the roster row.
     expect(within(screen.getByRole('table')).getByText('Approve deployment?')).toBeTruthy();
-    expect(fetchUrls()).toContain('/gc-supervisor/v0/city/test-city/session/gc-2568/pending');
+    expect(fetchUrls()).toContain('/v0/city/test-city/session/gc-2568/pending');
 
     fireEvent.click(screen.getByRole('button', { name: /copy attach/i }));
 
@@ -395,7 +395,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     await screen.findByText('responded to mayor');
 
     expect(fetchCalls).toContainEqual({
-      url: '/gc-supervisor/v0/city/test-city/session/gc-2568/respond',
+      url: '/v0/city/test-city/session/gc-2568/respond',
       method: 'POST',
       gcRequest: 'dashboard',
       body: {
@@ -430,7 +430,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
     // The disabled control must not reach the supervisor respond mutation.
     fireEvent.click(deny);
-    expect(fetchUrls()).not.toContain('/gc-supervisor/v0/city/test-city/session/gc-2568/respond');
+    expect(fetchUrls()).not.toContain('/v0/city/test-city/session/gc-2568/respond');
   });
 
   it('orphan agent name-link carries a different title tooltip than a session-bound one (ay6.2)', async () => {

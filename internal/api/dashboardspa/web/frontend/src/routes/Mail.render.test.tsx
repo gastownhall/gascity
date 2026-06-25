@@ -61,7 +61,7 @@ function stubFetch() {
         body: await requestBody(input, init),
         gcRequest: requestHeader(input, init, 'X-GC-Request'),
       });
-      if (url === '/gc-supervisor/v0/city/test-city/mail?limit=100') {
+      if (url === '/v0/city/test-city/mail?limit=100') {
         return jsonResponse({
           items: [
             mail({
@@ -108,7 +108,7 @@ function stubFetch() {
           total: 4,
         });
       }
-      if (url === '/gc-supervisor/v0/city/test-city/mail?limit=1000') {
+      if (url === '/v0/city/test-city/mail?limit=1000') {
         return jsonResponse({
           items: [
             mail({
@@ -153,7 +153,7 @@ function stubFetch() {
           total: 4,
         });
       }
-      if (url === '/gc-supervisor/v0/city/test-city/mail/thread/thread-direct') {
+      if (url === '/v0/city/test-city/mail/thread/thread-direct') {
         return jsonResponse({
           items: [
             mail({
@@ -178,7 +178,7 @@ function stubFetch() {
           total: 2,
         });
       }
-      if (url === '/gc-supervisor/v0/city/test-city/mail' && method === 'POST') {
+      if (url === '/v0/city/test-city/mail' && method === 'POST') {
         return jsonResponse(
           {
             id: 'mail-new',
@@ -203,10 +203,10 @@ function stubFetch() {
         markedRead.set(unreadMatch[1], false);
         return jsonResponse({ status: 'ok' });
       }
-      if (url === '/gc-supervisor/v0/city/test-city/mail/mail-inbox/archive' && method === 'POST') {
+      if (url === '/v0/city/test-city/mail/mail-inbox/archive' && method === 'POST') {
         return jsonResponse({ status: 'ok' });
       }
-      if (url === '/gc-supervisor/v0/city/test-city/mail/mail-inbox/reply' && method === 'POST') {
+      if (url === '/v0/city/test-city/mail/mail-inbox/reply' && method === 'POST') {
         return jsonResponse(
           {
             id: 'mail-reply',
@@ -299,9 +299,7 @@ describe('MailPage supervisor reads', () => {
 
     await screen.findByText('direct supervisor inbox');
 
-    expect(fetchCalls.map((call) => call.url)).toContain(
-      '/gc-supervisor/v0/city/test-city/mail?limit=100',
-    );
+    expect(fetchCalls.map((call) => call.url)).toContain('/v0/city/test-city/mail?limit=100');
     expect(fetchCalls.some((call) => call.url.startsWith('/api/city/test-city/mail'))).toBe(false);
     expect(screen.queryByText('operator sent only')).toBeNull();
     expect(screen.queryByText('other inbox')).toBeNull();
@@ -337,9 +335,7 @@ describe('MailPage supervisor reads', () => {
     });
 
     expect(await screen.findByText('expanded history item')).toBeTruthy();
-    expect(fetchCalls.map((call) => call.url)).toContain(
-      '/gc-supervisor/v0/city/test-city/mail?limit=1000',
-    );
+    expect(fetchCalls.map((call) => call.url)).toContain('/v0/city/test-city/mail?limit=1000');
     expect((screen.getByLabelText('Mail history limit') as HTMLSelectElement).value).toBe('1000');
   });
 
@@ -354,9 +350,7 @@ describe('MailPage supervisor reads', () => {
     });
 
     expect((screen.getByLabelText('Mail time window') as HTMLSelectElement).value).toBe('7d');
-    expect(fetchCalls.map((call) => call.url)).toContain(
-      '/gc-supervisor/v0/city/test-city/mail?limit=100',
-    );
+    expect(fetchCalls.map((call) => call.url)).toContain('/v0/city/test-city/mail?limit=100');
     expect(fetchCalls.some((call) => call.url.includes('since='))).toBe(false);
   });
 
@@ -368,7 +362,7 @@ describe('MailPage supervisor reads', () => {
     await screen.findByText('oldest in thread');
     expect(screen.getByText('newest in thread')).toBeTruthy();
     expect(fetchCalls.map((call) => call.url)).toContain(
-      '/gc-supervisor/v0/city/test-city/mail/thread/thread-direct',
+      '/v0/city/test-city/mail/thread/thread-direct',
     );
     expect(fetchCalls.some((call) => call.url.startsWith('/api/city/test-city/mail/threads'))).toBe(
       false,
@@ -381,11 +375,9 @@ describe('MailPage supervisor reads', () => {
     await screen.findByText('oldest in thread');
 
     expect(screen.getByText('newest in thread')).toBeTruthy();
+    expect(fetchCalls.map((call) => call.url)).toContain('/v0/city/test-city/mail?limit=1000');
     expect(fetchCalls.map((call) => call.url)).toContain(
-      '/gc-supervisor/v0/city/test-city/mail?limit=1000',
-    );
-    expect(fetchCalls.map((call) => call.url)).toContain(
-      '/gc-supervisor/v0/city/test-city/mail/thread/thread-direct',
+      '/v0/city/test-city/mail/thread/thread-direct',
     );
   });
 
@@ -401,7 +393,7 @@ describe('MailPage supervisor reads', () => {
     await screen.findByText('direct supervisor inbox');
     expect(fetchCalls).toContainEqual({
       method: 'POST',
-      url: '/gc-supervisor/v0/city/test-city/mail',
+      url: '/v0/city/test-city/mail',
       body: {
         to: 'mayor',
         subject: 'status',
@@ -432,7 +424,7 @@ describe('MailPage supervisor reads', () => {
     await waitFor(() => {
       expect(fetchCalls).toContainEqual({
         method: 'POST',
-        url: '/gc-supervisor/v0/city/test-city/mail/mail-inbox/read',
+        url: '/v0/city/test-city/mail/mail-inbox/read',
         body: undefined,
         gcRequest: 'dashboard',
       });
@@ -450,7 +442,7 @@ describe('MailPage supervisor reads', () => {
     await waitFor(() => {
       expect(fetchCalls).toContainEqual({
         method: 'POST',
-        url: '/gc-supervisor/v0/city/test-city/mail/mail-sent/mark-unread',
+        url: '/v0/city/test-city/mail/mail-sent/mark-unread',
         body: undefined,
         gcRequest: 'dashboard',
       });
@@ -466,7 +458,7 @@ describe('MailPage supervisor reads', () => {
     await waitFor(() => {
       expect(fetchCalls).toContainEqual({
         method: 'POST',
-        url: '/gc-supervisor/v0/city/test-city/mail/mail-inbox/archive',
+        url: '/v0/city/test-city/mail/mail-inbox/archive',
         body: undefined,
         gcRequest: 'dashboard',
       });
@@ -485,7 +477,7 @@ describe('MailPage supervisor reads', () => {
     await waitFor(() => {
       expect(fetchCalls).toContainEqual({
         method: 'POST',
-        url: '/gc-supervisor/v0/city/test-city/mail/mail-inbox/reply',
+        url: '/v0/city/test-city/mail/mail-inbox/reply',
         body: {
           body: 'got it',
           from: 'human',
@@ -619,14 +611,14 @@ describe('MailPage bulk read-state selection (gascity-dashboard-mp3g)', () => {
     await waitFor(() => {
       expect(fetchCalls).toContainEqual({
         method: 'POST',
-        url: '/gc-supervisor/v0/city/test-city/mail/mail-inbox/read',
+        url: '/v0/city/test-city/mail/mail-inbox/read',
         body: undefined,
         gcRequest: 'dashboard',
       });
     });
     expect(fetchCalls).toContainEqual({
       method: 'POST',
-      url: '/gc-supervisor/v0/city/test-city/mail/mail-firehose/read',
+      url: '/v0/city/test-city/mail/mail-firehose/read',
       body: undefined,
       gcRequest: 'dashboard',
     });
@@ -643,23 +635,19 @@ describe('MailPage bulk read-state selection (gascity-dashboard-mp3g)', () => {
     await waitFor(() => {
       expect(fetchCalls).toContainEqual({
         method: 'POST',
-        url: '/gc-supervisor/v0/city/test-city/mail/mail-sent/mark-unread',
+        url: '/v0/city/test-city/mail/mail-sent/mark-unread',
         body: undefined,
         gcRequest: 'dashboard',
       });
     });
     // mail-inbox / mail-other are already unread — bulk mark-unread must not
     // re-issue redundant writes for them.
-    expect(
-      fetchCalls.some(
-        (c) => c.url === '/gc-supervisor/v0/city/test-city/mail/mail-inbox/mark-unread',
-      ),
-    ).toBe(false);
-    expect(
-      fetchCalls.some(
-        (c) => c.url === '/gc-supervisor/v0/city/test-city/mail/mail-other/mark-unread',
-      ),
-    ).toBe(false);
+    expect(fetchCalls.some((c) => c.url === '/v0/city/test-city/mail/mail-inbox/mark-unread')).toBe(
+      false,
+    );
+    expect(fetchCalls.some((c) => c.url === '/v0/city/test-city/mail/mail-other/mark-unread')).toBe(
+      false,
+    );
   });
 
   it('updates the needs-you count after a bulk mark-read (same selector as the nav badge)', async () => {

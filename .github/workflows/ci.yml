@@ -1146,29 +1146,21 @@ jobs:
           node-version: "22"
       - name: Install SPA dependencies
         run: npm ci --silent
-        working-directory: cmd/gc/dashboard/web
-      - name: Verify generated TS schema is in sync
-        run: |
-          npm run gen --silent
-          if ! git diff --exit-code src/generated/schema.d.ts; then
-            echo "::error::Generated TS schema drifted. Regenerate via 'npm run gen' in cmd/gc/dashboard/web."
-            exit 1
-          fi
-        working-directory: cmd/gc/dashboard/web
+        working-directory: internal/api/dashboardspa/web
       - name: Typecheck (tsc --noEmit)
         run: npm run typecheck
-        working-directory: cmd/gc/dashboard/web
+        working-directory: internal/api/dashboardspa/web
       - name: Vitest
-        run: npm test
-        working-directory: cmd/gc/dashboard/web
+        run: npm run --workspace gas-city-dashboard-frontend test
+        working-directory: internal/api/dashboardspa/web
       - name: Build
         run: npm run build --silent
-        working-directory: cmd/gc/dashboard/web
+        working-directory: internal/api/dashboardspa/web
 
   # openclaw-bridge Node test suite. The bridge ships its own npm tests
   # (inbound at-least-once redelivery + gc client wire shapes); without this
   # gate, regressions under contrib/openclaw-bridge/** could merge because the
-  # only other npm job runs in cmd/gc/dashboard/web. Path-gated, so non-bridge
+  # only other npm job runs in internal/api/dashboardspa/web. Path-gated, so non-bridge
   # PRs skip it (and ci-required allows the skip).
   openclaw-bridge:
     name: openclaw-bridge Node tests

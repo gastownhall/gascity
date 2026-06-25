@@ -41,7 +41,6 @@ describe('browser storage wrapper', () => {
     vi.restoreAllMocks();
     installStorage('localStorage', originalLocalStorage);
     installStorage('sessionStorage', originalSessionStorage);
-    document.cookie = 'gascity_admin_csrf=; Max-Age=0; path=/';
   });
 
   it('distinguishes missing keys from storage failure', () => {
@@ -60,7 +59,6 @@ describe('browser storage wrapper', () => {
 
   it('reports read failures to the backend client-error route', () => {
     installStorage('localStorage', new ThrowingStorage());
-    document.cookie = 'gascity_admin_csrf=token; path=/';
     const fetchCalls: Array<{ url: unknown; init: RequestInit }> = [];
     const fetchSpy = vi.fn(async (url: unknown, init?: RequestInit) => {
       if (init === undefined) throw new Error('missing fetch init');
@@ -82,8 +80,9 @@ describe('browser storage wrapper', () => {
     expect(init.method).toBe('POST');
     expect(init.headers).toMatchObject({
       'Content-Type': 'application/json',
-      'X-CSRF-Token': 'token',
+      'X-GC-Request': 'dashboard',
     });
+    expect(init.credentials).toBe('same-origin');
     expect(JSON.parse(init.body as string)).toEqual({
       component: 'ThemeContext',
       operation: 'localStorage.getItem',

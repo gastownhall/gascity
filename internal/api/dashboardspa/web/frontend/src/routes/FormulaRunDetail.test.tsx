@@ -73,7 +73,7 @@ beforeEach(() => {
       if (url.startsWith('/api/city/test-city/runs/gc-adopt-pr-active')) {
         throw new Error(`old dashboard formula-run mirror should not be called: ${url}`);
       }
-      const transcriptPrefix = '/gc-supervisor/v0/city/test-city/session/';
+      const transcriptPrefix = '/v0/city/test-city/session/';
       if (url.startsWith(transcriptPrefix) && url.endsWith('/transcript?format=conversation')) {
         expect(init?.method ?? (input instanceof Request ? input.method : 'GET')).toBe('GET');
         const id = decodeURIComponent(

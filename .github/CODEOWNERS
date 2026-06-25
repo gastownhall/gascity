@@ -14,8 +14,8 @@
 /scripts/ @gastownhall/gascity-admin
 /contrib/k8s/ @gastownhall/gascity-admin
 /internal/buildimage/ @gastownhall/gascity-admin
-/cmd/gc/dashboard/web/package.json @gastownhall/gascity-admin
-/cmd/gc/dashboard/web/package-lock.json @gastownhall/gascity-admin
+/internal/api/dashboardspa/web/package.json @gastownhall/gascity-admin
+/internal/api/dashboardspa/web/package-lock.json @gastownhall/gascity-admin
 
 # All docs/ is owned by csells (auto-requests review on any docs-touching PR).
 /docs/ @csells

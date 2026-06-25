@@ -1,18 +1,20 @@
 import type { ClientErrorReport } from 'gas-city-dashboard-shared';
 import { errorMessage } from 'gas-city-dashboard-shared';
-import { readCsrfToken } from '../api/csrf';
 
 export type ClientErrorReportResult = { status: 'reported' } | { status: 'failed'; error: string };
 
 export async function reportClientError(
   event: ClientErrorReport,
 ): Promise<ClientErrorReportResult> {
+  // Same-origin custom-header CSRF: the /api/client-errors mutation guard only
+  // requires a non-empty X-GC-Request header (a cross-site request cannot set a
+  // custom header without a CORS preflight), so telemetry carries it directly —
+  // no cookie double-submit. keepalive lets the report survive an unload.
   const headers: Record<string, string> = {
     Accept: 'application/json',
     'Content-Type': 'application/json',
+    'X-GC-Request': 'dashboard',
   };
-  const token = readCsrfToken();
-  if (token.status === 'available') headers['X-CSRF-Token'] = token.token;
 
   try {
     const res = await fetch('/api/client-errors', {

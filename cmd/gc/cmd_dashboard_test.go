@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
@@ -8,17 +9,15 @@ import (
 	"testing"
 )
 
-func TestRunDashboardServeAllowsNoCityWithSupervisor(t *testing.T) {
+func TestRunDashboardNoticePrintsSupervisorURL(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Chdir(t.TempDir())
 
 	oldAlive := supervisorAliveHook
-	oldServe := dashboardServeHook
 	oldCityFlag := cityFlag
 	oldRigFlag := rigFlag
 	t.Cleanup(func() {
 		supervisorAliveHook = oldAlive
-		dashboardServeHook = oldServe
 		cityFlag = oldCityFlag
 		rigFlag = oldRigFlag
 	})
@@ -27,41 +26,30 @@ func TestRunDashboardServeAllowsNoCityWithSupervisor(t *testing.T) {
 	cityFlag = ""
 	rigFlag = ""
 
-	var gotPort int
-	var gotURL string
-	dashboardServeHook = func(port int, apiURL string) error {
-		gotPort = port
-		gotURL = apiURL
-		return nil
-	}
-
-	if err := runDashboardServe("gc dashboard", 9090, "", io.Discard); err != nil {
-		t.Fatalf("runDashboardServe() error: %v", err)
+	var stdout bytes.Buffer
+	if err := runDashboardNotice("gc dashboard", "", &stdout, io.Discard); err != nil {
+		t.Fatalf("runDashboardNotice() error: %v", err)
 	}
 
 	wantURL, err := supervisorAPIBaseURL()
 	if err != nil {
 		t.Fatalf("supervisorAPIBaseURL(): %v", err)
 	}
-	if gotPort != 9090 {
-		t.Fatalf("dashboard port = %d, want 9090", gotPort)
-	}
-	if gotURL != strings.TrimRight(wantURL, "/") {
-		t.Fatalf("dashboard api URL = %q, want %q", gotURL, strings.TrimRight(wantURL, "/"))
+	wantURL = strings.TrimRight(wantURL, "/")
+	if !strings.Contains(stdout.String(), wantURL) {
+		t.Fatalf("notice = %q, want it to include supervisor URL %q", stdout.String(), wantURL)
 	}
 }
 
-func TestRunDashboardServeAllowsNoCityWithAPIOverride(t *testing.T) {
+func TestRunDashboardNoticeUsesAPIOverride(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Chdir(t.TempDir())
 
 	oldAlive := supervisorAliveHook
-	oldServe := dashboardServeHook
 	oldCityFlag := cityFlag
 	oldRigFlag := rigFlag
 	t.Cleanup(func() {
 		supervisorAliveHook = oldAlive
-		dashboardServeHook = oldServe
 		cityFlag = oldCityFlag
 		rigFlag = oldRigFlag
 	})
@@ -70,27 +58,51 @@ func TestRunDashboardServeAllowsNoCityWithAPIOverride(t *testing.T) {
 	cityFlag = ""
 	rigFlag = ""
 
-	var gotURL string
-	dashboardServeHook = func(_ int, apiURL string) error {
-		gotURL = apiURL
-		return nil
+	var stdout bytes.Buffer
+	if err := runDashboardNotice("gc dashboard", "http://127.0.0.1:9999/", &stdout, io.Discard); err != nil {
+		t.Fatalf("runDashboardNotice() error: %v", err)
 	}
-
-	if err := runDashboardServe("gc dashboard", 9090, "http://127.0.0.1:9999/", io.Discard); err != nil {
-		t.Fatalf("runDashboardServe() error: %v", err)
+	if !strings.Contains(stdout.String(), "http://127.0.0.1:9999") {
+		t.Fatalf("notice = %q, want trimmed override URL", stdout.String())
 	}
-	if gotURL != "http://127.0.0.1:9999" {
-		t.Fatalf("dashboard api URL = %q, want trimmed override", gotURL)
+	if strings.Contains(stdout.String(), "http://127.0.0.1:9999/") {
+		t.Fatalf("notice = %q, want trailing slash trimmed", stdout.String())
 	}
 }
 
-// TestRunDashboardServeUsesStandaloneControllerAPI pins the post-fixup
-// behavior: the standalone controller's API now serves supervisor-shaped
-// /v0/city/{cityName}/... routes via api.NewSupervisorMux, so `gc
-// dashboard` targets it directly instead of hard-erroring. The previous
-// revision ("TestRunDashboardServeRejectsStandaloneCityAPIOutsideCityDir")
-// asserted the rejection that this fixup intentionally removed.
-func TestRunDashboardServeUsesStandaloneControllerAPI(t *testing.T) {
+// TestRunDashboardNoticeHintsStartWhenUnresolvable pins that, when neither a
+// supervisor nor a standalone-controller API can be resolved, the command
+// prints how to start the supervisor and still exits 0 (returns nil).
+func TestRunDashboardNoticeHintsStartWhenUnresolvable(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Chdir(t.TempDir())
+
+	oldAlive := supervisorAliveHook
+	oldCityFlag := cityFlag
+	oldRigFlag := rigFlag
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		cityFlag = oldCityFlag
+		rigFlag = oldRigFlag
+	})
+
+	supervisorAliveHook = func() int { return 0 }
+	cityFlag = ""
+	rigFlag = ""
+
+	var stdout bytes.Buffer
+	if err := runDashboardNotice("gc dashboard", "", &stdout, io.Discard); err != nil {
+		t.Fatalf("runDashboardNotice() error = %v, want nil (informational command exits 0)", err)
+	}
+	if !strings.Contains(stdout.String(), "gc supervisor start") {
+		t.Fatalf("notice = %q, want it to include the start hint %q", stdout.String(), "gc supervisor start")
+	}
+}
+
+// TestRunDashboardNoticeUsesStandaloneControllerAPI pins that the standalone
+// controller's API (cfg.API.Port) is reported as the dashboard URL when no
+// machine-wide supervisor is running.
+func TestRunDashboardNoticeUsesStandaloneControllerAPI(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 
 	cityDir := filepath.Join(t.TempDir(), "alpha")
@@ -114,12 +126,10 @@ port = 9123
 	t.Chdir(t.TempDir())
 
 	oldAlive := supervisorAliveHook
-	oldServe := dashboardServeHook
 	oldCityFlag := cityFlag
 	oldRigFlag := rigFlag
 	t.Cleanup(func() {
 		supervisorAliveHook = oldAlive
-		dashboardServeHook = oldServe
 		cityFlag = oldCityFlag
 		rigFlag = oldRigFlag
 	})
@@ -128,24 +138,11 @@ port = 9123
 	cityFlag = cityDir
 	rigFlag = ""
 
-	calledServe := false
-	var gotAPIURL string
-	dashboardServeHook = func(_ int, apiURL string) error {
-		calledServe = true
-		gotAPIURL = apiURL
-		return nil
+	var stdout bytes.Buffer
+	if err := runDashboardNotice("gc dashboard", "", &stdout, io.Discard); err != nil {
+		t.Fatalf("runDashboardNotice() error = %v, want nil (standalone-controller API is supported)", err)
 	}
-
-	err := runDashboardServe("gc dashboard", 9090, "", io.Discard)
-	if err != nil {
-		t.Fatalf("runDashboardServe() error = %v, want nil (standalone-controller API is supported)", err)
-	}
-	if !calledServe {
-		t.Fatal("dashboardServeHook was not called; expected it to target the standalone controller API")
-	}
-	// Standalone controller URL should match the city.toml api.port + a
-	// loopback host derived from cfg.API.BindOrDefault().
-	if !strings.Contains(gotAPIURL, ":9123") {
-		t.Fatalf("standalone API URL = %q, want it to include the configured port :9123", gotAPIURL)
+	if !strings.Contains(stdout.String(), ":9123") {
+		t.Fatalf("notice = %q, want it to include the configured standalone port :9123", stdout.String())
 	}
 }

@@ -66,11 +66,9 @@ describe('BeadsPage supervisor reads', () => {
 
     expect(await screen.findByRole('heading', { name: 'detail-only bead' })).toBeTruthy();
     expect(screen.getAllByText(/td-window-miss/i).length).toBeGreaterThan(0);
-    expect(
-      fetchCalls.some(
-        (call) => call.path === '/gc-supervisor/v0/city/test-city/bead/td-window-miss',
-      ),
-    ).toBe(true);
+    expect(fetchCalls.some((call) => call.path === '/v0/city/test-city/bead/td-window-miss')).toBe(
+      true,
+    );
   });
 
   it('renders dependency navigation and live-run access in the bead detail modal', async () => {
@@ -178,10 +176,10 @@ function stubFetch() {
       const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
       fetchCalls.push({ method, path: url.pathname, query: url.searchParams });
 
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/beads') {
+      if (url.pathname === '/v0/city/test-city/beads') {
         return jsonResponse(beadListForQuery(url.searchParams.get('type')));
       }
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/bead/td-window-miss') {
+      if (url.pathname === '/v0/city/test-city/bead/td-window-miss') {
         return jsonResponse(
           bead({
             id: 'td-window-miss',
@@ -190,7 +188,7 @@ function stubFetch() {
           }),
         );
       }
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/bead/td-bead-abc123') {
+      if (url.pathname === '/v0/city/test-city/bead/td-bead-abc123') {
         return jsonResponse(
           bead({
             id: 'td-bead-abc123',
@@ -200,7 +198,7 @@ function stubFetch() {
           }),
         );
       }
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/sessions') {
+      if (url.pathname === '/v0/city/test-city/sessions') {
         return jsonResponse({
           items: [
             {
@@ -219,7 +217,7 @@ function stubFetch() {
           total: 1,
         });
       }
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/agents') {
+      if (url.pathname === '/v0/city/test-city/agents') {
         return jsonResponse({
           items: [
             {
@@ -235,7 +233,7 @@ function stubFetch() {
           total: 1,
         });
       }
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/rigs') {
+      if (url.pathname === '/v0/city/test-city/rigs') {
         return jsonResponse({
           items: [
             {
@@ -309,7 +307,7 @@ function bead(overrides: Partial<SupervisorBead>): SupervisorBead {
 }
 
 function beadFetches(): FetchCall[] {
-  return fetchCalls.filter((call) => call.path === '/gc-supervisor/v0/city/test-city/beads');
+  return fetchCalls.filter((call) => call.path === '/v0/city/test-city/beads');
 }
 
 function jsonResponse(payload: unknown, init: ResponseInit = {}): Response {

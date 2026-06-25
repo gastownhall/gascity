@@ -701,24 +701,24 @@ diagrams-excalidraw:
 docs-dev:
 	./mint.sh dev
 
-## dashboard-build: regenerate SPA types + compile the dist bundle
+## dashboard-build: compile the SPA bundle and sync it into the embedded dist/
 dashboard-build:
-	cd cmd/gc/dashboard/web && npm ci --silent && npm run gen && npm run build
+	cd internal/api/dashboardspa/web && npm ci --silent && npm run build && rm -rf ../dist && cp -rf frontend/dist ../dist
 
 ## dashboard-dev: Vite dev server (HMR) for SPA iteration
 dashboard-dev:
-	cd cmd/gc/dashboard/web && npm run dev
+	cd internal/api/dashboardspa/web && npm run --workspace gas-city-dashboard-frontend dev
 
-## dashboard-check: typecheck + build the SPA, then go test the static handler
+## dashboard-check: typecheck + build the SPA, then go test the embedded handler + BFF
 dashboard-check: dashboard-build
-	cd cmd/gc/dashboard/web && npm run typecheck
-	$(TEST_ENV) go test ./cmd/gc/dashboard/...
+	cd internal/api/dashboardspa/web && npm run typecheck
+	$(TEST_ENV) go test ./internal/api/dashboardspa/... ./internal/api/dashboardbff/...
 
 ## dashboard-smoke: serve the built SPA bundle via Vite preview and verify it responds
 dashboard-smoke: dashboard-build
 	@PORT=$$(python3 -c 'import socket; sock = socket.socket(); sock.bind(("127.0.0.1", 0)); print(sock.getsockname()[1]); sock.close()'); \
 	LOG=$$(mktemp); \
-	( cd cmd/gc/dashboard/web && exec npm run preview -- --host 127.0.0.1 --strictPort --port $$PORT >"$$LOG" 2>&1 ) & \
+	( cd internal/api/dashboardspa/web/frontend && exec npm run preview -- --host 127.0.0.1 --strictPort --port $$PORT >"$$LOG" 2>&1 ) & \
 	PID=$$!; \
 	trap 'kill $$PID >/dev/null 2>&1 || true; wait $$PID >/dev/null 2>&1 || true; rm -f "$$LOG"' EXIT INT TERM; \
 	for attempt in $$(seq 1 40); do \
@@ -730,12 +730,12 @@ dashboard-smoke: dashboard-build
 	cat "$$LOG" >&2; \
 	exit 1
 
-## dashboard-ci: rebuild the SPA bundle and fail if the tracked dist/ is stale.
-## Used by CI to enforce that cmd/gc/dashboard/web/dist/ matches the source.
+## dashboard-ci: rebuild the SPA bundle and fail if the embedded dist/ is stale.
+## Used by CI to enforce that internal/api/dashboardspa/dist/ matches the source.
 dashboard-ci: dashboard-check
-	@if ! git diff --quiet -- cmd/gc/dashboard/web/dist; then \
-		echo "ERROR: cmd/gc/dashboard/web/dist/ is stale — run 'make dashboard-build' and commit." >&2; \
-		git --no-pager diff --stat -- cmd/gc/dashboard/web/dist; \
+	@if ! git diff --quiet -- internal/api/dashboardspa/dist; then \
+		echo "ERROR: internal/api/dashboardspa/dist/ is stale — run 'make dashboard-build' and commit." >&2; \
+		git --no-pager diff --stat -- internal/api/dashboardspa/dist; \
 		exit 1; \
 	fi
 

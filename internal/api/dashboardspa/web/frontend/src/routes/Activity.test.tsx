@@ -30,7 +30,7 @@ beforeEach(() => {
       );
       fetchCalls.push({ path: url.pathname, query: url.searchParams });
 
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/events') {
+      if (url.pathname === '/v0/city/test-city/events') {
         if (eventFetchMode === 'fail') {
           return new Response(JSON.stringify({ error: 'event store offline' }), {
             status: 503,
@@ -139,9 +139,7 @@ describe('ActivityPage', () => {
     expect(await within(table).findByText('session crashed while applying patch')).toBeTruthy();
     expect(within(table).queryByText('events.rotated')).toBeNull();
 
-    const eventFetch = fetchCalls.find(
-      (call) => call.path === '/gc-supervisor/v0/city/test-city/events',
-    );
+    const eventFetch = fetchCalls.find((call) => call.path === '/v0/city/test-city/events');
     expect(eventFetch).toBeDefined();
     expect(eventFetch?.query.get('type')).toBe('session.crashed');
     expect(eventFetch?.query.get('since')).toBe('24h');
@@ -194,9 +192,7 @@ describe('ActivityPage', () => {
     expect(await within(table).findByText('session.crashed')).toBeTruthy();
     expect(within(table).queryByText('events.rotated')).toBeNull();
 
-    const eventFetch = fetchCalls.find(
-      (call) => call.path === '/gc-supervisor/v0/city/test-city/events',
-    );
+    const eventFetch = fetchCalls.find((call) => call.path === '/v0/city/test-city/events');
     expect(eventFetch?.query.get('type')).toBe('session.crashed');
     expect(eventFetch?.query.get('since')).toBe('7d');
 
@@ -219,9 +215,7 @@ describe('ActivityPage', () => {
     expect(within(table).queryByText('session.crashed')).toBeNull();
     expect(within(table).queryByText('events.rotated')).toBeNull();
 
-    const eventFetch = fetchCalls.find(
-      (call) => call.path === '/gc-supervisor/v0/city/test-city/events',
-    );
+    const eventFetch = fetchCalls.find((call) => call.path === '/v0/city/test-city/events');
     expect(eventFetch?.query.get('actor')).toBe('rig-runner');
     expect(eventFetch?.query.has('signal')).toBe(false);
   });

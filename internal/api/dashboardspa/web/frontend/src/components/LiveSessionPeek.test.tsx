@@ -166,7 +166,7 @@ describe('LiveSessionPeek (streaming)', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = requestUrl(input);
-        if (url === '/gc-supervisor/v0/city/test-city/session/s1/transcript?format=conversation') {
+        if (url === '/v0/city/test-city/session/s1/transcript?format=conversation') {
           return jsonResponse(snapshot);
         }
         throw new Error(`unexpected fetch: ${url}`);

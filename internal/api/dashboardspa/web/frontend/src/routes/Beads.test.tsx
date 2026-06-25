@@ -29,11 +29,11 @@ beforeEach(() => {
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = parsedUrl(input);
       const method = requestMethod(input, init);
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/beads' && method === 'GET') {
+      if (url.pathname === '/v0/city/test-city/beads' && method === 'GET') {
         beadQueries.push(url.searchParams);
         return jsonResponse(beadListPayload(url.searchParams.has('type') ? [] : [sampleBead()]));
       }
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/beads' && method === 'POST') {
+      if (url.pathname === '/v0/city/test-city/beads' && method === 'POST') {
         supervisorWrites.push({
           method,
           path: url.pathname,
@@ -52,7 +52,7 @@ beforeEach(() => {
           { status: 201 },
         );
       }
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/sling' && method === 'POST') {
+      if (url.pathname === '/v0/city/test-city/sling' && method === 'POST') {
         supervisorWrites.push({
           method,
           path: url.pathname,
@@ -60,19 +60,13 @@ beforeEach(() => {
         });
         return jsonResponse({ status: 'ok', bead: `${PROJECT}-0002`, target: 'mayor' });
       }
-      if (
-        url.pathname === '/gc-supervisor/v0/city/test-city/bead/gascity-0001' &&
-        method === 'GET'
-      ) {
+      if (url.pathname === '/v0/city/test-city/bead/gascity-0001' && method === 'GET') {
         // The detail modal fetches the bead by id when it opens before the
         // board's full row is in state. Serve the full bead so the modal
         // renders deterministically regardless of load ordering.
         return jsonResponse(sampleBead());
       }
-      if (
-        url.pathname === '/gc-supervisor/v0/city/test-city/bead/gascity-0001' &&
-        method === 'PATCH'
-      ) {
+      if (url.pathname === '/v0/city/test-city/bead/gascity-0001' && method === 'PATCH') {
         supervisorWrites.push({
           method,
           path: url.pathname,
@@ -80,10 +74,7 @@ beforeEach(() => {
         });
         return jsonResponse({ status: 'ok' });
       }
-      if (
-        url.pathname === '/gc-supervisor/v0/city/test-city/bead/gascity-0001/close' &&
-        method === 'POST'
-      ) {
+      if (url.pathname === '/v0/city/test-city/bead/gascity-0001/close' && method === 'POST') {
         supervisorWrites.push({
           method,
           path: url.pathname,
@@ -91,17 +82,14 @@ beforeEach(() => {
         });
         return jsonResponse({ status: 'closed' });
       }
-      if (
-        url.pathname === '/gc-supervisor/v0/city/test-city/agent/mayor/nudge' &&
-        method === 'POST'
-      ) {
+      if (url.pathname === '/v0/city/test-city/agent/mayor/nudge' && method === 'POST') {
         supervisorWrites.push({ method, path: url.pathname });
         return jsonResponse({ status: 'ok' });
       }
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/sessions') {
+      if (url.pathname === '/v0/city/test-city/sessions') {
         return jsonResponse({ items: [], total: 0 });
       }
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/agents') {
+      if (url.pathname === '/v0/city/test-city/agents') {
         // Agents report `rig` as filesystem PATHS (not names), and one runs in
         // a directory (gascity-main) that is not a registered rig — exactly the
         // shapes the dropdown must canonicalize away.
@@ -114,7 +102,7 @@ beforeEach(() => {
           total: 3,
         });
       }
-      if (url.pathname === '/gc-supervisor/v0/city/test-city/rigs') {
+      if (url.pathname === '/v0/city/test-city/rigs') {
         return jsonResponse({
           items: [
             {
@@ -261,7 +249,7 @@ describe('BeadsPage', () => {
     expect(supervisorWrites).toEqual([
       {
         method: 'POST',
-        path: '/gc-supervisor/v0/city/test-city/beads',
+        path: '/v0/city/test-city/beads',
         body: {
           title: 'Route failing work',
           description: 'Please investigate the failed deployment.',
@@ -269,7 +257,7 @@ describe('BeadsPage', () => {
       },
       {
         method: 'POST',
-        path: '/gc-supervisor/v0/city/test-city/sling',
+        path: '/v0/city/test-city/sling',
         body: {
           bead: 'gascity-0002',
           rig: 'east',
@@ -309,11 +297,11 @@ describe('BeadsPage', () => {
       expect(supervisorWrites).toEqual([
         {
           method: 'POST',
-          path: '/gc-supervisor/v0/city/test-city/agent/mayor/nudge',
+          path: '/v0/city/test-city/agent/mayor/nudge',
         },
         {
           method: 'POST',
-          path: '/gc-supervisor/v0/city/test-city/bead/gascity-0001/close',
+          path: '/v0/city/test-city/bead/gascity-0001/close',
           body: {
             reason: 'verified done',
           },

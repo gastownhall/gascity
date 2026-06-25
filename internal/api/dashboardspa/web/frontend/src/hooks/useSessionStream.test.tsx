@@ -72,7 +72,7 @@ describe('useSessionStream', () => {
       stream: { status: 'connecting' },
     });
     expect(eventSources[0]?.url).toBe(
-      '/gc-supervisor/v0/city/test-city/session/gc-session-1/stream',
+      `${window.location.origin}/v0/city/test-city/session/gc-session-1/stream`,
     );
 
     act(() => eventSources[0]?.open());

@@ -779,7 +779,7 @@ func TestSlingRigContext(t *testing.T) {
 func TestSlingDashboardRigQualifiesBareTarget(t *testing.T) {
 	h, state := newSlingTestServer(t)
 	// Bare "worker" with body.Rig="myrig" (no scope_kind) — mirrors
-	// `sling <bead> worker --rig=myrig` via cmd/gc/dashboard/api.go.
+	// `sling <bead> worker --rig=myrig` as the dashboard SPA issues it.
 	// Must resolve to myrig/worker and hit the happy direct-bead path.
 	body := `{"target":"worker","bead":"abc","rig":"myrig"}`
 	rec := httptest.NewRecorder()
