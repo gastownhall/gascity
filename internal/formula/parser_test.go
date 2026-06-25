@@ -3378,3 +3378,34 @@ func TestParse_InMemory_NoContentHash(t *testing.T) {
 		t.Errorf("ContentHash should be empty for in-memory parse, got %q", f.ContentHash)
 	}
 }
+
+func TestParseTOML_LoopCountStringRejectsTemplateVar(t *testing.T) {
+	formulaTOML := `
+formula = "loop-count-string"
+
+[[steps]]
+id = "loop"
+title = "Loop"
+
+[steps.loop]
+count = "{{cups}}"
+
+[[steps.loop.body]]
+id = "work"
+title = "Do work"
+`
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(formulaTOML))
+	if err == nil {
+		t.Fatal("expected error for string loop.count, got nil")
+	}
+	if !strings.Contains(err.Error(), "integer literal") {
+		t.Errorf("error missing 'integer literal': %v", err)
+	}
+	if !strings.Contains(err.Error(), "range") {
+		t.Errorf("error missing 'range': %v", err)
+	}
+	if !strings.Contains(err.Error(), "1..{n}") {
+		t.Errorf("error missing '1..{n}' (single-brace form, guards against double-brace regression): %v", err)
+	}
+}
