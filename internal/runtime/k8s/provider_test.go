@@ -1643,6 +1643,12 @@ func TestInitBeadsInPodStripsProjectIDFromMetadata(t *testing.T) {
 	if count < 2 {
 		t.Errorf("expected %q to appear in both python3 patch invocations (>=2 times), got %d\nscript:\n%s", want, count, script)
 	}
+	if strings.Contains(script, "<<<") {
+		t.Errorf("metadata patch script must be POSIX sh compatible; found bash here-string in:\n%s", script)
+	}
+	if !strings.Contains(script, `printf '%s' "$PATCH" | python3 -c`) {
+		t.Errorf("metadata patch fallback should pipe PATCH into python3 stdin for POSIX sh compatibility:\n%s", script)
+	}
 }
 
 func TestStartSkipsStagingWhenPrebaked(t *testing.T) {
