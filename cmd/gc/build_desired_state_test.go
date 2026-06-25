@@ -2543,6 +2543,65 @@ func TestBuildDesiredState_MaterializesHookOverlaysBeforeFingerprinting(t *testi
 	}
 }
 
+// TestPrepareTemplateResolution_MaterializesFamilyOverlayForCustomProvider
+// guards gc-6bw8o on the pre-fingerprint materialization path. A rig-scoped
+// agent runs a custom provider "pi-vllm" (base="builtin:pi") whose rig overlay
+// ships only per-provider/pi/.pi/extensions/gc-hooks.js — there is no
+// per-provider/pi-vllm/ slot and the agent does NOT declare
+// install_agent_hooks=["pi"]. The concrete overlay name therefore has no
+// directory, so materializeProviderOverlaysBeforeFingerprint (reached via
+// prepareTemplateResolution) must fall back to the launch family (pi) via
+// EffectiveOverlayProviderNames and stage the family hook into the workdir
+// before resolveTemplate fingerprints CopyFiles. Before the fix this caller
+// used the concrete-only OverlayProviderNamesFromParts and never staged the
+// hook on this path.
+func TestPrepareTemplateResolution_MaterializesFamilyOverlayForCustomProvider(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	overlayDir := filepath.Join(cityDir, "packs", "myrig", "overlay")
+	hook := filepath.Join(overlayDir, "per-provider", "pi", ".pi", "extensions", "gc-hooks.js")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+		t.Fatalf("MkdirAll(overlay): %v", err)
+	}
+	if err := os.WriteFile(hook, []byte("// gc hook"), 0o644); err != nil {
+		t.Fatalf("WriteFile(hook): %v", err)
+	}
+
+	base := "builtin:pi"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "polecat",
+			Provider: "pi-vllm",
+			Scope:    "rig",
+			Dir:      "myrig",
+			// Intentionally no InstallAgentHooks: the family fallback must
+			// stage per-provider/pi/ purely from the concrete-absent
+			// resolution. Intentionally no StartCommand: it is an escape hatch
+			// that bypasses provider resolution (ResolveProvider step 1),
+			// which would defeat the base="builtin:pi" family fallback.
+		}},
+		Providers: map[string]config.ProviderSpec{
+			// Explicit command so resolution does not depend on a real `pi`
+			// binary on PATH; base still yields BuiltinAncestor=pi.
+			"pi-vllm": {Base: &base, Command: "/bin/echo"},
+		},
+		Rigs:           []config.Rig{{Name: "myrig", Path: rigDir}},
+		RigOverlayDirs: map[string][]string{"myrig": {overlayDir}},
+	}
+
+	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat", io.Discard)
+
+	staged := filepath.Join(rigDir, ".pi", "extensions", "gc-hooks.js")
+	if _, err := os.Stat(staged); err != nil {
+		t.Fatalf("family pi overlay not materialized before fingerprint for custom pi-vllm provider (gc-6bw8o): %v", err)
+	}
+}
+
 func TestBuildDesiredState_IncludesImportedAlwaysNamedSessions(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "repo")
