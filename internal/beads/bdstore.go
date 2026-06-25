@@ -1521,6 +1521,14 @@ func (tx *bdStoreTx) item(id string) (*bdStoreTxItem, error) {
 	return item, nil
 }
 
+// Create persists a bead immediately. The bd CLI has no multi-statement
+// transaction, so a create cannot be staged: subsequent staged writes in the
+// same Tx may reference the new bead's ID, which only exists after creation.
+// This matches the Store.Tx contract for stores without native transactions.
+func (tx *bdStoreTx) Create(b Bead) (Bead, error) {
+	return tx.store.Create(b)
+}
+
 func (tx *bdStoreTx) Update(id string, opts UpdateOpts) error {
 	if !hasUpdateOpts(opts) {
 		return nil

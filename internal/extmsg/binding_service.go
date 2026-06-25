@@ -36,6 +36,7 @@ type bindingMembershipEnsurer interface {
 	EnsureMembership(ctx context.Context, input EnsureMembershipInput) (ConversationMembershipRecord, error)
 	RemoveMembership(ctx context.Context, input RemoveMembershipInput) error
 	ensureMembershipLocked(input EnsureMembershipInput) (ConversationMembershipRecord, error)
+	ensureMembershipLockedWriter(w membershipWriter, input EnsureMembershipInput) (ConversationMembershipRecord, error)
 	removeMembershipLocked(input RemoveMembershipInput) error
 }
 
@@ -120,15 +121,35 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 			if active.SessionID != sessionID || active.AgentName != agentName {
 				return fmt.Errorf("%w: conversation already bound to %s", ErrBindingConflict, bindingTarget(*active))
 			}
-			if active.SessionName == "" && sessionName != "" {
-				if err := s.store.Update(active.ID, beads.UpdateOpts{
-					Labels:   []string{bindingSessionNameLabel(sessionName)},
-					Metadata: map[string]string{"session_name": sessionName},
-				}); err != nil {
-					return fmt.Errorf("backfill session name on binding %s: %w", active.ID, err)
+			// Coalesce the rebind's writes — optional session-name backfill,
+			// binding metadata, and transcript membership — into one commit so a
+			// rebind costs a single DOLT_COMMIT instead of 2-4 (gastownhall/gascity#3735).
+			if err := s.store.Tx("gc: extmsg rebind "+conversationLockKey(ref), func(tx beads.Tx) error {
+				if active.SessionName == "" && sessionName != "" {
+					if err := tx.Update(active.ID, beads.UpdateOpts{
+						Labels:   []string{bindingSessionNameLabel(sessionName)},
+						Metadata: map[string]string{"session_name": sessionName},
+					}); err != nil {
+						return fmt.Errorf("backfill session name on binding %s: %w", active.ID, err)
+					}
 				}
-			}
-			if err := s.updateBindingMetadata(*active, input.Metadata, input.ExpiresAt, now); err != nil {
+				if err := s.updateBindingMetadata(tx, *active, input.Metadata, input.ExpiresAt, now); err != nil {
+					return err
+				}
+				if s.transcript != nil {
+					if _, err := s.transcript.ensureMembershipLockedWriter(tx, EnsureMembershipInput{
+						Caller:         caller,
+						Conversation:   ref,
+						SessionID:      bindingMembershipKey(*active),
+						BackfillPolicy: MembershipBackfillSinceJoin,
+						Owner:          MembershipOwnerBinding,
+						Now:            now,
+					}); err != nil {
+						return wrapTranscriptSyncError("ensure transcript membership after bind", err)
+					}
+				}
+				return nil
+			}); err != nil {
 				return err
 			}
 			updated, err := s.getBinding(active.ID)
@@ -136,18 +157,6 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 				return err
 			}
 			out = updated
-			if s.transcript != nil {
-				if _, err := s.transcript.ensureMembershipLocked(EnsureMembershipInput{
-					Caller:         caller,
-					Conversation:   ref,
-					SessionID:      bindingMembershipKey(updated),
-					BackfillPolicy: MembershipBackfillSinceJoin,
-					Owner:          MembershipOwnerBinding,
-					Now:            now,
-				}); err != nil {
-					return wrapTranscriptSyncError("ensure transcript membership after bind", err)
-				}
-			}
 			return nil
 		}
 		nextGeneration := nextBindingGeneration(history)
@@ -164,49 +173,55 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 				labels = append(labels, bindingSessionNameLabel(sessionName))
 			}
 		}
-		b, err := s.store.Create(beads.Bead{
-			Title:  conversationTitle(ref),
-			Type:   "task",
-			Labels: labels,
-			Metadata: encodeMetadataFields(input.Metadata, map[string]string{
-				"schema_version":         strconv.Itoa(schemaVersion),
-				"scope_id":               ref.ScopeID,
-				"provider":               ref.Provider,
-				"account_id":             ref.AccountID,
-				"conversation_id":        ref.ConversationID,
-				"parent_conversation_id": ref.ParentConversationID,
-				"conversation_kind":      string(ref.Kind),
-				"session_id":             sessionID,
-				"session_name":           sessionName,
-				"agent_name":             agentName,
-				"binding_generation":     strconv.FormatInt(nextGeneration, 10),
-				"bound_at":               formatTime(now),
-				"expires_at":             formatTimePtr(input.ExpiresAt),
-				"last_touched_at":        formatTime(now),
-				"created_by_kind":        string(normalizeCaller(caller).Kind),
-				"created_by_id":          normalizeCaller(caller).ID,
-			}),
-		})
-		if err != nil {
-			return fmt.Errorf("create external binding: %w", err)
-		}
-		out, err = decodeBindingBead(b)
-		if err != nil {
-			return err
-		}
-		if s.transcript != nil {
-			if _, err := s.transcript.ensureMembershipLocked(EnsureMembershipInput{
-				Caller:         caller,
-				Conversation:   ref,
-				SessionID:      bindingMembershipKey(out),
-				BackfillPolicy: MembershipBackfillSinceJoin,
-				Owner:          MembershipOwnerBinding,
-				Now:            now,
-			}); err != nil {
-				return wrapTranscriptSyncError("ensure transcript membership after bind", err)
+		// Coalesce the new binding's create and its transcript membership (plus
+		// any first-touch transcript-state create) into one commit so a fresh
+		// bind costs a single DOLT_COMMIT (gastownhall/gascity#3735).
+		return s.store.Tx("gc: extmsg bind "+conversationLockKey(ref), func(tx beads.Tx) error {
+			b, err := tx.Create(beads.Bead{
+				Title:  conversationTitle(ref),
+				Type:   "task",
+				Labels: labels,
+				Metadata: encodeMetadataFields(input.Metadata, map[string]string{
+					"schema_version":         strconv.Itoa(schemaVersion),
+					"scope_id":               ref.ScopeID,
+					"provider":               ref.Provider,
+					"account_id":             ref.AccountID,
+					"conversation_id":        ref.ConversationID,
+					"parent_conversation_id": ref.ParentConversationID,
+					"conversation_kind":      string(ref.Kind),
+					"session_id":             sessionID,
+					"session_name":           sessionName,
+					"agent_name":             agentName,
+					"binding_generation":     strconv.FormatInt(nextGeneration, 10),
+					"bound_at":               formatTime(now),
+					"expires_at":             formatTimePtr(input.ExpiresAt),
+					"last_touched_at":        formatTime(now),
+					"created_by_kind":        string(normalizeCaller(caller).Kind),
+					"created_by_id":          normalizeCaller(caller).ID,
+				}),
+			})
+			if err != nil {
+				return fmt.Errorf("create external binding: %w", err)
 			}
-		}
-		return nil
+			decoded, err := decodeBindingBead(b)
+			if err != nil {
+				return err
+			}
+			out = decoded
+			if s.transcript != nil {
+				if _, err := s.transcript.ensureMembershipLockedWriter(tx, EnsureMembershipInput{
+					Caller:         caller,
+					Conversation:   ref,
+					SessionID:      bindingMembershipKey(decoded),
+					BackfillPolicy: MembershipBackfillSinceJoin,
+					Owner:          MembershipOwnerBinding,
+					Now:            now,
+				}); err != nil {
+					return wrapTranscriptSyncError("ensure transcript membership after bind", err)
+				}
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return SessionBindingRecord{}, err
@@ -891,7 +906,7 @@ func (s *bindingService) activeBinding(ctx context.Context, history []SessionBin
 	})
 }
 
-func (s *bindingService) updateBindingMetadata(record SessionBindingRecord, meta map[string]string, expiresAt *time.Time, now time.Time) error {
+func (s *bindingService) updateBindingMetadata(w beads.Tx, record SessionBindingRecord, meta map[string]string, expiresAt *time.Time, now time.Time) error {
 	fields := map[string]string{
 		"expires_at":      formatTimePtr(expiresAt),
 		"last_touched_at": formatTime(now),
@@ -903,7 +918,7 @@ func (s *bindingService) updateBindingMetadata(record SessionBindingRecord, meta
 	if len(kvs) == 0 {
 		return nil
 	}
-	return s.store.SetMetadataBatch(record.ID, kvs)
+	return w.SetMetadataBatch(record.ID, kvs)
 }
 
 func (s *bindingService) getBinding(id string) (SessionBindingRecord, error) {

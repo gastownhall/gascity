@@ -121,6 +121,81 @@ func TestBindingServiceExpiredBindingIsMissAndRebinds(t *testing.T) {
 	}
 }
 
+// commitCountingExtmsgStore counts standalone writes vs Tx batches so a test
+// can assert that a bind coalesces its writes into a single commit.
+type commitCountingExtmsgStore struct {
+	beads.Store
+	txCalls          int
+	standaloneWrites int
+}
+
+func (c *commitCountingExtmsgStore) Tx(commitMsg string, fn func(beads.Tx) error) error {
+	c.txCalls++
+	return c.Store.Tx(commitMsg, fn)
+}
+
+func (c *commitCountingExtmsgStore) Create(b beads.Bead) (beads.Bead, error) {
+	c.standaloneWrites++
+	return c.Store.Create(b)
+}
+
+func (c *commitCountingExtmsgStore) Update(id string, opts beads.UpdateOpts) error {
+	c.standaloneWrites++
+	return c.Store.Update(id, opts)
+}
+
+func (c *commitCountingExtmsgStore) SetMetadata(id, key, value string) error {
+	c.standaloneWrites++
+	return c.Store.SetMetadata(id, key, value)
+}
+
+func (c *commitCountingExtmsgStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	c.standaloneWrites++
+	return c.Store.SetMetadataBatch(id, kvs)
+}
+
+func TestBindingServiceBindCoalescesWritesIntoSingleCommit(t *testing.T) {
+	freezeTestClock(t)
+	counting := &commitCountingExtmsgStore{Store: beads.NewMemStore()}
+	svc := NewServices(counting).Bindings
+	ref := testConversationRef()
+
+	// A fresh bind creates three beads (binding + transcript-state +
+	// membership). All must land in one Tx with no standalone write —
+	// gastownhall/gascity#3735 turns 2-4 DOLT_COMMITs into one.
+	if _, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
+		Conversation: ref,
+		SessionID:    "sess-a",
+		Now:          testNow(),
+	}); err != nil {
+		t.Fatalf("Bind(fresh): %v", err)
+	}
+	if counting.txCalls != 1 {
+		t.Fatalf("fresh bind used %d Tx batches, want 1", counting.txCalls)
+	}
+	if counting.standaloneWrites != 0 {
+		t.Fatalf("fresh bind issued %d standalone writes, want 0 (all coalesced)", counting.standaloneWrites)
+	}
+
+	// A rebind of the same session coalesces its binding-metadata and
+	// transcript writes into a single Tx as well.
+	counting.txCalls = 0
+	counting.standaloneWrites = 0
+	if _, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
+		Conversation: ref,
+		SessionID:    "sess-a",
+		Now:          testNow().Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("Bind(rebind): %v", err)
+	}
+	if counting.txCalls != 1 {
+		t.Fatalf("rebind used %d Tx batches, want 1", counting.txCalls)
+	}
+	if counting.standaloneWrites != 0 {
+		t.Fatalf("rebind issued %d standalone writes, want 0 (all coalesced)", counting.standaloneWrites)
+	}
+}
+
 func TestBindingServiceBindSeparatesConversationVariants(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
@@ -3022,6 +3097,10 @@ func (f *flakyTranscriptService) UpdateMembership(context.Context, UpdateMembers
 }
 
 func (f *flakyTranscriptService) ensureMembershipLocked(input EnsureMembershipInput) (ConversationMembershipRecord, error) {
+	return f.EnsureMembership(context.Background(), input)
+}
+
+func (f *flakyTranscriptService) ensureMembershipLockedWriter(_ membershipWriter, input EnsureMembershipInput) (ConversationMembershipRecord, error) {
 	return f.EnsureMembership(context.Background(), input)
 }
 

@@ -109,6 +109,7 @@ type ConditionalAssignmentReleaser interface {
 // Keep this interface limited to methods needed by current transactional
 // write pairs; do not add Store methods speculatively.
 type Tx interface {
+	Create(b Bead) (Bead, error)
 	Update(id string, opts UpdateOpts) error
 	SetMetadataBatch(id string, kvs map[string]string) error
 	Close(id string) error
