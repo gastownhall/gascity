@@ -143,6 +143,38 @@ func (c *BdBackupFreshnessCheck) freshnessScanTargets() []bdBackupFreshnessTarge
 	return targets
 }
 
+// BulkDeleteSafe reports whether it is safe to perform a bulk bead deletion
+// given the current backup freshness across all managed scopes. It returns
+// safe=false and a human-readable reason as soon as one managed scope's ACTIVE
+// backup pipeline is not demonstrably current.
+//
+// Which pipeline is "active" per scope, and therefore which state file decides
+// freshness, is scanBackupFreshness's judgement — this gate deliberately does
+// not re-derive it, so the gate and BdBackupFreshnessCheck can never disagree
+// about whether a scope is protected. Concretely that means a scope with a
+// registered Dolt destination is judged on its Dolt sync state (including the
+// registered-but-never-synced case, which is unsafe), and only a scope that
+// never migrated is judged on the legacy embedded-store state.
+//
+// The gate is fail-closed on doubt: an unreadable, unparseable, or
+// timestamp-less state file blocks the deletion rather than being ignored,
+// because it leaves the recovery point unknown. The one deliberate exception is
+// a scope with NO backup state at all, which is treated as safe — "no backup
+// configured" is DoltBackupCheck's concern, and failing closed there would
+// block bulk deletion on every unbacked city.
+func BulkDeleteSafe(cityPath string, cfg *config.City, maxAge time.Duration, now time.Time) (bool, string) {
+	scopeRoots := managedDoltScopeRootsForConfig(cityPath, cfg, nil)
+	for _, scopeRoot := range scopeRoots {
+		scopeRoot = filepath.Clean(scopeRoot)
+		label := bdBackupScopeLabel(cityPath, scopeRoot)
+		beadsDir := filepath.Join(scopeRoot, ".beads")
+		if finding, ok := scanBackupFreshness(label, beadsDir, now, maxAge); ok {
+			return false, finding
+		}
+	}
+	return true, ""
+}
+
 // scanBackupFreshness reports whether a scope's ACTIVE backup pipeline has
 // stopped syncing.
 //

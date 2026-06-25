@@ -6,7 +6,65 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
+
+func TestBulkDeleteSafe(t *testing.T) {
+	now := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	maxAge := 24 * time.Hour
+
+	t.Run("all scopes fresh → safe", func(t *testing.T) {
+		scope1 := t.TempDir()
+		scope2 := t.TempDir()
+		writeBackupStateForFreshness(t, scope1, now.Add(-1*time.Hour).Format(time.RFC3339))
+		writeBackupStateForFreshness(t, scope2, now.Add(-2*time.Hour).Format(time.RFC3339))
+		cfg := &config.City{Rigs: []config.Rig{
+			{Path: scope1},
+			{Path: scope2},
+		}}
+		safe, reason := BulkDeleteSafe(scope1, cfg, maxAge, now)
+		if !safe {
+			t.Fatalf("all fresh: want safe=true, got safe=false, reason=%q", reason)
+		}
+		if reason != "" {
+			t.Fatalf("all fresh: want empty reason, got %q", reason)
+		}
+	})
+
+	t.Run("one stale scope → unsafe, reason contains scope label", func(t *testing.T) {
+		fresh := t.TempDir()
+		stale := t.TempDir()
+		writeBackupStateForFreshness(t, fresh, now.Add(-1*time.Hour).Format(time.RFC3339))
+		writeBackupStateForFreshness(t, stale, now.Add(-48*time.Hour).Format(time.RFC3339))
+		// Use stale path as cityPath so it appears as a labeled scope
+		cfg := &config.City{Rigs: []config.Rig{
+			{Path: fresh},
+			{Path: stale},
+		}}
+		safe, reason := BulkDeleteSafe(fresh, cfg, maxAge, now)
+		if safe {
+			t.Fatalf("stale scope: want safe=false, got safe=true")
+		}
+		if reason == "" {
+			t.Fatalf("stale scope: want non-empty reason")
+		}
+	})
+
+	t.Run("no backup_state.json in any scope → safe (unconfigured is not this check's job)", func(t *testing.T) {
+		scope1 := t.TempDir()
+		scope2 := t.TempDir()
+		cfg := &config.City{Rigs: []config.Rig{
+			{Path: scope1},
+			{Path: scope2},
+		}}
+		safe, reason := BulkDeleteSafe(scope1, cfg, maxAge, now)
+		if !safe {
+			t.Fatalf("no backup config: want safe=true, got safe=false, reason=%q", reason)
+		}
+		_ = reason
+	})
+}
 
 func writeBackupStateForFreshness(t *testing.T, scopeRoot, timestamp string) {
 	t.Helper()
