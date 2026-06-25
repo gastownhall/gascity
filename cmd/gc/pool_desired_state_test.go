@@ -1448,12 +1448,31 @@ func TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder(t *test
 	}
 
 	// A live named holder occupies the singleton's slot.
-	if live := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("active")}); !live["mayor"] {
-		t.Fatalf("live named alias-holder should mark mayor held; got %v", live)
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("active")})["mayor"]; !ok {
+		t.Fatalf("live named alias-holder should mark mayor held; got %v", canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("active")}))
 	}
 
 	// A failed-create holder released the alias -> must NOT be treated as held.
-	if failed := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("failed-create")}); failed["mayor"] {
-		t.Fatalf("failed-create holder released its alias and must NOT mark mayor held (over-suppression hang); got %v", failed)
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("failed-create")})["mayor"]; ok {
+		t.Fatalf("failed-create holder released its alias and must NOT mark mayor held (over-suppression hang); got %v", canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("failed-create")}))
+	}
+
+	// A closed holder no longer owns the alias.
+	closed := holder("active")
+	closed.Status = "closed"
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{closed})["mayor"]; ok {
+		t.Fatalf("closed holder released its alias and must NOT mark mayor held; got held")
+	}
+
+	// A pool-managed bead is the pool's own instance, not the named alias holder.
+	poolManaged := holder("active")
+	poolManaged.Metadata[poolManagedMetadataKey] = boolMetadata(true)
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{poolManaged})["mayor"]; ok {
+		t.Fatalf("pool-managed bead is not the named alias holder and must NOT mark mayor held; got held")
+	}
+
+	// A drained holder released its alias.
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("drained")})["mayor"]; ok {
+		t.Fatalf("drained holder released its alias and must NOT mark mayor held; got held")
 	}
 }

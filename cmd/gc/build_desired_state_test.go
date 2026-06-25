@@ -11334,3 +11334,99 @@ func TestBuildDesiredState_NamedAliasHolderSuppressesPoolStandby(t *testing.T) {
 		t.Fatalf("retained entry is not the named alias-holder: %+v", mayorEntries[0])
 	}
 }
+
+// TestBuildDesiredState_AsleepNamedAliasHolderStaysSingle documents the
+// gc-7e40y review ruling (mayor): an asleep canonical-singleton holder is NOT
+// a live alias holder, so pool demand SHOULD flow and WAKE the existing asleep
+// holder — net desired stays exactly 1, no redundant standby spawns.
+func TestBuildDesiredState_AsleepNamedAliasHolderStaysSingle(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+
+	// Ready, unassigned, routed work — mirrors live gc-78iq.
+	if _, err := store.Create(beads.Bead{
+		Title:    "routed mayor work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "gastown.mayor"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Named-session alias holder for "gastown.mayor" — mirrors live gc-wisp-ak5aoga.
+	if _, err := store.Create(beads.Bead{
+		Title:  "gastown.mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:gastown.mayor"},
+		Metadata: map[string]string{
+			"agent_name":                 "gastown.mayor",
+			"alias":                      "gastown.mayor",
+			"session_name":               "gastown__mayor",
+			"session_name_explicit":      "true",
+			"state":                      "asleep",
+			"session_origin":             "named",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "gastown.mayor",
+			namedSessionModeMetadata:     "always",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pool-managed standby, alias-deferred — mirrors live gc-wisp-tig9h8s.
+	if _, err := store.Create(beads.Bead{
+		Title:  "gastown.mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gastown.mayor"},
+		Metadata: map[string]string{
+			"agent_name":                      "gastown.mayor",
+			"alias":                           "",
+			"session_name":                    "gastown__mayor-gc-wisp-tig9h8s",
+			"state":                           "awake",
+			"session_origin":                  "ephemeral",
+			poolManagedMetadataKey:            boolMetadata(true),
+			poolAliasConflictMetadataKey:      "gastown.mayor",
+			poolAliasConflictCountMetadataKey: "249",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gchq"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			BindingName:       "gastown",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "mayor",
+			BindingName: "gastown",
+			Scope:       "city",
+			Mode:        "always",
+		}},
+	}
+
+	dsResult := buildDesiredState("gchq", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	var mayorEntries []TemplateParams
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "gastown.mayor" {
+			mayorEntries = append(mayorEntries, tp)
+		}
+	}
+	if len(mayorEntries) != 1 {
+		var names []string
+		for _, tp := range mayorEntries {
+			names = append(names, fmt.Sprintf("%s(alias=%q,named=%q)", tp.SessionName, tp.Alias, tp.ConfiguredNamedIdentity))
+		}
+		t.Fatalf("gastown.mayor desired entries = %d, want 1 — a live session already holds the canonical alias, so the pool must not demand a redundant standby (gc-7e40y dual). Got: %v", len(mayorEntries), names)
+	}
+	// The single retained entry must be the named alias-holder, not a deferred
+	// pool standby (alias empty because it lost the alias-acquisition race).
+	if mayorEntries[0].ConfiguredNamedIdentity != "gastown.mayor" {
+		t.Fatalf("retained entry is not the named alias-holder: %+v", mayorEntries[0])
+	}
+}
