@@ -294,31 +294,22 @@ native_store_unavailable gate=dolt_mode_safe reason="dolt_mode=embedded; native 
 `gc status --json | jq .beads` reports `"preflight_gate":"dolt_mode_safe"` with
 `"native_store_eligible":false`.
 
-Gas City requires `bd` to report Dolt server mode before enabling the native
-in-process store. When gc manages a local Dolt SQL server, it writes
-`dolt.mode: server` to `.beads/config.yaml` automatically on every `gc start`.
-The field may be absent after upgrading from an older gc version — `bd context`
-then reports `dolt_mode: embedded`, failing the gate.
-
-Confirm the current mode:
+The `dolt_mode_safe` gate keys off the `dolt_mode` value that `bd context`
+reports; a value of `embedded` fails the gate. The gate reads this from
+`bd context`, not from `.beads/config.yaml`, so hand-editing the config file is
+not the supported repair. Confirm what `bd` currently reports:
 
 ```bash
 bd context --json | jq .dolt_mode   # should print "server"
 ```
 
-Run the automatic repair and restart:
+**Remedy:** This is the same native-store fallback covered under
+[Native Store Falls Back Because Dolt Is in Embedded Mode](#native-store-falls-back-because-dolt-is-in-embedded-mode).
+Follow that section to run `bd` against a Dolt SQL server so `bd context`
+reports `dolt_mode=server`, then apply and re-check:
 
 ```bash
-gc doctor --fix
 gc restart
-```
-
-If the gate still fails after restart, add the field manually under the `dolt:`
-block in `.beads/config.yaml` and restart:
-
-```yaml
-dolt:
-  mode: server
 ```
 
 Do not bypass or disable the `dolt_mode_safe` check — it guards the store-mode
