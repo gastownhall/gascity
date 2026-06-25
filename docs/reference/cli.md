@@ -2763,12 +2763,18 @@ subtrees whose open descendants are also older than --stale-after. Pass one
 or more scoped order names when --include-wisps is set; wisp recovery is
 order-scoped to avoid scanning unrelated beads.
 
+When the number of eligible closed-bead deletions exceeds
+GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20), --confirm is required to
+proceed. This guard prevents accidental mass-deletes without an explicit
+operator acknowledgement.
+
 ```
 gc order sweep-tracking [order ...] [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--confirm` | bool |  | confirm bulk deletion when eligible count &gt; GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20) |
 | `--dry-run` | bool |  | report stale order-tracking and order wisp beads without closing them |
 | `--include-wisps` | bool |  | also close stale order-run wisp subtrees with open descendants |
 | `--quiet` | bool |  | suppress success output |

@@ -219,6 +219,7 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 	includeWisps := false
 	dryRun := false
 	quiet := false
+	confirm := false
 	cmd := &cobra.Command{
 		Use:   "sweep-tracking [order ...]",
 		Short: "Close stale and prune closed order-tracking beads",
@@ -235,10 +236,15 @@ use bounded cleanup to avoid spending an unbounded tick on stale work.
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
 or more scoped order names when --include-wisps is set; wisp recovery is
-order-scoped to avoid scanning unrelated beads.`,
+order-scoped to avoid scanning unrelated beads.
+
+When the number of eligible closed-bead deletions exceeds
+GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20), --confirm is required to
+proceed. This guard prevents accidental mass-deletes without an explicit
+operator acknowledgement.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdOrderSweepTrackingWithOptions(staleAfter, includeWisps, dryRun, quiet, args, stdout, stderr) != 0 {
+			if cmdOrderSweepTrackingWithOptions(staleAfter, includeWisps, dryRun, quiet, confirm, args, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -249,6 +255,7 @@ order-scoped to avoid scanning unrelated beads.`,
 	cmd.Flags().BoolVar(&includeWisps, "include-wisps", false, "also close stale order-run wisp subtrees with open descendants")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report stale order-tracking and order wisp beads without closing them")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, fmt.Sprintf("confirm bulk deletion when eligible count > GC_BULK_DELETE_CONFIRM_THRESHOLD (default %d)", bulkDeleteConfirmThreshold()))
 	return cmd
 }
 
@@ -1586,7 +1593,20 @@ type orderHistoryJSONSummary struct {
 
 // --- gc order sweep-tracking ---
 
-func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dryRun, quiet bool, orderNames []string, stdout, stderr io.Writer) int {
+// bulkDeleteConfirmThreshold returns the maximum number of eligible retention
+// deletions allowed without an explicit --confirm flag. Configurable via
+// GC_BULK_DELETE_CONFIRM_THRESHOLD (positive integer); default 20.
+func bulkDeleteConfirmThreshold() int {
+	if s := os.Getenv("GC_BULK_DELETE_CONFIRM_THRESHOLD"); s != "" {
+		var n int
+		if _, err := fmt.Sscanf(s, "%d", &n); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 20
+}
+
+func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm bool, orderNames []string, stdout, stderr io.Writer) int {
 	if staleAfter <= 0 {
 		fmt.Fprintln(stderr, "gc order sweep-tracking: --stale-after must be positive") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1621,6 +1641,23 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		return 1
 	}
 	now := time.Now()
+
+	// Bulk-delete confirm gate: before any retention deletions, count eligible
+	// beads and require --confirm when above GC_BULK_DELETE_CONFIRM_THRESHOLD.
+	if !dryRun {
+		retentionPolicy := orderTrackingRetentionPolicyForConfig(cfg)
+		eligible, countErr := countClosedOrderTrackingRetentionEligible(stores, now, retentionPolicy, onlyOrders)
+		if countErr == nil {
+			threshold := bulkDeleteConfirmThreshold()
+			if eligible > threshold && !confirm {
+				fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+					"gc order sweep-tracking: %d beads would be deleted — rerun with --confirm to proceed (GC_BULK_DELETE_CONFIRM_THRESHOLD=%d)\n",
+					eligible, threshold)
+				return 1
+			}
+		}
+	}
+
 	var result orderTrackingSweepResult
 	var sweepErr error
 	var retentionResult orderTrackingRetentionSweepResult

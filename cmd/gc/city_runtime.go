@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -1485,6 +1486,19 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 }
 
+// bulkDeleteMaxAge returns the maximum backup age allowed for bulk bead
+// deletions. Configurable via GC_BACKUP_MAX_AGE_FOR_BULK_DELETE (integer
+// seconds); defaults to 86400 s (24 h).
+func bulkDeleteMaxAge(_ *config.City) time.Duration {
+	if s := os.Getenv("GC_BACKUP_MAX_AGE_FOR_BULK_DELETE"); s != "" {
+		var secs int
+		if _, err := fmt.Sscanf(s, "%d", &secs); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return 24 * time.Hour
+}
+
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
 // are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
@@ -1495,6 +1509,15 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 		return
 	}
 	cr.orderTrackingRetentionWatchdogLast = now
+
+	if cr.cityPath != "" {
+		if safe, reason := doctor.BulkDeleteSafe(cr.cityPath, cr.cfg, bulkDeleteMaxAge(cr.cfg), now); !safe {
+			if cr.stderr != nil {
+				fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: skipping bulk delete — %s\n", cr.logPrefix, reason) //nolint:errcheck // best-effort stderr
+			}
+			return
+		}
+	}
 
 	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores()
 	defer closeOpened()
