@@ -288,7 +288,7 @@ The native in-process store is unavailable after `gc start`, and the supervisor
 log shows:
 
 ```
-native_store_unavailable gate=dolt_mode_safe reason="dolt_mode=embedded requires server mode or native_embedded build tag"
+native_store_unavailable gate=dolt_mode_safe reason="dolt_mode=embedded; native store requires Dolt server mode (bd context must report dolt_mode=server) — falling back to per-call bd. See troubleshooting."
 ```
 
 `gc status --json` reports `"preflight_gate":"dolt_mode_safe"` with
