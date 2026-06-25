@@ -88,7 +88,17 @@ verbatim.`,
 	return cmd
 }
 
-const defaultHookRunTimeout = 15 * time.Second
+// defaultHookRunTimeout is the hard timeout for a managed hook command run
+// via `gc hook run`. It wraps the work-query probe on the session-startup
+// path, so it must be at least as generous as hookWorkQueryTimeout — the
+// default work-probe makes ~6 sequential bd/store round-trips (three session
+// identifiers x in-progress+ready assigned tiers, then the pool-demand tier),
+// and on a multi-rig dolt city under concurrent load that routinely exceeded
+// the old 15s, killing the probe before it reached the pool-demand tier that
+// finds routed work — starving pool operators (gc.run-operator) of work they
+// were already routed. Reducing the probe's round-trip count is the proper
+// follow-up; until then this budget must cover the realistic loaded cost.
+const defaultHookRunTimeout = 30 * time.Second
 
 type hookRunOptions struct {
 	Timeout         time.Duration
@@ -437,11 +447,15 @@ func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) (map[strin
 // dir sets the command's working directory.
 type WorkQueryRunner func(command, dir string) (string, error)
 
-// hookWorkQueryTimeout caps the work-query subprocess. Default matches
-// the pre-bounded behavior (30s) so existing tests that legitimately
-// take >15s don't regress; the package-level var lets us lower it in
-// follow-up work after slow paths are identified and optimized.
-var hookWorkQueryTimeout = 30 * time.Second
+// hookWorkQueryTimeout caps the work-query subprocess. The default work-probe
+// issues ~6 sequential bd/store round-trips before the pool-demand tier that
+// finds routed work; on a multi-rig dolt city under concurrent load the probe
+// intermittently exceeded the prior 30s cap, so `runWorkQuery` killed it and
+// pool operators were starved of routed work. Raised to 60s to cover the
+// realistic loaded cost. The package-level var lets us lower it again in
+// follow-up work once the probe's round-trip count is reduced and the slow
+// per-rig `bd ready`/`gc ready` paths are optimized.
+var hookWorkQueryTimeout = 60 * time.Second
 
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment
