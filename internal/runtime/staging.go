@@ -33,7 +33,7 @@ func StageSessionWorkDir(cfg Config) error {
 // process. Nonfatal overlay preservation warnings are written to warnings.
 func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
 	if cfg.WorkDir != "" {
-		overlayProviders := OverlayProviderNames(cfg)
+		overlayProviders := EffectiveOverlayProviderNames(cfg)
 		for _, od := range cfg.PackOverlayDirs {
 			if err := StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
 				return fmt.Errorf("pack overlay %q -> %q: %w", od, cfg.WorkDir, err)
@@ -46,6 +46,38 @@ func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
 		}
 	}
 	return stageCopyFiles(cfg.WorkDir, cfg.CopyFiles)
+}
+
+// EffectiveOverlayProviderNames returns the provider overlay slots to stage for
+// cfg, resolving the concrete-vs-family primary against cfg's overlay sources.
+// The concrete cfg.ProviderOverlayName is honored only when a
+// per-provider/<concrete>/ directory exists in one of cfg's overlay source dirs
+// (PackOverlayDirs or OverlayDir); otherwise it is dropped so the slot list
+// falls back to the launch family cfg.ProviderName. This keeps a provider that
+// ships its own overlay (e.g. Kiro) on its concrete overlay, while letting a
+// custom provider with no concrete overlay dir (e.g. base="builtin:pi"
+// "pi-vllm", which has no per-provider/pi-vllm/) fall back to the family overlay
+// (per-provider/pi/) where its lifecycle hooks live (gc-6bw8o).
+//
+// The pure OverlayProviderNames is retained for fingerprinting, which must stay
+// filesystem-independent.
+func EffectiveOverlayProviderNames(cfg Config) []string {
+	overlayName := strings.TrimSpace(cfg.ProviderOverlayName)
+	if overlayName != "" && !overlayProviderDirExists(cfg, overlayName) {
+		overlayName = ""
+	}
+	return OverlayProviderNamesFromParts(cfg.ProviderName, overlayName, cfg.InstallAgentHooks)
+}
+
+// overlayProviderDirExists reports whether any of cfg's overlay source dirs
+// contains a per-provider/<providerName>/ overlay directory.
+func overlayProviderDirExists(cfg Config, providerName string) bool {
+	for _, od := range cfg.PackOverlayDirs {
+		if overlay.HasProviderDir(od, providerName) {
+			return true
+		}
+	}
+	return cfg.OverlayDir != "" && overlay.HasProviderDir(cfg.OverlayDir, providerName)
 }
 
 func stageCopyFiles(workDir string, copyFiles []CopyEntry) error {

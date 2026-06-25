@@ -643,6 +643,15 @@ func OverlayProviderNames(cfg Config) []string {
 
 // OverlayProviderNamesFromParts returns the effective provider overlay slots
 // for a launch provider, concrete overlay provider, and installed hooks.
+//
+// The concrete providerOverlayName is the primary slot, falling back to the
+// launch family providerName only when the concrete name is empty. Callers that
+// stage onto a real overlay source should instead use
+// EffectiveOverlayProviderNames, which downgrades a concrete name with no
+// per-provider/<concrete>/ directory to the family so a custom provider (e.g.
+// base="builtin:pi" "pi-vllm", which has no per-provider/pi-vllm/ overlay)
+// still stages the family overlay where its hooks live (gc-6bw8o), while a
+// provider that ships its own overlay (e.g. Kiro) keeps it.
 func OverlayProviderNamesFromParts(providerName, providerOverlayName string, installAgentHooks []string) []string {
 	primary := strings.TrimSpace(providerOverlayName)
 	if primary == "" {

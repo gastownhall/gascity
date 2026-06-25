@@ -184,6 +184,18 @@ func copyDirWithSkipRecursive(srcBase, dstBase, rel string, skip SkipFunc) error
 // agent's working directory only when the agent's resolved provider matches.
 const PerProviderDir = "per-provider"
 
+// HasProviderDir reports whether srcDir contains a per-provider overlay
+// directory for providerName (per-provider/<providerName>/). Staging uses it to
+// decide whether a concrete provider overlay exists before falling back to the
+// launch family overlay (gc-6bw8o).
+func HasProviderDir(srcDir, providerName string) bool {
+	if srcDir == "" || providerName == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(srcDir, PerProviderDir, providerName))
+	return err == nil && info.IsDir()
+}
+
 // CopyDirForProvider copies overlay files with provider awareness:
 //  1. Copies everything EXCEPT the per-provider/ subtree (universal files).
 //  2. If per-provider/<providerName>/ exists, copies its contents into dst
