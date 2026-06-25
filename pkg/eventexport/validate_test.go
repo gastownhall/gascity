@@ -3,6 +3,7 @@ package eventexport
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -153,10 +154,68 @@ func TestProfileZeroValue(t *testing.T) {
 // author to gate it in ProjectEvent + ValidateEnvelope (and bump SchemaVersion if
 // the wire changes) rather than letting it ship ungated.
 func TestEnvelopeFieldCount(t *testing.T) {
-	// 8 = the original 7 + step_id, added as a version-NEUTRAL optional correlation
-	// field (gated in ProjectEvent + ValidateEnvelope exactly like run_id/session_id),
-	// so SchemaVersion is unchanged — a pinned receiver still accepts a populated batch.
-	if n := reflect.TypeOf(Envelope{}).NumField(); n != 8 {
+	// 10 = the original 7 + StepID (a version-NEUTRAL opaque correlation field,
+	// gated in ProjectEvent + ValidateEnvelope exactly like run_id/session_id) +
+	// Title + Formula (free-form content under EmitContent — the deliberate
+	// exception to envelope-only, gated separately and length-capped, never
+	// opaque-gated).
+	if n := reflect.TypeOf(Envelope{}).NumField(); n != 10 {
 		t.Fatalf("Envelope has %d fields; a field changed — gate it in ProjectEvent and ValidateEnvelope, then update this guard (and bump SchemaVersion if the wire changes)", n)
+	}
+}
+
+// TestProjectEvent_ContentGating proves the EmitContent exception: with the flag
+// OFF (default) free-form title/formula are dropped even when the source carries
+// them; with it ON they round-trip verbatim (spaces/punctuation intact, NOT
+// opaque-gated); over-cap values drop; and mail-reduced types never carry content.
+func TestProjectEvent_ContentGating(t *testing.T) {
+	salt := []byte("0123456789abcdef")
+	src := TaggedEvent{
+		Seq: 1, Type: "bead.closed", Ts: time.Unix(1700000000, 0),
+		Actor: "alice", Subject: "mc-wisp-i6vz0e",
+		StepID:  "review-pipeline.synthesize",
+		Title:   "ESCALATION: JSONL spike detected [HIGH]",
+		Formula: "randy-triage-patrol",
+	}
+	// OFF: content + step_id dropped.
+	off, ok := ProjectEvent(src, Options{Salt: salt})
+	if !ok {
+		t.Fatal("projection unexpectedly dropped the event")
+	}
+	if off.Title != "" || off.Formula != "" || off.StepID != "" {
+		t.Fatalf("EmitContent/EmitCorrelation off must drop content+step_id, got title=%q formula=%q step_id=%q", off.Title, off.Formula, off.StepID)
+	}
+	// ON: content round-trips free-form, step_id under EmitCorrelation.
+	on, ok := ProjectEvent(src, Options{Salt: salt, EmitContent: true, EmitCorrelation: true})
+	if !ok {
+		t.Fatal("projection unexpectedly dropped the event")
+	}
+	if on.Title != src.Title {
+		t.Fatalf("title must round-trip verbatim, got %q want %q", on.Title, src.Title)
+	}
+	if on.Formula != src.Formula {
+		t.Fatalf("formula must round-trip verbatim, got %q want %q", on.Formula, src.Formula)
+	}
+	if on.StepID != src.StepID {
+		t.Fatalf("step_id must round-trip (opaque), got %q want %q", on.StepID, src.StepID)
+	}
+	if err := ValidateEnvelope(on); err != nil {
+		t.Fatalf("populated content envelope must validate: %v", err)
+	}
+	// Over-cap title is DROPPED, not truncated.
+	big := src
+	big.Title = strings.Repeat("a", maxContentLen+1)
+	over, _ := ProjectEvent(big, Options{Salt: salt, EmitContent: true})
+	if over.Title != "" {
+		t.Fatalf("over-cap title must be dropped, got %d bytes", len(over.Title))
+	}
+	// mail.sent never carries content even with EmitContent on.
+	mail := TaggedEvent{Seq: 2, Type: "mail.sent", Ts: time.Unix(1700000000, 0), Actor: "alice", Title: "secret subject", Formula: "f"}
+	menv, _ := ProjectEvent(mail, Options{Salt: salt, EmitContent: true})
+	if menv.Title != "" || menv.Formula != "" || menv.ActorHash != "" {
+		t.Fatalf("mail.sent must stay {seq,type,ts}, got %+v", menv)
+	}
+	if err := ValidateEnvelope(menv); err != nil {
+		t.Fatalf("mail-reduced envelope must validate: %v", err)
 	}
 }
