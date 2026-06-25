@@ -256,6 +256,11 @@ rig directory to find the correct .beads database. This command resolves
 the rig automatically from the --rig flag or by detecting the bead prefix
 in the arguments.
 
+Use --rig &lt;name&gt; to pin a specific rig store, or --city &lt;path&gt; to pin the
+city (HQ) store. An explicit --city is a true scope override: it forces the
+city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
+deliberate city-scoped query is never silently downgraded to a rig store.
+
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
 "update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
@@ -278,6 +283,7 @@ gc bd --rig my-project list
 gc bd --rig my-project create "New task"
 gc bd show my-project-abc          # auto-detects rig from bead prefix
 gc bd list --rig my-project -s open
+gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
 gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
 gc bd release-if-current my-project-abc worker-1
 ```
