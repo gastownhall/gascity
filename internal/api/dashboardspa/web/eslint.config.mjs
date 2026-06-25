@@ -96,8 +96,9 @@ export default tseslint.config(
       ecmaVersion: 'latest',
       sourceType: 'module',
       parserOptions: {
+        // The backend workspace was dropped when this SPA was vendored into the
+        // gc binary; only shared + frontend remain.
         project: [
-          './backend/tsconfig.test.json',
           './frontend/tsconfig.test.json',
           './shared/tsconfig.json',
         ],

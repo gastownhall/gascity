@@ -7,6 +7,7 @@ import { useAttentionModel } from '../attention/context';
 import type { AttentionDomain } from '../attention/compose';
 import { useTheme } from '../contexts/ThemeContext';
 import { useOperatorConfig } from '../contexts/OperatorConfigContext';
+import { READ_ONLY_CONTROL_TITLE, useReadOnly } from '../contexts/ReadOnlyContext';
 import { useViewingAs } from '../contexts/ViewingAsContext';
 import { displayLabel } from '../hooks/aliasPriority';
 import { useCachedData } from '../hooks/useCachedData';
@@ -54,6 +55,7 @@ export function Header() {
   const { resolved, toggle } = useTheme();
   const { viewingAs } = useViewingAs();
   const { operatorAlias } = useOperatorConfig();
+  const readOnly = useReadOnly();
   const attention = useAttentionModel();
   const { data: config } = useCachedData('config', () => api.config());
   // City switcher source (gascity-dashboard-ucc). Lists every managed city;
@@ -65,6 +67,18 @@ export function Header() {
   const { data: cities } = useCachedData('cities', () => supervisorApi().listCities());
   const activeCity = getActiveCity();
   const cityItems = cities?.items ?? [];
+  // The selected option value. Prefer the URL-derived active city, then the
+  // backend's reported city, so the switcher never renders blank.
+  const selectedCity = activeCity ?? config?.cityName ?? '';
+  // True once the list has loaded and the selected city is a member. While the
+  // list is empty (pre-load or a transient fetch blip) we do NOT flag the city
+  // as unknown — only a loaded list that omits it is a real miss.
+  const activeCityKnown =
+    selectedCity === '' || cityItems.some((c) => c.name === selectedCity);
+  // Show the switcher whenever there's a choice to make, or when the selected
+  // city is unknown — in the latter case the disabled "(unknown)" option keeps
+  // the stale city visible instead of an empty select.
+  const showSwitcher = cityItems.length > 1 || !activeCityKnown;
   const onSwitchCity = (next: string): void => {
     if (next === activeCity) return;
     window.location.assign(`/city/${encodeURIComponent(next)}/`);
@@ -99,18 +113,28 @@ export function Header() {
           <span className="text-fg-muted" aria-hidden="true">
             ·
           </span>
-          {cityItems.length > 1 ? (
+          {showSwitcher ? (
             <label className="sr-only" htmlFor="city-switcher">
               Switch city
             </label>
           ) : null}
-          {cityItems.length > 1 ? (
+          {showSwitcher ? (
             <select
               id="city-switcher"
-              value={activeCity ?? config?.cityName ?? ''}
+              value={selectedCity}
               onChange={(e) => onSwitchCity(e.target.value)}
               className="text-label uppercase tracking-wider text-fg-muted bg-transparent border-0 focus-mark cursor-pointer hover:text-fg transition-colors duration-150 ease-out-quart"
             >
+              {/* A grammar-valid but unregistered/renamed city in the URL is not
+                  a list member; without this the select would render blank and
+                  the operator couldn't tell which (stale) city they're on. The
+                  disabled option keeps it visible without making it selectable
+                  (gascity-dashboard-ux-stale-city-url-no-recovery). */}
+              {!activeCityKnown && selectedCity !== '' ? (
+                <option value={selectedCity} disabled>
+                  {selectedCity} (unknown)
+                </option>
+              ) : null}
               {cityItems.map((c) => (
                 <option key={c.name} value={c.name}>
                   {c.name}
@@ -120,12 +144,20 @@ export function Header() {
             </select>
           ) : (
             <span className="text-label uppercase tracking-wider text-fg-muted">
-              {activeCity ?? config?.cityName ?? 'city'}
+              {selectedCity || 'city'}
             </span>
           )}
           {showReadingAs && (
             <span className="text-label uppercase tracking-wider text-accent ml-3">
               · reading as {displayLabel(viewingAs.alias, operatorAlias)}
+            </span>
+          )}
+          {readOnly && (
+            <span
+              title={READ_ONLY_CONTROL_TITLE}
+              className="text-label uppercase tracking-wider text-warn ml-3"
+            >
+              · read-only
             </span>
           )}
         </div>

@@ -199,9 +199,9 @@ func TestClientErrorsInvalidJSON(t *testing.T) {
 }
 
 func TestClientErrorField(t *testing.T) {
-	// Control bytes and non-SGR CSI sequences stripped, whitespace collapsed.
-	// (sanitizeTerminalOutput preserves SGR color introducers like \x1b[31m as
-	// residue by design; logs avoid those by not emitting color.)
+	// Control bytes and CSI sequences (SGR and otherwise) are stripped whole and
+	// whitespace is collapsed, so untrusted browser input cannot inject into the
+	// log line.
 	if got := clientErrorField("a\x07 \x1b[2K b\tc\n"); got != "a b c" {
 		t.Errorf("clientErrorField sanitization = %q, want %q", got, "a b c")
 	}

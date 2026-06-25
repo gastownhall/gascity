@@ -137,6 +137,10 @@ func withRecovery(next http.Handler) http.Handler {
 // extra is checked with exact string equality after the localhost check.
 func withCORSAllowing(extra []string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The response varies by Origin (ACAO is set only for allowed origins),
+		// so caches must key on it; always advertise that, even when the origin
+		// is not allowed.
+		w.Header().Add("Vary", "Origin")
 		origin := r.Header.Get("Origin")
 		if originAllowed(origin, extra) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)

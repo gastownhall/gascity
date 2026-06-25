@@ -83,7 +83,7 @@ describe('BeadsPage supervisor reads', () => {
     expect(within(dialog).getByRole('button', { name: /view live run/i })).toBeTruthy();
   });
 
-  it('disables the New bead control and surfaces a read-only affordance under DASHBOARD_READONLY', async () => {
+  it('disables the New bead control and surfaces a read-only affordance in read-only mode', async () => {
     renderPage('/beads', [], { readOnly: true });
 
     await screen.findByText('direct supervisor bead');

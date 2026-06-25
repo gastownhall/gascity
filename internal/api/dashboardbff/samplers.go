@@ -129,16 +129,17 @@ func (m *samplerManager) enable(ctx context.Context, wg *sync.WaitGroup) {
 
 // ensure returns the sampler for a city, starting its background loop on first
 // use when the manager has been enabled (Start called). Before Start, it
-// returns a sampler with an empty (not-sampled-yet) snapshot.
-func (m *samplerManager) ensure(name, path string) *citySampler {
+// returns a sampler with an empty (not-sampled-yet) snapshot. The city's
+// on-disk path is not stored: rig paths come from the supervisor status body,
+// and the sampler keys everything else off cs.name.
+func (m *samplerManager) ensure(name string) *citySampler {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cs, ok := m.cities[name]
 	if !ok {
-		cs = &citySampler{name: name, path: path, mgr: m}
+		cs = &citySampler{name: name, mgr: m}
 		m.cities[name] = cs
 	}
-	cs.path = path
 	if m.enabled && m.ctx != nil && !cs.started {
 		cs.started = true
 		m.wg.Add(1)
@@ -154,10 +155,14 @@ func (m *samplerManager) ensure(name, path string) *citySampler {
 
 type citySampler struct {
 	name string
-	path string
 	mgr  *samplerManager
 
 	started bool
+
+	// beforeProbe, when set, runs once per rig-probe pass while no lock is held.
+	// It exists only as a test seam to prove refresh() does its blocking probe
+	// work off the lock; production never sets it.
+	beforeProbe func()
 
 	mu sync.RWMutex
 	// status
@@ -192,52 +197,106 @@ func (cs *citySampler) loop(ctx context.Context) {
 	}
 }
 
+// refresh recomputes the cached snapshot off the request path. It is the
+// module's hot loop, so it does ALL blocking/expensive work — the status read,
+// the parse, and the per-rig bd-doctor + TCP probe fan-out — on local
+// variables with NO lock held, then takes cs.mu.Lock() exactly once at the end
+// to publish the computed fields (microseconds). The contract is that a reader
+// (supervisorStatus/doltTrend/rigStoreHealth) never blocks behind a probe, so
+// the write lock must never be held across exec/TCP/HTTP.
+//
+// refresh runs only from the single loop() goroutine per sampler, so reading
+// the cadence gates and dolt ring under a brief RLock up front and writing the
+// computed ring back at the end cannot race another refresh.
 func (cs *citySampler) refresh(ctx context.Context) {
+	// 1. Blocking status read — already lock-free.
 	raw, err := cs.mgr.fetchStatus(ctx, cs.name)
 	now := time.Now()
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
 
 	if err != nil {
+		// Degrade, don't blank: keep the last-good status, dolt samples, and rig
+		// report; only flip the status availability + reason.
+		cs.mu.Lock()
 		cs.statusOK = false
 		cs.statusReason = "status_read_failed"
-		// Retain last good status, dolt samples, and rig report (degraded, not
-		// blank) per the BFF contract.
+		cs.mu.Unlock()
 		return
 	}
 
-	cs.statusRaw = raw
-	cs.statusAt = now
-	cs.statusOK = true
+	// 2. Snapshot the cadence gates and the current dolt ring under a brief
+	// RLock so the heavy work below sees a consistent starting point.
+	cs.mu.RLock()
+	lastDoltAppend := cs.lastDoltAppend
+	lastRig := cs.lastRig
+	prevDolt := cs.dolt
+	cs.mu.RUnlock()
 
 	parsed := parseStatusBody(raw)
 
-	// Dolt size ring (10-min cadence).
-	if cs.lastDoltAppend.IsZero() || now.Sub(cs.lastDoltAppend) >= doltAppendInterval {
+	// 3. Compute the dolt ring (10-min cadence) into locals. doltChanged tracks
+	// whether the gate fired so we only advance lastDoltAppend / publish a new
+	// ring when it did.
+	var (
+		newDolt        []doltSample
+		doltChanged    bool
+		appendDoltRing bool
+	)
+	if lastDoltAppend.IsZero() || now.Sub(lastDoltAppend) >= doltAppendInterval {
+		doltChanged = true
 		if parsed.StoreHealth != nil && parsed.StoreHealth.SizeBytes != nil && *parsed.StoreHealth.SizeBytes >= 0 {
-			cs.dolt = append(cs.dolt, doltSample{TS: now.UTC().Format(time.RFC3339Nano), Bytes: *parsed.StoreHealth.SizeBytes})
-			if len(cs.dolt) > doltRingSlots {
-				cs.dolt = cs.dolt[len(cs.dolt)-doltRingSlots:]
+			appendDoltRing = true
+			ring := make([]doltSample, len(prevDolt), len(prevDolt)+1)
+			copy(ring, prevDolt)
+			ring = append(ring, doltSample{TS: now.UTC().Format(time.RFC3339Nano), Bytes: *parsed.StoreHealth.SizeBytes})
+			if len(ring) > doltRingSlots {
+				ring = ring[len(ring)-doltRingSlots:]
 			}
-			cs.doltOK = true
-			cs.lastDoltAppend = now
-		} else {
-			cs.doltOK = false
-			cs.doltReason = "store_health_absent"
+			newDolt = ring
 		}
 	}
 
-	// Rig probe (5-min cadence; heavy: one bd doctor per rig).
-	if cs.lastRig.IsZero() || now.Sub(cs.lastRig) >= rigProbeInterval {
+	// 4. Probe the rigs (5-min cadence; heavy: one bd doctor + TCP dial per
+	// rig) into locals. No lock is held across the fan-out.
+	var (
+		newRigs    []rigStoreHealth
+		rigChanged bool
+	)
+	if lastRig.IsZero() || now.Sub(lastRig) >= rigProbeInterval {
+		rigChanged = true
+		if cs.beforeProbe != nil {
+			cs.beforeProbe()
+		}
 		rigs := make([]rigStoreHealth, 0, len(parsed.RigDetails))
 		for _, rd := range parsed.RigDetails {
 			rigs = append(rigs, cs.mgr.probeRig(ctx, rd.Name, rd.Path))
 		}
-		cs.rigs = rigs
+		newRigs = rigs
+	}
+
+	// 5. Publish: one short critical section, assignments only.
+	cs.mu.Lock()
+	cs.statusRaw = raw
+	cs.statusAt = now
+	cs.statusOK = true
+	if doltChanged {
+		if appendDoltRing {
+			cs.dolt = newDolt
+			cs.doltOK = true
+			cs.lastDoltAppend = now
+		} else {
+			// store_health absent: report unavailable but keep the last-good ring
+			// and do not advance lastDoltAppend, so the next tick retries.
+			cs.doltOK = false
+			cs.doltReason = "store_health_absent"
+		}
+	}
+	if rigChanged {
+		cs.rigs = newRigs
 		cs.rigAt = now
 		cs.rigOK = true
 		cs.lastRig = now
 	}
+	cs.mu.Unlock()
 }
 
 func (cs *citySampler) supervisorStatus() supervisorStatusReport {
@@ -337,7 +396,7 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 	if !isDir(beadsPath) {
 		return rigStoreHealth{
 			Rig: rigName, BeadsPath: beadsPath, Rollup: "down", Reachable: false,
-			Problems: []rigStoreCheck{}, Note: ".beads store not found on disk",
+			Problems: []rigStoreCheck{}, Note: sanitizeTerminalOutput(".beads store not found on disk"),
 		}
 	}
 
@@ -373,7 +432,10 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 	return rigStoreHealth{
 		Rig: rigName, BeadsPath: beadsPath, Rollup: rollup, Reachable: true,
 		DoltEndpoint: doltEndpoint, DoltConnected: doltConnected,
-		IssueCount: issueCount, Problems: problems, Note: note,
+		// Note carries subprocess/error text (bd doctor failure reason); sanitize
+		// it before it reaches the browser, per the "all subprocess output is
+		// sanitized" contract.
+		IssueCount: issueCount, Problems: problems, Note: sanitizeTerminalOutput(note),
 	}
 }
 
@@ -406,7 +468,15 @@ func parseDoctorChecks(stdout string) ([]rigStoreCheck, bool) {
 		if nm == "" {
 			nm = "unknown"
 		}
-		out = append(out, rigStoreCheck{Category: cat, Name: nm, Status: normalizeDoctorStatus(c.Status), Message: c.Message})
+		// Category, Name, and Message all come from bd doctor's JSON output;
+		// sanitize each before it reaches the browser, per the "all subprocess
+		// output is sanitized" contract. Status is normalized to a fixed enum.
+		out = append(out, rigStoreCheck{
+			Category: sanitizeTerminalOutput(cat),
+			Name:     sanitizeTerminalOutput(nm),
+			Status:   normalizeDoctorStatus(c.Status),
+			Message:  sanitizeTerminalOutput(c.Message),
+		})
 	}
 	return out, true
 }
@@ -544,9 +614,8 @@ func (p *Plane) registerSamplers() {
 // citySampler resolves the city to its sampler, returning false for an unknown
 // city (so the handler can 404). Starting the background loop is lazy.
 func (p *Plane) citySampler(name string) (*citySampler, bool) {
-	path, ok := p.resolveCityPath(name)
-	if !ok {
+	if _, ok := p.resolveCityPath(name); !ok {
 		return nil, false
 	}
-	return p.samplers.ensure(name, path), true
+	return p.samplers.ensure(name), true
 }

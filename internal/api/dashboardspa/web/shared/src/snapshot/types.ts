@@ -80,13 +80,13 @@ export interface DashboardRuntimeConfig {
   cityRoot: string;
   useFixtures: boolean;
   /**
-   * True when the backend runs with `DASHBOARD_READONLY=1` (AdminConfig
-   * `readOnly`, gascity-dashboard-uzhr). The server-side proxy gate (z8n7)
-   * already 405s supervisor mutations in this mode; the frontend projects
-   * this so the SPA can DISABLE (not hide) its mutating controls with a
-   * read-only affordance, rather than letting a click 405 into an
-   * unhandled API error. Part of exposure-hardening epic
-   * gascity-dashboard-lv4k.
+   * True when the supervisor binds a non-localhost address without
+   * `[supervisor].allow_mutations` (AdminConfig `readOnly`,
+   * gascity-dashboard-uzhr). The server-side proxy gate (z8n7) already 405s
+   * supervisor mutations in this mode; the frontend projects this so the SPA
+   * can DISABLE (not hide) its mutating controls with a read-only affordance,
+   * rather than letting a click 405 into an unhandled API error. Part of
+   * exposure-hardening epic gascity-dashboard-lv4k.
    */
   readOnly: boolean;
   /**

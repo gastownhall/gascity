@@ -1,10 +1,8 @@
 package dashboardbff
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -72,6 +71,12 @@ type localToolVersions struct {
 // versionProbeTimeout bounds each local tool version probe.
 const versionProbeTimeout = 5 * time.Second
 
+// localToolsTTL is how long a probed LocalToolVersions snapshot is reused
+// before the next request re-probes. Tool versions only change at deploy
+// cadence, so a short TTL keeps GET /api/health/local-tools from forking three
+// subprocesses on every poll.
+const localToolsTTL = 45 * time.Second
+
 // semverRE extracts a dotted semver token from version output (SEMVER_RE in
 // version-probe.ts).
 var semverRE = regexp.MustCompile(`(\d+\.\d+\.\d+)`)
@@ -83,7 +88,7 @@ func (p *Plane) registerHealth() {
 		writeJSON(w, http.StatusOK, currentSystemHealth())
 	})
 	p.mux.HandleFunc("GET /api/health/local-tools", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, probeLocalTools(r.Context()))
+		writeJSON(w, http.StatusOK, p.localToolVersions(r.Context()))
 	})
 }
 
@@ -205,17 +210,46 @@ func parseFloat(s string) float64 {
 	return v
 }
 
-// probeLocalTools probes the dolt, beads, and gc binaries concurrently. Each
-// result is either {status:available,version,source} or {status:unavailable,
-// reason}; a probe never fabricates a version.
-func probeLocalTools(ctx context.Context) localToolVersions {
+// localToolsCache memoizes one Plane's LocalToolVersions snapshot behind a
+// mutex and a TTL. The mutex also collapses concurrent refreshes so a burst of
+// GETs after expiry forks one set of probes, not one set per request.
+type localToolsCache struct {
+	mu      sync.Mutex
+	val     localToolVersions
+	expires time.Time
+	primed  bool
+}
+
+// localToolVersions returns the memoized tool-version snapshot, re-probing only
+// when the cached value is missing or older than localToolsTTL. Repeated GETs
+// within the TTL reuse the snapshot instead of forking three subprocesses each.
+// The cache lives on the Plane (one per process); its mutex collapses
+// concurrent refreshes so a burst of GETs after expiry forks one set of probes.
+func (p *Plane) localToolVersions(ctx context.Context) localToolVersions {
+	c := p.localTools
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.primed && time.Now().Before(c.expires) {
+		return c.val
+	}
+	c.val = p.probeLocalTools(ctx)
+	c.expires = time.Now().Add(localToolsTTL)
+	c.primed = true
+	return c.val
+}
+
+// probeLocalTools probes the dolt, beads, and gc binaries concurrently through
+// the shared exec runner (so each probe obeys the concurrency semaphore, clean
+// environment, and timeout). Each result is either {status:available,version,
+// source} or {status:unavailable,reason}; a probe never fabricates a version.
+func (p *Plane) probeLocalTools(ctx context.Context) localToolVersions {
 	var (
 		dolt, beads, gc localToolVersion
 		done            = make(chan struct{}, 3)
 	)
-	go func() { dolt = probeSemverTool(ctx, "dolt", "version"); done <- struct{}{} }()
-	go func() { beads = probeSemverTool(ctx, "bd", "version"); done <- struct{}{} }()
-	go func() { gc = probeGCVersion(ctx); done <- struct{}{} }()
+	go func() { dolt = p.probeSemverTool(ctx, "dolt", "version"); done <- struct{}{} }()
+	go func() { beads = p.probeSemverTool(ctx, "bd", "version"); done <- struct{}{} }()
+	go func() { gc = p.probeGCVersion(ctx); done <- struct{}{} }()
 	for i := 0; i < 3; i++ {
 		<-done
 	}
@@ -226,12 +260,12 @@ func probeLocalTools(ctx context.Context) localToolVersions {
 // source is the resolved binary path. A LookPath miss, exec failure, non-zero
 // exit, or unrecognizable version surfaces as unavailable with a reason —
 // never a fabricated version (probeVersion in version-probe.ts).
-func probeSemverTool(ctx context.Context, cmd, sub string) localToolVersion {
+func (p *Plane) probeSemverTool(ctx context.Context, cmd, sub string) localToolVersion {
 	path, err := exec.LookPath(cmd)
 	if err != nil {
 		return unavailable(cmd + " not found on PATH")
 	}
-	stdout, code, err := runProbe(ctx, cmd, sub)
+	stdout, code, err := p.runProbe(ctx, cmd, sub)
 	if err != nil {
 		return unavailable(cmd + " " + sub + " probe failed: " + err.Error())
 	}
@@ -253,12 +287,12 @@ type gcVersionJSON struct {
 // probeGCVersion runs `gc version --json` and reads the version field verbatim
 // so a local `dev` build surfaces as "dev" rather than collapsing to "no
 // recognizable version" (probeGcVersionJson in version-probe.ts).
-func probeGCVersion(ctx context.Context) localToolVersion {
+func (p *Plane) probeGCVersion(ctx context.Context) localToolVersion {
 	path, err := exec.LookPath("gc")
 	if err != nil {
 		return unavailable("gc not found on PATH")
 	}
-	stdout, code, err := runProbe(ctx, "gc", "version", "--json")
+	stdout, code, err := p.runProbe(ctx, "gc", "version", "--json")
 	if err != nil {
 		return unavailable("gc version probe failed: " + err.Error())
 	}
@@ -272,27 +306,21 @@ func probeGCVersion(ctx context.Context) localToolVersion {
 	return localToolVersion{Status: "available", Version: parsed.Version, Source: path}
 }
 
-// runProbe runs a short, shell-free version command under the plane's clean
-// environment, returning stdout, the exit code, and a spawn/timeout error.
-func runProbe(ctx context.Context, cmd string, args ...string) (stdout string, code int, err error) {
-	cctx, cancel := context.WithTimeout(ctx, versionProbeTimeout)
-	defer cancel()
-	c := exec.CommandContext(cctx, cmd, args...)
-	c.Env = cleanEnv()
-	var out bytes.Buffer
-	c.Stdout = &out
-	runErr := c.Run()
-	if runErr != nil {
-		var ee *exec.ExitError
-		if errors.As(runErr, &ee) {
-			return out.String(), ee.ExitCode(), nil
-		}
-		return out.String(), -1, runErr
+// runProbe runs a short, shell-free version command through the shared exec
+// runner so the probe obeys the maxConcurrent semaphore, the clean environment,
+// and a bounded timeout. It returns stdout, the exit code, and a spawn/timeout
+// error (a non-zero exit is reported in code, not as an error).
+func (p *Plane) runProbe(ctx context.Context, cmd string, args ...string) (stdout string, code int, err error) {
+	res, err := p.exec.run(ctx, cmd, args, versionProbeTimeout, maxBytes)
+	if err != nil {
+		return "", -1, err
 	}
-	return out.String(), 0, nil
+	return res.stdout, res.exitCode, nil
 }
 
-// unavailable builds an unavailable LocalToolVersion with the given reason.
+// unavailable builds an unavailable LocalToolVersion with the given reason. The
+// reason forwards subprocess/error text, so it is sanitized before it reaches
+// the browser, per the "all subprocess output is sanitized" contract.
 func unavailable(reason string) localToolVersion {
-	return localToolVersion{Status: "unavailable", Reason: reason}
+	return localToolVersion{Status: "unavailable", Reason: sanitizeTerminalOutput(reason)}
 }

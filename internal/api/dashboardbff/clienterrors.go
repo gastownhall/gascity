@@ -25,6 +25,10 @@ const maxClientErrorBody = 64 << 10
 // route's MAX_FIELD_LENGTH so a single report cannot dominate the log line.
 const maxClientErrorField = 240
 
+// maxClientErrorReports caps how many entries one request can emit, so a single
+// 64KB array body cannot amplify into thousands of log lines.
+const maxClientErrorReports = 32
+
 // registerClientLog wires POST /api/client-errors onto the plane mux. It is a
 // telemetry sink: it accepts a single report or an array of reports, logs one
 // structured line per entry, and answers 204 No Content. As a mutation it
@@ -41,6 +45,9 @@ func (p *Plane) registerClientLog() {
 			writeError(w, http.StatusBadRequest, "invalid client error report")
 			return
 		}
+		if len(reports) > maxClientErrorReports {
+			reports = reports[:maxClientErrorReports]
+		}
 		for _, rep := range reports {
 			log.Printf("client-error: %s %s: %s",
 				clientErrorField(rep.Component),
@@ -48,6 +55,7 @@ func (p *Plane) registerClientLog() {
 				clientErrorField(rep.Message),
 			)
 		}
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.WriteHeader(http.StatusNoContent)
 	})
 }

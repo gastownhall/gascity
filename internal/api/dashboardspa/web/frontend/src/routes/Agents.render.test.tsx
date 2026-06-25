@@ -406,7 +406,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     expect(fetchUrls()).not.toContain('/api/city/test-city/sessions/gc-2568/respond');
   });
 
-  it('disables the pending Approve/Deny controls under DASHBOARD_READONLY (gascity-dashboard-uzhr)', async () => {
+  it('disables the pending Approve/Deny controls in read-only mode (gascity-dashboard-uzhr)', async () => {
     render(
       <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
         <NowProvider intervalMs={1_000_000}>

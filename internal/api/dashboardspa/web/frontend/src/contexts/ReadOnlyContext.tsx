@@ -2,12 +2,14 @@ import { createContext, useContext, type ReactNode } from 'react';
 import { StatusBadge } from '../components/StatusBadge';
 
 // Server-enforced read-only posture surfaced to the SPA
-// (gascity-dashboard-uzhr). When the backend runs with `DASHBOARD_READONLY=1`,
-// the supervisor transport-proxy gate (z8n7) 405s every mutation. Without a
+// (gascity-dashboard-uzhr). Read-only is set when the supervisor binds a
+// non-localhost address without `[supervisor].allow_mutations`; the supervisor
+// transport-proxy gate (z8n7) then 405s every mutation. The backend projects
+// this through `/config` -> `DashboardRuntimeConfig.readOnly`. Without a
 // matching client affordance the SPA's create/sling/claim/close/nudge buttons
 // stay live and a click 405s into an unhandled API error. This context carries
-// the flag from `/config` so mutating controls render DISABLED (per
-// DESIGN.md §States have words: disabled + an explanatory title), never hidden.
+// the flag so mutating controls render DISABLED (per DESIGN.md §States have
+// words: disabled + an explanatory title), never hidden.
 //
 // Default `false` covers the pre-config-load window and any consumer mounted
 // outside the provider: controls render enabled, exactly as before this flag
@@ -27,7 +29,8 @@ export function ReadOnlyProvider({
   return <ReadOnlyContext.Provider value={readOnly}>{children}</ReadOnlyContext.Provider>;
 }
 
-/** True when the dashboard backend is in read-only mode (DASHBOARD_READONLY=1). */
+/** True when the dashboard backend is in read-only mode (supervisor bound
+ *  non-localhost without `[supervisor].allow_mutations`). */
 export function useReadOnly(): boolean {
   return useContext(ReadOnlyContext);
 }

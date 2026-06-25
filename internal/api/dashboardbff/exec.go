@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -152,8 +153,15 @@ func (b *cappedBuffer) markTruncated() {
 func (b *cappedBuffer) String() string { return b.buf.String() }
 
 // cleanEnv builds the minimal environment passed to every subprocess. No host
-// environment is inherited; PATH/HOME/LANG are assigned intentionally and
-// GITHUB_TOKEN is forwarded only when present (mirrors exec-core.ts::cleanEnv).
+// environment is inherited; PATH/HOME/LANG are assigned intentionally.
+//
+// GITHUB_TOKEN is deliberately NOT forwarded: none of the dashboard's
+// read-only probes (git log/diff, bd doctor, version probes) need it, and
+// leaking it into a git invocation whose cwd is request-influenced would be
+// needless credential exposure (least privilege). The GIT_* settings neutralize
+// attacker-authored repo config in a probed cwd — no transport protocols and no
+// terminal credential prompt — so a hostile repo cannot drive an out-of-band
+// helper that inherits this environment.
 func cleanEnv() []string {
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -163,25 +171,26 @@ func cleanEnv() []string {
 	if path == "" {
 		path = home + "/.local/bin:/usr/local/bin:/usr/bin:/bin"
 	}
-	env := []string{
+	return []string{
 		"PATH=" + path,
 		"HOME=" + home,
 		"LANG=C.UTF-8",
 		"NO_COLOR=1",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ALLOW_PROTOCOL=none",
 	}
-	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
-		env = append(env, "GITHUB_TOKEN="+tok)
-	}
-	return env
 }
 
-// Terminal-output sanitizer, ported from exec.ts. Strips OSC sequences,
-// non-SGR CSI sequences, C0/DEL/C1 control bytes, and all 12 Unicode
+// Terminal-output sanitizer, ported from exec.ts. Strips OSC sequences, CSI
+// sequences (full ECMA-48 grammar), C0/DEL/C1 control bytes, and all 12 Unicode
 // bidi/RTL controls from CVE-2021-42574, BEFORE any subprocess output reaches
-// the browser.
+// the browser. csiRE matches the complete `ESC [ params intermediates final`
+// form (final byte 0x40-0x7e), so SGR and every other CSI sequence is removed
+// whole; NO_COLOR=1 already suppresses color, so there is nothing to preserve,
+// and ctrlRE is the backstop for any residual ESC.
 var (
 	oscRE  = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
-	csiRE  = regexp.MustCompile(`\x1b\[[?0-9;]*[a-ln-zA-LN-Z]`)
+	csiRE  = regexp.MustCompile(`\x1b\[[\x30-\x3f]*[\x20-\x2f]*[@-~]`)
 	ctrlRE = regexp.MustCompile(`[\x00-\x08\x0b-\x1f\x7f-\x9f]`)
 	bidiRE = regexp.MustCompile(`[\x{061c}\x{200e}\x{200f}\x{202a}-\x{202e}\x{2066}-\x{2069}]`)
 )
@@ -218,18 +227,27 @@ func isPathUnderRoot(cwd, root string) bool {
 	return cwd == root || strings.HasPrefix(cwd, root+"/")
 }
 
-// isValidRunCwd validates a run cwd before it is handed to `git -C <cwd>`.
-// Shape is always checked; when allowedRoots is non-empty the cwd must also
-// sit at or under one sanctioned root (RUN_CWD_ALLOWED_ROOTS).
+// isValidRunCwd validates a run cwd before it is handed to `git -C <cwd>`. It is
+// FAIL-CLOSED: the cwd must pass the lexical shape check AND its real path (via
+// EvalSymlinks) must sit at or under one allowedRoots entry's real path. An
+// empty allowedRoots denies every cwd, so a caller must always supply at least
+// one sanctioned root (the resolved city directory). Resolving symlinks on both
+// sides closes the escape where a symlink under an allowed root points outside
+// it (git -C follows the directory symlink).
 func isValidRunCwd(cwd string, allowedRoots []string) bool {
-	if !isValidHostPath(cwd) {
+	if !isValidHostPath(cwd) || len(allowedRoots) == 0 {
 		return false
 	}
-	if len(allowedRoots) == 0 {
-		return true
+	realCwd, err := filepath.EvalSymlinks(filepath.Clean(cwd))
+	if err != nil {
+		return false
 	}
 	for _, root := range allowedRoots {
-		if isPathUnderRoot(cwd, root) {
+		realRoot, err := filepath.EvalSymlinks(filepath.Clean(root))
+		if err != nil {
+			continue
+		}
+		if isPathUnderRoot(realCwd, realRoot) {
 			return true
 		}
 	}
@@ -245,6 +263,22 @@ var runReviewablePaths = []string{
 }
 
 const gitPretty = "--pretty=format:%H%x09%h%x09%an%x09%aI%x09%D%x09%s"
+
+// gitHardeningArgs are prepended (before the subcommand) to every git
+// invocation so attacker-authored repo config in a request-influenced cwd
+// cannot drive an external-transport helper, an fsmonitor daemon, or a hook.
+var gitHardeningArgs = []string{
+	"-c", "protocol.ext.allow=never",
+	"-c", "core.fsmonitor=false",
+	"-c", "core.hooksPath=/dev/null",
+}
+
+// gitArgs assembles a hardened `git -c … -C <cwd> <args…>` argv.
+func gitArgs(cwd string, args ...string) []string {
+	full := append([]string{}, gitHardeningArgs...)
+	full = append(full, "-C", cwd)
+	return append(full, args...)
+}
 
 // gitLogViews is the hardcoded enum of `git log` invocations. The operator can
 // only pick a view name; arbitrary git arguments can never reach the server.
@@ -268,8 +302,7 @@ func (r *execRunner) execGitLog(ctx context.Context, view string) (*execResult, 
 	if !ok {
 		return nil, validationErr("unknown git view")
 	}
-	full := append([]string{"-C", gitRepoPath()}, args...)
-	return r.run(ctx, "git", full, gitLogTimeout, maxBytes)
+	return r.run(ctx, "git", gitArgs(gitRepoPath(), args...), gitLogTimeout, maxBytes)
 }
 
 // runGitViews is the hardcoded enum of per-run git reads for formula run-detail
@@ -310,8 +343,7 @@ func (r *execRunner) execRunGit(ctx context.Context, cwd, view string, allowedRo
 		}
 		args = v
 	}
-	full := append([]string{"-C", cwd}, args...)
-	return r.run(ctx, "git", full, runGitTimeout, outCap)
+	return r.run(ctx, "git", gitArgs(cwd, args...), runGitTimeout, outCap)
 }
 
 // execRunGitDiffFrom runs `git diff <baseRevision>` over reviewable paths.
@@ -319,8 +351,8 @@ func (r *execRunner) execRunGitDiffFrom(ctx context.Context, cwd, baseRevision s
 	if !isValidRunCwd(cwd, allowedRoots) || !baseRevisionRE.MatchString(baseRevision) {
 		return nil, validationErr("invalid run git diff args")
 	}
-	args := append([]string{"-C", cwd, "diff", "--no-ext-diff", "--no-color", baseRevision}, runReviewablePaths...)
-	return r.run(ctx, "git", args, runGitTimeout, maxRunDiffBytes)
+	diffArgs := append([]string{"diff", "--no-ext-diff", "--no-color", baseRevision}, runReviewablePaths...)
+	return r.run(ctx, "git", gitArgs(cwd, diffArgs...), runGitTimeout, maxRunDiffBytes)
 }
 
 // execRunGitNameStatusFrom runs `git diff --name-status <baseRevision>`.
@@ -328,8 +360,8 @@ func (r *execRunner) execRunGitNameStatusFrom(ctx context.Context, cwd, baseRevi
 	if !isValidRunCwd(cwd, allowedRoots) || !baseRevisionRE.MatchString(baseRevision) {
 		return nil, validationErr("invalid run git name-status args")
 	}
-	args := append([]string{"-C", cwd, "diff", "--name-status", "--no-ext-diff", "--no-color", baseRevision}, runReviewablePaths...)
-	return r.run(ctx, "git", args, runGitTimeout, maxBytes)
+	nameStatusArgs := append([]string{"diff", "--name-status", "--no-ext-diff", "--no-color", baseRevision}, runReviewablePaths...)
+	return r.run(ctx, "git", gitArgs(cwd, nameStatusArgs...), runGitTimeout, maxBytes)
 }
 
 // execBdDoctor runs a read-only `bd doctor` health probe of a rig's embedded

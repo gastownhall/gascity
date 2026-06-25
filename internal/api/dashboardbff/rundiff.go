@@ -96,7 +96,8 @@ func (p *Plane) registerRunDiff() {
 
 func (p *Plane) handleRunDiff(w http.ResponseWriter, r *http.Request) {
 	cityName := r.PathValue("cityName")
-	if _, ok := p.resolveCityPath(cityName); !ok {
+	cityPath, ok := p.resolveCityPath(cityName)
+	if !ok {
 		writeError(w, http.StatusNotFound, "unknown city")
 		return
 	}
@@ -123,7 +124,14 @@ func (p *Plane) handleRunDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := p.readRunGitDiff(r.Context(), cwd)
+	// The effective allowed-roots for this request are the configured roots plus
+	// the resolved city's own directory. Always passing the city path means runs
+	// under the city work by default, while the empty-allowlist case stays
+	// fail-closed (isValidRunCwd rejects everything when the effective list is
+	// empty), so arbitrary host paths are still refused.
+	allowedRoots := append(append([]string{}, p.deps.RunCwdAllowedRoots...), cityPath)
+
+	resp, err := p.readRunGitDiff(r.Context(), cwd, allowedRoots)
 	if err != nil {
 		// The exec methods return a validation error when the cwd fails the
 		// shape/allowlist gate; surface that as a 400 rather than a 500 so the
@@ -187,6 +195,8 @@ func (e runExecutionPath) resolve() (cwd string, errMsg string) {
 // (from an "unavailable" execution path) yields a path_unknown diff. Otherwise
 // it resolves the repo root, the comparison base (upstream merge-base vs HEAD),
 // and assembles the reviewable status, changedFiles, and unified patch.
+// allowedRoots is the effective run-cwd allowlist (configured roots plus the
+// resolved city dir); every git read is gated against it.
 //
 // Simplification vs the BFF: the BFF additionally walks UNTRACKED files via the
 // `untracked` git view (git ls-files --others) and synthesizes per-file patches
@@ -196,12 +206,12 @@ func (e runExecutionPath) resolve() (cwd string, errMsg string) {
 // `status` view passes --untracked-files=all; only their synthesized patch
 // bodies and changedFiles entries are omitted. The tracked-diff path — the core
 // of the endpoint — is ported faithfully.
-func (p *Plane) readRunGitDiff(ctx context.Context, cwd string) (runDiffResponse, error) {
+func (p *Plane) readRunGitDiff(ctx context.Context, cwd string, allowedRoots []string) (runDiffResponse, error) {
 	if cwd == "" {
 		return emptyDiff("path_unknown"), nil
 	}
 
-	rootRes, err := p.exec.execRunGit(ctx, cwd, "root", p.deps.RunCwdAllowedRoots)
+	rootRes, err := p.exec.execRunGit(ctx, cwd, "root", allowedRoots)
 	if err != nil {
 		return runDiffResponse{}, err
 	}
@@ -211,12 +221,12 @@ func (p *Plane) readRunGitDiff(ctx context.Context, cwd string) (runDiffResponse
 		return emptyDiff("not_git"), nil
 	}
 
-	comparison, cmpErr := p.resolveComparison(ctx, cwd)
+	comparison, cmpErr := p.resolveComparison(ctx, cwd, allowedRoots)
 	if cmpErr != nil {
 		return runDiffResponse{}, cmpErr
 	}
 
-	statusRes, err := p.exec.execRunGit(ctx, cwd, "status", p.deps.RunCwdAllowedRoots)
+	statusRes, err := p.exec.execRunGit(ctx, cwd, "status", allowedRoots)
 	if err != nil {
 		return runDiffResponse{}, err
 	}
@@ -225,11 +235,11 @@ func (p *Plane) readRunGitDiff(ctx context.Context, cwd string) (runDiffResponse
 	}
 	status := parseStatusLines(statusRes.stdout)
 
-	trackedPatch, patchTrunc, perr := p.readTrackedPatch(ctx, cwd, comparison)
+	trackedPatch, patchTrunc, perr := p.readTrackedPatch(ctx, cwd, comparison, allowedRoots)
 	if perr != nil {
 		return runDiffResponse{}, perr
 	}
-	changedFiles, cerr := p.readTrackedChangedFiles(ctx, cwd, comparison)
+	changedFiles, cerr := p.readTrackedChangedFiles(ctx, cwd, comparison, allowedRoots)
 	if cerr != nil {
 		return runDiffResponse{}, cerr
 	}
@@ -279,8 +289,8 @@ func errorDiff(rootPath string) runDiffResponse {
 // resolveComparison ports diff.ts resolveComparison. It prefers an upstream
 // merge-base comparison; if no upstream is configured or its merge-base can't
 // be resolved to a valid hash, it falls back to comparing against HEAD.
-func (p *Plane) resolveComparison(ctx context.Context, cwd string) (runDiffCompare, error) {
-	upstream, err := p.exec.execRunGit(ctx, cwd, "upstream", p.deps.RunCwdAllowedRoots)
+func (p *Plane) resolveComparison(ctx context.Context, cwd string, allowedRoots []string) (runDiffCompare, error) {
+	upstream, err := p.exec.execRunGit(ctx, cwd, "upstream", allowedRoots)
 	if err != nil {
 		return runDiffCompare{}, err
 	}
@@ -288,7 +298,7 @@ func (p *Plane) resolveComparison(ctx context.Context, cwd string) (runDiffCompa
 	if upstream.exitCode != 0 || upstreamRef == "" {
 		return runDiffCompare{Kind: "head", Reason: "no_upstream"}, nil
 	}
-	mergeBase, err := p.exec.execRunGit(ctx, cwd, "merge-base-upstream", p.deps.RunCwdAllowedRoots)
+	mergeBase, err := p.exec.execRunGit(ctx, cwd, "merge-base-upstream", allowedRoots)
 	if err != nil {
 		return runDiffCompare{}, err
 	}
@@ -304,10 +314,10 @@ func (p *Plane) resolveComparison(ctx context.Context, cwd string) (runDiffCompa
 // diff (truncated) is treated as success even with a non-zero exit. A HEAD diff
 // that fails outright degrades to an empty patch (matching the BFF's logWarn +
 // empty-return), while an upstream diff failure is a hard error.
-func (p *Plane) readTrackedPatch(ctx context.Context, cwd string, comparison runDiffCompare) (string, bool, error) {
+func (p *Plane) readTrackedPatch(ctx context.Context, cwd string, comparison runDiffCompare, allowedRoots []string) (string, bool, error) {
 	switch comparison.Kind {
 	case "upstream":
-		res, err := p.exec.execRunGitDiffFrom(ctx, cwd, comparison.MergeBase, p.deps.RunCwdAllowedRoots)
+		res, err := p.exec.execRunGitDiffFrom(ctx, cwd, comparison.MergeBase, allowedRoots)
 		if err != nil {
 			return "", false, err
 		}
@@ -316,7 +326,7 @@ func (p *Plane) readTrackedPatch(ctx context.Context, cwd string, comparison run
 		}
 		return res.stdout, res.truncated, nil
 	case "head":
-		res, err := p.exec.execRunGit(ctx, cwd, "diff-head", p.deps.RunCwdAllowedRoots)
+		res, err := p.exec.execRunGit(ctx, cwd, "diff-head", allowedRoots)
 		if err != nil {
 			return "", false, err
 		}
@@ -333,14 +343,14 @@ func (p *Plane) readTrackedPatch(ctx context.Context, cwd string, comparison run
 // name-status output for the chosen comparison, keeps only reviewable lines,
 // parses each into a RunChangedFile, and drops any whose path is not reviewable.
 // A non-zero exit degrades to an empty list (the BFF logs and returns []).
-func (p *Plane) readTrackedChangedFiles(ctx context.Context, cwd string, comparison runDiffCompare) ([]runChangedFile, error) {
+func (p *Plane) readTrackedChangedFiles(ctx context.Context, cwd string, comparison runDiffCompare, allowedRoots []string) ([]runChangedFile, error) {
 	var res *execResult
 	var err error
 	switch comparison.Kind {
 	case "upstream":
-		res, err = p.exec.execRunGitNameStatusFrom(ctx, cwd, comparison.MergeBase, p.deps.RunCwdAllowedRoots)
+		res, err = p.exec.execRunGitNameStatusFrom(ctx, cwd, comparison.MergeBase, allowedRoots)
 	case "head":
-		res, err = p.exec.execRunGit(ctx, cwd, "name-status-head", p.deps.RunCwdAllowedRoots)
+		res, err = p.exec.execRunGit(ctx, cwd, "name-status-head", allowedRoots)
 	default:
 		return nil, nil
 	}

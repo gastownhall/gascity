@@ -4,10 +4,29 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+// initGitRepo creates a minimal git repo at dir and returns dir. It is used by
+// the run-diff allowlist tests, which need a real repo under the resolved city
+// path so an in-city execution path is accepted end-to-end.
+func initGitRepo(t *testing.T, dir string) string {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	return dir
+}
 
 // postRunDiff issues a guarded POST to the run-diff endpoint. The plane's
 // mutation guard requires X-GC-Request, so every call carries it.
@@ -49,6 +68,73 @@ func TestRunDiffInvalidCwd400(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for invalid (relative) cwd", rec.Code)
 	}
+}
+
+// An absolute execution path OUTSIDE the resolved city dir and not in
+// RunCwdAllowedRoots is rejected: the effective allowlist is {RunCwdAllowedRoots
+// + cityPath}, which is never empty, so a path under neither root fails the
+// run-cwd gate and surfaces as a 400. This is the MEDIUM security fix.
+func TestRunDiffPathOutsideCityRejected(t *testing.T) {
+	cityDir := initGitRepo(t, t.TempDir())
+	outside := t.TempDir() // a sibling temp dir, not under the city and not allowlisted
+	p := New(Deps{Resolver: mapResolver{"alpha": cityDir}})
+
+	rec := postRunDiff(t, p, "/api/city/alpha/runs/gc-run-1/diff",
+		`{"executionPath":{"kind":"known","path":`+jsonString(outside)+`}}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a path outside the city dir", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "invalid execution path") {
+		t.Errorf("body = %s, want an invalid-execution-path error", rec.Body.String())
+	}
+}
+
+// An execution path UNDER the resolved city dir is accepted by default (the city
+// path is always part of the effective allowlist), so a real git repo there
+// yields a 200 diff without any RunCwdAllowedRoots configured.
+func TestRunDiffPathUnderCityAccepted(t *testing.T) {
+	cityDir := initGitRepo(t, t.TempDir())
+	p := New(Deps{Resolver: mapResolver{"alpha": cityDir}})
+
+	rec := postRunDiff(t, p, "/api/city/alpha/runs/gc-run-1/diff",
+		`{"executionPath":{"kind":"known","path":`+jsonString(cityDir)+`}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %s), want 200 for an in-city git repo", rec.Code, rec.Body.String())
+	}
+	var got runDiffResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// A real (empty) repo resolves a known root rather than a path/allowlist
+	// rejection; the exact kind ("ok"/"not_git") depends on git, but it must not
+	// be a rejection.
+	if got.RootPath.Kind == "unavailable" && got.RootPath.Reason == "path_unknown" {
+		t.Errorf("in-city repo treated as path_unknown: %+v", got)
+	}
+}
+
+// A path under an explicitly configured RunCwdAllowedRoots (but outside the city
+// dir) is still accepted, confirming the city path is appended to, not replacing,
+// the configured roots.
+func TestRunDiffPathUnderConfiguredRootAccepted(t *testing.T) {
+	cityDir := initGitRepo(t, t.TempDir())
+	otherRoot := initGitRepo(t, t.TempDir())
+	p := New(Deps{
+		Resolver:           mapResolver{"alpha": cityDir},
+		RunCwdAllowedRoots: []string{otherRoot},
+	})
+
+	rec := postRunDiff(t, p, "/api/city/alpha/runs/gc-run-1/diff",
+		`{"executionPath":{"kind":"known","path":`+jsonString(otherRoot)+`}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %s), want 200 for a path under a configured root", rec.Code, rec.Body.String())
+	}
+}
+
+// jsonString quotes s as a JSON string literal for inline request bodies.
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // A missing/empty execution path is a malformed body, rejected at parse time.

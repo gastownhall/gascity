@@ -1,8 +1,16 @@
-import { Suspense, lazy, useMemo, type ReactNode } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import {
+  Suspense,
+  lazy,
+  useMemo,
+  type ComponentType,
+  type LazyExoticComponent,
+  type ReactNode,
+} from 'react';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { api } from './api/client';
 import { AttentionProvider } from './attention/context';
 import { useLiveAttentionContributors } from './attention/liveContributors';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Layout } from './components/Layout';
 import { NowProvider } from './contexts/NowContext';
 import {
@@ -16,6 +24,7 @@ import { useCachedData } from './hooks/useCachedData';
 import { RunSummaryProvider, useRunSummary } from './runs/runSummarySubscription';
 import { ALL_VIEWS } from './views/registry';
 import { filterEnabledViews, resolveDefaultViewWithLogging } from './views/resolve';
+import type { FrontendViewDescriptor } from './views/types';
 
 const AgentsPage = lazy(() => import('./routes/Agents').then((m) => ({ default: m.AgentsPage })));
 const AgentDetailPage = lazy(() =>
@@ -79,42 +88,12 @@ export function App() {
             <RunSummaryProvider>
               <AttentionRoot operator={operator}>
                 <Layout>
-                  <Suspense fallback={null}>
-                    <Routes>
-                      {/* `/` resolution (PRD §6 / bead 9yj.5):
-                  DEFAULT_VIEW env → descriptor `defaultRoute: true` →
-                  kb3 ambient home fallback. The resolver runs once per
-                  enabled-set / env change; warnings surface in the
-                  browser console for premortem #5 visibility. */}
-                      <Route
-                        path="/"
-                        element={
-                          defaultRedirectTo !== null ? (
-                            <Navigate to={defaultRedirectTo} replace />
-                          ) : DefaultViewElement !== null ? (
-                            <DefaultViewElement />
-                          ) : (
-                            <AmbientHomePage />
-                          )
-                        }
-                      />
-                      <Route path="/agents" element={<AgentsPage />} />
-                      <Route path="/agents/:slug" element={<AgentDetailPage />} />
-                      <Route path="/beads" element={<BeadsPage />} />
-                      <Route path="/runs" element={<RunsPage />} />
-                      <Route path="/runs/:runId" element={<FormulaRunDetailPage />} />
-                      <Route path="/mail" element={<MailPage />} />
-                      {/* Modular-dashboard registry routes, filtered by the
-                  backend's enabledModules set. A disabled module's path
-                  is absent so deep-link bookmarks surface the operator's
-                  MODULES_ENABLED change as the explicit catch-all route. */}
-                      {enabledViews.map((v) => {
-                        const Element = v.element;
-                        return <Route key={v.id} path={v.path} element={<Element />} />;
-                      })}
-                      <Route path="*" element={<NotFoundPage />} />
-                    </Routes>
-                  </Suspense>
+                  {configError !== null && <ConfigErrorBanner message={configError} />}
+                  <RoutedMain
+                    defaultRedirectTo={defaultRedirectTo}
+                    DefaultViewElement={DefaultViewElement}
+                    enabledViews={enabledViews}
+                  />
                 </Layout>
               </AttentionRoot>
             </RunSummaryProvider>
@@ -140,6 +119,84 @@ function AttentionRoot({
   const { source } = useRunSummary();
   const contributors = useLiveAttentionContributors(operator, source);
   return <AttentionProvider contributors={contributors}>{children}</AttentionProvider>;
+}
+
+/**
+ * The routed main column, wrapped in an inner ErrorBoundary so a crashed route
+ * degrades in place while the Header, nav, and city-switcher stay live
+ * (gascity-dashboard-ux-no-per-route-error-boundary). The root boundary in
+ * main.tsx remains the last-resort catch-all. The boundary's `key` is tied to
+ * the location pathname so navigating away from a crashed route remounts a
+ * fresh boundary instead of leaving the operator stuck on the fallback.
+ */
+function RoutedMain({
+  defaultRedirectTo,
+  DefaultViewElement,
+  enabledViews,
+}: {
+  defaultRedirectTo: string | null;
+  DefaultViewElement: LazyExoticComponent<ComponentType> | null;
+  enabledViews: ReadonlyArray<FrontendViewDescriptor>;
+}) {
+  const { pathname } = useLocation();
+  return (
+    <ErrorBoundary key={pathname}>
+      <Suspense fallback={null}>
+        <Routes>
+          {/* `/` resolution (PRD §6 / bead 9yj.5):
+              DEFAULT_VIEW env → descriptor `defaultRoute: true` →
+              kb3 ambient home fallback. The resolver runs once per
+              enabled-set / env change; warnings surface in the
+              browser console for premortem #5 visibility. */}
+          <Route
+            path="/"
+            element={
+              defaultRedirectTo !== null ? (
+                <Navigate to={defaultRedirectTo} replace />
+              ) : DefaultViewElement !== null ? (
+                <DefaultViewElement />
+              ) : (
+                <AmbientHomePage />
+              )
+            }
+          />
+          <Route path="/agents" element={<AgentsPage />} />
+          <Route path="/agents/:slug" element={<AgentDetailPage />} />
+          <Route path="/beads" element={<BeadsPage />} />
+          <Route path="/runs" element={<RunsPage />} />
+          <Route path="/runs/:runId" element={<FormulaRunDetailPage />} />
+          <Route path="/mail" element={<MailPage />} />
+          {/* Modular-dashboard registry routes, filtered by the
+              backend's enabledModules set. A disabled module's path
+              is absent so deep-link bookmarks surface the operator's
+              MODULES_ENABLED change as the explicit catch-all route. */}
+          {enabledViews.map((v) => {
+            const Element = v.element;
+            return <Route key={v.id} path={v.path} element={<Element />} />;
+          })}
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
+
+/**
+ * Top-of-app banner for a failed `/config` fetch. Read-only posture already
+ * fails closed on this error (resolveReadOnly), but the operator should also
+ * see WHY the dashboard is degraded rather than guessing from disabled
+ * controls. Rendered inside the main column so the Header and nav stay live.
+ */
+function ConfigErrorBanner({ message }: { message: string }) {
+  return (
+    <section
+      role="alert"
+      className="mb-8 border border-warn/40 rounded-sm px-4 py-3 text-body text-fg-muted"
+    >
+      <span className="text-warn">config unavailable:</span> {message} · some controls may be
+      disabled until it loads.
+    </section>
+  );
 }
 
 function NotFoundPage() {

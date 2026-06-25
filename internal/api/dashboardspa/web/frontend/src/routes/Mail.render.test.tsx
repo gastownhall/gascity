@@ -487,7 +487,7 @@ describe('MailPage supervisor reads', () => {
     });
   });
 
-  it('disables Compose and surfaces a read-only affordance under DASHBOARD_READONLY', async () => {
+  it('disables Compose and surfaces a read-only affordance in read-only mode', async () => {
     renderMailPage('/mail', { readOnly: true });
 
     await screen.findByText('direct supervisor inbox');

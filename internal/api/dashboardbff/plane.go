@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -54,10 +55,11 @@ type Deps struct {
 // Plane is the host-side /api/* HTTP surface. It owns the shared mutation
 // guard, the sandboxed exec runner, and the per-city slow-status samplers.
 type Plane struct {
-	deps     Deps
-	exec     *execRunner
-	mux      *http.ServeMux
-	samplers *samplerManager
+	deps       Deps
+	exec       *execRunner
+	mux        *http.ServeMux
+	samplers   *samplerManager
+	localTools *localToolsCache
 
 	wg   sync.WaitGroup
 	stop context.CancelFunc
@@ -66,7 +68,7 @@ type Plane struct {
 // New builds the /api plane. Call Start to enable background samplers and Stop
 // to drain them on shutdown.
 func New(deps Deps) *Plane {
-	p := &Plane{deps: deps, exec: newExecRunner(), mux: http.NewServeMux()}
+	p := &Plane{deps: deps, exec: newExecRunner(), mux: http.NewServeMux(), localTools: &localToolsCache{}}
 	p.samplers = newSamplerManager(deps, p.exec)
 	p.registerRoutes()
 	return p
@@ -94,9 +96,11 @@ func (p *Plane) Stop() {
 }
 
 // guard enforces the plane's write policy: when read-only, every mutation is
-// refused; otherwise every mutation must carry a non-empty X-GC-Request header
-// (the supervisor's CSRF convention). Safe methods pass through. One shared
-// gate so no per-handler check can be forgotten.
+// refused; otherwise every mutation must (a) be same-origin and (b) carry a
+// non-empty X-GC-Request header (the supervisor's CSRF convention). Safe
+// methods pass through. The same-origin assertion is defense-in-depth so a CORS
+// regression elsewhere cannot reopen CSRF on its own. One shared gate so no
+// per-handler check can be forgotten.
 func (p *Plane) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -106,6 +110,10 @@ func (p *Plane) guard(next http.Handler) http.Handler {
 				writeError(w, http.StatusMethodNotAllowed, "dashboard is read-only")
 				return
 			}
+			if !sameOriginMutation(r) {
+				writeError(w, http.StatusForbidden, "cross-origin request rejected")
+				return
+			}
 			if strings.TrimSpace(r.Header.Get("X-GC-Request")) == "" {
 				writeError(w, http.StatusForbidden, "missing X-GC-Request header")
 				return
@@ -113,6 +121,29 @@ func (p *Plane) guard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// sameOriginMutation reports whether an unsafe-method request originates from
+// the dashboard's own origin. It trusts the browser-set Sec-Fetch-Site signal
+// when present, and otherwise compares the Origin host to the request Host. A
+// request with no Origin (common for same-origin navigations/fetches) is
+// allowed; a present cross-origin Origin/Sec-Fetch-Site is rejected.
+func sameOriginMutation(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	case "cross-site", "same-site":
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return u.Host == r.Host
 }
 
 // registerRoutes wires every plane endpoint. Each registerX lives in its own
@@ -141,7 +172,12 @@ func (p *Plane) resolveCityPath(name string) (string, bool) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	h := w.Header()
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	// Security headers on every /api JSON response (writeError routes through
+	// here too): never sniff the type, never frameable.
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }

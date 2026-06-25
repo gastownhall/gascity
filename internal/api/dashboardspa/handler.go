@@ -127,7 +127,11 @@ func buildCSP(index []byte) string {
 		"font-src 'self' data:",
 		"connect-src 'self'",
 		"base-uri 'self'",
+		"form-action 'self'",
 		"frame-ancestors 'none'",
+		"frame-src 'none'",
+		"worker-src 'self'",
+		"manifest-src 'self'",
 		"object-src 'none'",
 	}, "; ")
 }

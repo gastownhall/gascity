@@ -558,6 +558,7 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 				})
 			}
 			fmt.Fprintf(stdout, "Supervisor started (PID %d)\n", pid) //nolint:errcheck // best-effort stdout
+			printDashboardStartHint(stdout)
 			return 0
 		}
 		time.Sleep(supervisorReadyPollInterval)
