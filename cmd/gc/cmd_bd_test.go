@@ -165,11 +165,12 @@ func TestResolveBdScopeTarget(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		rigName   string
-		args      []string
-		want      execStoreTarget
-		wantError string
+		name         string
+		rigName      string
+		args         []string
+		cityExplicit bool
+		want         execStoreTarget
+		wantError    string
 	}{
 		{
 			name:    "explicit rig name",
@@ -230,11 +231,49 @@ func TestResolveBdScopeTarget(t *testing.T) {
 				Prefix:    "ga",
 			},
 		},
+		{
+			// gastownhall/gascity#3410: an explicit --city must pin the city
+			// store and not be silently downgraded to a rig store, even when a
+			// rig-prefixed bead id is present in the args.
+			name:         "explicit city pins city over bead-prefix",
+			rigName:      "",
+			args:         []string{"show", "projectwrenunity-0xk"},
+			cityExplicit: true,
+			want: execStoreTarget{
+				ScopeRoot: cityDir,
+				ScopeKind: "city",
+				Prefix:    "ga",
+			},
+		},
+		{
+			name:         "explicit city pins city for list",
+			rigName:      "",
+			args:         []string{"list", "--status", "open"},
+			cityExplicit: true,
+			want: execStoreTarget{
+				ScopeRoot: cityDir,
+				ScopeKind: "city",
+				Prefix:    "ga",
+			},
+		},
+		{
+			// An explicit --rig still wins over an explicit --city.
+			name:         "explicit rig wins over explicit city",
+			rigName:      "wren",
+			args:         []string{"list"},
+			cityExplicit: true,
+			want: execStoreTarget{
+				ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+				ScopeKind: "rig",
+				Prefix:    "projectwrenunity",
+				RigName:   "wren",
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveBdScopeTarget(cfgForTest(), cityDir, tt.rigName, tt.args)
+			got, err := resolveBdScopeTarget(cfgForTest(), cityDir, tt.rigName, tt.args, tt.cityExplicit)
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 					t.Fatalf("resolveBdScopeTarget() error = %v, want %q", err, tt.wantError)
@@ -269,7 +308,7 @@ func TestResolveBdScopeTargetUsesRedirectedWorktreeRig(t *testing.T) {
 		Workspace: config.Workspace{Name: "gascity"},
 		Rigs:      []config.Rig{{Name: "frontend", Path: filepath.Join("rigs", "frontend"), Prefix: "fr"}},
 	}
-	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"})
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false)
 	if err != nil {
 		t.Fatalf("resolveBdScopeTarget() error = %v", err)
 	}
@@ -305,7 +344,7 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 
 	t.Run("GC_RIG env routes to rig when no flag and no bead-id args", func(t *testing.T) {
 		t.Setenv("GC_RIG", "chatehr")
-		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list", "--assignee=chatehr/gastown.refinery", "--status=open"})
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list", "--assignee=chatehr/gastown.refinery", "--status=open"}, false)
 		if err != nil {
 			t.Fatalf("resolveBdScopeTarget() error = %v", err)
 		}
@@ -322,7 +361,7 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 
 	t.Run("explicit --rig flag overrides GC_RIG env", func(t *testing.T) {
 		t.Setenv("GC_RIG", "chatehr")
-		got, err := resolveBdScopeTarget(cfg, cityDir, "wren", []string{"list"})
+		got, err := resolveBdScopeTarget(cfg, cityDir, "wren", []string{"list"}, false)
 		if err != nil {
 			t.Fatalf("resolveBdScopeTarget() error = %v", err)
 		}
@@ -345,7 +384,7 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 		bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
 			return beadID == "projectwrenunity-0xk" && target.RigName == "wren"
 		}
-		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "projectwrenunity-0xk"})
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "projectwrenunity-0xk"}, false)
 		if err != nil {
 			t.Fatalf("resolveBdScopeTarget() error = %v", err)
 		}
@@ -362,7 +401,7 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 
 	t.Run("unknown GC_RIG env falls through to city root", func(t *testing.T) {
 		t.Setenv("GC_RIG", "nonexistent-rig")
-		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"})
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false)
 		if err != nil {
 			t.Fatalf("resolveBdScopeTarget() error = %v", err)
 		}
@@ -394,7 +433,7 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 		Workspace: config.Workspace{Name: "gascity"},
 		Rigs:      []config.Rig{{Name: "frontend", Path: filepath.Join("rigs", "frontend"), Prefix: "fr"}},
 	}
-	_, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"})
+	_, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false)
 	if err == nil || !strings.Contains(err.Error(), "points outside declared city rigs") {
 		t.Fatalf("resolveBdScopeTarget() error = %v, want foreign redirect error", err)
 	}
@@ -1646,7 +1685,7 @@ func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 	}
 	setCwd(t, filepath.Join(rigDir, "nested"))
 
-	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"context", "--json"})
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"context", "--json"}, false)
 	if err != nil {
 		t.Fatalf("resolveBdScopeTarget() error = %v", err)
 	}
@@ -1679,7 +1718,7 @@ func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
 	}
 	setCwd(t, filepath.Join(rigDir, "nested"))
 
-	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "mc-city1"})
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "mc-city1"}, false)
 	if err != nil {
 		t.Fatalf("resolveBdScopeTarget() error = %v", err)
 	}

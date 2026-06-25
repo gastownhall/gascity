@@ -135,6 +135,8 @@ func computePoolDesiredStates(
 		}
 	}
 
+	aliasHeldTemplates := canonicalSingletonAliasHeldTemplates(cfg, sessionBeads)
+
 	var resumeRequests []SessionRequest
 	wakeRequestedTemplates := make(map[string]struct{})
 
@@ -255,6 +257,9 @@ func computePoolDesiredStates(
 			if !ok {
 				continue
 			}
+			if _, ok := aliasHeldTemplates[template]; ok {
+				continue
+			}
 			newCount := capNewDemandCount(limits, usage, agent, scaleCount)
 			inFlight := inFlightNewRequests[template]
 			inFlightCount := minInt(len(inFlight), newCount)
@@ -307,7 +312,40 @@ func computePoolDesiredStates(
 		}
 	}
 
-	return applyNestedCaps(cfg, allRequests, trace)
+	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+}
+
+func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionBeads []beads.Bead) map[string]struct{} {
+	held := make(map[string]struct{})
+	if cfg == nil {
+		return held
+	}
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || !agent.UsesCanonicalSingletonPoolIdentity() {
+			continue
+		}
+		template := agent.QualifiedName()
+		for _, sb := range sessionBeads {
+			// None of these own the canonical alias: a closed or drained named
+			// session released it at close via the retire path, a pool-managed bead
+			// never held it, and a failed-create bead released it via
+			// failedCreateIdentityReleased (names.go). Counting any as a live holder
+			// would suppress demand while the alias is actually free, hanging routed
+			// work.
+			if sb.Status == "closed" || isPoolManagedSessionBead(sb) || isDrainedSessionBead(sb) || isFailedCreateSessionBead(sb) {
+				continue
+			}
+			if strings.TrimSpace(sb.Metadata["state"]) == "asleep" {
+				continue
+			}
+			if strings.TrimSpace(sb.Metadata["alias"]) == template {
+				held[template] = struct{}{}
+				break
+			}
+		}
+	}
+	return held
 }
 
 func poolInFlightNewRequests(cfg *config.City, sessionBeads []beads.Bead, resumeSessionBeadIDs map[string]struct{}) map[string][]SessionRequest {
@@ -366,7 +404,7 @@ func poolSessionConsumesNewDemand(session beads.Bead) bool {
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
 // Accepts requests in priority order, rejecting any that would exceed a cap.
-func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
+func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
 	// Sort by priority DESC, resume tier first within same priority.
 	sort.SliceStable(requests, func(i, j int) bool {
 		if requests[i].BeadPriority != requests[j].BeadPriority {
@@ -415,6 +453,9 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 		}
 		template := agent.QualifiedName()
 		minSess := agent.EffectiveMinActiveSessions()
+		if _, ok := aliasHeldTemplates[template]; ok {
+			continue
+		}
 		for usage.agentCount[template] < minSess {
 			req := SessionRequest{
 				Template:       template,

@@ -1285,7 +1285,7 @@ func TestApplyNestedCaps_DedupsConcreteSessionRequestsAcrossTiers(t *testing.T) 
 		{Template: "claude", Tier: "new", SessionBeadID: "sess-2"},
 	}
 
-	result := applyNestedCaps(cfg, requests, nil)
+	result := applyNestedCaps(cfg, requests, nil, nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1419,5 +1419,60 @@ func TestComputePoolDesiredStates_RoutedRigScopedDoesNotSpawnNew(t *testing.T) {
 	}
 	if total != 0 {
 		t.Fatalf("total requests = %d, want 0", total)
+	}
+}
+
+// TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder is the
+// regression guard for the failed-create over-suppression hang found during the
+// gc-7e40y fix review (opencode+Fugu Ultra). A failed-create bead RELEASES its
+// alias (failedCreateIdentityReleased, names.go), so it must NOT count as a live
+// holder -- otherwise pool demand is suppressed while the canonical alias is
+// actually free, hanging routed work for the template.
+func TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("mayor", "", intPtr(1), 0)}, // canonical singleton
+	}
+	holder := func(state string) beads.Bead {
+		return beads.Bead{
+			ID:     "sess-" + state,
+			Status: "open",
+			Type:   sessionBeadType,
+			Metadata: map[string]string{
+				"session_name":   "mayor",
+				"template":       "mayor",
+				"alias":          "mayor",
+				"session_origin": "named",
+				"state":          state,
+			},
+		}
+	}
+
+	// A live named holder occupies the singleton's slot.
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("active")})["mayor"]; !ok {
+		t.Fatalf("live named alias-holder should mark mayor held; got %v", canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("active")}))
+	}
+
+	// A failed-create holder released the alias -> must NOT be treated as held.
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("failed-create")})["mayor"]; ok {
+		t.Fatalf("failed-create holder released its alias and must NOT mark mayor held (over-suppression hang); got %v", canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("failed-create")}))
+	}
+
+	// A closed holder no longer owns the alias.
+	closed := holder("active")
+	closed.Status = "closed"
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{closed})["mayor"]; ok {
+		t.Fatalf("closed holder released its alias and must NOT mark mayor held; got held")
+	}
+
+	// A pool-managed bead is the pool's own instance, not the named alias holder.
+	poolManaged := holder("active")
+	poolManaged.Metadata[poolManagedMetadataKey] = boolMetadata(true)
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{poolManaged})["mayor"]; ok {
+		t.Fatalf("pool-managed bead is not the named alias holder and must NOT mark mayor held; got held")
+	}
+
+	// A drained holder released its alias.
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("drained")})["mayor"]; ok {
+		t.Fatalf("drained holder released its alias and must NOT mark mayor held; got held")
 	}
 }

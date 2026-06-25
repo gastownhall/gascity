@@ -88,7 +88,17 @@ var (
 	workflowServeIdlePollInterval  = 100 * time.Millisecond
 	workflowServeIdlePollAttempts  = 3
 	workflowServeWakeSweepInterval = 1 * time.Second
-	workflowServeMaxIdleSleep      = 30 * time.Second
+	// Cap the --follow idle backoff at 5s. A worker that closes a step bead
+	// with a raw bd write does not publish a city BeadClosed event, so the
+	// control-dispatcher only notices the next ready step on its idle re-poll.
+	// At the former 30s cap each graph hop could wait up to ~30s, so a
+	// multi-step workflow accumulated minutes of pure wake latency (the bulk of
+	// the TestGraphWorkflowSuccessPath flake). 5s keeps the loop responsive
+	// across hops while still backing off from the 1s base; the cost is one
+	// serve loop polling every 5s rather than 30s when a city is fully idle.
+	// (Complementary to the wake-debounce coalescing below, which only helps
+	// the event-arrival path; a raw-bd-write close publishes no event.)
+	workflowServeMaxIdleSleep = 5 * time.Second
 	// workflowServeWakeDebounce is the coalescing window opened once the first
 	// relevant event wakes the --follow loop. Additional buffered events that
 	// arrive during the window are drained and folded into the same wake so a
@@ -96,7 +106,7 @@ var (
 	// single work/ready re-scan instead of N heavy per-event Dolt scans. This is
 	// a fixed (max-wait) window, so a lone relevant wake also waits out the
 	// window before its drain; the delay is intentional and small relative to
-	// the 1–30s idle sleeps it replaces. Set it to 0 to disable coalescing and
+	// the 1–5s idle sleeps it replaces. Set it to 0 to disable coalescing and
 	// restore one-event-one-drain. Injectable so tests can shrink it. Fixes
 	// gastownhall/gascity#3206.
 	workflowServeWakeDebounce = 250 * time.Millisecond

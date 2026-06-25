@@ -408,6 +408,7 @@ func sweepSubprocessTestProcesses() {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
+	waitForPIDsReaped(killSet)
 }
 
 func configureIntegrationSupervisorCommand(cmd *exec.Cmd) {
@@ -499,6 +500,32 @@ func terminateIntegrationPIDs(killSet map[int]bool) {
 		if err := syscall.Kill(pid, syscall.Signal(0)); err == nil {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
+	}
+	waitForPIDsReaped(killSet)
+}
+
+// waitForPIDsReaped blocks until every PID in killSet is gone (signal-0 errors)
+// or a bounded deadline elapses. Without it, a SIGKILL returns before the
+// kernel has torn the process down and released its open files: a following
+// t.TempDir() RemoveAll then races a dying managed Dolt server under
+// cityDir/.beads/dolt ("directory not empty"), and a following test can
+// re-bind the just-freed managed Dolt port and adopt a half-dead server whose
+// DB still has prior tables ("alter pre-existing dirty tables"). The deadline
+// guarantees a wedged process can never hang the suite.
+func waitForPIDsReaped(killSet map[int]bool) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		alive := false
+		for pid := range killSet {
+			if err := syscall.Kill(pid, syscall.Signal(0)); err == nil {
+				alive = true
+				break
+			}
+		}
+		if !alive {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
