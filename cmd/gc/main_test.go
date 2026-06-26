@@ -109,6 +109,13 @@ func configureSupervisorHooksForTests() {
 	ensureSupervisorRunningHook = func(_, _ io.Writer) int { return 0 }
 	reloadSupervisorHook = func(_, _ io.Writer) int { return 0 }
 	supervisorAliveHook = func() int { return 0 }
+	// Neutralize systemd lingering so install tests never spawn loginctl
+	// or mutate the test runner's real linger state. Reporting linger as
+	// already enabled makes ensureSupervisorLinger a silent no-op, keeping
+	// existing install-path stdout/stderr assertions intact. Dedicated
+	// linger tests override these locally.
+	supervisorLoginctlRun = func(_ ...string) error { return nil }
+	supervisorLingerEnabled = func(_ string) bool { return true }
 	startNudgePoller = func(string, string, string) error { return nil }
 	initLookPath = func(file string) (string, error) { return file, nil }
 	initProbeProvidersReadiness = func(_ context.Context, providers []string, _ bool) (map[string]api.ReadinessItem, error) {
