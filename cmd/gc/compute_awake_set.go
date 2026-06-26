@@ -453,10 +453,22 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// in_progress ownership or open work with Ready=true; blocked open
 		// assignments do not prevent idle sleep. Manual sessions within their
 		// grace period are also exempt.
+		//
+		// On_demand named sessions woken by routed/named demand
+		// ("named-demand", "work-query") are also exempt: that demand means
+		// there is pending work for this specific session, so an idle window
+		// must not put it back to sleep. Without this, an asleep on_demand
+		// named session (e.g. a refinery) with routed work that already exists
+		// (open_count==desired_count==1) is re-slept every tick and the work
+		// is wedged forever — the reconciler reports reason_code=retained
+		// indefinitely. A fresh cold-create wakes only because it has no
+		// idle reference. The "work done, no demand" drain still fires via the
+		// "on-demand:running" reason, which is NOT exempt. See #3413.
 		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !bead.IdleSince.IsZero() &&
 			!isAlwaysNamedSession(input.NamedSessions, bead) &&
 			desired[name] != "assigned-work" && desired[name] != "min-active" &&
 			desired[name] != "reset-pending" &&
+			desired[name] != "named-demand" && desired[name] != "work-query" &&
 			!inManualGracePeriod(bead, input.ManualGracePeriod, input.Now) {
 			agent, hasAgent := lookupAgent(bead.Template)
 			var idleTimeout time.Duration
