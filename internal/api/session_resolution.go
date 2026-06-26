@@ -193,6 +193,9 @@ func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Conte
 		if err := extmsg.ReassignSessionBindings(ctx, store, b.ID, replacementID, now); err != nil {
 			return fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", b.ID, replacementID, err)
 		}
+		if err := extmsg.ReassignSessionParticipants(ctx, store, b.ID, replacementID); err != nil {
+			return fmt.Errorf("reassign external message participants from retired session %s to %s: %w", b.ID, replacementID, err)
+		}
 	}
 	return nil
 }
@@ -444,54 +447,127 @@ func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string
 	return best.ID, true, nil
 }
 
+// resolveSessionTargetIDWithContext drives session.DecideSessionTarget: the
+// classifier owns the precedence ladder, this adapter performs the lookup
+// each gather action names and keeps the matched ID or error for the step a
+// terminal decision cites. Lookups run exactly when the old inline ladder
+// ran them — an exact-ID hit never reaches the live scan.
 func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store beads.Store, identifier string, opts apiSessionResolveOptions) (string, error) {
 	if store == nil {
 		return "", fmt.Errorf("session store unavailable")
 	}
-	if _, ok := parseAPITemplateTarget(identifier); ok {
-		return "", apiSessionTargetNotFound(identifier)
+	_, templateForm := parseAPITemplateTarget(identifier)
+	facts := session.TargetFacts{
+		TemplateForm: templateForm,
+		AllowClosed:  opts.allowClosed,
 	}
-	if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
-		return id, nil
-	} else if !errors.Is(err, session.ErrSessionNotFound) {
-		return "", err
-	}
-	if id, matched, err := s.resolveConfiguredNamedSessionIDWithContext(ctx, store, identifier, opts); err == nil {
-		return id, nil
-	} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
-		return "", err
-	}
-	if id, err := session.ResolveSessionID(store, identifier); err == nil {
-		if cfg := s.state.Config(); cfg != nil {
-			if bead, getErr := store.Get(id); getErr == nil && apiIsNamedSessionBead(bead) {
-				identity := apiNamedSessionIdentity(bead)
-				if identity != "" && config.FindNamedSession(cfg, identity) == nil {
-					return "", apiSessionTargetRejectedByConfig(identifier)
-				}
+	selected := map[session.TargetStep]string{}
+	failed := map[session.TargetStep]error{}
+	// The classifier gathers each of the ladder's six facts at most once, so
+	// classification terminates within seven decisions. The bound (matching
+	// gatherSequence in the classifier tests) turns a classifier regression
+	// that re-requests a gathered fact into an internal error instead of a
+	// spinning request goroutine.
+	for range 16 {
+		dec := session.DecideSessionTarget(facts)
+		if dec.Action == session.TargetDone {
+			switch dec.Result {
+			case session.TargetSelected:
+				return selected[dec.Source], nil
+			case session.TargetRejectedByConfig:
+				return "", apiSessionTargetRejectedByConfig(identifier)
+			case session.TargetError:
+				return "", failed[dec.Source]
+			default:
+				return "", apiSessionTargetNotFound(identifier)
 			}
 		}
-		return id, nil
-	} else if !errors.Is(err, session.ErrSessionNotFound) {
-		return "", err
-	}
-	if id, ok, err := resolveLiveSessionByPathAlias(store, identifier); err != nil {
-		return "", err
-	} else if ok {
-		return id, nil
-	}
-	if opts.allowClosed {
-		if _, ok, err := s.findNamedSessionSpecForTarget(store, identifier); err != nil {
-			return "", err
-		} else if ok {
-			return "", apiSessionTargetNotFound(identifier)
+		switch dec.Gather {
+		case session.TargetStepExactID:
+			id, err := session.ResolveSessionIDByExactID(store, identifier)
+			facts.ExactID = lookupFact(err)
+			selected[dec.Gather], failed[dec.Gather] = id, err
+		case session.TargetStepConfiguredName:
+			id, matched, err := s.resolveConfiguredNamedSessionIDWithContext(ctx, store, identifier, opts)
+			switch {
+			case err == nil:
+				facts.ConfiguredName = session.NamedLookupMatch
+				selected[dec.Gather] = id
+			case matched || !errors.Is(err, session.ErrSessionNotFound):
+				facts.ConfiguredName = session.NamedLookupTerminalError
+				failed[dec.Gather] = err
+			default:
+				facts.ConfiguredName = session.NamedLookupNoMatch
+			}
+		case session.TargetStepLive:
+			id, err := session.ResolveSessionID(store, identifier)
+			facts.Live = lookupFact(err)
+			selected[dec.Gather], failed[dec.Gather] = id, err
+			if err == nil {
+				facts.LiveConfigOrphan = s.liveSessionMatchIsConfigOrphan(store, id)
+			}
+		case session.TargetStepPathAlias:
+			id, ok, err := resolveLiveSessionByPathAlias(store, identifier)
+			switch {
+			case err != nil:
+				facts.PathAlias = session.LookupError
+				failed[dec.Gather] = err
+			case ok:
+				facts.PathAlias = session.LookupMatch
+				selected[dec.Gather] = id
+			default:
+				facts.PathAlias = session.LookupNoMatch
+			}
+		case session.TargetStepClosedNamedSpec:
+			_, ok, err := s.findNamedSessionSpecForTarget(store, identifier)
+			switch {
+			case err != nil:
+				facts.ClosedNamedSpec = session.LookupError
+				failed[dec.Gather] = err
+			case ok:
+				facts.ClosedNamedSpec = session.LookupMatch
+			default:
+				facts.ClosedNamedSpec = session.LookupNoMatch
+			}
+		case session.TargetStepClosed:
+			id, err := session.ResolveSessionIDAllowClosed(store, identifier)
+			facts.Closed = lookupFact(err)
+			selected[dec.Gather], failed[dec.Gather] = id, err
+		default:
+			return "", fmt.Errorf("session target classifier requested unknown step %v", dec.Gather)
 		}
-		if id, err := session.ResolveSessionIDAllowClosed(store, identifier); err == nil {
-			return id, nil
-		} else if !errors.Is(err, session.ErrSessionNotFound) {
-			return "", err
-		}
 	}
-	return "", apiSessionTargetNotFound(identifier)
+	return "", fmt.Errorf("session target classifier did not terminate for %q", identifier)
+}
+
+// lookupFact maps a Resolve* error to the classifier's tri-state lookup
+// fact: nil is a match, ErrSessionNotFound is a miss, anything else is a
+// terminal lookup error.
+func lookupFact(err error) session.TargetLookupFact {
+	switch {
+	case err == nil:
+		return session.LookupMatch
+	case errors.Is(err, session.ErrSessionNotFound):
+		return session.LookupNoMatch
+	default:
+		return session.LookupError
+	}
+}
+
+// liveSessionMatchIsConfigOrphan reports whether a live-resolved bead is a
+// named-session bead whose configured identity is absent from current
+// config. Lookup failures fail open: the match stands.
+func (s *Server) liveSessionMatchIsConfigOrphan(store beads.Store, id string) bool {
+	cfg := s.state.Config()
+	if cfg == nil {
+		return false
+	}
+	bead, err := store.Get(id)
+	if err != nil || !apiIsNamedSessionBead(bead) {
+		return false
+	}
+	identity := apiNamedSessionIdentity(bead)
+	return identity != "" && config.FindNamedSession(cfg, identity) == nil
 }
 
 func (s *Server) resolveSessionTargetID(store beads.Store, identifier string, opts apiSessionResolveOptions) (string, error) {

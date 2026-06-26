@@ -19,13 +19,11 @@ var (
 	materializeSyntheticRepo = builtinpacks.MaterializeSyntheticRepo
 )
 
-// RepoCacheRoot returns the shared machine-local repo cache root.
+// RepoCacheRoot returns the shared machine-local repo cache root,
+// honoring the GC_HOME override via config.GlobalRepoCacheRoot so the
+// install and resolve sides always agree on one cache.
 func RepoCacheRoot() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolving home dir: %w", err)
-	}
-	return filepath.Join(home, ".gc", "cache", "repos"), nil
+	return config.GlobalRepoCacheRoot()
 }
 
 // RepoCacheKey returns the canonical source+commit cache key.
@@ -60,7 +58,7 @@ func EnsureRepoInCache(source, commit string) (string, error) {
 		return "", fmt.Errorf("creating repo cache root: %w", err)
 	}
 	return config.WithRepoCacheWriteLock(root, func() (string, error) {
-		if builtinpacks.IsSource(source) {
+		if config.IsBundledSourceAtCanonicalPin(source, commit) {
 			return ensureBundledRepoInCacheLocked(source, commit, cachePath)
 		}
 		return ensureRepoInCacheLocked(source, commit, parsed, cachePath)
@@ -187,7 +185,13 @@ func checkoutExistingCache(cachePath, commit string) error {
 }
 
 func cachedRepoDirty(cachePath string) (bool, error) {
-	status, err := runGit(cachePath, "status", "--porcelain", "--ignored")
+	// Intentionally NOT --ignored: gitignored build artifacts written into
+	// the cache in place (e.g. Python __pycache__/*.pyc from running a cached
+	// pack's scripts, or a stray .DS_Store) are not local modifications to the
+	// pack's tracked content and must not count as "dirty" — they recur and
+	// would otherwise wedge the city behind a perpetual "run gc import install"
+	// gate (vp-gny3). A reinstall's `git clean -ffdx` still clears them.
+	status, err := runGit(cachePath, "status", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("checking cached repo worktree status: %w", err)
 	}
@@ -257,35 +261,10 @@ func defaultRunGit(dir string, args ...string) (string, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	for _, e := range os.Environ() {
-		if k, _, ok := strings.Cut(e, "="); ok && fetchGitEnvBlacklist[k] {
-			continue
-		}
-		cmd.Env = append(cmd.Env, e)
-	}
-	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	cmd.Env = gitutil.HermeticEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-var fetchGitEnvBlacklist = map[string]bool{
-	"GIT_DIR":                          true,
-	"GIT_WORK_TREE":                    true,
-	"GIT_INDEX_FILE":                   true,
-	"GIT_OBJECT_DIRECTORY":             true,
-	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
-	"GIT_COMMON_DIR":                   true,
-	"GIT_CEILING_DIRECTORIES":          true,
-	"GIT_DISCOVERY_ACROSS_FILESYSTEM":  true,
-	"GIT_NAMESPACE":                    true,
-	"GIT_CONFIG":                       true,
-	"GIT_CONFIG_GLOBAL":                true,
-	"GIT_CONFIG_SYSTEM":                true,
-	"GIT_CONFIG_NOSYSTEM":              true,
-	"GIT_CONFIG_COUNT":                 true,
-	"GIT_EXEC_PATH":                    true,
-	"GIT_PAGER":                        true,
 }

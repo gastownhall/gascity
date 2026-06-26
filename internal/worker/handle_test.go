@@ -567,6 +567,22 @@ func TestCanonicalProfileIdentityOpenCode(t *testing.T) {
 	}
 }
 
+func TestCanonicalProfileIdentityMimoCode(t *testing.T) {
+	identity, ok := CanonicalProfileIdentity(ProfileMimoCodeTmuxCLI)
+	if !ok {
+		t.Fatal("CanonicalProfileIdentity(ProfileMimoCodeTmuxCLI) = false, want true")
+	}
+	if identity.ProviderFamily != "mimocode" {
+		t.Fatalf("ProviderFamily = %q, want mimocode", identity.ProviderFamily)
+	}
+	if identity.TransportClass != "tmux-cli" {
+		t.Fatalf("TransportClass = %q, want tmux-cli", identity.TransportClass)
+	}
+	if identity.CertificationFingerprint == "" {
+		t.Fatal("CertificationFingerprint is empty")
+	}
+}
+
 func TestCanonicalProfileIdentityKimi(t *testing.T) {
 	identity, ok := CanonicalProfileIdentity(ProfileKimiTmuxCLI)
 	if !ok {

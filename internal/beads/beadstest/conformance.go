@@ -13,17 +13,17 @@ import (
 )
 
 // Options controls optional behavior of the Store conformance suite.
-// Each opt-out should reference an external bead/escalation explaining
-// why a conforming implementation cannot pass the affected subtest.
+//
+// Opt-outs are governed by the conformance-skip ledger (conformance_skips.go):
+// a request to skip a subtest is honored ONLY when a matching, unexpired ledger
+// entry exists, naming a tracking bead and an expiry. Without one the subtest
+// hard-fails, so an opt-out can never silently launder a regression.
 type Options struct {
-	// SkipTxApplyConformance skips the TxRunsCallbackAndAppliesWriteSurface
-	// subtest. Use only when the backing implementation has a known defect
-	// outside the Store contract (e.g., an external CLI bug). The other Tx
-	// subtests still run.
+	// SkipTxApplyConformance requests skipping the
+	// TxRunsCallbackAndAppliesWriteSurface subtest. It is honored only when a
+	// valid, unexpired entry for that subtest exists in the skip ledger;
+	// otherwise the subtest fails loudly.
 	SkipTxApplyConformance bool
-	// SkipTxApplyReason is reported via t.Skipf when SkipTxApplyConformance
-	// is true. Should name the escalation bead or upstream issue.
-	SkipTxApplyReason string
 }
 
 // RunStoreTests runs the full conformance suite against a Store implementation.
@@ -298,7 +298,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatalf("List() returned %d beads, want 2", len(got))
 		}
 		titles := titlesOf(got)
-		if !containsAll(titles, "first", "second") {
+		if !hasExactly(titles, "first", "second") {
 			t.Errorf("List() titles = %v, want [first second]", titles)
 		}
 	})
@@ -329,7 +329,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatalf("List() returned %d beads, want 3", len(got))
 		}
 		titles := titlesOf(got)
-		if !containsAll(titles, "alpha", "beta", "gamma") {
+		if !hasExactly(titles, "alpha", "beta", "gamma") {
 			t.Errorf("List() titles = %v, want [alpha beta gamma]", titles)
 		}
 	})
@@ -435,7 +435,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatalf("Ready() returned %d beads, want 2", len(got))
 		}
 		titles := titlesOf(got)
-		if !containsAll(titles, "first", "second") {
+		if !hasExactly(titles, "first", "second") {
 			t.Errorf("Ready() titles = %v, want [first second]", titles)
 		}
 	})
@@ -584,7 +584,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatalf("Ready() returned %d beads, want 3", len(got))
 		}
 		titles := titlesOf(got)
-		if !containsAll(titles, "alpha", "beta", "gamma") {
+		if !hasExactly(titles, "alpha", "beta", "gamma") {
 			t.Errorf("Ready() titles = %v, want [alpha beta gamma]", titles)
 		}
 	})
@@ -596,7 +596,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatal(err)
 		}
 		// Create beads with types that bd ready excludes.
-		for _, typ := range []string{"molecule", "step", "message", "gate", "merge-request", "session", "agent", "role", "rig"} {
+		for _, typ := range []string{"molecule", "step", "convoy", "message", "gate", "merge-request", "session", "agent", "role", "rig"} {
 			if _, err := s.Create(beads.Bead{Title: typ, Type: typ}); err != nil {
 				t.Fatal(err)
 			}
@@ -677,7 +677,8 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 
 	t.Run("TxRunsCallbackAndAppliesWriteSurface", func(t *testing.T) {
 		if opts.SkipTxApplyConformance {
-			t.Skipf("skipping: %s", opts.SkipTxApplyReason)
+			requireLedgeredSkip(t, "TxRunsCallbackAndAppliesWriteSurface")
+			return
 		}
 		s := newStore()
 		b, err := s.Create(beads.Bead{Title: "before"})
@@ -748,6 +749,59 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		s := newStore()
 		if err := s.Tx("conformance nil tx", nil); err == nil {
 			t.Fatal("Tx(nil) returned nil, want error")
+		}
+	})
+
+	// ListStorageTierContract pins query.go's TierMode row filter (#3045,
+	// #3444): TierIssues keeps history and no-history rows and drops only
+	// ephemeral ones; TierWisps keeps no-history and ephemeral rows; TierBoth
+	// unions all three. Backends must agree on these cardinalities or API list
+	// totals silently shift with backend selection.
+	//
+	// This shared subtest seeds through Store.Create, so it runs only for the
+	// Create-seedable backends wired through RunStoreTests: MemStore,
+	// FileStore, ExecStore, the br exec bridge, and NativeDoltStore. Two
+	// full-Store backends seed differently and pin the same tier contract
+	// through their own tests instead: BdStore via
+	// TestBdStoreListStorageTierConformance, and the DoltLite read store via
+	// TestDoltliteReadStoreTierModesIncludeWisps (its Create routes to the
+	// external bd runner, so it cannot use this Create-based harness and seeds
+	// the snapshot tables directly). Keep those backend-specific tier tests in
+	// sync with this contract.
+	t.Run("ListStorageTierContract", func(t *testing.T) {
+		s := newStore()
+		if _, err := s.Create(beads.Bead{Title: "tier-history", Labels: []string{"tier-contract"}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Create(beads.Bead{Title: "tier-no-history", Labels: []string{"tier-contract"}, NoHistory: true}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Create(beads.Bead{Title: "tier-ephemeral", Labels: []string{"tier-contract"}, Ephemeral: true}); err != nil {
+			t.Fatal(err)
+		}
+
+		issues, err := s.List(beads.ListQuery{Label: "tier-contract"})
+		if err != nil {
+			t.Fatalf("List issues tier: %v", err)
+		}
+		if got := titlesOf(issues); !hasExactly(got, "tier-history", "tier-no-history") {
+			t.Errorf("issues tier titles = %v, want [tier-history tier-no-history]", got)
+		}
+
+		wisps, err := s.List(beads.ListQuery{Label: "tier-contract", TierMode: beads.TierWisps})
+		if err != nil {
+			t.Fatalf("List wisps tier: %v", err)
+		}
+		if got := titlesOf(wisps); !hasExactly(got, "tier-ephemeral", "tier-no-history") {
+			t.Errorf("wisps tier titles = %v, want [tier-ephemeral tier-no-history]", got)
+		}
+
+		both, err := s.List(beads.ListQuery{Label: "tier-contract", TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatalf("List both tiers: %v", err)
+		}
+		if got := titlesOf(both); !hasExactly(got, "tier-ephemeral", "tier-history", "tier-no-history") {
+			t.Errorf("both tier titles = %v, want [tier-ephemeral tier-history tier-no-history]", got)
 		}
 	})
 }
@@ -1033,8 +1087,12 @@ func titlesOf(bs []beads.Bead) []string {
 	return titles
 }
 
-// containsAll checks that sorted has all the expected values.
-func containsAll(sorted []string, want ...string) bool {
+// hasExactly reports whether sorted holds exactly the want values and no
+// others — set equality (equal length plus an element-wise match after
+// sorting). The tier checks above rely on this to also catch over-inclusion,
+// such as an ephemeral row leaking into TierIssues. It is not a subset check:
+// do not use it where extra elements should be tolerated.
+func hasExactly(sorted []string, want ...string) bool {
 	expected := make([]string, len(want))
 	copy(expected, want)
 	sort.Strings(expected)

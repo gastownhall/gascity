@@ -10,7 +10,7 @@ import (
 // molecule packages. Must be called after config.LoadWithIncludes and before
 // any formula compilation or molecule instantiation.
 func applyFeatureFlags(cfg *config.City) {
-	gw := cfg.Daemon.FormulaV2
+	gw := cfg.Daemon.FormulaV2Enabled()
 	formula.SetFormulaV2Enabled(gw)
 	molecule.SetGraphApplyEnabled(gw)
 }

@@ -19,8 +19,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
-	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
 )
@@ -530,12 +530,12 @@ func workflowFormulaSearchPaths(cfg *config.City, bead beads.Bead) []string {
 	if cfg == nil {
 		return nil
 	}
-	if rigName := strings.TrimSpace(bead.Metadata[graphExecutionRigContextMetaKey]); rigName != "" {
+	if rigName := strings.TrimSpace(bead.Metadata[graphroute.GraphExecutionRigContextMetaKey]); rigName != "" {
 		if paths := cfg.FormulaLayers.SearchPaths(rigName); len(paths) > 0 {
 			return paths
 		}
 	}
-	routedTo := workflowExecutionRoute(bead)
+	routedTo := graphroute.WorkflowExecutionRoute(bead)
 	if routedTo == "" {
 		return cfg.FormulaLayers.City
 	}
@@ -556,11 +556,20 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 	}
 	routingRigContext := strings.TrimSpace(defaultRoute.RigContext)
 	if routingRigContext == "" {
-		routingRigContext = graphRouteRigContext(defaultRoute.QualifiedName)
+		routingRigContext = graphroute.GraphRouteRigContext(defaultRoute.QualifiedName)
 	}
-	controlRoute, err := controlDispatcherBinding(store, cityName, cfg, routingRigContext)
-	if err != nil {
-		return err
+	controlRoutes := map[string]graphRouteBinding{}
+	controlRouteFor := func(rigContext string) (graphRouteBinding, error) {
+		rigContext = strings.TrimSpace(rigContext)
+		if binding, ok := controlRoutes[rigContext]; ok {
+			return binding, nil
+		}
+		binding, err := graphroute.ControlDispatcherBinding(store, cityName, cfg, rigContext, cliGraphrouteDeps(cityPath))
+		if err != nil {
+			return graphRouteBinding{}, err
+		}
+		controlRoutes[rigContext] = binding
+		return binding, nil
 	}
 
 	for i := range fragment.Steps {
@@ -602,20 +611,35 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		if err != nil {
 			return err
 		}
-		if isControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
-			assignGraphStepRoute(step, binding, &controlRoute)
+		if graphroute.IsControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
+			controlRigContext := graphRouteBindingRigContext(binding)
+			if controlRigContext == "" {
+				controlRigContext = routingRigContext
+			}
+			controlRoute, err := controlRouteFor(controlRigContext)
+			if err != nil {
+				return err
+			}
+			graphroute.AssignGraphStepRoute(step, binding, &controlRoute)
 			continue
 		}
-		assignGraphStepRoute(step, binding, nil)
+		graphroute.AssignGraphStepRoute(step, binding, nil)
 	}
 	return nil
+}
+
+func graphRouteBindingRigContext(binding graphRouteBinding) string {
+	if rigContext := strings.TrimSpace(binding.RigContext); rigContext != "" {
+		return rigContext
+	}
+	return graphroute.GraphRouteRigContext(binding.QualifiedName)
 }
 
 func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store beads.Store, storeRef, cityName, cityPath string, cfg *config.City) error {
 	if recipe == nil {
 		return fmt.Errorf("recipe is nil")
 	}
-	routedTo := workflowExecutionRoute(source)
+	routedTo := graphroute.WorkflowExecutionRoute(source)
 	if strings.TrimSpace(routedTo) == "" {
 		if strings.TrimSpace(source.Metadata[beadmeta.KindMetadataKey]) == "drain" {
 			vars, err := drainItemRecipeVars(recipe)
@@ -624,12 +648,7 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 			}
 			scopeKind := strings.TrimSpace(source.Metadata[beadmeta.ScopeKindMetadataKey])
 			scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey])
-			deps := sling.SlingDeps{
-				CityPath:              cityPath,
-				Resolver:              cliAgentResolver{},
-				DirectSessionResolver: cliDirectSessionResolver,
-			}
-			return sling.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, sling.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, sling.GraphRouteBinding{}, store, cityName, cfg, deps)
+			return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, graphroute.GraphRouteBinding{}, store, cityName, cfg, cliGraphrouteDeps(cityPath))
 		}
 		binding, err := graphFallbackBindingForBead(source, store, cityName, cityPath, cfg)
 		if err != nil {
@@ -644,12 +663,7 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 		}
 		scopeKind := strings.TrimSpace(source.Metadata[beadmeta.ScopeKindMetadataKey])
 		scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey])
-		deps := sling.SlingDeps{
-			CityPath:              cityPath,
-			Resolver:              cliAgentResolver{},
-			DirectSessionResolver: cliDirectSessionResolver,
-		}
-		return sling.DecorateGraphWorkflowRecipe(recipe, sling.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, binding.QualifiedName, binding.SessionName, store, cityName, cfg, deps)
+		return graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, binding.QualifiedName, binding.SessionName, store, cityName, cfg, cliGraphrouteDeps(cityPath))
 	}
 	vars, err := drainItemRecipeVars(recipe)
 	if err != nil {
@@ -657,16 +671,11 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 	}
 	scopeKind := strings.TrimSpace(source.Metadata[beadmeta.ScopeKindMetadataKey])
 	scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey])
-	if binding, ok, err := resolveGraphDirectSessionBinding(store, cityName, cityPath, cfg, routedTo, workflowExecutionRigContext(source)); err != nil {
+	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(store, cityName, cfg, routedTo, workflowExecutionRigContext(source), cliGraphrouteDeps(cityPath)); err != nil {
 		return err
 	} else if ok {
-		deps := sling.SlingDeps{
-			CityPath:              cityPath,
-			Resolver:              cliAgentResolver{},
-			DirectSessionResolver: cliDirectSessionResolver,
-		}
-		defaultRoute := sling.GraphRouteBinding{DirectSessionID: binding.DirectSessionID, RigContext: binding.RigContext}
-		return sling.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, sling.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, defaultRoute, store, cityName, cfg, deps)
+		defaultRoute := graphroute.GraphRouteBinding{DirectSessionID: binding.DirectSessionID, RigContext: binding.RigContext}
+		return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, defaultRoute, store, cityName, cfg, cliGraphrouteDeps(cityPath))
 	}
 	return applyGraphRouting(recipe, nil, routedTo, vars, scopeKind, scopeRef, storeRef, store, cityName, cityPath, cfg)
 }
@@ -675,10 +684,10 @@ func workflowExecutionRigContext(bead beads.Bead) string {
 	if bead.Metadata == nil {
 		return ""
 	}
-	if rigContext := strings.TrimSpace(bead.Metadata[graphExecutionRigContextMetaKey]); rigContext != "" {
+	if rigContext := strings.TrimSpace(bead.Metadata[graphroute.GraphExecutionRigContextMetaKey]); rigContext != "" {
 		return rigContext
 	}
-	return graphRouteRigContext(workflowExecutionRoute(bead))
+	return graphroute.GraphRouteRigContext(graphroute.WorkflowExecutionRoute(bead))
 }
 
 func drainItemRecipeVars(recipe *formula.Recipe) (map[string]string, error) {
@@ -699,23 +708,23 @@ func drainItemRecipeVars(recipe *formula.Recipe) (map[string]string, error) {
 }
 
 func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
-	routedTo := workflowExecutionRoute(source)
+	routedTo := graphroute.WorkflowExecutionRoute(source)
 	if routedTo == "" {
 		return graphRouteBinding{SessionName: source.Assignee}, nil
 	}
 	rigContext := workflowExecutionRigContext(source)
-	if binding, ok, err := resolveGraphDirectSessionBinding(store, cityName, cityPath, cfg, routedTo, rigContext); err != nil {
+	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(store, cityName, cfg, routedTo, rigContext, cliGraphrouteDeps(cityPath)); err != nil {
 		return graphRouteBinding{}, err
 	} else if ok {
 		return binding, nil
 	}
 	if cfg == nil {
-		return graphRouteBinding{}, fmt.Errorf("graph.v2 routing for %s requires config", source.ID)
+		return graphRouteBinding{}, fmt.Errorf("formulas v2 routing for %s requires config", source.ID)
 	}
 
 	agentCfg, ok := resolveAgentIdentity(cfg, routedTo, rigContext)
 	if !ok {
-		return graphRouteBinding{}, fmt.Errorf("unknown graph.v2 fallback target %q on %s", routedTo, source.ID)
+		return graphRouteBinding{}, fmt.Errorf("unknown formulas v2 fallback target %q on %s", routedTo, source.ID)
 	}
 
 	binding := graphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
@@ -1342,6 +1351,9 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		// was stamped), we fall back to blank for backward compatibility.
 		nextRoute := strings.TrimSpace(currentSource.Metadata[beadmeta.RunTargetMetadataKey])
 		if err := target.storeView.store.SetMetadata(currentSource.ID, beadmeta.RoutedToMetadataKey, nextRoute); err != nil {
+			return err
+		}
+		if err := clearSessionAffinityMetadataOnBead(target.storeView.store, currentSource.ID); err != nil {
 			return err
 		}
 		if err := target.storeView.store.Update(currentSource.ID, beads.UpdateOpts{

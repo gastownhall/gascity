@@ -11,11 +11,13 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads/contract"
-	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/packman"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -24,6 +26,7 @@ const rigDeferredStoreInitWait = 30 * time.Second
 var (
 	rigReloadControllerConfig = reloadControllerConfig
 	rigWaitForStoreAccessible = waitForRigStoreAccessible
+	rigListSessionProvider    = newSessionProvider
 )
 
 func newRigCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -96,9 +99,9 @@ check remains informational.`,
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
   gc rig add /path/to/master-repo --default-branch master
-  gc rig add ./my-project --include packs/gastown
+  gc rig add ./my-project --include gastown
   gc rig add ./my-project --include packs/planner --include packs/architect
-  gc rig add ./my-project --include packs/gastown --start-suspended
+  gc rig add ./my-project --include gastown --start-suspended
   gc rig add /path/to/existing --adopt`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -265,7 +268,11 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	// that comparison use the resolvable path (gascity#3137).
 	includes = canonicalizeBuiltinPackIncludes(fs, cityPath, includes, cfg.Packs)
 
-	explicitRigImports := boundImportsFromLegacySources(includes, cfg.Packs)
+	explicitRigImports, commitRigImports, err := ensureBundledRigImportsInstalled(cityPath, boundImportsFromLegacySources(includes, cfg.Packs))
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig add: installing bundled rig imports: %v\n", err) //nolint:errcheck // best-effort stderr
+		return config.Rig{}, 1
+	}
 	if cityUsesBdStoreContract(cityPath) && cityDoltConfigHasLifecycleFields(cfg.Dolt) {
 		registerCityDoltConfig(cityPath, cfg.Dolt)
 		defer clearCityDoltConfig(cityPath)
@@ -358,7 +365,15 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 				fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
 				return config.Rig{}, 1
 			}
-			defaultRigImports = composeDefaultRigImports(rootDefaultRigImports, cfg.Workspace.LegacyDefaultRigIncludes(), cfg.Packs)
+			// Default-rig imports take the same pin/cache hardening as
+			// explicit --include imports: a version-less bundled source
+			// arriving from root-pack defaults or legacy
+			// default_rig_includes must not persist version-less.
+			defaultRigImports, commitRigImports, err = ensureBundledRigImportsInstalled(cityPath, composeDefaultRigImports(rootDefaultRigImports, cfg.Workspace.LegacyDefaultRigIncludes(), cfg.Packs))
+			if err != nil {
+				fmt.Fprintf(stderr, "gc rig add: installing bundled rig imports: %v\n", err) //nolint:errcheck // best-effort stderr
+				return config.Rig{}, 1
+			}
 			if len(defaultRigImports) > 0 {
 				rig.Imports = boundImportsMap(defaultRigImports)
 			}
@@ -537,8 +552,29 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 			return config.Rig{}, 1
 		}
 
-		if err := writeCityConfigForEditFS(fs, tomlPath, nextCfg); err != nil {
-			writeRigAddRollbackError(fs, stderr, snapshots, "writing config", err)
+		var writeErr error
+		if !reAdd {
+			// Surgical append: preserve existing comments by appending only the
+			// new [[rigs]] block instead of re-serializing the whole file.
+			newRig := nextCfg.Rigs[len(nextCfg.Rigs)-1]
+			writeErr = config.AppendRigAndWriteSiteBindingsForEdit(fs, tomlPath, nextCfg, newRig)
+		} else {
+			writeErr = writeCityConfigForEditFS(fs, tomlPath, nextCfg)
+		}
+		if writeErr != nil {
+			writeRigAddRollbackError(fs, stderr, snapshots, "writing config", writeErr)
+			return config.Rig{}, 1
+		}
+	}
+
+	// Persist packs.lock and materialize bundled rig imports only after the
+	// city config write succeeds, so the lockfile honors the same
+	// "city.toml written last" contract: any earlier failure leaves
+	// packs.lock untouched, and a failure here rolls back through the
+	// snapshot (which now covers packs.lock).
+	if commitRigImports != nil {
+		if err := commitRigImports(); err != nil {
+			writeRigAddRollbackError(fs, stderr, snapshots, "installing bundled rig imports", err)
 			return config.Rig{}, 1
 		}
 	}
@@ -625,16 +661,15 @@ func formatBoundImports(imports []config.BoundImport) string {
 }
 
 // canonicalizeBuiltinPackIncludes rewrites --include tokens that name a
-// materialized builtin pack to the resolvable .gc/system/packs/<name> path.
-// Builtin packs are materialized under .gc/system/packs and are not registered
-// in [packs], so a bare "<name>" or "packs/<name>" token (the form documented in
-// `gc rig add --help`) would otherwise be persisted as the non-resolvable literal
-// "./<token>", breaking pack expansion citywide (gascity#3137). Only tokens whose
-// pack is actually materialized (.gc/system/packs/<name>/pack.toml exists) are
-// rewritten; everything else is returned unchanged so genuine local-path imports
-// are preserved. A token whose raw form or derived single-segment name is a key
-// in packs is left unchanged so an explicitly configured [packs] reference keeps
-// its configured source rather than being shadowed by the builtin.
+// bundled pack to its canonical remote source. Builtin packs compose from
+// the user-global repo cache and are not registered in [packs], so a bare
+// "<name>" or "packs/<name>" token (the form documented in `gc rig add
+// --help`) would otherwise be persisted as the non-resolvable literal
+// "./<token>", breaking pack expansion citywide (gascity#3137). A token
+// whose raw form or derived single-segment name is a key in packs, or
+// that resolves to a real local pack directory in the city, is left
+// unchanged so explicit references keep their configured/local source
+// rather than being shadowed by the builtin.
 func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []string, packs map[string]config.PackSource) []string {
 	out := make([]string, len(includes))
 	for i, inc := range includes {
@@ -657,12 +692,73 @@ func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []str
 		if _, ok := packs[name]; ok {
 			continue
 		}
-		packToml := filepath.Join(cityPath, filepath.FromSlash(citylayout.SystemPacksRoot), name, "pack.toml")
-		if _, err := fs.Stat(packToml); err == nil {
-			out[i] = citylayout.SystemPacksRoot + "/" + name
+		// A token that resolves to a real local pack in the city is a local
+		// import, not a builtin-pack reference.
+		if !filepath.IsAbs(tok) {
+			if _, err := fs.Stat(filepath.Join(cityPath, filepath.FromSlash(tok), "pack.toml")); err == nil {
+				continue
+			}
+		}
+		if source, ok := builtinpacks.CanonicalImportSource(name); ok {
+			out[i] = source
 		}
 	}
 	return out
+}
+
+// ensureBundledRigImportsInstalled pins any bundled-source rig imports so
+// the new rig composes offline without a manual "gc import install". It
+// returns a copy of imports with version-less bundled entries pinned at the
+// canonical bundled version, plus a commit function that persists packs.lock
+// and materializes the imports into the cache. The commit is deferred — and
+// is nil when there are no bundled imports to persist — so the packs.lock
+// write obeys the same "city.toml written last" atomicity contract as the
+// rest of rig add: the lockfile is mutated only after the city config write
+// succeeds, and the rig-add rollback snapshot covers it. Resolution (which
+// only reads packs.lock and hydrates the shared repo cache) still happens
+// eagerly here so any resolution error is surfaced before mutation begins.
+//
+// The input slice is not modified, and callers must persist the returned
+// slice so the city.toml rig import carries the same pin the lockfile
+// records: a version-less import resolves as "latest" if packs.lock is
+// regenerated or lost, and "gc import upgrade" treats it as unconstrained —
+// either path silently replaces the builtin the user asked for.
+func ensureBundledRigImportsInstalled(cityPath string, imports []config.BoundImport) ([]config.BoundImport, func() error, error) {
+	pinned := append([]config.BoundImport(nil), imports...)
+	declared := make(map[string]config.Import)
+	for i := range pinned {
+		if !builtinpacks.IsSource(pinned[i].Import.Source) {
+			continue
+		}
+		if strings.TrimSpace(pinned[i].Import.Version) == "" {
+			pinned[i].Import.Version = bundledSourcePinnedVersion(pinned[i].Import.Source)
+		}
+		declared[pinned[i].Binding] = pinned[i].Import
+	}
+	if len(declared) == 0 {
+		return pinned, nil, nil
+	}
+	existing, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	for name, imp := range declared {
+		existing[name] = imp
+	}
+	lock, err := syncImports(cityPath, existing, packman.InstallResolveIfNeeded)
+	if err != nil {
+		return nil, nil, err
+	}
+	commit := func() error {
+		if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
+			return err
+		}
+		if _, err := installLockedImports(cityPath); err != nil {
+			return err
+		}
+		return nil
+	}
+	return pinned, commit, nil
 }
 
 func boundImportsFromLegacySources(sources []string, packs map[string]config.PackSource) []config.BoundImport {
@@ -779,13 +875,21 @@ func boundImportsMap(imports []config.BoundImport) map[string]config.Import {
 }
 
 func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) ([]fileSnapshot, error) {
-	snapshots := make([]fileSnapshot, 0, len(cfg.Rigs)*3+5)
-	cityToml, err := snapshotOptionalFile(fs, filepath.Join(cityPath, "city.toml"))
+	snapshots := make([]fileSnapshot, 0, len(cfg.Rigs)*3+6)
+	cityToml, err := snapshotResolvedFile(fs, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		return nil, err
 	}
 	snapshots = append(snapshots, cityToml)
-	siteToml, err := snapshotOptionalFile(fs, config.SiteBindingPath(cityPath))
+	// packs.lock is written by the deferred bundled-rig-import commit after
+	// the city config write, so it must be covered by the rollback snapshot
+	// to keep rig add atomic across the lockfile.
+	packsLock, err := snapshotOptionalFile(fs, filepath.Join(cityPath, "packs.lock"))
+	if err != nil {
+		return nil, err
+	}
+	snapshots = append(snapshots, packsLock)
+	siteToml, err := snapshotResolvedFile(fs, config.SiteBindingPath(cityPath))
 	if err != nil {
 		return nil, err
 	}
@@ -795,7 +899,7 @@ func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) 
 		return nil, err
 	}
 	snapshots = append(snapshots, citySnapshots...)
-	cityPort, err := snapshotOptionalFile(fs, filepath.Join(cityPath, ".beads", "dolt-server.port"))
+	cityPort, err := snapshotResolvedFile(fs, filepath.Join(cityPath, ".beads", "dolt-server.port"))
 	if err != nil {
 		return nil, err
 	}
@@ -816,7 +920,7 @@ func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) 
 			return nil, err
 		}
 		snapshots = append(snapshots, rigSnapshots...)
-		rigPort, err := snapshotOptionalFile(fs, filepath.Join(rigPath, ".beads", "dolt-server.port"))
+		rigPort, err := snapshotResolvedFile(fs, filepath.Join(rigPath, ".beads", "dolt-server.port"))
 		if err != nil {
 			return nil, err
 		}
@@ -1138,8 +1242,16 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 			Running: hqRunning,
 			Beads:   rigBeadsStatus(fs, cityPath),
 		})
+		// Build the session provider once and share it across rigs:
+		// constructing it per rig reopened the session store and re-forked
+		// tmux probes, making --json scale O(rigs) in subprocesses (~7x
+		// slower than the text path, which skips running-status detection).
+		var sp runtime.Provider
+		if len(cfg.Rigs) > 0 {
+			sp = rigListSessionProvider()
+		}
 		for i := range cfg.Rigs {
-			running := rigHasRunningAgent(cfg, cfg.Rigs[i].Name)
+			running := rigHasRunningAgent(cfg, cfg.Rigs[i].Name, sp)
 			result.Rigs = append(result.Rigs, RigListItem{
 				Name:               cfg.Rigs[i].Name,
 				Path:               cfg.Rigs[i].Path,
@@ -1199,12 +1311,14 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 	return 0
 }
 
-func rigHasRunningAgent(cfg *config.City, rigName string) bool {
-	if cfg == nil || rigName == "" {
+// rigHasRunningAgent reports whether any agent scoped to rigName has a live
+// session. The caller supplies the session provider so a single provider can
+// be reused across rigs instead of reconstructed per rig (see doRigList).
+func rigHasRunningAgent(cfg *config.City, rigName string, sp runtime.Provider) bool {
+	if cfg == nil || rigName == "" || sp == nil {
 		return false
 	}
 	cityName := cfg.EffectiveCityName()
-	sp := newSessionProvider()
 	for i := range cfg.Agents {
 		a := cfg.Agents[i]
 		if a.Dir != rigName {
@@ -1537,6 +1651,37 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cfg.Rigs = filtered
+
+	// Drop config blocks that reference the removed rig; left dangling they
+	// break a later load of the city (#3666). The three [[patches.*]] kinds and
+	// a [[github.pr_monitor]] hard-fail config.LoadWithIncludes once their
+	// now-absent rig can no longer be resolved (ApplyPatches "not found in
+	// merged config" / ValidateGitHubPRMonitors "rig is not declared"); an
+	// [[orders.overrides]] instead dangles at order-scan time. The issue named
+	// [[patches.agent]] and [[orders.overrides]]; the rest fail the same way on
+	// rig removal, so sweep them all.
+	cfg.Patches.Agents = slices.DeleteFunc(cfg.Patches.Agents,
+		func(p config.AgentPatch) bool { return p.Dir == rigName })
+	cfg.Patches.NamedSessions = slices.DeleteFunc(cfg.Patches.NamedSessions,
+		func(p config.NamedSessionPatch) bool { return p.Dir == rigName })
+	cfg.Patches.Rigs = slices.DeleteFunc(cfg.Patches.Rigs,
+		func(p config.RigPatch) bool { return p.Name == rigName })
+	// Capture rig-scoped PR monitor names before deleting them so we can also
+	// drop any [[patches.github_pr_monitor]] that targets them by name —
+	// otherwise the patch dangles and ApplyPatches fails ("github pr monitor
+	// %q not found in merged config") on the next compose, the same #3666 class.
+	removedMonitors := map[string]bool{}
+	for _, m := range cfg.GitHub.PRMonitors {
+		if m.Rig == rigName {
+			removedMonitors[m.Name] = true
+		}
+	}
+	cfg.GitHub.PRMonitors = slices.DeleteFunc(cfg.GitHub.PRMonitors,
+		func(m config.GitHubPRMonitor) bool { return m.Rig == rigName })
+	cfg.Patches.GitHubPRMonitors = slices.DeleteFunc(cfg.Patches.GitHubPRMonitors,
+		func(p config.GitHubPRMonitorPatch) bool { return removedMonitors[p.Name] })
+	cfg.Orders.Overrides = slices.DeleteFunc(cfg.Orders.Overrides,
+		func(o config.OrderOverride) bool { return o.Rig == rigName })
 
 	// Write updated config.
 	if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {

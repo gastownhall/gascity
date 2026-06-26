@@ -14,11 +14,15 @@ const (
 	labelGroupBase            = "gc:extmsg-group"
 	labelGroupParticipantBase = "gc:extmsg-group-participant"
 	labelTranscriptBase       = "gc:extmsg-transcript"
-	labelMembershipBase       = "gc:extmsg-membership"
-	labelTranscriptStateBase  = "gc:extmsg-transcript-state"
+
+	labelGroupParticipantSessionNamePrefix = "extmsg:group:participant:session-name:v1:"
+	labelMembershipBase                    = "gc:extmsg-membership"
+	labelTranscriptStateBase               = "gc:extmsg-transcript-state"
 
 	labelBindingConversationPrefix = "extmsg:binding:conv:v1:"
 	labelBindingSessionPrefix      = "extmsg:binding:session:v1:"
+	labelBindingSessionNamePrefix  = "extmsg:binding:sessionname:v1:"
+	labelBindingAgentPrefix        = "extmsg:binding:agent:v1:"
 	labelDeliveryRoutePrefix       = "extmsg:delivery:route:v1:"
 	labelDeliverySessionPrefix     = "extmsg:delivery:session:v1:"
 	labelGroupRootPrefix           = "extmsg:group:root:v1:"
@@ -47,6 +51,18 @@ func bindingConversationLabel(ref ConversationRef) string {
 
 func bindingSessionLabel(sessionID string) string {
 	return labelBindingSessionPrefix + strings.TrimSpace(sessionID)
+}
+
+// bindingSessionNameLabel labels a binding by the stable session name its
+// target session was created under. Unlike bindingSessionLabel (which keys on
+// the volatile session bead ID), this label survives respawn, so the reaper
+// can find every binding owned by a name even after the original bead closes.
+func bindingSessionNameLabel(sessionName string) string {
+	return labelBindingSessionNamePrefix + strings.TrimSpace(sessionName)
+}
+
+func bindingAgentLabel(agentName string) string {
+	return labelBindingAgentPrefix + strings.TrimSpace(agentName)
 }
 
 func deliveryRouteLabel(ref ConversationRef, sessionID string) string {
@@ -84,6 +100,15 @@ func groupParticipantLabel(groupID string) string {
 
 func groupParticipantSessionLabel(sessionID string) string {
 	return labelGroupParticipantSession + strings.TrimSpace(sessionID)
+}
+
+// groupParticipantSessionNameLabel labels a participant by the stable session
+// name its target session was created under. Unlike groupParticipantSessionLabel
+// (which keys on the volatile bead ID), this label survives respawn, so
+// ReassignSessionParticipants can find participants owned by a name even after
+// the original session bead closes.
+func groupParticipantSessionNameLabel(name string) string {
+	return labelGroupParticipantSessionNamePrefix + strings.TrimSpace(name)
 }
 
 func transcriptConversationLabel(ref ConversationRef) string {

@@ -18,6 +18,14 @@ import (
 // suite.
 func newDoltliteStoreWithIssues(t testing.TB, issues []testDoltliteIssue) *DoltliteReadStore {
 	t.Helper()
+	return newDoltliteStoreWithRows(t, issues, nil)
+}
+
+// newDoltliteStoreWithRows builds a DoltLite read store seeded with rows in
+// both storage tables: issues land in the durable issues table and wisps in
+// the wisps table (set Ephemeral/NoHistory per row to pick the storage flag).
+func newDoltliteStoreWithRows(t testing.TB, issues, wisps []testDoltliteIssue) *DoltliteReadStore {
+	t.Helper()
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -40,6 +48,9 @@ func newDoltliteStoreWithIssues(t testing.TB, issues []testDoltliteIssue) *Doltl
 	createTestDoltliteSchema(t, db)
 	for _, issue := range issues {
 		insertTestDoltliteIssue(t, db, "issues", "labels", "dependencies", issue)
+	}
+	for _, wisp := range wisps {
+		insertTestDoltliteIssue(t, db, "wisps", "wisp_labels", "wisp_dependencies", wisp)
 	}
 	backing := NewBdStore(dir, func(string, string, ...string) ([]byte, error) {
 		t.Fatal("backing bd runner should not be called by doltlite count tests")
@@ -72,6 +83,7 @@ func TestDoltliteCountMatchesList(t *testing.T) {
 		{name: "status closed", query: ListQuery{Status: "closed"}},
 		{name: "status in_progress", query: ListQuery{Status: "in_progress"}},
 		{name: "by assignee", query: ListQuery{Assignee: "rig/worker"}},
+		{name: "by no-history assignee", query: ListQuery{Assignee: "rig/nohistory-worker"}},
 		{name: "by label", query: ListQuery{Label: "tier-test"}},
 		{name: "exclude session", query: ListQuery{AllowScan: true, IncludeClosed: true}, exclude: []string{"session"}},
 		{name: "exclude session+task", query: ListQuery{AllowScan: true, IncludeClosed: true}, exclude: []string{"session", "task"}},
@@ -123,6 +135,119 @@ func TestDoltliteCountUnsupportedShapes(t *testing.T) {
 				t.Fatalf("Count err = %v, want ErrCountUnsupported", err)
 			}
 		})
+	}
+}
+
+// TestDoltliteCountTierIssuesIncludesNoHistoryWisps pins the #3444 contract on
+// the hydration-free counter: TierIssues counts durable issues plus
+// non-ephemeral (no_history) wisps rows — exactly what the aligned List
+// returns — while ephemeral wisps stay excluded. A cross-table duplicate id
+// must be counted once, mirroring List's seen-map dedupe.
+func TestDoltliteCountTierIssuesIncludesNoHistoryWisps(t *testing.T) {
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	issues := []testDoltliteIssue{
+		{ID: "gc-durable", Title: "durable", Status: "open", IssueType: "task", CreatedAt: base, Labels: []string{"count-tier"}},
+		{ID: "gc-dup", Title: "dup durable", Status: "open", IssueType: "task", CreatedAt: base.Add(time.Second), Labels: []string{"count-tier"}},
+		// The issues twin of gc-dup-unmatched does NOT match the query, so
+		// List returns the wisps twin and the count dedupe must not drop it.
+		{ID: "gc-dup-unmatched", Title: "dup durable other label", Status: "open", IssueType: "task", CreatedAt: base.Add(5 * time.Second), Labels: []string{"other"}},
+	}
+	wisps := []testDoltliteIssue{
+		{ID: "gc-nohistory", Title: "no-history", Status: "open", IssueType: "task", CreatedAt: base.Add(2 * time.Second), Labels: []string{"count-tier"}, NoHistory: true},
+		{ID: "gc-ephemeral", Title: "ephemeral", Status: "open", IssueType: "task", CreatedAt: base.Add(3 * time.Second), Labels: []string{"count-tier"}, Ephemeral: true},
+		// Defensive cross-table id collision: List dedupes it, Count must too.
+		{ID: "gc-dup", Title: "dup wisp", Status: "open", IssueType: "task", CreatedAt: base.Add(4 * time.Second), Labels: []string{"count-tier"}, NoHistory: true},
+		{ID: "gc-dup-unmatched", Title: "dup wisp matching", Status: "open", IssueType: "task", CreatedAt: base.Add(6 * time.Second), Labels: []string{"count-tier"}, NoHistory: true},
+	}
+	store := newDoltliteStoreWithRows(t, issues, wisps)
+
+	query := ListQuery{Label: "count-tier"}
+	list, err := store.List(query)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	wantIDs := map[string]bool{"gc-durable": true, "gc-dup": true, "gc-nohistory": true, "gc-dup-unmatched": true}
+	if len(list) != len(wantIDs) {
+		t.Fatalf("List rows = %v, want ids %v", testBeadIDs(list), wantIDs)
+	}
+	for _, b := range list {
+		if !wantIDs[b.ID] {
+			t.Fatalf("List rows = %v, want ids %v", testBeadIDs(list), wantIDs)
+		}
+	}
+
+	got, err := store.Count(context.Background(), query)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if got != len(list) {
+		t.Fatalf("Count = %d, want len(List) = %d", got, len(list))
+	}
+}
+
+// TestDoltliteCountExcludedIssueTwinSuppressesWispTwin pins the #3449 review
+// fix: when a durable issue twin's type is in excludeTypes, List drops the issue
+// AND has already deduped its same-id no-history wisp twin behind it, so neither
+// survives the post-List exclusion. Count must match — the wisp dedupe anti-join
+// is built from the issues-table pass BEFORE excludeTypes, so the excluded issue
+// still suppresses its wisp twin instead of letting Count overcount it.
+func TestDoltliteCountExcludedIssueTwinSuppressesWispTwin(t *testing.T) {
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	issues := []testDoltliteIssue{
+		// Durable twin of gc-twin has an excluded type. List returns it, the
+		// excludeTypes filter then drops it, and its wisp twin is already deduped
+		// away — so the matching set contributes nothing for gc-twin.
+		{ID: "gc-twin", Title: "excluded durable twin", Status: "open", IssueType: "session", CreatedAt: base.Add(time.Second), Labels: []string{"excl-dedupe"}},
+		{ID: "gc-keep", Title: "kept task", Status: "open", IssueType: "task", CreatedAt: base.Add(2 * time.Second), Labels: []string{"excl-dedupe"}},
+	}
+	wisps := []testDoltliteIssue{
+		// Non-excluded no-history wisp sharing gc-twin's id. Before the fix the
+		// wisp dedupe subquery still carried excludeTypes, so the excluded issue
+		// fell out of the anti-join set and this wisp was wrongly counted.
+		{ID: "gc-twin", Title: "kept wisp twin", Status: "open", IssueType: "task", CreatedAt: base.Add(3 * time.Second), Labels: []string{"excl-dedupe"}, NoHistory: true},
+	}
+	store := newDoltliteStoreWithRows(t, issues, wisps)
+
+	query := ListQuery{Label: "excl-dedupe"}
+	exclude := []string{"session"}
+
+	list, err := store.List(query)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := 0
+	for _, b := range list {
+		if !containsTestString(exclude, b.Type) {
+			want++
+		}
+	}
+	got, err := store.Count(context.Background(), query, exclude...)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if got != want {
+		t.Fatalf("Count = %d, want len(List filtered by excludeTypes) = %d", got, want)
+	}
+}
+
+// TestDoltliteCountLegacyWispsSchemaMatchesList pins Count==List parity for
+// pre-storage-flag snapshots: without the discriminator columns every wisps
+// row is ephemeral, so the TierIssues count stays issues-table only.
+func TestDoltliteCountLegacyWispsSchemaMatchesList(t *testing.T) {
+	store, closeStore := newLegacyTestDoltliteReadStore(t)
+	defer closeStore()
+
+	query := ListQuery{Label: "tier-test"}
+	list, err := store.List(query)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got, err := store.Count(context.Background(), query)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if got != len(list) || got != 1 {
+		t.Fatalf("Count = %d, want len(List) = %d = 1", got, len(list))
 	}
 }
 

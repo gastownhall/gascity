@@ -130,13 +130,13 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 			if err := formula.ValidateGraphV2ReservedSymbolsTransitively(resolved, parser, false); err != nil {
 				return Invocation{}, err
 			}
-			return Invocation{}, fmt.Errorf("graph.v2 formula %q requires a target convoy", formulaName)
+			return Invocation{}, fmt.Errorf("v2 formula %q requires a target convoy", formulaName)
 		}
 		if recipeRequiresTarget {
 			if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, false); err != nil {
 				return Invocation{}, err
 			}
-			return Invocation{}, fmt.Errorf("graph.v2 formula %q requires a target convoy", formulaName)
+			return Invocation{}, fmt.Errorf("v2 formula %q requires a target convoy", formulaName)
 		}
 		if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, false); err != nil {
 			return Invocation{}, err
@@ -153,7 +153,7 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 		return Invocation{}, err
 	}
 	if store == nil {
-		return Invocation{}, fmt.Errorf("graph.v2 formula %q requires a bead store to normalize target %s", formulaName, targetID)
+		return Invocation{}, fmt.Errorf("v2 formula %q requires a bead store to normalize target %s", formulaName, targetID)
 	}
 	convoyID, err := NormalizeInputConvoy(store, targetID)
 	if err != nil {
@@ -164,7 +164,7 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 	if len(legacyRefs) > 0 {
 		memberID, err := ResolveLegacyIssueAlias(store, convoyID)
 		if err != nil {
-			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for graph.v2 formula %q: %w", formulaName, err)
+			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for v2 formula %q: %w", formulaName, err)
 		}
 		inv.Vars[LegacyIssueVar] = memberID
 	}
@@ -180,7 +180,7 @@ func legacyIssueDeprecations(formulaName string, refs []string) []string {
 	out := make([]string, 0, len(refs))
 	for _, ref := range refs {
 		out = append(out, fmt.Sprintf(
-			"formula %q: %s — deprecated in graph.v2 and removed next release; migrate to the convoy_id work-bead derivation (gastownhall/gascity#2941)",
+			"formula %q: %s — deprecated in formulas v2 and removed next release; migrate to the convoy_id work-bead derivation (gastownhall/gascity#2941)",
 			formulaName, ref))
 	}
 	return out
@@ -249,14 +249,14 @@ func validateDrainItemFormulas(parentName string, searchPaths []string, recipe *
 		vars := varsWithConvoyPlaceholder(nonReservedRuntimeVars(parentVars))
 		recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), itemFormula, searchPaths, vars)
 		if err != nil {
-			return fmt.Errorf("validating drain item formula %q for graph.v2 formula %q: %w", itemFormula, parentName, err)
+			return fmt.Errorf("validating drain item formula %q for v2 formula %q: %w", itemFormula, parentName, err)
 		}
 		root := recipe.RootStep()
 		if root == nil || root.Metadata[beadmeta.KindMetadataKey] != "workflow" || !strings.EqualFold(root.Metadata[beadmeta.FormulaContractMetadataKey], "graph.v2") {
-			return fmt.Errorf("drain item formula %q for graph.v2 formula %q must declare contract = \"graph.v2\"", itemFormula, parentName)
+			return fmt.Errorf("drain item formula %q for v2 formula %q must declare the formulas v2 contract ([requires] formula_compiler = \">=2.0.0\")", itemFormula, parentName)
 		}
 		if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
-			return fmt.Errorf("validating drain item formula %q runtime vars for graph.v2 formula %q: %w", itemFormula, parentName, err)
+			return fmt.Errorf("validating drain item formula %q runtime vars for v2 formula %q: %w", itemFormula, parentName, err)
 		}
 	}
 	return nil
@@ -341,7 +341,7 @@ func ValidateNoReservedUserVars(vars map[string]string) error {
 	for key := range vars {
 		switch strings.TrimSpace(key) {
 		case ConvoyIDVar, LegacyIssueVar, legacyBeadIDVar:
-			return fmt.Errorf("graph.v2 reserved variable %q cannot be supplied by the caller", key)
+			return fmt.Errorf("formulas v2 reserved variable %q cannot be supplied by the caller", key)
 		}
 	}
 	return nil
@@ -352,20 +352,20 @@ func ValidateNoReservedUserVars(vars map[string]string) error {
 func NormalizeInputConvoy(store beads.Store, targetID string) (string, error) {
 	targetID = strings.TrimSpace(targetID)
 	if store == nil {
-		return "", fmt.Errorf("graph.v2 invocation requires a bead store")
+		return "", fmt.Errorf("formulas v2 invocation requires a bead store")
 	}
 	if targetID == "" {
-		return "", fmt.Errorf("graph.v2 target is required")
+		return "", fmt.Errorf("formulas v2 target is required")
 	}
 	target, err := store.Get(targetID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
-			return "", fmt.Errorf("graph.v2 target %s not found: %w", targetID, err)
+			return "", fmt.Errorf("formulas v2 target %s not found: %w", targetID, err)
 		}
-		return "", fmt.Errorf("loading graph.v2 target %s: %w", targetID, err)
+		return "", fmt.Errorf("loading formulas v2 target %s: %w", targetID, err)
 	}
 	if convoycore.IsTerminalStatus(target.Status) {
-		return "", fmt.Errorf("graph.v2 target %s is %s", target.ID, target.Status)
+		return "", fmt.Errorf("formulas v2 target %s is %s", target.ID, target.Status)
 	}
 	if target.Type == "convoy" {
 		return target.ID, nil
@@ -381,10 +381,10 @@ func NormalizeInputConvoy(store beads.Store, targetID string) (string, error) {
 // graph.v2 invocation target.
 func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Bead, error) {
 	if store == nil {
-		return beads.Bead{}, fmt.Errorf("graph.v2 invocation requires a bead store")
+		return beads.Bead{}, fmt.Errorf("formulas v2 invocation requires a bead store")
 	}
 	if convoycore.IsTerminalStatus(target.Status) {
-		return beads.Bead{}, fmt.Errorf("graph.v2 target %s is %s", target.ID, target.Status)
+		return beads.Bead{}, fmt.Errorf("formulas v2 target %s is %s", target.ID, target.Status)
 	}
 	if strings.TrimSpace(target.ID) == "" {
 		return beads.Bead{}, fmt.Errorf("input convoy target id is empty")
@@ -408,8 +408,12 @@ func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Be
 }
 
 // PreparePreviewInvocation validates graph.v2 preview inputs without creating
-// input convoys or workflow roots.
-func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, userVars map[string]string) (Invocation, error) {
+// input convoys or workflow roots. targetIsRoutingIdentity marks targetID as
+// a configured agent identity (for example a workflow root's gc.routed_to
+// value) rather than a bead or convoy ID; routing identities have no
+// bead-store entry, so the preview substitutes a synthetic input convoy
+// instead of resolving the target through the store.
+func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, targetIsRoutingIdentity bool, userVars map[string]string) (Invocation, error) {
 	resolved, parser, err := loadFormulaWithParser(formulaName, searchPaths)
 	if err != nil {
 		return Invocation{}, fmt.Errorf("loading formula %q: %w", formulaName, err)
@@ -453,14 +457,19 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 				return Invocation{}, err
 			}
 		}
-		return Invocation{}, fmt.Errorf("graph.v2 target is required")
+		return Invocation{}, fmt.Errorf("formulas v2 target is required")
 	}
 	if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, true); err != nil {
 		return Invocation{}, err
 	}
-	inputConvoyID, err := PreviewInputConvoyID(store, targetID)
-	if err != nil {
-		return Invocation{}, err
+	var inputConvoyID string
+	if targetIsRoutingIdentity {
+		inputConvoyID = PreviewInputConvoyIDForRoutingIdentity(targetID)
+	} else {
+		inputConvoyID, err = PreviewInputConvoyID(store, targetID)
+		if err != nil {
+			return Invocation{}, err
+		}
 	}
 	inv.Targeted = true
 	inv.InputConvoy = inputConvoyID
@@ -476,7 +485,7 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 	if len(legacyRefs) > 0 {
 		memberID, err := previewLegacyIssueAlias(store, targetID, inputConvoyID)
 		if err != nil {
-			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for graph.v2 formula %q: %w", formulaName, err)
+			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for v2 formula %q: %w", formulaName, err)
 		}
 		inv.Vars[LegacyIssueVar] = memberID
 	}
@@ -501,22 +510,33 @@ func previewLegacyIssueAlias(store beads.Store, targetID, inputConvoyID string) 
 func PreviewInputConvoyID(store beads.Store, targetID string) (string, error) {
 	targetID = strings.TrimSpace(targetID)
 	if store == nil {
-		return "", fmt.Errorf("graph.v2 preview requires a bead store")
+		return "", fmt.Errorf("formulas v2 preview requires a bead store")
 	}
 	target, err := store.Get(targetID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
-			return "", fmt.Errorf("graph.v2 target %s not found: %w", targetID, err)
+			return "", fmt.Errorf("formulas v2 target %s not found: %w", targetID, err)
 		}
-		return "", fmt.Errorf("loading graph.v2 target %s: %w", targetID, err)
+		return "", fmt.Errorf("loading formulas v2 target %s: %w", targetID, err)
 	}
 	if convoycore.IsTerminalStatus(target.Status) {
-		return "", fmt.Errorf("graph.v2 target %s is %s", target.ID, target.Status)
+		return "", fmt.Errorf("formulas v2 target %s is %s", target.ID, target.Status)
 	}
 	if target.Type == "convoy" {
 		return target.ID, nil
 	}
 	return previewInputConvoyPrefix + target.ID, nil
+}
+
+// PreviewInputConvoyIDForRoutingIdentity returns the synthetic read-only
+// input convoy ID a graph.v2 preview should use when the preview target is a
+// routing identity (a configured agent identity, for example a workflow
+// root's gc.routed_to value) rather than a bead or convoy ID. Routing
+// identities have no bead-store entry, so the preview substitutes the same
+// synthetic preview-input-convoy value a non-convoy bead target receives,
+// without a store lookup.
+func PreviewInputConvoyIDForRoutingIdentity(targetID string) string {
+	return previewInputConvoyPrefix + strings.TrimSpace(targetID)
 }
 
 // LockKey serializes process-local graph.v2 materialization for a deterministic

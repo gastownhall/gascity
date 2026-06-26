@@ -419,7 +419,7 @@ title = "Expanded {{convoy_id}}"
 	if err == nil {
 		t.Fatal("PrepareInvocation succeeded, want targetless expanded convoy_id error")
 	}
-	if !strings.Contains(err.Error(), "convoy_id requires a targeted graph.v2 invocation") {
+	if !strings.Contains(err.Error(), "convoy_id requires a targeted formulas v2 invocation") {
 		t.Fatalf("error = %q, want expanded convoy_id target error", err)
 	}
 }
@@ -453,7 +453,7 @@ condition = "!{{convoy_id}}"
 	if err == nil {
 		t.Fatal("PrepareInvocation succeeded, want targetless expanded condition convoy_id error")
 	}
-	if !strings.Contains(err.Error(), "convoy_id requires a targeted graph.v2 invocation") {
+	if !strings.Contains(err.Error(), "convoy_id requires a targeted formulas v2 invocation") {
 		t.Fatalf("error = %q, want expanded condition convoy_id target error", err)
 	}
 }
@@ -477,7 +477,7 @@ condition = "!{{convoy_id}}"
 	if err == nil {
 		t.Fatal("PrepareInvocation succeeded, want targetless conditioned convoy_id error")
 	}
-	if !strings.Contains(err.Error(), "convoy_id requires a targeted graph.v2 invocation") {
+	if !strings.Contains(err.Error(), "convoy_id requires a targeted formulas v2 invocation") {
 		t.Fatalf("error = %q, want conditioned convoy_id target error", err)
 	}
 }
@@ -501,7 +501,7 @@ title = "Inspect {{convoy_id}}"
 		t.Fatalf("Create target: %v", err)
 	}
 
-	inv, err := PreparePreviewInvocation(context.Background(), store, "work", []string{dir}, target.ID, nil)
+	inv, err := PreparePreviewInvocation(context.Background(), store, "work", []string{dir}, target.ID, false, nil)
 	if err != nil {
 		t.Fatalf("PreparePreviewInvocation: %v", err)
 	}
@@ -518,6 +518,51 @@ title = "Inspect {{convoy_id}}"
 	}
 	if len(matches) != 0 {
 		t.Fatalf("preview created input convoys = %+v, want none", matches)
+	}
+}
+
+func TestPreparePreviewInvocationRoutingIdentityTargetSkipsBeadLookup(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "work.formula.toml", `
+formula = "work"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{convoy_id}}"
+`)
+	store := beads.NewMemStore()
+
+	// A routing identity (e.g. a workflow root's gc.routed_to value) has no
+	// bead-store entry; the preview must not fail the bead lookup.
+	inv, err := PreparePreviewInvocation(context.Background(), store, "work", []string{dir}, "myrig/worker", true, nil)
+	if err != nil {
+		t.Fatalf("PreparePreviewInvocation: %v", err)
+	}
+	want := previewInputConvoyPrefix + "myrig/worker"
+	if inv.InputConvoy != want {
+		t.Fatalf("preview invocation = %+v, want routing-identity preview input convoy %q", inv, want)
+	}
+	if got := inv.Vars[ConvoyIDVar]; got != want {
+		t.Fatalf("vars[%s] = %q, want %q", ConvoyIDVar, got, want)
+	}
+	matches, err := store.List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatalf("List convoys: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("preview created input convoys = %+v, want none", matches)
+	}
+}
+
+func TestPreviewInputConvoyIDForRoutingIdentity(t *testing.T) {
+	got := PreviewInputConvoyIDForRoutingIdentity("  myrig/worker  ")
+	want := previewInputConvoyPrefix + "myrig/worker"
+	if got != want {
+		t.Fatalf("PreviewInputConvoyIDForRoutingIdentity = %q, want %q", got, want)
 	}
 }
 
@@ -618,8 +663,8 @@ title = "Legacy item"
 	if err == nil {
 		t.Fatal("PrepareInvocation succeeded, want drain item graph.v2 error")
 	}
-	if !strings.Contains(err.Error(), "must declare contract = \"graph.v2\"") {
-		t.Fatalf("error = %q, want graph.v2 item formula message", err)
+	if !strings.Contains(err.Error(), "must declare the formulas v2 contract ([requires] formula_compiler = \">=2.0.0\")") {
+		t.Fatalf("error = %q, want formulas v2 item formula message", err)
 	}
 	matches, err := store.List(beads.ListQuery{Type: "convoy"})
 	if err != nil {

@@ -187,6 +187,7 @@ func (w *beadWire) toBead() beads.Bead {
 		Labels:      w.Labels,
 		Metadata:    coerceMetadata(w.Metadata),
 		Ephemeral:   w.Ephemeral,
+		NoHistory:   w.NoHistory,
 		DeferUntil:  cloneTimePtr(w.DeferUntil),
 	}
 }

@@ -1,12 +1,15 @@
 ---
-title: Gastown on Gas City — Config Recipes
+title: Configure the Gastown Pack
 description: Task-oriented config overrides for running the Gastown pack on Gas City — register rigs, scale pools, swap providers, patch agents, and tweak prompts.
 ---
 
 This page collects the common config edits for the Gastown pack — the changes
 you reach for *while editing files*. The conceptual migration story, including
 how Gas Town roles and mechanisms map onto Gas City primitives, lives in
-[Coming from Gas Town](/getting-started/coming-from-gastown).
+[Coming from Gas Town](/getting-started/coming-from-gastown); for the primitives
+themselves, see [The six primitives](/getting-started/how-gas-city-works).
+
+![Gastown agents by scope: city-scoped agents (mayor, deacon, boot, dog) load from [imports.gastown]; rig-scoped agents (witness, refinery, polecat) load from a rig import; crew are individually named directory agents plus a named session that you add yourself.](/diagrams/excalidraw-rendered/gastown-agents-by-scope.svg)
 
 ## Common Gastown Overrides
 
@@ -24,7 +27,7 @@ schema = 2
 
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
 ```
 
 ```toml
@@ -34,7 +37,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
 ```
 
 ```bash
@@ -52,7 +55,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -70,7 +73,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -124,7 +127,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
 
 [[rigs.patches]]
 agent = "gastown.refinery"
@@ -135,6 +138,70 @@ For prompt or overlay replacement, patch the imported agent from your root city 
 
 If that change turns out to be broadly useful across cities, that is when it should move into the pack.
 
+### Default a formula var for one rig
+
+Rig-scoped `formula_vars` fill formula `[vars]` values when a formula runs in
+that rig and the caller passed no explicit `--var`. They beat formula-level
+defaults and lose to `--var` flags; `gc formula show` renders them as
+`(rig default="...")`.
+
+```toml
+# city.toml
+[[rigs]]
+name = "myproject"
+
+[rigs.formula_vars]
+branch = "develop"
+```
+
+To layer the same change from a patch, use `[[patches.rigs]]` — the
+`formula_vars` merge is additive, so unrelated keys are preserved:
+
+```toml
+[[patches.rigs]]
+name = "myproject"
+
+[patches.rigs.formula_vars]
+branch = "develop"
+```
+
+### Change an agent's default sling formula
+
+`default_sling_formula` names the formula sling applies automatically for an
+agent. Override it per rig:
+
+```toml
+# city.toml
+[[rigs]]
+name = "myproject"
+
+[[rigs.patches]]
+agent = "gastown.polecat"
+default_sling_formula = "mol-scoped-work"
+```
+
+### Disable or retime a pack order
+
+The Gastown pack ships the `digest-generate` order (cooldown trigger, every
+24h). Skip it everywhere it is discovered:
+
+```toml
+# city.toml
+[orders]
+skip = ["digest-generate"]
+```
+
+Or retime it with an override. An override with no `rig` matches only the
+city-level instance; `rig = "*"` matches every instance; a rig name matches
+that rig's instance:
+
+```toml
+[[orders.overrides]]
+name = "digest-generate"
+rig = "*"
+interval = "12h"
+```
+
 ## A Complete Gastown Example
 
 The overrides above are fragments — single edits you splice into an existing
@@ -142,13 +209,12 @@ config. This section assembles them into a full, runnable topology: the three
 files that express the whole Gastown pack on Gas City.
 
 Read them in order. The **city file** is the normal starting point — the
-deployment you boot; it also carries the explicit includes for the builtin
-`core` and `bd` packs (`gc init` writes these, `gc doctor --fix` repairs
-them). The **root pack** wires the Gastown import and the default rig binding
-behind it. The **nested pack** holds the reusable defaults — the roles, named
-sessions, and dog pool every Gastown city inherits.
+deployment you boot. The **root pack** wires the Gastown import and the default
+rig binding behind it, plus the builtin `core` and `bd` imports `gc init` pins
+(`gc doctor --fix` repairs them). The **nested pack** holds the reusable
+defaults — the roles, named sessions, and dog pool every Gastown city inherits.
 
-All three are PackV2 (`schema = 2`, `agents/<name>/`).
+All three use the current pack layout (`schema = 2`, `agents/<name>/`).
 
 ### `city.toml` — the deployment
 
@@ -181,23 +247,25 @@ All three are PackV2 (`schema = 2`, `agents/<name>/`).
 name = "gastown"
 provider = "claude"
 global_fragments = ["command-glossary", "operational-awareness"]
-# Builtin packs compose only through explicit includes (gc init writes
-# these; gc doctor --fix repairs them).
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
+# Builtin packs (core, bd) compose through explicit pinned imports in
+# pack.toml (gc init writes these; gc doctor --fix repairs them).
 
 [providers.claude]
 base = "builtin:claude"
 
 [defaults.rig.imports.gastown]
-source = "packs/gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
 
 [daemon]
 patrol_interval = "30s"
 max_restarts = 5
 restart_window = "1h"
 shutdown_timeout = "5s"
-# Enable compiler-v2 formulas from imported packs. Legacy molecule formulas keep
-# molecule_id attachment semantics unless they declare a compiler-v2 requirement.
+# Formulas v2 is the default; this line only makes the choice
+# explicit. Set formula_v2 = false only for cities pinned to formula compiler
+# v1. v1 molecule formulas keep molecule_id attachment semantics unless
+# they declare the v2 requirement.
 formula_v2 = true
 
 # Register a rig to activate per-rig agents (witness, refinery, polecat):
@@ -205,33 +273,9 @@ formula_v2 = true
 # name = "myproject"
 # path = "/path/to/your/project"
 
-# Crew members are persistent, individually named workers, so they can't be
-# pack-stamped. Each one is a directory agent under agents/<name>/ plus a
-# named session that keeps it alive. To add a crew member "wolf" bound to a
-# registered rig "myproject":
-#
-#   1. Create agents/wolf/agent.toml (relative paths resolve against this
-#      city directory):
-#
-#        scope = "rig"
-#        dir = "myproject"
-#        nudge = "Check your hook and mail, then act accordingly."
-#        work_dir = ".gc/worktrees/myproject/crew/wolf"
-#        idle_timeout = "4h"
-#        prompt_template = "packs/gastown/assets/prompts/crew.template.md"
-#        pre_start = ["{{.CityRoot}}/packs/gastown/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
-#
-#      tmux theming comes from the gastown pack's [global] session_live hooks,
-#      so crew members need no session_setup wiring of their own.
-#
-#   2. Keep the crew session alive by declaring a named session here. The
-#      dir must match the agent's so the session resolves to "myproject/wolf":
-#
-# [[named_session]]
-# template = "wolf"
-# dir = "myproject"
-# scope = "rig"
-# mode = "always"
+# Crew members are persistent, individually named directory agents
+# (agents/<name>/) plus an always-on named session — see "Add a named crew
+# agent" above for the agent.toml and named_session to add here.
 ```
 
 ### `pack.toml` — the root pack
@@ -250,11 +294,18 @@ formula_v2 = true
 name = "gastown"
 schema = 2
 
+# Pinned public registry import; resolved offline from the gc binary's
+# bundled copy. The gastown pack is no longer a local directory.
 [imports.gastown]
-source = "packs/gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
 ```
 
-### `packs/gastown/pack.toml` — the reusable defaults
+### The gastown pack — the reusable defaults
+
+The pack itself lives in the gascity-packs registry
+(github.com/gastownhall/gascity-packs, `gastown/`); its pack.toml looks
+like this:
 
 ```toml
 # Gas Town — domain-specific coding workflow pack.
@@ -264,9 +315,12 @@ source = "packs/gastown"
 # (witness, refinery, polecat). Mechanical housekeeping (gate/orphan/wisp
 # sweeps, branch pruning, nudge relays) ships with the builtin core pack.
 #
-# Referenced by both workspace.pack and rigs[].pack:
-#   workspace.pack → expands city-scoped agents only (mayor, deacon, boot, dog)
-#   rigs[].pack    → expands rig agents only (witness, refinery, polecat)
+# Imported at both city and rig scope:
+#   [imports.gastown] (root pack)              → expands city-scoped agents
+#                                                 only (mayor, deacon, boot, dog)
+#   [defaults.rig.imports.gastown] / [rigs.imports.gastown]
+#                                              → expands rig agents only
+#                                                 (witness, refinery, polecat)
 #
 # Crew members are individually named directory agents (agents/<name>/) plus a
 # named session; see the crew member note in the city file above.

@@ -142,7 +142,7 @@ func AgentProcessNames(cfg *City, agent Agent, lookPath LookPathFunc) []string {
 // Agent-level overrides workspace-level (replace, not additive).
 // Returns nil if neither specifies hooks.
 func ResolveInstallHooks(agent *Agent, ws *Workspace) []string {
-	if agent != nil && agent.Implicit && agent.Name == ControlDispatcherAgentName {
+	if IsDeterministicControlDispatcher(agent) {
 		return nil
 	}
 	if len(agent.InstallAgentHooks) > 0 {
@@ -301,6 +301,17 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.SessionIDFlag != "" {
 		result.SessionIDFlag = city.SessionIDFlag
 	}
+	// Upstream serving-env binding inherits per-field: a child harness keeps the
+	// base's env-var names unless it overrides a specific one.
+	if city.UpstreamEnv.BaseURL != "" {
+		result.UpstreamEnv.BaseURL = city.UpstreamEnv.BaseURL
+	}
+	if city.UpstreamEnv.APIKey != "" {
+		result.UpstreamEnv.APIKey = city.UpstreamEnv.APIKey
+	}
+	if city.UpstreamEnv.AuthToken != "" {
+		result.UpstreamEnv.AuthToken = city.UpstreamEnv.AuthToken
+	}
 
 	if city.TitleModel != "" {
 		result.TitleModel = city.TitleModel
@@ -411,7 +422,7 @@ func mergeOptionsSchemaByKey(base, city []ProviderOption) ([]ProviderOption, map
 			continue
 		}
 		if idx, ok := index[opt.Key]; ok && opt.Key != "" {
-			out[idx] = opt
+			out[idx] = mergeProviderOptionByKey(out[idx], opt)
 			continue
 		}
 		if opt.Key != "" {
@@ -420,6 +431,43 @@ func mergeOptionsSchemaByKey(base, city []ProviderOption) ([]ProviderOption, map
 		out = append(out, opt)
 	}
 	return out, pruned
+}
+
+func mergeProviderOptionByKey(base, overlay ProviderOption) ProviderOption {
+	out := overlay
+	if out.Label == "" {
+		out.Label = base.Label
+	}
+	if out.Type == "" {
+		out.Type = base.Type
+	}
+	if out.Default == "" {
+		out.Default = base.Default
+	}
+	out.Choices = mergeOptionChoicesByValue(base.Choices, overlay.Choices)
+	return out
+}
+
+func mergeOptionChoicesByValue(base, overlay []OptionChoice) []OptionChoice {
+	out := make([]OptionChoice, 0, len(base)+len(overlay))
+	index := make(map[string]int, len(base)+len(overlay))
+	for _, choice := range base {
+		if choice.Value != "" {
+			index[choice.Value] = len(out)
+		}
+		out = append(out, choice)
+	}
+	for _, choice := range overlay {
+		if idx, ok := index[choice.Value]; ok && choice.Value != "" {
+			out[idx] = choice
+			continue
+		}
+		if choice.Value != "" {
+			index[choice.Value] = len(out)
+		}
+		out = append(out, choice)
+	}
+	return out
 }
 
 func optionKeysRemovedByReplacement(base, replacement []ProviderOption) map[string]bool {
@@ -584,6 +632,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		SessionIDFlag:          spec.SessionIDFlag,
 		TitleModel:             spec.TitleModel,
 		ACPCommand:             spec.ACPCommand,
+		UpstreamEnv:            spec.UpstreamEnv,
 	}
 	// Deep-copy OptionsSchema to avoid aliasing the spec's slice.
 	if len(spec.OptionsSchema) > 0 {

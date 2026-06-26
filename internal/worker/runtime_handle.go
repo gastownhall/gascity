@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/promptsafe"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -203,6 +204,9 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 }
 
 // Message submits a runtime nudge as a synchronous worker message.
+// Runtime-only sessions are permanently excluded from invocation
+// telemetry (gc.agent.tokens.*, gc.agent.invocation.cost_usd); see
+// SessionHandle.recordInvocationTelemetry. Do not add a telemetry hook here.
 func (h *RuntimeHandle) Message(ctx context.Context, req MessageRequest) (result MessageResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationMessage)
 	defer func() {
@@ -235,6 +239,8 @@ func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 }
 
 // Nudge submits a best-effort reminder to the live runtime session.
+// Like Message, it is permanently excluded from invocation telemetry;
+// see SessionHandle.recordInvocationTelemetry.
 func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
@@ -426,6 +432,13 @@ func formatRuntimeWaitIdleReminder(source, message string) string {
 	if source == "" {
 		source = "session"
 	}
+	// Sanitize attacker-controllable fields before interpolating into the
+	// <system-reminder> block. The deferred-nudge body is sender-supplied, so
+	// without this a sender can embed </system-reminder> sequences to break out
+	// of the reminder and inject a forged operator/system directive.
+	// See gastownhall/gascity#2195 and the ga-vs7 notification-injection incident.
+	source = promptsafe.SanitizeForSystemReminder(source)
+	message = promptsafe.SanitizeForSystemReminder(message)
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	sb.WriteString("You have a deferred reminder that was queued until a safe boundary:\n\n")

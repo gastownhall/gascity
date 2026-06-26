@@ -72,6 +72,11 @@ type Formula struct {
 	// Catalog opts the formula into user-facing workflow discovery.
 	Catalog *CatalogMetadata `json:"catalog,omitempty" toml:"catalog,omitempty"`
 
+	// Metadata holds formula-level metadata for inspection APIs.
+	// Unlike step metadata, these values are not copied into bead metadata and
+	// may contain nested TOML/JSON structures.
+	Metadata map[string]any `json:"metadata,omitempty" toml:"metadata,omitempty"`
+
 	// Contract opts the formula into a specific runtime contract.
 	// "graph.v2" enables graph-first workflow compilation when formula_v2 is enabled.
 	Contract string `json:"contract,omitempty" toml:"contract,omitempty"`
@@ -391,6 +396,12 @@ func (s *Step) UnmarshalTOML(data interface{}) error {
 	raw, ok := data.(map[string]interface{})
 	if !ok {
 		return fmt.Errorf("type mismatch for formula.Step: expected table but found %T", data)
+	}
+
+	if loopRaw, ok := raw["loop"].(map[string]interface{}); ok {
+		if _, isStr := loopRaw["count"].(string); isStr {
+			return fmt.Errorf("loop.count must be an integer literal (e.g. count = 3), not a quoted string; for variable-driven iteration use range = \"1..{n}\" with var = \"n\" (note: range expressions use single-brace {n}, not double-brace {{n}})")
+		}
 	}
 
 	encoded, err := json.Marshal(raw)
@@ -1512,7 +1523,7 @@ func validateRetry(spec *RetrySpec, errs *[]string, prefix string, step *Step) {
 
 func validateDrain(spec *DrainSpec, errs *[]string, prefix string, step *Step, graphV2 bool) {
 	if !graphV2 {
-		*errs = append(*errs, fmt.Sprintf("%s.drain: drain requires contract = \"graph.v2\"", prefix))
+		*errs = append(*errs, fmt.Sprintf("%s.drain: drain steps must declare the formulas v2 contract ([requires] formula_compiler = \">=2.0.0\")", prefix))
 	}
 	switch spec.Context {
 	case "", "separate":

@@ -19,13 +19,16 @@ func newRuntimeCmd(stdout, stderr io.Writer) *cobra.Command {
 
 These commands read and write session metadata to coordinate lifecycle
 events (drain, restart) between agents and the controller. They are
-designed to be called from within running agent sessions, not by humans.`,
+designed to be called from within running agent sessions, not by humans.
+
+The exception is "gc runtime check", which validates a Runtime Provider
+Protocol executable — run by humans and runtime-pack CIs.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			known := []string{"drain", "undrain", "drain-check", "drain-ack", "request-restart"}
+			known := []string{"drain", "undrain", "drain-check", "drain-ack", "request-restart", "check", "conformance"}
 			fmt.Fprintf(stderr, "gc runtime: unknown subcommand %q\nAvailable subcommands: %v\n", args[0], known) //nolint:errcheck // best-effort stderr
 			return errExit
 		},
@@ -36,6 +39,8 @@ designed to be called from within running agent sessions, not by humans.`,
 		newRuntimeDrainCheckCmd(stdout, stderr),
 		newRuntimeDrainAckCmd(stdout, stderr),
 		newRuntimeRequestRestartCmd(stdout, stderr),
+		newRuntimeCheckCmd(stdout, stderr),
+		newRuntimeConformanceCmd(stdout, stderr),
 	)
 	return cmd
 }

@@ -4,6 +4,7 @@ package tierb_test
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	gascitypacks "github.com/gastownhall/gascity-packs"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -270,9 +273,11 @@ func writeGastownIdleProbeOrders(t *testing.T, cityDir string) {
 	if err := os.MkdirAll(orderDir, 0o755); err != nil {
 		t.Fatalf("create orders dir: %v", err)
 	}
-	formulaOrder, err := os.ReadFile(filepath.Join(cityDir, "packs", "gastown", "orders", "digest-generate.toml"))
+	// The gastown pack is no longer copied into the city; read the digest
+	// order from the pack embedded in the gc binary (gascity-packs module).
+	formulaOrder, err := fs.ReadFile(gascitypacks.Gastown(), "orders/digest-generate.toml")
 	if err != nil {
-		t.Fatalf("read copied digest order: %v", err)
+		t.Fatalf("read embedded gastown digest order: %v", err)
 	}
 	formulaOrderBody := string(formulaOrder)
 	if !strings.Contains(formulaOrderBody, `interval = "24h"`) {

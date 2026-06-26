@@ -128,12 +128,11 @@ func TestTransitiveGastownPackDigestOrderResolvesAndRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gastownRoot, err := filepath.Abs(filepath.Join("..", "..", "examples", "gastown"))
-	if err != nil {
-		t.Fatalf("Abs(examples/gastown): %v", err)
-	}
-	gastownPackDir := filepath.Join(gastownRoot, "packs", "gastown")
-	retiredMaintenanceFormulaLayer := filepath.Join(gastownRoot, "packs", "maintenance", "formulas")
+	// The example city no longer carries a checked-in gastown pack copy;
+	// materialize the module-embedded pack so the wrapper import below
+	// exercises transitive local-path composition against the real bytes.
+	gastownPackDir := materializeEmbeddedGastownPack(t)
+	retiredMaintenanceFormulaLayer := filepath.Join(filepath.Dir(gastownPackDir), "maintenance", "formulas")
 	digestFormulaLayer := filepath.Join(gastownPackDir, "formulas")
 	digestFormulaFile := filepath.Join(digestFormulaLayer, "mol-digest-generate.toml")
 	shutdownFormulaFile := filepath.Join(digestFormulaLayer, "mol-shutdown-dance.toml")

@@ -51,26 +51,31 @@ Local checks reuse the same script protocol as pack doctor checks:
 The first stdout line becomes the check message. Additional stdout lines are
 shown by `gc doctor --verbose`.
 
-## "city.toml does not include required builtin pack(s)" Warning
+## "does not import required builtin pack(s)" Warning
 
-Builtin packs compose only through explicit `[workspace]` includes in
-`city.toml` — nothing splices them into config composition implicitly.
-`gc init` writes the includes for new cities:
+Builtin packs compose only through explicit pinned `[imports]` in
+`pack.toml` — nothing splices them into config composition implicitly.
+`gc init` writes the imports (plus a matching `packs.lock`) for new cities:
 
 ```toml
-[workspace]
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "sha:<pinned commit>"
+
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "sha:<pinned commit>"
 ```
 
 (The `bd` entry is written only for bd-provider cities, the default;
 non-bd providers get only `core`.)
 
-If a required include is missing — typically in a city created before the
-includes became explicit — config load still refreshes the materialized
-pack content under `.gc/system/packs/` and prints a once-per-city warning:
+If a required import is missing — typically in a city created before the
+imports became explicit — config load still self-heals the user-global pack
+cache and prints a once-per-city warning:
 
 ```
-warning: city.toml does not include required builtin pack(s) core; run "gc doctor --fix" to add the missing include(s)
+warning: this city does not import required builtin pack(s) core; run "gc doctor --fix" to add the missing import(s)
 ```
 
 Run the suggested fix:
@@ -79,12 +84,11 @@ Run the suggested fix:
 gc doctor --fix
 ```
 
-The `builtin-pack-includes` doctor check adds the missing include(s) and
-removes stale includes that point at the retired
-`.gc/system/packs/maintenance` pack, whose exec orders and scripts now
-ship in the bundled core pack at `.gc/system/packs/core`. Stale
-`.gc/system/packs/maintenance` directories on disk are pruned
-automatically by materialization.
+The `builtin-pack-imports` doctor check migrates the city to the imports
+model: it strips legacy `workspace.includes` entries pointing at the retired
+per-city `.gc/system/packs` tree, adds the missing pinned import(s) to
+`pack.toml`, and refreshes `packs.lock` and the cache. Leftover
+`.gc/system/packs` directories on disk are pruned automatically.
 
 ## "command not found" After Install
 
@@ -169,7 +173,7 @@ check.
 | Tool | Min version | macOS | Linux |
 |------|-------------|-------|-------|
 | dolt | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
-| bd | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
+| bd | 1.0.4 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
 ### Optional for GitHub gates
@@ -215,9 +219,10 @@ Upgrade via Homebrew (`brew upgrade dolt`) or download a newer release from
 
 ## `bd` Version Too Old
 
-Gas City requires `bd` 1.0.0 or newer. The bd-backed store relies on wisps
-support, including `bd create --ephemeral` and `bd query ephemeral=true`, so
-older binaries can fail order-tracking and wisp cleanup paths. Check your
+Gas City requires `bd` 1.0.4 or newer. The bd-backed store relies on
+ephemeral-bead support used by order tracking, including `bd create
+--ephemeral` and `bd query ephemeral=true`, so older binaries can fail
+order tracking and the cleanup of those ephemeral beads. Check your
 version:
 
 ```bash
@@ -235,13 +240,80 @@ store when executable `.beads/hooks/on_create`, `.beads/hooks/on_update`, or
 bead events for external `bd` writes; the native in-process store does not run
 shell hooks.
 
-For controller-managed Gas City deployments, confirm that the controller is
+For orchestrator-managed Gas City deployments, confirm that the orchestrator is
 wrapping stores with `CachingStore` and emitting `bead.created`,
 `bead.updated`, `bead.closed`, and `bead.deleted` events to the event bus. After
 that migration is verified, remove the executable hook scripts from the city or
 rig `.beads/hooks/` directory to allow native store adoption. Keep
 `GC_BEADS_FORCE_FALLBACK=1` set when a deployment still depends on those hook
 scripts directly.
+
+## Native Store Falls Back Because Dolt Is in Embedded Mode
+
+**Symptom:** `gc status` or `gc session list` is slower than expected, or
+`gc doctor` reports `native_store_unavailable gate=dolt_mode_safe`.
+
+Gas City's native in-process beads store requires that `bd context` reports
+`dolt_mode=server`. When `bd` is configured with an embedded Dolt instance (the
+default for a freshly installed `bd`), the `dolt_mode_safe` gate fails and Gas
+City falls back to invoking the `bd` CLI as a subprocess for every store
+operation. Each subprocess call adds tens to hundreds of milliseconds of
+overhead, which accumulates noticeably during `gc status` and `gc session list`.
+
+**Remedy:** Run `bd` against a Dolt SQL server so that `bd context` reports
+`dolt_mode=server`:
+
+```bash
+# Start a local Dolt SQL server (one-time setup)
+dolt sql-server --port 28231
+
+# Confirm bd resolves server mode
+bd context --json | grep dolt_mode
+# expected: "dolt_mode": "server"
+```
+
+Once `bd context` reports `dolt_mode=server`, `gc doctor` will clear the
+`dolt_mode_safe` gate and Gas City will use the native store automatically
+on the next start.
+
+<Note>
+The `gascity_native_beads` build tag visible in some source files is a
+test-only mechanism — it requires `GC_NATIVE_DOLTLITE_BEADS=true` and is
+not a supported operator path. Use Dolt server mode instead.
+</Note>
+
+## `dolt_mode_safe` Preflight Gate Fails
+
+The native in-process store is unavailable after `gc start`, and the supervisor
+log shows:
+
+```
+native_store_unavailable gate=dolt_mode_safe reason="dolt_mode=embedded; native store requires Dolt server mode (bd context must report dolt_mode=server) — falling back to per-call bd. See troubleshooting."
+```
+
+`gc status --json | jq .beads` reports `"preflight_gate":"dolt_mode_safe"` with
+`"native_store_eligible":false`.
+
+The `dolt_mode_safe` gate keys off the `dolt_mode` value that `bd context`
+reports; a value of `embedded` fails the gate. The gate reads this from
+`bd context`, not from `.beads/config.yaml`, so hand-editing the config file is
+not the supported repair. Confirm what `bd` currently reports:
+
+```bash
+bd context --json | jq .dolt_mode   # should print "server"
+```
+
+**Remedy:** This is the same native-store fallback covered under
+[Native Store Falls Back Because Dolt Is in Embedded Mode](#native-store-falls-back-because-dolt-is-in-embedded-mode).
+Follow that section to run `bd` against a Dolt SQL server so `bd context`
+reports `dolt_mode=server`, then apply and re-check:
+
+```bash
+gc restart
+```
+
+Do not bypass or disable the `dolt_mode_safe` check — it guards the store-mode
+contract that keeps `bd` and gc in agreement.
 
 ## flock Not Found (macOS)
 
@@ -326,6 +398,109 @@ Apply the change by regenerating the service file:
 ```bash
 gc service restart     # restarts the launchd/systemd service
 ```
+
+## Supervisor Log Written Twice (journald + supervisor.log)
+
+`gc supervisor run` tees its output into `${GC_HOME}/supervisor.log`
+(defaults to `~/.gc/supervisor.log`) so `gc supervisor logs` works no matter
+how the supervisor was started. Under a hand-managed systemd unit with
+`StandardOutput=journal`, that tee becomes a second copy of every line:
+journald keeps one, and `supervisor.log` grows without rotation.
+
+Set `GC_SUPERVISOR_LOG_TEE=0` in the supervisor's environment to disable the
+tee so the service manager's log is the single sink. Only the literal value
+`0` disables it; any other value (or unset) keeps the default tee.
+
+```ini
+# hand-managed ~/.config/systemd/user/gascity-supervisor.service
+[Service]
+StandardOutput=journal
+StandardError=journal
+Environment=GC_SUPERVISOR_LOG_TEE=0
+```
+
+Scope and caveats:
+
+- **The variable matters in two places.** The supervisor process's
+  environment controls the tee. The shell running `gc supervisor logs`
+  controls only what that command reports: when the variable is set there
+  and `supervisor.log` exists, the file is tailed with a staleness warning;
+  when the file is absent, the command points at the service manager's log
+  (`journalctl --user -u gascity-supervisor.service` on Linux) instead. A
+  unit's `Environment=` lines are invisible to your interactive shell, so
+  export the variable in both for coherent behavior.
+- **Service files generated by `gc supervisor install` or `gc start` do not
+  need — and do not honor — the opt-out.** Generated units redirect
+  supervisor output straight into `supervisor.log` (systemd
+  `StandardOutput=append:`, launchd `StandardOutPath`), and the tee already
+  suppresses itself when its output is that same file, so `supervisor.log`
+  is the single sink in those shapes. The variable is not captured into
+  generated service files automatically; it exists for units you manage by
+  hand.
+- **To persist the variable into a generated service file anyway** — for
+  example as a starting point you then hand-edit to
+  `StandardOutput=journal` — opt it in explicitly and regenerate:
+
+  ```bash
+  export GC_SUPERVISOR_LOG_TEE=0
+  GC_SUPERVISOR_ENV=GC_SUPERVISOR_LOG_TEE gc supervisor install
+  ```
+
+  Note that `gc start` regenerates the service file with the file-redirect
+  defaults, so a hand-edited unit at gc's service path stays journal-only
+  only on hosts where gc never manages the unit.
+
+## Delegating the Supervisor Lifecycle to an Operator-Managed systemd Unit
+
+By default `gc` owns the supervisor lifecycle: `gc start` installs and
+starts a per-user service (`gascity-supervisor`), and binary-drift
+detection restarts that service directly. Hosts that run the supervisor
+under an operator-managed systemd unit instead — for example a hardened
+system service with its own restart policy — can delegate the lifecycle:
+
+```bash
+GC_SUPERVISOR_SYSTEMD_UNIT=gascity-prod.service  # unit that owns the supervisor
+GC_SUPERVISOR_SYSTEMD_SCOPE=system               # "system" (default) or "user"
+```
+
+With the unit configured:
+
+- `gc supervisor start` and the `gc start` ensure path run
+  `systemctl [--user] start <unit>` (bounded, so a wedged unit cannot
+  hold the CLI indefinitely) and wait for the control socket to answer.
+  When the socket stays unreachable — the usual situation for a
+  system-scope unit running under a different user — start falls back
+  to the same liveness evidence `gc supervisor status` trusts: an
+  active unit, then the supervisor HTTP API. Only when all three are
+  silent does start fail. gc never writes, loads, or daemon-reloads its
+  own service files in delegated mode; `gc supervisor install` refuses
+  to run, and `gc supervisor uninstall` only removes gc's own legacy
+  service.
+- `gc supervisor stop` runs `systemctl [--user] stop <unit>`
+  synchronously, bounded by `--wait-timeout` (default 30s) whether or
+  not `--wait` is set, then verifies a previously-running supervisor
+  actually exited. A live supervisor the unit does not manage (common
+  mid-migration) fails the stop with its PID instead of reporting a
+  false "Supervisor stopped.", and stop with nothing running keeps the
+  legacy exit-1 "supervisor is not running" contract.
+- The `gc start` drift auto-restart runs `systemctl try-restart <unit>`
+  (a unit the operator stopped stays stopped) and fails unless the
+  restart verifiably resolved the drift: a supervisor that was not
+  replaced, a replacement still serving the drifted build (the unit's
+  `ExecStart` launches a stale binary), or an unverifiable post-restart
+  probe each fail instead of declaring "ready" while a stale supervisor
+  keeps serving.
+- `gc supervisor status` probes the delegated unit
+  (`systemctl [--user] is-active <unit>`) when the control socket is
+  unreachable — the usual situation for a system-scope unit running
+  under a different user — and reports a broken delegation config (a
+  warning in text mode, a `config_error` field in `--json`) instead of
+  a bare "not running".
+
+An invalid `GC_SUPERVISOR_SYSTEMD_SCOPE` value is a hard error on every
+lifecycle path; gc never silently falls back to the default unit.
+Setting `GC_SUPERVISOR_SYSTEMD_UNIT` on a non-Linux platform is the
+same kind of hard error — delegation is a systemd contract.
 
 ## JSONL Archive Push Failures
 
@@ -448,8 +623,8 @@ the escalation marker.
 ### Maintenance escalation and completion routing
 
 Core maintenance scripts route alerts through a generic escalation hook
-instead of mailing a hardcoded role. Orders inherit the controller's
-environment, so set these at controller start to customize routing:
+instead of mailing a hardcoded role. Orders inherit the orchestrator's
+environment, so set these at orchestrator start to customize routing:
 
 - `GC_ESCALATION_RECIPIENT` — mail recipient for escalations (default:
   `human`, the reserved human mailbox).
@@ -461,7 +636,8 @@ environment, so set these at controller start to customize routing:
 - `GC_MAINTENANCE_DONE_TARGET` — session target to nudge with
   `MAINTENANCE_DONE:`/warn summaries when a maintenance run completes
   (default: unset, no completion nudge). Deployments that relied on the
-  old hardcoded deacon nudges should set this to restore that loop.
+  old hardcoded completion nudges to a health-patrol session should set
+  this to restore that loop.
 
 Common root causes, in rough order of frequency:
 
@@ -481,7 +657,7 @@ Common root causes, in rough order of frequency:
 
 If the underlying problem cannot be fixed immediately (e.g., the remote
 host is down for scheduled maintenance), set
-`GC_JSONL_MAX_PUSH_FAILURES=99` in the controller's environment and
+`GC_JSONL_MAX_PUSH_FAILURES=99` in the orchestrator's environment and
 restart the city with `gc restart`. That bumps the escalation threshold
 from 3 to 99, which at the current 15-minute tick rate is ~24 hours of
 silence.
@@ -495,7 +671,7 @@ terminal emulator.
 
 ## Build From Source Fails
 
-Building from source requires `make` and Go 1.25 or newer:
+Building from source requires `make` and Go 1.26.4 or newer:
 
 ```bash
 make --version
@@ -530,6 +706,9 @@ hatches (`gc rig set-endpoint --inherit`/`--self --force`/`--external`),
 and an end-to-end recovery recipe.
 
 ## Still Stuck?
+
+If a symptom only makes sense once you know how the pieces fit together, see
+[The six primitives](/getting-started/how-gas-city-works) for the underlying model.
 
 Open an issue at
 [gastownhall/gascity/issues](https://github.com/gastownhall/gascity/issues)

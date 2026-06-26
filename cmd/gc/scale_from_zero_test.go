@@ -342,3 +342,179 @@ func TestBuildDesiredState_ScaleFromZero_UnqualifiedTemplateDoesNotSuppressCold(
 		t.Errorf("expected demand 1 (stray unqualified session must not suppress cold), got %d", demand)
 	}
 }
+
+// TestBuildDesiredState_ScaleFromZero_LegacyBoundTemplateSuppressesCold proves
+// the cold detection counts an adopted session bead persisted under a removed
+// binding ("rig-A/gc.planner") as a running session of the current unbound
+// rig-A/planner agent. The identities are equivalent after bound→unbound
+// migration, so the pool is NOT cold and the cold-wake probe must not fire —
+// otherwise every tick over-probes and transiently over-wakes a pool that
+// already has a live adopted session. The bare-name distinctness guarantee of
+// TestBuildDesiredState_ScaleFromZero_UnqualifiedTemplateDoesNotSuppressCold
+// must survive this widening.
+func TestBuildDesiredState_ScaleFromZero_LegacyBoundTemplateSuppressesCold(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := tmpDir + "/rigs/rig-A"
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	maxSess := 5
+	minSess := 0
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:              "planner",
+				MaxActiveSessions: &maxSess,
+				MinActiveSessions: &minSess,
+				ScaleCheck:        "printf 0", // custom check returns 0
+				Dir:               "rig-A",
+				Provider:          "mock",
+			},
+		},
+		Rigs: []config.Rig{
+			{Name: "rig-A", Path: rigPath},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"mock": {
+				Command: "true",
+			},
+		},
+	}
+
+	cityStore := beads.NewMemStore()
+	rigAStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{
+		"rig-A": rigAStore,
+	}
+
+	qualifiedName := "rig-A/planner"
+
+	// Adopted pool session bead persisted under the removed binding. Its
+	// stored template is the legacy bound identity of the SAME agent, so it
+	// must count toward rig-A/planner's running sessions.
+	if _, err := rigAStore.Create(beads.Bead{
+		ID:     "adopted-session",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "rig-A/gc.planner",
+			"session_name": "planner-legacy-1",
+			"state":        "active",
+			"pool_slot":    "1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Route demand to rig-A/planner in the city store.
+	if _, err := cityStore.Create(beads.Bead{
+		ID:     "bead-1",
+		Status: "open",
+		Type:   "task",
+		Metadata: map[string]string{
+			"gc.routed_to": qualifiedName,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionBeads := &sessionBeadSnapshot{} // Empty city store snapshot
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore, rigStores, sessionBeads, nil, os.Stderr,
+	)
+
+	// The adopted legacy-bound session counts as running → pool is not cold →
+	// the custom check's 0 stands and no cold-wake probe inflates demand.
+	if demand := result.ScaleCheckCounts[qualifiedName]; demand != 0 {
+		t.Errorf("expected demand 0 (adopted legacy-bound session suppresses cold probe), got %d", demand)
+	}
+}
+
+// TestBuildDesiredState_ScaleFromZero_LegacyBoundUnassignedRoutedWorkWakesCanonicalPool
+// proves the BF-1 review finding is closed: open, unassigned work routed to the
+// legacy bound form of a now-unbound pool agent ("rig-A/gc.planner") must wake
+// and be claimable by the canonical "rig-A/planner" pool. The canonical
+// pool-demand probe matches gc.routed_to against the canonical target by raw
+// string, so before the reconciler canonicalizes the route the cold pool never
+// sees the demand and migration-era ready work stays stuck at zero. After the
+// re-home the cold-wake probe counts it (clamped to 1) and the persisted route
+// is canonical so the canonical worker's work_query/claim path can surface it.
+func TestBuildDesiredState_ScaleFromZero_LegacyBoundUnassignedRoutedWorkWakesCanonicalPool(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := tmpDir + "/rigs/rig-A"
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	maxSess := 5
+	minSess := 0
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:              "planner",
+				MaxActiveSessions: &maxSess,
+				MinActiveSessions: &minSess,
+				ScaleCheck:        "printf 0", // custom check returns 0
+				Dir:               "rig-A",
+				Provider:          "mock",
+			},
+		},
+		Rigs: []config.Rig{
+			{Name: "rig-A", Path: rigPath},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"mock": {
+				Command: "true",
+			},
+		},
+	}
+
+	cityStore := beads.NewMemStore()
+	rigAStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{
+		"rig-A": rigAStore,
+	}
+
+	const legacyRoute = "rig-A/gc.planner"
+	const canonical = "rig-A/planner"
+
+	// Open, unassigned demand still routed to the removed bound identity. No live
+	// session owns it (empty assignee, open status), so it is pure migration-era
+	// ready work that the canonical pool cannot see until its route is rewritten.
+	created, err := cityStore.Create(beads.Bead{
+		Status: "open",
+		Type:   "task",
+		Metadata: map[string]string{
+			"gc.routed_to": legacyRoute,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sessionBeads := &sessionBeadSnapshot{} // cold pool: no running sessions
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore, rigStores, sessionBeads, nil, os.Stderr,
+	)
+
+	// The legacy-routed demand is canonicalized to rig-A/planner, so the cold-wake
+	// probe now sees it and wakes the pool from zero (clamped to 1).
+	if demand := result.ScaleCheckCounts[canonical]; demand != 1 {
+		t.Errorf("expected demand 1 (legacy-routed work canonicalized wakes cold pool), got %d", demand)
+	}
+
+	// The persisted route is canonical, so the canonical worker's work_query and
+	// the claim predicate (raw-string gc.routed_to match) can surface and claim it.
+	got, err := cityStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", created.ID, err)
+	}
+	if routed := got.Metadata["gc.routed_to"]; routed != canonical {
+		t.Errorf("gc.routed_to = %q, want %q (re-homed to canonical)", routed, canonical)
+	}
+}

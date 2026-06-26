@@ -48,6 +48,12 @@ func writeMalformedHistoryTranscript(t *testing.T, profile Profile) string {
 			t.Fatalf("write malformed opencode transcript: %v", err)
 		}
 		return path
+	case ProfileMimoCodeTmuxCLI:
+		path := filepath.Join(t.TempDir(), "session.json")
+		if err := os.WriteFile(path, []byte(`{"info":{"id":"malformed-mimocode","directory":"/tmp/gascity/phase2/mimocode"},"messages":[`), 0o644); err != nil {
+			t.Fatalf("write malformed mimocode transcript: %v", err)
+		}
+		return path
 	case ProfilePiTmuxCLI:
 		return writeLinesFile(t, "session.jsonl", []string{
 			`{"type":"session","version":3,"id":"malformed-pi","timestamp":"2026-04-04T09:00:00Z","cwd":"/tmp/gascity/phase2/pi"}`,
@@ -104,6 +110,11 @@ func writeInteractionHistoryTranscript(t *testing.T, profile Profile) string {
 		return writeOpenCodeExportTranscript(t, "opencode-interaction-phase2", "/tmp/gascity/phase2/opencode", []string{
 			`{"info":{"id":"msg_user_1","sessionID":"opencode-interaction-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"run a tool"}]}`,
 			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-interaction-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
+		})
+	case ProfileMimoCodeTmuxCLI:
+		return writeMimoCodeExportTranscript(t, "mimocode-interaction-phase2", "/tmp/gascity/phase2/mimocode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"mimocode-interaction-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"run a tool"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"mimocode-interaction-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
 		})
 	case ProfilePiTmuxCLI:
 		return writePiSessionTranscript(t, "pi-interaction-phase2", "/tmp/gascity/phase2/pi", []string{
@@ -165,6 +176,11 @@ func writeInteractionLifecycleTranscript(t *testing.T, profile Profile, finalSta
 		return writeOpenCodeExportTranscript(t, "opencode-interaction-lifecycle-phase2", "/tmp/gascity/phase2/opencode", []string{
 			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-interaction-lifecycle-phase2","role":"assistant","time":{"created":1770000000000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
 			fmt.Sprintf(`{"info":{"id":"msg_user_1","sessionID":"opencode-interaction-lifecycle-phase2","role":"user","parentID":"msg_assistant_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_2","type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
+		})
+	case ProfileMimoCodeTmuxCLI:
+		return writeMimoCodeExportTranscript(t, "mimocode-interaction-lifecycle-phase2", "/tmp/gascity/phase2/mimocode", []string{
+			`{"info":{"id":"msg_assistant_1","sessionID":"mimocode-interaction-lifecycle-phase2","role":"assistant","time":{"created":1770000000000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
+			fmt.Sprintf(`{"info":{"id":"msg_user_1","sessionID":"mimocode-interaction-lifecycle-phase2","role":"user","parentID":"msg_assistant_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_2","type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
 		})
 	case ProfilePiTmuxCLI:
 		return writePiSessionTranscript(t, "pi-interaction-lifecycle-phase2", "/tmp/gascity/phase2/pi", []string{
@@ -251,6 +267,17 @@ func writeToolTranscript(t *testing.T, profile Profile, openTail bool) string {
 			`{"info":{"id":"msg_user_1","sessionID":"opencode-tool-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"read the file"}]}`,
 			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-tool-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_tool_1","type":"tool","callID":"call-1","tool":"Read","state":` + state + `}]}` + tail,
 		})
+	case ProfileMimoCodeTmuxCLI:
+		state := `{"status":"running","input":{"path":"README.md"}}`
+		tail := ""
+		if !openTail {
+			state = `{"status":"completed","input":{"path":"README.md"},"output":"file data"}`
+			tail = `,{"info":{"id":"msg_assistant_2","sessionID":"mimocode-tool-phase2","role":"assistant","parentID":"msg_assistant_1","time":{"created":1770000002000}},"parts":[{"id":"part_assistant_2","type":"text","text":"done"}]}`
+		}
+		return writeMimoCodeExportTranscript(t, "mimocode-tool-phase2", "/tmp/gascity/phase2/mimocode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"mimocode-tool-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"read the file"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"mimocode-tool-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_tool_1","type":"tool","callID":"call-1","tool":"Read","state":` + state + `}]}` + tail,
+		})
 	case ProfilePiTmuxCLI:
 		entries := []string{
 			`{"type":"message","id":"msg_user_1","parentId":null,"timestamp":"2026-04-04T09:00:00Z","message":{"role":"user","content":"read the file"}}`,
@@ -288,6 +315,20 @@ func writeOpenCodeExportTranscript(t *testing.T, sessionID, workDir string, mess
 	body := `{"info":{"id":` + fmt.Sprintf("%q", sessionID) + `,"directory":` + fmt.Sprintf("%q", workDir) + `},"messages":[` + strings.Join(messages, ",") + `]}`
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write opencode transcript: %v", err)
+	}
+	return path
+}
+
+// writeMimoCodeExportTranscript writes a MiMo Code session export into the
+// mirror layout consumed by the mimocode reader. MiMo Code is an OpenCode fork
+// whose exports share the `{info, messages}` JSON shape byte-for-byte.
+func writeMimoCodeExportTranscript(t *testing.T, sessionID, workDir string, messages []string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "session.json")
+	body := `{"info":{"id":` + fmt.Sprintf("%q", sessionID) + `,"directory":` + fmt.Sprintf("%q", workDir) + `},"messages":[` + strings.Join(messages, ",") + `]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write mimocode transcript: %v", err)
 	}
 	return path
 }

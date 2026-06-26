@@ -21,7 +21,13 @@ func (s *BdStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 	ids := make([]string, 0, len(items))
 	seen := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		if item.ID == "" || item.Status == "closed" || item.IsBlocked != nil {
+		// Message (mail) beads are never dependency-blocked ready work, and
+		// bd's denormalized is_blocked column flaps NULL<->false for ephemeral
+		// mail wisps. Enriching them makes the CachingStore reconciler re-emit
+		// bead.updated for every open mail bead on every cycle (an event flood
+		// that starves gc-hook work queries). Leave their IsBlocked at bd's nil
+		// fallback so the reconcile diff converges.
+		if item.ID == "" || item.Status == "closed" || item.IsBlocked != nil || item.Type == "message" {
 			continue
 		}
 		if _, ok := seen[item.ID]; ok {
@@ -48,7 +54,7 @@ func (s *BdStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 	enriched := make([]Bead, len(items))
 	copy(enriched, items)
 	for i := range enriched {
-		if enriched[i].ID == "" || enriched[i].Status == "closed" || enriched[i].IsBlocked != nil {
+		if enriched[i].ID == "" || enriched[i].Status == "closed" || enriched[i].IsBlocked != nil || enriched[i].Type == "message" {
 			continue
 		}
 		blocked, ok := projection[enriched[i].ID]

@@ -23,7 +23,7 @@ var fanoutVarPattern = regexp.MustCompile(`\{([^}]+)\}`)
 func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	switch bead.Metadata[beadmeta.FanoutStateMetadataKey] {
 	case "spawned":
-		outcome, err := resolveFinalizeOutcome(store, bead.ID)
+		outcome, err := resolveBlockedOutcome(store, bead.ID)
 		if err != nil {
 			if errors.Is(err, errFinalizePending) {
 				return ControlResult{}, nil
@@ -73,7 +73,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: resolving source step %q: %w", bead.ID, sourceRef, err)
 	}
-	if source.Metadata[beadmeta.OutcomeMetadataKey] == "fail" {
+	if beadOutcomeFailed(source) {
 		if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing failed fanout: %w", bead.ID, err)
 		}
@@ -297,11 +297,18 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 		return
 	}
 	executionRoute := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRoutedToMetadataKey])
+	executionRigContext := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRigContextMetadataKey])
 	routeCfg := loadAttemptRouteConfig(opts.CityPath)
 	for i := range fragment.Steps {
 		step := &fragment.Steps[i]
 		if step.Metadata[beadmeta.KindMetadataKey] == "spec" {
 			continue
+		}
+		if executionRigContext != "" && strings.TrimSpace(step.Metadata[beadmeta.ExecutionRigContextMetadataKey]) == "" {
+			if step.Metadata == nil {
+				step.Metadata = make(map[string]string)
+			}
+			step.Metadata[beadmeta.ExecutionRigContextMetadataKey] = executionRigContext
 		}
 		if isAttemptControlKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			target := strings.TrimSpace(step.Metadata[beadmeta.ExecutionRoutedToMetadataKey])

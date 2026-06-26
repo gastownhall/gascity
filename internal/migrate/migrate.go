@@ -65,6 +65,7 @@ type agentFile struct {
 	Nudge                  string            `toml:"nudge,omitempty"`
 	Session                string            `toml:"session,omitempty"`
 	Provider               string            `toml:"provider,omitempty"`
+	Upstream               string            `toml:"upstream,omitempty"`
 	StartCommand           string            `toml:"start_command,omitempty"`
 	Lifecycle              string            `toml:"lifecycle,omitempty"`
 	Args                   []string          `toml:"args,omitempty"`
@@ -159,9 +160,13 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		cityCfg.Agents = nil
 	}
 
-	// Canonical builtin system-pack includes (.gc/system/packs/<name>) are
-	// the supported V2 form written by gc init; they stay in city.toml.
-	// Only other entries are legacy PackV1 includes to migrate.
+	// Canonical builtin system-pack includes (.gc/system/packs/<name>) are a
+	// retired transitional surface that `gc doctor --fix` converts to pinned
+	// [imports] entries. `gc migrate` deliberately preserves them in city.toml
+	// so a city authored by an older binary keeps composing through the
+	// migrate step; the follow-up `gc doctor --fix` completes the conversion.
+	// Only the other entries are legacy PackV1 includes that migrate rewrites
+	// here.
 	builtinIncludes := make([]string, 0, len(cityCfg.Workspace.LegacyIncludes()))
 	for _, inc := range cityCfg.Workspace.LegacyIncludes() {
 		if config.IsBuiltinSystemPackInclude(inc) {
@@ -220,6 +225,23 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 
 	if migratePackAuthoringSurfaces(&packCfg, cityCfg, report) {
 		packChanged = true
+	}
+
+	// Drop the redundant control-dispatcher named session that gc init versions
+	// prior to v1.3.0-rc3 injected. The control dispatcher serves via
+	// demand-scaling of the core-pack agent template (openControlDispatcherDemand),
+	// so the named session is dead weight; on upgraded cities its bare backing
+	// template no longer resolves and it emits a confusing "backing template not
+	// found ... disabled" warning on every command. Removing it here lets
+	// `gc doctor --fix` clean up existing cities. Idempotent.
+	if updated, removed := dropRedundantControlDispatcherNamedSession(packCfg.NamedSessions); removed > 0 {
+		packCfg.NamedSessions = updated
+		packChanged = true
+		report.Changes = append(report.Changes, "drop redundant control-dispatcher named session from pack.toml")
+	}
+	if updated, removed := dropRedundantControlDispatcherNamedSession(cityCfg.NamedSessions); removed > 0 {
+		cityCfg.NamedSessions = updated
+		report.Changes = append(report.Changes, "drop redundant control-dispatcher named session from city.toml")
 	}
 
 	removeMigratedPackSources(cityCfg, migratedPacks)
@@ -287,6 +309,14 @@ func packNameStillReferencedByRigIncludes(cityCfg *config.City, name string) boo
 	return false
 }
 
+// loadCityFile reads, parses, and key-loss-guards a city.toml for migration.
+// Migration deliberately uses the real OS filesystem (fsys.OSFS) rather than a
+// parameterized fsys.FS: it is a one-shot CLI step over a concrete city
+// directory the operator names, it already reads bytes via os.ReadFile, and its
+// sibling calls (GuardCityRewriteKeyLoss, ResolveWorkspaceIdentity, and the
+// byte-level city.toml rewrites) all run against that same on-disk tree. No
+// runtime caller migrates over a virtual filesystem, so threading an fsys.FS
+// through the migration path would add abstraction with no consumer.
 func loadCityFile(path string) (*config.City, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -294,6 +324,13 @@ func loadCityFile(path string) (*config.City, error) {
 	}
 	cfg, err := config.Parse(data)
 	if err != nil {
+		return nil, fmt.Errorf("migrate %q: %w", path, err)
+	}
+	// Apply rewrites city.toml from this re-marshaled struct, so keys the
+	// binary does not recognize would vanish silently (the ga-lurp5d
+	// incident class). Refuse before any mutation, mirroring what
+	// loadPackFile does for pack.toml via migrationFatalPackWarnings.
+	if err := config.GuardCityRewriteKeyLoss(fsys.OSFS{}, path); err != nil {
 		return nil, fmt.Errorf("migrate %q: %w", path, err)
 	}
 	if err := config.ResolveWorkspaceIdentity(fsys.OSFS{}, filepath.Dir(path), cfg); err != nil {
@@ -400,6 +437,9 @@ func mergeAgentDefaultsAliasForMigration(dst *config.AgentDefaults, src config.A
 	if !meta.IsDefined("agent_defaults", "model") {
 		dst.Model = src.Model
 	}
+	if !meta.IsDefined("agent_defaults", "upstream") {
+		dst.Upstream = src.Upstream
+	}
 	if !meta.IsDefined("agent_defaults", "wake_mode") {
 		dst.WakeMode = src.WakeMode
 	}
@@ -430,6 +470,9 @@ func mergeMigratedAgentDefaults(dst *config.AgentDefaults, src config.AgentDefau
 	if dst.Model == "" {
 		dst.Model = src.Model
 	}
+	if dst.Upstream == "" {
+		dst.Upstream = src.Upstream
+	}
 	if dst.WakeMode == "" {
 		dst.WakeMode = src.WakeMode
 	}
@@ -446,6 +489,7 @@ func mergeMigratedAgentDefaults(dst *config.AgentDefaults, src config.AgentDefau
 func isZeroAgentDefaults(defaults config.AgentDefaults) bool {
 	return defaults.Provider == "" &&
 		defaults.Model == "" &&
+		defaults.Upstream == "" &&
 		defaults.WakeMode == "" &&
 		defaults.DefaultSlingFormula == "" &&
 		len(defaults.AllowOverlay) == 0 &&
@@ -876,6 +920,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		Nudge:                  agent.Nudge,
 		Session:                agent.Session,
 		Provider:               agent.Provider,
+		Upstream:               agent.Upstream,
 		StartCommand:           agent.StartCommand,
 		Lifecycle:              agent.Lifecycle,
 		Args:                   agent.Args,
@@ -927,6 +972,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.Nudge == "" &&
 		cfg.Session == "" &&
 		cfg.Provider == "" &&
+		cfg.Upstream == "" &&
 		cfg.StartCommand == "" &&
 		cfg.Lifecycle == "" &&
 		len(cfg.Args) == 0 &&
@@ -977,6 +1023,38 @@ func dedupeStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+// dropRedundantControlDispatcherNamedSession removes the on_demand
+// control-dispatcher named session that gc init versions prior to v1.3.0-rc3
+// injected. It matches only the auto-created shape (name=control-dispatcher,
+// template bare "control-dispatcher" or core-qualified "core.control-dispatcher")
+// so any user-defined named session is left untouched. Returns the filtered
+// slice and the number removed.
+func dropRedundantControlDispatcherNamedSession(sessions []config.NamedSession) ([]config.NamedSession, int) {
+	const dispatcher = config.ControlDispatcherAgentName
+	removed := 0
+	out := make([]config.NamedSession, 0, len(sessions))
+	for _, ns := range sessions {
+		// Match ONLY the auto-created shape: name=control-dispatcher, a bare or
+		// core-qualified backing template, on_demand (or unset) mode, and no
+		// explicit scope/dir. A user who hand-authored a control-dispatcher
+		// session with a custom template, always mode, or an explicit scope/dir
+		// expressed intent and must be left untouched.
+		autoCreated := ns.Name == dispatcher &&
+			(ns.Template == dispatcher || ns.Template == "core."+dispatcher) &&
+			(ns.Mode == "" || ns.Mode == "on_demand") &&
+			ns.Dir == "" && ns.Scope == ""
+		if autoCreated {
+			removed++
+			continue
+		}
+		out = append(out, ns)
+	}
+	if removed == 0 {
+		return sessions, 0
+	}
+	return out, removed
 }
 
 func relativeOrSame(path string) string {

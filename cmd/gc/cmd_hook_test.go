@@ -19,6 +19,18 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
+// setHookRunExecutableForTest stubs the re-exec target of `gc hook run` to the
+// shell so tests can drive the wrapper with `sh -c` scripts instead of the real
+// gc binary. The stub is restored on cleanup.
+func setHookRunExecutableForTest(t *testing.T) func() {
+	t.Helper()
+	previous := hookRunExecutable
+	hookRunExecutable = func() (string, error) { return "sh", nil }
+	restore := func() { hookRunExecutable = previous }
+	t.Cleanup(restore)
+	return restore
+}
+
 func TestNewHookCmdUsesRoutedWorkHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd := newHookCmd(&stdout, &stderr)
@@ -28,6 +40,54 @@ func TestNewHookCmdUsesRoutedWorkHelp(t *testing.T) {
 	}
 	if !strings.Contains(cmd.Long, "Finds routed work using the agent's work_query config.") {
 		t.Fatalf("Long = %q, want routed-work description", cmd.Long)
+	}
+}
+
+func TestHookClaimJSONPassesRootJSONContract(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "printf '[]'"
+` + builtinImportsTOML("core", "bd")
+	writeBuiltinImportsLock(t, cityDir, "core", "bd")
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_SESSION_NAME", "worker-session")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityDir, "hook", "worker", "--claim", "--json"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("run(hook worker --claim --json) = 0, want no-work exit")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var payload struct {
+		OK      bool   `json:"ok"`
+		Command string `json:"command"`
+		Action  string `json:"action"`
+		Reason  string `json:"reason"`
+		Error   struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("hook claim payload is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.Error.Code == "json_unsupported" {
+		t.Fatalf("hook claim was rejected by global JSON contract gate: %s", stdout.String())
+	}
+	if !payload.OK || payload.Command != "hook" || payload.Action != "drain" || payload.Reason != "no_work" {
+		t.Fatalf("payload = %+v, want hook drain no_work", payload)
 	}
 }
 
@@ -155,6 +215,99 @@ work_query = "kill -9 $$"
 	}
 	if len(evts) != 0 {
 		t.Fatalf("work-query failure events = %d, want 0 for explicit different target: %+v", len(evts), evts)
+	}
+}
+
+// TestCmdHookPoolInstanceFallsBackToTemplate verifies that when gc hook is
+// called with an explicit pool-instance name (e.g. "rig/polecat-adhoc-XYZ")
+// that is not in the city config, but GC_TEMPLATE points to the pool binding
+// that IS in config, the hook resolves via GC_TEMPLATE and returns work.
+// This covers the pack-script pattern "gc hook $GC_AGENT" for pool agents.
+func TestCmdHookPoolInstanceFallsBackToTemplate(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Only the pool binding "polecat" is in config — instances are not.
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "polecat"
+work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work item\"}]'"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	// Pool instance env: GC_AGENT/GC_ALIAS = instance name, GC_TEMPLATE = binding.
+	t.Setenv("GC_AGENT", "polecat-adhoc-abc123")
+	t.Setenv("GC_ALIAS", "polecat-adhoc-abc123")
+	t.Setenv("GC_TEMPLATE", "polecat")
+	t.Setenv("GC_SESSION_NAME", "polecat-mc-abc")
+	t.Setenv("GC_SESSION_ID", "mc-abc123")
+
+	var stdout, stderr bytes.Buffer
+	// Simulate "gc hook $GC_AGENT" — positional arg is the instance name.
+	code := cmdHookWithFormat([]string{"polecat-adhoc-abc123"}, false, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithFormat(pool instance arg) = %d, want 0; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "ga-pool1") {
+		t.Errorf("stdout = %q, want to contain work item ga-pool1", stdout.String())
+	}
+}
+
+// TestCmdHookUnrelatedExplicitTargetDoesNotFallBackToTemplate verifies that
+// the GC_TEMPLATE fallback does NOT fire for an unrelated explicit target that
+// is not this instance's own runtime identity. An unresolved explicit arg that
+// matches none of GC_ALIAS/GC_AGENT/GC_SESSION_NAME must error with "not found
+// in config" rather than silently reinterpreting as the template agent.
+func TestCmdHookUnrelatedExplicitTargetDoesNotFallBackToTemplate(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Only the pool binding "polecat" is in config.
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "polecat"
+work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work item\"}]'"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	// Pool instance env: GC_TEMPLATE resolves to "polecat", but the explicit
+	// arg below is neither the instance name nor any runtime identity env.
+	t.Setenv("GC_AGENT", "polecat-adhoc-abc123")
+	t.Setenv("GC_ALIAS", "polecat-adhoc-abc123")
+	t.Setenv("GC_TEMPLATE", "polecat")
+	t.Setenv("GC_SESSION_NAME", "polecat-mc-abc")
+	t.Setenv("GC_SESSION_ID", "mc-abc123")
+
+	var stdout, stderr bytes.Buffer
+	// An unrelated, unresolved explicit target must NOT fall back to the template.
+	code := cmdHookWithFormat([]string{"some-other-missing-agent"}, false, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithFormat(unrelated target) = %d, want 1; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "not found in config") {
+		t.Errorf("stderr = %q, want to contain \"not found in config\"", stderr.String())
 	}
 }
 
@@ -289,6 +442,128 @@ func TestDoHookClaimRetriesAfterClaimConflict(t *testing.T) {
 	}
 	if result.BeadID != "hw-won" || result.Reason != "claimed" {
 		t.Fatalf("unexpected claim result: %+v", result)
+	}
+}
+
+// TestDoHookClaimEmitsRejectedOnLostClaim covers ADR-0009 acceptance (a): a
+// second claim on a bead already live-claimed by another worker is rejected as
+// a no-op and surfaces a bead.claim_rejected event naming the winner.
+func TestDoHookClaimEmitsRejectedOnLostClaim(t *testing.T) {
+	type rejection struct{ bead, existing, attempted string }
+	var rejected []rejection
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"hw-lost","status":"open","metadata":{"gc.routed_to":"worker"}},
+			{"id":"hw-won","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			if beadID == "hw-lost" {
+				// Lost the race: the re-read shows the bead owned by worker-2.
+				return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2", Metadata: map[string]string{"gc.routed_to": "worker"}}, false, nil
+			}
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		EmitClaimRejected: func(beadID, existing, attempted string) {
+			rejected = append(rejected, rejection{beadID, existing, attempted})
+		},
+		ResolveWorkBranch: func(string) string { return "" }, // suppress stamp noise
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(lost claim) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if len(rejected) != 1 {
+		t.Fatalf("expected exactly one rejection, got %+v", rejected)
+	}
+	if got := rejected[0]; got.bead != "hw-lost" || got.existing != "worker-2" || got.attempted != "worker-1" {
+		t.Fatalf("rejection = %+v, want {hw-lost worker-2 worker-1}", got)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.BeadID != "hw-won" || result.Reason != "claimed" {
+		t.Fatalf("unexpected claim result: %+v", result)
+	}
+}
+
+// TestDoHookClaimStampsWorkBranch covers ADR-0009 acceptance (d): the worker's
+// branch is stamped onto the bead as gc.work_branch at claim time.
+func TestDoHookClaimStampsWorkBranch(t *testing.T) {
+	var stampedBead, stampedBranch, stampedAssignee string
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-stamp","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		ResolveWorkBranch: func(string) string { return "bd-hw-stamp" },
+		StampWorkBranch: func(_ context.Context, _ string, _ []string, beadID, assignee, branch string) error {
+			stampedBead, stampedAssignee, stampedBranch = beadID, assignee, branch
+			return nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(stamp) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stampedBead != "hw-stamp" || stampedBranch != "bd-hw-stamp" || stampedAssignee != "worker-1" {
+		t.Fatalf("stamp = bead %q branch %q assignee %q, want hw-stamp/bd-hw-stamp/worker-1", stampedBead, stampedBranch, stampedAssignee)
+	}
+}
+
+// TestDoHookClaimSkipsStampWhenBranchUnchanged guards the idempotent path: a
+// claim whose bead already carries the resolved branch performs no stamp write.
+func TestDoHookClaimSkipsStampWhenBranchUnchanged(t *testing.T) {
+	var stampCalls int
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-idem","status":"open","metadata":{"gc.routed_to":"worker","gc.work_branch":"bd-hw-idem"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker", "gc.work_branch": "bd-hw-idem"}}, true, nil
+		},
+		ResolveWorkBranch: func(string) string { return "bd-hw-idem" },
+		StampWorkBranch: func(_ context.Context, _ string, _ []string, _, _, _ string) error {
+			stampCalls++
+			return nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim(idempotent stamp) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stampCalls != 0 {
+		t.Fatalf("stamp write count = %d, want 0 (branch already current)", stampCalls)
 	}
 }
 
@@ -592,6 +867,132 @@ func TestHookInjectDoesNotRunWorkQuery(t *testing.T) {
 	}
 }
 
+func TestHookRunTimesOutAndFailsOpenWhenConfigured(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	restore := setHookRunExecutableForTest(t)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := cmdHookRun([]string{"-c", "sleep 10"}, hookRunOptions{
+		Timeout:         50 * time.Millisecond,
+		TimeoutExitCode: 0,
+	}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookRun timeout code = %d, want fail-open 0; stderr=%s", code, stderr.String())
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("cmdHookRun timeout took %s, want bounded below provider hook timeout", elapsed)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "timed out after 50ms") {
+		t.Fatalf("stderr = %q, want timeout diagnostic", stderr.String())
+	}
+}
+
+func TestHookRunPreservesChildExitCodeAndOutput(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	restore := setHookRunExecutableForTest(t)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookRun([]string{"-c", "printf ok; exit 7"}, hookRunOptions{
+		Timeout:         time.Second,
+		TimeoutExitCode: 124,
+	}, nil, &stdout, &stderr)
+	if code != 7 {
+		t.Fatalf("cmdHookRun code = %d, want child exit 7; stderr=%s", code, stderr.String())
+	}
+	if stdout.String() != "ok" {
+		t.Fatalf("stdout = %q, want ok", stdout.String())
+	}
+}
+
+// TestHookRunForwardsStdinToChild guards the regression where `gc hook run`
+// left cmd.Stdin nil, so wrapped commands such as `nudge drain --inject` saw
+// /dev/null instead of the provider UserPromptSubmit JSON and silently dropped
+// context-pressure injection. The child here echoes its stdin; the wrapper must
+// forward the piped input through to it.
+func TestHookRunForwardsStdinToChild(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	restore := setHookRunExecutableForTest(t)
+	defer restore()
+
+	const payload = `{"transcript_path":"/tmp/transcript.jsonl"}`
+	var stdout, stderr bytes.Buffer
+	code := cmdHookRun([]string{"-c", "cat"}, hookRunOptions{
+		Timeout:         time.Second,
+		TimeoutExitCode: 124,
+	}, strings.NewReader(payload), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookRun code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stdout.String() != payload {
+		t.Fatalf("child stdin not forwarded: stdout = %q, want %q", stdout.String(), payload)
+	}
+}
+
+// TestHookRunDiscardsPartialStdoutOnTimeout guards the fail-open contract: a
+// child that prints partial injectable output and then wedges past the timeout
+// must not leak that partial output to the provider. The wrapper buffers child
+// stdout and discards it when the deadline fires.
+func TestHookRunDiscardsPartialStdoutOnTimeout(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	restore := setHookRunExecutableForTest(t)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookRun([]string{"-c", "printf partial; sleep 10"}, hookRunOptions{
+		Timeout:         50 * time.Millisecond,
+		TimeoutExitCode: 0,
+	}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookRun timeout code = %d, want fail-open 0; stderr=%s", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("partial stdout leaked on timeout: stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "timed out after 50ms") {
+		t.Fatalf("stderr = %q, want timeout diagnostic", stderr.String())
+	}
+}
+
+// TestHookRunCommandForwardsStdinAndArgsAfterDoubleDash exercises the full
+// production wiring through the real Cobra command: flags before `--` are
+// parsed by `gc hook run`, the args after `--` reach the wrapped child
+// verbatim, and the command's stdin (defaulting to os.Stdin in production,
+// injected here via SetIn) is forwarded to the child. The child echoes its
+// stdin, so a passthrough failure shows up as empty stdout.
+func TestHookRunCommandForwardsStdinAndArgsAfterDoubleDash(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	restore := setHookRunExecutableForTest(t)
+	defer restore()
+
+	const payload = `{"transcript_path":"/tmp/transcript.jsonl"}`
+	var stdout, stderr bytes.Buffer
+	cmd := newHookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"run", "--timeout", "5s", "--timeout-exit-code", "0", "--", "-c", "cat"})
+	cmd.SetIn(strings.NewReader(payload))
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc hook run failed: %v; stderr=%s", err, stderr.String())
+	}
+	if stdout.String() != payload {
+		t.Fatalf("cobra hook run did not forward stdin through `--`: stdout = %q, want %q", stdout.String(), payload)
+	}
+}
+
 func TestHookCommandCodexInjectDoesNotBlockStop(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
@@ -665,12 +1066,12 @@ func TestHookCommandHookFormatIsIgnoredForNonInjectOutput(t *testing.T) {
 	}
 	cityToml := `[workspace]
 name = "test-city"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [[agent]]
 name = "worker"
 work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
-`
+` + builtinImportsTOML("core", "bd")
+	writeBuiltinImportsLock(t, cityDir, "core", "bd")
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1179,6 +1580,74 @@ dir = "myrig"
 	}
 	if !strings.Contains(out, "rig=myrig") {
 		t.Fatalf("stdout = %q, want GC_RIG=myrig", out)
+	}
+}
+
+// TestCmdHookRigScopedAgentFindsCityStoreWork guards the rig→city read
+// federation: a root-only (city-store) bead assigned to a rig-scoped agent
+// must surface through gc hook. The rig store is the agent's primary entry,
+// and a rig-backed agent's own work-query env is ALSO rig-scoped
+// (controllerWorkQueryEnv switches to rig coordinates when the agent has a
+// configured rig), so without a federated city entry the hook reports empty
+// while assigned city work sits invisible — e.g. singleton patrol wisps
+// created in the city store for a rig-scoped witness. Mirror of the #2877
+// city→rig federation in the opposite direction.
+func TestCmdHookRigScopedAgentFindsCityStoreWork(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_TMUX_SESSION", "host-session")
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "myrig"
+path = %q
+
+[[agent]]
+name = "worker"
+dir = "myrig"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fake bd answers with one ready row ONLY when queried against the
+	// CITY store; every rig-scoped query sees []. This simulates a root-only
+	// bead assigned to the rig-scoped agent.
+	cityBeads := filepath.Join(cityDir, ".beads")
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$BEADS_DIR" in
+  %s*) printf '[{"id":"td-city1","status":"open","assignee":"myrig/worker","title":"root-only city work"}]' ;;
+  *) printf '[]' ;;
+esac
+`, cityBeads)
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", rigDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook() = %d, want 0 (city-store work must surface); stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "td-city1") {
+		t.Fatalf("stdout = %q, want the city-store bead td-city1", stdout.String())
 	}
 }
 

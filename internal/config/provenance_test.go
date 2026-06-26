@@ -86,7 +86,7 @@ func TestProviderProvenance_InferredOptionDefaultsFromArgs(t *testing.T) {
 			Base: &b,
 			Args: []string{
 				"-m",
-				"gpt-5.3-codex-spark",
+				"gpt-5.3-codex",
 			},
 		},
 	}

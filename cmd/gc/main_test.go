@@ -168,6 +168,28 @@ func configureFSPressureForTests() {
 	}
 }
 
+// testTempRootAliveSentinel pins the alive-sentinel flock on this process's
+// test temp root for the binary's lifetime. The reference must stay live:
+// the runtime finalizes unreachable os.Files, which would close the
+// descriptor and release the lock, letting cross-namespace sweepers reclaim
+// an active root (ga-djbcqt).
+var testTempRootAliveSentinel *os.File
+
+type cleanupTestingM struct {
+	m     testscript.TestingM
+	paths []string
+}
+
+func (m cleanupTestingM) Run() int {
+	code := m.m.Run()
+	for _, path := range m.paths {
+		if path != "" {
+			_ = os.RemoveAll(path)
+		}
+	}
+	return code
+}
+
 func TestMain(m *testing.M) {
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar
 	// command. On that path we must not create a new temp root — the parent
@@ -192,22 +214,26 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv(managedDoltTestParentPIDEnv, fmt.Sprintf("%d", os.Getpid())); err != nil {
 		panic(err)
 	}
-	// Sweep stale testTempRoot dirs in system /tmp before creating a new one.
-	// Sharded cmd/gc runs use a separate prefix so concurrent worktrees with
-	// older test harnesses cannot remove this package's active root.
-	testTempRootPrefix := cmdGCTestTempRootPrefix()
-	sweepOrphanPIDPrefixedDirs(os.TempDir(), testTempRootPrefix)
-	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testTempRootPrefix))
+	// Sweep stale testTempRoot dirs under the inherited temp dir (honoring
+	// TMPDIR) before creating a new one there. Sharded cmd/gc runs use a
+	// separate prefix so concurrent worktrees with older test harnesses
+	// cannot remove this package's active root. The root's alive sentinel
+	// flock must stay held for the binary's lifetime: sweepers in other
+	// processes — including other PID namespaces — probe it instead of
+	// trusting PID visibility (ga-djbcqt).
+	testTempRoot, sentinel, err := createActiveTestTempRoot(cmdGCTestTempRootPrefix())
 	if err != nil {
 		panic(err)
 	}
-	if err := os.WriteFile(filepath.Join(testTempRoot, testActiveTempRootMarker), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
-		panic(err)
-	}
+	testTempRootAliveSentinel = sentinel
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
 		panic(err)
 	}
-	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(testTempRoot, "tmux")); err != nil {
+	tmuxSocketRoot, tmuxSocketCleanupRoot, err := cmdGCTmuxSocketRoot(testTempRoot)
+	if err != nil {
+		panic(err)
+	}
+	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic(err)
 	}
 	tmpRoot := os.TempDir()
@@ -245,7 +271,11 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
-	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot), map[string]func(){
+	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	if tmuxSocketCleanupRoot != "" {
+		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
+	}
+	testscript.Main(testRunner, map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
 			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -451,16 +481,14 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("not_found", func(t *testing.T) {
-		// Use an explicit /tmp-rooted dir so the upward walk cannot
-		// accidentally hit a real .gc/ directory on the host (e.g.
-		// a running city under $HOME).
-		dir, err := os.MkdirTemp("/tmp", "gc-test-notfound-*")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = os.RemoveAll(dir) }()
+		// Pin HOME to the test dir so the discovery ceiling is dir itself.
+		// The walk checks dir (no city/runtime found) then stops at the ceiling
+		// without climbing into /tmp or $HOME, which may have a live .gc/ on
+		// the host (e.g. a running city at /tmp/.gc or $HOME/.gc).
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
 
-		_, err = findCity(dir)
+		_, err := findCity(dir)
 		if err == nil {
 			t.Fatal("findCity() should fail without city.toml or .gc/")
 		}
@@ -2749,15 +2777,11 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	// city.toml keeps the runtime-local [workspace] with the explicit
-	// builtin pack includes (core + bd for the default bd provider).
-	// workspace.name lives in .gc/site.toml.
+	// city.toml keeps only the runtime-local [workspace]; builtin packs
+	// compose via pinned [imports] in pack.toml. workspace.name lives in
+	// .gc/site.toml.
 	got := string(f.Files[filepath.Join("/bright-lights", "city.toml")])
 	want := `[workspace]
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
-
-[daemon]
-formula_v2 = true
 
 # [mail]
 # retention_ttl controls how long read messages are retained before purge.
@@ -2769,12 +2793,26 @@ formula_v2 = true
 		t.Errorf("city.toml content:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 
-	// pack.toml keeps the portable pack metadata and named session; the
-	// fresh mayor scaffold now comes from agents/<name>/ discovery.
+	// pack.toml keeps the portable pack metadata, the pinned builtin pack
+	// imports (core + bd for the default bd provider), and the named
+	// sessions; the fresh mayor scaffold comes from agents/<name>/ discovery,
+	// while the control dispatcher is an explicit city-owned alias for the
+	// core import's deterministic dispatcher template.
 	packGot := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
 	packWant := `[pack]
 name = "bright-lights"
 schema = 2
+
+[imports]
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "` + config.BundledPackImportVersion + `"
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "` + config.BundledPackImportVersion + `"
+[imports.gascity]
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+version = "` + config.PublicGascityPackVersion + `"
 
 [[named_session]]
 template = "mayor"
@@ -3143,8 +3181,8 @@ func TestRunWizardDefaults(t *testing.T) {
 	if !wiz.interactive {
 		t.Error("expected interactive = true")
 	}
-	if wiz.configName != "minimal" {
-		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
+	if wiz.configName != "gascity" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "gascity")
 	}
 	if wiz.defaultProvider != "claude" {
 		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "claude")
@@ -3172,8 +3210,8 @@ func TestRunWizardNilStdin(t *testing.T) {
 	if wiz.interactive {
 		t.Error("expected interactive = false for nil stdin")
 	}
-	if wiz.configName != "minimal" {
-		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
+	if wiz.configName != "gascity" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "gascity")
 	}
 	if wiz.provider != "" {
 		t.Errorf("provider = %q, want empty", wiz.provider)
@@ -3213,7 +3251,7 @@ func TestRunWizardSelectCodex(t *testing.T) {
 
 func TestRunWizardCustomTemplate(t *testing.T) {
 	// Select custom template → skips agent question, returns minimal config.
-	stdin := strings.NewReader("3\n")
+	stdin := strings.NewReader("4\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
@@ -3236,7 +3274,7 @@ func TestRunWizardCustomTemplate(t *testing.T) {
 func TestRunWizardGastownTemplate(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude")
 	// Select gastown template + default agent.
-	stdin := strings.NewReader("2\n")
+	stdin := strings.NewReader("3\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
@@ -3316,8 +3354,8 @@ func TestRunWizardEOFStdin(t *testing.T) {
 	wiz := runWizard(stdin, &stdout)
 
 	// EOF means default for both questions.
-	if wiz.configName != "minimal" {
-		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
+	if wiz.configName != "gascity" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "gascity")
 	}
 	if wiz.defaultProvider != "claude" {
 		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "claude")
@@ -3458,10 +3496,8 @@ func TestDoInitWithGastownTemplate(t *testing.T) {
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
 	}
-	wantIncludes := []string{".gc/system/packs/core", ".gc/system/packs/bd"}
-	if got := cfg.Workspace.LegacyIncludes(); len(got) != len(wantIncludes) ||
-		got[0] != wantIncludes[0] || got[1] != wantIncludes[1] {
-		t.Errorf("Workspace.Includes = %v, want %v (explicit builtin pack includes)", got, wantIncludes)
+	if got := cfg.Workspace.LegacyIncludes(); len(got) != 0 {
+		t.Errorf("Workspace.Includes = %v, want none (builtin packs compose via pack.toml imports)", got)
 	}
 	if len(cfg.Workspace.LegacyDefaultRigIncludes()) != 0 {
 		t.Errorf("Workspace.DefaultRigIncludes = %v, want empty", cfg.Workspace.LegacyDefaultRigIncludes())
@@ -3922,11 +3958,11 @@ scale_check = "echo 3"
 	if cfg.ResolvedWorkspaceName != "bright-lights" {
 		t.Errorf("ResolvedWorkspaceName = %q, want %q (should be overridden)", cfg.ResolvedWorkspaceName, "bright-lights")
 	}
-	// The builtin core pack ships no agents (the former maintenance
-	// fallback dog is gone), so only the two authored agents are explicit.
+	// The builtin core pack contributes the visible control-dispatcher agent;
+	// the former maintenance fallback dog remains gone.
 	explicit := explicitAgents(cfg.Agents)
-	if len(explicit) != 2 {
-		t.Fatalf("len(explicitAgents) = %d, want 2", len(explicit))
+	if len(explicit) != 3 {
+		t.Fatalf("len(explicitAgents) = %d, want 3", len(explicit))
 	}
 	explicitByName := make(map[string]config.Agent, len(explicit))
 	for _, agent := range explicit {
@@ -3939,6 +3975,9 @@ scale_check = "echo 3"
 	worker, ok := explicitByName["worker"]
 	if !ok {
 		t.Fatalf("explicitAgents missing worker: %+v", explicit)
+	}
+	if _, ok := explicitByName[config.ControlDispatcherAgentName]; !ok {
+		t.Fatalf("explicitAgents missing control-dispatcher: %+v", explicit)
 	}
 	if worker.MaxActiveSessions == nil {
 		t.Fatal("worker.MaxActiveSessions is nil, want non-nil")
@@ -6844,9 +6883,10 @@ start_command = "echo"
 min = 0
 max = -1
 `
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tomlContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tomlContent+builtinImportsTOML("core")), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeBuiltinImportsLock(t, dir, "core")
 
 	orig, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(orig) })
@@ -6898,9 +6938,10 @@ start_command = "echo"
 min = 0
 max = -1
 `
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tomlContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tomlContent+builtinImportsTOML("core")), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeBuiltinImportsLock(t, dir, "core")
 
 	orig, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(orig) })
@@ -6929,7 +6970,7 @@ max = -1
 }
 
 func materializeBuiltinPrompts(cityPath string) error {
-	return MaterializeBuiltinPacks(cityPath)
+	return EnsureBuiltinRuntimeAssets(cityPath, io.Discard)
 }
 
 func TestDoPrimeHookDoesNotCreateRuntimeSessionSidecar(t *testing.T) {

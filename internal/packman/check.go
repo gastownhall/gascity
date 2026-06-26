@@ -228,7 +228,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 		return "", false
 	}
 
-	if builtinpacks.IsSource(source) {
+	if config.IsBundledSourceAtCanonicalPin(source, commit) {
 		if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
 			gitInfo, gitErr := os.Stat(filepath.Join(cachePath, ".git"))
 			if gitErr == nil && !gitutil.MissingCheckoutMarker(gitInfo, gitErr) {

@@ -48,6 +48,26 @@ type managedDoltStartedProcess struct {
 	StartIdentity string
 }
 
+// defaultManagedDoltBindHost is the listener host a managed dolt sql-server
+// binds when no explicit host is configured. Loopback by default: the work
+// ledger must not listen on a wildcard (LAN-reachable) interface unless the
+// operator explicitly opts in with GC_DOLT_HOST=0.0.0.0. Distinct from
+// defaultManagedDoltHost (bd_env.go), which is the client-side connect
+// default.
+const defaultManagedDoltBindHost = "127.0.0.1"
+
+// normalizeManagedDoltBindHost resolves the listener host for a managed dolt
+// sql-server. Blank means "no explicit choice" and resolves to the loopback
+// default; any explicit value — including the 0.0.0.0 wildcard opt-out for
+// multi-host deployments — is preserved.
+func normalizeManagedDoltBindHost(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return defaultManagedDoltBindHost
+	}
+	return host
+}
+
 const (
 	managedDoltTestModeEnv      = "GC_MANAGED_DOLT_TEST_MODE"
 	managedDoltTestParentPIDEnv = "GC_MANAGED_DOLT_TEST_PARENT_PID"
@@ -130,9 +150,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	if err != nil || portNum <= 0 {
 		return managedDoltStartReport{}, fmt.Errorf("invalid port %q", port)
 	}
-	if strings.TrimSpace(host) == "" {
-		host = "0.0.0.0"
-	}
+	host = normalizeManagedDoltBindHost(host)
 	if strings.TrimSpace(user) == "" {
 		user = "root"
 	}
@@ -146,6 +164,17 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	doltConfig, err := resolveManagedDoltConfigForStart(cityPath, archiveLevel)
 	if err != nil {
 		return report, err
+	}
+
+	// Lock-keyed singleton guard (gastownhall/gascity#3174). Dolt holds an
+	// exclusive flock on each database's `.dolt/noms/LOCK` until its chunk
+	// journal is flushed and the store is closed; TCP teardown happens
+	// earlier. Waiting on the lock — not the port — guarantees a prior
+	// instance has finished writing before we bind the same data_dir. If the
+	// lock is still held after the configured window, fail closed: refusing
+	// to start is recoverable, a corrupted noms journal is not.
+	if err := waitForManagedDoltDataDirLockFree(layout.DataDir, managedDoltLockReleaseTimeoutFn(cityPath)); err != nil {
+		return report, fmt.Errorf("refusing to start dolt sql-server for %s: %w", layout.DataDir, err)
 	}
 
 	currentPort := portNum
@@ -271,6 +300,12 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	return report, fmt.Errorf("dolt server could not find a free port after repeated address-in-use failures (last port %d)", report.Port)
 }
 
+// managedDoltLockReleaseTimeoutFn resolves the configured wait window for
+// dolt's on-disk exclusive store lock in the start guard. Package-level var
+// so tests can shim the window without writing a city.toml. Production
+// points at resolveManagedDoltLockReleaseTimeout.
+var managedDoltLockReleaseTimeoutFn = resolveManagedDoltLockReleaseTimeout
+
 // managedDoltStartAddressInUseRetryWindowFn resolves the configured retry window for
 // the address-in-use loop in startManagedDoltProcessWithOptions. It is a
 // package-level var so tests can shim the resolution without writing a
@@ -305,8 +340,9 @@ func resolveManagedDoltStartAddressInUseRetryWindow(cityPath string) time.Durati
 // became free within the window. A non-positive retryWindow returns false
 // immediately (no wait).
 //
-// The host argument matches the host dolt will bind to (typically "0.0.0.0"
-// in production); using the same host for the probe and the bind avoids
+// The host argument matches the host dolt will bind to (typically
+// "127.0.0.1" in production); using the same host for the probe and the
+// bind avoids
 // false-positive availability reports caused by interface-specific bind
 // states. The poll interval is shrunk to the retry window when the window is
 // shorter than the default 2s, so a sub-2s window still gets one check
@@ -357,13 +393,15 @@ var managedDoltPortAvailableFn = managedDoltPortAvailableForHost
 // bound by a Go net.Listen call. Mirrors managedDoltPortAvailable's check but
 // uses the configured host instead of forcing 127.0.0.1, so the probe is
 // faithful to what dolt's bind will attempt (interface-specific TIME_WAIT
-// state on a wildcard bind is not seen by a localhost probe). A blank or "*"
-// host is normalized to "0.0.0.0".
+// state on a wildcard bind is not seen by a localhost probe). A "*" host is
+// an explicit wildcard spelling and normalizes to "0.0.0.0"; a blank host
+// normalizes to the loopback bind default, matching
+// startManagedDoltProcessWithOptions.
 func managedDoltPortAvailableForHost(host string, port int) bool {
-	host = strings.TrimSpace(host)
-	if host == "" || host == "*" {
+	if strings.TrimSpace(host) == "*" {
 		host = "0.0.0.0"
 	}
+	host = normalizeManagedDoltBindHost(host)
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		return false
@@ -375,6 +413,9 @@ func managedDoltPortAvailableForHost(host string, port int) bool {
 func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile *os.File) (managedDoltStartedProcess, error) {
 	if managedDoltTestWatchdogEnabled() {
 		return startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath, logFile)
+	}
+	if managedDoltScopeWatchdogEnabled() {
+		return startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePath, logFile)
 	}
 	cmd := exec.Command("dolt", "sql-server", "--config", configFile)
 	cmd.Stdout = logFile
@@ -393,7 +434,7 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 	if err != nil {
 		return managedDoltStartedProcess{}, err
 	}
-	watchdogExecutable, err := managedDoltTestWatchdogExecutable()
+	watchdogExecutable, err := managedDoltWatchdogExecutable()
 	if err != nil {
 		_ = os.Remove(disarmFile)
 		return managedDoltStartedProcess{}, err
@@ -467,7 +508,10 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 	return started, nil
 }
 
-func managedDoltTestWatchdogExecutable() (string, error) {
+// managedDoltWatchdogExecutable resolves the gc binary to re-exec as a
+// managed-dolt watchdog. It serves both the test watchdog and the
+// production scope watchdog (dolt_scope_watchdog.go).
+func managedDoltWatchdogExecutable() (string, error) {
 	executable, executableErr := managedDoltTestExecutable()
 	if executableErr == nil && strings.TrimSpace(executable) != "" {
 		return executable, nil
@@ -475,16 +519,16 @@ func managedDoltTestWatchdogExecutable() (string, error) {
 	fallback := strings.TrimSpace(os.Args[0])
 	if fallback == "" {
 		if executableErr != nil {
-			return "", fmt.Errorf("resolve dolt test watchdog executable: os.Executable: %w", executableErr)
+			return "", fmt.Errorf("resolve dolt watchdog executable: os.Executable: %w", executableErr)
 		}
-		return "", fmt.Errorf("resolve dolt test watchdog executable: os.Executable returned empty path")
+		return "", fmt.Errorf("resolve dolt watchdog executable: os.Executable returned empty path")
 	}
 	if filepath.IsAbs(fallback) {
 		return fallback, nil
 	}
 	abs, err := filepath.Abs(fallback)
 	if err != nil {
-		return "", fmt.Errorf("resolve dolt test watchdog executable from argv %q: %w", fallback, err)
+		return "", fmt.Errorf("resolve dolt watchdog executable from argv %q: %w", fallback, err)
 	}
 	return abs, nil
 }
@@ -769,6 +813,11 @@ func resolveManagedDoltConfigForStart(cityPath string, explicitArchiveLevel int)
 			}
 		}
 	}
+	if doltConfig.AutoGCEnabled == nil {
+		if parsed, ok := parseEnvAutoGCEnabled(os.Getenv("GC_DOLT_AUTO_GC_ENABLED")); ok {
+			doltConfig.AutoGCEnabled = &parsed
+		}
+	}
 	if doltConfig.MaxConnections <= 0 {
 		doltConfig.MaxConnections = positiveEnvInt("GC_DOLT_MAX_CONNECTIONS")
 	}
@@ -779,6 +828,27 @@ func resolveManagedDoltConfigForStart(cityPath string, explicitArchiveLevel int)
 		doltConfig.WriteTimeoutMillis = positiveEnvInt("GC_DOLT_WRITE_TIMEOUT_MILLIS")
 	}
 	return doltConfig, nil
+}
+
+// parseEnvAutoGCEnabled parses the GC_DOLT_AUTO_GC_ENABLED override.
+// Accepts Go bool spellings (strconv.ParseBool) plus Dolt's ON/OFF.
+// Unset or unparseable values report ok=false so callers keep the default.
+func parseEnvAutoGCEnabled(raw string) (value, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, false
+	}
+	switch strings.ToUpper(raw) {
+	case "ON":
+		return true, true
+	case "OFF":
+		return false, true
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, false
+	}
+	return parsed, true
 }
 
 func positiveEnvInt(key string) int {
@@ -819,6 +889,14 @@ func resolveDoltArchiveLevel(explicit int) int {
 // managedDoltStopPollInterval, matching the stop/unregister path: without the
 // clamp a sub-100ms configured grace would still sleep a fixed ~100ms before
 // the first re-check, sending SIGKILL well past the intended deadline.
+//
+// When cityPath is known, SIGKILL is additionally gated on the dolt exclusive
+// store lock being free (gastownhall/gascity#3174): a holder is mid-flush,
+// and killing it tears the noms journal. The wait is extended by the
+// lock-release window while the lock is held; if the process still holds it
+// after that, the function returns an error instead of killing. An empty
+// cityPath (test watchdog, recovery cleanup without a city) keeps the legacy
+// unconditional SIGKILL.
 func terminateManagedDoltPID(cityPath string, pid int) error {
 	if pid <= 0 {
 		return nil
@@ -837,9 +915,31 @@ func terminateManagedDoltPID(cityPath string, pid int) error {
 		}
 		time.Sleep(pollInterval)
 	}
+	if dataDir := terminateManagedDoltDataDir(cityPath); dataDir != "" {
+		if err := waitManagedDoltSIGKILLLockGate(pid, dataDir, pidAlive, gracePeriod, managedDoltLockReleaseTimeoutFn(cityPath), pollInterval); err != nil {
+			return err
+		}
+		if !pidAlive(pid) {
+			return nil
+		}
+	}
 	_ = process.Signal(syscall.SIGKILL)
 	time.Sleep(250 * time.Millisecond)
 	return nil
+}
+
+// terminateManagedDoltDataDir resolves the managed data dir for the SIGKILL
+// lock gate in terminateManagedDoltPID. Returns "" when no city is known so
+// callers without a layout keep the legacy unconditional SIGKILL.
+func terminateManagedDoltDataDir(cityPath string) string {
+	if strings.TrimSpace(cityPath) == "" {
+		return ""
+	}
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		return ""
+	}
+	return layout.DataDir
 }
 
 func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {

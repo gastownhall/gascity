@@ -24,6 +24,7 @@ func TestRepoCacheKeyDeterministic(t *testing.T) {
 func TestRepoCachePathUsesHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	got, err := RepoCachePath("https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
@@ -52,6 +53,7 @@ func TestRepoCacheKeyNormalizesGitHubShortcut(t *testing.T) {
 func TestEnsureRepoInCacheUsesExistingCloneWhenCheckoutMatches(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	path, err := RepoCachePath("https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
@@ -70,7 +72,7 @@ func TestEnsureRepoInCacheUsesExistingCloneWhenCheckoutMatches(t *testing.T) {
 		if reflect.DeepEqual(args, []string{"rev-parse", "HEAD"}) {
 			return "abc123", nil
 		}
-		if reflect.DeepEqual(args, []string{"status", "--porcelain", "--ignored"}) {
+		if reflect.DeepEqual(args, []string{"status", "--porcelain"}) {
 			return "", nil
 		}
 		return "", fmt.Errorf("unexpected git call: %v", args)
@@ -86,7 +88,7 @@ func TestEnsureRepoInCacheUsesExistingCloneWhenCheckoutMatches(t *testing.T) {
 	}
 	want := [][]string{
 		{"rev-parse", "HEAD"},
-		{"status", "--porcelain", "--ignored"},
+		{"status", "--porcelain"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("git calls = %#v, want %#v", calls, want)
@@ -96,6 +98,7 @@ func TestEnsureRepoInCacheUsesExistingCloneWhenCheckoutMatches(t *testing.T) {
 func TestEnsureRepoInCacheRepairsDirtyMatchingCheckout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	path, err := RepoCachePath("https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
@@ -138,7 +141,7 @@ func TestEnsureRepoInCacheRepairsDirtyMatchingCheckout(t *testing.T) {
 	}
 	want := [][]string{
 		{"rev-parse", "HEAD"},
-		{"status", "--porcelain", "--ignored"},
+		{"status", "--porcelain"},
 		{"reset", "--hard", "--quiet", "abc123"},
 		{"clean", "-ffdx", "--quiet"},
 	}
@@ -150,6 +153,7 @@ func TestEnsureRepoInCacheRepairsDirtyMatchingCheckout(t *testing.T) {
 func TestEnsureRepoInCacheRepairsExistingCloneCheckout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	path, err := RepoCachePath("https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
@@ -201,6 +205,7 @@ func TestEnsureRepoInCacheRepairsExistingCloneCheckout(t *testing.T) {
 func TestEnsureRepoInCacheReclonesInvalidExistingCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	path, err := RepoCachePath("https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
@@ -244,7 +249,7 @@ func TestEnsureRepoInCacheReclonesInvalidExistingCache(t *testing.T) {
 	}
 	want := [][]string{
 		{"rev-parse", "HEAD"},
-		{"status", "--porcelain", "--ignored"},
+		{"status", "--porcelain"},
 		{"clone", "--quiet", "https://github.com/example/repo", path},
 		{"checkout", "--quiet", "abc123"},
 	}
@@ -256,6 +261,7 @@ func TestEnsureRepoInCacheReclonesInvalidExistingCache(t *testing.T) {
 func TestEnsureRepoInCacheCleansFreshCloneAfterPackValidationFailure(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	path, err := RepoCachePath("https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
@@ -289,6 +295,7 @@ func TestEnsureRepoInCacheCleansFreshCloneAfterPackValidationFailure(t *testing.
 func TestEnsureRepoInCacheReclonesCacheDirWithoutGit(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	path, err := RepoCachePath("https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
@@ -344,6 +351,7 @@ func TestEnsureRepoInCacheReclonesCacheDirWithoutGit(t *testing.T) {
 func TestEnsureRepoInCacheReclonesCacheFileWithoutGit(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	path, err := RepoCachePath("https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)

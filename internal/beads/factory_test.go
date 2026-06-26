@@ -1,8 +1,10 @@
 package beads
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +14,47 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+// TestLogNativeUnavailableDowngradesBDContextAgreementToDebug pins the noise
+// fix: the bd_context_agreement gate (a benign degrade-not-block check that
+// fires on every non-git city root) logs at Debug so it is silent at the
+// default Info threshold, while identity_match keeps Error and every other
+// gate keeps Warn. The structured BeadsDiagnostic still carries the signal.
+func TestLogNativeUnavailableDowngradesBDContextAgreementToDebug(t *testing.T) {
+	newLogger := func(buf *bytes.Buffer, level slog.Level) *slog.Logger {
+		return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: level}))
+	}
+
+	// bd_context_agreement is suppressed at the default Info threshold.
+	var buf bytes.Buffer
+	logNativeUnavailable(newLogger(&buf, slog.LevelInfo), "scope", string(contract.PreflightCheckBDContextAgreement), "reason")
+	if buf.Len() != 0 {
+		t.Fatalf("bd_context_agreement at Info threshold should be silent (Debug), got: %q", buf.String())
+	}
+
+	// ...but it still emits at Debug threshold, so it is downgraded, not deleted.
+	buf.Reset()
+	logNativeUnavailable(newLogger(&buf, slog.LevelDebug), "scope", string(contract.PreflightCheckBDContextAgreement), "reason")
+	if !strings.Contains(buf.String(), "level=DEBUG") || !strings.Contains(buf.String(), nativeUnavailableMessage) {
+		t.Fatalf("bd_context_agreement should log at DEBUG, got: %q", buf.String())
+	}
+
+	// identity_match still logs at Error.
+	buf.Reset()
+	logNativeUnavailable(newLogger(&buf, slog.LevelInfo), "scope", string(contract.PreflightCheckIdentityMatch), "reason")
+	if !strings.Contains(buf.String(), "level=ERROR") {
+		t.Fatalf("identity_match should log at ERROR, got: %q", buf.String())
+	}
+
+	// Any other gate keeps Warn (blast radius is contained to the one gate).
+	buf.Reset()
+	logNativeUnavailable(newLogger(&buf, slog.LevelInfo), "scope", "force_fallback", "reason")
+	if !strings.Contains(buf.String(), "level=WARN") {
+		t.Fatalf("a non-special gate should log at WARN, got: %q", buf.String())
+	}
+}
+
 func TestOpenStoreAtForCityEligibleNativeReturnsInjectedNativeStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := "/city"
 	native := NewMemStore()
 
@@ -47,6 +89,7 @@ func TestOpenStoreAtForCityEligibleNativeReturnsInjectedNativeStore(t *testing.T
 }
 
 func TestOpenStoreAtForCityIneligibleProviderSkipsPreflight(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot: "/city",
 		Provider:  "unknown",
@@ -72,6 +115,7 @@ func TestOpenStoreAtForCityIneligibleProviderSkipsPreflight(t *testing.T) {
 }
 
 func TestOpenStoreAtForCityContextDriftFallsBackWithPreflightDiagnostic(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := "/city"
 	var bdOpened bool
 
@@ -144,6 +188,7 @@ func TestOpenStoreAtForCityForceFallbackSkipsPreflightAndNativeOpen(t *testing.T
 }
 
 func TestOpenStoreAtForCityNativeOpenFailureFallsBackWithDiagnostic(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := "/city"
 	fallback := NewMemStore()
 	var bdOpened bool
@@ -184,6 +229,7 @@ func TestOpenStoreAtForCityNativeOpenFailureFallsBackWithDiagnostic(t *testing.T
 }
 
 func TestOpenStoreAtForCityExecBdContractFallbackUsesExecStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := "/city"
 	provider := "exec:/tmp/gc-beads-bd.sh"
 	execStore := NewMemStore()
@@ -220,6 +266,7 @@ func TestOpenStoreAtForCityExecBdContractFallbackUsesExecStore(t *testing.T) {
 }
 
 func TestOpenStoreAtForCityExecutableHooksBlockNativeStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := t.TempDir()
 	hooksDir := filepath.Join(scope, ".beads", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
@@ -260,6 +307,7 @@ func TestOpenStoreAtForCityExecutableHooksBlockNativeStore(t *testing.T) {
 }
 
 func TestOpenStoreAtForCityGCStampedHooksDoNotBlockNativeStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := t.TempDir()
 	hooksDir := filepath.Join(scope, ".beads", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
@@ -301,6 +349,7 @@ func TestOpenStoreAtForCityGCStampedHooksDoNotBlockNativeStore(t *testing.T) {
 }
 
 func TestOpenStoreAtForCityEmbeddedStampMarkerStillBlocksNativeStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
 	scope := t.TempDir()
 	hooksDir := filepath.Join(scope, ".beads", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {

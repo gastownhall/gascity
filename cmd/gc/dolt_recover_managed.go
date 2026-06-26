@@ -28,9 +28,7 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 	if strings.TrimSpace(port) == "" {
 		return managedDoltRecoverReport{}, fmt.Errorf("missing port")
 	}
-	if strings.TrimSpace(host) == "" {
-		host = "0.0.0.0"
-	}
+	host = normalizeManagedDoltBindHost(host)
 	if strings.TrimSpace(user) == "" {
 		user = "root"
 	}

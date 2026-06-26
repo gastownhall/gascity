@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -32,10 +33,14 @@ import (
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
-var testEnvC *helpers.Env
+var (
+	testEnvC                *helpers.Env
+	attachedWorkflowPattern = regexp.MustCompile(`(?m)^Attached workflow (\S+)\b`)
+)
 
 const tierCStartupTimeout = "3m"
 
@@ -62,7 +67,7 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", tmpRoot); err != nil {
 		panic("acceptance-c: setting TMPDIR: " + err.Error())
 	}
-	tmpDir, err := os.MkdirTemp(tmpRoot, "gcac-*")
+	tmpDir, err := os.MkdirTemp(tmpRoot, fmt.Sprintf("gcac-%d-*", os.Getpid()))
 	if err != nil {
 		panic("acceptance-c: creating temp dir: " + err.Error())
 	}
@@ -162,9 +167,15 @@ func TestMain(m *testing.M) {
 		panic("acceptance-c: tmux not found")
 	}
 
+	// Reap dolt orphans left by prior crashed runs, then guard this run so an
+	// interrupt / timeout / OOM does not leak a dolt sql-server (issue #3640).
+	dolttest.SweepStale(tmpRoot, "gcac-")
+	stopGuard := dolttest.Guard(tmpDir)
+
 	code := m.Run()
 
 	helpers.RunGC(testEnvC, "", "supervisor", "stop", "--wait") //nolint:errcheck
+	stopGuard()
 	os.Exit(code)
 }
 
@@ -186,6 +197,8 @@ func TestSwarm_SlingWorkCoderCommits(t *testing.T) {
 	c := helpers.NewCity(t, testEnvC)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "swarm"))
 	applyTierCAcceptanceConfig(t, c)
+	unregisterOut, unregisterErr := c.GC("unregister", c.Dir)
+	require.NoError(t, unregisterErr, "gc unregister after init: %s", unregisterOut)
 
 	// Add the rig via gc rig add (initializes beads, hooks, routes).
 	c.RigAdd(rigDir, "packs/swarm")
@@ -199,7 +212,7 @@ func TestSwarm_SlingWorkCoderCommits(t *testing.T) {
 	time.Sleep(15 * time.Second)
 
 	// Sling work to the coder pool.
-	out, err := c.GC("sling", swarmRigAgent(rigName, "coder"), "Create a file called hello.txt with the text 'hello world'")
+	out, err := c.GC("sling", swarmRigAgent(rigName, "coder"), "Create a file named hello.txt in the current working directory (use a relative path, not an absolute path) with the text 'hello world'")
 	if err != nil {
 		t.Fatalf("gc sling: %v\n%s", err, out)
 	}
@@ -256,19 +269,20 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	}, 2*time.Minute, 2*time.Second, "rig bead store did not become ready")
 
 	// Sling attached formula work while the pool is suspended.
-	out, err := c.GC("sling", gastownRigAgent(rigName, "polecat"), "Create a file called feature.txt containing 'new feature'", "--on", "mol-polecat-work")
+	out, err := c.GC("sling", gastownRigAgent(rigName, "polecat"), "Create a file named feature.txt in the current working directory (use a relative path, not an absolute path) containing 'new feature'", "--on", "mol-polecat-work")
 	if err != nil {
 		t.Fatalf("gc sling: %v\n%s", err, out)
 	}
 	t.Logf("Slung work to polecat: %s", strings.TrimSpace(out))
+	attachedWorkflowID := parseAttachedWorkflowID(out)
 
 	routeKey := gastownRigAgent(rigName, "polecat")
 	readyOut, err := bdCmd(testEnvC, rigDir, "ready", "--metadata-field", "gc.routed_to="+routeKey, "--unassigned", "--json", "--limit=20")
 	require.NoError(t, err, "bd ready")
 	var ready []beadJSON
 	require.NoError(t, json.Unmarshal([]byte(readyOut), &ready), "unmarshal ready queue")
-	require.Len(t, ready, 1, "expected only the outer bead in the routed ready queue")
-	require.NotContains(t, ready[0].ID, ".", "expected outer bead id, not a step id")
+	require.Len(t, ready, 1, "expected only the routed source/workflow root in the ready queue")
+	require.NotContains(t, ready[0].ID, ".", "expected source/workflow root id, not a step id")
 
 	outerID := ready[0].ID
 	outerOut, err := bdCmd(testEnvC, rigDir, "show", outerID, "--json")
@@ -276,8 +290,11 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	var outer []beadJSON
 	require.NoError(t, json.Unmarshal([]byte(outerOut), &outer), "unmarshal outer bead")
 	require.Len(t, outer, 1, "expected one outer bead")
-	moleculeID := metaString(outer[0].Metadata, "molecule_id")
-	require.NotEmpty(t, moleculeID, "outer bead should carry molecule_id metadata")
+	moleculeID := attachedRootID(outer[0])
+	if moleculeID == "" {
+		moleculeID = attachedWorkflowID
+	}
+	require.NotEmpty(t, moleculeID, "routed bead should carry or be the attached workflow/molecule root")
 
 	rootOut, err := bdCmd(testEnvC, rigDir, "show", moleculeID, "--json")
 	require.NoError(t, err, "bd show molecule root")
@@ -295,10 +312,10 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	c.StartForeground()
 
 	// Poll for outcome: refinery must eventually merge the work to origin/main.
-	// 18 minutes: Synthetic-backed workers can take longer to start and
+	// 25 minutes: Synthetic-backed workers can take longer to start and
 	// complete the polecat -> witness -> refinery chain than the original
 	// Anthropic-backed budget this test was written around.
-	deadline := 18 * time.Minute
+	deadline := 25 * time.Minute
 	merged := pollForCondition(t, deadline, 15*time.Second, func() bool {
 		_ = gitCmd(t, rigDir, "fetch", "origin")
 		content := gitCmd(t, rigDir, "show", "origin/main:feature.txt")
@@ -402,14 +419,22 @@ func TestGastown_MayorDispatchPipeline(t *testing.T) {
 	c.RigAdd(rigDir, "packs/gastown")
 	seedGastownClaudeProjects(t, c, rigName)
 
-	// Limit pool sizes.
-	c.AppendToConfig("\n[[rigs.overrides]]\nagent = \"polecat\"\n[rigs.overrides.pool]\nmin = 1\nmax = 1\n")
+	// Keep polecat idle until the mayor creates routed work. A warm min=1
+	// polecat can see the fixture TODO and directly mutate the repo before the
+	// mayor dispatch path has anything to prove.
+	c.AppendToConfig("\n[[rigs.overrides]]\nagent = \"polecat\"\n[rigs.overrides.pool]\nmin = 0\nmax = 1\n")
 
 	c.StartWithSupervisor()
 	time.Sleep(15 * time.Second)
 
-	// Send mail to mayor asking to implement a feature.
-	out, err := c.GC("mail", "send", "mayor", "Please add a greet() function to app.py that prints 'hello'")
+	// Send durable mail, then notify the mayor so an idle session processes it.
+	dispatchTarget := gastownRigAgent(rigName, "polecat")
+	body := fmt.Sprintf(
+		"Create a rig work bead in rig %q for this task, then dispatch it with `gc sling %s <bead-id>`: add a greet() function to app.py that prints 'hello'. Do not edit the file directly as mayor.",
+		rigName,
+		dispatchTarget,
+	)
+	out, err := c.GC("mail", "send", "--notify", "mayor", "-s", "Dispatch app.py greet work to polecat", "-m", body)
 	if err != nil {
 		t.Fatalf("gc mail send: %v\n%s", err, out)
 	}
@@ -588,6 +613,27 @@ func metaString(meta map[string]any, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(v))
+}
+
+func attachedRootID(bead beadJSON) string {
+	if id := metaString(bead.Metadata, "molecule_id"); id != "" {
+		return id
+	}
+	if id := metaString(bead.Metadata, "workflow_id"); id != "" {
+		return id
+	}
+	if metaString(bead.Metadata, "gc.kind") == "workflow" || metaString(bead.Metadata, "gc.formula_contract") == "graph.v2" {
+		return bead.ID
+	}
+	return ""
+}
+
+func parseAttachedWorkflowID(output string) string {
+	match := attachedWorkflowPattern.FindStringSubmatch(output)
+	if len(match) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(match[1])
 }
 
 func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
@@ -950,6 +996,18 @@ func TestUniqueRigName(t *testing.T) {
 		if got := uniqueRigName(tc.testName); got != tc.want {
 			t.Errorf("uniqueRigName(%q) = %q, want %q", tc.testName, got, tc.want)
 		}
+	}
+}
+
+func TestParseAttachedWorkflowID(t *testing.T) {
+	output := `Created pir-pgi — "Create a file called feature.txt containing 'new feature'"
+Attached workflow pir-swc (formula "mol-polecat-work") to pir-swc
+`
+	if got := parseAttachedWorkflowID(output); got != "pir-swc" {
+		t.Fatalf("parseAttachedWorkflowID() = %q, want pir-swc", got)
+	}
+	if got := parseAttachedWorkflowID("Created pir-pgi\n"); got != "" {
+		t.Fatalf("parseAttachedWorkflowID() = %q, want empty", got)
 	}
 }
 

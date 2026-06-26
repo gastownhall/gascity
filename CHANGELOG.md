@@ -7,26 +7,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pin the `beads` dependency to the stable v1.0.4.** v1.3.0 built against
+  `beads v1.0.5`, which was subsequently withdrawn (demoted to a pre-release;
+  `v1.0.4` is the current stable release). v1.3.1 repins the `beads` Go module
+  and the CI `bd` toolchain (`BD_VERSION`) to `v1.0.4`. No behavior change is
+  expected — Gas City already defaults to `bd_compatibility = "bd-1.0.4"`
+  semantics, and the config still accepts both `bd-1.0.4` and `bd-1.0.5`.
+
+## [1.3.0] - 2026-06-18
+
+### Upgrading Notes
+
+- **Run `gc doctor --fix` once per existing city after upgrading.** The 1.3
+  doctor owns the breaking migrations for explicit provider catalogs and
+  explicit pack imports/locks. The relevant checks are `provider-catalog`,
+  `builtin-pack-imports`, and `packv2-import-state`.
+- **Provider references must be declared in `[providers]`.** Cities that set
+  `workspace.provider` or agent-level `provider` values now need matching
+  `[providers.<name>]` entries. `gc doctor --fix` appends missing built-in
+  aliases such as `[providers.claude] base = "builtin:claude"`; custom
+  providers still require hand-authored provider tables.
+- **Built-in and gastown pack composition changed.** Gas City no longer
+  relies on implicit built-ins or per-city `.gc/system/packs` materialization.
+  Existing `workspace.includes = [".gc/system/packs/..."]`, legacy public
+  `gastown`/`maintenance` import sources, superseded bundled pins, and stale
+  locks are migrated to explicit pinned imports in `pack.toml` plus
+  `packs.lock`.
+- **No control-dispatcher named session is generated.** The control dispatcher
+  serves entirely via demand-scaling of the core pack's `core.control-dispatcher`
+  agent template (controller work routed through `gc.routed_to =
+  "core.control-dispatcher"`), so the on-demand `[[named_session]]` alias older
+  builds wrote is redundant. `gc init` no longer creates it, and `gc doctor
+  --fix` (during a pack-layout migration) drops the stale alias from upgraded
+  cities so its "backing template not found … disabled" warning stops firing.
+- **Generated configs no longer pin `formula_v2`.** Formula v2 is on by
+  default, so `gc init` omits the `[daemon] formula_v2` line instead of writing
+  the default value. An explicit `formula_v2 = false` (or the deprecated
+  `graph_workflows = false` alias) is still honored and preserved on round-trip.
+- **`gc session logs --tail N` no longer renders blank.** Every transcript
+  entry that occupies a tail window now prints at least one line — a non-error
+  `tool_result` shows `tool_result: ok`, and any otherwise non-rendering entry
+  (empty text, thinking, or an unrecognized block) shows `(no displayable
+  content)` — so a tail landing on such entries can no longer produce empty
+  output.
+- **The built-in Claude provider no longer declares a fresh-start
+  `session_id_flag`.** Claude remains resume-capable, but Gas City now records
+  the provider-created session key after startup instead of passing a
+  preselected fresh-session ID.
+- **The `gastown` pack is now consumed from
+  `github.com/gastownhall/gascity-packs`.** The old checked-in
+  `examples/gastown/packs/gastown` tree is gone. Move local customizations
+  into an explicitly imported pack instead of editing `.gc/system/packs` or
+  the retired vendored example path.
+- **Fallback agents were removed.** Packs that previously depended on a
+  fallback dog/worker must ship their own worker pool and formulas. Cross-pack
+  agent name collisions are now hard errors.
+- **Public imports are intentionally small.** Authored `[imports.<binding>]`
+  tables expose `source` and optional `version`; older `export`,
+  `transitive`, and `shadow` keys remain compatibility-only loader behavior,
+  not public schema.
+- **Formula v2 targeted executions use `convoy_id`, not `bead_id`.**
+  Graph/formula v2 templates no longer receive `{{bead_id}}`; update them to
+  use the reserved `{{convoy_id}}` variable for the input convoy. Formula v2
+  rejects authored inputs named `convoy_id` or `bead_id`, and `{{issue}}`
+  remains only a temporary compatibility alias that should be migrated too.
+
 ### Changed
 
+- **Version pins on builtin packs are honored: the binary only pre-seeds
+  its embedded content at each pack's canonical pin.** Previously the
+  bundled synthetic cache served the running binary's embedded bytes for
+  ANY commit pinned on a bundled source — editing the pin changed nothing.
+  Now only the canonical pin (the one `gc init` writes) resolves from the
+  embedded copy; a bundled source pinned at any other commit behaves
+  exactly like a regular remote import: `gc import install` fetches that
+  exact commit from git, validation uses the git checkout, and the cache
+  slot uses the plain remote key. Cities on canonical pins keep working
+  fully offline, including across binary upgrades that keep the pin
+  constants; releases that bump a canonical pin migrate existing cities
+  via `gc doctor --fix` (superseded canonical pins are rewritten to the
+  current one).
+
+- **Builtin packs are no longer materialized into cities; they compose via
+  pinned imports resolved from the user-global pack cache.** The per-city
+  `.gc/system/packs` tree is retired (and pruned on sight): `gc init` now
+  writes pinned `[imports.core]`/`[imports.bd]` entries into pack.toml plus
+  a matching packs.lock, and the gc binary self-heals the GC_HOME cache
+  (`$GC_HOME/cache/repos`) with its own embedded content so the pins resolve
+  offline. The `builtin-pack-includes` doctor check became
+  `builtin-pack-imports`: it migrates legacy `workspace.includes =
+  [".gc/system/packs/..."]` cities by stripping the includes, upserting the
+  pinned imports (creating a minimal pack.toml for legacy cities), and
+  refreshing packs.lock and the cache. The bd lifecycle script moved behind
+  a stable per-city shim at `.gc/scripts/gc-beads-bd.sh` that execs the
+  cache-resolved bundled script; provider normalization still recognizes
+  the legacy materialized path. All repo-cache roots (packman install,
+  config resolution, doctor) now uniformly resolve via GC_HOME instead of
+  mixing `$HOME/.gc` and GC_HOME. `gc rig add --include <builtin>`
+  canonicalizes to the bundled remote source and locks it. **Migration:**
+  run `gc doctor --fix` once per existing city.
+
+- **The registry `gascity` planning pack is bundled and offered by the init
+  wizard.** `gc init` now offers `gascity` as a config template alongside
+  minimal/gastown (also via `--template gascity`), wiring the pinned public
+  import from gascity-packs the same way the gastown template does. The
+  pack is embedded from the `github.com/gastownhall/gascity-packs` module
+  root, so the pin resolves offline from the bundled synthetic cache.
+
+- **The bundled gastown pack is now a Go module dependency, not a checked-in
+  copy.** `examples/gastown/packs/gastown` is gone; the gc binary embeds the
+  pack from `github.com/gastownhall/gascity-packs` (pinned in go.mod to the
+  registry release commit), and the example city composes gastown through
+  the pinned public registry import plus a committed `packs.lock` — the same
+  shape `gc init` writes — resolved offline from the bundled synthetic
+  cache. `scripts/update-bundled-gastown-pack` no longer writes a vendored
+  tree; it bumps the go.mod pin, the `PublicGastownPack*` constants, and the
+  example pins from the latest registry release, and `--check` verifies the
+  pinned module content against the registry hash. The gastown integration
+  tests in `examples/gastown` now run against the module-embedded bytes, so
+  a runtime/pack mismatch fails in gascity CI.
+
 - **The bundled maintenance pack was folded into the core pack, and builtin
-  packs are no longer implicitly included.** There is now one builtin pack —
-  core — carrying everything any city needs: the gc-* skills, default worker
-  prompts, core formulas, the mechanical housekeeping orders that used to
-  ship in the maintenance pack (gate-sweep, orphan-sweep, cross-rig-deps,
-  order-tracking-sweep, spawn-storm-detect, prune-branches, wisp-compact,
-  nudge-mail-sweep, nudge-on-route, cascade-nudge-on-blocker-close), the
-  check-binaries doctor check, and the per-provider hook overlays. Config
-  load no longer splices builtin packs into composition: `gc init` writes
-  explicit includes into city.toml (`[workspace] includes =
-  [".gc/system/packs/core", ".gc/system/packs/bd"]`; the bd entry only for
-  bd-provider cities), and the new fixable `builtin-pack-includes` doctor
-  check repairs missing includes and removes stale
-  `.gc/system/packs/maintenance` references. Config load still self-heals
-  the materialized `.gc/system/packs` content and warns once per city when a
-  required builtin include is missing. **Migration:** run
-  `gc doctor --fix` once per existing city; stale materialized maintenance
-  directories are pruned automatically.
+  packs compose only through explicit pinned imports.** The bundled `core`
+  pack carries the gc-* skills, default worker prompts, core formulas, the
+  mechanical housekeeping orders that used to ship in the maintenance pack
+  (gate-sweep, orphan-sweep, cross-rig-deps, order-tracking-sweep,
+  spawn-storm-detect, prune-branches, wisp-compact, nudge-mail-sweep,
+  nudge-on-route, cascade-nudge-on-blocker-close), the check-binaries doctor
+  check, and the per-provider hook overlays. Config load no longer splices
+  builtin packs into composition: `gc init` writes explicit `[imports.core]`
+  and, for default bd-provider cities, `[imports.bd]` entries into
+  `pack.toml`, plus a matching `packs.lock`. The fixable
+  `builtin-pack-imports` doctor check repairs missing imports and migrates
+  legacy `workspace.includes = [".gc/system/packs/..."]` cities by stripping
+  those includes, adding the pinned imports, and pruning stale
+  `.gc/system/packs` materialization. **Migration:** run `gc doctor --fix`
+  once per existing city.
 - **The implicit fallback dog is gone, and the `fallback` agent field was
   removed.** The gastown pack now owns its dog pool outright
   (`agents/dog/`, themed, with `mol-shutdown-dance`), and the dolt pack
@@ -41,6 +159,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Early access: the public `gascity-packs` collection.** v1.3.0 ships the
+  first early-access release of
+  [`gascity-packs`](https://github.com/gastownhall/gascity-packs) — an opt-in
+  collection of Gas City packs composed via `pack.toml` `[imports]`. Add one
+  with e.g.
+  `gc import add --name gc https://github.com/gastownhall/gascity-packs.git//gascity`.
+  Featured packs:
+  - **`gascity`** — planning & implementation workflow pack; bundled in the
+    release and the default `gc init` template (also `--template gascity`).
+  - **`gastown`** — multi-agent orchestration / default coding workflow pack;
+    bundled and offered by `gc init` (`--template gastown`).
+  - **`compound-engineering`** (`compound-build`) — Every Inc.'s Compound
+    Engineering methodology as a build factory: brainstorm/plan → persona-panel
+    plan review → implement → wide reviewer-persona fanout → resolution.
+  - **`gstack`** (`gstack-build`) — garrytan/gstack founder-style sprint:
+    office-hours intake → multi-perspective plan review → staff review → QA →
+    security → release readiness.
+  - **`superpowers`** (`superpowers-build`) — Jesse Vincent's Superpowers skill
+    library as a build factory: brainstorm → written-spec approval → per-task
+    TDD → spec-compliance then code-quality review.
+  `gascity` and `gastown` are in the supported registry; the three
+  build-methodology packs (`compound-engineering`, `gstack`, `superpowers`) are
+  early access and each import `gascity` as `gc`. See the gascity-packs README
+  for the full list and import instructions.
+
+- **Formulas v2 and `drain` are the supported path for new graph
+  workflows.** The v2 compiler emits flat workflow graphs with
+  controller-owned control/finalize beads, and `drain` is now the canonical
+  fan-out primitive for scattering convoy members into per-item formula runs.
+  The bundled `gascity` planning pack ships graph.v2 build and implementation
+  formulas, including the mayor skill's documented `gc sling ... --on
+  <formula>` launch flow and drain-based `implement` workflow, so new Gas City
+  methodology workflows no longer need the legacy `gc.output_json`/tally fan-out
+  pattern.
+
+- Proxy-process workspace services now receive `GC_SERVICE_SECRETS_DIR`
+  (`<GC_SERVICE_STATE_ROOT>/secrets`) in their environment, alongside the
+  existing `GC_SERVICE_*` variables. The directory is scaffolded at `0700`
+  by the service state-root setup and is the sanctioned home for
+  pack-managed credentials (bot tokens etc.), so pack services can rely on
+  the explicit contract instead of deriving the path from
+  `GC_SERVICE_STATE_ROOT`. See #3429.
 - `gc nudge drain --inject` now prepends a one-line current-time stamp
   (operator-local + UTC + epoch) to its `UserPromptSubmit` hook output, giving
   agents a live clock in context every turn. The local zone follows the host
@@ -119,6 +279,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the agent template path (`cfgAgent.MouseModeOn()`), which is unchanged and has
   neither the `manual`/`named` interactive marker. Replaces the portharbour
   po-vtg2 city-local `set-hook` stopgap with the in-source fix. Refs: ga-c4w.
+
+### Troubleshooting (packs, imports, registry)
+
+v1.3.0 changed pack composition: built-in/gastown packs are now consumed via
+explicit pinned `[imports]` in `pack.toml` + `packs.lock`, served from a
+content-hashed cache under `~/.gc/cache/repos/` (nothing is materialized into
+`.gc/system/packs` anymore). Most upgrade issues are fixed by one command — run
+it once per existing city after upgrading:
+
+```
+gc doctor --fix
+```
+
+It owns the mechanical migrations (`provider-catalog`, `builtin-pack-imports`,
+`packv2-import-state`): it adds missing pinned imports, strips legacy
+`workspace.includes` / `[packs]` surfaces, re-pins superseded canonical
+versions, refreshes `packs.lock` + cache, and prunes leftover `.gc/system/packs`.
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `does not import required builtin pack(s) core; run "gc doctor --fix"` | City predates explicit `[imports]`. | `gc doctor --fix` |
+| `workspace.includes is deprecated in v2; use [imports]` / `[packs] is deprecated` / `unsupported PackV1` | Legacy v1 composition surfaces. | `gc doctor --fix` (a fragment-authored `[packs]` may need a manual edit) |
+| `remote import <src> is not installed (missing packs.lock); run "gc import install"` | Declared import lacks a lock pin, or its cache checkout is absent. | `gc import install` (diagnose with `gc import check` / `gc import status`) |
+| `synthetic cache is invalid at <dir>: missing bundled pack cache marker` | Bundled synthetic cache present but invalid (an *absent* cache self-heals offline). | `gc import install` |
+| `N bundled import(s) pinned at a superseded canonical version` | Stale `packs.lock` from an older `gc`. | `gc doctor --fix` (offline re-pin) |
+| `durable import(s) use command-time registry selectors` | A `registry:` selector was written into `pack.toml`. | Manual edit — replace with the concrete source (`gc pack registry show <pack>`) |
+| `gc start` prints `FATAL: pack schema 2 not supported` | A stale supervisor still on the old binary. | let `gc start` auto-restart, or `systemctl --user restart gascity-supervisor` |
+
+**See also:** `docs/getting-started/troubleshooting.md`,
+`docs/reference/system-packs.md`, `docs/guides/understanding-packs.md`,
+`docs/guides/shareable-packs.md`, `docs/guides/registry-showcase.md`,
+`docs/troubleshooting/gc-start-walkthrough.mdx`, and the `gc doctor` /
+`gc import` / `gc pack registry` references in `docs/reference/cli.md`.
 
 ## [1.2.1] - 2026-05-31
 
@@ -441,5 +634,8 @@ community contributors. See the GitHub release page for the full narrative.
   semantics, watchdog reconciliation cadence, dirty-cache fallback reads.
 - Long tail of session lifecycle, wake-budget, and pool identity fixes.
 
-[Unreleased]: https://github.com/gastownhall/gascity/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/gastownhall/gascity/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/gastownhall/gascity/compare/v1.2.1...v1.3.0
+[1.2.1]: https://github.com/gastownhall/gascity/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/gastownhall/gascity/releases/tag/v1.2.0
 [1.0.0]: https://github.com/gastownhall/gascity/releases/tag/v1.0.0

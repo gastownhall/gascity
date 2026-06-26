@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -17,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/cityinit"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/packman"
 )
 
 // --- Supervisor Huma input/output types ---
@@ -32,13 +35,14 @@ type SupervisorCitiesOutput struct {
 // SupervisorHealthOutput is the response for GET /health (supervisor scope).
 type SupervisorHealthOutput struct {
 	Body struct {
-		Status        string             `json:"status" doc:"Health status (\"ok\")."`
-		Version       string             `json:"version" doc:"Supervisor version."`
-		BuildID       string             `json:"build_id,omitempty" doc:"Build identity (typically a short git commit hash, with \"-dirty\" suffix when built from an unclean tree). Empty when unavailable."`
-		UptimeSec     int                `json:"uptime_sec" doc:"Supervisor uptime in seconds."`
-		CitiesTotal   int                `json:"cities_total" doc:"Total managed cities."`
-		CitiesRunning int                `json:"cities_running" doc:"Cities currently running."`
-		Startup       *SupervisorStartup `json:"startup,omitempty" doc:"First-city startup info for single-city deployments."`
+		Status          string             `json:"status" doc:"Health status (\"ok\")."`
+		Version         string             `json:"version" doc:"Supervisor version."`
+		BuildID         string             `json:"build_id,omitempty" doc:"Build identity (typically a short git commit hash, with \"-dirty\" suffix when built from an unclean tree). Empty when unavailable."`
+		UptimeSec       int                `json:"uptime_sec" doc:"Supervisor uptime in seconds."`
+		CitiesTotal     int                `json:"cities_total" doc:"Total managed cities."`
+		CitiesRunning   int                `json:"cities_running" doc:"Cities currently running."`
+		PacksLockSHA256 string             `json:"packs_lock_sha256,omitempty" doc:"SHA-256 hex digest of the first managed city's packs.lock contents, for single-city deployments (mirrors the startup field's first-city semantics). Drift checkers compare this against the committed lockfile copy. Omitted when no city is registered, the city has no packs.lock, or the lockfile is unreadable (read error logged server-side) — treat absence as unknown, not as proof there is no lockfile."`
+		Startup         *SupervisorStartup `json:"startup,omitempty" doc:"First-city startup info for single-city deployments."`
 	}
 }
 
@@ -247,11 +251,13 @@ func (sm *SupervisorMux) humaHandleHealth(_ context.Context, _ *struct{}) (*Supe
 	cities := sm.resolver.ListCities()
 	var running int
 	var startup *SupervisorStartup
+	var packsLockSHA string
 	for _, c := range cities {
 		if c.Running {
 			running++
 		}
 		if startup == nil {
+			packsLockSHA = packsLockSHA256(c.Path)
 			if c.Running {
 				startup = &SupervisorStartup{
 					Ready:           true,
@@ -274,8 +280,28 @@ func (sm *SupervisorMux) humaHandleHealth(_ context.Context, _ *struct{}) (*Supe
 	out.Body.UptimeSec = int(time.Since(sm.startedAt).Seconds())
 	out.Body.CitiesTotal = len(cities)
 	out.Body.CitiesRunning = running
+	out.Body.PacksLockSHA256 = packsLockSHA
 	out.Body.Startup = startup
 	return out, nil
+}
+
+// packsLockSHA256 returns the hex-encoded SHA-256 digest of the
+// packs.lock file under cityPath, or "" when the file is missing.
+// Unexpected read errors are logged and reported as absent: /health
+// must stay available even when a city directory is unreadable.
+func packsLockSHA256(cityPath string) string {
+	if cityPath == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, packman.LockfileName))
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("health: reading %s for %s: %v", packman.LockfileName, cityPath, err)
+		}
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func (sm *SupervisorMux) humaHandleReadiness(ctx context.Context, input *SupervisorReadinessInput) (*SupervisorReadinessOutput, error) {

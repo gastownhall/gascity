@@ -254,6 +254,70 @@ func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAliasHistory(t *testin
 	}
 }
 
+func TestComputePoolDesiredStates_ResumeResolvesPersistedBoundTemplate(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("implementation-worker", "gascity-packs", intPtr(8), 0)},
+	}
+	sessionName := "gc__implementation-worker-mc-xbvk5"
+	work := []beads.Bead{
+		workBead("gp-qx0o", "gascity-packs/gc.implementation-worker", sessionName, "in_progress", 5),
+	}
+	sessions := []beads.Bead{{
+		ID:     "mc-xbvk5",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":             "gascity-packs/gc.implementation-worker",
+			"session_name":         sessionName,
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}}
+
+	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if result[0].Template != "gascity-packs/implementation-worker" {
+		t.Fatalf("result template = %q, want current canonical template", result[0].Template)
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 || reqs[0].Tier != "resume" || reqs[0].SessionBeadID != "mc-xbvk5" {
+		t.Fatalf("requests = %+v, want one resume for mc-xbvk5", reqs)
+	}
+}
+
+// TestComputePoolDesiredStates_WakeKnownIdentityResolvesPersistedBoundAssignee
+// covers the wake-known-identity tier one migration class over from the
+// resume tier: in-progress work assigned to the pool identity itself under
+// the legacy bound form, with no open session bead. The assignee/template
+// comparison must use identity equivalence so the work still produces a wake
+// request for the current canonical template instead of being treated as
+// orphaned.
+func TestComputePoolDesiredStates_WakeKnownIdentityResolvesPersistedBoundAssignee(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("implementation-worker", "gascity-packs", intPtr(8), 0)},
+	}
+	legacyIdentity := "gascity-packs/gc.implementation-worker"
+	work := []beads.Bead{
+		workBead("gp-qx1o", legacyIdentity, legacyIdentity, "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, nil, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if result[0].Template != "gascity-packs/implementation-worker" {
+		t.Fatalf("result template = %q, want current canonical template", result[0].Template)
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 || reqs[0].Tier != "wake-known-identity" || reqs[0].WorkBeadID != "gp-qx1o" {
+		t.Fatalf("requests = %+v, want one wake-known-identity for gp-qx1o", reqs)
+	}
+}
+
 func TestComputePoolDesiredStates_MaxCapsTotal(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(2), 0)},
@@ -704,7 +768,7 @@ func TestComputePoolDesiredStates_CapsNewDemandBeforeMaterializingRequests(t *te
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, sessions, map[string]int{"claude": 10}, trace)
+	result := computePoolDesiredStates(cfg, work, sessions, map[string]int{"claude": 10}, nil, trace)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1157,7 +1221,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTrace(t *testing.T) {
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 5}, trace)
+	result := computePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 5}, nil, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 5 {
 		t.Fatalf("result = %#v, want five desired requests", result)
@@ -1190,7 +1254,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReus
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 5}, trace)
+	result := computePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 5}, nil, trace)
 
 	if len(result) != 0 {
 		t.Fatalf("result = %#v, want no desired requests when workspace cap is exhausted", result)
@@ -1221,7 +1285,7 @@ func TestApplyNestedCaps_DedupsConcreteSessionRequestsAcrossTiers(t *testing.T) 
 		{Template: "claude", Tier: "new", SessionBeadID: "sess-2"},
 	}
 
-	result := applyNestedCaps(cfg, requests, nil)
+	result := applyNestedCaps(cfg, requests, nil, nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1355,5 +1419,60 @@ func TestComputePoolDesiredStates_RoutedRigScopedDoesNotSpawnNew(t *testing.T) {
 	}
 	if total != 0 {
 		t.Fatalf("total requests = %d, want 0", total)
+	}
+}
+
+// TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder is the
+// regression guard for the failed-create over-suppression hang found during the
+// gc-7e40y fix review (opencode+Fugu Ultra). A failed-create bead RELEASES its
+// alias (failedCreateIdentityReleased, names.go), so it must NOT count as a live
+// holder -- otherwise pool demand is suppressed while the canonical alias is
+// actually free, hanging routed work for the template.
+func TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("mayor", "", intPtr(1), 0)}, // canonical singleton
+	}
+	holder := func(state string) beads.Bead {
+		return beads.Bead{
+			ID:     "sess-" + state,
+			Status: "open",
+			Type:   sessionBeadType,
+			Metadata: map[string]string{
+				"session_name":   "mayor",
+				"template":       "mayor",
+				"alias":          "mayor",
+				"session_origin": "named",
+				"state":          state,
+			},
+		}
+	}
+
+	// A live named holder occupies the singleton's slot.
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("active")})["mayor"]; !ok {
+		t.Fatalf("live named alias-holder should mark mayor held; got %v", canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("active")}))
+	}
+
+	// A failed-create holder released the alias -> must NOT be treated as held.
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("failed-create")})["mayor"]; ok {
+		t.Fatalf("failed-create holder released its alias and must NOT mark mayor held (over-suppression hang); got %v", canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("failed-create")}))
+	}
+
+	// A closed holder no longer owns the alias.
+	closed := holder("active")
+	closed.Status = "closed"
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{closed})["mayor"]; ok {
+		t.Fatalf("closed holder released its alias and must NOT mark mayor held; got held")
+	}
+
+	// A pool-managed bead is the pool's own instance, not the named alias holder.
+	poolManaged := holder("active")
+	poolManaged.Metadata[poolManagedMetadataKey] = boolMetadata(true)
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{poolManaged})["mayor"]; ok {
+		t.Fatalf("pool-managed bead is not the named alias holder and must NOT mark mayor held; got held")
+	}
+
+	// A drained holder released its alias.
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("drained")})["mayor"]; ok {
+		t.Fatalf("drained holder released its alias and must NOT mark mayor held; got held")
 	}
 }

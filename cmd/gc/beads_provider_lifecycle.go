@@ -99,9 +99,11 @@ func cityDoltConfigHasLifecycleFields(cfg config.DoltConfig) bool {
 	return cfg.Host != "" ||
 		cfg.Port != 0 ||
 		cfg.ArchiveLevel != nil ||
+		cfg.AutoGCEnabled != nil ||
 		cfg.MaxConnections != 0 ||
 		cfg.ReadTimeoutMillis != 0 ||
-		cfg.WriteTimeoutMillis != 0
+		cfg.WriteTimeoutMillis != 0 ||
+		cfg.DoltLockReleaseTimeout != ""
 }
 
 func registerCityDoltConfig(cityPath string, cfg config.DoltConfig) {
@@ -134,11 +136,9 @@ var (
 var (
 	initDirIfReadyEnsureBeadsProvider = ensureBeadsProvider
 	initDirIfReadyInitAndHookDir      = initAndHookDir
-	initDirIfReadyRetryDelay          = time.Second
+	initDirIfReadyWaitForManagedDolt  = waitForManagedDoltInitReady
 	initAndHookDirWaitForScopeReady   = waitForBeadsScopeReadyAfterRecovery
 )
-
-const initDirIfReadyRetryLimit = 2
 
 func isRetryableManagedDoltLifecycleError(err error) bool {
 	if err == nil {
@@ -290,31 +290,14 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 	return false, nil
 }
 
-func initDirIfReadyManagedDolt(cityPath, dir, prefix, provider string) error {
-	var err error
-	for attempt := 1; attempt <= initDirIfReadyRetryLimit; attempt++ {
-		if err = initDirIfReadyEnsureBeadsProvider(cityPath); err != nil {
-			err = fmt.Errorf("bead store: %w", err)
-		} else if err = initDirIfReadyInitAndHookDir(cityPath, dir, prefix); err == nil {
-			return nil
-		}
-		if attempt == initDirIfReadyRetryLimit || !shouldRetryInitDirIfReady(cityPath, provider, err) {
-			return err
-		}
-		time.Sleep(initDirIfReadyRetryDelay)
+func initDirIfReadyManagedDolt(cityPath, dir, prefix, _ string) error {
+	if err := initDirIfReadyEnsureBeadsProvider(cityPath); err != nil {
+		return fmt.Errorf("bead store: %w", err)
 	}
-	return err
-}
-
-func shouldRetryInitDirIfReady(cityPath, provider string, err error) bool {
-	if !providerUsesBdStoreContract(provider) || !cityUsesManagedDoltBeadsLifecycle(cityPath) {
-		return false
+	if err := initDirIfReadyWaitForManagedDolt(cityPath, managedDoltInitReadyTimeout); err != nil {
+		return err
 	}
-	owned, ownershipErr := managedDoltLifecycleOwned(cityPath)
-	if ownershipErr != nil || !owned {
-		return false
-	}
-	return isRetryableManagedDoltLifecycleError(err)
+	return initDirIfReadyInitAndHookDir(cityPath, dir, prefix)
 }
 
 func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.ConfigState, bool, error) {
@@ -493,25 +476,16 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 }
 
 // initAndHookDir is the atomic unit of bead store initialization:
-// init the directory, then install event hooks. The ordering matters
-// because init (bd init) may recreate .beads/ and wipe existing hooks.
+// init the directory, then remove any stale gc-managed bead event hooks.
+// The ordering matters because init (bd init) may recreate .beads/ and
+// wipe existing hooks. installBeadHooks only removes gc-stamped hooks and
+// is always safe to run regardless of event_hooks config.
 func initAndHookDir(cityPath, dir, prefix string) error {
-	// Honor [beads] event_hooks=false: skip installing the bd write hooks
-	// (on_create/on_update/on_close). Those hooks fork a full `gc event emit`
-	// per bead write — a real CPU/connection-churn source under load — and a
-	// city that opts out of them must not have them silently reinstalled on
-	// every reconcile. Default (unset) stays true. Load failure → default true.
-	installHooks := true
-	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
-		installHooks = cfg.Beads.EventHooksEnabled()
-	}
 	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
 		return err
 	} else if usesPostgres {
-		if installHooks {
-			if err := installBeadHooks(dir, cityPath); err != nil {
-				return fmt.Errorf("install hooks at %s: %w", dir, err)
-			}
+		if err := installBeadHooks(dir, cityPath); err != nil {
+			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
 		return nil
 	}
@@ -547,10 +521,8 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		}
 	}
 	// Non-fatal: hooks are convenience (event forwarding), not critical.
-	if installHooks {
-		if err := installBeadHooks(dir, cityPath); err != nil {
-			return fmt.Errorf("install hooks at %s: %w", dir, err)
-		}
+	if err := installBeadHooks(dir, cityPath); err != nil {
+		return fmt.Errorf("install hooks at %s: %w", dir, err)
 	}
 	return nil
 }
@@ -1375,17 +1347,24 @@ func writeDoltPortFile(dir, port, scopeLabel string, warn io.Writer) {
 		}
 		fmt.Fprintf(warn, "WARN: %s .beads/dolt-server.port rewrite %s → %s (managed city port)\n", label, existing, trimmedPort) //nolint:errcheck // best-effort stderr
 	}
-	if err := ensureBeadsDir(fsys.OSFS{}, filepath.Dir(portFile)); err != nil {
+	writePath, err := resolveDoltPortFileWritePath(fsys.OSFS{}, portFile)
+	if err != nil {
 		return
 	}
-	_ = fsys.WriteFileAtomic(fsys.OSFS{}, portFile, []byte(trimmedPort+"\n"), 0o644)
+	if err := ensureBeadsDir(fsys.OSFS{}, filepath.Dir(writePath)); err != nil {
+		return
+	}
+	_ = fsys.WriteFileAtomic(fsys.OSFS{}, writePath, []byte(trimmedPort+"\n"), 0o644)
 }
 
 func removeDoltPortFile(dir string) {
 	if dir == "" {
 		return
 	}
-	_ = os.Remove(filepath.Join(dir, ".beads", "dolt-server.port"))
+	// Resolve through any operator symlink so cleanup clears the target and
+	// preserves the link, mirroring writeDoltPortFile's symlink-preserving
+	// write path (ga-lurp5d). Best-effort: ignore the resolve/remove error.
+	_ = removeResolvedDoltPortFile(fsys.OSFS{}, dir)
 }
 
 func removeScopeLocalDoltServerArtifacts(dir string) error {
@@ -1997,9 +1976,11 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		"GC_DOLT_LOCK_FILE",
 		"GC_DOLT_CONFIG_FILE",
 		"GC_DOLT_ARCHIVE_LEVEL",
+		"GC_DOLT_AUTO_GC_ENABLED",
 		"GC_DOLT_MAX_CONNECTIONS",
 		"GC_DOLT_READ_TIMEOUT_MILLIS",
 		"GC_DOLT_WRITE_TIMEOUT_MILLIS",
+		"GC_DOLT_LOCK_RELEASE_TIMEOUT_MS",
 	} {
 		env = removeEnvKey(env, key)
 	}
@@ -2030,6 +2011,9 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		if dc.ArchiveLevel != nil {
 			env = append(env, fmt.Sprintf("GC_DOLT_ARCHIVE_LEVEL=%d", *dc.ArchiveLevel))
 		}
+		if dc.AutoGCEnabled != nil {
+			env = append(env, fmt.Sprintf("GC_DOLT_AUTO_GC_ENABLED=%t", *dc.AutoGCEnabled))
+		}
 		if dc.MaxConnections > 0 {
 			env = append(env, fmt.Sprintf("GC_DOLT_MAX_CONNECTIONS=%d", dc.MaxConnections))
 		}
@@ -2038,6 +2022,11 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		}
 		if dc.WriteTimeoutMillis > 0 {
 			env = append(env, fmt.Sprintf("GC_DOLT_WRITE_TIMEOUT_MILLIS=%d", dc.WriteTimeoutMillis))
+		}
+		// An explicit "0s" is meaningful (probe once, no wait), so gate on
+		// field presence rather than a non-zero duration.
+		if dc.DoltLockReleaseTimeout != "" {
+			env = append(env, fmt.Sprintf("GC_DOLT_LOCK_RELEASE_TIMEOUT_MS=%d", dc.DoltLockReleaseTimeoutDuration().Milliseconds()))
 		}
 	}
 	// `gc start` runs in the user's shell, which doesn't see vars set
@@ -2109,12 +2098,16 @@ func acquireProviderSemaphoreForOp(cityPath, op string) (func(), error) {
 }
 
 // providerOpTimeout returns the context timeout for a given lifecycle
-// operation. The "start" and "recover" operations get a longer timeout
-// because dolt server startup can take 30+ seconds for large data dirs.
-// All other operations use 30s.
+// operation. The "start", "recover", and "init" operations get a longer
+// timeout: dolt server startup can take 30+ seconds for large data dirs, and
+// initializing a rig's bead store can likewise exceed 30s when it creates or
+// migrates a database on a busy shared dolt server. Under the old 30s budget,
+// init of an existing-but-unmigrated rig DB during a config reload was
+// SIGKILLed, leaving the supervisor "keeping old config" so newly configured
+// rigs never came online. All other operations use 30s.
 var providerOpTimeout = func(op string) time.Duration {
 	switch op {
-	case "start", "recover":
+	case "start", "recover", "init":
 		return 120 * time.Second
 	default:
 		return 30 * time.Second

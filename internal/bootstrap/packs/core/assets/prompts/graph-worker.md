@@ -107,7 +107,7 @@ gc hook --claim --drain-ack --json
 - `gc.kind=ralph` and `gc.kind=retry` are logical controller beads. You should
   not execute them directly.
 - `gc.kind=check|fanout|retry-eval|scope-check|workflow-finalize` are handled by the
-  implicit `control-dispatcher` lane. Normal workers should not receive them.
+  core-pack `control-dispatcher` lane. Normal workers should not receive them.
 - If you see a teardown bead, run it even if earlier work failed. That is the
   point of the scope/finalizer model.
 

@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -396,6 +398,119 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 	}
 	if !found {
 		t.Fatalf("delivered conversation peer nudge not found; calls=%#v", fs.sp.Calls)
+	}
+}
+
+// faultBindingService injects a fixed error from ResolveByConversation so the
+// inbound handler's error-status mapping can be exercised without a live store.
+// The normalized inbound path resolves the binding first, so this single
+// override is enough to drive the handler's error branch; the embedded nil
+// interface is never touched on that path.
+type faultBindingService struct {
+	extmsg.BindingService
+	err error
+}
+
+func (f faultBindingService) ResolveByConversation(context.Context, extmsg.ConversationRef) (*extmsg.SessionBindingRecord, error) {
+	return nil, f.err
+}
+
+func inboundNormalizedBody(t *testing.T) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"message": map[string]any{
+			"provider_message_id": "m1",
+			"conversation": map[string]any{
+				"scope_id":        "scope-1",
+				"provider":        "telegram",
+				"account_id":      "acct-1",
+				"conversation_id": "chat-1",
+				"kind":            "dm",
+			},
+			"actor":       map[string]any{"id": "u1", "display_name": "User", "is_bot": false},
+			"text":        "hello",
+			"received_at": time.Now().UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(body): %v", err)
+	}
+	return string(body)
+}
+
+// TestHandleExtMsgInboundNormalizedTransientStorageFaultReturns500 pins the
+// /extmsg/inbound contract that out-of-process adapters depend on: a transient
+// server-side storage fault (e.g. a DoltLite "database is locked" while
+// resolving the binding) must surface as 5xx, not a permanent-looking 4xx.
+// Adapters classify 4xx as a permanent drop and 5xx as retryable, so collapsing
+// transient faults to 422 would let a redeliverable message be lost.
+func TestHandleExtMsgInboundNormalizedTransientStorageFaultReturns500(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	services := extmsg.NewServices(fs.cityBeadStore)
+	services.Bindings = faultBindingService{err: errors.New("database is locked")}
+	fs.extmsgSvc = &services
+	fs.adapterReg = extmsg.NewAdapterRegistry()
+
+	req := newPostRequest(cityURL(fs, "/extmsg/inbound"), strings.NewReader(inboundNormalizedBody(t)))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("transient storage fault: status = %d, want %d; body: %s",
+			rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+}
+
+// TestHandleExtMsgInboundNormalizedInvalidConversationReturns400 is the other
+// half of the same contract: genuinely malformed/unroutable input is permanent
+// and must stay 4xx so adapters drop it instead of retrying a poison message
+// forever. ErrInvalidConversation is the deterministic validation error a
+// normalized message can trigger.
+func TestHandleExtMsgInboundNormalizedInvalidConversationReturns400(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	services := extmsg.NewServices(fs.cityBeadStore)
+	services.Bindings = faultBindingService{err: fmt.Errorf("%w: scope_id required", extmsg.ErrInvalidConversation)}
+	fs.extmsgSvc = &services
+	fs.adapterReg = extmsg.NewAdapterRegistry()
+
+	req := newPostRequest(cityURL(fs, "/extmsg/inbound"), strings.NewReader(inboundNormalizedBody(t)))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid conversation: status = %d, want %d; body: %s",
+			rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+// TestHandleExtMsgInboundNormalizedInvariantViolationReturns400 pins the third
+// arm of the contract: an invariant violation (e.g. duplicate active bindings
+// surfaced by ResolveByConversation, or duplicate groups/participants/transcript
+// state surfaced by the group-route and transcript steps) is permanent — the
+// same inbound message re-resolves the same corrupt state and fails identically
+// until it is repaired out-of-band. It must stay 4xx so adapters drop the poison
+// message instead of retrying a 5xx forever and wedging the account's ordered
+// inbound stream behind it.
+func TestHandleExtMsgInboundNormalizedInvariantViolationReturns400(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	services := extmsg.NewServices(fs.cityBeadStore)
+	services.Bindings = faultBindingService{err: fmt.Errorf("%w: multiple active bindings for telegram/acct-1/chat-1", extmsg.ErrInvariantViolation)}
+	fs.extmsgSvc = &services
+	fs.adapterReg = extmsg.NewAdapterRegistry()
+
+	req := newPostRequest(cityURL(fs, "/extmsg/inbound"), strings.NewReader(inboundNormalizedBody(t)))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invariant violation: status = %d, want %d; body: %s",
+			rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }
 

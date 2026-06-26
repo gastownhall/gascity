@@ -74,7 +74,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 	}
 	parentVars, err := graphv2.ParseRuntimeVarsMetadata(root.Metadata[graphv2.RuntimeVarsMetadataKey])
 	if err != nil {
-		return ControlResult{}, fmt.Errorf("%s: parsing graph.v2 runtime vars on root %s: %w", bead.ID, rootID, err)
+		return ControlResult{}, fmt.Errorf("%s: parsing formulas v2 runtime vars on root %s: %w", bead.ID, rootID, err)
 	}
 	itemFormula := strings.TrimSpace(bead.Metadata[beadmeta.DrainFormulaMetadataKey])
 	if itemFormula == "" {
@@ -126,7 +126,11 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		}
 
 		if row.ItemRootID == "" {
-			rootID, created, err := ensureDrainItemRoot(store, bead, unit, member, len(members), row, itemFormula, parentVars, opts)
+			blockerIDs, err := drainProjectedBlockerIDs(store, member.ID, manifest)
+			if err != nil {
+				return ControlResult{}, fmt.Errorf("%s: listing source dependencies for member %s: %w", bead.ID, member.ID, err)
+			}
+			rootID, created, err := ensureDrainItemRoot(store, bead, unit, member, len(members), row, itemFormula, parentVars, blockerIDs, opts)
 			if err != nil {
 				if errors.Is(err, errDrainInvalidItemFormula) {
 					return closeDrainItemFormulaFailure(store, bead, manifest, err)
@@ -145,10 +149,22 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 			}
 			return ControlResult{}, fmt.Errorf("%s: wiring drain item root %s: %w", bead.ID, row.ItemRootID, err)
 		}
+		if err := ensureDrainRowDependencyProjection(store, bead, manifest, member.ID, row.ItemRootID); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
+			return ControlResult{}, fmt.Errorf("%s: projecting drain dependencies for member %s: %w", bead.ID, member.ID, err)
+		}
 		row.Status = "wired"
 		if err := persistDrainManifest(store, bead.ID, manifest, map[string]string{beadmeta.DrainStateMetadataKey: "expanding"}); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: recording drain progress: %w", bead.ID, err)
 		}
+	}
+	if err := ensureDrainDependencyProjection(store, bead, manifest); err != nil {
+		if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+			return ControlResult{}, ErrControlPending
+		}
+		return ControlResult{}, fmt.Errorf("%s: projecting drain dependencies: %w", bead.ID, err)
 	}
 	if err := persistDrainManifest(store, bead.ID, manifest, map[string]string{
 		beadmeta.DrainStateMetadataKey:          "expanded",
@@ -220,7 +236,11 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 		}
 		return drainManifest{}, nil, errDrainLimitExceeded
 	}
-	return buildDrainManifest(bead, parentConvoyID, itemFormula, members), members, nil
+	orderedMembers, err := orderDrainMembersByDependencies(store, members)
+	if err != nil {
+		return drainManifest{}, nil, fmt.Errorf("%s: ordering drain members for %s: %w", bead.ID, parentConvoyID, err)
+	}
+	return buildDrainManifest(bead, parentConvoyID, itemFormula, orderedMembers), orderedMembers, nil
 }
 
 var (
@@ -284,13 +304,22 @@ func completeDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		}
 		parentVars, err := graphv2.ParseRuntimeVarsMetadata(root.Metadata[graphv2.RuntimeVarsMetadataKey])
 		if err != nil {
-			return ControlResult{}, fmt.Errorf("%s: parsing graph.v2 runtime vars on root %s: %w", bead.ID, rootID, err)
+			return ControlResult{}, fmt.Errorf("%s: parsing formulas v2 runtime vars on root %s: %w", bead.ID, rootID, err)
 		}
 		members, err := loadDrainManifestMembers(store, bead.ID, manifest)
 		if err != nil {
 			return ControlResult{}, err
 		}
 		return advanceSharedDrain(store, bead, manifest, members, manifest.Formula, parentVars, opts)
+	}
+	// Re-running the projection here lets manifests whose item workflows were
+	// wired to source members by earlier builds heal while the drain waits on
+	// open item roots; expansion never revisits an expanded drain.
+	if err := ensureDrainDependencyProjection(store, bead, manifest); err != nil {
+		if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+			return ControlResult{}, ErrControlPending
+		}
+		return ControlResult{}, fmt.Errorf("%s: repairing drain dependency projection: %w", bead.ID, err)
 	}
 	if strings.TrimSpace(bead.Metadata[beadmeta.DrainStateMetadataKey]) != "completing" {
 		if err := store.SetMetadata(bead.ID, beadmeta.DrainStateMetadataKey, "completing"); err != nil {
@@ -363,6 +392,16 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 	if len(manifest.Rows) == 0 {
 		return closeDrainWithManifest(store, bead.ID, manifest, "succeeded", "pass", "drain-succeeded")
 	}
+	// Repair materialized rows before waiting on them: a row wired to a
+	// source member by an earlier build never closes (drains do not close
+	// source members), and in shared mode its blocker row is not even
+	// materialized until this row's root closes.
+	if err := ensureDrainDependencyProjection(store, bead, manifest); err != nil {
+		if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+			return ControlResult{}, ErrControlPending
+		}
+		return ControlResult{}, fmt.Errorf("%s: repairing shared drain dependency projection: %w", bead.ID, err)
+	}
 	onItemFailure := drainOnItemFailure(bead)
 	for i := range manifest.Rows {
 		row := &manifest.Rows[i]
@@ -392,12 +431,18 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 		if err := reserveDrainMember(store, bead, member); err != nil {
 			return closeDrainReservationFailure(store, bead, manifest, err)
 		}
-		created, err := materializeDrainRow(store, bead, manifest.ParentConvoyID, members, row, member, itemFormula, parentVars, opts)
+		created, err := materializeDrainRow(store, bead, manifest, members, row, member, itemFormula, parentVars, opts)
 		if err != nil {
 			if errors.Is(err, errDrainInvalidItemFormula) {
 				return closeDrainItemFormulaFailure(store, bead, manifest, err)
 			}
 			return ControlResult{}, err
+		}
+		if err := ensureDrainDependencyProjection(store, bead, manifest); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
+			return ControlResult{}, fmt.Errorf("%s: projecting shared drain dependencies: %w", bead.ID, err)
 		}
 		if err := persistDrainManifest(store, bead.ID, manifest, map[string]string{
 			beadmeta.DrainStateMetadataKey:          "expanded",
@@ -414,11 +459,11 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 	return closeDrainWithManifest(store, bead.ID, manifest, "succeeded", "pass", "drain-succeeded")
 }
 
-func materializeDrainRow(store beads.Store, control beads.Bead, parentConvoyID string, members []beads.Bead, row *drainManifestRow, member beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (int, error) {
+func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainManifest, members []beads.Bead, row *drainManifestRow, member beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (int, error) {
 	createdCount := 0
 	var unit beads.Bead
 	if row.UnitConvoyID == "" {
-		createdUnit, created, err := ensureDrainUnitConvoy(store, control, parentConvoyID, len(members), *row, member)
+		createdUnit, created, err := ensureDrainUnitConvoy(store, control, manifest.ParentConvoyID, len(members), *row, member)
 		if err != nil {
 			return 0, err
 		}
@@ -436,7 +481,11 @@ func materializeDrainRow(store beads.Store, control beads.Bead, parentConvoyID s
 		unit = reloaded
 	}
 	if row.ItemRootID == "" {
-		rootID, created, err := ensureDrainItemRoot(store, control, unit, member, len(members), row, itemFormula, parentVars, opts)
+		blockerIDs, err := drainProjectedBlockerIDs(store, member.ID, manifest)
+		if err != nil {
+			return 0, fmt.Errorf("%s: listing source dependencies for member %s: %w", control.ID, member.ID, err)
+		}
+		rootID, created, err := ensureDrainItemRoot(store, control, unit, member, len(members), row, itemFormula, parentVars, blockerIDs, opts)
 		if err != nil {
 			return 0, err
 		}
@@ -452,8 +501,166 @@ func materializeDrainRow(store beads.Store, control beads.Bead, parentConvoyID s
 		}
 		return 0, fmt.Errorf("%s: wiring drain item root %s: %w", control.ID, row.ItemRootID, err)
 	}
+	if err := ensureDrainRowDependencyProjection(store, control, manifest, member.ID, row.ItemRootID); err != nil {
+		if controllerSpawnBoundaryPending(store, control.ID, err, opts) {
+			return 0, ErrControlPending
+		}
+		return 0, fmt.Errorf("%s: projecting drain dependencies for member %s: %w", control.ID, member.ID, err)
+	}
 	row.Status = "wired"
 	return createdCount, nil
+}
+
+func ensureDrainDependencyProjection(store beads.Store, control beads.Bead, manifest drainManifest) error {
+	for _, row := range manifest.Rows {
+		memberID := strings.TrimSpace(row.MemberID)
+		rootID := strings.TrimSpace(row.ItemRootID)
+		if memberID == "" || rootID == "" {
+			continue
+		}
+		if err := ensureDrainRowDependencyProjection(store, control, manifest, memberID, rootID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureDrainRowDependencyProjection(store beads.Store, control beads.Bead, manifest drainManifest, memberID, rootID string) error {
+	blockerIDs, err := drainProjectedBlockerIDs(store, memberID, manifest)
+	if err != nil {
+		return fmt.Errorf("%s: listing source dependencies for member %s: %w", control.ID, memberID, err)
+	}
+	for _, blockerID := range blockerIDs {
+		if blockerID == rootID {
+			continue
+		}
+		if err := ensureDrainWorkflowBlocksOn(store, rootID, blockerID); err != nil {
+			return fmt.Errorf("%s: wiring item workflow %s for member %s to blocker %s: %w", control.ID, rootID, memberID, blockerID, err)
+		}
+	}
+	if err := repairDrainWorkflowSourceMemberDeps(store, manifest, memberID, rootID); err != nil {
+		return fmt.Errorf("%s: repairing source-member dependencies on item workflow %s for member %s: %w", control.ID, rootID, memberID, err)
+	}
+	return nil
+}
+
+func drainRootByMember(manifest drainManifest) map[string]string {
+	rootByMember := make(map[string]string, len(manifest.Rows))
+	for _, row := range manifest.Rows {
+		memberID := strings.TrimSpace(row.MemberID)
+		rootID := strings.TrimSpace(row.ItemRootID)
+		if memberID == "" || rootID == "" {
+			continue
+		}
+		rootByMember[memberID] = rootID
+	}
+	return rootByMember
+}
+
+func drainManifestMemberIDs(manifest drainManifest) map[string]bool {
+	memberIDs := make(map[string]bool, len(manifest.Rows))
+	for _, row := range manifest.Rows {
+		memberID := strings.TrimSpace(row.MemberID)
+		if memberID == "" {
+			continue
+		}
+		memberIDs[memberID] = true
+	}
+	return memberIDs
+}
+
+func drainProjectedBlockerIDs(store beads.Store, memberID string, manifest drainManifest) ([]string, error) {
+	rootByMember := drainRootByMember(manifest)
+	manifestMembers := drainManifestMemberIDs(manifest)
+	deps, err := store.DepList(memberID, "down")
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(deps))
+	blockerIDs := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		if !beads.IsReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		dependsOnID := strings.TrimSpace(dep.DependsOnID)
+		if dependsOnID == "" || dependsOnID == memberID {
+			continue
+		}
+		blockerID := dependsOnID
+		if projectedRootID := strings.TrimSpace(rootByMember[dependsOnID]); projectedRootID != "" {
+			blockerID = projectedRootID
+		} else if manifestMembers[dependsOnID] {
+			// An in-manifest member without a materialized item root must not
+			// be embedded as a blocker: drains do not close source members,
+			// so that edge would never release. Manifests persisted before
+			// dependency ordering can reach this state on resume; the
+			// manifest-wide sweep wires the item-root dependency once the
+			// blocker's root exists.
+			continue
+		}
+		if seen[blockerID] {
+			continue
+		}
+		seen[blockerID] = true
+		blockerIDs = append(blockerIDs, blockerID)
+	}
+	return blockerIDs, nil
+}
+
+func ensureDrainWorkflowBlocksOn(store beads.Store, rootID, blockerID string) error {
+	rootID = strings.TrimSpace(rootID)
+	blockerID = strings.TrimSpace(blockerID)
+	if rootID == "" || blockerID == "" || rootID == blockerID {
+		return nil
+	}
+	workflowBeads, err := listByWorkflowRoot(store, rootID)
+	if err != nil {
+		return err
+	}
+	for _, bead := range workflowBeads {
+		if strings.TrimSpace(bead.ID) == "" || bead.ID == blockerID {
+			continue
+		}
+		if err := ensureBlockingDependency(store, bead.ID, blockerID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// repairDrainWorkflowSourceMemberDeps removes ready-blocking dependencies
+// that earlier builds embedded from item workflow beads onto other manifest
+// source members. Drains do not close source members, so such an edge stalls
+// the item workflow permanently; the projected item-root dependency wired by
+// ensureDrainRowDependencyProjection before this repair supersedes it.
+func repairDrainWorkflowSourceMemberDeps(store beads.Store, manifest drainManifest, memberID, rootID string) error {
+	manifestMembers := drainManifestMemberIDs(manifest)
+	workflowBeads, err := listByWorkflowRoot(store, rootID)
+	if err != nil {
+		return err
+	}
+	for _, bead := range workflowBeads {
+		if strings.TrimSpace(bead.ID) == "" {
+			continue
+		}
+		deps, err := store.DepList(bead.ID, "down")
+		if err != nil {
+			return fmt.Errorf("listing dependencies for item workflow bead %s: %w", bead.ID, err)
+		}
+		for _, dep := range deps {
+			if !beads.IsReadyBlockingDependencyType(dep.Type) {
+				continue
+			}
+			dependsOnID := strings.TrimSpace(dep.DependsOnID)
+			if dependsOnID == "" || dependsOnID == memberID || !manifestMembers[dependsOnID] {
+				continue
+			}
+			if err := store.DepRemove(bead.ID, dependsOnID); err != nil {
+				return fmt.Errorf("removing source-member dependency %s from item workflow bead %s: %w", dependsOnID, bead.ID, err)
+			}
+		}
+	}
+	return nil
 }
 
 func recordDrainRowOutcome(row *drainManifestRow, root beads.Bead) bool {
@@ -545,6 +752,82 @@ func buildDrainManifest(bead beads.Bead, parentConvoyID, itemFormula string, mem
 	return drainManifest{Version: 1, Context: context, ParentConvoyID: parentConvoyID, Formula: itemFormula, Rows: rows}
 }
 
+func orderDrainMembersByDependencies(store beads.Store, members []beads.Bead) ([]beads.Bead, error) {
+	if len(members) < 2 {
+		return members, nil
+	}
+	memberByID := make(map[string]beads.Bead, len(members))
+	for _, member := range members {
+		memberID := strings.TrimSpace(member.ID)
+		if memberID == "" {
+			continue
+		}
+		memberByID[memberID] = member
+	}
+	blockersByMember := make(map[string]map[string]bool, len(members))
+	for _, member := range members {
+		memberID := strings.TrimSpace(member.ID)
+		if memberID == "" {
+			continue
+		}
+		deps, err := store.DepList(memberID, "down")
+		if err != nil {
+			return nil, fmt.Errorf("listing source dependencies for member %s: %w", memberID, err)
+		}
+		for _, dep := range deps {
+			if !beads.IsReadyBlockingDependencyType(dep.Type) {
+				continue
+			}
+			blockerID := strings.TrimSpace(dep.DependsOnID)
+			if blockerID == "" || blockerID == memberID {
+				continue
+			}
+			if _, ok := memberByID[blockerID]; !ok {
+				continue
+			}
+			if blockersByMember[memberID] == nil {
+				blockersByMember[memberID] = make(map[string]bool)
+			}
+			blockersByMember[memberID][blockerID] = true
+		}
+	}
+	ordered := make([]beads.Bead, 0, len(members))
+	emitted := make(map[string]bool, len(members))
+	for len(ordered) < len(members) {
+		progressed := false
+		for _, member := range members {
+			memberID := strings.TrimSpace(member.ID)
+			if emitted[memberID] {
+				continue
+			}
+			blocked := false
+			for blockerID := range blockersByMember[memberID] {
+				if !emitted[blockerID] {
+					blocked = true
+					break
+				}
+			}
+			if blocked {
+				continue
+			}
+			ordered = append(ordered, member)
+			emitted[memberID] = true
+			progressed = true
+		}
+		if !progressed {
+			cycleMembers := make([]string, 0, len(members)-len(ordered))
+			for _, member := range members {
+				memberID := strings.TrimSpace(member.ID)
+				if memberID != "" && !emitted[memberID] {
+					cycleMembers = append(cycleMembers, memberID)
+				}
+			}
+			return nil, fmt.Errorf("source dependency cycle among drain members: %s", strings.Join(cycleMembers, ", "))
+		}
+	}
+	return ordered, nil
+}
+
 func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID string, count int, row drainManifestRow, member beads.Bead) (beads.Bead, bool, error) {
 	unlock := graphv2.LockKey(row.UnitKey)
 	defer unlock()
@@ -606,7 +889,7 @@ func trackDrainMember(store beads.Store, unitConvoyID string, member beads.Bead)
 	return convoycore.TrackItem(store, unitConvoyID, member.ID)
 }
 
-func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, count int, row *drainManifestRow, itemFormula string, parentVars map[string]string, opts ProcessOptions) (string, bool, error) {
+func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, count int, row *drainManifestRow, itemFormula string, parentVars map[string]string, blockerIDs []string, opts ProcessOptions) (string, bool, error) {
 	unlock := graphv2.LockKey(row.ItemRootKey)
 	defer unlock()
 	if err := closeFailedDrainItemRoots(store, control.ID, row.ItemRootKey); err != nil {
@@ -642,7 +925,7 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 		return "", false, fmt.Errorf("%w: %s: compiling drain item formula %q: %w", errDrainInvalidItemFormula, control.ID, itemFormula, err)
 	}
 	if !isGraphV2WorkflowRecipe(recipe) {
-		return "", false, fmt.Errorf("%w: %s: drain item formula %q must declare contract = \"graph.v2\"", errDrainInvalidItemFormula, control.ID, itemFormula)
+		return "", false, fmt.Errorf("%w: %s: drain item formula %q must declare the formulas v2 contract ([requires] formula_compiler = \">=2.0.0\")", errDrainInvalidItemFormula, control.ID, itemFormula)
 	}
 	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
 		return "", false, fmt.Errorf("%w: %s: validating drain item formula %q: %w", errDrainInvalidItemFormula, control.ID, itemFormula, err)
@@ -656,6 +939,7 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 	}
 	result, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{
 		Vars:             runtimeVars,
+		ExternalDeps:     drainWorkflowExternalDeps(recipe, blockerIDs),
 		PriorityOverride: member.Priority,
 	})
 	if err != nil {
@@ -668,6 +952,37 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 		return "", false, fmt.Errorf("%s: instantiating drain item formula %q: %w", control.ID, itemFormula, err)
 	}
 	return result.RootID, true, nil
+}
+
+func drainWorkflowExternalDeps(recipe *formula.Recipe, blockerIDs []string) []molecule.ExternalDep {
+	if recipe == nil || len(recipe.Steps) == 0 || len(blockerIDs) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var deps []molecule.ExternalDep
+	for _, step := range recipe.Steps {
+		stepID := strings.TrimSpace(step.ID)
+		if stepID == "" {
+			continue
+		}
+		for _, blockerID := range blockerIDs {
+			blockerID = strings.TrimSpace(blockerID)
+			if blockerID == "" {
+				continue
+			}
+			key := stepID + "\x00" + blockerID
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			deps = append(deps, molecule.ExternalDep{
+				StepID:      stepID,
+				DependsOnID: blockerID,
+				Type:        "blocks",
+			})
+		}
+	}
+	return deps
 }
 
 func drainItemRuntimeVars(recipe *formula.Recipe, vars map[string]string) map[string]string {

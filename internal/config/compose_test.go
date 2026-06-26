@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -55,7 +56,7 @@ name = "test"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if !cfg.Daemon.FormulaV2 {
+	if !cfg.Daemon.FormulaV2Enabled() {
 		t.Fatal("Daemon.FormulaV2 = false, want true when formula_v2 is omitted")
 	}
 }
@@ -73,7 +74,7 @@ formula_v2 = false
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if cfg.Daemon.FormulaV2 {
+	if cfg.Daemon.FormulaV2Enabled() {
 		t.Fatal("Daemon.FormulaV2 = true, want explicit false")
 	}
 }
@@ -97,7 +98,7 @@ patrol_interval = "1m"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if cfg.Daemon.FormulaV2 {
+	if cfg.Daemon.FormulaV2Enabled() {
 		t.Fatal("Daemon.FormulaV2 = true, want root explicit false to survive daemon fragment")
 	}
 	if cfg.Daemon.PatrolInterval != "1m" {
@@ -735,6 +736,113 @@ KEY_C = "3"
 	}
 }
 
+func TestLoadWithIncludes_FragmentUpstreamComposes(t *testing.T) {
+	// A [upstreams.<name>] block declared in a city fragment must compose into
+	// the city's Upstreams map; without it, a valid layered city silently loses
+	// the upstream declaration and later session resolution fails with
+	// "not declared".
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["upstreams.toml"]
+
+[workspace]
+name = "test"
+
+[upstreams.base_only]
+base_url = "https://base.example"
+
+[upstreams.shared]
+base_url = "https://city.example"
+`)
+	fs.Files["/city/upstreams.toml"] = []byte(`
+[upstreams.frag_only]
+base_url = "https://frag.example"
+
+[upstreams.shared]
+base_url = "https://fragment-override.example"
+`)
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	// Base-only upstream preserved.
+	if got := cfg.Upstreams["base_only"].BaseURL; got != "https://base.example" {
+		t.Errorf("base_only.BaseURL = %q, want %q", got, "https://base.example")
+	}
+	// Fragment-declared upstream composed in (the finding: it must not be dropped).
+	if got := cfg.Upstreams["frag_only"].BaseURL; got != "https://frag.example" {
+		t.Errorf("frag_only.BaseURL = %q, want %q", got, "https://frag.example")
+	}
+	// Collision: the included fragment replaces the base entry and warns,
+	// matching provider/pack merge behavior.
+	if got := cfg.Upstreams["shared"].BaseURL; got != "https://fragment-override.example" {
+		t.Errorf("shared.BaseURL = %q, want fragment override", got)
+	}
+	found := false
+	for _, w := range prov.Warnings {
+		if strings.Contains(w, "shared") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected collision warning for upstream %q, got: %v", "shared", prov.Warnings)
+	}
+}
+
+func TestLoadWithIncludes_ProviderUpstreamEnvMerge(t *testing.T) {
+	// A fragment override of a provider's [providers.<name>.upstream_env]
+	// serving-env binding must deep-merge per sub-field: untouched names survive,
+	// defined names override (with a collision warning), new names are added.
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["binding.toml"]
+
+[workspace]
+name = "test"
+
+[providers.custom]
+command = "agent"
+
+[providers.custom.upstream_env]
+base_url = "BASE_A"
+api_key = "KEY_A"
+`)
+	fs.Files["/city/binding.toml"] = []byte(`
+[providers.custom.upstream_env]
+api_key = "KEY_OVERRIDE"
+auth_token = "TOKEN_B"
+`)
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	b := cfg.Providers["custom"].UpstreamEnv
+	// Untouched sub-field preserved.
+	if b.BaseURL != "BASE_A" {
+		t.Errorf("BaseURL = %q, want %q", b.BaseURL, "BASE_A")
+	}
+	// Overridden sub-field.
+	if b.APIKey != "KEY_OVERRIDE" {
+		t.Errorf("APIKey = %q, want %q", b.APIKey, "KEY_OVERRIDE")
+	}
+	// New sub-field added from the fragment.
+	if b.AuthToken != "TOKEN_B" {
+		t.Errorf("AuthToken = %q, want %q", b.AuthToken, "TOKEN_B")
+	}
+	// Collision warning for the overridden api_key binding.
+	found := false
+	for _, w := range prov.Warnings {
+		if strings.Contains(w, "upstream_env.api_key") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected api_key collision warning, got: %v", prov.Warnings)
+	}
+}
+
 func TestLoadWithIncludes_WorkspaceMerge(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
@@ -894,6 +1002,30 @@ provider = "file"
 	}
 	if cfg.Beads.Provider != "file" {
 		t.Errorf("Beads.Provider = %q, want %q", cfg.Beads.Provider, "file")
+	}
+}
+
+func TestLoadWithIncludes_UsageSectionFromFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["infra.toml"]
+
+[workspace]
+name = "test"
+`)
+	// The root city does not configure [usage]; an imported fragment does. The
+	// composed config must honor the fragment's sink, not silently fall back to
+	// the default local sink (gastownhall/gascity#3513 review).
+	fs.Files["/city/infra.toml"] = []byte(`
+[usage]
+provider = "discard"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Usage.Provider != "discard" {
+		t.Errorf("Usage.Provider = %q, want %q (imported [usage] fragment must compose)", cfg.Usage.Provider, "discard")
 	}
 }
 
@@ -2340,8 +2472,8 @@ provider = "kiro"
 	if rp.ResumeFlag != "--resume" {
 		t.Errorf("ResumeFlag = %q, want --resume (inherited from claude)", rp.ResumeFlag)
 	}
-	if rp.SessionIDFlag != "--session-id" {
-		t.Errorf("SessionIDFlag = %q, want --session-id (inherited from claude)", rp.SessionIDFlag)
+	if rp.SessionIDFlag != "" {
+		t.Errorf("SessionIDFlag = %q, want empty (inherited from modern claude)", rp.SessionIDFlag)
 	}
 	if !rp.SupportsHooks {
 		t.Error("SupportsHooks = false, want true (inherited from claude)")
@@ -2476,4 +2608,190 @@ KIRO_AGENT_MODE = "headless"
 	if kiro.Command != "kiro-cli" {
 		t.Errorf("Command = %q, want kiro (from root)", kiro.Command)
 	}
+}
+
+func TestLoadWithIncludes_OrderTrackingDeleteAfterCloseDefaulted(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	p, ok := cfg.Beads.Policies["order_tracking"]
+	if !ok {
+		t.Fatal("order_tracking policy not present after LoadWithIncludes")
+	}
+	if p.DeleteAfterClose != DefaultOrderTrackingDeleteAfterClose {
+		t.Errorf("order_tracking.delete_after_close = %q, want %q", p.DeleteAfterClose, DefaultOrderTrackingDeleteAfterClose)
+	}
+}
+
+func TestLoadWithIncludes_OrderTrackingDeleteAfterCloseExplicitPreserved(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[beads.policies.order_tracking]
+delete_after_close = "48h"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	p := cfg.Beads.Policies["order_tracking"]
+	if p.DeleteAfterClose != "48h" {
+		t.Errorf("order_tracking.delete_after_close = %q, want 48h (explicit value must not be overridden)", p.DeleteAfterClose)
+	}
+}
+
+// TestLoadWithIncludesSkipsBundledImportsOnNonOSFS pins the hermetic-load
+// contract: bundled builtin sources only exist on the real filesystem (the
+// user-global cache), so fake-FS loads compose without them instead of
+// failing resolution.
+func TestLoadWithIncludesSkipsBundledImportsOnNonOSFS(t *testing.T) {
+	coreSource, ok := builtinpacks.Source("core")
+	if !ok {
+		t.Fatal("bundled core pack not registered")
+	}
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
+
+[imports.core]
+source = "` + coreSource + `"
+version = "` + BundledPackImportVersion + `"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if dir := cfg.PackDirByName("core"); dir != "" {
+		t.Errorf("PackDirByName(core) = %q, want empty on fake FS", dir)
+	}
+}
+
+// TestLoadWithIncludes_FragmentAgentDefaultsUpstreamPropagates verifies that an
+// [agent_defaults].upstream defined in a fragment survives mergeAgentDefaults
+// and is applied to agents with no explicit upstream. Before the merge fix the
+// fragment-defined upstream was silently dropped (mergeAgentDefaults folded
+// provider/model/wake_mode/default_sling_formula but not upstream), so the
+// agent fell back to the ambient serving environment.
+func TestLoadWithIncludes_FragmentAgentDefaultsUpstreamPropagates(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["defaults.toml"]
+
+[workspace]
+name = "test"
+
+[[agent]]
+name = "worker"
+`)
+	fs.Files["/city/defaults.toml"] = []byte(`
+[agent_defaults]
+upstream = "groq-prod"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.AgentDefaults.Upstream != "groq-prod" {
+		t.Errorf("AgentDefaults.Upstream = %q, want %q", cfg.AgentDefaults.Upstream, "groq-prod")
+	}
+	explicit := explicitAgents(cfg.Agents)
+	for _, a := range explicit {
+		if a.Name == "worker" {
+			if a.Upstream != "groq-prod" {
+				t.Errorf("worker Upstream = %q, want %q", a.Upstream, "groq-prod")
+			}
+			return
+		}
+	}
+	t.Error("worker agent not found")
+}
+
+// TestLoadWithIncludes_AgentDefaultsUpstreamRedefinitionWarns verifies that when
+// two fragments each set [agent_defaults].upstream, the later layer wins and a
+// redefinition warning is emitted, matching the behavior of the sibling scalar
+// fields (provider/model/wake_mode/default_sling_formula) in mergeAgentDefaults.
+func TestLoadWithIncludes_AgentDefaultsUpstreamRedefinitionWarns(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["a.toml", "b.toml"]
+
+[workspace]
+name = "test"
+
+[[agent]]
+name = "worker"
+`)
+	fs.Files["/city/a.toml"] = []byte(`
+[agent_defaults]
+upstream = "groq-prod"
+`)
+	fs.Files["/city/b.toml"] = []byte(`
+[agent_defaults]
+upstream = "fireworks-prod"
+`)
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.AgentDefaults.Upstream != "fireworks-prod" {
+		t.Errorf("AgentDefaults.Upstream = %q, want later-layer %q", cfg.AgentDefaults.Upstream, "fireworks-prod")
+	}
+	if !containsWarningPrefix(prov.Warnings, "agent_defaults.upstream redefined by") {
+		t.Errorf("missing agent_defaults.upstream redefinition warning in %v", prov.Warnings)
+	}
+}
+
+// TestLoadWithIncludes_AgentDefaultsAliasUpstreamFolds verifies that a legacy
+// [agents].upstream alias folds into the canonical [agent_defaults] target via
+// mergeAgentDefaultsAliasPreferCanonical and reaches agents. Before the fold fix
+// the alias upstream was dropped while the sibling alias keys
+// (provider/model/wake_mode/default_sling_formula) folded correctly.
+func TestLoadWithIncludes_AgentDefaultsAliasUpstreamFolds(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["defaults.toml"]
+
+[workspace]
+name = "test"
+
+[[agent]]
+name = "worker"
+`)
+	fs.Files["/city/defaults.toml"] = []byte(`
+[agents]
+upstream = "groq-prod"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.AgentDefaults.Upstream != "groq-prod" {
+		t.Errorf("AgentDefaults.Upstream = %q, want %q", cfg.AgentDefaults.Upstream, "groq-prod")
+	}
+	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
+		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
+	}
+	explicit := explicitAgents(cfg.Agents)
+	for _, a := range explicit {
+		if a.Name == "worker" {
+			if a.Upstream != "groq-prod" {
+				t.Errorf("worker Upstream = %q, want %q", a.Upstream, "groq-prod")
+			}
+			return
+		}
+	}
+	t.Error("worker agent not found")
 }

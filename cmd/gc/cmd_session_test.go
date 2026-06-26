@@ -710,11 +710,11 @@ func TestCmdSessionNew_CustomACPProviderDefaultsAgentSessionToACP(t *testing.T) 
 
 	oldBuild := buildSessionProviderByName
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
-	buildSessionProviderByName = func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		if name == "acp" {
 			return &transportCapableSessionProvider{Fake: runtime.NewFake()}, nil
 		}
-		return oldBuild(name, sc, cityName, cityPath)
+		return oldBuild(cfg, name, sc, cityName, cityPath)
 	}
 
 	cityDir := t.TempDir()
@@ -745,11 +745,11 @@ func TestCmdSessionNewRejectsExplicitTmuxAgentWhenCitySessionProviderIsACP(t *te
 
 	oldBuild := buildSessionProviderByName
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
-	buildSessionProviderByName = func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		if name == "acp" {
 			return &transportCapableSessionProvider{Fake: runtime.NewFake()}, nil
 		}
-		return oldBuild(name, sc, cityName, cityPath)
+		return oldBuild(cfg, name, sc, cityName, cityPath)
 	}
 
 	cityDir := t.TempDir()
@@ -1098,11 +1098,11 @@ func TestBuildResumeCommandIncludesWrappedCodexResumeDefaults(t *testing.T) {
 				Args: []string{
 					"run", "codex", "--",
 					"--dangerously-bypass-approvals-and-sandbox",
-					"-m", "gpt-5.3-codex-spark",
+					"-m", "gpt-5.3-codex",
 					"-c", "model_reasoning_effort=\"medium\"",
 				},
 				PathCheck:     "true",
-				ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+				ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume {{.SessionKey}}",
 			},
 		},
 	}
@@ -1115,7 +1115,7 @@ func TestBuildResumeCommandIncludesWrappedCodexResumeDefaults(t *testing.T) {
 	}
 
 	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", nil, io.Discard)
-	want := "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume -c model_reasoning_effort=medium abc-123"
+	want := "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume -c model_reasoning_effort=medium abc-123"
 	if cmd != want {
 		t.Fatalf("resume command = %q, want %q", cmd, want)
 	}
@@ -1900,6 +1900,7 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 				Title:       "Worker session",
 				Alias:       "worker-1",
 				SessionName: "worker-gc-abc",
+				WorkDir:     "/tmp/gc/workspaces/worker",
 				CreatedAt:   "2026-04-23T10:00:00Z",
 				LastActive:  "2026-04-23T12:00:00Z",
 				Attached:    true,
@@ -1912,7 +1913,7 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 		t.Fatalf("renderSessionListFromAPI(--json) = %d, want 0", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{`"id"`, `"session_name"`, `"created_at"`, `"last_active"`, `"last_output"`} {
+	for _, want := range []string{`"id"`, `"session_name"`, `"work_dir"`, `"created_at"`, `"last_active"`, `"last_output"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("API JSON output missing %s:\n%s", want, out)
 		}
@@ -1934,6 +1935,38 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 	}
 	if got.Sessions[0]["session_name"] != "worker-gc-abc" {
 		t.Fatalf("session_name = %#v, want worker-gc-abc; row=%#v", got.Sessions[0]["session_name"], got.Sessions[0])
+	}
+	if got.Sessions[0]["work_dir"] != "/tmp/gc/workspaces/worker" {
+		t.Fatalf("work_dir = %#v, want /tmp/gc/workspaces/worker; row=%#v", got.Sessions[0]["work_dir"], got.Sessions[0])
+	}
+}
+
+func TestRenderSessionListFromAPIHumanIncludesTitleAndWorkDir(t *testing.T) {
+	var stdout bytes.Buffer
+	code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{
+		Body: []SessionView{
+			{
+				ID:          "gc-abc",
+				Template:    "gascity-packs/packer.packsmith",
+				State:       "active",
+				Reason:      "assigned",
+				Title:       "jjw: update workspace docs",
+				Alias:       "worker-1",
+				SessionName: "worker-gc-abc",
+				WorkDir:     "/tmp/gc/.gc/workspaces/gascity-packs/packs/jjw",
+				CreatedAt:   "2026-04-23T10:00:00Z",
+				LastActive:  "2026-04-23T12:00:00Z",
+			},
+		},
+	}, false, &stdout)
+	if code != 0 {
+		t.Fatalf("renderSessionListFromAPI() = %d, want 0", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{"TITLE", "WORKDIR", "jjw: update workspace docs", "/tmp/gc/.gc/workspaces/gascity-packs/packs/jjw"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("API human output missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -1965,6 +1998,7 @@ func TestCmdSessionList_RendersLastNudgeColumn(t *testing.T) {
 			"session_name":                       "nudged-session",
 			"template":                           "worker",
 			"state":                              "asleep",
+			"work_dir":                           "/tmp/gc/workspaces/nudged",
 			session.MetadataLastNudgeDeliveredAt: nudgeStamp,
 		},
 	}); err != nil {
@@ -1979,6 +2013,7 @@ func TestCmdSessionList_RendersLastNudgeColumn(t *testing.T) {
 			"session_name": "quiet-session",
 			"template":     "worker",
 			"state":        "asleep",
+			"work_dir":     "/tmp/gc/workspaces/quiet",
 		},
 	}); err != nil {
 		t.Fatalf("store.Create(quiet session bead): %v", err)
@@ -1993,6 +2028,12 @@ func TestCmdSessionList_RendersLastNudgeColumn(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) < 1 || !strings.Contains(lines[0], "LAST NUDGE") {
 		t.Fatalf("missing LAST NUDGE column header; first line = %q\nfull output:\n%s", firstLine(lines), out)
+	}
+	if !strings.Contains(lines[0], "WORKDIR") {
+		t.Fatalf("missing WORKDIR column header; first line = %q\nfull output:\n%s", firstLine(lines), out)
+	}
+	if !strings.Contains(out, "/tmp/gc/workspaces/nudged") || !strings.Contains(out, "/tmp/gc/workspaces/quiet") {
+		t.Fatalf("output missing session work dirs:\n%s", out)
 	}
 	if !strings.Contains(out, "2h ago") {
 		t.Fatalf("output missing formatted LAST NUDGE (want %q) for nudged session:\n%s", "2h ago", out)
@@ -2103,7 +2144,7 @@ func TestCmdSessionPeekJSONSuccessIsJSONOnly(t *testing.T) {
 	fakeProvider := runtime.NewFake()
 	fakeProvider.SetPeekOutput("runtime-session", "hello\nworld\n")
 	oldBuild := buildSessionProviderByName
-	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
 		return fakeProvider, nil
 	}
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
@@ -2369,13 +2410,13 @@ template = "mayor"
 		t.Fatalf("WriteFile(pack.toml): %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`[workspace]
-includes = [".gc/system/packs/core"]
 
 [beads]
 provider = "file"
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
+	writeBuiltinImportsFixture(t, dir, "core")
 	if err := os.WriteFile(filepath.Join(dir, ".gc", "site.toml"), []byte(`workspace_name = "test-city"
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile(.gc/site.toml): %v", err)

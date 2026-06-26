@@ -2,6 +2,8 @@
 CLAUDE.local.md
 coverage.txt
 coverage.integration-*.txt
+coverage.noncmdgc.txt
+coverage.cmdgc.*.txt
 cmd/gc/.runtime/
 /bin/
 /gc
@@ -20,6 +22,16 @@ cmd/gc/.runtime/
 !examples/gastown/packs/maintenance/overlays/default/.claude/settings.json
 !examples/swarm/packs/swarm/overlays/default/.claude/
 !examples/swarm/packs/swarm/overlays/default/.claude/settings.json
+
+# Commit the shared project skill tree (Claude Code's documented location).
+# The rest of the developer-local root .claude/ stays ignored. Anchored to the
+# repo root so the nested example-pack .claude/ rules above are untouched.
+!/.claude/
+/.claude/*
+!/.claude/skills/
+
+# sync-project-agents writes local migration backups here; don't commit them.
+.agents/migration/
 .gc/
 
 # Dolt database files (added by bd init)
@@ -45,6 +57,9 @@ reports/
 tmp_*.diff
 tmp_*.patch
 issues.jsonl
+
+# Python bytecode from script tests
+__pycache__/
 
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/

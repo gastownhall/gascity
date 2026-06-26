@@ -179,6 +179,7 @@ func TestProxyProcessHelper(t *testing.T) {
 			"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": os.Getenv("GC_CONTROL_DISPATCHER_TRACE_DEFAULT"),
 			"GC_SERVICE_NAME":                     os.Getenv("GC_SERVICE_NAME"),
 			"GC_SERVICE_STATE_ROOT":               os.Getenv("GC_SERVICE_STATE_ROOT"),
+			"GC_SERVICE_SECRETS_DIR":              os.Getenv("GC_SERVICE_SECRETS_DIR"),
 			"GC_SERVICE_URL_PREFIX":               os.Getenv("GC_SERVICE_URL_PREFIX"),
 			"GC_SERVICE_PUBLIC_URL":               os.Getenv("GC_SERVICE_PUBLIC_URL"),
 			"GC_SERVICE_VISIBILITY":               os.Getenv("GC_SERVICE_VISIBILITY"),
@@ -278,6 +279,9 @@ func TestProxyProcessPublishesServiceEnv(t *testing.T) {
 	}
 	if env["GC_SERVICE_STATE_ROOT"] != filepath.Join(rt.cityPath, ".gc", "services", "bridge") {
 		t.Fatalf("GC_SERVICE_STATE_ROOT = %q, want %q", env["GC_SERVICE_STATE_ROOT"], filepath.Join(rt.cityPath, ".gc", "services", "bridge"))
+	}
+	if env["GC_SERVICE_SECRETS_DIR"] != filepath.Join(rt.cityPath, ".gc", "services", "bridge", "secrets") {
+		t.Fatalf("GC_SERVICE_SECRETS_DIR = %q, want %q", env["GC_SERVICE_SECRETS_DIR"], filepath.Join(rt.cityPath, ".gc", "services", "bridge", "secrets"))
 	}
 	if env["GC_SERVICE_PUBLIC_URL"] != "https://bridge--acme--deadbeef.apps.example.com" {
 		t.Fatalf("GC_SERVICE_PUBLIC_URL = %q, want authoritative route", env["GC_SERVICE_PUBLIC_URL"])

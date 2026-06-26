@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/promptsafe"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -565,6 +566,13 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 }
 
 func formatWaitIdleReminder(source, message string) string {
+	// Sanitize attacker-controllable fields before interpolating into the
+	// <system-reminder> block. The deferred-nudge body is sender-supplied, so
+	// without this a sender can embed </system-reminder> sequences to break out
+	// of the reminder and inject a forged operator/system directive.
+	// See gastownhall/gascity#2195 and the ga-vs7 notification-injection incident.
+	source = promptsafe.SanitizeForSystemReminder(source)
+	message = promptsafe.SanitizeForSystemReminder(message)
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	sb.WriteString("You have a deferred reminder that was queued until a safe boundary:\n\n")

@@ -32,7 +32,7 @@ func ValidateGraphV2ReservedSymbols(f *Formula, allowConvoyReference bool) error
 		return nil
 	}
 	sort.Strings(errs)
-	return fmt.Errorf("graph.v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	return fmt.Errorf("formulas v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
 // ValidateGraphV2ReservedSymbolsTransitively enforces graph.v2 reserved input
@@ -51,7 +51,7 @@ func ValidateGraphV2ReservedSymbolsTransitively(f *Formula, parser *Parser, allo
 		return nil
 	}
 	sort.Strings(scanner.errs)
-	return fmt.Errorf("graph.v2 reserved variable validation failed:\n  - %s", strings.Join(scanner.errs, "\n  - "))
+	return fmt.Errorf("formulas v2 reserved variable validation failed:\n  - %s", strings.Join(scanner.errs, "\n  - "))
 }
 
 // ValidateGraphV2ExpandedFormula enforces graph.v2-only constraints after
@@ -69,7 +69,7 @@ func ValidateGraphV2ExpandedFormula(f *Formula, allowConvoyReference bool) error
 		return nil
 	}
 	sort.Strings(errs)
-	return fmt.Errorf("graph.v2 expanded formula validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	return fmt.Errorf("formulas v2 expanded formula validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
 // ValidateGraphV2RecipeReservedSymbols validates reserved references after a
@@ -80,7 +80,7 @@ func ValidateGraphV2RecipeReservedSymbols(recipe *Recipe, allowConvoyReference b
 		return nil
 	}
 	sort.Strings(errs)
-	return fmt.Errorf("graph.v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	return fmt.Errorf("formulas v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
 // GraphV2FormulaReferencesInputConvoy reports whether a formula requires a
@@ -289,7 +289,7 @@ func ValidateGraphV2ReservedSymbolsWithVisitor(f *Formula, allowConvoyReference 
 		return nil
 	}
 	sort.Strings(errs)
-	return fmt.Errorf("graph.v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	return fmt.Errorf("formulas v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
 func collectGraphV2ReservedRefsInFormula(prefix string, f *Formula, allowConvoyReference bool, errs *[]string, visit func(path, name string), checkVarNames bool) {
@@ -311,7 +311,7 @@ func collectGraphV2ReservedRefsInFormula(prefix string, f *Formula, allowConvoyR
 				// tracked member of the input convoy.
 				continue
 			}
-			*errs = append(*errs, fmt.Sprintf("%s: graph.v2 reserved variable cannot be declared", declPath))
+			*errs = append(*errs, fmt.Sprintf("%s: formulas v2 reserved variable cannot be declared", declPath))
 		}
 	}
 	collectGraphV2ReservedRefsInStringWithVisitor(graphV2Path(prefix, "description"), f.Description, allowConvoyReference, errs, visit)
@@ -362,7 +362,7 @@ func graphV2RecipeReservedSymbolErrors(recipe *Recipe, allowConvoyReference bool
 				visit("vars."+name, strings.TrimSpace(name))
 			}
 			if strings.TrimSpace(name) != "issue" {
-				errs = append(errs, fmt.Sprintf("vars.%s: graph.v2 reserved variable cannot be declared", name))
+				errs = append(errs, fmt.Sprintf("vars.%s: formulas v2 reserved variable cannot be declared", name))
 			}
 		}
 		if def == nil {
@@ -770,14 +770,14 @@ func collectGraphV2ReservedRefsInStringWithVisitor(path, value string, allowConv
 			}
 			switch name {
 			case "convoy_id":
-				*errs = append(*errs, fmt.Sprintf("%s: convoy_id requires a targeted graph.v2 invocation", path))
+				*errs = append(*errs, fmt.Sprintf("%s: convoy_id requires a targeted formulas v2 invocation", path))
 			case "issue":
 				// Deprecated one-release compat alias (#2941): {{issue}}
 				// resolves to the single tracked member of the input convoy.
 				// GraphV2LegacyIssueRefs surfaces these for deprecation
 				// warnings.
 			case "bead_id":
-				*errs = append(*errs, fmt.Sprintf("%s: %s is not available in graph.v2 formulas; use convoy_id", path, name))
+				*errs = append(*errs, fmt.Sprintf("%s: %s is not available in v2 formulas; use convoy_id", path, name))
 			}
 		}
 	}
@@ -805,7 +805,7 @@ func collectOutputJSONWarnings(steps []*Step, formulaName string, out *[]string)
 	for _, step := range steps {
 		if step.Drain == nil && strings.TrimSpace(step.Metadata[beadmeta.OutputJSONRequiredMetadataKey]) == "true" {
 			*out = append(*out, fmt.Sprintf(
-				"formula %s step %s: gc.output_json is legacy; use drain in graph.v2 formulas (see: engdocs/drain-fanout.md)",
+				"formula %s step %s: gc.output_json is deprecated; use drain in v2 formulas (see: engdocs/drain-fanout.md)",
 				formulaName, step.ID,
 			))
 		}

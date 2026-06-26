@@ -46,7 +46,6 @@ func newSlingTestServer(t *testing.T) (http.Handler, *fakeMutatorState) {
 
 func TestNewSyncsFormulaV2FeatureFlags(t *testing.T) {
 	state := newFakeMutatorState(t)
-	state.cfg.Daemon.FormulaV2 = true
 
 	formulatest.SetV2ForTest(t, false)
 	prevGraphApply := molecule.IsGraphApplyEnabled()
@@ -660,7 +659,6 @@ func TestSlingGraphV2RejectsLegacySourceWorkflowConflict(t *testing.T) {
 	})
 
 	srv, state := newSlingTestServer(t)
-	state.cfg.Daemon.FormulaV2 = true
 	setFormulaV2(true)
 	molecule.SetGraphApplyEnabled(true)
 	formulaDir := t.TempDir()

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
@@ -69,8 +70,10 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 		Provider:              sp,
 		CityPath:              cityPath,
 		SearchPaths:           searchPaths,
+		UsageSink:             usageSinkForCity(cfg, cityPath),
 		ResolveTransport:      resolveTransport,
 		ResolveSessionRuntime: workerSessionRuntimeResolverWithConfig(cityPath, cfg),
+		Pricing:               cfg.PricingRegistry(),
 	})
 }
 
@@ -98,7 +101,7 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 	if resolved == nil {
 		return runtime.Config{}
 	}
-	return runtime.Config{
+	hints := agent.StartupHints{
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
@@ -113,6 +116,45 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 		// this does not weaken controller-poll safety.
 		MouseOn: true,
 	}
+	// Project through the single StartupHints → runtime.Config mapping so this
+	// CLI create path can never silently drop a hint field the reconciler
+	// threads (gc-0tna7). It still populates only the provider-resolvable subset
+	// above; closing the remaining create-vs-resume population gap is the
+	// internal/worker.Factory follow-up.
+	return hints.ToRuntimeConfig()
+}
+
+// applyWorkerOverlayHints populates the provider-overlay staging fields
+// (ProviderName/ProviderOverlayName/InstallAgentHooks/PackOverlayDirs) on a
+// worker create/resume runtime.Config, mirroring the canonical create-time
+// sourcing in cmd/gc/template_resolve.go (resolveTemplate). The worker.Factory
+// create and resume paths build runtime.Config directly and never route through
+// resolveTemplate, so without this they leave these fields empty:
+// OverlayProviderNames then falls back to ProviderName="" and the per-provider
+// overlay (e.g. core/overlay/per-provider/pi/.pi/extensions/gc-hooks.js for a
+// custom base="builtin:pi" provider) is never staged, the harness never signals
+// ready, and the controller churns into a fall-back-to-claude loop (gc-6bw8o).
+// Best-effort: a missing cfg/resolved (CLI direct-start fallback) leaves the
+// config untouched rather than failing the start.
+func applyWorkerOverlayHints(hints *runtime.Config, cfg *config.City, cityPath, template string, resolved *config.ResolvedProvider) {
+	if hints == nil || cfg == nil || resolved == nil {
+		return
+	}
+	// ProviderName is the launch family (BuiltinAncestor, e.g. "pi" for a
+	// base="builtin:pi" provider); ProviderOverlayName is the concrete provider
+	// name — identical to resolveTemplate's hint assignment.
+	hints.ProviderName = resolvedProviderLaunchFamily(resolved)
+	hints.ProviderOverlayName = strings.TrimSpace(resolved.Name)
+	agentCfg := findAgentByTemplate(cfg, template)
+	if agentCfg == nil {
+		// No agent config to resolve install-hooks/rig overlay scope against
+		// (e.g. a synthetic session). Still stage city pack overlays.
+		hints.PackOverlayDirs = effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, "")
+		return
+	}
+	hints.InstallAgentHooks = config.ResolveInstallHooks(agentCfg, &cfg.Workspace)
+	rigName := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), firstNonEmptyGCString(agentCfg.QualifiedName(), template), agentCfg, cfg.Rigs).Rig
+	hints.PackOverlayDirs = effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, rigName)
 }
 
 func resolvedRuntimeMCPServersWithConfig(
@@ -236,6 +278,11 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	if err != nil {
 		return nil, err
 	}
+	// Stage provider-overlay hooks on the CLI create path the same way the
+	// reconciler create path does; resolvedWorkerSessionConfigWithConfig builds
+	// runtime.Config directly and never routes through resolveTemplate
+	// (gc-6bw8o).
+	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityPath, template, resolved)
 	return factory.SessionForResolvedRuntime(sessionCfg)
 }
 
@@ -548,23 +595,33 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		}
 		sessionLive = expandSessionSetup(agentCfg.SessionLive, setupCtx)
 	}
+	// Project the resolved hint subset through the single StartupHints →
+	// runtime.Config mapping (gc-0tna7), then layer the caller-owned
+	// WorkDir/Env/MCPServers. SessionLive is resolved above (ga-vtkhi) so
+	// resumed sessions re-theme; closing the remaining create-time field gap
+	// is the internal/worker.Factory population follow-up.
+	runtimeHints := agent.StartupHints{
+		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
+		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
+		ReadyDelayMs:           resolved.ReadyDelayMs,
+		ProcessNames:           resolved.ProcessNames,
+		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
+		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
+		SessionLive:            sessionLive,
+	}.ToRuntimeConfig()
+	runtimeHints.WorkDir = workDir
+	runtimeHints.Env = sessionEnv
+	runtimeHints.MCPServers = mcpServers
+	// Stage provider-overlay hooks on resume the same way the reconciler create
+	// path does; this resume resolver builds runtime.Config directly and never
+	// routes through resolveTemplate (gc-6bw8o).
+	applyWorkerOverlayHints(&runtimeHints, cfg, cityPath, info.Template, resolved)
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
 		Provider:   resolvedWorkerRuntimeProviderLabel(resolved, transport, info),
 		SessionEnv: sessionEnv,
-		Hints: runtime.Config{
-			WorkDir:                workDir,
-			Env:                    sessionEnv,
-			Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
-			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-			ReadyDelayMs:           resolved.ReadyDelayMs,
-			ProcessNames:           resolved.ProcessNames,
-			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-			AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-			MCPServers:             mcpServers,
-			SessionLive:            sessionLive,
-		},
+		Hints:      runtimeHints,
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyGCString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyGCString(resolved.ResumeStyle, info.ResumeStyle),

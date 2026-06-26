@@ -13,7 +13,7 @@
 set -e
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
-GC_BEADS_BD_SCRIPT="${GC_BEADS_BD_SCRIPT:-$GC_CITY_PATH/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh}"
+GC_BEADS_BD_SCRIPT="${GC_BEADS_BD_SCRIPT:-$GC_CITY_PATH/.gc/scripts/gc-beads-bd.sh}"
 
 if [ ! -x "$GC_BEADS_BD_SCRIPT" ]; then
   echo "gc dolt restart: gc-beads-bd not found" >&2
@@ -38,15 +38,27 @@ if [ "$#" -ne 0 ]; then
   exit 64
 fi
 
-if [ -n "${GC_DOLT_HOST:-}" ] && [ "$GC_DOLT_HOST" != "0.0.0.0" ]; then
-  echo "gc dolt restart: not supported for remote dolt servers (set GC_DOLT_HOST=0.0.0.0 or unset to manage a local server)" >&2
-  exit 1
-fi
+# Local-managed means GC_DOLT_HOST is empty, 127.0.0.1 (the default bind),
+# or 0.0.0.0 (the explicit wildcard opt-out). Anything else names a remote
+# server whose process GC cannot manage.
+case "${GC_DOLT_HOST:-}" in
+  ''|127.0.0.1|0.0.0.0|localhost|"::1"|"[::1]") ;;
+  *)
+    echo "gc dolt restart: not supported for remote dolt servers (set GC_DOLT_HOST=127.0.0.1, GC_DOLT_HOST=0.0.0.0, or unset to manage a local server)" >&2
+    exit 1
+    ;;
+esac
 
 CITY_RUNTIME_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-$CITY_RUNTIME_DIR/packs/dolt}"
 LOG_FILE="${GC_DOLT_LOG_FILE:-$PACK_STATE_DIR/dolt.log}"
 BD_SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$GC_BEADS_BD_SCRIPT")" && pwd)"
+if [ ! -f "$BD_SCRIPT_DIR/dolt-enospc.sh" ]; then
+  # GC_BEADS_BD_SCRIPT may be the stable city shim; the helper ships next
+  # to the real script in the bd pack (the sibling of this dolt pack).
+  DOLT_PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)}"
+  BD_SCRIPT_DIR="$(CDPATH= cd -- "$DOLT_PACK_DIR/../assets/scripts" 2>/dev/null && pwd || printf '%s' "$BD_SCRIPT_DIR")"
+fi
 . "$BD_SCRIPT_DIR/dolt-enospc.sh"
 
 if recovery_should_skip_due_to_enospc; then

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -109,13 +110,14 @@ func assertSingleStopWithBenignNoise(t *testing.T, ops []string) {
 	}
 }
 
-// assertHooksExist checks that all bead hooks exist at the given directory.
-func assertHooksExist(t *testing.T, dir, context string) {
+// assertHooksAbsent checks that gc-installed bead event hooks are absent at dir.
+// installBeadHooks now removes these hooks; they must not exist after any gc operation.
+func assertHooksAbsent(t *testing.T, dir, context string) {
 	t.Helper()
 	for _, hook := range []string{"on_create", "on_close", "on_update"} {
 		path := filepath.Join(dir, ".beads", "hooks", hook)
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("hook %s missing at %s (%s): %v", hook, dir, context, err)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("hook %s must be absent at %s (%s): stat err=%v", hook, dir, context, err)
 		}
 	}
 }
@@ -161,7 +163,7 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 	ops := readOpLog(t, logFile)
 	assertOpSubsequence(t, ops, "probe", "start", "init "+cityPath)
 	cityInitOps := len(ops)
-	assertHooksExist(t, cityPath, "after city init")
+	assertHooksAbsent(t, cityPath, "after city init")
 
 	// Phase 2: gc rig add — initDirIfReady for rig.
 	rigPrefix := "mr"
@@ -179,17 +181,10 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 	}
 	assertOpSubsequence(t, ops[cityInitOps:], "probe", "start", "init "+rigPath)
 	rigInitOps := len(ops)
-	assertHooksExist(t, rigPath, "after rig add")
+	assertHooksAbsent(t, rigPath, "after rig add")
 
-	// Phase 3: Simulate hook wipe (bd init recreates .beads/).
-	if err := os.RemoveAll(filepath.Join(cityPath, ".beads", "hooks")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(filepath.Join(rigPath, ".beads", "hooks")); err != nil {
-		t.Fatal(err)
-	}
-
-	// Phase 4: gc start — startBeadsLifecycle reinstalls everything.
+	// Phase 3: gc start — startBeadsLifecycle re-runs provider init and removes
+	// any stale gc hooks. No hooks are installed since autoclose runs in-process.
 	cfg := testCityConfig(cityName, []config.Rig{
 		{Name: "myrig", Path: rigPath, Prefix: rigPrefix},
 	})
@@ -203,9 +198,9 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 	}
 	assertOpSubsequence(t, ops[rigInitOps:], "start", "init "+cityPath, "init "+rigPath)
 
-	// Verify hooks reinstalled at both paths after start.
-	assertHooksExist(t, cityPath, "after start")
-	assertHooksExist(t, rigPath, "after start")
+	// Verify gc hooks are absent at both paths after start.
+	assertHooksAbsent(t, cityPath, "after start")
+	assertHooksAbsent(t, rigPath, "after start")
 }
 
 // TestLifecycleCoordination_StartOrder verifies that start precedes any
@@ -282,7 +277,7 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferred(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	MaterializeBuiltinPacks(dir) //nolint:errcheck
+	materializeBuiltinPacksForTest(t, dir)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 
@@ -352,7 +347,7 @@ func TestLifecycleCoordination_InitDirIfReadySkipsProviderForPostgresCityAndRig(
 	if deferred {
 		t.Fatal("initDirIfReady(city) deferred = true, want false")
 	}
-	assertHooksExist(t, cityPath, "after postgres city init")
+	assertHooksAbsent(t, cityPath, "after postgres city init")
 
 	deferred, err = initDirIfReady(cityPath, rigPath, "pg")
 	if err != nil {
@@ -361,31 +356,32 @@ func TestLifecycleCoordination_InitDirIfReadySkipsProviderForPostgresCityAndRig(
 	if deferred {
 		t.Fatal("initDirIfReady(rig) deferred = true, want false")
 	}
-	assertHooksExist(t, rigPath, "after postgres rig add")
+	assertHooksAbsent(t, rigPath, "after postgres rig add")
 
 	if ensureCalls != 0 {
 		t.Fatalf("managed Dolt provider start calls = %d, want 0", ensureCalls)
 	}
 }
 
-func TestLifecycleCoordination_InitDirIfReady_RetriesTransientManagedDoltFailure(t *testing.T) {
+func TestLifecycleCoordination_InitDirIfReady_PropagatesManagedDoltInitFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	MaterializeBuiltinPacks(dir) //nolint:errcheck
+	materializeBuiltinPacksForTest(t, dir)
 	t.Setenv("GC_BEADS", "bd")
 
 	originalEnsure := initDirIfReadyEnsureBeadsProvider
 	originalInitAndHook := initDirIfReadyInitAndHookDir
-	originalDelay := initDirIfReadyRetryDelay
+	originalWait := initDirIfReadyWaitForManagedDolt
 	t.Cleanup(func() {
 		initDirIfReadyEnsureBeadsProvider = originalEnsure
 		initDirIfReadyInitAndHookDir = originalInitAndHook
-		initDirIfReadyRetryDelay = originalDelay
+		initDirIfReadyWaitForManagedDolt = originalWait
 	})
 
-	initDirIfReadyRetryDelay = 0
+	// Bypass the pre-flight wait; we're testing initAndHookDir error propagation.
+	initDirIfReadyWaitForManagedDolt = func(_ string, _ time.Duration) error { return nil }
 
 	var ensureCalls int
 	initDirIfReadyEnsureBeadsProvider = func(_ string) error {
@@ -396,65 +392,60 @@ func TestLifecycleCoordination_InitDirIfReady_RetriesTransientManagedDoltFailure
 	var initCalls int
 	initDirIfReadyInitAndHookDir = func(_, _, _ string) error {
 		initCalls++
-		if initCalls == 1 {
-			return fmt.Errorf("exec beads init: signal: terminated")
-		}
-		return nil
+		return fmt.Errorf("exec beads init: signal: terminated")
 	}
 
 	deferred, err := initDirIfReady(dir, dir, "gc")
-	if err != nil {
-		t.Fatalf("initDirIfReady() error = %v, want nil after retry", err)
+	if err == nil {
+		t.Fatal("initDirIfReady() error = nil, want propagated initAndHookDir failure")
 	}
 	if deferred {
 		t.Fatal("initDirIfReady() deferred = true, want false")
 	}
-	if ensureCalls != 2 {
-		t.Fatalf("ensureBeadsProvider calls = %d, want 2", ensureCalls)
+	if ensureCalls != 1 {
+		t.Fatalf("ensureBeadsProvider calls = %d, want 1", ensureCalls)
 	}
-	if initCalls != 2 {
-		t.Fatalf("initAndHookDir calls = %d, want 2", initCalls)
+	if initCalls != 1 {
+		t.Fatalf("initAndHookDir calls = %d, want 1 (no retry)", initCalls)
 	}
 }
 
-func TestLifecycleCoordination_InitDirIfReady_RetriesManagedDoltSchemaNotReady(t *testing.T) {
+func TestLifecycleCoordination_InitDirIfReady_PropagatesManagedDoltSchemaError(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	MaterializeBuiltinPacks(dir) //nolint:errcheck
+	materializeBuiltinPacksForTest(t, dir)
 	t.Setenv("GC_BEADS", "bd")
 
 	originalEnsure := initDirIfReadyEnsureBeadsProvider
 	originalInitAndHook := initDirIfReadyInitAndHookDir
-	originalDelay := initDirIfReadyRetryDelay
+	originalWait := initDirIfReadyWaitForManagedDolt
 	t.Cleanup(func() {
 		initDirIfReadyEnsureBeadsProvider = originalEnsure
 		initDirIfReadyInitAndHookDir = originalInitAndHook
-		initDirIfReadyRetryDelay = originalDelay
+		initDirIfReadyWaitForManagedDolt = originalWait
 	})
 
-	initDirIfReadyRetryDelay = 0
+	// Bypass the pre-flight wait; we're testing initAndHookDir error propagation.
+	initDirIfReadyWaitForManagedDolt = func(_ string, _ time.Duration) error { return nil }
 	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
 
 	var initCalls int
 	initDirIfReadyInitAndHookDir = func(_, _, _ string) error {
 		initCalls++
-		if initCalls == 1 {
-			return fmt.Errorf("bd list: exit status 1: table not found: issues")
-		}
-		return nil
+		return fmt.Errorf("bd list: exit status 1: table not found: issues")
 	}
 
 	deferred, err := initDirIfReady(dir, dir, "gc")
-	if err != nil {
-		t.Fatalf("initDirIfReady() error = %v, want nil after retry", err)
+	if err == nil {
+		t.Fatal("initDirIfReady() error = nil, want propagated schema error")
 	}
 	if deferred {
 		t.Fatal("initDirIfReady() deferred = true, want false")
 	}
-	if initCalls != 2 {
-		t.Fatalf("initAndHookDir calls = %d, want 2", initCalls)
+	if initCalls != 1 {
+		t.Fatalf("initAndHookDir calls = %d, want 1 (no retry)", initCalls)
 	}
 }
 
@@ -472,14 +463,10 @@ func TestLifecycleCoordination_InitDirIfReady_DoesNotRetryNonManagedProviderFail
 
 	originalEnsure := initDirIfReadyEnsureBeadsProvider
 	originalInitAndHook := initDirIfReadyInitAndHookDir
-	originalDelay := initDirIfReadyRetryDelay
 	t.Cleanup(func() {
 		initDirIfReadyEnsureBeadsProvider = originalEnsure
 		initDirIfReadyInitAndHookDir = originalInitAndHook
-		initDirIfReadyRetryDelay = originalDelay
 	})
-
-	initDirIfReadyRetryDelay = 0
 
 	var ensureCalls int
 	initDirIfReadyEnsureBeadsProvider = func(_ string) error {
@@ -519,7 +506,7 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferredPreservesExistingDoltDat
 	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"gascity"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	MaterializeBuiltinPacks(dir) //nolint:errcheck
+	materializeBuiltinPacksForTest(t, dir)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 

@@ -217,7 +217,7 @@ func resolveOverrideVars(overrides map[string]string, parentVars map[string]stri
 			resolved[name] = value
 			continue
 		}
-		resolved[name] = substituteVars(value, parentVars)
+		resolved[name] = substituteVars(Substitute(value, parentVars), parentVars)
 	}
 	return resolved
 }
@@ -713,7 +713,8 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, vars map[stri
 			}
 
 			// Merge formula default vars with step's ExpandVars overrides
-			expansionVars := mergeVars(expFormula, step.ExpandVars)
+			// resolved against the parent invocation vars.
+			expansionVars := mergeVars(expFormula, resolveOverrideVars(step.ExpandVars, vars))
 
 			// Expand the step using the template (reuse existing expandStep)
 			expandedSteps, err := expandStep(step, expFormula.Template, 0, expansionVars)

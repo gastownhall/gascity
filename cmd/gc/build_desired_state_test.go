@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -345,6 +346,65 @@ func TestCollectAssignedWorkBeadsIncludesReadyOpenAssignedWisp(t *testing.T) {
 	}
 }
 
+func TestCollectAssignedWorkBeadsIncludesOpenAssignedRootOnlyMoleculeWisp(t *testing.T) {
+	store := beads.NewMemStore()
+	wisp, err := store.Create(beads.Bead{
+		Title:     "refinery patrol",
+		Type:      "molecule",
+		Status:    "open",
+		Assignee:  "repo/refinery",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create root-only wisp: %v", err)
+	}
+	cfg := &config.City{
+		NamedSessions: []config.NamedSession{{
+			Template: "repo/refinery",
+			Mode:     "on_demand",
+		}},
+	}
+
+	got, partial := collectAssignedWorkBeads(cfg, store)
+
+	if partial {
+		t.Fatal("collectAssignedWorkBeads reported partial results")
+	}
+	if len(got) != 1 || got[0].ID != wisp.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want assigned root-only molecule wisp %s", got, wisp.ID)
+	}
+}
+
+func TestCollectAssignedWorkBeadsIgnoresOpenAssignedMoleculeContainer(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "workflow container",
+		Type:     "molecule",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	}); err != nil {
+		t.Fatalf("create molecule container: %v", err)
+	}
+	cfg := &config.City{
+		NamedSessions: []config.NamedSession{{
+			Template: "repo/refinery",
+			Mode:     "on_demand",
+		}},
+	}
+
+	got, partial := collectAssignedWorkBeads(cfg, store)
+
+	if partial {
+		t.Fatal("collectAssignedWorkBeads reported partial results")
+	}
+	if len(got) != 0 {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want assigned non-wisp molecule container ignored", got)
+	}
+}
+
 func TestCollectAssignedWorkBeadsUsesLiveReadyAfterExternalDependencyClose(t *testing.T) {
 	backing := beads.NewMemStore()
 	blocker, err := backing.Create(beads.Bead{
@@ -623,6 +683,51 @@ func TestDefaultScaleCheckCountsSeesExternalRoutedWorkAfterCachePrime(t *testing
 	}
 	if got := counts[template]; got != 1 {
 		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 for post-prime external routed work", template, got)
+	}
+}
+
+func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
+	const template = "gascity/workflows.codex-min"
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:  "manual order run wisp",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.PackMetadataKey:          "packer",
+			beadmeta.PackWorkspaceMetadataKey: "existing-workspace",
+			"gc.routed_to":                    template,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+
+	counts, demand, _, errs := defaultScaleCheckCountsAndDemand([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 1", template, got)
+	}
+	if got := demand[template].WorkBeadIDs; !reflect.DeepEqual(got, []string{work.ID}) {
+		t.Fatalf("WorkBeadIDs = %v, want [%s]", got, work.ID)
+	}
+	if got := demand[template].Titles[work.ID]; got != "manual order run wisp" {
+		t.Fatalf("Titles[%s] = %q, want manual order run wisp", work.ID, got)
+	}
+	if got := demand[template].Packs[work.ID]; got != "packer" {
+		t.Fatalf("Packs[%s] = %q, want packer", work.ID, got)
+	}
+	if got := demand[template].Workspaces[work.ID]; got != "existing-workspace" {
+		t.Fatalf("Workspaces[%s] = %q, want existing-workspace", work.ID, got)
+	}
+	if got := demand[template].StoreRefs[work.ID]; got != "rig:gascity" {
+		t.Fatalf("StoreRefs[%s] = %q, want rig:gascity", work.ID, got)
 	}
 }
 
@@ -1362,7 +1467,7 @@ func TestDefaultScaleCheckCountsReadyErrorNamesAffectedTemplates(t *testing.T) {
 	}
 }
 
-func TestDefaultNamedSessionDemandUsesPartialReadyRows(t *testing.T) {
+func TestDefaultNamedSessionDemandRecordsPartialWithoutRoutedDemand(t *testing.T) {
 	store := &partialAssignedWorkStore{MemStore: beads.NewMemStore(), partialReady: true}
 	if _, err := store.Create(beads.Bead{
 		Title:  "queued worker work",
@@ -1391,8 +1496,8 @@ func TestDefaultNamedSessionDemandUsesPartialReadyRows(t *testing.T) {
 		storeKey: "rig:gascity",
 		store:    store,
 	}}, cfg, "test-city")
-	if !demand["primary"] {
-		t.Fatalf("defaultNamedSessionDemand[primary] = false, want survivor row counted")
+	if len(demand) != 0 {
+		t.Fatalf("defaultNamedSessionDemand = %v, want no named demand from routed metadata", demand)
 	}
 	if len(errs) != 1 || !beads.IsPartialResult(errs[0]) {
 		t.Fatalf("defaultNamedSessionDemand errs = %v, want partial-result diagnostic", errs)
@@ -1408,7 +1513,7 @@ func TestDefaultNamedSessionDemandUsesPartialReadyRows(t *testing.T) {
 	}
 }
 
-func TestDefaultNamedSessionDemandCountsRunTargetOnlyWorkflowDuringMigration(t *testing.T) {
+func TestDefaultNamedSessionDemandIgnoresNamedIdentityRunTargetOnlyWorkflow(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
 		Title:  "legacy workflow root",
@@ -1416,7 +1521,7 @@ func TestDefaultNamedSessionDemandCountsRunTargetOnlyWorkflowDuringMigration(t *
 		Status: "open",
 		Metadata: map[string]string{
 			"gc.kind":       "workflow",
-			"gc.run_target": "reviewer",
+			"gc.run_target": "primary",
 		},
 	}); err != nil {
 		t.Fatalf("create routed bead: %v", err)
@@ -1441,8 +1546,8 @@ func TestDefaultNamedSessionDemandCountsRunTargetOnlyWorkflowDuringMigration(t *
 	if len(errs) != 0 {
 		t.Fatalf("defaultNamedSessionDemand errs = %v", errs)
 	}
-	if !demand["primary"] {
-		t.Fatal("defaultNamedSessionDemand[primary] = false, want legacy run_target demand")
+	if len(demand) != 0 {
+		t.Fatalf("defaultNamedSessionDemand = %v, want no named demand from gc.run_target metadata", demand)
 	}
 }
 
@@ -1551,6 +1656,36 @@ func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *tes
 	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 0 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0", len(got))
+	}
+}
+
+func TestCollectAssignedWorkBeads_ExcludesUnassignedInProgressWorkflowRoot(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "workflow root",
+		Type:   "molecule",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "workflow",
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	if err := store.Update(root.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("mark workflow root in_progress: %v", err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              "worker",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(2),
+	}}}
+
+	got, _ := collectAssignedWorkBeads(cfg, store)
+	if len(got) != 0 {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want unassigned workflow root ignored", got)
 	}
 }
 
@@ -2022,6 +2157,61 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 	}
 }
 
+func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAssignee(t *testing.T) {
+	cityStore := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	rigStore := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "repo", Path: "/repo"}},
+		NamedSessions: []config.NamedSession{{
+			Dir:      "repo",
+			Name:     "control-dispatcher",
+			Template: "control-dispatcher",
+			Mode:     "on_demand",
+		}},
+	}
+	identity := cfg.NamedSessions[0].QualifiedName()
+	runtimeName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+	if _, err := rigStore.Create(beads.Bead{
+		Title:    "ready control work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: runtimeName,
+	}); err != nil {
+		t.Fatalf("create ready work bead: %v", err)
+	}
+
+	got, stores, storeRefs, partial := collectAssignedWorkBeadsWithStores(
+		cfg,
+		cityStore,
+		map[string]beads.Store{"repo": rigStore},
+		nil,
+		nil,
+	)
+	if partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
+	}
+	if len(got) != 0 {
+		t.Fatalf("got = %#v, want no future-runtime-assigned named-session work", got)
+	}
+	if len(stores) != 0 {
+		t.Fatalf("stores = %#v, want none", stores)
+	}
+	if len(storeRefs) != 0 {
+		t.Fatalf("storeRefs = %#v, want none", storeRefs)
+	}
+	queried := make(map[string]bool)
+	for _, query := range rigStore.readyQueries {
+		queried[query.Assignee] = true
+	}
+	if queried[runtimeName] {
+		t.Fatalf("rig Ready queries = %#v, must not include future runtime assignee %q", rigStore.readyQueries, runtimeName)
+	}
+	if !queried[identity] {
+		t.Fatalf("rig Ready queries = %#v, want canonical named-session assignee %q", rigStore.readyQueries, identity)
+	}
+}
+
 func TestCollectAssignedWorkBeadsWithStores_TracksRigStore(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -2350,6 +2540,65 @@ func TestBuildDesiredState_MaterializesHookOverlaysBeforeFingerprinting(t *testi
 	if got := runtime.CoreFingerprint(secondCfg); got != firstHash {
 		t.Fatalf("core fingerprint changed after runtime overlay materialization: first=%s second=%s firstCopyFiles=%#v secondCopyFiles=%#v",
 			firstHash, got, firstCfg.CopyFiles, secondCfg.CopyFiles)
+	}
+}
+
+// TestPrepareTemplateResolution_MaterializesFamilyOverlayForCustomProvider
+// guards gc-6bw8o on the pre-fingerprint materialization path. A rig-scoped
+// agent runs a custom provider "pi-vllm" (base="builtin:pi") whose rig overlay
+// ships only per-provider/pi/.pi/extensions/gc-hooks.js — there is no
+// per-provider/pi-vllm/ slot and the agent does NOT declare
+// install_agent_hooks=["pi"]. The concrete overlay name therefore has no
+// directory, so materializeProviderOverlaysBeforeFingerprint (reached via
+// prepareTemplateResolution) must fall back to the launch family (pi) via
+// EffectiveOverlayProviderNames and stage the family hook into the workdir
+// before resolveTemplate fingerprints CopyFiles. Before the fix this caller
+// used the concrete-only OverlayProviderNamesFromParts and never staged the
+// hook on this path.
+func TestPrepareTemplateResolution_MaterializesFamilyOverlayForCustomProvider(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	overlayDir := filepath.Join(cityDir, "packs", "myrig", "overlay")
+	hook := filepath.Join(overlayDir, "per-provider", "pi", ".pi", "extensions", "gc-hooks.js")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+		t.Fatalf("MkdirAll(overlay): %v", err)
+	}
+	if err := os.WriteFile(hook, []byte("// gc hook"), 0o644); err != nil {
+		t.Fatalf("WriteFile(hook): %v", err)
+	}
+
+	base := "builtin:pi"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "polecat",
+			Provider: "pi-vllm",
+			Scope:    "rig",
+			Dir:      "myrig",
+			// Intentionally no InstallAgentHooks: the family fallback must
+			// stage per-provider/pi/ purely from the concrete-absent
+			// resolution. Intentionally no StartCommand: it is an escape hatch
+			// that bypasses provider resolution (ResolveProvider step 1),
+			// which would defeat the base="builtin:pi" family fallback.
+		}},
+		Providers: map[string]config.ProviderSpec{
+			// Explicit command so resolution does not depend on a real `pi`
+			// binary on PATH; base still yields BuiltinAncestor=pi.
+			"pi-vllm": {Base: &base, Command: "/bin/echo"},
+		},
+		Rigs:           []config.Rig{{Name: "myrig", Path: rigDir}},
+		RigOverlayDirs: map[string][]string{"myrig": {overlayDir}},
+	}
+
+	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat", io.Discard)
+
+	staged := filepath.Join(rigDir, ".pi", "extensions", "gc-hooks.js")
+	if _, err := os.Stat(staged); err != nil {
+		t.Fatalf("family pi overlay not materialized before fingerprint for custom pi-vllm provider (gc-6bw8o): %v", err)
 	}
 }
 
@@ -3392,6 +3641,68 @@ func TestRealizePoolDesiredSessionsDefersAliasWhenNormalizationCollides(t *testi
 	}
 }
 
+// TestRealizePoolDesiredSessionsResumePreservesLegacyBoundSessionName traces
+// the bound→unbound adoption through realize: a resume request for the
+// current canonical template that carries a session bead persisted under the
+// removed binding must keep that bead's persisted session_name, so the live
+// runtime session is reused instead of being renamed or recreated (which
+// would orphan the running agent holding in-progress work).
+func TestRealizePoolDesiredSessionsResumePreservesLegacyBoundSessionName(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	adopted, err := store.Create(beads.Bead{
+		Title:  "gascity-packs/gc.implementation-worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity-packs/gc.implementation-worker"},
+		Metadata: map[string]string{
+			"template":             "gascity-packs/gc.implementation-worker",
+			"agent_name":           "gascity-packs/gc.implementation-worker",
+			"session_name":         "gc__implementation-worker-mc-1",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "implementation-worker",
+			Dir:               "gascity-packs",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(8),
+		}},
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(adopted)
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = snapshot
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "gascity-packs/implementation-worker",
+		Requests: []SessionRequest{{
+			Template:      "gascity-packs/implementation-worker",
+			Tier:          "resume",
+			SessionBeadID: adopted.ID,
+		}},
+	}, desired, &stderr)
+
+	tp, ok := desired["gc__implementation-worker-mc-1"]
+	if !ok {
+		t.Fatalf("desired state missing adopted resume session under persisted session_name; keys=%v stderr=%q",
+			mapKeys(desired), stderr.String())
+	}
+	if tp.SessionName != "gc__implementation-worker-mc-1" {
+		t.Fatalf("TemplateParams.SessionName = %q, want persisted session_name preserved", tp.SessionName)
+	}
+	if got := len(desired); got != 1 {
+		t.Fatalf("desired sessions = %d, want 1 (no duplicate spawn for adopted bead)", got)
+	}
+}
+
 func TestRealizePoolDesiredSessionsLimitsFreshCreatesToWakeBudget(t *testing.T) {
 	maxWakes := 2
 	store := beads.NewMemStore()
@@ -3427,6 +3738,202 @@ func TestRealizePoolDesiredSessionsLimitsFreshCreatesToWakeBudget(t *testing.T) 
 	}
 	if !strings.Contains(stderr.String(), "pool session create budget exhausted") {
 		t.Fatalf("stderr = %q, want budget exhaustion diagnostic", stderr.String())
+	}
+}
+
+func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			WorkDir:           ".gc/workspaces/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: []SessionRequest{{
+			Template:      "worker",
+			Tier:          "new",
+			WorkBeadID:    "gp-59q",
+			WorkBeadTitle: "Fix pack route templates!",
+			WorkPack:      "packer",
+			WorkStoreRef:  "rig:gascity-packs",
+		}},
+	}, desired, &stderr)
+
+	sessions := bp.sessionBeads.Open()
+	if len(sessions) != 1 {
+		t.Fatalf("created session beads = %d, want 1; stderr=%q", len(sessions), stderr.String())
+	}
+	stored, err := store.Get(sessions[0].ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got := stored.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "gp-59q" {
+		t.Fatalf("trigger bead metadata = %q, want gp-59q", got)
+	}
+	if got := stored.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; got != "rig:gascity-packs" {
+		t.Fatalf("trigger store metadata = %q, want rig:gascity-packs", got)
+	}
+	if got := stored.Metadata[beadmeta.PackWorkspaceMetadataKey]; got != "" {
+		t.Fatalf("pack workspace metadata = %q, want empty default pack workspace", got)
+	}
+	wantWorkDir := filepath.Join(bp.cityPath, ".gc", "workspaces", "packer")
+	if got := stored.Metadata["work_dir"]; got != wantWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, wantWorkDir)
+	}
+	if len(desired) != 1 {
+		t.Fatalf("desired sessions = %d, want 1", len(desired))
+	}
+	for _, tp := range desired {
+		if got := tp.Env["GC_TRIGGER_BEAD_ID"]; got != "gp-59q" {
+			t.Fatalf("GC_TRIGGER_BEAD_ID = %q, want gp-59q", got)
+		}
+		if got := tp.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "gp-59q" {
+			t.Fatalf("GC_TRIGGER_WORK_BEAD_ID = %q, want gp-59q", got)
+		}
+		if got := tp.Env["GC_TRIGGER_BEAD_STORE_REF"]; got != "rig:gascity-packs" {
+			t.Fatalf("GC_TRIGGER_BEAD_STORE_REF = %q, want rig:gascity-packs", got)
+		}
+		if got := tp.Env["GC_TRIGGER_WORK_STORE_REF"]; got != "rig:gascity-packs" {
+			t.Fatalf("GC_TRIGGER_WORK_STORE_REF = %q, want rig:gascity-packs", got)
+		}
+		if got := tp.Env["GC_PACKER_PACK"]; got != "packer" {
+			t.Fatalf("GC_PACKER_PACK = %q, want packer", got)
+		}
+	}
+}
+
+func TestRealizePoolDesiredSessionsHonorsExplicitPackWorkspace(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			WorkDir:           ".gc/workspaces/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	workspace := "gp-59q-fix-pack-route-templates"
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: []SessionRequest{{
+			Template:      "worker",
+			Tier:          "new",
+			WorkBeadID:    "gp-59q",
+			WorkBeadTitle: "Fix pack route templates!",
+			WorkPack:      "packer",
+			WorkWorkspace: workspace,
+			WorkStoreRef:  "rig:gascity-packs",
+		}},
+	}, map[string]TemplateParams{}, &stderr)
+
+	sessions := bp.sessionBeads.Open()
+	if len(sessions) != 1 {
+		t.Fatalf("created session beads = %d, want 1; stderr=%q", len(sessions), stderr.String())
+	}
+	stored, err := store.Get(sessions[0].ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got := stored.Metadata[beadmeta.PackWorkspaceMetadataKey]; got != workspace {
+		t.Fatalf("pack workspace metadata = %q, want %q", got, workspace)
+	}
+	wantWorkDir := filepath.Join(bp.cityPath, ".gc", "workspaces", "packer", workspace)
+	if got := stored.Metadata["work_dir"]; got != wantWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, wantWorkDir)
+	}
+}
+
+func TestRealizePoolDesiredSessionsRebindUpdatesPackWorkspaceMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	oldWorkDir := filepath.Join(t.TempDir(), "old")
+	reusable, err := store.Create(beads.Bead{
+		Title:  "worker reusable",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                              "worker",
+			"agent_name":                            "worker-7",
+			"alias":                                 "worker-7",
+			"session_name":                          "worker-reusable",
+			"state":                                 "awake",
+			"pool_slot":                             "7",
+			poolManagedMetadataKey:                  boolMetadata(true),
+			beadmeta.TriggerBeadIDMetadataKey:       "gp-old",
+			beadmeta.TriggerBeadStoreRefMetadataKey: "rig:gascity-packs",
+			beadmeta.PackMetadataKey:                "packer",
+			beadmeta.PackWorkspaceMetadataKey:       "old-workspace",
+			beadmeta.WorkDirMetadataKey:             oldWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey:       oldWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			WorkDir:           ".gc/workspaces/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(reusable)
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = snapshot
+	workspace := "route-smoke"
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: []SessionRequest{{
+			Template:      "worker",
+			Tier:          "resume",
+			SessionBeadID: reusable.ID,
+			WorkBeadID:    "gp-new",
+			WorkBeadTitle: "Route smoke",
+			WorkPack:      "packer",
+			WorkWorkspace: workspace,
+			WorkStoreRef:  "rig:gascity-packs",
+		}},
+	}, map[string]TemplateParams{}, &stderr)
+
+	stored, err := store.Get(reusable.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	wantWorkDir := filepath.Join(bp.cityPath, ".gc", "workspaces", "packer", workspace)
+	if got := stored.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "gp-new" {
+		t.Fatalf("trigger bead metadata = %q, want gp-new", got)
+	}
+	if got := stored.Metadata[beadmeta.PackWorkspaceMetadataKey]; got != workspace {
+		t.Fatalf("pack workspace metadata = %q, want %q", got, workspace)
+	}
+	if got := stored.Metadata[beadmeta.WorkDirMetadataKey]; got != wantWorkDir {
+		t.Fatalf("gc.work_dir = %q, want %q", got, wantWorkDir)
+	}
+	if got := stored.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != wantWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, wantWorkDir)
 	}
 }
 
@@ -4574,7 +5081,7 @@ func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *tes
 		err  error
 	}, 2)
 	create := func(qualifiedInstance string, slot int) {
-		bead, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, "worker", qualifiedInstance, slot)
+		bead, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, "worker", qualifiedInstance, slot, nil)
 		results <- struct {
 			bead beads.Bead
 			err  error
@@ -4651,7 +5158,7 @@ func TestCreatePoolSessionBeadWithGuardedAliasDropsTmuxAliasWhenIdentifierLockFa
 	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 	bp.sessionBeads = newSessionBeadSnapshot(nil)
 
-	bead, err := createPoolSessionBeadWithGuardedAlias(bp, &cfg.Agents[0], "worker", "worker-1", 1)
+	bead, err := createPoolSessionBeadWithGuardedAlias(bp, &cfg.Agents[0], "worker", "worker-1", 1, nil)
 	if err != nil {
 		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
 	}
@@ -4817,7 +5324,7 @@ func TestCreatePoolSessionBeadWithGuardedAlias_LogsAliasLockSetupFailure(t *test
 		stderr:       &stderr,
 	}
 
-	bead, err := createPoolSessionBeadWithGuardedAlias(bp, nil, "claude", "claude-1", 1)
+	bead, err := createPoolSessionBeadWithGuardedAlias(bp, nil, "claude", "claude-1", 1, nil)
 	if err != nil {
 		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
 	}
@@ -4854,7 +5361,7 @@ func TestCreatePoolSessionBeadWithGuardedAliasRejectsUnsupportedTransport(t *tes
 	sp := &acpOnlyDesiredStateProvider{Fake: runtime.NewFake()}
 	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, sp, time.Now().UTC(), store, io.Discard)
 
-	_, err := createPoolSessionBeadWithGuardedAlias(bp, &cfg.Agents[0], "worker", "worker", 0)
+	_, err := createPoolSessionBeadWithGuardedAlias(bp, &cfg.Agents[0], "worker", "worker", 0, nil)
 	if err == nil || !strings.Contains(err.Error(), "cannot route tmux sessions") {
 		t.Fatalf("createPoolSessionBeadWithGuardedAlias error = %v, want tmux routing rejection", err)
 	}
@@ -5154,7 +5661,7 @@ func TestBuildDesiredState_PoolInFlightSessionsPreservePartialScaleDemand(t *tes
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedWorkMaterializesNamedSession(t *testing.T) {
+func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedWorkUsesTemplatePoolDemand(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -5193,18 +5700,18 @@ func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedWorkMaterializesNam
 			foundGeneric = true
 		}
 	}
-	if !foundNamed {
-		t.Fatal("default routed work should materialize the on-demand named session")
+	if foundNamed {
+		t.Fatal("template-routed work should not materialize the on-demand named session")
 	}
-	if foundGeneric {
-		t.Fatal("default routed work should not create a parallel generic session for the named template")
+	if !foundGeneric {
+		t.Fatal("template-routed work should create generic template demand")
 	}
-	if !dsResult.NamedSessionDemand["mayor"] {
-		t.Fatal("NamedSessionDemand should record default routed work for mayor")
+	if dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("NamedSessionDemand should not record template-routed work for mayor")
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTaskWispMaterializesNamedSession(t *testing.T) {
+func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTaskWispUsesTemplatePoolDemand(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -5234,20 +5741,28 @@ func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTaskWispMaterialize
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
 	foundNamed := false
+	foundGeneric := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "mayor" && tp.ConfiguredNamedIdentity == "mayor" {
 			foundNamed = true
+			continue
+		}
+		if tp.TemplateName == "mayor" {
+			foundGeneric = true
 		}
 	}
-	if !foundNamed {
-		t.Fatal("default routed task wisp should materialize the on-demand named session")
+	if foundNamed {
+		t.Fatal("template-routed task wisp should not materialize the on-demand named session")
 	}
-	if !dsResult.NamedSessionDemand["mayor"] {
-		t.Fatal("NamedSessionDemand should record default routed task wisp for mayor")
+	if !foundGeneric {
+		t.Fatal("template-routed task wisp should create generic template demand")
+	}
+	if dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("NamedSessionDemand should not record template-routed task wisp for mayor")
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTemplateMaterializesSingletonIdentity(t *testing.T) {
+func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTemplateUsesGenericPoolDemand(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -5277,6 +5792,7 @@ func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTemplateMaterialize
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
 	foundNamed := false
+	foundGeneric := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName != "worker" {
 			continue
@@ -5285,13 +5801,16 @@ func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTemplateMaterialize
 			foundNamed = true
 			continue
 		}
-		t.Fatalf("routed singleton template created generic worker session: %+v", tp)
+		foundGeneric = true
 	}
-	if !foundNamed {
-		t.Fatal("default routed work should materialize the singleton named identity for worker")
+	if foundNamed {
+		t.Fatal("template-routed work should not materialize the singleton named identity for worker")
 	}
-	if !dsResult.NamedSessionDemand["primary"] {
-		t.Fatal("NamedSessionDemand should record singleton identity demand")
+	if !foundGeneric {
+		t.Fatal("template-routed work should create generic worker demand")
+	}
+	if dsResult.NamedSessionDemand["primary"] {
+		t.Fatal("NamedSessionDemand should not record singleton identity demand from template route")
 	}
 }
 
@@ -5406,6 +5925,146 @@ func TestBuildDesiredState_OnDemandNamedSession_DirectAssigneeMaterializes(t *te
 	}
 	if !found {
 		t.Fatal("direct assignee should materialize on-demand named session")
+	}
+}
+
+// TestBuildDesiredState_NamedBackingPoolNoCap_RoutedDemandDoesNotSpawnPhantoms
+// is the ga-xq1fsv regression repro (molecule-patrol demand ratchet, healthy
+// reads). A [[named_session]] backed by a pool-capable agent template that has
+// NO custom scale_check and NO max_active_sessions cap must resolve unassigned
+// gc.routed_to=<template> patrol demand to its single canonical named identity
+// — never to generic "{name}-N" pool phantoms.
+//
+// Root cause (bda368b0e "keep template-routed graph work unassigned"): the
+// backsNamedSession branch in buildDesiredStateWithSessionBeads now appends the
+// template's default probe to defaultScaleTargets (build_desired_state.go:561),
+// so the unassigned routed patrol roots are counted as generic pool demand by
+// defaultScaleCheckCounts. ComputePoolDesiredStates then emits N "new" requests,
+// and because the template has no max=1 cap (UsesCanonicalSingletonPoolIdentity
+// is false) realizePoolDesiredSessions materializes them as witness-1..N
+// alongside the canonical "witness" named session. Before bda368b0e the same
+// probe fed only defaultNamedScaleTargets, so routed demand resolved to the
+// single named identity.
+//
+// This facet engages on fully healthy (non-partial) reads, so the ga-01yukx /
+// #3686 partial-read fail-closed guards never trigger. MemStore reads are
+// non-partial, asserted below. MUST fail on e22049f86 (1 named + N phantoms)
+// and pass after the fix.
+func TestBuildDesiredState_NamedBackingPoolNoCap_RoutedDemandDoesNotSpawnPhantoms(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	const template = "witness"
+	const routedDemand = 3
+	for i := 0; i < routedDemand; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:  "witness patrol root",
+			Type:   "task", // actionable root (wisp/task); molecule/step roots are Ready()-excluded
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.routed_to": template,
+			},
+		}); err != nil {
+			t.Fatalf("create routed patrol demand %d: %v", i, err)
+		}
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         template,
+			StartCommand: "true",
+			WorkQuery:    "printf ''",
+			// no ScaleCheck        -> default routed-work probe drives demand
+			// no MaxActiveSessions -> UsesCanonicalSingletonPoolIdentity()==false,
+			//                         so pool path synthesizes {name}-N identities
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: template,
+			Mode:     "always",
+		}},
+	}
+	identity := cfg.NamedSessions[0].QualifiedName()
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	// This facet must engage on healthy reads, distinguishing it from the
+	// ga-01yukx partial-read facet whose guards fail closed.
+	if len(dsResult.ScaleCheckPartialTemplates) != 0 ||
+		len(dsResult.PoolScaleCheckPartialTemplates) != 0 ||
+		len(dsResult.NamedScaleCheckPartialTemplates) != 0 {
+		t.Fatalf("repro must exercise healthy (non-partial) reads, but reads were partial: scale=%v pool=%v named=%v",
+			dsResult.ScaleCheckPartialTemplates, dsResult.PoolScaleCheckPartialTemplates, dsResult.NamedScaleCheckPartialTemplates)
+	}
+
+	var named, phantom []string
+	for key, tp := range dsResult.State {
+		if tp.ConfiguredNamedIdentity == identity {
+			named = append(named, key)
+			continue
+		}
+		phantom = append(phantom, key)
+	}
+	if len(named) != 1 {
+		t.Fatalf("expected exactly 1 canonical named session %q, got %d: %v (state=%+v)", identity, len(named), named, dsResult.State)
+	}
+	if len(phantom) != 0 {
+		t.Fatalf("named-backing pool template %q spawned %d phantom pool session(s) %v alongside the canonical named session; "+
+			"unassigned gc.routed_to patrol demand must resolve to the single named identity (<=1), not generic {name}-N pool workers "+
+			"(scale_check_counts=%v)", template, len(phantom), phantom, dsResult.ScaleCheckCounts)
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_RuntimeAssigneeDoesNotMaterialize(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "fixture")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("create rig dir: %v", err)
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "control-dispatcher",
+			Dir:               "fixture",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "control-dispatcher",
+			Dir:      "fixture",
+			Mode:     "on_demand",
+		}},
+	}
+	identity := cfg.NamedSessions[0].QualifiedName()
+	runtimeName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+	if _, err := rigStore.Create(beads.Bead{
+		Title:    "runtime-assigned control work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: runtimeName,
+	}); err != nil {
+		t.Fatalf("create rig work: %v", err)
+	}
+
+	dsResult := buildDesiredStateWithSessionBeads(
+		cfg.EffectiveCityName(), cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), cityStore, map[string]beads.Store{"fixture": rigStore}, nil, nil, io.Discard,
+	)
+
+	if dsResult.NamedSessionDemand[identity] {
+		t.Fatalf("NamedSessionDemand[%s] = true for future runtime assignee %q", identity, runtimeName)
+	}
+	found := false
+	for _, tp := range dsResult.State {
+		if tp.ConfiguredNamedIdentity == identity {
+			found = true
+			break
+		}
+	}
+	if found {
+		t.Fatalf("future runtime assignee %q should not materialize on-demand named session %q", runtimeName, identity)
 	}
 }
 
@@ -6960,6 +7619,7 @@ func TestBuildDesiredState_ScaleCheckErrorPreservesDormantAffectedPoolSessionWit
 	}
 
 	poolDesired := retainScaleCheckPartialPoolDesired(
+		cfg,
 		PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
 		snapshot,
 		result.PoolScaleCheckPartialTemplates,
@@ -6969,7 +7629,7 @@ func TestBuildDesiredState_ScaleCheckErrorPreservesDormantAffectedPoolSessionWit
 	}
 }
 
-func TestBuildDesiredState_NamedScaleCheckPartialDoesNotRetainGenericPoolSession(t *testing.T) {
+func TestBuildDesiredState_NamedBackedPoolPartialRetainsGenericPoolSession(t *testing.T) {
 	cityPath := t.TempDir()
 	store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
 	poolSession := beads.Bead{
@@ -7022,14 +7682,14 @@ func TestBuildDesiredState_NamedScaleCheckPartialDoesNotRetainGenericPoolSession
 	if !result.ScaleCheckPartialTemplates["worker"] {
 		t.Fatalf("ScaleCheckPartialTemplates[worker] = false, want named-session partial recorded; templates=%v stderr=%s", result.ScaleCheckPartialTemplates, stderr.String())
 	}
-	if result.PoolScaleCheckPartialTemplates["worker"] {
-		t.Fatalf("PoolScaleCheckPartialTemplates[worker] = true, want false for named-session partial; templates=%v", result.PoolScaleCheckPartialTemplates)
+	if !result.PoolScaleCheckPartialTemplates["worker"] {
+		t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true for template pool partial; templates=%v", result.PoolScaleCheckPartialTemplates)
 	}
 	if !result.NamedScaleCheckPartialTemplates["worker"] {
 		t.Fatalf("NamedScaleCheckPartialTemplates[worker] = false, want true; templates=%v", result.NamedScaleCheckPartialTemplates)
 	}
-	if _, ok := result.State["worker-bd-123"]; ok {
-		t.Fatalf("generic pool session retained by named-session partial: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+	if _, ok := result.State["worker-bd-123"]; !ok {
+		t.Fatalf("generic pool session was not retained by template pool partial: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
 	}
 }
 
@@ -10084,5 +10744,748 @@ func TestBuildDesiredState_NamedSessionWorkQueryDoesNotDriveControllerDemand(t *
 
 	if dsResult.NamedSessionDemand["alpha/dog"] {
 		t.Fatal("NamedSessionDemand[alpha/dog] came from controller-side work_query")
+	}
+}
+
+func TestBuildDesiredState_OpenBlockedControlDispatcherWorkRetainsDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{
+		Title:  "blocking worker attempt",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	control, err := store.Create(beads.Bead{
+		Title:  "Finalize cleanup",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "retry",
+			"gc.routed_to": "core.control-dispatcher",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	if err := store.DepAdd(control.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block control: %v", err)
+	}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	result := buildDesiredStateWithSessionBeads(
+		"test-city",
+		cityPath,
+		time.Now().UTC(),
+		cfg,
+		runtime.NewFake(),
+		store,
+		nil,
+		newSessionBeadSnapshot(nil),
+		nil,
+		io.Discard,
+	)
+
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 1 {
+		t.Fatalf("ScaleCheckCounts[core.control-dispatcher] = %d, want 1", got)
+	}
+	if len(result.State) != 1 {
+		t.Fatalf("desired state count = %d, want 1; state=%v", len(result.State), mapKeys(result.State))
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName != "core.control-dispatcher" {
+			t.Fatalf("desired TemplateName = %q, want core.control-dispatcher", desired.TemplateName)
+		}
+	}
+}
+
+// TestOpenControlDispatcherDemandHonorsBareLegacyRoute guards the upgrade gap:
+// control beads created by pre-1.3 builds route to the binding-stripped bare
+// name ("control-dispatcher"), not the qualified "core.control-dispatcher".
+// In-flight work persisted across the upgrade must still scale the qualified
+// dispatcher, and demand must be keyed by its qualified template name so the
+// scaler matches it.
+func TestOpenControlDispatcherDemandHonorsBareLegacyRoute(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	work := []beads.Bead{{
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "retry",
+			"gc.routed_to": config.ControlDispatcherAgentName, // bare, pre-1.3 route
+		},
+	}}
+	demand := openControlDispatcherDemand(cfg, work)
+	if !demand["core.control-dispatcher"] {
+		t.Fatalf("openControlDispatcherDemand = %v, want demand keyed by qualified name from bare route", demand)
+	}
+}
+
+// TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates verifies that
+// when the demand store returns a partial result for a pool agent:
+//   - poolScaleCheckPartialTemplates is set for the affected template
+//   - existing active/awake session beads are retained in desired state
+//   - no new session creates are added beyond the existing beads
+//   - retainScaleCheckPartialPoolDesired counts only active/awake beads (not creating)
+//
+// This exercises Changes 1+2 from ga-0xljyj.
+func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "echo",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+		}},
+	}
+
+	makeSessionBead := func(id, sessionName, state, slot string) beads.Bead {
+		return beads.Bead{
+			ID:     id,
+			Title:  "worker",
+			Type:   sessionBeadType,
+			Status: "open",
+			Labels: []string{sessionBeadLabel, "template:worker"},
+			Metadata: map[string]string{
+				"session_name":         sessionName,
+				"template":             "worker",
+				"agent_name":           "worker",
+				"pool_slot":            slot,
+				poolManagedMetadataKey: boolMetadata(true),
+				"state":                state,
+			},
+		}
+	}
+
+	t.Run("one active bead retained, no new creates", func(t *testing.T) {
+		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		activeSession := makeSessionBead("session-worker-active", "worker-active-1", "active", "1")
+
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot([]beads.Bead{activeSession}),
+			nil, &stderr,
+		)
+
+		if !result.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true; stderr=%s", stderr.String())
+		}
+		if _, ok := result.State["worker-active-1"]; !ok {
+			t.Fatalf("active session not retained in desired state: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+		}
+		workerEntries := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerEntries++
+			}
+		}
+		if workerEntries != 1 {
+			t.Fatalf("desired state has %d worker entries, want exactly 1; keys=%v", workerEntries, mapKeys(result.State))
+		}
+
+		snapshot := newSessionBeadSnapshot([]beads.Bead{activeSession})
+		poolDesired := retainScaleCheckPartialPoolDesired(
+			cfg,
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			snapshot,
+			result.PoolScaleCheckPartialTemplates,
+		)
+		if got := poolDesired["worker"]; got != 1 {
+			t.Fatalf("poolDesired[worker] = %d, want 1 (confirmed-alive active bead)", got)
+		}
+	})
+
+	// Criterion #3 (ga-4qbgqf.1): awake sessions are also retained, not just active.
+	t.Run("one awake bead retained, no new creates", func(t *testing.T) {
+		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		awakeSession := makeSessionBead("session-worker-awake", "worker-awake-1", "awake", "1")
+
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot([]beads.Bead{awakeSession}),
+			nil, &stderr,
+		)
+
+		if !result.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true; stderr=%s", stderr.String())
+		}
+		if _, ok := result.State["worker-awake-1"]; !ok {
+			t.Fatalf("awake session not retained in desired state: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+		}
+		workerEntries := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerEntries++
+			}
+		}
+		if workerEntries != 1 {
+			t.Fatalf("desired state has %d worker entries, want exactly 1; keys=%v", workerEntries, mapKeys(result.State))
+		}
+
+		snapshot := newSessionBeadSnapshot([]beads.Bead{awakeSession})
+		poolDesired := retainScaleCheckPartialPoolDesired(
+			cfg,
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			snapshot,
+			result.PoolScaleCheckPartialTemplates,
+		)
+		if got := poolDesired["worker"]; got != 1 {
+			t.Fatalf("poolDesired[worker] = %d, want 1 (confirmed-alive awake bead)", got)
+		}
+	})
+
+	t.Run("zero existing beads yields zero creates", func(t *testing.T) {
+		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot([]beads.Bead{}),
+			nil, &stderr,
+		)
+
+		if !result.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true; stderr=%s", stderr.String())
+		}
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				t.Fatalf("unexpected worker entry in desired state during partial read with no existing sessions: keys=%v", mapKeys(result.State))
+			}
+		}
+
+		snapshot := newSessionBeadSnapshot([]beads.Bead{})
+		poolDesired := retainScaleCheckPartialPoolDesired(
+			cfg,
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			snapshot,
+			result.PoolScaleCheckPartialTemplates,
+		)
+		if got := poolDesired["worker"]; got != 0 {
+			t.Fatalf("poolDesired[worker] = %d, want 0 with no existing sessions", got)
+		}
+	})
+
+	// Change 2 regression: creating beads must be preserved in desired (not
+	// drained) but must NOT inflate poolDesired — only active/awake count.
+	t.Run("creating bead preserved but not counted in poolDesired", func(t *testing.T) {
+		store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		activeSession := makeSessionBead("session-worker-active", "worker-active-1", "active", "1")
+		creatingSession := makeSessionBead("session-worker-creating", "worker-creating-2", "creating", "2")
+
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot([]beads.Bead{activeSession, creatingSession}),
+			nil, &stderr,
+		)
+
+		if !result.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true; stderr=%s", stderr.String())
+		}
+		if _, ok := result.State["worker-active-1"]; !ok {
+			t.Fatalf("active session not retained: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+		}
+		if _, ok := result.State["worker-creating-2"]; !ok {
+			t.Fatalf("creating session not preserved in desired state (would allow premature drain): keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+		}
+
+		snapshot := newSessionBeadSnapshot([]beads.Bead{activeSession, creatingSession})
+		poolDesired := retainScaleCheckPartialPoolDesired(
+			cfg,
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			snapshot,
+			result.PoolScaleCheckPartialTemplates,
+		)
+		// Only the active bead counts; creating must not inflate poolDesired.
+		if got := poolDesired["worker"]; got != 1 {
+			t.Fatalf("poolDesired[worker] = %d, want 1 (creating bead must not be counted as wake demand)", got)
+		}
+	})
+
+	// Criterion #5 (ga-4qbgqf.1): the narrow alive-on-partial guard for pool creates
+	// allows stale creating beads to roll back within the partial tick itself.
+	// Only in-flight creates holding an active pending_create_claim lease are
+	// shielded; expired/cleared creates (no lease) drain immediately.
+	t.Run("stale creating bead rolls back during partial tick", func(t *testing.T) {
+		partialStore := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		staleSession := makeSessionBead("session-worker-stale", "worker-stale-4", "creating", "4")
+		snapshot := newSessionBeadSnapshot([]beads.Bead{staleSession})
+
+		// Partial tick: the narrow pool-create guard (poolPartialCreate) does NOT
+		// shield a stale creating bead (no pending_create_claim), so it rolls back now.
+		var pStderr strings.Builder
+		partialResult := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), partialStore, nil,
+			snapshot, nil, &pStderr,
+		)
+		if !partialResult.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("partial tick: PoolScaleCheckPartialTemplates[worker] = false; stderr=%s", pStderr.String())
+		}
+		if _, ok := partialResult.State["worker-stale-4"]; ok {
+			t.Fatalf("partial tick: stale creating bead unexpectedly retained in State; narrow guard must allow rollback; keys=%v stderr=%s", mapKeys(partialResult.State), pStderr.String())
+		}
+	})
+
+	// Criterion #6 (ga-4qbgqf.3): fresh in-flight creates (pending_create_claim=true)
+	// are retained in desired state and in the retained count during a partial tick.
+	// poolPartialAlive is true via isPendingPoolCreate, so the narrow guard keeps them.
+	t.Run("fresh pending_create_claim creating bead retained during partial tick", func(t *testing.T) {
+		partialStore := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+		freshCreate := beads.Bead{
+			ID:     "session-worker-fresh",
+			Title:  "worker",
+			Type:   sessionBeadType,
+			Status: "open",
+			Labels: []string{sessionBeadLabel, "template:worker"},
+			Metadata: map[string]string{
+				"session_name":         "worker-fresh-3",
+				"template":             "worker",
+				"agent_name":           "worker",
+				"pool_slot":            "3",
+				poolManagedMetadataKey: boolMetadata(true),
+				"state":                "creating",
+				"pending_create_claim": boolMetadata(true),
+			},
+		}
+		snapshot := newSessionBeadSnapshot([]beads.Bead{freshCreate})
+
+		var pStderr strings.Builder
+		partialResult := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), partialStore, nil,
+			snapshot, nil, &pStderr,
+		)
+		if !partialResult.PoolScaleCheckPartialTemplates["worker"] {
+			t.Fatalf("partial tick: PoolScaleCheckPartialTemplates[worker] = false; stderr=%s", pStderr.String())
+		}
+		if _, ok := partialResult.State["worker-fresh-3"]; !ok {
+			t.Fatalf("partial tick: fresh pending_create_claim=true bead absent from State; poolPartialAlive must retain it; keys=%v stderr=%s", mapKeys(partialResult.State), pStderr.String())
+		}
+		poolDesired := retainScaleCheckPartialPoolDesired(
+			cfg,
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), partialResult.ScaleCheckCounts)),
+			snapshot,
+			partialResult.PoolScaleCheckPartialTemplates,
+		)
+		if got := poolDesired["worker"]; got != 1 {
+			t.Fatalf("poolDesired[worker] = %d, want 1 (fresh pending_create_claim=true create counts as retained capacity)", got)
+		}
+	})
+
+	// Change 3 (ga-btv7tm): draining/drained/archived sessions must NOT be
+	// preserved in desired state during a partial tick. Preserving them would
+	// interrupt an in-progress drain lifecycle.
+	t.Run("draining/drained/archived NOT preserved during partial tick", func(t *testing.T) {
+		for _, state := range []string{"draining", "drained", "archived"} {
+			state := state
+			t.Run(state, func(t *testing.T) {
+				store := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
+				b := makeSessionBead("session-worker-"+state, "worker-"+state+"-1", state, "1")
+				var pStderr strings.Builder
+				result := buildDesiredStateWithSessionBeads(
+					"test-city", cityPath, time.Now().UTC(),
+					cfg, runtime.NewFake(), store, nil,
+					newSessionBeadSnapshot([]beads.Bead{b}),
+					nil, &pStderr,
+				)
+				if _, ok := result.State["worker-"+state+"-1"]; ok {
+					t.Fatalf("state=%s bead must NOT be preserved in desired during partial tick (would interrupt drain); keys=%v stderr=%s",
+						state, mapKeys(result.State), pStderr.String())
+				}
+			})
+		}
+	})
+}
+
+func TestBuildDesiredState_ProviderRedBlocksNewPoolSessionCreate(t *testing.T) {
+	writeHealthFile := func(t *testing.T, cityPath, status string) {
+		t.Helper()
+		dir := filepath.Join(cityPath, ".gc", "cache")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		probedAt := float64(time.Now().UnixNano()) / 1e9
+		content := fmt.Sprintf(`{"providers":[{"provider":"claude","status":%q,"probed_at":%f}]}`, status, probedAt)
+		if err := os.WriteFile(filepath.Join(dir, "provider-health.json"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	makeCfg := func() *config.City {
+		return &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Agents: []config.Agent{{
+				Name:              "worker",
+				Provider:          "claude",
+				StartCommand:      "echo",
+				ScaleCheck:        "printf 3",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+			}},
+		}
+	}
+
+	makeSessionBead := func(id, sessionName, state, slot string) beads.Bead {
+		return beads.Bead{
+			ID:     id,
+			Title:  "worker",
+			Type:   sessionBeadType,
+			Status: "open",
+			Labels: []string{sessionBeadLabel, "template:worker"},
+			Metadata: map[string]string{
+				"session_name":         sessionName,
+				"template":             "worker",
+				"agent_name":           "worker",
+				"pool_slot":            slot,
+				poolManagedMetadataKey: boolMetadata(true),
+				"state":                state,
+			},
+		}
+	}
+
+	// Scenario A: registry red — no new creates for pool agent.
+	t.Run("registry red blocks new creates", func(t *testing.T) {
+		cityPath := t.TempDir()
+		writeHealthFile(t, cityPath, "unhealthy")
+		cfg := makeCfg()
+		store := beads.NewMemStore()
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot(nil),
+			nil, &stderr,
+		)
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				t.Fatalf("expected no worker creates when provider is red; got entry %q; stderr=%s", tp.SessionName, stderr.String())
+			}
+		}
+		if !strings.Contains(stderr.String(), "provider red, fresh create blocked") {
+			t.Fatalf("expected 'provider red, fresh create blocked' in stderr; stderr=%s", stderr.String())
+		}
+	})
+
+	// Scenario B: registry absent — fail-open, creates proceed normally.
+	t.Run("registry absent fails open", func(t *testing.T) {
+		cityPath := t.TempDir()
+		// no provider-health.json written
+		cfg := makeCfg()
+		store := beads.NewMemStore()
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot(nil),
+			nil, &stderr,
+		)
+		workerCreates := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerCreates++
+			}
+		}
+		if workerCreates == 0 {
+			t.Fatalf("expected worker creates when registry absent (fail-open); stderr=%s", stderr.String())
+		}
+	})
+
+	// Scenario C: registry healthy — creates proceed normally.
+	t.Run("registry healthy allows create", func(t *testing.T) {
+		cityPath := t.TempDir()
+		writeHealthFile(t, cityPath, "healthy")
+		cfg := makeCfg()
+		store := beads.NewMemStore()
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot(nil),
+			nil, &stderr,
+		)
+		workerCreates := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerCreates++
+			}
+		}
+		if workerCreates == 0 {
+			t.Fatalf("expected worker creates when provider is healthy; stderr=%s", stderr.String())
+		}
+	})
+
+	// Scenario D: red gate does not block reuse of an existing active session;
+	// no additional new creates are planned.
+	t.Run("red gate does not block reuse of active session", func(t *testing.T) {
+		cityPath := t.TempDir()
+		writeHealthFile(t, cityPath, "unhealthy")
+		cfg := makeCfg()
+		active := makeSessionBead("session-worker-1", "worker-1", "active", "1")
+		store := beads.NewMemStore()
+		var stderr strings.Builder
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(),
+			cfg, runtime.NewFake(), store, nil,
+			newSessionBeadSnapshot([]beads.Bead{active}),
+			nil, &stderr,
+		)
+		if _, ok := result.State["worker-1"]; !ok {
+			t.Fatalf("active session must be reused even when provider is red; keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+		}
+		workerEntries := 0
+		for _, tp := range result.State {
+			if tp.TemplateName == "worker" {
+				workerEntries++
+			}
+		}
+		// The active session is reused; the red gate blocks any additional creates.
+		if workerEntries != 1 {
+			t.Fatalf("expected exactly 1 worker entry (reused active); got %d; keys=%v stderr=%s", workerEntries, mapKeys(result.State), stderr.String())
+		}
+	})
+}
+
+// TestBuildDesiredState_NamedAliasHolderSuppressesPoolStandby is the FAITHFUL
+// gc-7e40y dual-mayor repro at the buildDesiredState level, mirroring the exact
+// live gastown.mayor bead shapes.
+//
+// The mayor shape: a bound agent (gastown.mayor) that is BOTH a configured
+// [[named_session]] (mode=always) AND trips UsesCanonicalSingletonPoolIdentity
+// (max_active_sessions=1, no min, no scale_check, no namepool). A live named
+// session holds the canonical alias "gastown.mayor". A pool-managed standby
+// session already exists, alias-deferred (pool_alias_conflict=gastown.mayor).
+//
+// EMPIRICAL ROOT (bisected against the live controller, commit dbc702304):
+// the dual is DEMANDED by ready, unassigned, routed work (live: gc-78iq with
+// gc.routed_to=gastown.mayor). defaultScaleCheckCounts counts that work →
+// scaleCheckCounts[gastown.mayor]=1 → computePoolDesiredStates emits one
+// tier="new" pool request → realizePoolDesiredSessions reuses the standby bead,
+// which then DEFERS on the held canonical alias (recordDeferredNonExpandingPool
+// AliasConflict). That standby is added to desired state alongside the named
+// alias-holder: two desired sessions for a max=1 agent. The standby can never
+// acquire the alias (held by the named session), so it defers forever and,
+// with effective_sleep_after_idle=off, never reaps.
+//
+// The fix must credit the live canonical-alias holder as occupying the
+// singleton's one slot, suppressing the redundant pool new-demand. Keyed on
+// CANONICAL-ALIAS OWNERSHIP, not isNamedSessionBead — a manual session holding
+// NO alias must still let the pool want its instance (see
+// TestComputePoolDesiredStates_ManualSessionDoesNotConsumeSingletonNewDemand).
+//
+// RED before the fix: produces 2 desired entries for gastown.mayor (the named
+// holder + the alias-deferred pool standby).
+func TestBuildDesiredState_NamedAliasHolderSuppressesPoolStandby(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+
+	// Ready, unassigned, routed work — mirrors live gc-78iq.
+	if _, err := store.Create(beads.Bead{
+		Title:    "routed mayor work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "gastown.mayor"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Named-session alias holder for "gastown.mayor" — mirrors live gc-wisp-ak5aoga.
+	if _, err := store.Create(beads.Bead{
+		Title:  "gastown.mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:gastown.mayor"},
+		Metadata: map[string]string{
+			"agent_name":                 "gastown.mayor",
+			"alias":                      "gastown.mayor",
+			"session_name":               "gastown__mayor",
+			"session_name_explicit":      "true",
+			"state":                      "awake",
+			"session_origin":             "named",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "gastown.mayor",
+			namedSessionModeMetadata:     "always",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pool-managed standby, alias-deferred — mirrors live gc-wisp-tig9h8s.
+	if _, err := store.Create(beads.Bead{
+		Title:  "gastown.mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gastown.mayor"},
+		Metadata: map[string]string{
+			"agent_name":                      "gastown.mayor",
+			"alias":                           "",
+			"session_name":                    "gastown__mayor-gc-wisp-tig9h8s",
+			"state":                           "awake",
+			"session_origin":                  "ephemeral",
+			poolManagedMetadataKey:            boolMetadata(true),
+			poolAliasConflictMetadataKey:      "gastown.mayor",
+			poolAliasConflictCountMetadataKey: "249",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gchq"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			BindingName:       "gastown",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "mayor",
+			BindingName: "gastown",
+			Scope:       "city",
+			Mode:        "always",
+		}},
+	}
+
+	dsResult := buildDesiredState("gchq", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	var mayorEntries []TemplateParams
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "gastown.mayor" {
+			mayorEntries = append(mayorEntries, tp)
+		}
+	}
+	if len(mayorEntries) != 1 {
+		var names []string
+		for _, tp := range mayorEntries {
+			names = append(names, fmt.Sprintf("%s(alias=%q,named=%q)", tp.SessionName, tp.Alias, tp.ConfiguredNamedIdentity))
+		}
+		t.Fatalf("gastown.mayor desired entries = %d, want 1 — a live session already holds the canonical alias, so the pool must not demand a redundant standby (gc-7e40y dual). Got: %v", len(mayorEntries), names)
+	}
+	// The single retained entry must be the named alias-holder, not a deferred
+	// pool standby (alias empty because it lost the alias-acquisition race).
+	if mayorEntries[0].ConfiguredNamedIdentity != "gastown.mayor" {
+		t.Fatalf("retained entry is not the named alias-holder: %+v", mayorEntries[0])
+	}
+}
+
+// TestBuildDesiredState_AsleepNamedAliasHolderStaysSingle documents the
+// gc-7e40y review ruling (mayor): an asleep canonical-singleton holder is NOT
+// a live alias holder, so pool demand SHOULD flow and WAKE the existing asleep
+// holder — net desired stays exactly 1, no redundant standby spawns.
+func TestBuildDesiredState_AsleepNamedAliasHolderStaysSingle(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+
+	// Ready, unassigned, routed work — mirrors live gc-78iq.
+	if _, err := store.Create(beads.Bead{
+		Title:    "routed mayor work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "gastown.mayor"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Named-session alias holder for "gastown.mayor" — mirrors live gc-wisp-ak5aoga.
+	if _, err := store.Create(beads.Bead{
+		Title:  "gastown.mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:gastown.mayor"},
+		Metadata: map[string]string{
+			"agent_name":                 "gastown.mayor",
+			"alias":                      "gastown.mayor",
+			"session_name":               "gastown__mayor",
+			"session_name_explicit":      "true",
+			"state":                      "asleep",
+			"session_origin":             "named",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "gastown.mayor",
+			namedSessionModeMetadata:     "always",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pool-managed standby, alias-deferred — mirrors live gc-wisp-tig9h8s.
+	if _, err := store.Create(beads.Bead{
+		Title:  "gastown.mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gastown.mayor"},
+		Metadata: map[string]string{
+			"agent_name":                      "gastown.mayor",
+			"alias":                           "",
+			"session_name":                    "gastown__mayor-gc-wisp-tig9h8s",
+			"state":                           "awake",
+			"session_origin":                  "ephemeral",
+			poolManagedMetadataKey:            boolMetadata(true),
+			poolAliasConflictMetadataKey:      "gastown.mayor",
+			poolAliasConflictCountMetadataKey: "249",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gchq"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			BindingName:       "gastown",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "mayor",
+			BindingName: "gastown",
+			Scope:       "city",
+			Mode:        "always",
+		}},
+	}
+
+	dsResult := buildDesiredState("gchq", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	var mayorEntries []TemplateParams
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "gastown.mayor" {
+			mayorEntries = append(mayorEntries, tp)
+		}
+	}
+	if len(mayorEntries) != 1 {
+		var names []string
+		for _, tp := range mayorEntries {
+			names = append(names, fmt.Sprintf("%s(alias=%q,named=%q)", tp.SessionName, tp.Alias, tp.ConfiguredNamedIdentity))
+		}
+		t.Fatalf("gastown.mayor desired entries = %d, want 1 — a live session already holds the canonical alias, so the pool must not demand a redundant standby (gc-7e40y dual). Got: %v", len(mayorEntries), names)
+	}
+	// The single retained entry must be the named alias-holder, not a deferred
+	// pool standby (alias empty because it lost the alias-acquisition race).
+	if mayorEntries[0].ConfiguredNamedIdentity != "gastown.mayor" {
+		t.Fatalf("retained entry is not the named alias-holder: %+v", mayorEntries[0])
 	}
 }

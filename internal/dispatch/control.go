@@ -370,6 +370,9 @@ func IsTransientControllerError(err error) bool {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
+	if isTransientWorkQueryFailure(msg) {
+		return true
+	}
 	transientNeedles := []string{
 		"i/o timeout",
 		"context deadline exceeded",
@@ -387,6 +390,25 @@ func IsTransientControllerError(err error) bool {
 		"sqlite_busy",
 	}
 	for _, needle := range transientNeedles {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTransientWorkQueryFailure(msg string) bool {
+	if !strings.Contains(msg, "running work query") {
+		return false
+	}
+	workQueryNeedles := []string{
+		"signal: killed",
+		"signal: terminated",
+		"exit status 137",
+		"exit status 143",
+		"timed out after",
+	}
+	for _, needle := range workQueryNeedles {
 		if strings.Contains(msg, needle) {
 			return true
 		}
@@ -450,10 +472,17 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 	// execution lane restored manually. Prefer each step's explicit target when
 	// available, and only inherit the parent execution lane as a fallback.
 	executionRoute := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRoutedToMetadataKey])
+	executionRigContext := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRigContextMetadataKey])
 	routeCfg := loadAttemptRouteConfig(opts.CityPath)
 	for i := range recipe.Steps {
 		if recipe.Steps[i].Metadata[beadmeta.KindMetadataKey] == "spec" {
 			continue
+		}
+		if executionRigContext != "" && strings.TrimSpace(recipe.Steps[i].Metadata[beadmeta.ExecutionRigContextMetadataKey]) == "" {
+			if recipe.Steps[i].Metadata == nil {
+				recipe.Steps[i].Metadata = make(map[string]string)
+			}
+			recipe.Steps[i].Metadata[beadmeta.ExecutionRigContextMetadataKey] = executionRigContext
 		}
 		target := strings.TrimSpace(recipe.Steps[i].Metadata[beadmeta.RunTargetMetadataKey])
 		if target == "" {
@@ -971,6 +1000,7 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 		step.Metadata = make(map[string]string)
 	}
 	resolvedExecutionTarget := strings.TrimSpace(executionTarget)
+	rigContext := strings.TrimSpace(step.Metadata[beadmeta.ExecutionRigContextMetadataKey])
 	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg, store); ok {
 		switch {
 		case binding.qualifiedName != "":
@@ -990,51 +1020,37 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 	}
 	step.Labels = removeAttemptPoolLabels(step.Labels)
 
-	controlTarget := controlDispatcherTargetForExecutionTarget(resolvedExecutionTarget)
-	if assignee, ok := resolveAttemptControlAssignee(controlTarget, cfg, store); ok {
+	controlTarget := controlDispatcherTargetForExecutionTarget(resolvedExecutionTarget, rigContext, cfg)
+	if controlTarget != "" {
+		step.Metadata[beadmeta.RoutedToMetadataKey] = controlTarget
+	} else {
 		delete(step.Metadata, beadmeta.RoutedToMetadataKey)
-		step.Assignee = assignee
-		return
 	}
-
-	step.Metadata[beadmeta.RoutedToMetadataKey] = controlTarget
 	step.Assignee = ""
 }
 
-func controlDispatcherTargetForExecutionTarget(executionTarget string) string {
+func controlDispatcherTargetForExecutionTarget(executionTarget, rigContext string, cfg *config.City) string {
 	executionTarget = strings.TrimSpace(executionTarget)
-	if slash := strings.IndexByte(executionTarget, '/'); slash > 0 {
-		return executionTarget[:slash] + "/" + config.ControlDispatcherAgentName
-	}
-	return config.ControlDispatcherAgentName
-}
-
-func resolveAttemptControlAssignee(target string, cfg *config.City, store beads.Store) (string, bool) {
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return "", false
-	}
-	if binding, ok := resolveAttemptRouteBinding(target, cfg, store); ok {
-		if binding.directSessionID != "" {
-			return binding.directSessionID, true
-		}
-		if binding.sessionName != "" {
-			return binding.sessionName, true
+	rigContext = strings.TrimSpace(rigContext)
+	if rigContext == "" {
+		if slash := strings.IndexByte(executionTarget, '/'); slash > 0 {
+			rigContext = executionTarget[:slash]
 		}
 	}
 	if cfg != nil {
-		if named := config.FindNamedSession(cfg, target); named != nil {
-			if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok && spec.SessionName != "" {
-				return spec.SessionName, true
+		for _, agentCfg := range cfg.Agents {
+			if !config.IsDeterministicControlDispatcher(&agentCfg) {
+				continue
 			}
-		}
-		if agentCfg := config.FindAgent(cfg, target); agentCfg != nil {
-			if sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName()); sessionName != "" {
-				return sessionName, true
+			if strings.TrimSpace(agentCfg.Dir) == rigContext {
+				return agentCfg.QualifiedName()
 			}
 		}
 	}
-	return "", false
+	if rigContext != "" {
+		return rigContext + "/" + config.ControlDispatcherAgentName
+	}
+	return config.ControlDispatcherAgentName
 }
 
 func isAttemptControlKind(kind string) bool {
@@ -1066,9 +1082,6 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 							return attemptRouteBinding{directSessionID: bead.ID}, true
 						}
 					}
-				}
-				if spec.SessionName != "" {
-					return attemptRouteBinding{sessionName: spec.SessionName}, true
 				}
 			}
 			return attemptRouteBinding{
@@ -1510,10 +1523,20 @@ func copyNonGCMetadata(dst, src map[string]string) {
 
 func updateMetadataAndClose(store beads.Store, beadID string, metadata map[string]string) error {
 	status := "closed"
-	return store.Update(beadID, beads.UpdateOpts{
+	if err := store.Update(beadID, beads.UpdateOpts{
 		Status:   &status,
 		Metadata: metadata,
-	})
+	}); err != nil {
+		return err
+	}
+	bead, err := store.Get(beadID)
+	if err != nil {
+		return fmt.Errorf("verifying close of %s: %w", beadID, err)
+	}
+	if bead.Status == "closed" {
+		return nil
+	}
+	return store.Close(beadID)
 }
 
 // Note: listByWorkflowRoot, setOutcomeAndClose, propagateRetrySubjectMetadata,

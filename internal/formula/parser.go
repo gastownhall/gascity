@@ -242,6 +242,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Formula:     formula.Formula,
 		Description: formula.Description,
 		Catalog:     formula.Catalog,
+		Metadata:    cloneFormulaMetadata(formula.Metadata),
 		Contract:    formula.Contract,
 		Requires:    cloneRequirements(formula.Requires),
 		Type:        formula.Type,
@@ -294,6 +295,10 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		if !merged.Pour {
 			merged.Pour = parent.Pour
 		}
+
+		// Merge parent metadata with child and earlier parents taking
+		// precedence. Nested tables are merged recursively.
+		merged.Metadata = mergeFormulaMetadata(parent.Metadata, merged.Metadata)
 
 		// Merge parent vars (parent vars are inherited, child overrides)
 		for name, varDef := range parent.Vars {
@@ -398,6 +403,82 @@ func mergeSteps(parent, child []*Step) []*Step {
 	}
 
 	return result
+}
+
+func mergeFormulaMetadata(base, overlay map[string]any) map[string]any {
+	if len(base) == 0 {
+		return cloneFormulaMetadata(overlay)
+	}
+	if len(overlay) == 0 {
+		return cloneFormulaMetadata(base)
+	}
+
+	result := cloneFormulaMetadata(base)
+	for key, overlayValue := range overlay {
+		if baseMap, ok := formulaMetadataMap(result[key]); ok {
+			if overlayMap, ok := formulaMetadataMap(overlayValue); ok {
+				result[key] = mergeFormulaMetadata(baseMap, overlayMap)
+				continue
+			}
+		}
+		result[key] = cloneFormulaMetadataValue(overlayValue)
+	}
+	return result
+}
+
+func cloneFormulaMetadata(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	clone := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		clone[key] = cloneFormulaMetadataValue(value)
+	}
+	return clone
+}
+
+func cloneFormulaMetadataValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		return cloneFormulaMetadata(v)
+	case map[string]string:
+		clone := make(map[string]any, len(v))
+		for key, value := range v {
+			clone[key] = value
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(v))
+		for i, item := range v {
+			clone[i] = cloneFormulaMetadataValue(item)
+		}
+		return clone
+	case []string:
+		return append([]string(nil), v...)
+	case []int64:
+		return append([]int64(nil), v...)
+	case []float64:
+		return append([]float64(nil), v...)
+	case []bool:
+		return append([]bool(nil), v...)
+	default:
+		return value
+	}
+}
+
+func formulaMetadataMap(value any) (map[string]any, bool) {
+	switch v := value.(type) {
+	case map[string]any:
+		return v, true
+	case map[string]string:
+		out := make(map[string]any, len(v))
+		for key, value := range v {
+			out[key] = value
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 // mergeComposeRules merges two compose rule sets.

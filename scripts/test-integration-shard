@@ -11,6 +11,9 @@ shard="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 source "$repo_root/scripts/lib/common.sh"
+# shellcheck source=lib/test-slice.sh
+source "$repo_root/scripts/lib/test-slice.sh"
+gc_test_slice_reexec "$repo_root/scripts/test-integration-shard" "$@"
 
 timeout="${GO_TEST_TIMEOUT:-30m}"
 pkg="./test/integration"
@@ -277,7 +280,7 @@ run_rest_full_shard_modulo() {
   local excluded excluded_name test_name
 
   excluded=""
-  for excluded_name in "${formula_tests[@]}" "${rest_smoke_tests[@]}" TestBdStoreConformance; do
+  for excluded_name in "${formula_tests[@]}" "${rest_smoke_tests[@]}" TestBdStoreConformance TestBdStoreMailWispInsert; do
     excluded+="${excluded_name}"$'\n'
   done
 
@@ -353,7 +356,7 @@ case "$shard" in
     run_pkg_tests "$pkg" "${review_formulas_recovery_tests[@]}"
     ;;
   bdstore)
-    run_pkg_tests "$pkg" TestBdStoreConformance
+    run_pkg_tests "$pkg" TestBdStoreConformance TestBdStoreMailWispInsert
     ;;
   rest-smoke)
     run_rest_smoke_shard

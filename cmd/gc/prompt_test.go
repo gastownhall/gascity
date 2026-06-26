@@ -2,16 +2,50 @@ package main
 
 import (
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	gascitypacks "github.com/gastownhall/gascity-packs"
+
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 const formulaFilesystemSearchGuidance = "**Never use wide filesystem searches when a CLI command exists.**"
+
+// materializeEmbeddedGastownPack writes the module-embedded gastown pack
+// (the exact bytes the gc binary bundles) to a t.TempDir()-rooted directory
+// and returns the pack root (pack.toml at top level). The checked-in
+// example no longer carries a pack copy — the pack arrives via the pinned
+// public import — so pack-content tests run against the embedded bytes,
+// with the same file modes the runtime materializer applies.
+func materializeEmbeddedGastownPack(t *testing.T) string {
+	t.Helper()
+	src := gascitypacks.Gastown()
+	root := filepath.Join(t.TempDir(), "gastown")
+	err := fs.WalkDir(src, ".", func(rel string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		dst := filepath.Join(root, filepath.FromSlash(rel))
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
+		data, err := fs.ReadFile(src, rel)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dst, data, builtinpacks.MaterializedFileMode(rel))
+	})
+	if err != nil {
+		t.Fatalf("materializing embedded gastown pack: %v", err)
+	}
+	return root
+}
 
 func TestRenderPromptEmptyPath(t *testing.T) {
 	f := fsys.NewFake()
@@ -769,11 +803,7 @@ func TestRenderPromptGlobalAndPerAgent(t *testing.T) {
 }
 
 func TestRenderPromptGastownDogPromptHasRequiredSharedTemplates(t *testing.T) {
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("filepath.Abs(repo root): %v", err)
-	}
-	gastownDir := filepath.Join(repoRoot, "examples", "gastown", "packs", "gastown")
+	gastownDir := materializeEmbeddedGastownPack(t)
 	promptPath := filepath.Join(gastownDir, "agents", "dog", "prompt.template.md")
 
 	raw, err := os.ReadFile(promptPath)
@@ -810,15 +840,18 @@ func TestFormulaFilesystemSearchGuidanceCoversPromptSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("filepath.Abs(repo root): %v", err)
 	}
+	gastownDir := materializeEmbeddedGastownPack(t)
 
-	paths := []string{
-		"examples/gastown/packs/gastown/template-fragments/following-mol.template.md",
-		"internal/bootstrap/packs/core/assets/prompts/pool-worker.md",
-		"internal/bootstrap/packs/core/assets/prompts/graph-worker.md",
+	paths := map[string]string{
+		"embedded gastown pack/template-fragments/following-mol.template.md": filepath.Join(
+			gastownDir, "template-fragments", "following-mol.template.md"),
+		"internal/bootstrap/packs/core/assets/prompts/pool-worker.md": filepath.Join(
+			repoRoot, "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.md"),
+		"internal/bootstrap/packs/core/assets/prompts/graph-worker.md": filepath.Join(
+			repoRoot, "internal", "bootstrap", "packs", "core", "assets", "prompts", "graph-worker.md"),
 	}
-	for _, rel := range paths {
+	for rel, path := range paths {
 		t.Run(rel, func(t *testing.T) {
-			path := filepath.Join(repoRoot, rel)
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatalf("os.ReadFile(%s): %v", path, err)
@@ -874,15 +907,22 @@ func TestCoreWorkerPromptsUseHookClaimProtocol(t *testing.T) {
 		})
 	}
 
-	for _, rel := range []string{
-		"internal/bootstrap/packs/core/overlay/per-provider/kiro/AGENTS.md",
-		"internal/bootstrap/packs/core/skills/gc-work/SKILL.md",
-		"examples/gastown/packs/gastown/agents/mayor/prompt.template.md",
-		"examples/hyperscale/packs/hyperscale/agents/worker/prompt.template.md",
-		"examples/swarm/packs/swarm/agents/coder/prompt.template.md",
-	} {
+	gastownDir := materializeEmbeddedGastownPack(t)
+	staticPrompts := map[string]string{
+		"internal/bootstrap/packs/core/overlay/per-provider/kiro/AGENTS.md": filepath.Join(
+			repoRoot, "internal", "bootstrap", "packs", "core", "overlay", "per-provider", "kiro", "AGENTS.md"),
+		"internal/bootstrap/packs/core/skills/gc-work/SKILL.md": filepath.Join(
+			repoRoot, "internal", "bootstrap", "packs", "core", "skills", "gc-work", "SKILL.md"),
+		"embedded gastown pack/agents/mayor/prompt.template.md": filepath.Join(
+			gastownDir, "agents", "mayor", "prompt.template.md"),
+		"examples/hyperscale/packs/hyperscale/agents/worker/prompt.template.md": filepath.Join(
+			repoRoot, "examples", "hyperscale", "packs", "hyperscale", "agents", "worker", "prompt.template.md"),
+		"examples/swarm/packs/swarm/agents/coder/prompt.template.md": filepath.Join(
+			repoRoot, "examples", "swarm", "packs", "swarm", "agents", "coder", "prompt.template.md"),
+	}
+	for rel, path := range staticPrompts {
 		t.Run(rel, func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join(repoRoot, rel))
+			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatalf("ReadFile(%s): %v", rel, err)
 			}

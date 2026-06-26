@@ -18,13 +18,13 @@
     "userPromptSubmitted": [
       {
         "type": "command",
-        "bash": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc nudge drain --inject",
-        "timeoutSec": 10
+        "bash": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject",
+        "timeoutSec": 30
       },
       {
         "type": "command",
-        "bash": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc mail check --inject",
-        "timeoutSec": 10
+        "bash": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject",
+        "timeoutSec": 30
       }
     ]
   }

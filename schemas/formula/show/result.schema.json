@@ -24,6 +24,10 @@
     "description": {
       "type": "string"
     },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    },
     "phase": {
       "type": "string"
     },

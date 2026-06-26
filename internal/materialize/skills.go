@@ -50,15 +50,16 @@ import (
 // vendorSinks maps an agent provider to the relative directory under the
 // agent's scope-root or session WorkDir where skills are materialized.
 //
-// Only the four providers with verified skill-reading behavior are
-// included. The other four providers recognized by hooks.go (copilot,
-// cursor, pi, omp) intentionally have no entry — VendorSink returns
-// ok=false so the caller can log a single skip line per session.
+// Only the providers with verified skill-reading behavior are included.
+// The other providers recognized by hooks.go (copilot, cursor, pi, omp)
+// intentionally have no entry — VendorSink returns ok=false so the caller
+// can log a single skip line per session.
 var vendorSinks = map[string]string{
 	"claude":   ".claude/skills",
 	"codex":    ".codex/skills",
 	"gemini":   ".gemini/skills",
 	"opencode": ".opencode/skills",
+	"mimocode": ".mimocode/skills",
 }
 
 // VendorSink returns the sink subdirectory for a provider, relative to

@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,49 @@ import (
 
 	beadslib "github.com/steveyegge/beads"
 )
+
+// rawDBGetter matches beadslib's internal storage.RawDBAccessor without
+// importing its internal package. DoltStore satisfies this interface.
+type rawDBGetter interface {
+	DB() *sql.DB
+}
+
+// idDefaultRepairTables lists the char(36) id columns whose DEFAULT (uuid())
+// some Dolt versions silently strip from the expression default that beads
+// migrations add via PREPARE/EXECUTE. Without the default, beadslib INSERTs
+// that never supply id fail with "Field 'id' doesn't have a default value":
+//   - dependencies: DepAdd (migration 0043)
+//   - events / wisp_events: RecordEventInTable, reached when gc stamps
+//     metadata (e.g. gc.routed_to during sling) on a non-ephemeral bead.
+var idDefaultRepairTables = []string{"dependencies", "events", "wisp_events"}
+
+// repairIDDefault ensures table.id has DEFAULT (uuid()). It is idempotent and
+// tolerant of an absent table (e.g. wisp_events): it checks INFORMATION_SCHEMA
+// and only issues the ALTER when the id column exists without a default.
+//
+//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+func repairIDDefault(db *sql.DB, table string) error {
+	var idCols, withDefault int
+	err := db.QueryRow(`
+		SELECT COUNT(*), COUNT(COLUMN_DEFAULT)
+		FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE()
+		  AND TABLE_NAME = ?
+		  AND COLUMN_NAME = 'id'
+	`, table).Scan(&idCols, &withDefault)
+	if err != nil {
+		return fmt.Errorf("checking %s.id default: %w", table, err)
+	}
+	if idCols == 0 || withDefault > 0 {
+		// Table/column absent, or the default is already present.
+		return nil
+	}
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())", table))
+	if err != nil {
+		return fmt.Errorf("repairing %s.id default: %w", table, err)
+	}
+	return nil
+}
 
 const nativeDoltStoreActor = "gascity"
 
@@ -162,6 +206,15 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 	if err != nil {
 		_ = storage.Close()
 		return nil, fmt.Errorf("reading native issue prefix: %w", err)
+	}
+	if accessor, ok := storage.(rawDBGetter); ok {
+		for _, table := range idDefaultRepairTables {
+			if repairErr := repairIDDefault(accessor.DB(), table); repairErr != nil {
+				// Log but don't fail: the error will surface on the first
+				// DepAdd / event-recording write against the affected table.
+				fmt.Fprintf(os.Stderr, "WARNING: gc beads: %v\n", repairErr)
+			}
+		}
 	}
 	return newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix), nil
 }
@@ -364,7 +417,7 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 
 		return nil
 	}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
 
 	result := &GraphApplyResult{IDs: keyToID}
@@ -448,41 +501,125 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
 	err = storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
-		if opts.ParentID != nil {
-			if err := s.validateUpdateParent(ctx, tx, *opts.ParentID); err != nil {
-				return err
-			}
-		}
-		updates, err := s.nativeUpdates(ctx, tx, id, opts)
-		if err != nil {
-			return err
-		}
-		if len(updates) > 0 {
-			if err := tx.UpdateIssue(ctx, id, updates, s.actor); err != nil {
-				return nativeStoreError(id, err)
-			}
-		}
-		for _, label := range opts.Labels {
-			if err := tx.AddLabel(ctx, id, label, s.actor); err != nil {
-				return nativeStoreError(id, err)
-			}
-		}
-		for _, label := range opts.RemoveLabels {
-			if err := tx.RemoveLabel(ctx, id, label, s.actor); err != nil {
-				return nativeStoreError(id, err)
-			}
-		}
-		if opts.ParentID != nil {
-			if err := s.updateParentInTransaction(ctx, tx, id, *opts.ParentID); err != nil {
-				return err
-			}
-		}
-		return nil
+		return s.applyUpdateInTx(ctx, tx, id, opts)
 	})
 	if err != nil {
 		return nativeStoreError(id, err)
 	}
 	return nil
+}
+
+// applyUpdateInTx applies an Update against an open beadslib transaction. It is
+// shared by the standalone Update (one op, one commit) and the multi-write
+// Store.Tx path (many ops, one commit) so both routes have identical semantics.
+func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Transaction, id string, opts UpdateOpts) error {
+	if opts.ParentID != nil {
+		if err := s.validateUpdateParent(ctx, tx, *opts.ParentID); err != nil {
+			return err
+		}
+	}
+	updates, err := s.nativeUpdates(ctx, tx, id, opts)
+	if err != nil {
+		return err
+	}
+	if len(updates) > 0 {
+		if err := tx.UpdateIssue(ctx, id, updates, s.actor); err != nil {
+			return nativeStoreError(id, err)
+		}
+	}
+	for _, label := range opts.Labels {
+		if err := tx.AddLabel(ctx, id, label, s.actor); err != nil {
+			return nativeStoreError(id, err)
+		}
+	}
+	for _, label := range opts.RemoveLabels {
+		if err := tx.RemoveLabel(ctx, id, label, s.actor); err != nil {
+			return nativeStoreError(id, err)
+		}
+	}
+	if opts.ParentID != nil {
+		if err := s.updateParentInTransaction(ctx, tx, id, *opts.ParentID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applySetMetadataBatchInTx merges metadata onto a bead within an open
+// transaction. Mirrors SetMetadataBatch, sharing the read-modify-write path so
+// the Store.Tx route coalesces with sibling writes into a single commit.
+func (s *NativeDoltStore) applySetMetadataBatchInTx(ctx context.Context, tx beadslib.Transaction, id string, kvs map[string]string) error {
+	if len(kvs) == 0 {
+		return nil
+	}
+	issue, err := tx.GetIssue(ctx, id)
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	if issue == nil {
+		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	}
+	metadata, err := metadataMapFromNative(issue.Metadata)
+	if err != nil {
+		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
+	}
+	if metadata == nil {
+		metadata = make(map[string]string, len(kvs))
+	}
+	for k, v := range kvs {
+		metadata[k] = v
+	}
+	raw, err := metadataRawFromMap(metadata)
+	if err != nil {
+		return err
+	}
+	return nativeStoreError(id, tx.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
+}
+
+// applyCloseInTx closes a bead within an open transaction, mirroring Close.
+// Closing an already-closed bead is a no-op; a missing bead is ErrNotFound.
+func (s *NativeDoltStore) applyCloseInTx(ctx context.Context, tx beadslib.Transaction, id string) error {
+	current, err := tx.GetIssue(ctx, id)
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	if current == nil {
+		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	}
+	if current.Status == beadslib.StatusClosed {
+		return nil
+	}
+	reason := nativeCloseReasonFromIssue(current)
+	return nativeStoreError(id, tx.CloseIssue(ctx, id, reason, s.actor, ""))
+}
+
+// applyCreateInTx creates a bead and its dependencies within an open
+// transaction. Unlike the standalone Create, no compensation is needed: a
+// mid-create failure rolls the whole transaction back.
+func (s *NativeDoltStore) applyCreateInTx(ctx context.Context, tx beadslib.Transaction, b Bead) (Bead, error) {
+	issue, err := nativeIssueFromBead(b)
+	if err != nil {
+		return Bead{}, err
+	}
+	deps := cloneNativeDependencies(issue.Dependencies)
+	issue.Dependencies = nil
+	if err := tx.CreateIssue(ctx, issue, s.actor); err != nil {
+		return Bead{}, err
+	}
+	for _, dep := range deps {
+		if dep == nil {
+			continue
+		}
+		persisted := *dep
+		if strings.TrimSpace(persisted.IssueID) == "" {
+			persisted.IssueID = issue.ID
+		}
+		if err := tx.AddDependency(ctx, &persisted, s.actor); err != nil {
+			return Bead{}, fmt.Errorf("persisting native create dependency %q -> %q: %w", persisted.IssueID, persisted.DependsOnID, nativeStoreError(persisted.IssueID, err))
+		}
+	}
+	issue.Dependencies = deps
+	return beadFromNativeIssue(issue)
 }
 
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
@@ -812,14 +949,55 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
 }
 
-// Tx executes fn sequentially against the native Dolt store.
-func (s *NativeDoltStore) Tx(_ string, fn func(Tx) error) error {
-	_, release, err := s.acquireStorage()
+// Tx executes fn inside a single native Dolt transaction so every write in the
+// callback shares one DOLT_COMMIT. This is the coalescing path that lets a
+// caller (e.g. an extmsg bind) issue several bead writes at the cost of one
+// commit instead of one per write.
+func (s *NativeDoltStore) Tx(commitMsg string, fn func(Tx) error) error {
+	if fn == nil {
+		return errors.New("beads tx: nil callback")
+	}
+	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
 	}
-	release()
-	return runSequentialTx(s, fn)
+	defer release()
+	ctx, cancel := nativeDoltOperationContext(context.TODO())
+	defer cancel()
+	if strings.TrimSpace(commitMsg) == "" {
+		commitMsg = "gc: tx"
+	}
+	return storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+		return fn(&nativeDoltTx{store: s, ctx: ctx, tx: tx})
+	})
+}
+
+// nativeDoltTx adapts the Store.Tx write surface onto an open beadslib
+// transaction. Every method routes through the store's applyXInTx helpers so
+// transactional and standalone writes share one implementation.
+type nativeDoltTx struct {
+	store *NativeDoltStore
+	ctx   context.Context
+	tx    beadslib.Transaction
+}
+
+func (t *nativeDoltTx) Create(b Bead) (Bead, error) {
+	return t.store.applyCreateInTx(t.ctx, t.tx, b)
+}
+
+func (t *nativeDoltTx) Update(id string, opts UpdateOpts) error {
+	if err := t.store.applyUpdateInTx(t.ctx, t.tx, id, opts); err != nil {
+		return nativeStoreError(id, err)
+	}
+	return nil
+}
+
+func (t *nativeDoltTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	return t.store.applySetMetadataBatchInTx(t.ctx, t.tx, id, kvs)
+}
+
+func (t *nativeDoltTx) Close(id string) error {
+	return t.store.applyCloseInTx(t.ctx, t.tx, id)
 }
 
 // Delete permanently removes a bead from the upstream beads storage layer.

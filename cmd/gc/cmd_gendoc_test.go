@@ -40,9 +40,13 @@ func TestGenDocProducesMarkdown(t *testing.T) {
 		t.Error("hidden command gen-doc should not appear")
 	}
 
-	// Check basic structure.
-	if !strings.Contains(out, "# CLI Reference") {
-		t.Error("missing CLI Reference header")
+	// Check basic structure: frontmatter title, never a body H1 (Mintlify
+	// renders the title; a body H1 would duplicate it).
+	if !strings.Contains(out, `title: "CLI Reference"`) {
+		t.Error("missing CLI Reference frontmatter title")
+	}
+	if strings.Contains(out, "# CLI Reference") {
+		t.Error("body H1 duplicates the frontmatter title")
 	}
 	if !strings.Contains(out, "Auto-generated") {
 		t.Error("missing auto-generated note")
@@ -68,6 +72,8 @@ func TestGenDocImportAddDocumentsSourceLanes(t *testing.T) {
 		"remote GitHub repository subpaths",
 		"Registry catalog handles are lookup shortcuts",
 		"source and optional version",
+		"local binding name",
+		"display/advisory metadata",
 	} {
 		if !strings.Contains(section, want) {
 			t.Fatalf("gc import add docs missing %q:\n%s", want, section)

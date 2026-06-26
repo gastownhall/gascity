@@ -4393,3 +4393,148 @@ func TestRouteMailCount_StaleBannerOver30s(t *testing.T) {
 		t.Errorf("stdout missing stale banner:\n%s", stdout.String())
 	}
 }
+
+// --- cmdMailSend positional body regression tests (#3331) ---
+
+// mailSendTestCity creates a temp city and registers a session bead with the
+// given alias so it can act as a mail recipient. Returns the city path.
+func mailSendTestCity(t *testing.T, alias string) string {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: "test-city/" + alias,
+			"alias":                      alias,
+			"session_name":               alias + "-session",
+		},
+	}); err != nil {
+		t.Fatalf("Create session bead for %q: %v", alias, err)
+	}
+	return cityPath
+}
+
+// mailSendTestFindMessage lists message beads in the city store and returns the
+// first one found, failing if none exist.
+func mailSendTestFindMessage(t *testing.T, cityPath string) beads.Bead {
+	t.Helper()
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt after send: %v", err)
+	}
+	all, err := store.List(beads.ListQuery{Type: "message", Status: "open", TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("List messages: %v", err)
+	}
+	if len(all) > 0 {
+		return all[0]
+	}
+	t.Fatalf("message bead not found; total beads = %d", len(all))
+	return beads.Bead{}
+}
+
+func TestCmdMailSendPositionalBodyHonouredWhenSubjectFlagSet(t *testing.T) {
+	// Regression for #3331: positional body after recipient was silently dropped
+	// when -s was set but -m was absent.
+	cityPath := mailSendTestCity(t, "mayor")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	msg := mailSendTestFindMessage(t, cityPath)
+	if msg.Title != "subject" {
+		t.Errorf("Title = %q, want %q", msg.Title, "subject")
+	}
+	if msg.Description != "positional body" {
+		t.Errorf("Description = %q, want %q (positional body was dropped)", msg.Description, "positional body")
+	}
+}
+
+func TestCmdMailSendFlagBodyWinsOverPositional(t *testing.T) {
+	// When both -m and a positional body are present, -m wins.
+	cityPath := mailSendTestCity(t, "mayor")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "flag body", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	msg := mailSendTestFindMessage(t, cityPath)
+	if msg.Description != "flag body" {
+		t.Errorf("Description = %q, want %q (-m flag body should win)", msg.Description, "flag body")
+	}
+}
+
+func TestCmdMailSendNoBodyStillWorks(t *testing.T) {
+	// No positional body and no -m flag: empty body is valid.
+	cityPath := mailSendTestCity(t, "mayor")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"mayor/"}, false, false, "controller", "", "subject", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	msg := mailSendTestFindMessage(t, cityPath)
+	if msg.Title != "subject" {
+		t.Errorf("Title = %q, want %q", msg.Title, "subject")
+	}
+	if msg.Description != "" {
+		t.Errorf("Description = %q, want empty", msg.Description)
+	}
+}
+
+func TestCmdMailSendAllPositionalBodyHonouredWhenSubjectFlagSet(t *testing.T) {
+	// Regression for #3331 --all arm: positional body dropped when -s set but -m absent.
+	cityPath := mailSendTestCity(t, "worker")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"positional body"}, false, true, "controller", "", "subject", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend --all = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	msg := mailSendTestFindMessage(t, cityPath)
+	if msg.Title != "subject" {
+		t.Errorf("Title = %q, want %q", msg.Title, "subject")
+	}
+	if msg.Description != "positional body" {
+		t.Errorf("Description = %q, want %q (--all positional body was dropped)", msg.Description, "positional body")
+	}
+}
+
+func TestCmdMailSendAllFlagBodyWinsOverPositional(t *testing.T) {
+	// When both -m and a positional body are present with --all, -m wins.
+	cityPath := mailSendTestCity(t, "worker")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"positional body"}, false, true, "controller", "", "subject", "flag body", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend --all = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	msg := mailSendTestFindMessage(t, cityPath)
+	if msg.Description != "flag body" {
+		t.Errorf("Description = %q, want %q (--all -m flag body should win over positional)", msg.Description, "flag body")
+	}
+}

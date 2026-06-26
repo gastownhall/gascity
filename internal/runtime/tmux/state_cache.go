@@ -62,6 +62,13 @@ type processSnapshot struct {
 type runtimeStateSnapshot struct {
 	Sessions  map[string]sessionRuntimeState
 	Processes processSnapshot
+	// ProcessesAvailable reports whether the OS process-table snapshot was
+	// fetched successfully. tmux list-panes establishes session liveness on its
+	// own; the process snapshot is only a secondary refinement (matching pane
+	// PIDs to processNames). When the full-OS ps scan loses the CPU race to a
+	// busy fleet it is marked unavailable rather than discarding the
+	// authoritative tmux liveness, and processAlive degrades optimistically.
+	ProcessesAvailable bool
 }
 
 // StateCache caches tmux runtime state to avoid spawning N subprocess calls per
@@ -260,9 +267,19 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	}
 	processes, err := fetchProcessSnapshot(ctx)
 	if err != nil {
-		return runtimeStateSnapshot{}, err
+		// Degrade, do NOT discard: tmux list-panes above already established
+		// session liveness. The process snapshot is a secondary refinement
+		// (matching pane PIDs to processNames). A full-OS ps scan that loses the
+		// CPU race to a busy/KO fleet must never throw away authoritative tmux
+		// liveness — that is what was starving the controller's reconcile and
+		// cold-pool-spawner. Keep the sessions; mark process detail unavailable
+		// so processAlive degrades optimistically instead of reporting dead.
+		log.Printf("tmux state cache: process snapshot degraded, retaining tmux session liveness: %v", err)
+		state.ProcessesAvailable = false
+		return state, nil
 	}
 	state.Processes = processes
+	state.ProcessesAvailable = true
 	return state, nil
 }
 
@@ -274,6 +291,13 @@ func (s runtimeStateSnapshot) processAlive(sessionName string, processNames []st
 	names := processNameSet(processNames)
 	if len(names) == 0 {
 		return false
+	}
+	if !s.ProcessesAvailable {
+		// The OS process snapshot failed (e.g. the ps scan timed out under
+		// fleet load). tmux confirms the session/pane is alive; we cannot verify
+		// the inner process, so degrade optimistically rather than report it
+		// dead. A failed secondary probe must never trigger a reap/respawn.
+		return true
 	}
 	for _, pane := range session.Panes {
 		if pane.processAlive(names, s.Processes) {

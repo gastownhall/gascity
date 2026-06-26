@@ -92,7 +92,6 @@ stdout 'missing-root'
 [workspace]
 name = "no-v2"
 provider = "claude"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [providers.claude]
 base = "builtin:claude"
@@ -130,7 +129,6 @@ needs = ["lane"]
 [workspace]
 name = "with-v2"
 provider = "claude"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [providers.claude]
 base = "builtin:claude"

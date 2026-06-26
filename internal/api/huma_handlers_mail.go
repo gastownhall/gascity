@@ -10,6 +10,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
 // mailReadDeadline is shorter than the API client's 10s timeout so typed
@@ -458,6 +459,7 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 	}
 
 	msg, err := mp.Send(input.Body.From, resolved, input.Body.Subject, input.Body.Body)
+	telemetry.RecordMailOp(ctx, "send", err)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		return nil, huma.Error500InternalServerError(err.Error())
@@ -603,8 +605,10 @@ func (s *Server) humaHandleMailRead(ctx context.Context, input *MailReadInput) (
 		return nil, huma.Error404NotFound("message " + id + " not found")
 	}
 	if err := mp.MarkRead(id); err != nil {
+		telemetry.RecordMailOp(ctx, "mark_read", err)
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
+	telemetry.RecordMailOp(ctx, "mark_read", nil)
 	if err := waitForMailReadState(ctx, mp, id, true); err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
@@ -626,8 +630,10 @@ func (s *Server) humaHandleMailMarkUnread(ctx context.Context, input *MailMarkUn
 		return nil, huma.Error404NotFound("message " + id + " not found")
 	}
 	if err := mp.MarkUnread(id); err != nil {
+		telemetry.RecordMailOp(ctx, "mark_unread", err)
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
+	telemetry.RecordMailOp(ctx, "mark_unread", nil)
 	if err := waitForMailReadState(ctx, mp, id, false); err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
@@ -662,7 +668,7 @@ func waitForMailReadState(ctx context.Context, mp mail.Provider, id string, want
 }
 
 // humaHandleMailArchive is the Huma-typed handler for POST /v0/mail/{id}/archive.
-func (s *Server) humaHandleMailArchive(_ context.Context, input *MailArchiveInput) (*OKResponse, error) {
+func (s *Server) humaHandleMailArchive(ctx context.Context, input *MailArchiveInput) (*OKResponse, error) {
 	id := input.ID
 	rig := input.Rig
 	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
@@ -682,8 +688,10 @@ func (s *Server) humaHandleMailArchive(_ context.Context, input *MailArchiveInpu
 			resp.Body.Status = "archived"
 			return resp, nil
 		}
+		telemetry.RecordMailOp(ctx, "archive", err)
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
+	telemetry.RecordMailOp(ctx, "archive", nil)
 	s.recordMailEvent(events.MailArchived, "api", id, resolvedRig, nil)
 	resp := &OKResponse{}
 	resp.Body.Status = "archived"
@@ -691,7 +699,7 @@ func (s *Server) humaHandleMailArchive(_ context.Context, input *MailArchiveInpu
 }
 
 // humaHandleMailReply is the Huma-typed handler for POST /v0/mail/{id}/reply.
-func (s *Server) humaHandleMailReply(_ context.Context, input *MailReplyInput) (*IndexOutput[mail.Message], error) {
+func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput) (*IndexOutput[mail.Message], error) {
 	id := input.ID
 	rig := input.Rig
 
@@ -704,6 +712,7 @@ func (s *Server) humaHandleMailReply(_ context.Context, input *MailReplyInput) (
 	}
 
 	msg, err := mp.Reply(id, input.Body.From, input.Body.Subject, input.Body.Body)
+	telemetry.RecordMailOp(ctx, "reply", err)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
@@ -717,7 +726,7 @@ func (s *Server) humaHandleMailReply(_ context.Context, input *MailReplyInput) (
 }
 
 // humaHandleMailDelete is the Huma-typed handler for DELETE /v0/mail/{id}.
-func (s *Server) humaHandleMailDelete(_ context.Context, input *MailDeleteInput) (*OKResponse, error) {
+func (s *Server) humaHandleMailDelete(ctx context.Context, input *MailDeleteInput) (*OKResponse, error) {
 	id := input.ID
 	rig := input.Rig
 	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
@@ -737,8 +746,10 @@ func (s *Server) humaHandleMailDelete(_ context.Context, input *MailDeleteInput)
 			resp.Body.Status = "deleted"
 			return resp, nil
 		}
+		telemetry.RecordMailOp(ctx, "delete", err)
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
+	telemetry.RecordMailOp(ctx, "delete", nil)
 	s.recordMailEvent(events.MailDeleted, "api", id, resolvedRig, nil)
 	resp := &OKResponse{}
 	resp.Body.Status = "deleted"

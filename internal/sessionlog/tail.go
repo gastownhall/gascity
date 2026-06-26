@@ -138,6 +138,7 @@ func splitLines(data []byte) [][]byte {
 type tailEntry struct {
 	Type    string          `json:"type"`
 	Subtype string          `json:"subtype,omitempty"`
+	UUID    string          `json:"uuid"`
 	Message json.RawMessage `json:"message"`
 }
 
@@ -252,10 +253,15 @@ func unwrapJSONString(raw json.RawMessage) json.RawMessage {
 
 // assistantMessage is the structure inside the "message" field for assistant entries.
 type assistantMessage struct {
+	// ID is the provider message identifier (msg_*). Claude Code writes one
+	// assistant entry per content block of a single API response; every
+	// block entry repeats the same message ID and usage object.
+	ID    string `json:"id"`
 	Role  string `json:"role"`
 	Model string `json:"model"`
 	Usage *struct {
 		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	} `json:"usage"`

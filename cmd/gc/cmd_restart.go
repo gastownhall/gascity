@@ -15,14 +15,15 @@ import (
 func newRestartCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "restart [path]",
+		Use:   "restart [path|name]",
 		Short: "Restart all agent sessions in the city",
 		Long: `Restart the city by stopping it then starting it again.
 
 Equivalent to running "gc stop" followed by "gc start". Under supervisor
 mode this unregisters the city, then re-registers it and triggers an
 immediate reconcile.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRestartJSON(args, stdout, stderr, jsonOut) != 0 {
 				return errExit
@@ -35,27 +36,26 @@ immediate reconcile.`,
 }
 
 func cmdRestartJSON(args []string, stdout, stderr io.Writer, jsonOut bool) int {
-	nameOverride, err := restartRegistrationName(args)
+	// Resolve the city reference ONCE up front (accepting a path or a
+	// registered name) and thread the resolved PATH into both the stop and
+	// start legs, so a bare name can never re-resolve to different targets
+	// across legs.
+	cityPath, nameOverride, err := restartTarget(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	resolvedArgs := []string{cityPath}
 	restartStdout := stdout
 	if jsonOut {
 		restartStdout = io.Discard
 	}
-	if code := cmdStop(args, restartStdout, stderr, 0, false); code != 0 {
+	if code := cmdStop(resolvedArgs, restartStdout, stderr, 0, false); code != 0 {
 		return code
 	}
-	code := doStartWithNameOverride(args, false /*controllerMode*/, restartStdout, stderr, nameOverride)
+	code := doStartWithNameOverride(resolvedArgs, false /*controllerMode*/, restartStdout, stderr, nameOverride)
 	if code != 0 || !jsonOut {
 		return code
-	}
-	cityPath := ""
-	if dir, err := resolveStartDir(args); err == nil {
-		if resolved, err := requireBootstrappedCity(dir); err == nil {
-			cityPath = resolved
-		}
 	}
 	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc restart", lifecycleActionJSON{
 		Command:  "restart",
@@ -66,20 +66,26 @@ func cmdRestartJSON(args []string, stdout, stderr io.Writer, jsonOut bool) int {
 	})
 }
 
-func restartRegistrationName(args []string) (string, error) {
+// restartTarget resolves the restart argument once to the city path and its
+// registered name (empty when the city is not registered), so both the stop
+// and start legs operate on the same resolved path.
+func restartTarget(args []string) (cityPath, nameOverride string, err error) {
 	dir, err := resolveStartDir(args)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	cityPath, err := requireBootstrappedCity(dir)
+	cityPath, err = requireBootstrappedCity(dir)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	entry, registered, err := registeredCityEntry(cityPath)
-	if err != nil || !registered {
-		return "", err
+	entry, registered, lookupErr := registeredCityEntry(cityPath)
+	if lookupErr != nil {
+		return "", "", lookupErr
 	}
-	return entry.EffectiveName(), nil
+	if registered {
+		nameOverride = entry.EffectiveName()
+	}
+	return cityPath, nameOverride, nil
 }
 
 // newRigRestartCmd creates the "gc rig restart <name>" subcommand.
@@ -177,11 +183,12 @@ func doRigRestart(
 			}
 			if running {
 				targets = append(targets, stopTarget{
-					name:     sn,
-					template: a.QualifiedName(),
-					subject:  a.QualifiedName(),
-					order:    len(targets),
-					resolved: true,
+					name:      sn,
+					template:  a.QualifiedName(),
+					agentName: a.QualifiedName(),
+					subject:   a.QualifiedName(),
+					order:     len(targets),
+					resolved:  true,
 				})
 			}
 		} else {
@@ -193,11 +200,12 @@ func doRigRestart(
 			}
 			for _, ref := range refs {
 				targets = append(targets, stopTarget{
-					name:     ref.sessionName,
-					template: a.QualifiedName(),
-					subject:  ref.qualifiedInstance,
-					order:    len(targets),
-					resolved: true,
+					name:      ref.sessionName,
+					template:  a.QualifiedName(),
+					agentName: ref.qualifiedInstance,
+					subject:   ref.qualifiedInstance,
+					order:     len(targets),
+					resolved:  true,
 				})
 			}
 		}

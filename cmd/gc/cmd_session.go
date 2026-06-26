@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/telemetry"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
@@ -225,7 +226,8 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	}
 
 	// Store the canonical qualified name so the reconciler can match it
-	// via findAgentByTemplate (which compares against QualifiedName()).
+	// via findAgentByTemplate (which resolves canonical, V1 dir+name, and
+	// legacy bound identities).
 	canonicalTemplate := found.QualifiedName()
 	configuredOwner := sessionNewAliasOwner(cfg, &found)
 	reservationIDs := []string{alias, explicitName}
@@ -764,7 +766,7 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 	}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tWORKDIR\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
 	for _, s := range cr.Body {
 		state := s.State
 		if state == "" {
@@ -776,9 +778,10 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 		}
 		target := sessionViewTarget(s)
 		title := sessionViewTitle(s)
+		workDir := sessionViewWorkDir(s)
 		age := sessionViewAge(s.CreatedAt)
 		lastActive := sessionViewLastActive(s.LastActive)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, age, lastActive) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, workDir, age, lastActive) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 
@@ -810,6 +813,10 @@ func sessionViewTitle(s SessionView) string {
 		return title[:27] + "..."
 	}
 	return title
+}
+
+func sessionViewWorkDir(s SessionView) string {
+	return sessionListDisplayValue(s.WorkDir)
 }
 
 // sessionViewAge formats a CreatedAt RFC3339 string the same way the
@@ -951,7 +958,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE\tLAST NUDGE") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tWORKDIR\tAGE\tLAST ACTIVE\tLAST NUDGE") //nolint:errcheck // best-effort stdout
 	for _, s := range sessions {
 		state := string(s.State)
 		if s.State == "" {
@@ -960,6 +967,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		reason := sessionReason(s, beadIndex, cfg, cachedSP, poolDesired, readyWaitSet)
 		target := sessionListTarget(s)
 		title := sessionListTitle(s)
+		workDir := sessionListWorkDir(s)
 		age := formatDuration(time.Since(s.CreatedAt))
 		lastActive := "-"
 		if !s.LastActive.IsZero() {
@@ -969,7 +977,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		if !s.LastNudgeDeliveredAt.IsZero() {
 			lastNudge = formatDuration(time.Since(s.LastNudgeDeliveredAt)) + " ago"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, age, lastActive, lastNudge) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, workDir, age, lastActive, lastNudge) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 	return 0
@@ -1143,6 +1151,18 @@ func sessionListTitle(s session.Info) string {
 	return title
 }
 
+func sessionListWorkDir(s session.Info) string {
+	return sessionListDisplayValue(s.WorkDir)
+}
+
+func sessionListDisplayValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
 // attachmentCachingProvider wraps a runtime.Provider and caches IsAttached
 // results to avoid redundant tmux subprocess calls. wakeReasons calls
 // IsAttached per session, but cmdSessionList already queried it.
@@ -1173,6 +1193,13 @@ func (p *attachmentCachingProvider) SleepCapability(name string) runtime.Session
 		return scp.SleepCapability(name)
 	}
 	return runtime.SessionSleepCapabilityDisabled
+}
+
+func (p *attachmentCachingProvider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if rp, ok := p.Provider.(runtime.RelaunchProvider); ok {
+		return rp.Relaunch(ctx, name, cfg)
+	}
+	return runtime.ErrRelaunchUnsupported
 }
 
 func (p *attachmentCachingProvider) Pending(name string) (*runtime.PendingInteraction, error) {
@@ -2233,6 +2260,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		Message: "killed",
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "killed"),
 	})
+	recordSessionKillStop(bead, beadErr, cfg)
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:    "kill",
@@ -2245,6 +2273,24 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	}
 	fmt.Fprintf(stdout, "Session %s killed.\n", sessionID) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// recordSessionKillStop records gc.agent.stops.total for a manual
+// "gc session kill", beside the SessionStopped emission. The metric reason is
+// "killed" to match the adjacent SessionStopped event payload so operators can
+// distinguish a manual kill from an ordinary stop. Skip-on-unknown: when the
+// session bead failed to load (or carries no bounded session name) nothing is
+// recorded — an unknown identity must not become a garbage metric label.
+// Purely observational: it never influences control flow or the exit code.
+func recordSessionKillStop(bead beads.Bead, beadErr error, cfg *config.City) {
+	if beadErr != nil {
+		return
+	}
+	sessionName := strings.TrimSpace(bead.Metadata["session_name"])
+	if sessionName == "" {
+		return
+	}
+	telemetry.RecordAgentStop(context.Background(), sessionName, sessionAgentMetricIdentity(bead, cfg), "killed", nil)
 }
 
 func sessionKillRuntimeAlreadyInactive(bead beads.Bead, sp runtime.Provider) bool {

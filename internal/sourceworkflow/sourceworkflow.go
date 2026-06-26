@@ -365,11 +365,12 @@ func ListWorkflowBeads(store beads.Store, rootID string) ([]beads.Bead, error) {
 	if store == nil || rootID == "" {
 		return nil, nil
 	}
-	root, err := store.Get(rootID)
+	reader := beads.HandlesFor(store).Live
+	root, err := reader.Get(rootID)
 	if err != nil {
 		return nil, err
 	}
-	descendants, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+	descendants, err := reader.List(beads.ListQuery{
 		IncludeClosed: true,
 		Metadata: map[string]string{
 			beadmeta.RootBeadIDMetadataKey: rootID,

@@ -6,11 +6,20 @@
 # No LLM judgment needed — runs inline in the controller.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
+#
+# RPO note: BACKUP_STALE_S (default 43200 = 12h = 2x backup interval) is the
+# threshold at which backup artifact age triggers a [WARN: backup stale] advisory.
+# With 6h backup syncs and fail-closed journal corruption recovery, maximum data
+# loss on journal corruption without manual intervention is one 6h backup interval.
+# If BACKUP_STALE_S exceeds 2x the backup interval, a single missed backup cycle
+# is undetected. Keep BACKUP_STALE_S <= 2x the configured backup order
+# interval (`interval` in orders/mol-dog-backup.toml, currently 6h).
 set -euo pipefail
 
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
 . "$PACK_DIR/assets/scripts/latency.sh"
+. "$PACK_DIR/assets/scripts/advisory_state.sh"
 . "$PACK_DIR/assets/scripts/_notify.sh"
 
 PORT="$GC_DOLT_PORT"
@@ -20,16 +29,31 @@ USER="${GC_DOLT_USER:-root}"
 # precedence; otherwise derive from the legacy seconds knob (default 1s ->
 # 1000ms) for backward compatibility.
 LATENCY_WARN_MS="${GC_DOCTOR_LATENCY_WARN_MS:-$(( ${GC_DOCTOR_LATENCY_WARN_S:-1} * 1000 ))}"
-CONN_MAX="${GC_DOCTOR_CONN_MAX:-50}"
 CONN_WARN_PCT="${GC_DOCTOR_CONN_WARN_PCT:-80}"
 BACKUP_STALE_S="${GC_DOCTOR_BACKUP_STALE_S:-43200}"  # 2x 6h backup interval
 BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
+# Advisory dedup state (#3409): records the signature of the last-sent [MEDIUM]
+# advisory so a persistent condition collapses into one rolling alert instead of
+# a fresh bead every 5-min tick. DOLT_STATE_DIR is set by runtime.sh.
+ADVISORY_STATE_FILE="${GC_DOCTOR_ADVISORY_STATE_FILE:-$DOLT_STATE_DIR/doctor-advisory-state}"
 
 dolt_sql() {
     DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" \
         run_bounded 10 \
         dolt --host "$HOST" --port "$PORT" --user "$USER" --no-tls sql "$@"
 }
+
+# CONN_MAX: explicit override > server @@GLOBAL.max_connections > fallback.
+if [ -n "${GC_DOCTOR_CONN_MAX:-}" ]; then
+    CONN_MAX="$GC_DOCTOR_CONN_MAX"
+else
+    _server_max=$(dolt_sql -r csv -q "SELECT @@GLOBAL.max_connections" 2>/dev/null | tail -1 || true)
+    case "${_server_max:-}" in
+        ''|*[!0-9]*) CONN_MAX=256 ;;
+        *) CONN_MAX="$_server_max" ;;
+    esac
+    unset _server_max
+fi
 
 file_mtime() {
     file_path="$1"
@@ -138,15 +162,21 @@ if [ "${ORPHAN_COUNT:-0}" -gt 0 ]; then
 fi
 
 # Backup freshness: check newest backup artifact per database.
-# Scope mirrors mol-dog-backup.sh: only DBs with a configured <db>-backup
-# remote are eligible. Cities with user DBs but no backup remotes
-# (legitimate config) must not get false stale-backup alarms.
+# Every user database is in scope. DBs without a configured <db>-backup
+# remote are reported as a coverage gap rather than silently excluded —
+# the exclusion is how unconfigured production DBs went unbacked-up until
+# journal corruption made them unrecoverable (#3176). mol-dog-backup.sh
+# auto-configures the remote on its next run, so this warning self-heals
+# unless the backup dog itself is failing.
 BACKUP_ELIGIBLE_DBS=""
+BACKUP_STALE_ITEMS=""
 for db in $USER_DBS; do
     db_dir="$DOLT_DATA_DIR/$db"
     if [ -d "$db_dir/.dolt" ]; then
-        if (cd "$db_dir" && dolt backup 2>/dev/null | awk '{print $1}' | grep -qx "${db}-backup"); then
+        if (cd "$db_dir" && run_bounded 30 dolt backup 2>/dev/null | awk '{print $1}' | grep -qx "${db}-backup"); then
             BACKUP_ELIGIBLE_DBS="$BACKUP_ELIGIBLE_DBS $db"
+        else
+            append_backup_stale "$db backup remote missing"
         fi
     fi
 done
@@ -157,7 +187,6 @@ if [ -n "$BACKUP_ELIGIBLE_DBS" ]; then
     if [ ! -d "$BACKUP_ARTIFACT_DIR" ]; then
         BACKUP_STALE=" [WARN: backup artifact dir missing]"
     else
-        BACKUP_STALE_ITEMS=""
         NOW_S=$(date +%s)
         for db in $BACKUP_ELIGIBLE_DBS; do
             NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
@@ -170,24 +199,39 @@ if [ -n "$BACKUP_ELIGIBLE_DBS" ]; then
                 append_backup_stale "$db backup is $((BACKUP_AGE / 3600))h old"
             fi
         done
-        if [ -n "$BACKUP_STALE_ITEMS" ]; then
-            BACKUP_STALE=" [WARN: backup freshness: $BACKUP_STALE_ITEMS]"
-        fi
     fi
+fi
+if [ -n "$BACKUP_STALE_ITEMS" ]; then
+    BACKUP_STALE="$BACKUP_STALE [WARN: backup freshness: $BACKUP_STALE_ITEMS]"
 fi
 
 # --- Step 3: Compose report and escalate if critical ---
 
 WARNINGS="${LATENCY_WARN}${CONN_WARN}${ORPHAN_WARN}${BACKUP_STALE}"
 if [ -n "$WARNINGS" ]; then
-    if ! send_escalation \
-        "Dolt health advisory [MEDIUM]" \
-        "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
+    # Dedup (#3409): key on which conditions are active — not their tick-volatile
+    # values (exact latency ms, connection count, backup age) — and re-send only
+    # when that set changes. Record after a successful send so a failed
+    # escalation retries next tick. The CRITICAL "server unreachable" path above
+    # is never deduped, so a true outage always alerts.
+    ADVISORY_SIG=""
+    if [ -n "$LATENCY_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}latency "; fi
+    if [ -n "$CONN_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}conn "; fi
+    if [ -n "$ORPHAN_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}orphan "; fi
+    if [ -n "$BACKUP_STALE" ]; then ADVISORY_SIG="${ADVISORY_SIG}backup "; fi
+    if advisory_changed "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"; then
+        if send_escalation \
+            "Dolt health advisory [MEDIUM]" \
+            "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
 Connections: ${CONN_COUNT}/${CONN_MAX}${CONN_WARN}
 Disk: ${DISK_USAGE}
 Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
-        :
+            advisory_record "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"
+        fi
     fi
+else
+    # Healthy: forget the last advisory so a future condition re-alerts.
+    advisory_clear "$ADVISORY_STATE_FILE"
 fi
 
 SUMMARY="doctor — server: ok, latency: ${LATENCY_MS}ms, conns: ${CONN_COUNT}/${CONN_MAX}, disk: ${DISK_USAGE}, orphans: ${ORPHAN_COUNT}"

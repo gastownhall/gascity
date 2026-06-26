@@ -332,8 +332,61 @@ func TestHandleOutbound_BindingMismatchRejected(t *testing.T) {
 	if len(adapter.publishs) != 0 {
 		t.Fatalf("adapter publishes = %d, want 0 on rejection", len(adapter.publishs))
 	}
-	if len(*captured) != 0 {
-		t.Fatalf("captured events = %d, want 0 on rejection", len(*captured))
+	// The rejection is no longer silent: a structured mismatch warning fires
+	// so the cross-wire is observable (RCA gc-5aie6). No outbound event,
+	// because nothing was published.
+	if len(*captured) != 1 {
+		t.Fatalf("captured events = %d, want 1 (mismatch warning) on rejection", len(*captured))
+	}
+	ev := (*captured)[0]
+	if ev.Type != events.ExtMsgOutboundChannelMismatch {
+		t.Fatalf("event type = %q, want %q", ev.Type, events.ExtMsgOutboundChannelMismatch)
+	}
+	if ev.Subject != "sess-other" {
+		t.Fatalf("event subject = %q, want sess-other (the posting session)", ev.Subject)
+	}
+	payload, ok := ev.Payload.(OutboundChannelMismatchPayload)
+	if !ok {
+		t.Fatalf("event payload type = %T, want OutboundChannelMismatchPayload", ev.Payload)
+	}
+	if payload.PostingSession != "sess-other" {
+		t.Fatalf("payload.PostingSession = %q, want sess-other", payload.PostingSession)
+	}
+	if payload.OwnerSession != "sess-owner" {
+		t.Fatalf("payload.OwnerSession = %q, want sess-owner", payload.OwnerSession)
+	}
+	if payload.ConversationID != ref.ConversationID {
+		t.Fatalf("payload.ConversationID = %q, want %q", payload.ConversationID, ref.ConversationID)
+	}
+}
+
+// TestHandleOutbound_OwnBindingNoMismatchEvent confirms the mismatch warning
+// is scoped to genuine cross-wires: a session publishing into the channel it
+// owns emits only the normal outbound event, never a mismatch warning.
+func TestHandleOutbound_OwnBindingNoMismatchEvent(t *testing.T) {
+	freezeTestClock(t)
+	fabric, _, captured, deps := newOutboundTestRig(t)
+	ref := testConversationRef()
+
+	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
+		Conversation: ref,
+		SessionID:    "sess-owner",
+		Now:          testNow(),
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	if _, err := HandleOutbound(context.Background(), deps, testControllerCaller(), OutboundRequest{
+		SessionID:    "sess-owner",
+		Conversation: ref,
+		Text:         "hello",
+	}); err != nil {
+		t.Fatalf("HandleOutbound: %v", err)
+	}
+	for _, ev := range *captured {
+		if ev.Type == events.ExtMsgOutboundChannelMismatch {
+			t.Fatalf("unexpected mismatch warning on own-channel publish: %#v", ev)
+		}
 	}
 }
 

@@ -21,7 +21,7 @@ import (
 
 func TestFormulaCommands(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	t.Run("List_GastownCity_ShowsFormulas", func(t *testing.T) {
 		out, err := c.GC("formula", "list")
@@ -71,7 +71,7 @@ func TestFormulaCommands(t *testing.T) {
 
 	t.Run("List_TutorialCity", func(t *testing.T) {
 		tc := helpers.NewCity(t, testEnv)
-		tc.Init("claude")
+		tc.InitNoStart("claude")
 
 		out, err := tc.GC("formula", "list")
 		if err != nil {

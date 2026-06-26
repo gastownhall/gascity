@@ -172,6 +172,59 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 	}
 }
 
+func TestResolveProviderOptionsSchemaByKeyMergesChoices(t *testing.T) {
+	base := BasePrefixBuiltin + "codex"
+	providers := map[string]ProviderSpec{
+		"codex": {
+			Base:               &base,
+			OptionsSchemaMerge: "by_key",
+			OptionDefaults: map[string]string{
+				"effort": "low",
+				"model":  "gpt-5.4-mini",
+			},
+			OptionsSchema: []ProviderOption{{
+				Key:     "model",
+				Label:   "Model",
+				Type:    "select",
+				Default: "",
+				Choices: []OptionChoice{{
+					Value:       "gpt-5.4-mini",
+					Label:       "GPT-5.4 Mini",
+					FlagArgs:    []string{"--model", "gpt-5.4-mini"},
+					FlagAliases: [][]string{{"-m", "gpt-5.4-mini"}},
+				}},
+			}},
+		},
+	}
+
+	defaultResolved, err := ResolveProvider(&Agent{Name: "worker"}, &Workspace{Provider: "codex"}, providers, lookPathOnly("codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider default agent: %v", err)
+	}
+	defaultArgs := strings.Join(defaultResolved.ResolveDefaultArgs(), " ")
+	if !strings.Contains(defaultArgs, "--model gpt-5.4-mini") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing city-added default model", defaultResolved.ResolveDefaultArgs())
+	}
+
+	optInAgent := &Agent{
+		Name: "polecat",
+		OptionDefaults: map[string]string{
+			"model": "gpt-5.5",
+		},
+	}
+	optInResolved, err := ResolveProvider(optInAgent, &Workspace{Provider: "codex"}, providers, lookPathOnly("codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider opt-in agent: %v", err)
+	}
+	optInArgs := strings.Join(optInResolved.ResolveDefaultArgs(), " ")
+	if !strings.Contains(optInArgs, "--model gpt-5.5") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing preserved built-in opt-in model", optInResolved.ResolveDefaultArgs())
+	}
+	if strings.Contains(optInArgs, "gpt-5.4-mini") {
+		t.Fatalf("ResolveDefaultArgs() = %v, default model survived agent override", optInResolved.ResolveDefaultArgs())
+	}
+}
+
 func TestResolveProviderRequiresExplicitBuiltinCatalogEntry(t *testing.T) {
 	agent := &Agent{Name: "worker", Provider: "claude"}
 	_, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
@@ -190,7 +243,7 @@ func TestAgentProcessNamesResolvesExplicitProvider(t *testing.T) {
 	}
 
 	got := AgentProcessNames(cfg, Agent{Name: "worker"}, lookPathOnly("codex"))
-	want := []string{"codex"}
+	want := []string{"codex", "codex-raw"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("AgentProcessNames() = %v, want %v", got, want)
 	}
@@ -1152,10 +1205,10 @@ func TestResolveProviderChainLeafArgsOverrideInheritedCodexDefaults(t *testing.T
 			Args: []string{
 				"run", "codex", "--",
 				"--dangerously-bypass-approvals-and-sandbox",
-				"-m", "gpt-5.3-codex-spark",
+				"-m", "gpt-5.3-codex",
 				"-c", "model_reasoning_effort=\"medium\"",
 			},
-			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume {{.SessionKey}}",
 		},
 	}
 	agent := &Agent{Name: "codex-min", Provider: "codex-mini"}
@@ -1167,8 +1220,8 @@ func TestResolveProviderChainLeafArgsOverrideInheritedCodexDefaults(t *testing.T
 	if !reflect.DeepEqual(resolved.Args, wantArgs) {
 		t.Fatalf("Args = %v, want %v", resolved.Args, wantArgs)
 	}
-	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
-		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex-spark", got)
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex", got)
 	}
 	if got := resolved.EffectiveDefaults["effort"]; got != "medium" {
 		t.Fatalf("EffectiveDefaults[effort] = %q, want medium", got)
@@ -1183,8 +1236,8 @@ func TestResolveProviderChainLeafArgsOverrideInheritedCodexDefaults(t *testing.T
 	if strings.Contains(command, "gpt-5.5") {
 		t.Fatalf("resolved launch command = %q, inherited max model leaked into mini provider", command)
 	}
-	if strings.Count(command, "gpt-5.3-codex-spark") != 1 {
-		t.Fatalf("resolved launch command = %q, want one spark model flag", command)
+	if strings.Count(command, "gpt-5.3-codex") != 1 {
+		t.Fatalf("resolved launch command = %q, want one Codex model flag", command)
 	}
 	if strings.Count(command, "model_reasoning_effort=medium") != 1 {
 		t.Fatalf("resolved launch command = %q, want one medium effort flag", command)
@@ -1202,7 +1255,7 @@ func TestResolveProviderExplicitBaseArgsOverrideSameLayerOptionDefaults(t *testi
 			Base: &builtinCodex,
 			Args: []string{
 				"-m",
-				"gpt-5.3-codex-spark",
+				"gpt-5.3-codex",
 			},
 			OptionDefaults: map[string]string{
 				"model": "gpt-5.5",
@@ -1215,14 +1268,14 @@ func TestResolveProviderExplicitBaseArgsOverrideSameLayerOptionDefaults(t *testi
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
-	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
-		t.Fatalf("EffectiveDefaults[model] = %q, want args-inferred gpt-5.3-codex-spark", got)
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want args-inferred gpt-5.3-codex", got)
 	}
 	defaultLine := strings.Join(resolved.ResolveDefaultArgs(), " ")
 	if strings.Contains(defaultLine, "gpt-5.5") {
 		t.Fatalf("ResolveDefaultArgs() = %v, preserved stale same-layer option_defaults", resolved.ResolveDefaultArgs())
 	}
-	if !strings.Contains(defaultLine, "gpt-5.3-codex-spark") {
+	if !strings.Contains(defaultLine, "gpt-5.3-codex") {
 		t.Fatalf("ResolveDefaultArgs() = %v, missing args-inferred model", resolved.ResolveDefaultArgs())
 	}
 }
@@ -1242,7 +1295,7 @@ func TestResolveProviderChainChildOptionDefaultsBeatInheritedArgs(t *testing.T) 
 		"codex-mini": {
 			Base: basePtr("codex-base"),
 			OptionDefaults: map[string]string{
-				"model": "gpt-5.3-codex-spark",
+				"model": "gpt-5.3-codex",
 			},
 		},
 	}
@@ -1250,8 +1303,8 @@ func TestResolveProviderChainChildOptionDefaultsBeatInheritedArgs(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ResolveProviderChain: %v", err)
 	}
-	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
-		t.Fatalf("EffectiveDefaults[model] = %q, want child option default gpt-5.3-codex-spark", got)
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want child option default gpt-5.3-codex", got)
 	}
 	if strings.Contains(strings.Join(resolved.ResolveDefaultArgs(), " "), "gpt-5.5") {
 		t.Fatalf("ResolveDefaultArgs() = %v, inherited parent arg overrode child option_defaults", resolved.ResolveDefaultArgs())
@@ -1271,7 +1324,7 @@ func TestResolveProviderChainArgsAppendInfersSchemaDefaults(t *testing.T) {
 			Base: basePtr("codex-wrapper"),
 			ArgsAppend: []string{
 				"-m",
-				"gpt-5.3-codex-spark",
+				"gpt-5.3-codex",
 			},
 		},
 	}
@@ -1284,11 +1337,11 @@ func TestResolveProviderChainArgsAppendInfersSchemaDefaults(t *testing.T) {
 	if !reflect.DeepEqual(resolved.Args, wantArgs) {
 		t.Fatalf("Args = %v, want schema-managed args_append stripped to %v", resolved.Args, wantArgs)
 	}
-	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
-		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex-spark", got)
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex", got)
 	}
 	defaultLine := strings.Join(resolved.ResolveDefaultArgs(), " ")
-	if !strings.Contains(defaultLine, "--model gpt-5.3-codex-spark") {
+	if !strings.Contains(defaultLine, "--model gpt-5.3-codex") {
 		t.Fatalf("ResolveDefaultArgs() = %v, missing args_append-inferred model", resolved.ResolveDefaultArgs())
 	}
 	optKeys := resolved.Provenance.MapKeyLayer["option_defaults"]
@@ -1318,7 +1371,7 @@ func TestResolveProviderChainSchemaOnlyChildArgsReplaceInheritedArgs(t *testing.
 			Base: basePtr("codex-wrapper"),
 			Args: []string{
 				"-m",
-				"gpt-5.3-codex-spark",
+				"gpt-5.3-codex",
 			},
 		},
 	}
@@ -1333,8 +1386,8 @@ func TestResolveProviderChainSchemaOnlyChildArgsReplaceInheritedArgs(t *testing.
 	if len(resolved.Args) != 0 {
 		t.Fatalf("Args = %v, want empty slice with no inherited parent args", resolved.Args)
 	}
-	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
-		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex-spark", got)
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex", got)
 	}
 }
 
@@ -1384,10 +1437,10 @@ func TestResolveProviderAgentOptionDefaultsUpdateWrappedResumeDefaults(t *testin
 			Args: []string{
 				"run", "codex", "--",
 				"--dangerously-bypass-approvals-and-sandbox",
-				"-m", "gpt-5.3-codex-spark",
+				"-m", "gpt-5.3-codex",
 				"-c", "model_reasoning_effort=\"medium\"",
 			},
-			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume {{.SessionKey}}",
 		},
 	}
 	agent := &Agent{
@@ -1481,6 +1534,54 @@ func TestMergeProviderOverBuiltinOptionsSchemaByKeyAndOmit(t *testing.T) {
 	}
 	if got := merged.OptionDefaults["effort"]; got != "high" {
 		t.Errorf("effort default = %q, want high", got)
+	}
+}
+
+func TestMergeProviderOverBuiltinOptionsSchemaByKeyMergesChoices(t *testing.T) {
+	base := ProviderSpec{
+		OptionsSchema: []ProviderOption{{
+			Key:     "model",
+			Label:   "Base Model",
+			Type:    "select",
+			Default: "opus",
+			Choices: []OptionChoice{
+				{Value: "opus", Label: "Old Opus", FlagArgs: []string{"--model", "old-opus"}},
+				{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "sonnet"}},
+			},
+		}},
+	}
+	city := ProviderSpec{
+		OptionsSchemaMerge: "by_key",
+		OptionsSchema: []ProviderOption{{
+			Key: "model",
+			Choices: []OptionChoice{
+				{Value: "opus", Label: "New Opus", FlagArgs: []string{"--model", "new-opus"}},
+				{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "haiku"}},
+			},
+		}},
+	}
+
+	merged := MergeProviderOverBuiltin(base, city)
+	if len(merged.OptionsSchema) != 1 {
+		t.Fatalf("option count = %d, want 1", len(merged.OptionsSchema))
+	}
+	model := merged.OptionsSchema[0]
+	if model.Label != "Base Model" {
+		t.Errorf("label = %q, want inherited Base Model", model.Label)
+	}
+	if model.Type != "select" {
+		t.Errorf("type = %q, want inherited select", model.Type)
+	}
+	if model.Default != "opus" {
+		t.Errorf("default = %q, want inherited opus", model.Default)
+	}
+	wantChoices := []OptionChoice{
+		{Value: "opus", Label: "New Opus", FlagArgs: []string{"--model", "new-opus"}},
+		{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "sonnet"}},
+		{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "haiku"}},
+	}
+	if !reflect.DeepEqual(model.Choices, wantChoices) {
+		t.Fatalf("choices = %#v, want %#v", model.Choices, wantChoices)
 	}
 }
 
@@ -1810,12 +1911,15 @@ func TestResolveInstallHooksNilWorkspace(t *testing.T) {
 	}
 }
 
-func TestResolveInstallHooksImplicitControlDispatcherIgnoresWorkspaceHooks(t *testing.T) {
-	agent := &Agent{Name: ControlDispatcherAgentName, Implicit: true}
+func TestResolveInstallHooksControlDispatcherIgnoresWorkspaceHooks(t *testing.T) {
+	agent := &Agent{
+		Name:         ControlDispatcherAgentName,
+		StartCommand: ControlDispatcherStartCommandFor("{{.Agent}}"),
+	}
 	ws := &Workspace{InstallAgentHooks: []string{"gemini"}}
 	got := ResolveInstallHooks(agent, ws)
 	if len(got) != 0 {
-		t.Fatalf("ResolveInstallHooks implicit control-dispatcher = %v, want none", got)
+		t.Fatalf("ResolveInstallHooks control-dispatcher = %v, want none", got)
 	}
 }
 
@@ -2065,6 +2169,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		PermissionModes:        map[string]string{"yolo": "--yolo"},
 		OptionDefaults:         map[string]string{"permission_mode": "yolo"},
 		OptionsSchema:          []ProviderOption{{Key: "model"}},
+		UpstreamEnv:            UpstreamEnvBinding{BaseURL: "X_BASE_URL", APIKey: "X_API_KEY", AuthToken: "X_AUTH_TOKEN"},
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
 		ACPCommand:             "custom-acp",

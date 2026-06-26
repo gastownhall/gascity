@@ -49,10 +49,13 @@ type ScaleCheckRunner func(command, dir string, env map[string]string) (string, 
 // completes before beadReconcileTick), the effective concurrency never
 // exceeds this limit at any given moment.
 
-// bdProbeTimeout is the timeout for bd subprocess probes (scale_check,
-// work_query). Generous to accommodate bd calls that serialize through
-// a shared dolt sql-server when many pool probes run in parallel.
-const bdProbeTimeout = 180 * time.Second
+// bdProbeTimeoutDefault is the default timeout for bd subprocess probes
+// (scale_check, work_query). Generous to accommodate bd calls that serialize
+// through a shared dolt sql-server when many pool probes run in parallel.
+const bdProbeTimeoutDefault = 180 * time.Second
+
+// bdProbeTimeoutFloor is the minimum accepted GC_BD_PROBE_TIMEOUT value.
+const bdProbeTimeoutFloor = 5 * time.Second
 
 // hookTimeout is the timeout for lifecycle hook commands (on_death,
 // on_boot). Kept shorter than probe timeout because hooks run
@@ -79,10 +82,31 @@ func shellCommand(command, dir string, timeout time.Duration, env map[string]str
 	return string(out), nil
 }
 
+// parseBDProbeTimeout reads GC_BD_PROBE_TIMEOUT and returns the parsed duration.
+// Unset or empty: returns bdProbeTimeoutDefault (180s). Invalid: logs warning,
+// returns default. Below floor (5s): logs warning, returns floor.
+func parseBDProbeTimeout(stderr io.Writer) time.Duration {
+	raw := strings.TrimSpace(os.Getenv("GC_BD_PROBE_TIMEOUT"))
+	if raw == "" {
+		return bdProbeTimeoutDefault
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc: GC_BD_PROBE_TIMEOUT=%s invalid duration, using %s\n", raw, bdProbeTimeoutDefault) //nolint:errcheck
+		return bdProbeTimeoutDefault
+	}
+	if d < bdProbeTimeoutFloor {
+		fmt.Fprintf(stderr, "gc: GC_BD_PROBE_TIMEOUT=%s below minimum (%s), using %s\n", raw, bdProbeTimeoutFloor, bdProbeTimeoutFloor) //nolint:errcheck
+		return bdProbeTimeoutFloor
+	}
+	return d
+}
+
 // shellScaleCheck runs a scale_check command via sh -c and returns stdout.
-// dir sets the command's working directory. Uses bdProbeTimeout (180s).
+// dir sets the command's working directory. Uses bdProbeTimeoutDefault (180s)
+// unless GC_BD_PROBE_TIMEOUT overrides it.
 func shellScaleCheck(command, dir string, env map[string]string) (string, error) {
-	return shellCommand(command, dir, bdProbeTimeout, env)
+	return shellCommand(command, dir, parseBDProbeTimeout(os.Stderr), env)
 }
 
 // shellRunHook runs a lifecycle hook command (on_death, on_boot) via
@@ -231,6 +255,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		Scope:             src.Scope,
 		Session:           src.Session,
 		Provider:          src.Provider,
+		Upstream:          src.Upstream,
 		InheritedProvider: src.InheritedProvider,
 		PromptTemplate:    src.PromptTemplate,
 		Nudge:             src.Nudge,

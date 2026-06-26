@@ -25,7 +25,6 @@ func TestInternalMaterializeSkillsMaterializesClaude(t *testing.T) {
 	}
 	cityToml := `[workspace]
 name = "test-city"
-includes = [".gc/system/packs/core"]
 
 [beads]
 provider = "file"
@@ -35,6 +34,7 @@ provider = "file"
 	// Pack.toml enables PackSkillsDir discovery. Without it, the
 	// materializer sees no shared city catalog and the sink stays empty.
 	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
+	writeBuiltinImportsFixture(t, cityDir, "core")
 	writeSkillSource(t, filepath.Join(cityDir, "skills", "plan"))
 
 	workdir := t.TempDir()
@@ -836,5 +836,75 @@ func TestInternalMaterializeSkillsBestEffortSkipsUnknownAgent(t *testing.T) {
 	}
 	if !strings.Contains(se.String(), "best-effort") {
 		t.Fatalf("expected a best-effort skip warning on stderr, got %q", se.String())
+	}
+}
+
+// TestInternalMaterializeSkillsBestEffortExitsZeroOnResolveCityError guards
+// the pre_start robustness fix: when the city itself can't be resolved (e.g.
+// GC_CITY unset, cwd outside any city, city directory missing), --best-effort
+// must warn and exit 0 so session start is not fatal.
+func TestInternalMaterializeSkillsBestEffortExitsZeroOnResolveCityError(t *testing.T) {
+	clearGCEnv(t)
+	// Change cwd to an isolated tempdir so all city-discovery steps fail:
+	// no GC_CITY, no GC_DIR, no registered cities (GC_HOME is also a fresh
+	// tempdir set by clearGCEnv), and the walk-up from cwd finds nothing.
+	t.Chdir(t.TempDir())
+
+	workdir := t.TempDir()
+	const agent = "some-agent"
+
+	// Direct call (no --best-effort): unresolvable city is fatal.
+	var so, se bytes.Buffer
+	if code := run([]string{"internal", "materialize-skills", "--agent", agent, "--workdir", workdir}, &so, &se); code == 0 {
+		t.Fatalf("city not found without --best-effort: got exit 0, want non-zero; stderr=%q", se.String())
+	}
+
+	// --best-effort: warn and exit 0 so pre_start is not fatal.
+	so.Reset()
+	se.Reset()
+	if code := run([]string{"internal", "materialize-skills", "--best-effort", "--agent", agent, "--workdir", workdir}, &so, &se); code != 0 {
+		t.Fatalf("city not found with --best-effort: exit %d, want 0; stderr=%q", code, se.String())
+	}
+	if !strings.Contains(se.String(), "best-effort") {
+		t.Fatalf("expected a best-effort skip warning on stderr, got %q", se.String())
+	}
+}
+
+// TestInternalMaterializeSkillsBestEffortExitsZeroOnLoadCityConfigError guards
+// the case where the city directory exists (has .gc/) but city.toml is absent
+// or unreadable. Under --best-effort this must warn and exit 0.
+func TestInternalMaterializeSkillsBestEffortExitsZeroOnLoadCityConfigError(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	// .gc/ present → passes validateCityPath; no city.toml → loadCityConfig fails.
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	workdir := t.TempDir()
+	var so, se bytes.Buffer
+	if code := run([]string{"internal", "materialize-skills", "--best-effort", "--agent", "some-agent", "--workdir", workdir}, &so, &se); code != 0 {
+		t.Fatalf("missing city.toml with --best-effort: exit %d, want 0; stderr=%q", code, se.String())
+	}
+	if !strings.Contains(se.String(), "best-effort") {
+		t.Fatalf("expected a best-effort skip warning on stderr, got %q", se.String())
+	}
+}
+
+// TestInternalMaterializeSkillsNonBestEffortFailsOnLoadCityConfigError guards
+// that the hard-fail path (no --best-effort) still returns non-zero when
+// city.toml is missing, so direct invocations get a clear error.
+func TestInternalMaterializeSkillsNonBestEffortFailsOnLoadCityConfigError(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	var so, se bytes.Buffer
+	if code := run([]string{"internal", "materialize-skills", "--agent", "some-agent", "--workdir", t.TempDir()}, &so, &se); code == 0 {
+		t.Fatalf("missing city.toml without --best-effort: got exit 0, want non-zero; stderr=%q", se.String())
 	}
 }

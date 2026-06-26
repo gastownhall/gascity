@@ -9,5 +9,5 @@ import "embed"
 
 // PackFS contains the core pack files.
 //
-//go:embed pack.toml all:assets doctor formulas orders all:overlay skills
+//go:embed pack.toml all:agents all:assets doctor formulas orders all:overlay skills
 var PackFS embed.FS

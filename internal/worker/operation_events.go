@@ -5,11 +5,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/usage"
 )
 
 type workerOperation string
@@ -68,6 +72,16 @@ type operationEventPayload struct {
 	CacheCreationTokens int     `json:"cache_creation_tokens,omitempty"`
 	LatencyMs           int64   `json:"latency_ms,omitempty"`
 	CostUSDEstimate     float64 `json:"cost_usd_estimate,omitempty"`
+
+	// RunID is the run-root this operation belongs to, resolved per-operation
+	// from the bead metadata chain (workflow_id || molecule_id ||
+	// gc.root_bead_id-or-self || bead id || session id for manual chat). Lets
+	// consumers roll per-operation cost/latency up to a run.
+	RunID string `json:"run_id,omitempty"`
+	// Unpriced is a tri-state flag: nil = pricing not evaluated, true = tokens
+	// observed but no price resolved (CostUSDEstimate not authoritative), false
+	// = priced. Mirrors the Queued/Delivered pointer convention.
+	Unpriced *bool `json:"unpriced,omitempty"`
 }
 
 type operationEventTarget interface {
@@ -107,10 +121,7 @@ func newOperationEvent(ctx context.Context, target operationEventTarget, op work
 		StartedAt: startedAt,
 	}
 	target.populateOperationEventIdentity(&payload)
-	return &operationEvent{
-		target:  target,
-		payload: payload,
-	}
+	return &operationEvent{target: target, payload: payload}
 }
 
 func (h *SessionHandle) beginOperationEvent(ctx context.Context, op workerOperation) *operationEvent {
@@ -140,7 +151,7 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 	if payload.SessionID == "" {
 		payload.SessionID = h.currentSessionID()
 	}
-	if info, ok := h.currentOperationSessionInfo(); ok {
+	if info, bead, ok := h.currentOperationSessionInfo(); ok {
 		payload.SessionID = info.ID
 		fallback := h.operationEventFallbackSessionName()
 		if payload.SessionName == "" || payload.SessionName == fallback {
@@ -157,6 +168,16 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 		}
 		if strings.TrimSpace(payload.AgentName) == "" {
 			payload.AgentName = strings.TrimSpace(info.Alias)
+		}
+		// Per-operation run-root resolution off the session bead's own run chain
+		// (workflow_id || molecule_id || gc.root_bead_id-or-self || bead id ||
+		// session id for manual chat), shared with the compute-fact emitter via
+		// beadmeta.ResolveRunID so a run's model and compute facts agree. Per-work-bead
+		// attribution via a mutable work-bead pointer is deferred until a dispatch/claim
+		// writer exists, so pooled sessions resolve per-session today
+		// (engdocs/design/usage-facts-v0.md).
+		if strings.TrimSpace(payload.RunID) == "" {
+			payload.RunID = beadmeta.ResolveRunID(bead.Metadata, bead.ID, info.ID)
 		}
 	}
 	if payload.SessionName == "" {
@@ -180,16 +201,40 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 	}
 }
 
-func (h *SessionHandle) currentOperationSessionInfo() (sessionpkg.Info, bool) {
+func (h *SessionHandle) currentOperationSessionInfo() (sessionpkg.Info, beads.Bead, bool) {
 	id := h.currentSessionID()
 	if id == "" {
-		return sessionpkg.Info{}, false
+		return sessionpkg.Info{}, beads.Bead{}, false
 	}
-	info, err := h.manager.Get(id)
+	info, bead, err := h.manager.GetWithBead(id)
 	if err != nil {
-		return sessionpkg.Info{}, false
+		return sessionpkg.Info{}, beads.Bead{}, false
 	}
-	return info, true
+	return info, bead, true
+}
+
+// recordModelUsageFact writes one model usage fact to the handle's usage sink.
+// Best-effort and non-blocking: the sink derives its own write deadline, and a
+// failed write is logged (never a silent drop) rather than surfaced to the
+// prompt path. Facts are built from real transcript usage by the
+// invocation-telemetry seam (see recordInvocationTelemetry); a nil/discard sink
+// is a no-op.
+func (h *SessionHandle) recordModelUsageFact(f usage.Fact) {
+	if h.usageSink == nil || h.usageSink == usage.Discard {
+		return
+	}
+	// A fresh background context: this runs after the prompt op returns, so the
+	// request context may already be canceled, and a durable fact write must not
+	// be aborted by that. The sink enforces its own timeout.
+	if err := h.usageSink.Record(context.Background(), f); err != nil {
+		// Best-effort, but never a silent drop (engdocs/design/usage-facts-v0.md):
+		// a misconfigured exec: sink, a full disk, or a permissions error must be
+		// visible to the operator rather than quietly losing usage facts.
+		slog.Warn("recording model usage fact failed; fact dropped",
+			slog.String("run_id", f.RunID),
+			slog.String("upstream_req_id", f.UpstreamReqID),
+			slog.Any("error", err))
+	}
 }
 
 func (h *SessionHandle) recordWorkerOperationEvent(payload operationEventPayload) {
@@ -206,6 +251,15 @@ func operationEventsSuppressed(ctx context.Context) bool {
 
 func (h *SessionHandle) operationEventRecordingEnabled() bool {
 	return h != nil && h.recorder != nil && h.recorder != events.Discard
+}
+
+// usageFactRecordingEnabled reports whether this handle can record usage facts,
+// i.e. it has a live (non-discard) usage sink. It is independent of
+// operationEventRecordingEnabled so model facts flow from the invocation-telemetry
+// seam on handles configured with a sink but no event recorder (the CLI factory
+// path).
+func (h *SessionHandle) usageFactRecordingEnabled() bool {
+	return h != nil && h.usageSink != nil && h.usageSink != usage.Discard
 }
 
 func (h *SessionHandle) operationEventFallbackSessionName() string {

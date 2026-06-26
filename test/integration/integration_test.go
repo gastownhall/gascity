@@ -7,7 +7,9 @@
 // By default tests use tmux. Set GC_SESSION=subprocess to use the subprocess
 // provider instead (no tmux required).
 //
-// Session safety: all test cities use the "gctest-<8hex>" naming prefix.
+// Session safety: no-guard test cities use randomized 6-letter lowercase
+// names (see uniqueCityName) so they spread across distinct Dolt DB
+// prefixes instead of all collapsing to "gc".
 // Three layers of cleanup (pre-sweep, per-test t.Cleanup, post-sweep)
 // prevent orphan tmux sessions on developer boxes.
 package integration
@@ -34,6 +36,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -89,8 +92,9 @@ func TestMain(m *testing.M) {
 
 	subprocess := os.Getenv("GC_SESSION") == "subprocess"
 
-	// Build gc binary to a temp directory.
-	tmpDir, err := os.MkdirTemp("", "gc-integration-*")
+	// Build gc binary to a temp directory. The pid in the dir name lets a later
+	// run reap this run's dolt orphans if it dies abnormally (issue #3640).
+	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("gc-integration-%d-*", os.Getpid()))
 	if err != nil {
 		panic("integration: creating temp dir: " + err.Error())
 	}
@@ -132,6 +136,10 @@ func TestMain(m *testing.M) {
 		// their descendant pollers from prior interrupted runs.
 		sweepSubprocessTestProcesses()
 	}
+	// Reap dolt sql-server orphans left by prior crashed runs (SIGKILL /
+	// timeout bypasses in-process cleanup); scoped by owner-pid liveness so
+	// concurrent runs are spared (issue #3640).
+	dolttest.SweepStale(filepath.Dir(tmpDir), "gc-integration-")
 	stopSignalSweeper := installIntegrationSignalSweeper(subprocess)
 	defer stopSignalSweeper()
 
@@ -244,7 +252,9 @@ func TestMain(m *testing.M) {
 func installIntegrationSignalSweeper(subprocess bool) func() {
 	signals := make(chan os.Signal, 2)
 	done := make(chan struct{})
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	// SIGQUIT is what `go test -timeout` raises; without it a timed-out run
+	// would leak its dolt sql-server (issue #3640).
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	go func() {
 		select {
 		case sig := <-signals:
@@ -265,6 +275,11 @@ func installIntegrationSignalSweeper(subprocess bool) func() {
 
 func sweepIntegrationProcesses(subprocess bool) {
 	stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
+	// Reap dolt orphans under this run's home too — the per-test t.Cleanup that
+	// normally does this is bypassed on a signal (issue #3640).
+	if testGCHome != "" {
+		cleanupIntegrationDoltSQLServersUnderRoot(testGCHome)
+	}
 	if !subprocess {
 		tmuxtest.KillAllTestSessions(&mainTB{})
 		return
@@ -393,6 +408,7 @@ func sweepSubprocessTestProcesses() {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
+	waitForPIDsReaped(killSet)
 }
 
 func configureIntegrationSupervisorCommand(cmd *exec.Cmd) {
@@ -484,6 +500,32 @@ func terminateIntegrationPIDs(killSet map[int]bool) {
 		if err := syscall.Kill(pid, syscall.Signal(0)); err == nil {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
+	}
+	waitForPIDsReaped(killSet)
+}
+
+// waitForPIDsReaped blocks until every PID in killSet is gone (signal-0 errors)
+// or a bounded deadline elapses. Without it, a SIGKILL returns before the
+// kernel has torn the process down and released its open files: a following
+// t.TempDir() RemoveAll then races a dying managed Dolt server under
+// cityDir/.beads/dolt ("directory not empty"), and a following test can
+// re-bind the just-freed managed Dolt port and adopt a half-dead server whose
+// DB still has prior tables ("alter pre-existing dirty tables"). The deadline
+// guarantees a wedged process can never hang the suite.
+func waitForPIDsReaped(killSet map[int]bool) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		alive := false
+		for pid := range killSet {
+			if err := syscall.Kill(pid, syscall.Signal(0)); err == nil {
+				alive = true
+				break
+			}
+		}
+		if !alive {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -995,6 +1037,7 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, "BEADS_DOLT_PASSWORD")
 	env = filterEnv(env, "GC_SUPERVISOR_ENV")
 	env = filterEnv(env, "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL")
+	env = filterEnv(env, "GC_SUPERVISOR_LOG_TEE")
 	env = filterEnv(env, "DOLT_HOST")
 	env = filterEnv(env, "DOLT_PORT")
 	env = filterEnv(env, "DOLT_USER")

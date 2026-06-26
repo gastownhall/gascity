@@ -33,11 +33,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "gc nudge drain --inject --hook-format gemini"
+            "command": "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini"
           },
           {
             "type": "command",
-            "command": "gc mail check --inject --hook-format gemini"
+            "command": "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini"
           }
         ]
       }

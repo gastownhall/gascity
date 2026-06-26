@@ -33,9 +33,10 @@ func StartupDialogTimeout() time.Duration {
 //  1. Claude resume selector — requires Down+Enter to resume the full session
 //  2. Codex update dialog ("Update available") — requires Down+Enter to skip
 //  3. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?")
-//  4. Codex hook review dialog — requires Down+Enter to trust hooks
-//  5. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
-//  6. Claude custom API key confirmation — requires Up+Enter to select "Yes"
+//  4. MCP trust dialog (Claude "New MCP server found in this project") — requires Down+Enter to trust all project MCP servers
+//  5. Codex hook review dialog — requires Down+Enter to trust hooks
+//  6. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
+//  7. Claude custom API key confirmation — requires Up+Enter to select "Yes"
 //
 // The peek function should return the last N lines of the session's terminal output.
 // The sendKeys function should send bare tmux-style keystrokes (e.g., "Enter", "Down").
@@ -103,6 +104,17 @@ func AcceptStartupDialogsFromStreamWithStatus(
 	phaseObserved, err = acceptWorkspaceTrustDialogFromStream(ctx, timeout, stream, trackingSendKeys)
 	if err != nil {
 		return observed, fmt.Errorf("workspace trust dialog: %w", err)
+	}
+	observed = observed || phaseObserved
+	if !phaseObserved && !observed {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return observed, err
+	}
+	phaseObserved, err = acceptMCPTrustDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	if err != nil {
+		return observed, fmt.Errorf("mcp trust dialog: %w", err)
 	}
 	observed = observed || phaseObserved
 	if !phaseObserved && !observed {
@@ -190,6 +202,12 @@ func AcceptStartupDialogsWithTimeout(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := acceptMCPTrustDialog(ctx, timeout, peek, sendKeys); err != nil {
+		return fmt.Errorf("mcp trust dialog: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := acceptCodexHookReviewDialog(ctx, timeout, peek, sendKeys); err != nil {
 		return fmt.Errorf("codex hook review dialog: %w", err)
 	}
@@ -246,6 +264,7 @@ func acceptClaudeResumeDialog(
 		if containsPromptIndicator(content) ||
 			containsCodexUpdateDialog(content) ||
 			containsWorkspaceTrustDialog(content) ||
+			containsMCPTrustDialog(content) ||
 			containsCodexHookReviewDialog(content) ||
 			strings.Contains(content, "Bypass Permissions mode") ||
 			containsCustomAPIKeyDialog(content) ||
@@ -282,6 +301,7 @@ func acceptClaudeResumeDialogFromStream(
 func containsPostClaudeResumeStartupDialog(content string) bool {
 	return containsCodexUpdateDialog(content) ||
 		containsWorkspaceTrustDialog(content) ||
+		containsMCPTrustDialog(content) ||
 		containsCodexHookReviewDialog(content) ||
 		strings.Contains(content, "Bypass Permissions mode") ||
 		containsCustomAPIKeyDialog(content) ||
@@ -317,6 +337,7 @@ func acceptCodexUpdateDialog(
 
 		if containsPromptIndicator(content) ||
 			containsWorkspaceTrustDialog(content) ||
+			containsMCPTrustDialog(content) ||
 			containsCodexHookReviewDialog(content) ||
 			strings.Contains(content, "Bypass Permissions mode") ||
 			containsCustomAPIKeyDialog(content) ||
@@ -352,6 +373,7 @@ func acceptCodexUpdateDialogFromStream(
 
 func containsPostUpdateStartupDialog(content string) bool {
 	return containsWorkspaceTrustDialog(content) ||
+		containsMCPTrustDialog(content) ||
 		containsCodexHookReviewDialog(content) ||
 		strings.Contains(content, "Bypass Permissions mode") ||
 		containsCustomAPIKeyDialog(content) ||
@@ -391,7 +413,8 @@ func acceptWorkspaceTrustDialog(
 			return nil
 		}
 
-		if containsCodexHookReviewDialog(content) ||
+		if containsMCPTrustDialog(content) ||
+			containsCodexHookReviewDialog(content) ||
 			strings.Contains(content, "Bypass Permissions mode") ||
 			containsCustomAPIKeyDialog(content) ||
 			ContainsRateLimitDialog(content) {
@@ -426,10 +449,82 @@ func containsWorkspaceTrustDialog(content string) bool {
 }
 
 func containsPostTrustStartupDialog(content string) bool {
+	return containsMCPTrustDialog(content) ||
+		containsCodexHookReviewDialog(content) ||
+		strings.Contains(content, "Bypass Permissions mode") ||
+		containsCustomAPIKeyDialog(content) ||
+		ContainsRateLimitDialog(content)
+}
+
+// acceptMCPTrustDialog dismisses Claude Code's project-MCP trust modal
+// ("New MCP server found in this project"). A headless managed agent cannot
+// answer it, so gc selects option 2, "Use this and all future MCP servers in
+// this project" (Down, Enter). Option 2 persists trust to ~/.claude.json so
+// the modal does not recur. The modal appears after workspace trust, so this
+// runs after acceptWorkspaceTrustDialog. See gascity#3466.
+func acceptMCPTrustDialog(
+	ctx context.Context,
+	timeout time.Duration,
+	peek func(lines int) (string, error),
+	sendKeys func(keys ...string) error,
+) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		content, err := peek(startupDialogPeekLines)
+		if err != nil {
+			return err
+		}
+
+		if containsMCPTrustDialog(content) {
+			if err := sendKeys("Down"); err != nil {
+				return err
+			}
+			sleep(ctx, bypassDialogConfirmDelay)
+			return sendKeys("Enter")
+		}
+
+		if containsPromptIndicator(content) ||
+			containsCodexHookReviewDialog(content) ||
+			strings.Contains(content, "Bypass Permissions mode") ||
+			containsCustomAPIKeyDialog(content) ||
+			ContainsRateLimitDialog(content) {
+			return nil
+		}
+
+		sleep(ctx, dialogPollInterval)
+	}
+	return nil
+}
+
+func containsMCPTrustDialog(content string) bool {
+	return strings.Contains(content, "New MCP server found") &&
+		strings.Contains(content, "Use this and all future MCP servers")
+}
+
+func containsPostMCPTrustStartupDialog(content string) bool {
 	return containsCodexHookReviewDialog(content) ||
 		strings.Contains(content, "Bypass Permissions mode") ||
 		containsCustomAPIKeyDialog(content) ||
 		ContainsRateLimitDialog(content)
+}
+
+func acceptMCPTrustDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots *replayableSnapshotCursor,
+	sendKeys func(keys ...string) error,
+) (bool, error) {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:       containsMCPTrustDialog,
+		matchKeys:   []string{"Down", "Enter"},
+		matchDelay:  bypassDialogConfirmDelay,
+		ready:       containsPromptIndicator,
+		readyOrNext: containsPostMCPTrustStartupDialog,
+	})
 }
 
 // acceptCodexHookReviewDialog dismisses Codex's startup hook trust review.
@@ -943,7 +1038,7 @@ func containsPromptIndicator(content string) bool {
 		if trimmed == "" {
 			continue
 		}
-		for _, prefix := range []string{"\u276f", "\u203a"} {
+		for _, prefix := range []string{"\u276f", "\u203a", ">"} {
 			rest, ok := strings.CutPrefix(trimmed, prefix+" ")
 			if trimmed == prefix || (ok && !isNumberedMenuRow(rest)) {
 				return true

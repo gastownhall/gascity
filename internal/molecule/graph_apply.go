@@ -84,7 +84,7 @@ func isTransientGraphApplyError(err error) bool {
 		return false
 	}
 	text := strings.ToLower(err.Error())
-	if !strings.Contains(text, "bd create --graph") {
+	if !isGraphApplyErrorText(text) {
 		return false
 	}
 	return strings.Contains(text, "i/o timeout") ||
@@ -94,6 +94,14 @@ func isTransientGraphApplyError(err error) bool {
 		strings.Contains(text, "bad connection") ||
 		strings.Contains(text, "connection reset") ||
 		strings.Contains(text, "broken pipe")
+}
+
+func isGraphApplyErrorText(text string) bool {
+	return strings.Contains(text, "bd create --graph") ||
+		strings.Contains(text, "native graph apply") ||
+		strings.Contains(text, "failed to check for dependency cycle") ||
+		strings.Contains(text, "graph create: adding edge") ||
+		strings.Contains(text, "adding edge ")
 }
 
 func instantiateFragmentViaGraphApply(ctx context.Context, store beads.Store, applier beads.GraphApplyStore, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {
@@ -132,11 +140,16 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 	graphWorkflow := preservesGraphActionTypes(recipe)
 	rootKey := recipe.Steps[0].ID
 	rootIncluded := false
+	externalDepsByStep, err := groupExternalDeps(opts.ExternalDeps)
+	if err != nil {
+		return nil, false, "", err
+	}
+	recipeParentByStep := recipeParentDeps(recipe.Deps)
 
 	plan := &beads.GraphApplyPlan{
 		CommitMessage: fmt.Sprintf("gc: instantiate %s", recipe.Name),
 		Nodes:         make([]beads.GraphApplyNode, 0, len(recipe.Steps)),
-		Edges:         make([]beads.GraphApplyEdge, 0, len(recipe.Deps)),
+		Edges:         make([]beads.GraphApplyEdge, 0, len(recipe.Deps)+len(opts.ExternalDeps)),
 	}
 
 	for i, step := range recipe.Steps {
@@ -206,6 +219,19 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if node.Assignee != "" {
 				node.AssignAfterCreate = true
 			}
+		}
+		for _, dep := range externalDepsByStep[step.ID] {
+			if dep.Type == "parent-child" && recipeParentByStep[step.ID] != "" {
+				continue
+			}
+			if dep.Type == "parent-child" {
+				node.ParentID = dep.DependsOnID
+			}
+			plan.Edges = append(plan.Edges, beads.GraphApplyEdge{
+				FromKey: step.ID,
+				ToID:    dep.DependsOnID,
+				Type:    dep.Type,
+			})
 		}
 		// Same residual-var guard as Instantiate — see #618.
 		if strings.Contains(node.Title, "{{") {

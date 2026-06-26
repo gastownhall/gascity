@@ -4794,3 +4794,52 @@ func TestCloseDetailed_StopSuccessClosesBead(t *testing.T) {
 		t.Errorf("bead Status = %q, want closed", b.Status)
 	}
 }
+
+func TestPersistInvocationUsageCursor(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := mgr.PersistInvocationUsageCursor(info.ID, "u1"); err != nil {
+		t.Fatalf("PersistInvocationUsageCursor(u1): %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata[MetadataKeyInvocationUsageCursor]; got != "u1" {
+		t.Fatalf("cursor metadata = %q, want u1", got)
+	}
+
+	// Unlike PersistSessionKey, the cursor must overwrite on every call.
+	if err := mgr.PersistInvocationUsageCursor(info.ID, "u2"); err != nil {
+		t.Fatalf("PersistInvocationUsageCursor(u2): %v", err)
+	}
+	b, err = store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata[MetadataKeyInvocationUsageCursor]; got != "u2" {
+		t.Fatalf("cursor metadata after overwrite = %q, want u2", got)
+	}
+
+	// Empty id or cursor is a no-op, not an error.
+	if err := mgr.PersistInvocationUsageCursor("", "u3"); err != nil {
+		t.Fatalf("PersistInvocationUsageCursor(empty id): %v", err)
+	}
+	if err := mgr.PersistInvocationUsageCursor(info.ID, "  "); err != nil {
+		t.Fatalf("PersistInvocationUsageCursor(blank cursor): %v", err)
+	}
+	b, err = store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata[MetadataKeyInvocationUsageCursor]; got != "u2" {
+		t.Fatalf("cursor metadata after no-ops = %q, want u2", got)
+	}
+}

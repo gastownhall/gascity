@@ -620,16 +620,19 @@ func TestProcessRetryEvalTransientAppendErrorStaysOpenForRetry(t *testing.T) {
 		Type:   "task",
 		Status: "closed",
 		Metadata: map[string]string{
-			"gc.kind":            "retry-run",
-			"gc.root_bead_id":    root.ID,
-			"gc.step_ref":        "demo.review.run.1",
-			"gc.logical_bead_id": logical.ID,
-			"gc.attempt":         "1",
-			"gc.max_attempts":    "3",
-			"gc.on_exhausted":    "hard_fail",
-			"gc.outcome":         "fail",
-			"gc.failure_class":   "transient",
-			"gc.failure_reason":  "rate_limited",
+			"gc.kind":               "retry-run",
+			"gc.root_bead_id":       root.ID,
+			"gc.step_ref":           "demo.review.run.1",
+			"gc.logical_bead_id":    logical.ID,
+			"gc.attempt":            "1",
+			"gc.max_attempts":       "3",
+			"gc.on_exhausted":       "hard_fail",
+			"gc.outcome":            "fail",
+			"gc.failure_class":      "transient",
+			"gc.failure_reason":     "rate_limited",
+			"gc.routed_to":          "polecat",
+			"gc.session_affinity":   "require",
+			"gc.continuation_group": "main",
 		},
 	})
 	eval1 := mustCreateWorkflowBead(t, base, beads.Bead{
@@ -1001,6 +1004,12 @@ func TestProcessRetryEvalTransientRetriesAndRecyclesPoolSession(t *testing.T) {
 	if run2.Assignee != "" {
 		t.Fatalf("run2 assignee = %q, want empty for pooled retry", run2.Assignee)
 	}
+	if run2.Metadata["gc.session_affinity"] != "" {
+		t.Fatalf("run2 gc.session_affinity = %q, want cleared with pooled retry assignee", run2.Metadata["gc.session_affinity"])
+	}
+	if run2.Metadata["gc.continuation_group"] != "" {
+		t.Fatalf("run2 gc.continuation_group = %q, want cleared with pooled retry assignee", run2.Metadata["gc.continuation_group"])
+	}
 	if got := run2.Metadata["gc.retry_from"]; got != run1.ID {
 		t.Fatalf("run2 gc.retry_from = %q, want %s", got, run1.ID)
 	}
@@ -1013,6 +1022,116 @@ func TestProcessRetryEvalTransientRetriesAndRecyclesPoolSession(t *testing.T) {
 	}
 	if len(logicalDeps) != 1 || logicalDeps[0].DependsOnID != eval2.ID {
 		t.Fatalf("logical deps = %+v, want only current retry eval %s", logicalDeps, eval2.ID)
+	}
+}
+
+// TestProcessRetryEvalTransientPreservesPinnedSessionAffinity covers the
+// preserve half of the clear/preserve rule: a retry whose previous attempt has
+// a concrete non-pool (pinned) assignee must keep both the assignee and the
+// session-affinity metadata, so shared-drain co-location survives the retry.
+// The pooled counterpart that clears affinity is
+// TestProcessRetryEvalTransientRetriesAndRecyclesPoolSession.
+func TestProcessRetryEvalTransientPreservesPinnedSessionAffinity(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	logical := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.review",
+			"gc.max_attempts": "3",
+			"gc.on_exhausted": "hard_fail",
+		},
+	})
+	run1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "review attempt 1",
+		Type:     "task",
+		Status:   "closed",
+		Assignee: "reviewer-mc-7",
+		Metadata: map[string]string{
+			"gc.kind":               "retry-run",
+			"gc.root_bead_id":       root.ID,
+			"gc.step_ref":           "demo.review.run.1",
+			"gc.logical_bead_id":    logical.ID,
+			"gc.attempt":            "1",
+			"gc.max_attempts":       "3",
+			"gc.on_exhausted":       "hard_fail",
+			"gc.outcome":            "fail",
+			"gc.failure_class":      "transient",
+			"gc.failure_reason":     "rate_limited",
+			"gc.continuation_group": "review-fixes",
+			"gc.session_affinity":   "require",
+		},
+	})
+	eval1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review eval 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-eval",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review.eval.1",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "1",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "hard_fail",
+		},
+	})
+	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
+	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
+
+	var recycled []string
+	result, err := ProcessControl(store, eval1, ProcessOptions{
+		RecycleSession: func(subject beads.Bead) error {
+			recycled = append(recycled, subject.Assignee)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval transient pinned): %v", err)
+	}
+	if !result.Processed || result.Action != "retry" {
+		t.Fatalf("result = %+v, want processed retry", result)
+	}
+	// A pinned (non-pool) retry stays on its named session, so no recycle fires.
+	if len(recycled) != 0 {
+		t.Fatalf("recycled = %v, want none for pinned retry", recycled)
+	}
+
+	var run2 beads.Bead
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen(): %v", err)
+	}
+	for _, bead := range all {
+		if bead.Metadata["gc.step_ref"] == "demo.review.run.2" {
+			run2 = bead
+		}
+	}
+	if run2.ID == "" {
+		t.Fatalf("missing retry attempt bead run2")
+	}
+	if run2.Assignee != "reviewer-mc-7" {
+		t.Fatalf("run2 assignee = %q, want preserved reviewer-mc-7", run2.Assignee)
+	}
+	if run2.Metadata["gc.session_affinity"] != "require" {
+		t.Fatalf("run2 gc.session_affinity = %q, want preserved require for pinned retry", run2.Metadata["gc.session_affinity"])
+	}
+	if run2.Metadata["gc.continuation_group"] != "review-fixes" {
+		t.Fatalf("run2 gc.continuation_group = %q, want preserved review-fixes for pinned retry", run2.Metadata["gc.continuation_group"])
+	}
+	if got := run2.Metadata["gc.retry_from"]; got != run1.ID {
+		t.Fatalf("run2 gc.retry_from = %q, want %s", got, run1.ID)
 	}
 }
 

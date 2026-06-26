@@ -52,6 +52,19 @@ const (
 	OutcomeSkipped = "skipped"
 )
 
+// Values of WorkOutcomeMetadataKey ("gc.work_outcome"), the typed work-record
+// close disposition (ADR-0009). Deliberately disjoint from the control-plane
+// OutcomeMetadataKey vocabulary above so the two never collide on one key. Only
+// WorkOutcomeShipped carries an artifact (a commit on the work branch); the
+// "shipped requires a reachable commit" rule is owned by the close gate in
+// cmd/gc, not declared here.
+const (
+	WorkOutcomeShipped   = "shipped"
+	WorkOutcomeNoOp      = "no-op"
+	WorkOutcomeBlocked   = "blocked"
+	WorkOutcomeAbandoned = "abandoned"
+)
+
 // Values of FailureClassMetadataKey ("gc.failure_class").
 const (
 	FailureClassTransient = "transient"

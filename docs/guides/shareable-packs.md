@@ -1,5 +1,5 @@
 ---
-title: "Shareable Packs"
+title: "Create and Share Packs"
 description: Create, import, and customize Gas City packs.
 ---
 
@@ -96,8 +96,12 @@ Prompt file discovery prefers `prompt.template.md`. `prompt.md` and
 
 ## Imports
 
-Packs compose other packs with named imports. Imports preserve provenance, so
-consumers can distinguish `gastown.polecat` from `review.polecat`.
+Packs compose other packs with named imports. The `[imports.<binding>]` key is
+the local binding you choose; it qualifies the imported agents' names so
+`gastown.polecat` and `review.polecat` coexist. See
+[Understanding Packs](/guides/understanding-packs#names) for how bindings,
+qualified names, and collisions work — this section is about *authoring* the
+imports.
 
 ```toml
 [imports.review]
@@ -111,38 +115,30 @@ repository root, prefer the same `/tree/<ref>/<path>` URL a browser can open:
 ```toml
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 ```
 
 Do not write registry handles such as `main:gastown` into `pack.toml`. Registry
 handles are command-time lookup shortcuts; authored pack TOML stores the
 resolved durable `source` and, when needed, `version`.
 
-Packs own their agents. If two packs composed into the same city or rig
-define the same agent name, composition fails with a duplicate-agent error —
-there is no fallback-agent resolution. Give pack agents unambiguous names,
-or drop one of the conflicting imports.
-
 ## Registry Discovery
 
-Registries help you find packs, but they do not change the authored import
-shape. The registry commands available in this release are discovery and cache
-management commands:
+Registries help you *find* packs; they never change the authored import shape.
+When you add a pack from a registry, `pack.toml` stores the resolved durable
+`source` and optional `version`, not the registry handle. The `main` registry
+(the public `gascity-packs` catalog) is configured by default:
 
 ```text
-gc pack registry add main https://github.com/gastownhall/gascity-packs.git
-gc pack registry refresh main
 gc pack registry search gastown
-gc pack registry show gastown
-gc pack registry list
-gc pack registry remove main
+gc pack registry show main:gastown      # prints a paste-ready import command
+gc pack registry publish .              # submit a pack (after gc pack registry login)
 ```
 
-When a registry entry is used to add or migrate a pack, the durable
-`pack.toml` entry stores the entry's resolved `source` and optional `version`,
-not the registry handle. Publishing registry content is still a registry-repo
-workflow in this wave: edit the registry catalog, review it, and refresh the
-local registry cache before searching or showing new entries.
+See [Public Registry Packs](/guides/registry-showcase) for the first-party
+catalog and cache-freshness controls (`--refresh`, `GC_REGISTRY_FRESHNESS`), and
+[Understanding Packs](/guides/understanding-packs#registries-handles-and-sources)
+for the handle-vs-source model.
 
 ## City Usage
 
@@ -157,7 +153,7 @@ schema = 2
 
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 
 [imports.review]
 source = "./assets/code-review"
@@ -175,7 +171,7 @@ default_sling_target = "backend/gastown.polecat"
 
 [defaults.rig.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 ```
 
 Machine-local rig paths are site bindings managed by `gc`:
@@ -195,7 +191,7 @@ name = "backend"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
 
 [rigs.imports.review]
 source = "./assets/code-review"
@@ -205,8 +201,8 @@ Rig-level imports create rig-scoped identities such as
 `backend/gastown.polecat` and `backend/review.reviewer`.
 
 Gas City's built-in packs are not implicit. `gc init` writes explicit
-workspace includes into `city.toml` (`.gc/system/packs/core`, plus
-`.gc/system/packs/bd` for bd-provider cities), and `gc doctor --fix` repairs
+pinned imports into `pack.toml` (`core`, plus `bd` for bd-provider
+cities), and `gc doctor --fix` repairs
 missing or stale entries. The former `maintenance` pack no longer exists; its
 housekeeping orders ship in the bundled `core` pack. See
 [System Packs](/reference/system-packs) for details.
@@ -222,7 +218,7 @@ scope = "city"
 mode = "always"
 
 [[named_session]]
-template = "polecat"
+template = "builder"
 scope = "rig"
 mode = "on_demand"
 ```
@@ -281,13 +277,16 @@ The loader still exposes some V1 fields for migration and old city support:
 - `workspace.includes`
 - `[[rigs]].includes`
 - `[packs.*]`
-- `[formulas].dir`
 
-Treat those as migration surfaces for your own packs, with one exception:
-the built-in system packs compose through explicit `workspace.includes`
-entries in `city.toml` (`gc init` writes them; `gc doctor --fix` repairs
-them). `gc doctor --fix` can migrate root
-`pack.toml` legacy inline agent definitions into `agents/<name>/agent.toml`;
-legacy agent definitions inside config fragments still need a hand edit. New
-shareable packs should use `schema = 2`, `[imports.*]`,
+`[formulas].dir` is not among them: it does not load at all. A
+`[formulas].dir` declaration is a hard parse error in `city.toml`, in every
+config fragment, and in `pack.toml` (`[formulas].dir is no longer supported;
+use the well-known formulas/ directory`), and `gc doctor` reports any
+remaining declaration through the fixable `v2-formulas-dir` check. Put
+formulas in the well-known `formulas/` directory.
+
+Treat the listed fields as migration surfaces for your own packs. `gc doctor
+--fix` migrates root `pack.toml` legacy inline agent definitions into
+`agents/<name>/agent.toml`; legacy definitions inside config fragments still
+need a hand edit. New shareable packs should use `schema = 2`, `[imports.*]`,
 `agents/<name>/`, conventional `formulas/`, and patches for customization.

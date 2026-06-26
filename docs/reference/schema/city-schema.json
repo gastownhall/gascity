@@ -1,0 +1,2876 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gastownhall/gascity/internal/config/city",
+  "$ref": "#/$defs/City",
+  "$defs": {
+    "ACPSessionConfig": {
+      "properties": {
+        "handshake_timeout": {
+          "type": "string",
+          "description": "HandshakeTimeout is how long to wait for the ACP handshake to complete.\nDuration string (e.g., \"30s\", \"1m\"). Defaults to \"30s\".",
+          "default": "30s"
+        },
+        "nudge_busy_timeout": {
+          "type": "string",
+          "description": "NudgeBusyTimeout is how long to wait for an agent to become idle\nbefore sending a new prompt. Duration string. Defaults to \"60s\".",
+          "default": "60s"
+        },
+        "output_buffer_lines": {
+          "type": "integer",
+          "description": "OutputBufferLines is the number of output lines to keep in the\ncircular buffer for Peek. Defaults to 1000.",
+          "default": 1000
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ACPSessionConfig holds settings for the ACP session provider."
+    },
+    "APIConfig": {
+      "properties": {
+        "port": {
+          "type": "integer",
+          "description": "Port is the TCP port to listen on. Defaults to 9443; 0 = disabled."
+        },
+        "bind": {
+          "type": "string",
+          "description": "Bind is the address to bind the listener to. Defaults to \"127.0.0.1\"."
+        },
+        "allow_mutations": {
+          "type": "boolean",
+          "description": "AllowMutations overrides the default read-only behavior when bind is\nnon-localhost. Set to true in containerized environments where the API\nmust bind to 0.0.0.0 for health probes but mutations are still safe."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "APIConfig configures the HTTP API server."
+    },
+    "Agent": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the unique identifier for this agent."
+        },
+        "description": {
+          "type": "string",
+          "description": "Description is a human-readable description shown in MC's session creation UI."
+        },
+        "dir": {
+          "type": "string",
+          "description": "Dir is the identity prefix for rig-scoped agents and the default\nworking directory when WorkDir is not set."
+        },
+        "work_dir": {
+          "type": "string",
+          "description": "WorkDir overrides the session working directory without changing the\nagent's qualified identity. Relative paths resolve against city root\nand may use the same template placeholders as session_setup."
+        },
+        "tmux_alias": {
+          "type": "string",
+          "description": "TmuxAlias overrides the tmux session_name for pool and factory-created\nmanual sessions of this agent. When unset, sessions fall back to the\nuniversal derivation (\"s-\u003cbeadID\u003e\" for ad-hoc sessions,\n\"\u003cbasename\u003e-\u003cbeadID\u003e\" for pool sessions). When set, it is expanded as a\nGo text/template using the same PathContext fields as work_dir /\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),\nsanitized for tmux, and validated as an explicit session name. For pool\nsessions, a live-name collision appends the bead ID as a deterministic\nsuffix. For manual `gc session new` sessions, tmux_alias becomes the\nexplicit session_name and takes precedence over --alias, which remains the\ncommand/mail alias; duplicate explicit names fail closed. Configured named\nsessions keep their named-session runtime name instead of using\ntmux_alias. When no --alias is supplied, work_dir templates that use\n{{.Agent}} see the resolved tmux_alias as the concrete session identity."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "city",
+            "rig"
+          ],
+          "description": "Scope defines where this agent is instantiated: \"city\" (one per city) or\n\"rig\" (one per rig). Omit the field for an unscoped agent instantiated in\nboth city and rig expansion contexts. Only meaningful for pack-defined\nagents; inline agents in city.toml use Dir directly."
+        },
+        "suspended": {
+          "type": "boolean",
+          "description": "Suspended prevents the reconciler from spawning this agent. Toggle with gc agent suspend/resume."
+        },
+        "pre_start": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers. Template variables same as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+        },
+        "prompt_template": {
+          "type": "string",
+          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the city directory."
+        },
+        "nudge": {
+          "type": "string",
+          "description": "Nudge is text typed into the agent's tmux session after startup.\nUsed for CLI agents that don't accept command-line prompts."
+        },
+        "session": {
+          "type": "string",
+          "enum": [
+            "acp"
+          ],
+          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the city-level session provider (typically tmux).\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\nThe agent's resolved provider must have supports_acp = true."
+        },
+        "provider": {
+          "type": "string",
+          "description": "Provider names the provider preset to use for this agent."
+        },
+        "upstream": {
+          "type": "string",
+          "description": "Upstream selects the model-serving endpoint (a key in [upstreams]) for\nthis agent — WHO serves the model. \"\" (default) falls back to\nagent_defaults.upstream; if still empty, no upstream env is injected\n(ambient behavior). Switching it relaunches the agent in the warm box."
+        },
+        "start_command": {
+          "type": "string",
+          "description": "StartCommand overrides the provider's command for this agent."
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "one_shot"
+          ],
+          "description": "Lifecycle controls runtime lifetime semantics. Empty uses the default\nlong-lived session lifecycle; \"one_shot\" means the command is expected\nto do bounded work and exit cleanly."
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Args overrides the provider's default arguments."
+        },
+        "prompt_mode": {
+          "type": "string",
+          "enum": [
+            "arg",
+            "flag",
+            "none"
+          ],
+          "description": "PromptMode controls how prompts are delivered: \"arg\", \"flag\", or \"none\".",
+          "default": "arg"
+        },
+        "prompt_flag": {
+          "type": "string",
+          "description": "PromptFlag is the CLI flag used to pass prompts when prompt_mode is \"flag\"."
+        },
+        "ready_delay_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "ReadyDelayMs is milliseconds to wait after launch before considering the agent ready."
+        },
+        "ready_prompt_prefix": {
+          "type": "string",
+          "description": "ReadyPromptPrefix is the string prefix that indicates the agent is ready for input."
+        },
+        "process_names": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ProcessNames lists process names to look for when checking if the agent is running."
+        },
+        "emits_permission_warning": {
+          "type": "boolean",
+          "description": "EmitsPermissionWarning indicates whether the agent emits permission prompts that should be suppressed."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env sets additional environment variables for the agent process."
+        },
+        "option_defaults": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "OptionDefaults overrides the provider's effective schema defaults\nfor this agent. Keys are option keys, values are choice values.\nApplied on top of the provider's OptionDefaults (agent keys win).\nExample: option_defaults = { permission_mode = \"plan\", model = \"sonnet\" }"
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions is the agent-level cap on concurrent sessions.\nNil means inherit from rig, then workspace, then unlimited.\nReplaces pool.max."
+        },
+        "min_active_sessions": {
+          "type": "integer",
+          "description": "MinActiveSessions is the minimum number of sessions to keep alive.\nAgent-level only. Counts against rig/workspace caps. Replaces pool.min.\nThis controls pool sessions independently of [[named_session]]\nmode=\"always\"; both produce sessions, and gc doctor reports accidental\ncombinations."
+        },
+        "scale_check": {
+          "type": "string",
+          "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)\nbefore running the command."
+        },
+        "drain_timeout": {
+          "type": "string",
+          "description": "DrainTimeout is the maximum time to wait for a session to finish its\ncurrent work before force-killing it during scale-down. Duration string\n(e.g., \"5m\", \"30m\", \"1h\"). Defaults to \"5m\".",
+          "default": "5m"
+        },
+        "on_boot": {
+          "type": "string",
+          "description": "OnBoot is a shell command template run once at controller startup for\nthis agent. If it contains Go template placeholders, gc expands them\nusing the same PathContext fields as work_dir and session_setup\n(Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running\nthe command."
+        },
+        "on_death": {
+          "type": "string",
+          "description": "OnDeath is a shell command template run when a session dies unexpectedly.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName) before running the command."
+        },
+        "namepool": {
+          "type": "string",
+          "description": "Namepool is the path to a plain text file with one name per line.\nWhen set, sessions use names from the file as display aliases."
+        },
+        "work_query": {
+          "type": "string",
+          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and\nprompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
+        },
+        "sling_query": {
+          "type": "string",
+          "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName) before replacing {} with the bead\nID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
+        },
+        "idle_timeout": {
+          "type": "string",
+          "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking."
+        },
+        "max_session_age": {
+          "type": "string",
+          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle.\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
+        },
+        "max_session_age_jitter": {
+          "type": "string",
+          "description": "MaxSessionAgeJitter bounds random jitter added to MaxSessionAge on a\nper-session basis so a fleet of identically-configured agents doesn't\nsynchronize restarts. Duration string (e.g., \"15m\"). Empty or 0\ndisables jitter (every session restarts at exactly MaxSessionAge).\nIgnored when MaxSessionAge is unset."
+        },
+        "sleep_after_idle": {
+          "type": "string",
+          "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string (e.g., \"30s\") or \"off\"."
+        },
+        "install_agent_hooks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.\nWhen set, replaces (not adds to) the workspace default."
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills is a tombstone field retained for v0.15.1 backwards\ncompatibility. Accepted during parse for migration visibility, but\nattachment-list fields are accepted but ignored by the active\nmaterializer."
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\nAccepted during parse for migration visibility, but attachment-list\nfields are accepted but ignored by the active materializer."
+        },
+        "hooks_installed": {
+          "type": "boolean",
+          "description": "HooksInstalled overrides automatic hook detection. Set to true when hooks\nare manually installed (e.g., merged into the project's own hook config)\nand auto-installation via install_agent_hooks is not desired. When true,\nthe agent is treated as hook-enabled for startup behavior: no prime\ninstruction in beacon and no delayed nudge. Interacts with\ninstall_agent_hooks — set this instead when hooks are pre-installed."
+        },
+        "session_setup": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.\nCommands run in gc's process (not inside the agent session) via sh -c.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+        },
+        "session_setup_script": {
+          "type": "string",
+          "description": "SessionSetupScript is the path to a script run after session_setup commands.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root.\nThe script receives context via environment variables (GC_SESSION plus\nexisting GC_* vars). On failure, the last 4 KiB of the script's\nstdout/stderr is included in the error and may appear in controller\nand reconciler logs; avoid set -x or echoing secrets in setup scripts."
+        },
+        "session_live": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SessionLive is a list of shell commands that are safe to re-apply\nwithout restarting the agent. Run at startup (after session_setup)\nand re-applied on config change without triggering a restart.\nMust be idempotent. Typical use: tmux theming, keybindings, status bars.\nSame template placeholders as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+        },
+        "overlay_dir": {
+          "type": "string",
+          "description": "OverlayDir is a directory whose contents are recursively copied (additive)\ninto the agent's working directory at startup. Existing files are not\noverwritten. Relative paths resolve against the declaring config file's\ndirectory (pack-safe)."
+        },
+        "default_sling_formula": {
+          "type": "string",
+          "description": "DefaultSlingFormula is the formula name automatically applied via --on\nwhen beads are slung to this agent, unless --no-formula is set.\nExample: \"mol-polecat-work\""
+        },
+        "inject_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "InjectFragments lists named template fragments to append to this agent's\nrendered prompt. Fragments come from shared template directories across\nall loaded packs. Each name must match a {{ define \"name\" }} block."
+        },
+        "append_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AppendFragments is the V2 per-agent alias for prompt fragment injection.\nIt layers after InjectFragments and before inherited/default fragments."
+        },
+        "inject_assigned_skills": {
+          "type": "boolean",
+          "description": "InjectAssignedSkills controls whether gc appends an\n\"assigned skills\" appendix to the agent's rendered prompt. The\nappendix lists every skill visible to this agent, partitioned\ninto (assigned-to-you, shared-with-every-agent), so agents\nsharing a scope-root sink can tell which skills are their\nspecialization vs which are the city-wide set.\n\nPointer tri-state:\n  nil   -\u003e inherit: inject when the agent has a vendor sink\n  *true -\u003e explicitly inject (equivalent to the default)\n  *false -\u003e disable; the template is responsible for rendering\n            any skill guidance itself"
+        },
+        "attach": {
+          "type": "boolean",
+          "description": "Attach controls whether the agent's session supports interactive\nattachment (e.g., tmux attach). When false, the agent can use a\nlighter runtime (subprocess instead of tmux). Defaults to true."
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "DependsOn lists agent names that must be awake before this agent wakes.\nUsed for dependency-ordered startup and shutdown. Validated for cycles\nat config load time."
+        },
+        "resume_command": {
+          "type": "string",
+          "description": "ResumeCommand is the full shell command to run when resuming this agent.\nSupports {{.SessionKey}} template variable. When set, takes precedence\nover the provider's ResumeFlag/ResumeStyle. Example:\n  \"claude --resume {{.SessionKey}} --dangerously-skip-permissions\""
+        },
+        "wake_mode": {
+          "type": "string",
+          "enum": [
+            "resume",
+            "fresh"
+          ],
+          "description": "WakeMode controls context freshness across sleep/wake cycles.\n\"resume\" (default): reuse provider session key for conversation continuity.\n\"fresh\": start a new provider session on every wake (polecat pattern)."
+        },
+        "mouse_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "MouseMode controls whether tmux mouse mode is preserved for this agent.\n\"on\" leaves the session's mouse setting alone for human-attached\nsessions; \"off\" or empty preserves the SDK's default mouse-off startup\nbehavior for headless sessions."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "Agent defines a configured agent in the city."
+    },
+    "AgentDefaults": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider is the default provider name for agents that do not set their\nown provider. It also counts as a configured provider for implicit agent\ninjection."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model is the parsed/composed default model name for agents\n(e.g., \"claude-sonnet-4-6\"), but it is not yet auto-applied at\nruntime. Agents with their own model override would take precedence."
+        },
+        "upstream": {
+          "type": "string",
+          "description": "Upstream is the default model-serving endpoint (a key in [upstreams])\nfor agents that do not set their own upstream (Phase C — the Upstream\naxis). Applied to agents with an empty Upstream by ApplyAgentDefaults."
+        },
+        "wake_mode": {
+          "type": "string",
+          "enum": [
+            "resume",
+            "fresh"
+          ],
+          "description": "WakeMode is the parsed/composed default wake mode (\"resume\" or\n\"fresh\"), but it is not yet auto-applied at runtime."
+        },
+        "default_sling_formula": {
+          "type": "string",
+          "description": "DefaultSlingFormula is the default formula used for agents that inherit\n[agent_defaults]. Explicit agents only receive this value when\nagent_defaults.default_sling_formula is set; implicit multi-session\nconfigs are seeded with \"mol-do-work\" elsewhere when no explicit default is set."
+        },
+        "allow_overlay": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AllowOverlay is parsed and composed as a config-level allowlist for\nsession overlays, but it is not yet inherited onto agents automatically\nat runtime."
+        },
+        "allow_env_override": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AllowEnvOverride is parsed and composed as a config-level allowlist for\nsession env overrides, but it is not yet inherited onto agents\nautomatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$."
+        },
+        "append_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AppendFragments lists named template fragments to auto-append to\n.template.md prompts after rendering. Legacy .md.tmpl prompts are\nstill supported during the transition; plain .md remains inert.\nV2 migration convenience — replaces global_fragments/inject_fragments\nfor config-wide defaults."
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills is a tombstone field retained for v0.15.1 backwards\ncompatibility. Parsed and composed for migration visibility, but\nattachment-list fields are accepted but ignored by the active\nmaterializer."
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\nParsed and composed for migration visibility, but attachment-list\nfields are accepted but ignored by the active materializer."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "AgentDefaults provides agent defaults declared via [agent_defaults] in city.toml or pack.toml."
+    },
+    "AgentOverride": {
+      "properties": {
+        "agent": {
+          "type": "string",
+          "description": "Agent is the name of the pack agent to override (required)."
+        },
+        "dir": {
+          "type": "string",
+          "description": "Dir overrides the stamped dir (default: rig name)."
+        },
+        "work_dir": {
+          "type": "string",
+          "description": "WorkDir overrides the agent's working directory without changing\nits qualified identity or rig association."
+        },
+        "tmux_alias": {
+          "type": "string",
+          "description": "TmuxAlias overrides the tmux session name template\n(see Agent.TmuxAlias for semantics)."
+        },
+        "scope": {
+          "type": "string",
+          "description": "Scope overrides the agent's scope (\"city\" or \"rig\")."
+        },
+        "suspended": {
+          "type": "boolean",
+          "description": "Suspended sets the agent's suspended state."
+        },
+        "pool": {
+          "$ref": "#/$defs/PoolOverride",
+          "description": "Pool overrides legacy [pool] fields that map to session scaling."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env adds or overrides environment variables."
+        },
+        "env_remove": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "EnvRemove lists env var keys to remove."
+        },
+        "pre_start": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PreStart overrides the agent's pre_start commands."
+        },
+        "prompt_template": {
+          "type": "string",
+          "description": "PromptTemplate overrides the prompt template path.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
+        },
+        "session": {
+          "type": "string",
+          "description": "Session overrides the session transport (\"acp\")."
+        },
+        "provider": {
+          "type": "string",
+          "description": "Provider overrides the provider name."
+        },
+        "upstream": {
+          "type": "string",
+          "description": "Upstream overrides the model-serving endpoint selection (Phase C)."
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Args overrides the provider's default arguments. Leave unset to keep\nthe pack-defined args; set to an empty list to clear them; set to a\npopulated list to replace them entirely (full replace, not append)."
+        },
+        "start_command": {
+          "type": "string",
+          "description": "StartCommand overrides the start command."
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "one_shot"
+          ],
+          "description": "Lifecycle overrides the runtime lifecycle (\"one_shot\" or empty)."
+        },
+        "nudge": {
+          "type": "string",
+          "description": "Nudge overrides the nudge text."
+        },
+        "idle_timeout": {
+          "type": "string",
+          "description": "IdleTimeout overrides the idle timeout duration string (e.g., \"30s\", \"5m\", \"1h\")."
+        },
+        "max_session_age": {
+          "type": "string",
+          "description": "MaxSessionAge overrides the max session age. Duration string (e.g., \"5h\").\nEmpty disables preemptive restart."
+        },
+        "max_session_age_jitter": {
+          "type": "string",
+          "description": "MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.\nDuration string (e.g., \"15m\"). Empty disables jitter."
+        },
+        "sleep_after_idle": {
+          "type": "string",
+          "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string (e.g., \"30s\") or \"off\"."
+        },
+        "install_agent_hooks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "InstallAgentHooks overrides the agent's install_agent_hooks list."
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills is a tombstone field retained for v0.15.1 backwards\ncompatibility. Parsed for migration visibility, but attachment-list\nfields are accepted but ignored by the active materializer."
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\nParsed for migration visibility, but attachment-list fields are\naccepted but ignored by the active materializer."
+        },
+        "hooks_installed": {
+          "type": "boolean",
+          "description": "HooksInstalled overrides automatic hook detection."
+        },
+        "inject_assigned_skills": {
+          "type": "boolean",
+          "description": "InjectAssignedSkills overrides Agent.InjectAssignedSkills\n(see that field for semantics)."
+        },
+        "session_setup": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SessionSetup overrides the agent's session_setup commands."
+        },
+        "session_setup_script": {
+          "type": "string",
+          "description": "SessionSetupScript overrides the agent's session_setup_script path.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
+        },
+        "session_live": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SessionLive overrides the agent's session_live commands."
+        },
+        "overlay_dir": {
+          "type": "string",
+          "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
+        },
+        "default_sling_formula": {
+          "type": "string",
+          "description": "DefaultSlingFormula overrides the default sling formula."
+        },
+        "inject_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "InjectFragments overrides the agent's inject_fragments list. Leave this\nfield unset to keep inherited fragments; JSON callers may send null for\nthe same no-op. Set an empty list to clear fragments; set a populated\nlist to replace fragments."
+        },
+        "append_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AppendFragments appends named template fragments to this agent's rendered\nprompt. It is the V2 spelling for per-agent fragment selection."
+        },
+        "pre_start_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PreStartAppend appends commands to the agent's pre_start list\n(instead of replacing). Applied after PreStart if both are set."
+        },
+        "session_setup_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SessionSetupAppend appends commands to the agent's session_setup list."
+        },
+        "session_live_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SessionLiveAppend appends commands to the agent's session_live list."
+        },
+        "install_agent_hooks_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "InstallAgentHooksAppend appends to the agent's install_agent_hooks list."
+        },
+        "skills_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SkillsAppend is a tombstone field retained for v0.15.1 backwards\ncompatibility. Parsed for migration visibility, but attachment-list\nfields are accepted but ignored by the active materializer."
+        },
+        "mcp_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCPAppend is a tombstone field retained for v0.15.1 backwards\ncompatibility. Parsed for migration visibility, but attachment-list\nfields are accepted but ignored by the active materializer."
+        },
+        "attach": {
+          "type": "boolean",
+          "description": "Attach overrides the agent's attach setting."
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "DependsOn overrides the agent's dependency list."
+        },
+        "resume_command": {
+          "type": "string",
+          "description": "ResumeCommand overrides the agent's resume_command template."
+        },
+        "wake_mode": {
+          "type": "string",
+          "enum": [
+            "resume",
+            "fresh"
+          ],
+          "description": "WakeMode overrides the agent's wake mode (\"resume\" or \"fresh\")."
+        },
+        "mouse_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
+        },
+        "inject_fragments_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "InjectFragmentsAppend appends to the agent's inject_fragments list."
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions overrides the agent-level cap on concurrent sessions."
+        },
+        "min_active_sessions": {
+          "type": "integer",
+          "description": "MinActiveSessions overrides the minimum number of sessions to keep alive."
+        },
+        "scale_check": {
+          "type": "string",
+          "description": "ScaleCheck overrides the shell command whose output reports new\nunassigned session demand for bead-backed reconciliation."
+        },
+        "option_defaults": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "OptionDefaults adds or overrides provider option defaults for this agent.\nKeys are option keys, values are choice values. Merges additively\n(override keys win over existing agent keys).\nExample: option_defaults = { model = \"sonnet\" }"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "agent"
+      ],
+      "description": "AgentOverride modifies a pack-stamped agent for a specific rig."
+    },
+    "AgentPatch": {
+      "properties": {
+        "dir": {
+          "type": "string",
+          "description": "Dir is the targeting key (required with Name). Identifies the agent's\nworking directory scope. Empty for city-scoped agents."
+        },
+        "name": {
+          "type": "string",
+          "description": "Name is the targeting key (required). Must match an existing agent's name."
+        },
+        "work_dir": {
+          "type": "string",
+          "description": "WorkDir overrides the agent's session working directory."
+        },
+        "tmux_alias": {
+          "type": "string",
+          "description": "TmuxAlias overrides the tmux session name template\n(see Agent.TmuxAlias for semantics)."
+        },
+        "scope": {
+          "type": "string",
+          "description": "Scope overrides the agent's scope (\"city\" or \"rig\")."
+        },
+        "suspended": {
+          "type": "boolean",
+          "description": "Suspended overrides the agent's suspended state."
+        },
+        "pool": {
+          "$ref": "#/$defs/PoolOverride",
+          "description": "Pool overrides legacy [pool] fields that map to session scaling."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env adds or overrides environment variables."
+        },
+        "env_remove": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "EnvRemove lists env var keys to remove after merging."
+        },
+        "pre_start": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PreStart overrides the agent's pre_start commands."
+        },
+        "prompt_template": {
+          "type": "string",
+          "description": "PromptTemplate overrides the prompt template path.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
+        },
+        "session": {
+          "type": "string",
+          "description": "Session overrides the session transport (\"acp\" or \"tmux\")."
+        },
+        "provider": {
+          "type": "string",
+          "description": "Provider overrides the provider name."
+        },
+        "upstream": {
+          "type": "string",
+          "description": "Upstream overrides the model-serving endpoint selection (Phase C)."
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Args overrides the provider's default arguments. Leave unset to keep\nthe pack-defined args; set to an empty list to clear them; set to a\npopulated list to replace them entirely (full replace, not append)."
+        },
+        "start_command": {
+          "type": "string",
+          "description": "StartCommand overrides the start command."
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "one_shot"
+          ],
+          "description": "Lifecycle overrides the runtime lifecycle (\"one_shot\" or empty)."
+        },
+        "nudge": {
+          "type": "string",
+          "description": "Nudge overrides the nudge text."
+        },
+        "idle_timeout": {
+          "type": "string",
+          "description": "IdleTimeout overrides the idle timeout. Duration string (e.g., \"30s\", \"5m\", \"1h\")."
+        },
+        "max_session_age": {
+          "type": "string",
+          "description": "MaxSessionAge overrides the max session age. Duration string (e.g., \"5h\")."
+        },
+        "max_session_age_jitter": {
+          "type": "string",
+          "description": "MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., \"15m\")."
+        },
+        "sleep_after_idle": {
+          "type": "string",
+          "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string or \"off\"."
+        },
+        "install_agent_hooks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "InstallAgentHooks overrides the agent's install_agent_hooks list."
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
+        },
+        "skills_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SkillsAppend is a tombstone field retained for v0.15.1 backwards\ncompatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
+        },
+        "mcp_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCPAppend is a tombstone field retained for v0.15.1 backwards\ncompatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
+        },
+        "hooks_installed": {
+          "type": "boolean",
+          "description": "HooksInstalled overrides automatic hook detection."
+        },
+        "inject_assigned_skills": {
+          "type": "boolean",
+          "description": "InjectAssignedSkills overrides per-agent appendix injection\n(see Agent.InjectAssignedSkills)."
+        },
+        "session_setup": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SessionSetup overrides the agent's session_setup commands."
+        },
+        "session_setup_script": {
+          "type": "string",
+          "description": "SessionSetupScript overrides the agent's session_setup_script path.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
+        },
+        "session_live": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SessionLive overrides the agent's session_live commands."
+        },
+        "overlay_dir": {
+          "type": "string",
+          "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
+        },
+        "default_sling_formula": {
+          "type": "string",
+          "description": "DefaultSlingFormula overrides the default sling formula."
+        },
+        "inject_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "InjectFragments overrides the agent's inject_fragments list. Leave this\nfield unset to keep inherited fragments; JSON callers may send null for\nthe same no-op. Set an empty list to clear fragments; set a populated\nlist to replace fragments."
+        },
+        "append_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AppendFragments overrides the agent's append_fragments list."
+        },
+        "attach": {
+          "type": "boolean",
+          "description": "Attach overrides the agent's attach setting."
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "DependsOn overrides the agent's dependency list."
+        },
+        "resume_command": {
+          "type": "string",
+          "description": "ResumeCommand overrides the agent's resume_command template."
+        },
+        "wake_mode": {
+          "type": "string",
+          "enum": [
+            "resume",
+            "fresh"
+          ],
+          "description": "WakeMode overrides the agent's wake mode (\"resume\" or \"fresh\")."
+        },
+        "mouse_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
+        },
+        "pre_start_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PreStartAppend appends commands to the agent's pre_start list\n(instead of replacing). Applied after PreStart if both are set."
+        },
+        "session_setup_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SessionSetupAppend appends commands to the agent's session_setup list."
+        },
+        "session_live_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SessionLiveAppend appends commands to the agent's session_live list."
+        },
+        "install_agent_hooks_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "InstallAgentHooksAppend appends to the agent's install_agent_hooks list."
+        },
+        "inject_fragments_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "InjectFragmentsAppend appends to the agent's inject_fragments list."
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions overrides the agent-level cap on concurrent sessions."
+        },
+        "min_active_sessions": {
+          "type": "integer",
+          "description": "MinActiveSessions overrides the minimum number of sessions to keep alive."
+        },
+        "scale_check": {
+          "type": "string",
+          "description": "ScaleCheck overrides the command template whose output reports new\nunassigned session demand for bead-backed reconciliation. Supports the\nsame Go template placeholders as Agent.scale_check."
+        },
+        "option_defaults": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "OptionDefaults adds or overrides provider option defaults for this agent.\nKeys are option keys, values are choice values. Merges additively\n(patch keys win over existing agent keys).\nExample: option_defaults = { model = \"sonnet\" }"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "dir",
+        "name"
+      ],
+      "description": "AgentPatch modifies an existing agent identified by (Dir, Name)."
+    },
+    "BeadPolicyConfig": {
+      "properties": {
+        "storage": {
+          "type": "string",
+          "enum": [
+            "history",
+            "no_history",
+            "ephemeral"
+          ],
+          "description": "Storage selects the intended persistence tier: \"history\", \"no_history\",\nor \"ephemeral\". Creation paths apply this incrementally as they opt in."
+        },
+        "delete_after_close": {
+          "type": "string",
+          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". ApplyBeadPolicyDefaults fills in a\nnon-empty default for recognized policy types (order_tracking: \"7d\"),\nso this field is populated after config load even when the city.toml\nomits it."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "BeadPolicyConfig holds storage and retention defaults for a named bead use."
+    },
+    "BeadsConfig": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider selects the bead store backend: \"bd\" (default, Dolt-backed),\n\"file\", or \"exec:\u003cscript\u003e\" for a user-supplied script. The \"sqlite\",\n\"sqlite-cgo\", and \"coordstore\" coordination-store providers were removed\nand now hard-error; migrate to \"doltlite\" or remove the setting.",
+          "default": "bd"
+        },
+        "backend": {
+          "type": "string",
+          "description": "Backend selects the bd storage engine when Provider is \"bd\".\nEmpty defaults to \"dolt\"; T3Code uses \"doltlite\" for local dev stores."
+        },
+        "event_hooks": {
+          "type": "boolean",
+          "description": "EventHooks controls installation of the bead event-forwarding hooks\n(.beads/hooks/on_create,on_update,on_close) that shell out to\n`gc event emit` on every bead write. Defaults to true. Set to false\nonce the controller's native cache-events already observe bead changes\n(the bd_hooks doctor gate): the lifecycle then removes the event hooks\n(leaving git hooks untouched) and stops reinstalling them, clearing the\nper-write churn and the native-store gate.",
+          "default": true
+        },
+        "bd_compatibility": {
+          "type": "string",
+          "enum": [
+            "bd-1.0.4",
+            "bd-1.0.5"
+          ],
+          "description": "BDCompatibility selects the bd CLI semantics Gas City may rely on.\nEmpty defaults to \"bd-1.0.4\", which keeps claimable work history-backed\nand avoids bd ready/list flags that are unavailable or incomplete in bd\n1.0.4."
+        },
+        "policies": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BeadPolicyConfig"
+          },
+          "type": "object",
+          "description": "Policies defines per-bead-use storage and garbage-collection defaults.\nPolicy names are interpreted by higher-level systems; unknown names are\npreserved so packs can stage future policy classes without breaking load."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "BeadsConfig holds bead store settings."
+    },
+    "ChatSessionsConfig": {
+      "properties": {
+        "idle_timeout": {
+          "type": "string",
+          "description": "IdleTimeout is the duration after which a detached chat session\nis auto-suspended. Duration string (e.g., \"30m\", \"1h\"). 0 = disabled."
+        },
+        "grace_period": {
+          "type": "string",
+          "description": "GracePeriod is the duration after creation during which a manual\nsession is protected from idle-sleep scale-to-zero. Duration string\n(e.g., \"10m\"). Empty = use default (10m). \"0\" = disabled."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ChatSessionsConfig configures chat session behavior."
+    },
+    "City": {
+      "properties": {
+        "include": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Include lists config fragment files to merge into this config.\nProcessed by LoadWithIncludes; not recursive (fragments cannot include)."
+        },
+        "workspace": {
+          "$ref": "#/$defs/Workspace",
+          "description": "Workspace holds city-level metadata (name, default provider)."
+        },
+        "providers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ProviderSpec"
+          },
+          "type": "object",
+          "description": "Providers defines named provider presets for agent startup."
+        },
+        "upstreams": {
+          "additionalProperties": {
+            "$ref": "#/$defs/UpstreamSpec"
+          },
+          "type": "object",
+          "description": "Upstreams defines named model-serving endpoint presets selectable per\nagent via the Upstream axis (Phase C). Each maps a name → serving env\n(base URL + credential refs); see UpstreamSpec."
+        },
+        "imports": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Import"
+          },
+          "type": "object",
+          "description": "Imports defines named pack imports. Each key is a local\nbinding name; the authored public contract stores a durable source plus\noptional version. Processed during ExpandCityPacks."
+        },
+        "defaults": {
+          "$ref": "#/$defs/PackDefaults",
+          "description": "Defaults holds city-level defaults that seed generated config. The\ncanonical default-rig import table is [defaults.rig.imports]."
+        },
+        "agent": {
+          "items": {
+            "$ref": "#/$defs/Agent"
+          },
+          "type": "array",
+          "description": "Agents lists all configured agents in this city. Pack-composed cities can\ncompose agents through [imports.*] and ship without any\n[[agent]] block."
+        },
+        "named_session": {
+          "items": {
+            "$ref": "#/$defs/NamedSession"
+          },
+          "type": "array",
+          "description": "NamedSessions lists canonical alias-backed sessions built from\nreusable agent templates."
+        },
+        "rigs": {
+          "items": {
+            "$ref": "#/$defs/Rig"
+          },
+          "type": "array",
+          "description": "Rigs lists external projects registered in the city."
+        },
+        "patches": {
+          "$ref": "#/$defs/Patches",
+          "description": "Patches holds targeted modifications applied after fragment merge."
+        },
+        "beads": {
+          "$ref": "#/$defs/BeadsConfig",
+          "description": "Beads configures the bead store backend."
+        },
+        "session": {
+          "$ref": "#/$defs/SessionConfig",
+          "description": "Session configures the session provider backend."
+        },
+        "mail": {
+          "$ref": "#/$defs/MailConfig",
+          "description": "Mail configures the mail provider backend."
+        },
+        "events": {
+          "$ref": "#/$defs/EventsConfig",
+          "description": "Events configures the events provider backend."
+        },
+        "usage": {
+          "$ref": "#/$defs/UsageConfig",
+          "description": "Usage configures the usage-fact sink backend."
+        },
+        "dolt": {
+          "$ref": "#/$defs/DoltConfig",
+          "description": "Dolt configures optional dolt server connection overrides."
+        },
+        "formulas": {
+          "$ref": "#/$defs/FormulasConfig",
+          "description": "Formulas is the legacy [formulas] table; authored [formulas].dir is\nrejected at config load. Formulas live in the well-known formulas/\ndirectory."
+        },
+        "daemon": {
+          "$ref": "#/$defs/DaemonConfig",
+          "description": "Daemon configures controller daemon settings."
+        },
+        "orders": {
+          "$ref": "#/$defs/OrdersConfig",
+          "description": "Orders configures order settings: skip list, max_timeout cap, and\nper-order overrides."
+        },
+        "api": {
+          "$ref": "#/$defs/APIConfig",
+          "description": "API configures the optional HTTP API server."
+        },
+        "chat_sessions": {
+          "$ref": "#/$defs/ChatSessionsConfig",
+          "description": "ChatSessions configures chat session behavior (auto-suspend)."
+        },
+        "session_sleep": {
+          "$ref": "#/$defs/SessionSleepConfig",
+          "description": "SessionSleep configures idle sleep policy defaults for managed sessions."
+        },
+        "convergence": {
+          "$ref": "#/$defs/ConvergenceConfig",
+          "description": "Convergence configures convergence loop limits."
+        },
+        "doctor": {
+          "$ref": "#/$defs/DoctorConfig",
+          "description": "Doctor configures gc doctor thresholds and policy toggles\n(worktree size warnings, nested-worktree auto-prune)."
+        },
+        "maintenance": {
+          "$ref": "#/$defs/MaintenanceConfig",
+          "description": "Maintenance configures periodic store-maintenance loops."
+        },
+        "service": {
+          "items": {
+            "$ref": "#/$defs/Service"
+          },
+          "type": "array",
+          "description": "Services declares workspace-owned HTTP services mounted on the\ncontroller edge under /svc/{name}."
+        },
+        "github": {
+          "$ref": "#/$defs/GitHubConfig",
+          "description": "GitHub configures GitHub-facing repository monitors."
+        },
+        "agent_defaults": {
+          "$ref": "#/$defs/AgentDefaults",
+          "description": "AgentDefaults provides root city defaults for agents that don't override\nthem (canonical TOML key: agent_defaults). Pack-local defaults use the\nsame table shape in pack.toml. The runtime currently applies provider,\ndefault_sling_formula, and append_fragments; the attachment-list fields\nremain tombstones, and the other fields are parsed/composed but not yet\ninherited automatically."
+        },
+        "pricing": {
+          "items": {
+            "$ref": "#/$defs/ModelPricing"
+          },
+          "type": "array",
+          "description": "Pricing holds per-model cost rate overrides keyed by (provider, model).\nCity-level entries override pack-level entries which override the\ndefaults shipped with the pricing package. See internal/pricing for the\nestimation seam introduced by issue #1255 (1d)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "workspace"
+      ],
+      "description": "City is the top-level configuration for a Gas City instance."
+    },
+    "ConvergenceConfig": {
+      "properties": {
+        "max_per_agent": {
+          "type": "integer",
+          "description": "MaxPerAgent is the maximum number of active convergence loops per agent\nin each bead store scope. City/HQ and each bound rig enforce the limit\nindependently. 0 means use default (2).",
+          "default": 2
+        },
+        "max_total": {
+          "type": "integer",
+          "description": "MaxTotal is the maximum total number of active convergence loops.\n0 means use default (10).",
+          "default": 10
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ConvergenceConfig holds convergence loop limits."
+    },
+    "DaemonConfig": {
+      "properties": {
+        "formula_v2": {
+          "type": "boolean",
+          "description": "FormulaV2 enables formula compiler v2 workflow infrastructure:\ncompiler-v2 workflow compilation, batch graph-apply bead creation, and\nrouting to the core pack's control-dispatcher worker.\nRequires bd with --graph support. Default: ENABLED. A nil pointer means\nthe default-on behavior and is OMITTED from generated configs (so\nauto-generated city.toml files never pin the default and never\naccidentally write formula_v2=false); an explicit formula_v2=false (or\nthe deprecated graph_workflows=false alias) is preserved as a non-nil\nfalse. Read the effective value via FormulaV2Enabled(), never the field.",
+          "default": true
+        },
+        "graph_workflows": {
+          "type": "boolean",
+          "description": "GraphWorkflows is the deprecated predecessor of FormulaV2. Retained\nfor backwards compatibility as an alias. Explicit formula_v2 wins."
+        },
+        "patrol_interval": {
+          "type": "string",
+          "description": "PatrolInterval is the health patrol interval. Duration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"30s\".",
+          "default": "30s"
+        },
+        "max_restarts": {
+          "type": "integer",
+          "description": "MaxRestarts is the maximum number of agent restarts within RestartWindow before\nthe agent is quarantined. 0 means unlimited (no crash loop detection). Defaults to 5.",
+          "default": 5
+        },
+        "restart_window": {
+          "type": "string",
+          "description": "RestartWindow is the sliding time window for counting restarts.\nDuration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"1h\".",
+          "default": "1h"
+        },
+        "session_circuit_breaker": {
+          "type": "boolean",
+          "description": "SessionCircuitBreaker enables the named-session respawn circuit breaker.\nWhen enabled, the controller suppresses no-progress named-session respawns\nafter the configured restart threshold is exceeded."
+        },
+        "session_circuit_breaker_max_restarts": {
+          "type": "integer",
+          "description": "SessionCircuitBreakerMaxRestarts overrides MaxRestarts for the\nnamed-session respawn circuit breaker. Nil reuses MaxRestartsOrDefault.\n0 disables the circuit breaker even when SessionCircuitBreaker is true.",
+          "default": 5
+        },
+        "session_circuit_breaker_window": {
+          "type": "string",
+          "description": "SessionCircuitBreakerWindow overrides RestartWindow for the named-session\nrespawn circuit breaker. Empty reuses RestartWindowDuration.",
+          "default": "1h"
+        },
+        "session_circuit_breaker_reset_after": {
+          "type": "string",
+          "description": "SessionCircuitBreakerResetAfter is the cooldown before an open named-session\nbreaker resets automatically. Empty defaults to 2 * SessionCircuitBreakerWindowDuration."
+        },
+        "shutdown_timeout": {
+          "type": "string",
+          "description": "ShutdownTimeout is the time to wait after sending Ctrl-C before force-killing\nagents during shutdown. Duration string (e.g., \"5s\", \"30s\"). Set to \"0s\"\nfor immediate kill. Defaults to \"5s\".",
+          "default": "5s"
+        },
+        "dolt_stop_timeout": {
+          "type": "string",
+          "description": "DoltStopTimeout is the SIGTERM→SIGKILL grace period for the managed dolt\nsubprocess during stop, unregister, restart, and startup/recovery\ncleanup. Independent of ShutdownTimeout (which gates agent drain) so a\nslow session drain cannot steal dolt's flush window. Duration string\n(e.g., \"30s\", \"1m\"). A too-short value risks SIGKILL during a journal\nindex update or manifest rotation, which corrupts dolt's chunk journal\n(see gastownhall/gascity#2090). Defaults to \"30s\", which absorbs the\nlongest observed flush window on commodity SSDs without unduly delaying\nunregister. Set to \"0s\" for immediate SIGKILL with no grace. Negative\nvalues are rejected at config load. Note: when a city is stopped via the\ncontroller (`gc stop` while a controller is running), the standalone\ncontroller-stop wait budget is `shutdown_timeout` + 15s (20s at the\ndefault `shutdown_timeout` of \"5s\"); a `dolt_stop_timeout` larger than\nthat budget can be cut short on that path even though the direct\nstop/unregister path always honors the full grace.",
+          "default": "30s"
+        },
+        "dolt_start_address_in_use_retry_window": {
+          "type": "string",
+          "description": "DoltStartAddressInUseRetryWindow is how long the managed dolt start\npath waits on the originally requested port when bind fails with\n\"address already in use\" before falling back to a higher port. The\ncommon cause is a TIME_WAIT socket left by an abrupt stop of a sibling\ndolt subprocess (external SIGTERM, supervisor restart, OOM kill); on\nLinux the listening-socket slot typically frees within ~30s. Falling\nback immediately publishes the rebound port to provider state, after\nwhich `recoverManagedDoltShouldReuseExisting` keeps accepting the\nrebound instance as canonical and consumers hardcoded to the original\nport stay broken until the orphan is killed. Duration string (e.g.,\n\"30s\", \"1m\"). Set to \"0s\" to disable the retry (legacy fall-back-\nimmediately behavior). Defaults to \"30s\". Each port is waited on at\nmost once per startManagedDoltProcessWithOptions invocation, so the\nworst-case wall time per startup is bounded by\n(DoltStartAddressInUseRetryWindow + per-attempt-startup) × min(5,\ndistinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.\nNegative values are rejected at config load.",
+          "default": "30s"
+        },
+        "wisp_gc_interval": {
+          "type": "string",
+          "description": "WispGCInterval is how often the garbage collector for wisps runs. A wisp is\nan ephemeral bead produced by a v1 formula run; this knob controls how often\nthe closed ones are swept. Duration string (e.g., \"5m\", \"1h\"). Wisp GC is\ndisabled unless both WispGCInterval and WispTTL are set."
+        },
+        "wisp_ttl": {
+          "type": "string",
+          "description": "WispTTL is how long a closed wisp (an ephemeral v1 formula-run bead) survives\nbefore being purged. Duration string (e.g., \"24h\", \"7d\"). Wisp GC is disabled\nunless both WispGCInterval and WispTTL are set."
+        },
+        "drift_drain_timeout": {
+          "type": "string",
+          "description": "DriftDrainTimeout is the maximum time to wait for an agent to acknowledge\na drain signal during a config-drift restart. If the agent doesn't ack\nwithin this window, the controller force-kills and restarts it.\nDuration string (e.g., \"2m\", \"5m\"). Defaults to \"2m\".",
+          "default": "2m"
+        },
+        "observe_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ObservePaths lists extra directories to search for Claude JSONL session\nfiles (e.g., aimux session paths). The default search path\n(~/.claude/projects/) is always included."
+        },
+        "probe_concurrency": {
+          "type": "integer",
+          "description": "ProbeConcurrency bounds the number of concurrent bd subprocess probes\nissued by the pool scale_check and work_query paths. bd serializes on\na shared dolt sql-server, so unbounded parallelism causes contention.\nNil (unset) defaults to 8. Set higher for workspaces with a fast\ndedicated dolt server, or lower to reduce contention on slow storage.",
+          "default": 8
+        },
+        "max_wakes_per_tick": {
+          "type": "integer",
+          "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Fresh generic pool session-bead creation uses the same\nbudget so the controller does not materialize more ordinary pool sessions\nthan it can wake. Bounded dependency-floor prerequisites are exempt.\nNil (unset) defaults to 5. Values \u003c= 0 are treated as the default — set a\npositive integer to override.",
+          "default": 5
+        },
+        "nudge_dispatcher": {
+          "type": "string",
+          "enum": [
+            "legacy",
+            "supervisor"
+          ],
+          "description": "NudgeDispatcher selects how queued nudges get delivered to running\nsessions. \"legacy\" (default) auto-spawns a per-session `gc nudge poll`\nprocess that polls the file-backed queue every 2s. \"supervisor\" runs\nthe delivery loop inside the city runtime instead, with a unix-socket\nwake fast path triggered by enqueue, eliminating the per-session bd\nshellout storm.",
+          "default": "legacy"
+        },
+        "auto_restart_on_drift": {
+          "type": "boolean",
+          "description": "AutoRestartOnDrift controls whether `gc start` automatically restarts\nthe supervisor when it detects the running supervisor's binary or\npack snapshot has drifted from on-disk state. Nil (unset) defaults\nto true — operators get the correct-by-default behavior. Set to\nfalse as a global kill switch (e.g., for production cities where a\nrebuild on the host should not auto-restart the supervisor).",
+          "default": true
+        },
+        "auto_reap_closed_bead_worktrees": {
+          "type": "boolean",
+          "description": "AutoReapClosedBeadWorktrees controls whether the reconciler patrol\nautomatically removes per-bead git worktrees once their associated\nwork bead reaches closed status. Only worktrees with a clean working\ntree, no unpushed commits, and no stashes are removed; unsafe worktrees\nare logged as warnings and left in place for operator review. Session\nhome directories (agent template directories) are never touched.\nDefaults to false. Set to true to enable automated worktree cleanup.",
+          "default": false
+        },
+        "start_ready_timeout": {
+          "type": "string",
+          "description": "StartReadyTimeout is how long `gc start` and `gc register` wait for\nthe supervisor to report the city as Running. Cities with many\nregistered or adopted sessions take longer to start because the\nper-tick wake budget (max_wakes_per_tick) throttles startup: wall\ntime to wake N sessions is roughly ceil(N / max_wakes_per_tick) *\npatrol_interval. At the defaults (5 wakes / 30s), ~40 sessions\nneed ~4 minutes. Duration string (e.g., \"5m\", \"10m\"). Defaults to\nDefaultStartReadyTimeout (5m). When set, this value replaces the\ndefault start/register budget; [session].startup_timeout may still\nextend the effective wait for a slow single session.",
+          "default": "5m"
+        },
+        "tick_debounce": {
+          "type": "string",
+          "description": "TickDebounce coalesces bursty event-driven ticks (pokeCh,\ncontrolDispatcherCh) within this window. A first event in a quiet\nperiod arms a timer; subsequent events arriving before the timer\nfires are dropped (the single delayed tick re-reads authoritative\nstate covering all collapsed events). Zero (the default) disables\ndebouncing — each event fires its own tick, matching pre-existing\nbehavior. Duration string (e.g., \"250ms\", \"500ms\"). Trade-off:\nadds tick latency up to this value when set."
+        },
+        "auto_prune_worker_dir": {
+          "type": "boolean",
+          "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, clean working tree, no unpushed commits, no\nstashed work. Nil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
+          "default": true
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DaemonConfig holds controller daemon settings."
+    },
+    "DoctorConfig": {
+      "properties": {
+        "worktree_rig_warn_size": {
+          "type": "string",
+          "description": "WorktreeRigWarnSize is the per-rig warning threshold for the total\ndisk footprint under .gc/worktrees/\u003crig\u003e/. Reported by the\nworktree-disk-size check. Go-style human size string (\"10GB\", \"500MB\").\nEmpty or unparseable falls back to the default (10 GB).",
+          "default": "10GB"
+        },
+        "worktree_rig_error_size": {
+          "type": "string",
+          "description": "WorktreeRigErrorSize is the per-rig error threshold. When any rig\nexceeds this, the worktree-disk-size check reports an error rather\nthan a warning. Empty or unparseable falls back to the default\n(50 GB).",
+          "default": "50GB"
+        },
+        "nested_worktree_prune": {
+          "type": "boolean",
+          "description": "NestedWorktreePrune escalates the nested-worktree-prune check\nfrom warning to error severity when safely-prunable nested\nworktrees are present, so CI / scripted doctor runs fail until\nthe operator runs `gc doctor --fix`. Actual removal still\nrequires --fix; this flag does not auto-prune. Safety is\nenforced by mechanical checks (no uncommitted changes, no\nunpushed commits, no stashes) — never by role identity.",
+          "default": false
+        },
+        "check": {
+          "items": {
+            "$ref": "#/$defs/LocalDoctorCheck"
+          },
+          "type": "array",
+          "description": "Checks holds city-local inline doctor checks declared via\n[[doctor.check]] in city.toml."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DoctorConfig holds settings for the gc doctor surface."
+    },
+    "DoltConfig": {
+      "properties": {
+        "port": {
+          "type": "integer",
+          "description": "Port is the dolt server port. 0 means use ephemeral port allocation\n(hashed from city path). Set explicitly to override.",
+          "default": 0
+        },
+        "host": {
+          "type": "string",
+          "description": "Host is the dolt server hostname. Defaults to localhost.",
+          "default": "localhost"
+        },
+        "archive_level": {
+          "type": "integer",
+          "description": "ArchiveLevel controls Dolt's auto_gc archive aggressiveness.\n0 disables archive compaction (lower CPU on startup).\n1 enables archive compaction (higher CPU on startup).\nnil (omitted) defaults to 0.",
+          "default": 0
+        },
+        "auto_gc_enabled": {
+          "type": "boolean",
+          "description": "AutoGCEnabled toggles Dolt's incremental auto-GC on the managed\nsql-server. Auto-GC bounds the noms journal so it never reaches\nGB scale, which shrinks both the unclean-stop corruption window\nand the recovery blast radius. nil (omitted) defaults to true.",
+          "default": true
+        },
+        "max_connections": {
+          "type": "integer",
+          "description": "MaxConnections overrides the managed Dolt listener max_connections.\n0 means use the managed default.",
+          "default": 256
+        },
+        "read_timeout_millis": {
+          "type": "integer",
+          "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
+          "default": 15000
+        },
+        "write_timeout_millis": {
+          "type": "integer",
+          "description": "WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.\n0 means use the managed default.",
+          "default": 300000
+        },
+        "dolt_lock_release_timeout": {
+          "type": "string",
+          "description": "DoltLockReleaseTimeout is how long managed-dolt lifecycle operations\nwait for dolt's on-disk exclusive store locks (the root-level\n`\u003cdata_dir\u003e/.dolt/noms/LOCK` and per-database\n`\u003cdata_dir\u003e/\u003cdb\u003e/.dolt/noms/LOCK` forms) to be released by a prior\nserver process before failing closed. The start path refuses to launch a\nsecond `dolt sql-server` against a data_dir whose lock is still held —\na prior instance that is shutting down holds the lock until its chunk\njournal is flushed, and binding before release corrupts the journal\n(see gastownhall/gascity#3174). The stop path uses the same window to\nwait for lock release after process exit before reporting success.\nDuration string (e.g., \"1m\", \"90s\"). Defaults to \"1m\", which covers\nthe flush window of multi-GB journals on commodity SSDs. Set to \"0s\"\nto probe once with no wait (still fail-closed when held). Negative\nvalues are rejected at config load. The managed lifecycle also\nprojects this value into the gc-beads-bd.sh shell fallback as\nGC_DOLT_LOCK_RELEASE_TIMEOUT_MS (milliseconds), so both paths honor\nthe configured window.",
+          "default": "1m"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DoltConfig holds optional dolt server overrides."
+    },
+    "DoltMaintenance": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled toggles the maintenance loop. Defaults to false (opt-in)."
+        },
+        "interval": {
+          "type": "string",
+          "description": "Interval is the cadence between maintenance runs as a duration\nstring (e.g., \"168h\"). Defaults to 168h (weekly).",
+          "default": "168h"
+        },
+        "alert_to": {
+          "type": "string",
+          "description": "AlertTo is the agent identity to mail on failure (e.g.,\n\"gascity/mayor\"). Empty disables alert mail."
+        },
+        "gc_timeout": {
+          "type": "string",
+          "description": "GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.\nDefaults to 10m.",
+          "default": "10m"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop."
+    },
+    "EventsConfig": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider selects the events backend: \"fake\", \"fail\",\n\"exec:\u003cscript\u003e\", or \"\" (default: file-backed JSONL)."
+        },
+        "rotation": {
+          "$ref": "#/$defs/EventsRotationConfig",
+          "description": "Rotation configures file-backed JSONL rotation. Defaults are applied\nby EventsRotationConfig helper methods when this table is absent."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "EventsConfig holds events provider settings."
+    },
+    "EventsRotationConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled controls automatic size-triggered rotation. Defaults to true.",
+          "default": true
+        },
+        "max_size_bytes": {
+          "type": "integer",
+          "description": "MaxSizeBytes is the active events.jsonl size threshold. Defaults to\nDefaultEventsRotationMaxSizeBytes.",
+          "default": 268435456
+        },
+        "check_interval_records": {
+          "type": "integer",
+          "description": "CheckIntervalRecords is the number of records between size checks.\nDefaults to DefaultEventsRotationCheckIntervalRecords.",
+          "default": 1024
+        },
+        "check_interval_seconds": {
+          "type": "integer",
+          "description": "CheckIntervalSeconds is the time backstop between size checks. Defaults\nto DefaultEventsRotationCheckIntervalSeconds.",
+          "default": 60
+        },
+        "archive_retain_age": {
+          "type": "string",
+          "description": "ArchiveRetainAge is an optional Go duration. Empty keeps all archives."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "EventsRotationConfig holds file-backed events rotation settings."
+    },
+    "FormulasConfig": {
+      "properties": {},
+      "additionalProperties": false,
+      "type": "object",
+      "description": "FormulasConfig is the legacy [formulas] table with no supported fields: authored [formulas].dir is rejected at config load (use the well-known formulas/ directory instead), and gc doctor flags any declaration as a fixable v2-formulas-dir error."
+    },
+    "GitHubConfig": {
+      "properties": {
+        "pr_monitor": {
+          "items": {
+            "$ref": "#/$defs/GitHubPRMonitor"
+          },
+          "type": "array",
+          "description": "PRMonitors declares GitHub pull-request readiness monitors."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "GitHubConfig groups GitHub-facing repository monitor declarations."
+    },
+    "GitHubPRMonitor": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the stable monitor identity used by patches and diagnostics."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Owner is the GitHub repository owner or organization."
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repo is the GitHub repository name."
+        },
+        "base_branches": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "BaseBranches lists the base branches this monitor owns."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig is the Gas City rig that owns repair work for this repository."
+        },
+        "notify": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Notify lists session or mail recipients for readiness notifications."
+        },
+        "repair_route": {
+          "type": "string",
+          "description": "RepairRoute is the operator-supplied route target for repair work."
+        },
+        "repair_workflow": {
+          "type": "string",
+          "description": "RepairWorkflow is the formula attached to repair beads created for this\nmonitor. Empty defaults to the standard polecat repair workflow so routed\nrepair work carries the branch/test/push/refinery steps instead of\nsitting as a raw routed task."
+        },
+        "webhook_secret_env": {
+          "type": "string",
+          "description": "WebhookSecretEnv is the environment variable containing the webhook\nHMAC secret. The secret value itself must not be stored in city.toml."
+        },
+        "webhook_secret_key": {
+          "type": "string",
+          "description": "WebhookSecretKey is an optional stable key for identifying the webhook\nsecret during rotation. When omitted, WebhookSecretEnv is the key."
+        },
+        "poll_interval": {
+          "type": "string",
+          "description": "PollInterval optionally enables bounded polling/backfill cadence."
+        },
+        "merge_queue": {
+          "type": "string",
+          "enum": [
+            "ignore",
+            "observe",
+            "repair"
+          ],
+          "description": "MergeQueuePolicy controls merge-queue signal handling. Empty defaults\nto \"observe\"; valid values are \"ignore\", \"observe\", and \"repair\"."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "owner",
+        "repo",
+        "base_branches",
+        "rig",
+        "repair_route"
+      ],
+      "description": "GitHubPRMonitor declares how one repository/base-branch set is monitored and where durable repair work should be routed when readiness fails."
+    },
+    "GitHubPRMonitorPatch": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the monitor identity to patch."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Owner overrides the GitHub repository owner or organization."
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repo overrides the GitHub repository name."
+        },
+        "base_branches": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "BaseBranches replaces the monitored base branch list. An empty list\nclears the field and will fail validation unless another patch fills it."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig overrides the owning rig."
+        },
+        "notify": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Notify replaces notification recipients. An empty list clears recipients."
+        },
+        "notify_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "NotifyAppend appends notification recipients after Notify replacement."
+        },
+        "repair_route": {
+          "type": "string",
+          "description": "RepairRoute overrides the repair route target."
+        },
+        "repair_workflow": {
+          "type": "string",
+          "description": "RepairWorkflow overrides the formula attached to repair beads."
+        },
+        "webhook_secret_env": {
+          "type": "string",
+          "description": "WebhookSecretEnv overrides the env var containing the webhook secret."
+        },
+        "webhook_secret_key": {
+          "type": "string",
+          "description": "WebhookSecretKey overrides the stable webhook secret key."
+        },
+        "poll_interval": {
+          "type": "string",
+          "description": "PollInterval overrides the optional polling cadence."
+        },
+        "merge_queue": {
+          "type": "string",
+          "enum": [
+            "ignore",
+            "observe",
+            "repair"
+          ],
+          "description": "MergeQueuePolicy overrides merge-queue signal handling."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "GitHubPRMonitorPatch modifies an existing GitHub PR readiness monitor by name."
+    },
+    "Import": {
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Source is the durable authored pack location: a local path, a remote git\nURL, or a dereferenceable GitHub tree URL for a pack below a repository\nroot, such as \"https://github.com/org/repo/tree/main/packs/foo\". Registry\nhandles are lookup-only in this release wave; authored [imports.*]\nentries store the resolved source plus optional version."
+        },
+        "version": {
+          "type": "string",
+          "description": "Version is an optional semver constraint for git-backed imports (e.g.,\n\"^1.2\"). Empty for local paths. \"sha:\u003chex\u003e\" pins a specific commit."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "description": "Import defines a named import of another pack."
+    },
+    "K8sConfig": {
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "description": "Namespace is the K8s namespace for agent pods. Default: \"gc\".",
+          "default": "gc"
+        },
+        "image": {
+          "type": "string",
+          "description": "Image is the container image for agents."
+        },
+        "context": {
+          "type": "string",
+          "description": "Context is the kubectl/kubeconfig context. Default: current."
+        },
+        "cpu_request": {
+          "type": "string",
+          "description": "CPURequest is the pod CPU request. Default: \"500m\".",
+          "default": "500m"
+        },
+        "mem_request": {
+          "type": "string",
+          "description": "MemRequest is the pod memory request. Default: \"1Gi\".",
+          "default": "1Gi"
+        },
+        "cpu_limit": {
+          "type": "string",
+          "description": "CPULimit is the pod CPU limit. Default: \"2\".",
+          "default": "2"
+        },
+        "mem_limit": {
+          "type": "string",
+          "description": "MemLimit is the pod memory limit. Default: \"4Gi\".",
+          "default": "4Gi"
+        },
+        "prebaked": {
+          "type": "boolean",
+          "description": "Prebaked skips init container staging and EmptyDir volumes when true.\nUse with images built by `gc build-image` that have city content baked in."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "K8sConfig holds native K8s session provider settings."
+    },
+    "LocalDoctorCheck": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the bare check name. The SDK injects the \"local:\" prefix;\ndo not include it here."
+        },
+        "script": {
+          "type": "string",
+          "description": "Script is the path to the check script, relative to the city root.\nExecution registration enforces containment within the city directory."
+        },
+        "description": {
+          "type": "string",
+          "description": "Description is optional human-readable text shown in verbose output."
+        },
+        "fix": {
+          "type": "string",
+          "description": "Fix is the optional path to a remediation script, relative to the\ncity root."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "script"
+      ],
+      "description": "LocalDoctorCheck is a city-local doctor check declared inline in city.toml via [[doctor.check]]."
+    },
+    "MailConfig": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider selects the mail backend: \"fake\", \"fail\",\n\"exec:\u003cscript\u003e\", or \"\" (default: beadmail)."
+        },
+        "retention_ttl": {
+          "type": "string",
+          "description": "RetentionTTL is how long read messages are retained before purge. Empty\nor \"0\" disables read-message retention."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "MailConfig holds mail provider settings."
+    },
+    "MaintenanceConfig": {
+      "properties": {
+        "dolt": {
+          "$ref": "#/$defs/DoltMaintenance",
+          "description": "Dolt configures the weekly Dolt store maintenance loop\n(CALL DOLT_GC + backup snapshot)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "MaintenanceConfig groups periodic store-maintenance subsections."
+    },
+    "ModelPricing": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider is the LLM provider label (e.g. \"claude\", \"codex\", \"gemini\")."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-8\")."
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier",
+          "description": "Tier holds the per-token-type rates."
+        },
+        "last_verified": {
+          "type": "string",
+          "description": "LastVerified is the date these rates were confirmed (YYYY-MM-DD)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "provider",
+        "model",
+        "tier",
+        "last_verified"
+      ],
+      "description": "ModelPricing is a complete pricing entry for a (Provider, Model) pair."
+    },
+    "NamedSession": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the configured public session identity. When omitted, Template\nremains the compatibility identity."
+        },
+        "template": {
+          "type": "string",
+          "description": "Template is the referenced agent template name. Root declarations may\ntarget imported agents via \"binding.agent\"."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "city",
+            "rig"
+          ],
+          "description": "Scope defines where this named session is instantiated in pack\nexpansion: \"city\" (one per city) or \"rig\" (one per rig). Omit the\nfield for an unscoped session instantiated in both city and rig\nexpansion contexts."
+        },
+        "dir": {
+          "type": "string",
+          "description": "Dir is the identity prefix for rig-scoped named sessions after pack\nexpansion. Empty means city-scoped."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "on_demand",
+            "always"
+          ],
+          "description": "Mode controls when the controller ensures this named session is live.\n\"on_demand\" (default): reserve identity and materialize when work or\nan explicit reference requires it.\n\"always\": keep the canonical session controller-managed.\nNote: mode=\"always\" is independent of min_active_sessions; both produce\nsessions, and gc doctor reports accidental duplicate-pool combinations."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "template"
+      ],
+      "description": "NamedSession defines a canonical persistent session backed by an agent template."
+    },
+    "NamedSessionPatch": {
+      "properties": {
+        "dir": {
+          "type": "string",
+          "description": "Dir is the targeting key. Empty targets a city-scoped named session."
+        },
+        "name": {
+          "type": "string",
+          "description": "Name is the canonical named-session identity. Use this to disambiguate\nsessions that share the same template."
+        },
+        "template": {
+          "type": "string",
+          "description": "Template is a compatibility targeting key when Name is omitted."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "on_demand",
+            "always"
+          ],
+          "description": "Mode overrides the named-session controller mode (\"on_demand\" or \"always\")."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "NamedSessionPatch modifies an existing named session identified by canonical name or, for compatibility, by an unambiguous template."
+    },
+    "OptionChoice": {
+      "properties": {
+        "value": {
+          "type": "string",
+          "description": "Value is the choice identifier matched against ProviderOption.Default and\nthe user's selection (e.g. \"opus-4.8\")."
+        },
+        "label": {
+          "type": "string",
+          "description": "Label is the human-readable choice name shown in tooling."
+        },
+        "flag_args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "FlagArgs are the CLI arguments injected when this choice is selected.\njson:\"-\" is intentional: FlagArgs must never appear in the public API DTO\n(security boundary — prevents clients from seeing internal CLI flags)."
+        },
+        "flag_aliases": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "array",
+          "description": "FlagAliases are equivalent CLI argument sequences stripped from legacy\nprovider args. Like FlagArgs, they stay server-side only."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "value",
+        "label",
+        "flag_args"
+      ],
+      "description": "OptionChoice is one allowed value for a \"select\" option."
+    },
+    "OrderOverride": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the order name to target (required)."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig scopes the override to a specific rig's order.\nEmpty matches city-level orders."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled overrides whether the order is active."
+        },
+        "trigger": {
+          "type": "string",
+          "description": "Trigger overrides the trigger type."
+        },
+        "gate": {
+          "type": "string",
+          "description": "Gate is a deprecated alias for Trigger accepted during the\ngate-\u003etrigger migration. Parsed inputs are normalized to Trigger.",
+          "deprecated": true
+        },
+        "interval": {
+          "type": "string",
+          "description": "Interval overrides the cooldown interval. Go duration string."
+        },
+        "schedule": {
+          "type": "string",
+          "description": "Schedule overrides the cron expression."
+        },
+        "check": {
+          "type": "string",
+          "description": "Check overrides the condition trigger check command."
+        },
+        "on": {
+          "type": "string",
+          "description": "On overrides the event trigger event type."
+        },
+        "pool": {
+          "type": "string",
+          "description": "Pool overrides the target session config."
+        },
+        "timeout": {
+          "type": "string",
+          "description": "Timeout overrides the per-order timeout. Go duration string."
+        },
+        "idempotent": {
+          "type": "boolean",
+          "description": "Idempotent overrides whether the order's dispatch is safe to repeat.\nIdempotent orders fail open when the open-work gate times out (#2893)."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env adds or overrides environment variables exported into an exec\norder's child process."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "OrderOverride modifies a scanned order's scheduling fields and exec env."
+    },
+    "OrdersConfig": {
+      "properties": {
+        "skip": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skip lists order names to exclude from scanning."
+        },
+        "max_timeout": {
+          "type": "string",
+          "description": "MaxTimeout is an operator hard cap on per-order timeouts.\nNo order gets more than this duration. Go duration string (e.g., \"60s\").\nEmpty means uncapped (no override)."
+        },
+        "overrides": {
+          "items": {
+            "$ref": "#/$defs/OrderOverride"
+          },
+          "type": "array",
+          "description": "Overrides apply per-order field overrides after scanning.\nEach override targets an order by name and optionally by rig."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "OrdersConfig holds order settings for orders discovered from flat TOML files (one file per order) in the orders/ directory beside each formula layer (packs, the city directory, and rig-local layers)."
+    },
+    "PackDefaults": {
+      "properties": {
+        "rig": {
+          "$ref": "#/$defs/PackRigDefaults"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PackDefaults holds [defaults] entries used to seed generated rig configuration."
+    },
+    "PackRigDefaults": {
+      "properties": {
+        "imports": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Import"
+          },
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PackRigDefaults holds the [defaults.rig] block — defaults applied to rigs created from this pack."
+    },
+    "Patches": {
+      "properties": {
+        "agent": {
+          "items": {
+            "$ref": "#/$defs/AgentPatch"
+          },
+          "type": "array",
+          "description": "Agents targets agents by (dir, name)."
+        },
+        "named_session": {
+          "items": {
+            "$ref": "#/$defs/NamedSessionPatch"
+          },
+          "type": "array",
+          "description": "NamedSessions targets configured named sessions by (dir, template)."
+        },
+        "rigs": {
+          "items": {
+            "$ref": "#/$defs/RigPatch"
+          },
+          "type": "array",
+          "description": "Rigs targets rigs by name."
+        },
+        "providers": {
+          "items": {
+            "$ref": "#/$defs/ProviderPatch"
+          },
+          "type": "array",
+          "description": "Providers targets providers by name."
+        },
+        "github_pr_monitor": {
+          "items": {
+            "$ref": "#/$defs/GitHubPRMonitorPatch"
+          },
+          "type": "array",
+          "description": "GitHubPRMonitors targets GitHub PR readiness monitors by name."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "Patches holds all patch blocks from composition."
+    },
+    "PoolOverride": {
+      "properties": {
+        "min": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Min overrides the minimum number of sessions."
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Max overrides the maximum number of sessions. 0 means no sessions can claim routed work."
+        },
+        "check": {
+          "type": "string",
+          "description": "Check overrides the session scale check command template. Supports the\nsame Go template placeholders as Agent.scale_check."
+        },
+        "drain_timeout": {
+          "type": "string",
+          "description": "DrainTimeout overrides the drain timeout. Duration string (e.g., \"5m\", \"30m\", \"1h\")."
+        },
+        "on_death": {
+          "type": "string",
+          "description": "OnDeath overrides the on_death command template. Supports the same Go\ntemplate placeholders as Agent.on_death."
+        },
+        "on_boot": {
+          "type": "string",
+          "description": "OnBoot overrides the on_boot command template. Supports the same Go\ntemplate placeholders as Agent.on_boot."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PoolOverride modifies legacy [pool] fields that map to session scaling."
+    },
+    "ProviderOption": {
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Key is the option identifier (e.g. \"model\"); also the merge key for\noptions_schema_merge = \"by_key\"."
+        },
+        "label": {
+          "type": "string",
+          "description": "Label is the human-readable option name shown in tooling."
+        },
+        "type": {
+          "type": "string",
+          "description": "\"select\" only (v1)"
+        },
+        "default": {
+          "type": "string",
+          "description": "Default is the Value of the choice selected when the user makes none."
+        },
+        "choices": {
+          "items": {
+            "$ref": "#/$defs/OptionChoice"
+          },
+          "type": "array",
+          "description": "Choices are the allowed values; selecting one injects its FlagArgs into the\nagent command line (how the Model axis renders to a harness CLI flag)."
+        },
+        "omit": {
+          "type": "boolean",
+          "description": "Omit is the removal sentinel for options_schema_merge = \"by_key\".\nWhen set on a child layer's entry, the matching Key inherited from\na parent layer is pruned from the resolved schema."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "key",
+        "label",
+        "type",
+        "default",
+        "choices"
+      ],
+      "description": "ProviderOption declares a single configurable option for a provider."
+    },
+    "ProviderPatch": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the targeting key (required). Must match an existing provider's name."
+        },
+        "base": {
+          "type": "string",
+          "description": "Base overrides the provider's inheritance parent (presence-aware).\nPointer to a pointer so the patch can distinguish \"no change\"\n(double-nil) from \"clear to inherit default\" (single-nil value in\nouter pointer) from \"set to explicit empty opt-out\" (value \"\" in\ninner pointer) from \"set to \u003cname\u003e\". Callers use:\n  nil          = patch does not touch Base\n  \u0026(*string)(nil) = patch clears Base to absent\n  \u0026(\u0026\"\")       = patch sets Base = \"\" (explicit opt-out)\n  \u0026(\u0026\"builtin:codex\") = patch sets Base to that value"
+        },
+        "command": {
+          "type": "string",
+          "description": "Command overrides the provider command."
+        },
+        "acp_command": {
+          "type": "string",
+          "description": "ACPCommand overrides the provider command for ACP transport sessions."
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Args overrides the provider args."
+        },
+        "acp_args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ACPArgs overrides the provider args for ACP transport sessions."
+        },
+        "args_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ArgsAppend overrides the provider args_append list."
+        },
+        "options_schema_merge": {
+          "type": "string",
+          "description": "OptionsSchemaMerge overrides the options_schema merge mode."
+        },
+        "prompt_mode": {
+          "type": "string",
+          "enum": [
+            "arg",
+            "flag",
+            "none"
+          ],
+          "description": "PromptMode overrides prompt delivery mode."
+        },
+        "prompt_flag": {
+          "type": "string",
+          "description": "PromptFlag overrides the prompt flag."
+        },
+        "ready_delay_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "ReadyDelayMs overrides the ready delay in milliseconds."
+        },
+        "accept_startup_dialogs": {
+          "type": "boolean",
+          "description": "AcceptStartupDialogs overrides startup dialog acceptance behavior."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env adds or overrides environment variables."
+        },
+        "env_remove": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "EnvRemove lists env var keys to remove."
+        },
+        "_replace": {
+          "type": "boolean",
+          "description": "Replace replaces the entire provider block instead of deep-merging."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "ProviderPatch modifies an existing provider identified by Name."
+    },
+    "ProviderSpec": {
+      "properties": {
+        "base": {
+          "type": "string",
+          "description": "Base names the parent provider this spec inherits from. Supported\nforms:\n  \"\u003cname\u003e\"          - custom first (self-excluded), then built-in\n  \"builtin:\u003cname\u003e\"  - force built-in lookup\n  \"provider:\u003cname\u003e\" - force custom lookup\n  \"\"                - explicit standalone opt-out\n  nil               - field absent; no explicit declaration"
+        },
+        "args_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ArgsAppend accumulates extra args after each layer's Args replacement."
+        },
+        "options_schema_merge": {
+          "type": "string",
+          "enum": [
+            "replace",
+            "by_key"
+          ],
+          "description": "OptionsSchemaMerge controls OptionsSchema merge mode across the\nchain: \"replace\" (default) or \"by_key\"."
+        },
+        "display_name": {
+          "type": "string",
+          "description": "DisplayName is the human-readable name shown in UI and logs."
+        },
+        "command": {
+          "type": "string",
+          "description": "Command is the executable to run for this provider."
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Args are default command-line arguments passed to the provider. The\nbuilt-in Kiro provider defaults to\n[\"chat\", \"--no-interactive\", \"--agent\", \"gascity\", \"--trust-all-tools\"];\nremove or replace \"--trust-all-tools\" by defining [providers.kiro].args\nexplicitly in city.toml."
+        },
+        "prompt_mode": {
+          "type": "string",
+          "enum": [
+            "arg",
+            "flag",
+            "none"
+          ],
+          "description": "PromptMode controls how prompts are delivered: \"arg\", \"flag\", or \"none\".",
+          "default": "arg"
+        },
+        "prompt_flag": {
+          "type": "string",
+          "description": "PromptFlag is the CLI flag used when prompt_mode is \"flag\" (e.g. \"--prompt\")."
+        },
+        "ready_delay_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "ReadyDelayMs is milliseconds to wait after launch before the provider is considered ready."
+        },
+        "ready_prompt_prefix": {
+          "type": "string",
+          "description": "ReadyPromptPrefix is the string prefix that indicates the provider is ready for input."
+        },
+        "process_names": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ProcessNames lists process names to look for when checking if the provider is running."
+        },
+        "emits_permission_warning": {
+          "type": "boolean",
+          "description": "EmitsPermissionWarning is tri-state: nil = inherit, \u0026true = enable,\n\u0026false = explicit disable."
+        },
+        "accept_startup_dialogs": {
+          "type": "boolean",
+          "description": "AcceptStartupDialogs is tri-state: nil = default startup dialog handling,\n\u0026true = force dialog acceptance, \u0026false = suppress it for providers that\nhandle permissions entirely through launch flags."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env sets additional environment variables for the provider process."
+        },
+        "path_check": {
+          "type": "string",
+          "description": "PathCheck overrides the binary name used for PATH detection.\nWhen set, lookupProvider and detectProviderName use this instead\nof Command for exec.LookPath checks. Useful when Command is a\nshell wrapper (e.g. sh -c '...') but we need to verify the real\nbinary is installed."
+        },
+        "supports_acp": {
+          "type": "boolean",
+          "description": "SupportsACP indicates the binary speaks the Agent Client Protocol\n(JSON-RPC 2.0 over stdio). When an agent sets session = \"acp\",\nits resolved provider must have SupportsACP = true."
+        },
+        "supports_hooks": {
+          "type": "boolean",
+          "description": "SupportsHooks indicates the provider has an executable hook mechanism\n(settings.json, plugins, etc.) for lifecycle events."
+        },
+        "instructions_file": {
+          "type": "string",
+          "description": "InstructionsFile is the filename the provider reads for project instructions\n(e.g., \"CLAUDE.md\", \"AGENTS.md\"). Empty defaults to \"AGENTS.md\"."
+        },
+        "resume_flag": {
+          "type": "string",
+          "description": "ResumeFlag is the CLI flag for resuming a session by ID.\nEmpty means the provider does not support resume.\nExamples: \"--resume\" (claude), \"resume\" (codex)"
+        },
+        "resume_style": {
+          "type": "string",
+          "description": "ResumeStyle controls how ResumeFlag is applied:\n  \"flag\"       → command --resume \u003ckey\u003e              (default)\n  \"subcommand\" → command resume \u003ckey\u003e"
+        },
+        "resume_command": {
+          "type": "string",
+          "description": "ResumeCommand is the full shell command to run when resuming a session.\nSupports only the {{.SessionKey}} template variable. When set, takes precedence\nover ResumeFlag/ResumeStyle. When schema-managed defaults are inserted, the\nresolver tokenizes and re-emits the command; for subcommand-style resume it\ninserts after the ResumeFlag token that precedes {{.SessionKey}}. Example:\n  \"claude --resume {{.SessionKey}} --dangerously-skip-permissions\"\nSchema-managed defaults missing from a subcommand-style resume command\nare inserted before {{.SessionKey}} during provider resolution."
+        },
+        "session_id_flag": {
+          "type": "string",
+          "description": "SessionIDFlag is the CLI flag for providers that support creating a\nfresh session with a caller-supplied ID. Empty means fresh starts cannot\nreceive a preselected provider session ID; resume metadata must come from\nthe provider after startup."
+        },
+        "permission_modes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "PermissionModes maps permission mode names to CLI flags.\nExample: {\"unrestricted\": \"--dangerously-skip-permissions\", \"plan\": \"--permission-mode plan\"}\nThis is a config-only lookup table consumed by external clients\n(e.g., real-world app) to populate permission mode dropdowns.\nLaunch-time flag substitution is planned for a follow-up PR —\ncurrently no runtime code reads this field."
+        },
+        "option_defaults": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "OptionDefaults overrides the Default value in OptionsSchema entries\nwithout redefining the schema itself. Keys are option keys (e.g.,\n\"permission_mode\"), values are choice values (e.g., \"unrestricted\").\ncity.toml users set this to customize provider behavior without\ntouching Args or OptionsSchema."
+        },
+        "options_schema": {
+          "items": {
+            "$ref": "#/$defs/ProviderOption"
+          },
+          "type": "array",
+          "description": "OptionsSchema declares the configurable options this provider supports.\nEach option maps to CLI args via its Choices[].FlagArgs field.\nSerialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side."
+        },
+        "upstream_env": {
+          "$ref": "#/$defs/UpstreamEnvBinding",
+          "description": "UpstreamEnv is this harness's serving-env contract (Phase C — the Upstream\naxis): the env-var NAMES this CLI reads for the model-serving base URL and\ncredential. It lets the resolver render an abstract [upstreams.\u003cname\u003e] onto\nthe right names for this harness, so an upstream preset is portable across\nharnesses (claude → ANTHROPIC_*, codex → OPENAI_*)."
+        },
+        "print_args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PrintArgs are CLI arguments that enable one-shot non-interactive mode.\nThe provider prints its response to stdout and exits. When empty, the\nprovider does not support one-shot invocation.\nExamples: [\"-p\"] (claude, gemini), [\"exec\"] (codex), [\"--quiet\", \"--prompt\"] (kimi)"
+        },
+        "title_model": {
+          "type": "string",
+          "description": "TitleModel is the OptionsSchema model key used for title generation.\nResolved via the \"model\" option in OptionsSchema to get FlagArgs.\nDefaults to the cheapest/fastest model for each provider.\nExamples: \"haiku\" (claude), \"o4-mini\" (codex), \"gemini-2.5-flash\" (gemini)"
+        },
+        "acp_command": {
+          "type": "string",
+          "description": "ACPCommand overrides Command when the session transport is ACP.\nWhen empty, Command is used for both tmux and ACP transports."
+        },
+        "acp_args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ProviderSpec defines a named provider's startup parameters."
+    },
+    "Rig": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the unique identifier for this rig."
+        },
+        "path": {
+          "type": "string",
+          "description": "Path is the absolute filesystem path to the rig's repository."
+        },
+        "prefix": {
+          "type": "string",
+          "description": "Prefix overrides the auto-derived bead ID prefix for this rig."
+        },
+        "default_branch": {
+          "type": "string",
+          "description": "DefaultBranch is the rig repository's mainline branch (e.g. \"main\",\n\"master\", \"develop\"). When set, routing formulas use this as the\ndefault merge target instead of probing origin/HEAD at sling time.\nCaptured by `gc rig add` from the rig's git config; set manually for\nrigs whose mainline isn't reachable via origin/HEAD."
+        },
+        "suspended": {
+          "type": "boolean",
+          "description": "Suspended is the deprecated pre-runtime-state suspension flag.\nParsed for backwards compatibility and treated as an alias for\nSuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing\ncities with `suspended = true` continue to start their rigs\nsuspended after upgrade. Live suspend/resume commands no longer\nwrite this field. `gc doctor` flags it and offers `--fix` to\nrename to suspended_on_start."
+        },
+        "suspended_on_start": {
+          "type": "boolean",
+          "description": "SuspendedOnStart is the rig's desired suspension state at city\nstart. When true and no explicit entry exists for this rig in\n.gc/runtime/suspension-state.json, the rig is treated as\nsuspended. Once the user has explicitly suspended or resumed the\nrig via `gc rig suspend/resume`, the runtime state wins."
+        },
+        "formulas_dir": {
+          "type": "string",
+          "description": "FormulasDir is a rig-local formula directory — the highest-priority\nformula layer, above city pack formulas, the city formulas/\ndirectory, and rig pack formulas. Overrides pack formulas for this\nrig by filename.\nRelative paths resolve against the city directory."
+        },
+        "includes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Includes lists pack directories or URLs for this rig (V1 mechanism).\nEach entry is a local path, a git source//sub#ref URL, or a GitHub tree URL."
+        },
+        "imports": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Import"
+          },
+          "type": "object",
+          "description": "Imports defines named pack imports for this rig (V2 mechanism).\nEach key is a binding name; agents from these imports get qualified\nnames like \"rigName/bindingName.agentName\"."
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions is the rig-level cap on total concurrent sessions across\nall agents in this rig. Nil means inherit from workspace (or unlimited)."
+        },
+        "overrides": {
+          "items": {
+            "$ref": "#/$defs/AgentOverride"
+          },
+          "type": "array",
+          "description": "Overrides are per-agent patches applied after pack expansion.\nV2 renames this to \"patches\" for consistency with [[patches.agent]].\nBoth TOML keys are accepted during migration."
+        },
+        "patches": {
+          "items": {
+            "$ref": "#/$defs/AgentOverride"
+          },
+          "type": "array",
+          "description": "Patches is the V2 name for rig-level agent overrides. Takes\nprecedence over Overrides if both are set."
+        },
+        "default_sling_target": {
+          "type": "string",
+          "description": "DefaultSlingTarget is the agent qualified name used when gc sling is\ninvoked with only a bead ID (no explicit target). Resolved via\nresolveAgentIdentity. Example: \"rig/polecat\""
+        },
+        "session_sleep": {
+          "$ref": "#/$defs/SessionSleepConfig",
+          "description": "SessionSleep overrides workspace-level idle sleep defaults for agents in\nthis rig."
+        },
+        "dolt_host": {
+          "type": "string",
+          "description": "DoltHost overrides the city-level Dolt host for this rig's beads.\nUse when the rig's database lives on a different Dolt server (e.g.,\nshared from another city)."
+        },
+        "dolt_port": {
+          "type": "string",
+          "description": "DoltPort overrides the city-level Dolt port for this rig's beads.\nWhen set, controller commands (scale_check, work_query) prefix their\nshell invocations with BEADS_DOLT_SERVER_PORT=\u003cport\u003e so bd connects to the\ncorrect server instead of the city-level default."
+        },
+        "formula_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "FormulaVars provides rig-scoped defaults for formula vars. Keys match\nvar names declared in formula `[vars.\u003cname\u003e]` blocks. Values are used\nwhen a formula runs in this rig and the caller did not pass an\nexplicit --var override. Takes precedence over formula-level defaults\nbut loses to --var flags."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "Rig defines an external project registered in the city."
+    },
+    "RigPatch": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the targeting key (required). Must match an existing rig's name."
+        },
+        "path": {
+          "type": "string",
+          "description": "Path overrides the rig's filesystem path."
+        },
+        "prefix": {
+          "type": "string",
+          "description": "Prefix overrides the bead ID prefix."
+        },
+        "default_branch": {
+          "type": "string",
+          "description": "DefaultBranch overrides the rig's recorded mainline branch."
+        },
+        "suspended": {
+          "type": "boolean",
+          "description": "Suspended is the deprecated, pre-runtime-state suspension override.\nParsed for backwards compatibility; `gc doctor` surfaces it as a\nwarning and recommends the rename to SuspendedOnStart. No behavioral\ncode path reads it."
+        },
+        "suspended_on_start": {
+          "type": "boolean",
+          "description": "SuspendedOnStart overrides the rig's desired suspension state at\ncity start. Mirrors Rig.SuspendedOnStart."
+        },
+        "formula_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "FormulaVars adds or overrides rig-scoped formula var defaults.\nAdditive merge: patch keys win over existing rig keys, unspecified\nkeys are preserved."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "RigPatch modifies an existing rig identified by Name."
+    },
+    "Service": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the unique service identifier within a workspace."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "workflow",
+            "proxy_process"
+          ],
+          "description": "Kind selects how the service is implemented."
+        },
+        "publish_mode": {
+          "type": "string",
+          "enum": [
+            "private",
+            "direct"
+          ],
+          "description": "PublishMode declares how the service is intended to be published.\nv0 supports private services and direct reuse of the API listener."
+        },
+        "state_root": {
+          "type": "string",
+          "description": "StateRoot overrides the managed service state root. Defaults to\n.gc/services/{name}. The path must stay within .gc/services/."
+        },
+        "publication": {
+          "$ref": "#/$defs/ServicePublicationConfig",
+          "description": "Publication declares generic publication intent. The platform decides\nwhether and how that intent becomes a public route."
+        },
+        "workflow": {
+          "$ref": "#/$defs/ServiceWorkflowConfig",
+          "description": "Workflow configures controller-owned workflow services."
+        },
+        "process": {
+          "$ref": "#/$defs/ServiceProcessConfig",
+          "description": "Process configures controller-supervised proxy services."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "Service declares a workspace-owned HTTP service mounted under /svc/{name}."
+    },
+    "ServiceProcessConfig": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Command is the argv used to start the local service process."
+        },
+        "health_path": {
+          "type": "string",
+          "description": "HealthPath, when set, is probed on the local listener before the\nservice is marked ready."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ServiceProcessConfig configures a controller-supervised local process that is reverse-proxied under /svc/{name}."
+    },
+    "ServicePublicationConfig": {
+      "properties": {
+        "visibility": {
+          "type": "string",
+          "enum": [
+            "private",
+            "public",
+            "tenant"
+          ],
+          "description": "Visibility selects whether the service is private to the workspace,\navailable publicly, or gated by tenant auth at the platform edge."
+        },
+        "hostname": {
+          "type": "string",
+          "description": "Hostname overrides the default hostname label derived from service.name."
+        },
+        "allow_websockets": {
+          "type": "boolean",
+          "description": "AllowWebSockets permits websocket upgrades on the published route."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ServicePublicationConfig declares platform-neutral publication intent."
+    },
+    "ServiceWorkflowConfig": {
+      "properties": {
+        "contract": {
+          "type": "string",
+          "description": "Contract selects the built-in workflow handler."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ServiceWorkflowConfig configures controller-owned workflow services."
+    },
+    "SessionConfig": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider selects the session backend: \"fake\", \"fail\", \"subprocess\",\n\"acp\", \"exec:\u003cscript\u003e\", \"k8s\", or \"\" (default: tmux)."
+        },
+        "k8s": {
+          "$ref": "#/$defs/K8sConfig",
+          "description": "K8s holds Kubernetes-specific settings for the native K8s provider."
+        },
+        "acp": {
+          "$ref": "#/$defs/ACPSessionConfig",
+          "description": "ACP holds settings for the ACP (Agent Client Protocol) session provider."
+        },
+        "setup_timeout": {
+          "type": "string",
+          "description": "SetupTimeout is the per-command/script timeout for session setup and\npre_start commands. Duration string (e.g., \"10s\", \"30s\"). Defaults to \"10s\".",
+          "default": "10s"
+        },
+        "nudge_ready_timeout": {
+          "type": "string",
+          "description": "NudgeReadyTimeout is how long to wait for the agent to be ready before\nsending nudge text. Duration string. Defaults to \"10s\".",
+          "default": "10s"
+        },
+        "nudge_retry_interval": {
+          "type": "string",
+          "description": "NudgeRetryInterval is the retry interval between nudge readiness polls.\nDuration string. Defaults to \"500ms\".",
+          "default": "500ms"
+        },
+        "nudge_lock_timeout": {
+          "type": "string",
+          "description": "NudgeLockTimeout is how long to wait to acquire the per-session nudge lock.\nDuration string. Defaults to \"30s\".",
+          "default": "30s"
+        },
+        "debounce_ms": {
+          "type": "integer",
+          "description": "DebounceMs is the default debounce interval in milliseconds for send-keys.\nDefaults to 500.",
+          "default": 500
+        },
+        "display_ms": {
+          "type": "integer",
+          "description": "DisplayMs is the default display duration in milliseconds for status messages.\nDefaults to 5000.",
+          "default": 5000
+        },
+        "startup_timeout": {
+          "type": "string",
+          "description": "StartupTimeout is how long to wait for each agent's Start() call before\ntreating it as failed. Duration string (e.g., \"60s\", \"2m\"). Defaults to \"60s\".",
+          "default": "60s"
+        },
+        "progress_stall_timeout": {
+          "type": "string",
+          "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it."
+        },
+        "socket": {
+          "type": "string",
+          "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, all tmux commands use \"tmux -L \u003csocket\u003e\" to connect to\na dedicated server. When empty, defaults to the city name\n(workspace.name) — giving every city its own tmux server\nautomatically. Set explicitly to override."
+        },
+        "remote_match": {
+          "type": "string",
+          "description": "RemoteMatch is a substring pattern for the hybrid provider to route\nsessions to the remote (K8s) backend. Sessions whose names contain\nthis pattern go to K8s; all others stay local (tmux).\nOverridden by the GC_HYBRID_REMOTE_MATCH env var if set."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "SessionConfig holds session provider settings."
+    },
+    "SessionSleepConfig": {
+      "properties": {
+        "interactive_resume": {
+          "type": "string",
+          "description": "InteractiveResume applies to attachable sessions using wake_mode=resume.\nAccepts a duration string or \"off\"."
+        },
+        "interactive_fresh": {
+          "type": "string",
+          "description": "InteractiveFresh applies to attachable sessions using wake_mode=fresh.\nAccepts a duration string or \"off\"."
+        },
+        "noninteractive": {
+          "type": "string",
+          "description": "NonInteractive applies to sessions with attach=false. Accepts a duration\nstring or \"off\"."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "SessionSleepConfig configures default idle sleep policies by session class."
+    },
+    "Tier": {
+      "properties": {
+        "prompt_usd_per_1m": {
+          "type": "number"
+        },
+        "completion_usd_per_1m": {
+          "type": "number"
+        },
+        "cache_read_usd_per_1m": {
+          "type": "number"
+        },
+        "cache_creation_usd_per_1m": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "prompt_usd_per_1m",
+        "completion_usd_per_1m",
+        "cache_read_usd_per_1m",
+        "cache_creation_usd_per_1m"
+      ],
+      "description": "Tier defines per-token-type rates in USD per 1 million tokens."
+    },
+    "UpstreamEnvBinding": {
+      "properties": {
+        "base_url": {
+          "type": "string",
+          "description": "BaseURL is the env var name the harness reads for the serving base URL."
+        },
+        "api_key": {
+          "type": "string",
+          "description": "APIKey is the env var name the harness reads for the API key."
+        },
+        "auth_token": {
+          "type": "string",
+          "description": "AuthToken is the env var name the harness reads for a bearer auth token."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "UpstreamEnvBinding is a harness's serving-env contract: the env-var NAMES this CLI reads for the model-serving endpoint and credential."
+    },
+    "UpstreamSpec": {
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Description is a human-readable summary shown in tooling."
+        },
+        "base_url": {
+          "type": "string",
+          "description": "BaseURL is the abstract serving endpoint, rendered onto the harness's\nbase_url env var name (UpstreamEnvBinding.BaseURL)."
+        },
+        "api_key": {
+          "type": "string",
+          "description": "APIKey is the abstract credential, rendered onto the harness's api_key env\nvar name. May be a $VAR ref so the secret stays out of config."
+        },
+        "auth_token": {
+          "type": "string",
+          "description": "AuthToken is an abstract bearer-token credential (an alternative to APIKey\nfor harnesses/upstreams that use a token), rendered onto the harness's\nauth_token env var name."
+        },
+        "base_url_env": {
+          "type": "string",
+          "description": "BaseURLEnv/APIKeyEnv/AuthTokenEnv override the HARNESS binding's env-var\nname for the corresponding abstract field. Needed for GATEWAY harnesses —\none CLI (e.g. opencode) fronting many upstreams where the credential env\nvar is upstream-dependent (GROQ_API_KEY, CEREBRAS_API_KEY, …), so the\nHARNESS has no single binding and the UPSTREAM names its own target.\nPrecedence per field: this override \u003e the harness binding \u003e error."
+        },
+        "api_key_env": {
+          "type": "string",
+          "description": "APIKeyEnv overrides the harness binding's api_key env-var name for this\nupstream (see BaseURLEnv for when this is needed)."
+        },
+        "auth_token_env": {
+          "type": "string",
+          "description": "AuthTokenEnv overrides the harness binding's auth_token env-var name for this\nupstream (see BaseURLEnv)."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env is a harness-specific escape hatch: raw env keys merged AFTER the\nabstract fields render. Values may use $VAR refs."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "UpstreamSpec is a named model-serving endpoint preset (Phase C — the Upstream axis: WHO serves+resolves the model)."
+    },
+    "UsageConfig": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider selects the usage sink backend:\n  - \"discard\" / \"fake\" → drop all facts\n  - \"exec:\u003cscript\u003e\" → user-supplied script (JSON fact per line on stdin)\n  - \"\" / \"local\" → durable file-backed JSONL at .gc/usage.jsonl (default)"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "UsageConfig holds usage-fact sink settings."
+    },
+    "Workspace": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the legacy checked-in city name. Runtime identity now resolves\nfrom site binding (.gc/site.toml workspace_name), declared config, and\nbasename precedence instead; gc init writes the machine-local name to\nsite.toml and omits it from city.toml."
+        },
+        "prefix": {
+          "type": "string",
+          "description": "Prefix overrides the auto-derived HQ bead ID prefix. When empty,\nthe prefix is derived from the city Name via DeriveBeadsPrefix."
+        },
+        "provider": {
+          "type": "string",
+          "description": "Provider is the default provider name used by agents that don't specify one."
+        },
+        "start_command": {
+          "type": "string",
+          "description": "StartCommand overrides the provider's command for all agents."
+        },
+        "suspended": {
+          "type": "boolean",
+          "description": "Suspended is the deprecated pre-runtime-state city suspension\nflag. Parsed for backwards compatibility and treated as an alias\nfor SuspendedOnStart by [Workspace.EffectiveSuspendedOnStart], so\nexisting cities with `suspended = true` continue to start\nsuspended after upgrade. Live suspend/resume commands no longer\nwrite this field. `gc doctor` flags it and offers `--fix` to\nrename to suspended_on_start."
+        },
+        "suspended_on_start": {
+          "type": "boolean",
+          "description": "SuspendedOnStart is the city's desired suspension state at start.\nWhen true and no explicit entry exists in\n.gc/runtime/suspension-state.json, the city is treated as\nsuspended. Once the user has explicitly suspended or resumed via\n`gc suspend/resume`, the runtime state wins."
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions is the workspace-level cap on total concurrent sessions.\nNil means unlimited. Agents and rigs inherit this if they don't set their own."
+        },
+        "session_template": {
+          "type": "string",
+          "description": "SessionTemplate is a template string supporting placeholders: {{.City}},\n{{.Agent}} (sanitized), {{.Dir}}, {{.Name}}. Controls tmux session naming.\nDefault (empty): \"{{.Agent}}\" — just the sanitized agent name. Per-city\ntmux socket isolation makes a city prefix unnecessary."
+        },
+        "install_agent_hooks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"antigravity\", \"kiro\", \"opencode\", \"mimocode\", \"groq\", \"cerebras\",\n\"copilot\", \"cursor\", \"pi\", \"omp\", \"kimi\"."
+        },
+        "global_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "GlobalFragments lists named template fragments injected into every\nagent's rendered prompt. Applied before per-agent InjectFragments.\nEach name must match a {{ define \"name\" }} block from a pack's\nprompts/shared/ directory."
+        },
+        "includes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Includes is the legacy city.toml pack-composition list.\n\nDeprecated: use root pack.toml [imports.*] instead. Run gc doctor to\ninspect; gc doctor --fix handles the safe mechanical rewrites available\nin this release wave. Each entry is a local path, a git source//sub#ref\nURL, or a GitHub tree URL."
+        },
+        "default_rig_includes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "DefaultRigIncludes is the legacy city.toml default-rig pack list.\n\nDeprecated: use city.toml [defaults.rig.imports.\u003cbinding\u003e] instead.\nRun gc doctor to inspect; gc doctor --fix handles the safe mechanical\nrewrites available in this release wave."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env defines workspace-wide environment variables applied to every\nmanaged session. Lowest config-precedence — overridden by provider,\nagent, and patch env. Use for cross-cutting variables like\nGC_TARGET_BRANCH that every agent should inherit."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "Workspace holds city-level metadata and optional defaults that apply to all agents unless overridden per-agent."
+    }
+  },
+  "title": "Gas City Configuration",
+  "description": "Schema for city.toml — the deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for pack composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n\u003e **Pack format source of truth:** Public pack format and loader semantics are specified in [Gas City Pack Specification](/reference/specs/pack-spec)."
+}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/packregistry"
 	"github.com/gastownhall/gascity/internal/remotesource"
 	"github.com/spf13/cobra"
@@ -273,6 +274,10 @@ func resolveLocalPackReleaseSource(source, packPath string) (repoDir, resolvedPa
 
 func localGitRoot(path string) (string, error) {
 	cmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")
+	// Strip git-locating env vars (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, ...)
+	// so the toplevel resolves from path, not a parent repo leaked through a
+	// pre-commit hook or nested worktree tooling.
+	cmd.Env = git.SanitizedEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("resolving local git root for %q: %s: %w", path, strings.TrimSpace(string(out)), err)
@@ -349,38 +354,16 @@ func runPackReleaseGitCommand(dir string, args ...string) error {
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	for _, env := range os.Environ() {
-		key, _, ok := strings.Cut(env, "=")
-		if ok && packReleaseGitEnvBlacklist[key] {
-			continue
-		}
-		cmd.Env = append(cmd.Env, env)
-	}
-	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	// Use the shared hermetic git environment so the isolated release-repo cache
+	// commands run with the canonical blacklist plus the discovery/config
+	// isolation and config pins, instead of a hand-maintained duplicate that can
+	// silently drift from git.HermeticEnv().
+	cmd.Env = git.HermeticEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return nil
-}
-
-var packReleaseGitEnvBlacklist = map[string]bool{
-	"GIT_DIR":                          true,
-	"GIT_WORK_TREE":                    true,
-	"GIT_INDEX_FILE":                   true,
-	"GIT_OBJECT_DIRECTORY":             true,
-	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
-	"GIT_COMMON_DIR":                   true,
-	"GIT_CEILING_DIRECTORIES":          true,
-	"GIT_DISCOVERY_ACROSS_FILESYSTEM":  true,
-	"GIT_NAMESPACE":                    true,
-	"GIT_CONFIG":                       true,
-	"GIT_CONFIG_GLOBAL":                true,
-	"GIT_CONFIG_SYSTEM":                true,
-	"GIT_CONFIG_NOSYSTEM":              true,
-	"GIT_CONFIG_COUNT":                 true,
-	"GIT_EXEC_PATH":                    true,
-	"GIT_PAGER":                        true,
 }
 
 func normalizePackReleasePath(raw string) (string, error) {

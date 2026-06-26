@@ -66,6 +66,7 @@ jobs:
       worker_phase2: ${{ steps.filter.outputs.worker_phase2 == 'true' || steps.filter.outputs.shared == 'true' }}
       cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process == 'true' || steps.filter.outputs.shared == 'true' }}
       integration: ${{ steps.filter.outputs.integration == 'true' || steps.filter.outputs.shared == 'true' }}
+      openclaw_bridge: ${{ steps.filter.outputs.openclaw_bridge }}
       # Raw cross-cutting signal and per-run coverage classification (metric).
       shared: ${{ steps.filter.outputs.shared }}
       suite_mode: ${{ steps.coverage.outputs.suite_mode }}
@@ -91,10 +92,11 @@ jobs:
               - 'go.mod'
               - 'internal/beads/**'
             packs:
-              - 'examples/gastown/packs/**'
+              - 'examples/gastown/**'
               - 'internal/config/pack.go'
               - 'internal/config/compose.go'
               - 'cmd/gc/embed_builtin_packs.go'
+              - 'scripts/update-bundled-gastown-pack'
             worker:
               - 'go.mod'
               - 'go.sum'
@@ -124,7 +126,7 @@ jobs:
               - 'Makefile'
               - 'cmd/gc/**'
               - 'internal/**'
-              - 'examples/gastown/packs/**'
+              - 'examples/gastown/**'
             integration:
               - 'go.mod'
               - 'go.sum'
@@ -134,7 +136,10 @@ jobs:
               - 'scripts/test-integration-shard'
               - 'scripts/test-go-test-shard'
               - 'scripts/go-test-observable'
-              - 'examples/gastown/packs/**'
+              - 'examples/gastown/**'
+            openclaw_bridge:
+              - 'contrib/openclaw-bridge/**'
+              - '.github/workflows/**'
             # Cross-cutting core paths. A change here is folded into every
             # gated output above, forcing a full union run. Beads is the
             # universal persistence substrate, events the universal observation
@@ -159,8 +164,8 @@ jobs:
     needs: runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
-      DOLT_VERSION: "2.1.4"
-      BD_VERSION: "v1.0.5"
+      DOLT_VERSION: "2.1.7"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -170,17 +175,26 @@ jobs:
           install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
+      - name: go.mod replace guard
+        run: make check-gomod-replace
       - name: Native dependency surface guard
         run: make check-native-dependency-surface
+      - name: Event-export isolation guard
+        run: make check-eventexport-isolation
       - name: Native DoltLite beads tests
         run: make test-native-doltlite-beads
+      - name: Get golangci-lint version for cache key
+        id: glint-version
+        run: |
+          version=$(grep -m1 '^GOLANGCI_LINT_VERSION := ' Makefile | awk '{print $3}')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
       - name: Restore golangci-lint cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .cache/golangci-lint
-          key: ${{ runner.os }}-golangci-lint-${{ hashFiles('go.sum', '.golangci.yml', 'Makefile') }}
+          key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ hashFiles('go.sum', '.golangci.yml') }}
           restore-keys: |
-            ${{ runner.os }}-golangci-lint-
+            ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-
       - name: Lint
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
@@ -192,18 +206,20 @@ jobs:
       - name: Docs
         run: make check-docs
 
-  preflight-unit-cover:
-    name: Preflight / unit cover
+  # Coverage reporting only matters on the main branch — codecov regression
+  # info doesn't need to gate every PR, and the full ./... unit suite is
+  # already covered by integration-shards, cmd-gc-process, and acceptance A.
+  # Split into two parallel push-only jobs to take the serial cmd/gc loop off
+  # the critical path (ga-29jlpr); Codecov merges uploads server-side.
+  preflight-unit-cover-noncmdgc:
+    name: Preflight / unit cover (noncmdgc)
     needs:
       - runner-policy
-    # Coverage reporting only matters on the main branch — codecov regression
-    # info doesn't need to gate every PR, and the full ./... unit suite is
-    # already covered by integration-shards, cmd-gc-process, and acceptance A.
     if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "2.1.4"
-      BD_VERSION: "v1.0.5"
+      DOLT_VERSION: "2.1.7"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -213,12 +229,47 @@ jobs:
           install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
-      - name: Test
-        run: make test-cover
+      - name: Unit cover (non-cmd/gc)
+        run: make test-cover-noncmdgc
       - name: Upload coverage to Codecov
+        if: hashFiles('coverage.noncmdgc.txt') != ''
         uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
-          files: coverage.txt
+          files: coverage.noncmdgc.txt
+          flags: unit-cover-noncmdgc
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true
+
+  preflight-unit-cover-cmdgc:
+    name: Preflight / unit cover (cmd/gc ${{ matrix.shard }} of 6)
+    needs:
+      - runner-policy
+    if: github.event_name == 'push'
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    env:
+      DOLT_VERSION: "2.1.7"
+      BD_VERSION: "v1.0.4"
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Install tools
+        run: make install-tools
+      - name: Unit cover (cmd/gc shard ${{ matrix.shard }} of 6)
+        run: make test-cover-cmdgc-shard CMD_GC_COVER_SHARD=${{ matrix.shard }} CMD_GC_COVER_TOTAL=6
+      - name: Upload coverage to Codecov
+        if: hashFiles(format('coverage.cmdgc.{0}.txt', matrix.shard)) != ''
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
+        with:
+          files: coverage.cmdgc.${{ matrix.shard }}.txt
+          flags: unit-cover-cmdgc
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
 
@@ -228,8 +279,8 @@ jobs:
       - runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "2.1.4"
-      BD_VERSION: "v1.0.5"
+      DOLT_VERSION: "2.1.7"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -327,8 +378,8 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
-      DOLT_VERSION: "2.1.4"
-      BD_VERSION: "v1.0.5"
+      DOLT_VERSION: "2.1.7"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -459,8 +510,8 @@ jobs:
             timeout_minutes: 15
             command: ./scripts/test-integration-shard rest-full-16-of-16
     env:
-      DOLT_VERSION: "2.1.4"
-      BD_VERSION: "v1.0.5"
+      DOLT_VERSION: "2.1.7"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -472,33 +523,6 @@ jobs:
         run: make install-tools
       - name: Run integration shard
         run: ${{ matrix.command }}
-
-  integration-sqlite-coordstore:
-    name: Integration / SQLite coordination store
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.integration == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 30
-    env:
-      DOLT_VERSION: "2.1.4"
-      BD_VERSION: "v1.0.5"
-      GC_BEADS: sqlite
-      GC_ACCEPTANCE_BEADS_PROVIDER: sqlite
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "true"
-      - name: Install tools
-        run: make install-tools
-      - name: Integration tests (SQLite coordination store)
-        run: make test-integration-bdstore
-      - name: Acceptance tests (SQLite coordination store, Tier A)
-        run: make test-acceptance
 
   worker-core-claude:
     name: Worker core (Claude)
@@ -954,6 +978,24 @@ jobs:
         run: make install-tools
       - name: Pack compatibility tests
         run: make test-acceptance
+      # The gastown pack ships via the gascity-packs Go module, so a routine
+      # go.mod bump can silently desync the embedded pack bytes from the
+      # provenance pins in internal/config/public_packs.go and the
+      # examples/gastown import. This check fails when any pin drifts from
+      # the latest registry release; every in-repo test stays green after
+      # such a drift, so this is the only automated guard.
+      - name: Bundled gastown pack pin check
+        timeout-minutes: 10
+        run: |
+          for attempt in 1 2 3; do
+            if scripts/update-bundled-gastown-pack --check; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
       - name: Live registry smoke
         timeout-minutes: 12
         run: |
@@ -969,8 +1011,8 @@ jobs:
         env:
           GC_TEST_GASCITY_PACKS_REGISTRY: main
     env:
-      DOLT_VERSION: "2.1.4"
-      BD_VERSION: "v1.0.5"
+      DOLT_VERSION: "2.1.7"
+      BD_VERSION: "v1.0.4"
 
   # Dashboard SPA typecheck + tests + build. Runs on every push/PR
   # so TS drift against the spec (e.g. a query param tightening from
@@ -1011,6 +1053,27 @@ jobs:
       - name: Build
         run: npm run build --silent
         working-directory: cmd/gc/dashboard/web
+
+  # openclaw-bridge Node test suite. The bridge ships its own npm tests
+  # (inbound at-least-once redelivery + gc client wire shapes); without this
+  # gate, regressions under contrib/openclaw-bridge/** could merge because the
+  # only other npm job runs in cmd/gc/dashboard/web. Path-gated, so non-bridge
+  # PRs skip it (and ci-required allows the skip).
+  openclaw-bridge:
+    name: openclaw-bridge Node tests
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.openclaw_bridge == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Install and test
+        run: npm ci --no-audit --no-fund && npm test
+        working-directory: contrib/openclaw-bridge
 
   # Runs when mail-related source paths change.
   mcp-mail:
@@ -1173,6 +1236,7 @@ jobs:
       - pack-gate
       - docker-session
       - k8s-session
+      - openclaw-bridge
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -1191,6 +1255,7 @@ jobs:
               "pack-gate",
               "docker-session",
               "k8s-session",
+              "openclaw-bridge",
           }
           failed = {}
           for job, meta in sorted(needs.items()):

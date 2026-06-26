@@ -2,9 +2,11 @@ package formula
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1797,6 +1799,56 @@ func TestCompileInlineExpansionUsesExpandVarsForConditionalTemplateSelection(t *
 	}
 }
 
+func TestCompileInlineExpansionResolvesExpandVarsFromParentVarsForConditions(t *testing.T) {
+	dir := t.TempDir()
+
+	expansion := `{
+		"formula": "report-mode-expansion",
+		"type": "expansion",
+		"version": 1,
+		"vars": {
+			"review_mode": {"default": "agent"}
+		},
+		"template": [
+			{"id": "{target}.report", "title": "Write report"},
+			{"id": "{target}.apply", "title": "Apply findings", "condition": "{{review_mode}} != report"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "report-mode-expansion.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion: %v", err)
+	}
+
+	formulaText := `{
+		"formula": "report-mode-parent",
+		"version": 1,
+		"vars": {
+			"review_mode": {"default": "report"}
+		},
+		"steps": [
+			{"id": "work", "title": "Work", "expand": "report-mode-expansion", "expand_vars": {"review_mode": "{{review_mode}}"}}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "report-mode-parent.formula.json"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	recipe, err := Compile(context.Background(), "report-mode-parent", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	for _, step := range recipe.Steps {
+		if step.ID == "report-mode-parent.work.apply" {
+			t.Fatalf("report-only inline expansion included apply step: %#v", step)
+		}
+	}
+	if len(recipe.Steps) != 2 {
+		t.Fatalf("len(recipe.Steps) = %d, want 2", len(recipe.Steps))
+	}
+	if got := recipe.Steps[1].ID; got != "report-mode-parent.work.report" {
+		t.Fatalf("recipe.Steps[1].ID = %q, want report-mode-parent.work.report", got)
+	}
+}
+
 func formatDepsForCleanup(deps []RecipeDep, stepID string) string {
 	var lines []string
 	for _, d := range deps {
@@ -2242,5 +2294,89 @@ type = "task"
 	want := ContentHash([]byte(content))
 	if recipe.ContentHash != want {
 		t.Errorf("ContentHash = %q, want %q", recipe.ContentHash, want)
+	}
+}
+
+func TestCompile_PropagatesRootMetadata(t *testing.T) {
+	dir := t.TempDir()
+	content := `
+formula = "mol-metadata"
+description = "Metadata propagation test"
+
+[metadata.gc.methodology]
+interaction_modes = ["headless", "autonomous"]
+review_modes = ["report"]
+
+[[steps]]
+id = "work"
+title = "Do work"
+type = "task"
+`
+	if err := os.WriteFile(filepath.Join(dir, "mol-metadata.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := Compile(context.Background(), "mol-metadata", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	var got struct {
+		GC struct {
+			Methodology struct {
+				InteractionModes []string `json:"interaction_modes"`
+				ReviewModes      []string `json:"review_modes"`
+			} `json:"methodology"`
+		} `json:"gc"`
+	}
+	data, err := json.Marshal(recipe.Metadata)
+	if err != nil {
+		t.Fatalf("marshal recipe metadata: %v", err)
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("metadata has unexpected shape: %v\n%s", err, string(data))
+	}
+	if want := []string{"headless", "autonomous"}; !reflect.DeepEqual(got.GC.Methodology.InteractionModes, want) {
+		t.Fatalf("metadata.gc.methodology.interaction_modes = %+v, want %+v", got.GC.Methodology.InteractionModes, want)
+	}
+	if want := []string{"report"}; !reflect.DeepEqual(got.GC.Methodology.ReviewModes, want) {
+		t.Fatalf("metadata.gc.methodology.review_modes = %+v, want %+v", got.GC.Methodology.ReviewModes, want)
+	}
+}
+
+func TestCompile_LoopCountStringParseError(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "loop-count-string"
+version = 1
+
+[vars.cups]
+description = "Cup count"
+required = true
+
+[[steps]]
+id = "brew"
+title = "Brew"
+
+[steps.loop]
+count = "{{cups}}"
+
+[[steps.loop.body]]
+id = "pour"
+title = "Pour"
+`
+	if err := os.WriteFile(filepath.Join(dir, "loop-count-string.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Compile(context.Background(), "loop-count-string", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile should reject string-valued loop.count")
+	}
+	if !strings.Contains(err.Error(), "integer") {
+		t.Errorf("error = %q, want to mention 'integer'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "range") {
+		t.Errorf("error = %q, want to mention 'range'", err.Error())
 	}
 }

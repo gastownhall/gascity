@@ -24,6 +24,7 @@ func execProjectedBackendEnvKeys() []string {
 	keys = append(keys, projectedPostgresEnvKeys...)
 	keys = appendBdCLIRemoteSyncOptOutEnvKeys(keys)
 	keys = appendBdAutoBackupOptOutEnvKeys(keys)
+	keys = appendBdContributorRoutingOptOutEnvKeys(keys)
 	return keys
 }
 
@@ -33,6 +34,7 @@ func setExecProjectedBackendEnvEmpty(env map[string]string) {
 	}
 	applyBdCLIRemoteSyncOptOut(env)
 	applyBdAutoBackupOptOut(env)
+	applyBdContributorRoutingOptOut(env)
 }
 
 func copyExecProjectedBackendEnv(dst, src map[string]string) {

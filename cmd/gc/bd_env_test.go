@@ -497,6 +497,60 @@ func TestRecoverManagedBDCommandDisablesAutoBackup(t *testing.T) {
 	}
 }
 
+func TestSessionBackendEnvDisablesContributorRouting(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_ROUTING_MODE", "auto")
+	t.Setenv("BEADS_ROUTING_MODE", "auto")
+
+	env := mustSessionBackendEnv(t, t.TempDir(), "", nil)
+	if got := env["BD_ROUTING_MODE"]; got != "off" {
+		t.Fatalf("BD_ROUTING_MODE = %q, want off", got)
+	}
+	if got := env["BEADS_ROUTING_MODE"]; got != "off" {
+		t.Fatalf("BEADS_ROUTING_MODE = %q, want off", got)
+	}
+}
+
+func TestRecoverManagedBDCommandDisablesContributorRouting(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_ROUTING_MODE", "auto")
+	t.Setenv("BEADS_ROUTING_MODE", "auto")
+
+	cityPath := t.TempDir()
+	envFile := filepath.Join(cityPath, "recover-env.txt")
+	scriptPath := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"printf 'BD_ROUTING_MODE=%s\\n' \"$BD_ROUTING_MODE\" > \"" + envFile + "\"\n" +
+		"printf 'BEADS_ROUTING_MODE=%s\\n' \"$BEADS_ROUTING_MODE\" >> \"" + envFile + "\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recoverManagedBDCommand(cityPath); err != nil {
+		t.Fatalf("recoverManagedBDCommand() error = %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	if got := values["BD_ROUTING_MODE"]; got != "off" {
+		t.Fatalf("BD_ROUTING_MODE = %q, want off", got)
+	}
+	if got := values["BEADS_ROUTING_MODE"]; got != "off" {
+		t.Fatalf("BEADS_ROUTING_MODE = %q, want off", got)
+	}
+}
+
 func TestBdRuntimeEnvExternalHostSkipsLocalState(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT_HOST", "remote.example.com")
@@ -5047,6 +5101,11 @@ func TestProjectedKeysCoverage(t *testing.T) {
 	for _, key := range bdAutoBackupOptOutEnvKeys {
 		if !projectedKeyStripped(key) {
 			t.Errorf("bdAutoBackupOptOutEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
+		}
+	}
+	for _, key := range bdContributorRoutingOptOutEnvKeys {
+		if !projectedKeyStripped(key) {
+			t.Errorf("bdContributorRoutingOptOutEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
 		}
 	}
 }

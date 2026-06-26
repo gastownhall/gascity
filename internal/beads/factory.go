@@ -258,5 +258,16 @@ func logNativeUnavailable(logger *slog.Logger, scope, gate, reason string) {
 		logger.Error(nativeUnavailableMessage, args...)
 		return
 	}
+	if gate == string(contract.PreflightCheckBDContextAgreement) {
+		// Benign, expected fallback: the native store declines activation when it
+		// cannot cross-verify bd's backend (e.g. the bd context probe is briefly
+		// unreachable) and transparently falls back to the bd-backed store. In
+		// deployments where the native store is not eligible this fires on every
+		// store-open, spamming WARN on routine commands like `gc session attach`.
+		// Log at DEBUG instead (still visible with -v); genuine backend
+		// disagreements remain surfaced by `gc doctor`'s preflight diagnostic.
+		logger.Debug(nativeUnavailableMessage, args...)
+		return
+	}
 	logger.Warn(nativeUnavailableMessage, args...)
 }

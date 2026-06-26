@@ -53,8 +53,8 @@ func TestSupportedProviders(t *testing.T) {
 	got := SupportedProviders()
 	want := map[string]bool{
 		"claude": true, "codex": true, "gemini": true, "kiro": true, "opencode": true,
-		"groq": true, "cerebras": true, "copilot": true, "cursor": true, "pi": true, "omp": true,
-		"antigravity": true, "kimi": true,
+		"mimocode": true, "groq": true, "cerebras": true, "copilot": true, "cursor": true,
+		"pi": true, "omp": true, "antigravity": true, "kimi": true,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("SupportedProviders() = %v, want %d entries", got, len(want))
@@ -143,14 +143,20 @@ func TestInstallClaude(t *testing.T) {
 	if !strings.Contains(claudeHookCommand(t, runtimeData, "PreCompact"), `gc handoff --auto "context cycle"`) {
 		t.Error("claude PreCompact hook should use gc handoff --auto (not gc prime or restart handoff) on compaction")
 	}
-	if !strings.Contains(s, "gc nudge drain --inject") {
-		t.Error("claude settings should contain gc nudge drain --inject")
+	if !strings.Contains(s, "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject") {
+		t.Error("claude settings should run nudge drain through gc hook run")
+	}
+	if !strings.Contains(s, "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject") {
+		t.Error("claude settings should run mail check through gc hook run")
 	}
 	if strings.Contains(s, "gc hook --inject") {
 		t.Error("fresh claude settings should not install no-op gc hook --inject")
 	}
 	if !strings.Contains(s, `"skipDangerousModePermissionPrompt": true`) {
 		t.Error("claude settings should contain skipDangerousModePermissionPrompt")
+	}
+	if !strings.Contains(s, `"enableAllProjectMcpServers": true`) {
+		t.Error("claude settings should pre-approve project MCP servers (enableAllProjectMcpServers) so managed agents don't block on the 'New MCP server found' trust modal (#3466)")
 	}
 	if !strings.Contains(s, `"editorMode": "normal"`) {
 		t.Error("claude settings should contain editorMode")
@@ -400,6 +406,9 @@ func TestInstallCodexUpgradesManagedFileMissingPreCompact(t *testing.T) {
 	}
 	if !strings.Contains(got, `gc handoff --auto --hook-format codex \"context cycle\"`) {
 		t.Errorf("upgraded codex PreCompact missing auto handoff command:\n%s", got)
+	}
+	if !strings.Contains(got, `gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`) {
+		t.Errorf("upgraded codex UserPromptSubmit missing bounded mail check command:\n%s", got)
 	}
 }
 
@@ -1436,7 +1445,7 @@ func TestInstallClaudeSurfacesNonObjectOverride(t *testing.T) {
 // are materialized from the embedded core pack overlay into the workdir.
 func TestInstallOverlayManagedProviders(t *testing.T) {
 	fs := fsys.NewFake()
-	providers := []string{"codex", "gemini", "opencode", "copilot", "cursor", "kiro", "pi", "omp", "antigravity", "kimi"}
+	providers := []string{"codex", "gemini", "opencode", "mimocode", "copilot", "cursor", "kiro", "pi", "omp", "antigravity", "kimi"}
 	if err := Install(fs, "/city", "/work", providers); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -1444,6 +1453,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"/work/.codex/hooks.json",
 		"/work/.gemini/settings.json",
 		"/work/.opencode/plugins/gascity.js",
+		"/work/.mimocode/plugin/gascity.js",
 		"/work/.github/hooks/gascity.json",
 		"/work/.github/copilot-instructions.md",
 		"/work/.cursor/hooks.json",
@@ -1477,6 +1487,44 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	if !strings.Contains(codexHooksText, `gc handoff --auto --hook-format codex \"context cycle\"`) {
 		t.Error("codex PreCompact should use auto handoff with Codex hook output format")
 	}
+	for _, want := range []string{
+		`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex`,
+		`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`,
+	} {
+		if !strings.Contains(codexHooksText, want) {
+			t.Errorf("codex prompt hooks missing bounded command %q:\n%s", want, codexHooksText)
+		}
+	}
+	geminiHooks := string(fs.Files["/work/.gemini/settings.json"])
+	for _, want := range []string{
+		`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini`,
+		`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini`,
+	} {
+		if !strings.Contains(geminiHooks, want) {
+			t.Errorf("gemini prompt hooks missing bounded command %q:\n%s", want, geminiHooks)
+		}
+	}
+	for path, wants := range map[string][]string{
+		"/work/.github/hooks/gascity.json": {
+			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+		},
+		"/work/.cursor/hooks.json": {
+			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+		},
+		"/work/.kiro/agents/gascity.json": {
+			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+		},
+	} {
+		data := string(fs.Files[path])
+		for _, want := range wants {
+			if !strings.Contains(data, want) {
+				t.Errorf("%s prompt hooks missing bounded command %q:\n%s", path, want, data)
+			}
+		}
+	}
 	// Copilot CLI documents preCompact (camelCase). The hook fires before
 	// context compaction starts so handoff can capture state; without it,
 	// long Copilot sessions silently lose context at compact boundaries.
@@ -1491,8 +1539,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	antigravityHooks := string(fs.Files["/work/.agents/hooks.json"])
 	for hookName, wantCommand := range map[string]string{
 		"gascity-prime":       `GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity`,
-		"gascity-nudge-drain": "gc nudge drain --inject --hook-format antigravity",
-		"gascity-mail-check":  "gc mail check --inject --hook-format antigravity",
+		"gascity-nudge-drain": "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity",
+		"gascity-mail-check":  "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity",
 	} {
 		if !strings.Contains(antigravityHooks, `"`+hookName+`"`) {
 			t.Errorf("Antigravity hooks missing hook %q:\n%s", hookName, antigravityHooks)
@@ -1531,6 +1579,30 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		if strings.Contains(opencodeHooks, unwanted) {
 			t.Errorf("OpenCode plugin contains obsolete marker %q:\n%s", unwanted, opencodeHooks)
 		}
+	}
+	mimocodeHooks := string(fs.Files["/work/.mimocode/plugin/gascity.js"])
+	for _, want := range []string{
+		"Gas City hooks for MiMo Code.",
+		"const GC_MIMOCODE_HOOK_VERSION = 2",
+		`process.env.GC_BIN || "gc"`,
+		"process.env.GC_MIMOCODE_TRANSCRIPT_DIR || defaultTranscriptDir()",
+		`path.join(home, ".local", "share", "gascity", "mimocode-transcripts")`,
+		`"experimental.session.compacting"`,
+		`runWithWarning(directory, "handoff", "--auto", "context cycle")`,
+		"output.context.push(handoff)",
+		"logRunFailure",
+		"logRunStderr",
+		"mirrorTranscript(directory, client",
+		"providerSessionEnv(sessionID)",
+		"GC_PROVIDER_SESSION_ID",
+		`GC_PROVIDER_SESSION_ID_REQUIRED: "mimocode"`,
+	} {
+		if !strings.Contains(mimocodeHooks, want) {
+			t.Errorf("MiMo Code plugin missing marker %q:\n%s", want, mimocodeHooks)
+		}
+	}
+	if strings.Contains(mimocodeHooks, "GC_OPENCODE_TRANSCRIPT_DIR") {
+		t.Errorf("MiMo Code plugin must not read the OpenCode transcript env var:\n%s", mimocodeHooks)
 	}
 	for _, rel := range []string{
 		"/work/.codex/hooks.json",
@@ -1638,6 +1710,8 @@ func TestInstallAntigravityMergesExistingHooks(t *testing.T) {
 		`"command": "echo custom"`,
 		`"gascity-prime"`,
 		`gc prime --hook --hook-format antigravity`,
+		`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity`,
+		`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity`,
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("merged Antigravity hooks missing %q:\n%s", want, data)
@@ -1956,6 +2030,73 @@ func TestInstallOpenCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
 	}
 	if got := string(fs.Files["/work/.opencode/plugins/gascity.js"]); got != string(custom) {
 		t.Fatalf("user-authored OpenCode plugin was overwritten:\n%s", got)
+	}
+}
+
+func TestMimoCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
+	current := []byte(`// Gas City hooks for MiMo Code.
+const GC_MIMOCODE_HOOK_VERSION = 2;
+const GC_BIN = process.env.GC_BIN || "gc";
+`)
+	versionless := []byte(`// Gas City hooks for MiMo Code.
+const GC_BIN = process.env.GC_BIN || "gc";
+`)
+	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 2"), []byte("GC_MIMOCODE_HOOK_VERSION = 1"), 1)
+	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 2"), []byte("GC_MIMOCODE_HOOK_VERSION = 3"), 1)
+
+	if !mimocodeHookNeedsUpgrade(versionless) {
+		t.Fatal("versionless managed MiMo Code hook did not request upgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(stale) {
+		t.Fatal("stale MiMo Code hook version did not request upgrade")
+	}
+	if mimocodeHookNeedsUpgrade(current) {
+		t.Fatal("current MiMo Code hook version requested upgrade")
+	}
+	if mimocodeHookNeedsUpgrade(future) {
+		t.Fatal("newer MiMo Code hook version requested downgrade")
+	}
+}
+
+func TestInstallMimoCodeHookUpgradesStaleManagedPlugin(t *testing.T) {
+	fs := fsys.NewFake()
+	legacy := []byte(`// Gas City hooks for MiMo Code.
+export default async function gascityPlugin() {
+  return {};
+}
+`)
+	fs.Files["/work/.mimocode/plugin/gascity.js"] = legacy
+
+	if err := Install(fs, "/city", "/work", []string{"mimocode"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := string(fs.Files["/work/.mimocode/plugin/gascity.js"])
+	if data == string(legacy) {
+		t.Fatal("stale MiMo Code managed plugin was preserved; expected managed upgrade")
+	}
+	if !strings.Contains(data, "const GC_MIMOCODE_HOOK_VERSION = 2") {
+		t.Errorf("upgraded MiMo Code plugin missing version marker:\n%s", data)
+	}
+	backup := string(fs.Files["/work/.mimocode/plugin/gascity.js.bak"])
+	if backup != string(legacy) {
+		t.Fatalf("legacy MiMo Code plugin backup = %q, want original legacy content", backup)
+	}
+}
+
+func TestInstallMimoCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := []byte(`export default async function customPlugin() {
+  return {};
+}
+`)
+	fs.Files["/work/.mimocode/plugin/gascity.js"] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"mimocode"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := string(fs.Files["/work/.mimocode/plugin/gascity.js"]); got != string(custom) {
+		t.Fatalf("user-authored MiMo Code plugin was overwritten:\n%s", got)
 	}
 }
 

@@ -41,6 +41,7 @@ func TestRepoCacheRootForPathUsesKnownCacheRootsOnly(t *testing.T) {
 	home := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "gc-home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	t.Setenv("GC_HOME", gcHome)
 
 	homeRoot := filepath.Join(home, ".gc", "cache", "repos")

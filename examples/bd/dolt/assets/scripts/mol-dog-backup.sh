@@ -116,30 +116,50 @@ acquire_backup_lock
 
 # --- Step 2: Sync databases to backup remotes ---
 
-# If GC_BACKUP_DATABASES is set, use it; otherwise auto-discover DBs that
-# have a named Dolt backup <db>-backup configured.
+# If GC_BACKUP_DATABASES is set, use it; otherwise auto-discover every user
+# database in the data dir. Discovery used to require an existing <db>-backup
+# remote, silently excluding unconfigured DBs from backup coverage — which is
+# how production DBs ended up unrecoverable after journal corruption (#3176:
+# beads_hq had no named remote, so it was never synced). DBs without the
+# remote now get one auto-configured below.
 if [ -n "${GC_BACKUP_DATABASES:-}" ]; then
     DATABASES=$(echo "$GC_BACKUP_DATABASES" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true)
 else
-    # Auto-discover: find databases that have a named Dolt backup <db>-backup.
     ALL_DBS=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | \
         grep -viE "$SYSTEM_DBS" || true)
     DATABASES=""
     for db in $ALL_DBS; do
-        db_dir="$DOLT_DATA_DIR/$db"
-        if [ -d "$db_dir/.dolt" ]; then
-            if (cd "$db_dir" && dolt backup 2>/dev/null | awk '{print $1}' | grep -qx "${db}-backup"); then
-                DATABASES="$DATABASES $db"
-            fi
+        if [ -d "$DOLT_DATA_DIR/$db/.dolt" ]; then
+            DATABASES="$DATABASES $db"
         fi
     done
     DATABASES=$(echo "$DATABASES" | tr ' ' '\n' | grep -v '^$' || true)
 fi
 
 if [ -z "$DATABASES" ]; then
-    echo "backup: no databases with backup remotes found, skipping"
+    echo "backup: no databases found, skipping"
     exit 0
 fi
+
+# ensure_backup_remote guarantees db has a named <db>-backup remote, creating
+# one under the backup artifact dir when missing. Auto-configuration is logged
+# loudly so operators can see when coverage was established rather than
+# assumed. Returns 1 when the remote cannot be configured.
+ensure_backup_remote() {
+    remote_db="$1"
+    remote_db_dir="$DOLT_DATA_DIR/$remote_db"
+    [ -d "$remote_db_dir/.dolt" ] || return 0 # sync loop reports not-found
+    if (cd "$remote_db_dir" && run_bounded 30 dolt backup 2>/dev/null | awk '{print $1}' | grep -qx "${remote_db}-backup"); then
+        return 0
+    fi
+    remote_url="file://$BACKUP_ARTIFACT_DIR/$remote_db"
+    mkdir -p "$BACKUP_ARTIFACT_DIR/$remote_db"
+    if (cd "$remote_db_dir" && run_bounded 30 dolt backup add "${remote_db}-backup" "$remote_url" >/dev/null 2>&1); then
+        echo "backup: auto-configured missing backup remote ${remote_db}-backup -> $remote_url"
+        return 0
+    fi
+    return 1
+}
 
 TOTAL=$(printf '%s\n' "$DATABASES" | awk 'NF {count++} END {print count + 0}')
 SYNCED=0
@@ -147,8 +167,12 @@ FAILED=0
 FAILED_DBS=""
 
 for db in $DATABASES; do
+    if ! ensure_backup_remote "$db"; then
+        append_failed_db "$db(backup add failed)"
+        continue
+    fi
     db_dir="$DOLT_DATA_DIR/$db"
-    if [ ! -d "$db_dir" ]; then
+    if [ ! -d "$db_dir/.dolt" ]; then
         append_failed_db "$db(not found)"
         continue
     fi

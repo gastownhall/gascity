@@ -101,9 +101,12 @@ func buildAwakeInputFromReconciler(
 			Now:      clk,
 		})
 		bead := AwakeSessionBead{
-			ID:                     b.ID,
-			SessionName:            name,
-			Template:               b.Metadata["template"],
+			ID:          b.ID,
+			SessionName: name,
+			// Canonicalize so adopted beads persisted under a legacy identity
+			// (e.g. a removed binding) key the awake engine by the current
+			// agent template. Unresolvable templates pass through unchanged.
+			Template:               normalizeAgentTemplateIdentity(cfg, b.Metadata["template"]),
 			State:                  string(lifecycle.CompatState),
 			SleepReason:            b.Metadata["sleep_reason"],
 			ManualSession:          isManualSessionBead(*b),

@@ -10,12 +10,31 @@ import (
 )
 
 // InboundResult captures the outcome of processing an inbound message.
+// TargetSessionID is set when the conversation is bound to a concrete
+// session; TargetAgentName is set when it is bound to a configured agent
+// identity, whose live session the delivery layer resolves (cold-waking one
+// when none is live).
 type InboundResult struct {
 	Message         ExternalInboundMessage
 	Binding         *SessionBindingRecord
 	GroupRoute      *GroupRouteDecision
 	TranscriptEntry *ConversationTranscriptRecord
 	TargetSessionID string
+	TargetAgentName string
+}
+
+// targetSubject is the event subject for the routed target: the concrete
+// session when one is bound, the agent identity otherwise.
+func (r *InboundResult) targetSubject() string {
+	if r.TargetSessionID != "" {
+		return r.TargetSessionID
+	}
+	return r.TargetAgentName
+}
+
+// routed reports whether the message resolved to any delivery target.
+func (r *InboundResult) routed() bool {
+	return r.TargetSessionID != "" || r.TargetAgentName != ""
 }
 
 // InboundDeps bundles the dependencies for inbound processing.
@@ -66,10 +85,11 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 	if binding != nil {
 		result.Binding = binding
 		result.TargetSessionID = binding.SessionID
+		result.TargetAgentName = binding.AgentName
 	}
 
 	// Step 4: If no binding, try group routing.
-	if result.TargetSessionID == "" {
+	if !result.routed() {
 		route, err := deps.Services.Groups.ResolveInbound(ctx, *msg)
 		if err != nil {
 			if !errors.Is(err, ErrGroupNotFound) && !errors.Is(err, ErrGroupRouteNotFound) {
@@ -83,7 +103,7 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 	}
 
 	// Step 5: Append to transcript.
-	if result.TargetSessionID != "" {
+	if result.routed() {
 		caller := Caller{
 			Kind:      CallerAdapter,
 			ID:        adapter.Name(),
@@ -117,11 +137,12 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 	// Wake is handled by the caller (HTTP handler calls state.Poke()).
 	// Sessions discover unread entries via gc transcript check --inject.
 	if deps.EmitEvent != nil {
-		deps.EmitEvent(events.ExtMsgInbound, result.TargetSessionID, InboundEventPayload{
+		deps.EmitEvent(events.ExtMsgInbound, result.targetSubject(), InboundEventPayload{
 			Provider:       msg.Conversation.Provider,
 			ConversationID: msg.Conversation.ConversationID,
 			Actor:          msg.Actor.DisplayName,
 			TargetSession:  result.TargetSessionID,
+			TargetAgent:    result.TargetAgentName,
 		})
 	}
 
@@ -148,10 +169,11 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 	if binding != nil {
 		result.Binding = binding
 		result.TargetSessionID = binding.SessionID
+		result.TargetAgentName = binding.AgentName
 	}
 
 	// Step 2: If no binding, try group routing.
-	if result.TargetSessionID == "" {
+	if !result.routed() {
 		route, err := deps.Services.Groups.ResolveInbound(ctx, msg)
 		if err != nil {
 			if !errors.Is(err, ErrGroupNotFound) && !errors.Is(err, ErrGroupRouteNotFound) {
@@ -164,7 +186,7 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 	}
 
 	// Step 3: Append to transcript.
-	if result.TargetSessionID != "" {
+	if result.routed() {
 		caller := Caller{Kind: CallerController, ID: "inbound-normalized"}
 		entry, err := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
 			Caller:            caller,
@@ -191,11 +213,12 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 
 	// Step 4: Emit event.
 	if deps.EmitEvent != nil {
-		deps.EmitEvent(events.ExtMsgInbound, result.TargetSessionID, InboundEventPayload{
+		deps.EmitEvent(events.ExtMsgInbound, result.targetSubject(), InboundEventPayload{
 			Provider:       msg.Conversation.Provider,
 			ConversationID: msg.Conversation.ConversationID,
 			Actor:          msg.Actor.DisplayName,
 			TargetSession:  result.TargetSessionID,
+			TargetAgent:    result.TargetAgentName,
 		})
 	}
 

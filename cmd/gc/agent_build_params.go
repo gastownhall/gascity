@@ -55,6 +55,22 @@ type agentBuildParams struct {
 	// may still be reused, and dependency-floor prerequisites are exempt.
 	poolSessionCreateBudget *poolSessionCreateBudget
 
+	// poolScaleCheckPartialTemplates holds pool templates whose scale_check
+	// returned a partial result this build cycle. selectOrPlanPoolSessionBead
+	// refuses new creates for these templates; existing-session reuse is
+	// unaffected. This field is assigned in buildDesiredState after
+	// evaluatePendingPoolsMap runs; newAgentBuildParams does not set it.
+	poolScaleCheckPartialTemplates map[string]bool
+
+	// providerHealthSnapshot is the per-build provider-health registry view.
+	// Loaded once at the start of buildDesiredState via loadProviderHealthSnapshot,
+	// which always returns a non-nil snapshot. When the registry file is absent,
+	// unreadable, or empty the snapshot has present=false and check() fails-open
+	// (healthy=true, registryPresent=false). This field is assigned in
+	// buildDesiredState before the pool realization loop; newAgentBuildParams
+	// does not set it.
+	providerHealthSnapshot *providerHealthSnapshot
+
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
 	beadNames map[string]string

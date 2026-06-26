@@ -6,6 +6,11 @@ package telemetry
 // provider} only. Per-bead and per-prompt-SHA dimensions live in the
 // WorkerOperation event log (#1252, 1a) — keeping them out of metrics
 // bounds cardinality.
+//
+// Emission coverage: recorded for the transcript-backed provider families
+// (claude, codex) driven through worker.SessionHandle prompt operations.
+// Runtime-only sessions (worker.RuntimeHandle) are permanently out of scope
+// (ga-tkvb31).
 
 import (
 	"context"

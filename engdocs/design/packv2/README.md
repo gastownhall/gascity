@@ -1,5 +1,11 @@
 # PackV2 Engineering Design Notes
 
+> **Historical PackV2 design note.** This page preserves design history and
+> rollout rationale. For current pack authoring guidance, use
+> `docs/reference/specs/pack-spec.md`, `docs/guides/understanding-packs.md`,
+> and `docs/guides/shareable-packs.md`. When this note disagrees with shipped
+> behavior, prefer the current docs, generated reference, code, and tests.
+
 This directory contains PackV2 engineering design notes, rollout ledgers, and
 historical reconciliation docs. These files are not user-facing product
 documentation and should not be used as the primary source for authoring a new

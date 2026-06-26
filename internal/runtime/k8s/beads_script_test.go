@@ -129,6 +129,11 @@ func TestBeadsScriptInitRejectsPartialCanonicalDoltTarget(t *testing.T) {
 }
 
 func TestBeadsScriptInitFallsBackToDirWhenStoreRootUnset(t *testing.T) {
+	// This test deliberately omits GC_STORE_ROOT from opts.Env to exercise the
+	// init fall-back to the dir argument. Neutralize any ambient GC_STORE_ROOT
+	// (set whenever the suite runs inside a gc city) so it cannot leak in via
+	// os.Environ() and defeat the fall-back the test is asserting.
+	clearDoltAndCityEnv(t)
 	result := runBeadsScript(t, beadsScriptOptions{
 		Op:   "init",
 		Args: []string{"/city/services/api", "ap"},

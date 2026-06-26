@@ -7,8 +7,17 @@ permissions:
   contents: read
 
 env:
-  DOLT_VERSION: "2.1.4"
-  BD_VERSION: "v1.0.5"
+  DOLT_VERSION: "2.1.7"
+  BD_VERSION: "v1.0.4"
+  # Bypass the systemd gascity-test.slice re-exec on CI runners. The Blacksmith
+  # runners' user systemd cannot reliably create a transient --scope for the
+  # heavy acceptance workloads; gc_test_slice_reexec then exec's
+  # `systemd-run --quiet`, which fails with no output and silently fails every
+  # acceptance shard before any test runs (observed in run 27745473874, all 5
+  # tier-C shards dead in ~40s). Plain execution is the historical default and
+  # is safe on these runners. Graceful-fallback fix for the slice helper is
+  # tracked separately; until then the RC gate must not depend on the slice.
+  GC_TEST_NO_SLICE: "1"
 
 jobs:
   # Reuse the shared CI graph so RC inherits new parity checks automatically.
@@ -170,7 +179,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         shard_index: [1, 2, 3, 4, 5]
     env:
@@ -206,7 +215,7 @@ jobs:
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 8
       matrix:
         include:
           - shard_name: packages-core-1-of-4
@@ -249,19 +258,19 @@ jobs:
             timeout_minutes: 20
             command: ./scripts/test-integration-shard packages-runtime-tmux-3-of-3
           - shard_name: review-formulas-basic-1-of-2
-            timeout_minutes: 20
+            timeout_minutes: 35
             command: ./scripts/test-integration-shard review-formulas-basic-1-of-2
           - shard_name: review-formulas-basic-2-of-2
-            timeout_minutes: 20
+            timeout_minutes: 35
             command: ./scripts/test-integration-shard review-formulas-basic-2-of-2
           - shard_name: review-formulas-retries-1-of-2
-            timeout_minutes: 20
+            timeout_minutes: 35
             command: ./scripts/test-integration-shard review-formulas-retries-1-of-2
           - shard_name: review-formulas-retries-2-of-2
-            timeout_minutes: 20
+            timeout_minutes: 35
             command: ./scripts/test-integration-shard review-formulas-retries-2-of-2
           - shard_name: review-formulas-recovery
-            timeout_minutes: 25
+            timeout_minutes: 35
             command: make test-integration-review-formulas-recovery
           - shard_name: bdstore
             timeout_minutes: 15
@@ -330,7 +339,7 @@ jobs:
     timeout-minutes: 110
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         shard_index: [1, 2, 3, 4, 5, 6]
     env:
@@ -385,51 +394,15 @@ jobs:
           path: dist/**
           if-no-files-found: error
 
-  macos_fast_tests:
-    name: macOS / fast tests / ${{ matrix.label }}
-    runs-on: blacksmith-12vcpu-macos-15
-    timeout-minutes: ${{ matrix.timeout_minutes }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: fsys-darwin-compile
-            timeout_minutes: 10
-            command: |
-              tmp="$(mktemp -d)"
-              trap 'rm -rf "$tmp"' EXIT
-              GOOS=darwin GOARCH=arm64 go test -c -o "$tmp/fsys.test" ./internal/fsys
-          - label: unit-core
-            timeout_minutes: 30
-            command: |
-              GC_FAST_UNIT=1 go test -timeout 20m $(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc$')
-          - label: cmd-gc-1-of-6
-            timeout_minutes: 30
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 1 6
-          - label: cmd-gc-2-of-6
-            timeout_minutes: 30
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 2 6
-          - label: cmd-gc-3-of-6
-            timeout_minutes: 30
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 3 6
-          - label: cmd-gc-4-of-6
-            timeout_minutes: 30
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 4 6
-          - label: cmd-gc-5-of-6
-            timeout_minutes: 30
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 5 6
-          - label: cmd-gc-6-of-6
-            timeout_minutes: 30
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 6 6
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-macos
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Run macOS fast test shard
-        run: ${{ matrix.command }}
+  mac_regression:
+    name: Mac regression
+    permissions:
+      contents: read
+    uses: ./.github/workflows/mac-regression.yml
+    with:
+      suite: full
+      force_blacksmith: true
+    secrets: inherit
 
   rc_summary:
     name: RC summary
@@ -445,7 +418,7 @@ jobs:
       - ubuntu_integration_shards
       - ubuntu_tutorial
       - ubuntu_goreleaser_snapshot
-      - macos_fast_tests
+      - mac_regression
     env:
       NEEDS_JSON: ${{ toJSON(needs) }}
     steps:

@@ -12,6 +12,8 @@ func profileFamily(profile Profile) string {
 		return "kimi"
 	case ProfileOpenCodeTmuxCLI:
 		return "opencode"
+	case ProfileMimoCodeTmuxCLI:
+		return "mimocode"
 	case ProfilePiTmuxCLI:
 		return "pi"
 	case ProfileClaudeTmuxCLI:

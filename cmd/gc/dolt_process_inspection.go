@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	processArgsPSTimeout = time.Second
+	processArgsPSTimeout = 10 * time.Second
 	lsofCommandTimeout   = 2 * time.Second
 )
 

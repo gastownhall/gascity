@@ -12,6 +12,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 func TestProcessDrainSeparateExpandsConvoyIntoUnitRoots(t *testing.T) {
@@ -54,6 +55,174 @@ func TestProcessDrainSeparateExpandsConvoyIntoUnitRoots(t *testing.T) {
 			t.Fatalf("item root graphv2 key = item root key %q, want formula-level key", row.ItemRootKey)
 		}
 	}
+}
+
+func TestProcessDrainSeparateProjectsMemberDependenciesOntoItemWorkflows(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	parentRoot := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	members, err := convoycore.Members(store, parentRoot.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("members = %d, want 2", len(members))
+	}
+	firstMember := members[0]
+	secondMember := members[1]
+	mustDepAdd(t, store, secondMember.ID, firstMember.ID, "blocks")
+
+	result, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	if result.Action != "drain-expanded" {
+		t.Fatalf("result = %+v, want drain-expanded", result)
+	}
+
+	drain = mustGetBead(t, store, drain.ID)
+	manifest := mustDrainManifest(t, drain)
+	rowByMember := make(map[string]drainManifestRow, len(manifest.Rows))
+	for _, row := range manifest.Rows {
+		rowByMember[row.MemberID] = row
+	}
+	firstRow := rowByMember[firstMember.ID]
+	secondRow := rowByMember[secondMember.ID]
+	if firstRow.ItemRootID == "" || secondRow.ItemRootID == "" {
+		t.Fatalf("missing item roots: first=%+v second=%+v", firstRow, secondRow)
+	}
+
+	assertHasBlockingDep(t, store, secondRow.ItemRootID, firstRow.ItemRootID)
+	secondWork := mustFindDrainItemWorkStep(t, store, secondRow.ItemRootID)
+	assertHasBlockingDep(t, store, secondWork.ID, firstRow.ItemRootID)
+
+	firstWork := mustFindDrainItemWorkStep(t, store, firstRow.ItemRootID)
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if !beadListContainsID(ready, firstWork.ID) {
+		t.Fatalf("first item work step %s should be ready; ready=%+v", firstWork.ID, ready)
+	}
+	if beadListContainsID(ready, secondWork.ID) {
+		t.Fatalf("second item work step %s should not be ready while %s is open; ready=%+v", secondWork.ID, firstRow.ItemRootID, ready)
+	}
+}
+
+func TestProcessDrainSeparateCreatesDependentItemWorkflowsBlocked(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(false)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	mem, drain := seedDrainWorkflow(t)
+	parentRoot := mustGetBead(t, mem, drain.Metadata["gc.root_bead_id"])
+	members, err := convoycore.Members(mem, parentRoot.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("members = %d, want 2", len(members))
+	}
+	firstMember := members[0]
+	secondMember := members[1]
+	mustDepAdd(t, mem, secondMember.ID, firstMember.ID, "blocks")
+
+	var firstRootID string
+	var secondRootID string
+	secondRootCreatedBlocked := false
+	secondWorkCreatedBlocked := false
+	store := &createObservingStore{
+		Store: mem,
+		onCreate: func(created beads.Bead) {
+			if created.Metadata["gc.drain_member_id"] == firstMember.ID && created.Metadata["gc.kind"] == "workflow" {
+				firstRootID = created.ID
+			}
+			if firstRootID == "" {
+				return
+			}
+			if created.Metadata["gc.drain_member_id"] == secondMember.ID && created.Metadata["gc.kind"] == "workflow" {
+				secondRootID = created.ID
+				secondRootCreatedBlocked = beadNeedsContains(created.Needs, firstRootID)
+			}
+			if secondRootID != "" && strings.HasPrefix(created.Title, "Work ") && (created.ParentID == secondRootID || created.Metadata["gc.root_bead_id"] == secondRootID) {
+				secondWorkCreatedBlocked = beadNeedsContains(created.Needs, firstRootID)
+			}
+		},
+	}
+
+	result, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	if result.Action != "drain-expanded" {
+		t.Fatalf("result = %+v, want drain-expanded", result)
+	}
+	if !secondRootCreatedBlocked {
+		t.Fatalf("second item root was created without a blocks need on first root %s", firstRootID)
+	}
+	if !secondWorkCreatedBlocked {
+		t.Fatalf("second item work step was created without a blocks need on first root %s", firstRootID)
+	}
+}
+
+func TestProcessDrainSeparateTopologicallyOrdersMembersBeforeCreation(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(false)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	mem, drain, blocker, dependent := seedReverseOrderedDrainWorkflow(t)
+	mustDepAdd(t, mem, dependent.ID, blocker.ID, "blocks")
+
+	var blockerRootID string
+	var dependentRootID string
+	dependentRootCreatedBlocked := false
+	dependentWorkCreatedBlocked := false
+	store := &createObservingStore{
+		Store: mem,
+		onCreate: func(created beads.Bead) {
+			if created.Metadata["gc.drain_member_id"] == blocker.ID && created.Metadata["gc.kind"] == "workflow" {
+				blockerRootID = created.ID
+			}
+			if created.Metadata["gc.drain_member_id"] == dependent.ID && created.Metadata["gc.kind"] == "workflow" {
+				dependentRootID = created.ID
+				dependentRootCreatedBlocked = blockerRootID != "" && beadNeedsContains(created.Needs, blockerRootID)
+			}
+			if dependentRootID != "" && strings.HasPrefix(created.Title, "Work ") && (created.ParentID == dependentRootID || created.Metadata["gc.root_bead_id"] == dependentRootID) {
+				dependentWorkCreatedBlocked = blockerRootID != "" && beadNeedsContains(created.Needs, blockerRootID)
+			}
+		},
+	}
+
+	result, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	if result.Action != "drain-expanded" {
+		t.Fatalf("result = %+v, want drain-expanded", result)
+	}
+
+	manifest := mustDrainManifest(t, mustGetBead(t, mem, drain.ID))
+	if len(manifest.Rows) != 2 {
+		t.Fatalf("manifest rows = %d, want 2", len(manifest.Rows))
+	}
+	if manifest.Rows[0].MemberID != blocker.ID || manifest.Rows[1].MemberID != dependent.ID {
+		t.Fatalf("manifest order = [%s, %s], want blocker %s before dependent %s", manifest.Rows[0].MemberID, manifest.Rows[1].MemberID, blocker.ID, dependent.ID)
+	}
+	if !dependentRootCreatedBlocked {
+		t.Fatalf("dependent item root was created without a blocks need on blocker root %s", blockerRootID)
+	}
+	if !dependentWorkCreatedBlocked {
+		t.Fatalf("dependent item work step was created without a blocks need on blocker root %s", blockerRootID)
+	}
+	assertHasBlockingDep(t, mem, manifest.Rows[1].ItemRootID, manifest.Rows[0].ItemRootID)
 }
 
 func TestProcessDrainSeparateSucceedsForEmptyInputConvoy(t *testing.T) {
@@ -725,6 +894,203 @@ func TestProcessDrainReplayClosesFailedItemRootBeforeRecreate(t *testing.T) {
 	}
 }
 
+func TestProcessDrainReplayConvoyOrderedManifestBlocksOnItemRootNotSourceMember(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain, blocker, dependent := seedReverseOrderedDrainWorkflow(t)
+	mustDepAdd(t, store, dependent.ID, blocker.ID, "blocks")
+	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	parentConvoyID := root.Metadata["gc.input_convoy_id"]
+	// Simulate a manifest persisted by a pre-ordering build: rows in convoy
+	// order, with the dependent member materializing before its blocker.
+	manifest := buildDrainManifest(drain, parentConvoyID, "drain-item",
+		[]beads.Bead{mustGetBead(t, store, dependent.ID), mustGetBead(t, store, blocker.ID)})
+	if len(manifest.Rows) != 2 || manifest.Rows[0].MemberID != dependent.ID || manifest.Rows[1].MemberID != blocker.ID {
+		t.Fatalf("manifest rows = %+v, want convoy order [dependent %s, blocker %s]", manifest.Rows, dependent.ID, blocker.ID)
+	}
+	if err := persistDrainManifest(store, drain.ID, manifest, map[string]string{"gc.drain_state": "expanding"}); err != nil {
+		t.Fatalf("persist manifest: %v", err)
+	}
+
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(drain replay): %v", err)
+	}
+	if result.Action != "drain-expanded" {
+		t.Fatalf("result = %+v, want drain-expanded", result)
+	}
+
+	replayed := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	rowByMember := make(map[string]drainManifestRow, len(replayed.Rows))
+	for _, row := range replayed.Rows {
+		rowByMember[row.MemberID] = row
+	}
+	dependentRow := rowByMember[dependent.ID]
+	blockerRow := rowByMember[blocker.ID]
+	if dependentRow.ItemRootID == "" || blockerRow.ItemRootID == "" {
+		t.Fatalf("missing item roots: dependent=%+v blocker=%+v", dependentRow, blockerRow)
+	}
+
+	assertHasBlockingDep(t, store, dependentRow.ItemRootID, blockerRow.ItemRootID)
+	dependentWork := mustFindDrainItemWorkStep(t, store, dependentRow.ItemRootID)
+	assertHasBlockingDep(t, store, dependentWork.ID, blockerRow.ItemRootID)
+	assertNoBlockingDep(t, store, dependentRow.ItemRootID, blocker.ID)
+	assertNoBlockingDep(t, store, dependentWork.ID, blocker.ID)
+
+	blockerWork := mustFindDrainItemWorkStep(t, store, blockerRow.ItemRootID)
+	if !mustReadyContains(t, store, blockerWork.ID) {
+		t.Fatalf("blocker item work step %s should be ready", blockerWork.ID)
+	}
+	if mustReadyContains(t, store, dependentWork.ID) {
+		t.Fatalf("dependent item work step %s should not be ready while blocker root %s is open", dependentWork.ID, blockerRow.ItemRootID)
+	}
+}
+
+func TestProcessDrainCompleteRepairsEmbeddedSourceMemberDeps(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	parentRoot := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	members, err := convoycore.Members(store, parentRoot.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("members = %d, want 2", len(members))
+	}
+	firstMember := members[0]
+	secondMember := members[1]
+	mustDepAdd(t, store, secondMember.ID, firstMember.ID, "blocks")
+
+	if _, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	rowByMember := make(map[string]drainManifestRow, len(manifest.Rows))
+	for _, row := range manifest.Rows {
+		rowByMember[row.MemberID] = row
+	}
+	firstRow := rowByMember[firstMember.ID]
+	secondRow := rowByMember[secondMember.ID]
+	secondWork := mustFindDrainItemWorkStep(t, store, secondRow.ItemRootID)
+	// Simulate edges embedded by a build that fell back to source members on
+	// a convoy-ordered manifest.
+	mustDepAdd(t, store, secondRow.ItemRootID, firstMember.ID, "blocks")
+	mustDepAdd(t, store, secondWork.ID, firstMember.ID, "blocks")
+
+	if _, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil && !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl(drain complete): %v", err)
+	}
+
+	assertNoBlockingDep(t, store, secondRow.ItemRootID, firstMember.ID)
+	assertNoBlockingDep(t, store, secondWork.ID, firstMember.ID)
+	assertHasBlockingDep(t, store, secondRow.ItemRootID, firstRow.ItemRootID)
+	assertHasBlockingDep(t, store, secondWork.ID, firstRow.ItemRootID)
+}
+
+func TestProcessDrainSharedRepairsEmbeddedSourceMemberDeps(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain, blocker, dependent := seedReverseOrderedDrainWorkflow(t)
+	if err := store.SetMetadata(drain.ID, "gc.drain_context", "shared"); err != nil {
+		t.Fatalf("SetMetadata(shared): %v", err)
+	}
+	mustDepAdd(t, store, dependent.ID, blocker.ID, "blocks")
+	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	parentConvoyID := root.Metadata["gc.input_convoy_id"]
+	// Simulate a manifest persisted by a pre-ordering build: rows in convoy
+	// order, with the dependent member materializing before its blocker.
+	manifest := buildDrainManifest(mustGetBead(t, store, drain.ID), parentConvoyID, "drain-item",
+		[]beads.Bead{mustGetBead(t, store, dependent.ID), mustGetBead(t, store, blocker.ID)})
+	if manifest.Context != "shared" {
+		t.Fatalf("manifest context = %q, want shared", manifest.Context)
+	}
+	if len(manifest.Rows) != 2 || manifest.Rows[0].MemberID != dependent.ID || manifest.Rows[1].MemberID != blocker.ID {
+		t.Fatalf("manifest rows = %+v, want convoy order [dependent %s, blocker %s]", manifest.Rows, dependent.ID, blocker.ID)
+	}
+	if err := persistDrainManifest(store, drain.ID, manifest, map[string]string{"gc.drain_state": "expanding"}); err != nil {
+		t.Fatalf("persist manifest: %v", err)
+	}
+
+	if _, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil && !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl(shared advance): %v", err)
+	}
+	replayed := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	dependentRow := replayed.Rows[0]
+	if dependentRow.MemberID != dependent.ID || dependentRow.ItemRootID == "" {
+		t.Fatalf("row 0 = %+v, want materialized dependent %s", dependentRow, dependent.ID)
+	}
+	dependentWork := mustFindDrainItemWorkStep(t, store, dependentRow.ItemRootID)
+	// Simulate the stall left by a build that embedded the source member: the
+	// blocker's item root cannot exist until this row's root closes.
+	mustDepAdd(t, store, dependentRow.ItemRootID, blocker.ID, "blocks")
+	mustDepAdd(t, store, dependentWork.ID, blocker.ID, "blocks")
+	if mustReadyContains(t, store, dependentWork.ID) {
+		t.Fatalf("dependent item work step %s should be blocked before repair", dependentWork.ID)
+	}
+
+	if _, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil && !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl(shared repair): %v", err)
+	}
+
+	assertNoBlockingDep(t, store, dependentRow.ItemRootID, blocker.ID)
+	assertNoBlockingDep(t, store, dependentWork.ID, blocker.ID)
+	if !mustReadyContains(t, store, dependentWork.ID) {
+		t.Fatalf("dependent item work step %s should be ready after repair", dependentWork.ID)
+	}
+}
+
+func TestProcessDrainSharedMaterializesInDependencyOrderAndBlocksOnItemRoot(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain, blocker, dependent := seedReverseOrderedDrainWorkflow(t)
+	if err := store.SetMetadata(drain.ID, "gc.drain_context", "shared"); err != nil {
+		t.Fatalf("SetMetadata(shared): %v", err)
+	}
+	mustDepAdd(t, store, dependent.ID, blocker.ID, "blocks")
+
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(shared first): %v", err)
+	}
+	if result.Action != "drain-shared-advanced" {
+		t.Fatalf("Action = %q, want drain-shared-advanced", result.Action)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	if len(manifest.Rows) != 2 || manifest.Rows[0].MemberID != blocker.ID || manifest.Rows[1].MemberID != dependent.ID {
+		t.Fatalf("manifest rows = %+v, want dependency order [blocker %s, dependent %s]", manifest.Rows, blocker.ID, dependent.ID)
+	}
+	blockerRow := manifest.Rows[0]
+	if blockerRow.ItemRootID == "" || manifest.Rows[1].ItemRootID != "" {
+		t.Fatalf("rows = %+v, want only blocker item root materialized", manifest.Rows)
+	}
+
+	if err := updateMetadataAndClose(store, blockerRow.ItemRootID, map[string]string{"gc.outcome": "pass"}); err != nil {
+		t.Fatalf("close blocker root pass: %v", err)
+	}
+	if _, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil && !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl(shared second): %v", err)
+	}
+	manifest = mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	dependentRow := manifest.Rows[1]
+	if dependentRow.MemberID != dependent.ID || dependentRow.ItemRootID == "" {
+		t.Fatalf("row 1 = %+v, want materialized dependent %s", dependentRow, dependent.ID)
+	}
+
+	dependentWork := mustFindDrainItemWorkStep(t, store, dependentRow.ItemRootID)
+	assertHasBlockingDep(t, store, dependentRow.ItemRootID, blockerRow.ItemRootID)
+	assertHasBlockingDep(t, store, dependentWork.ID, blockerRow.ItemRootID)
+	assertNoBlockingDep(t, store, dependentRow.ItemRootID, blocker.ID)
+	assertNoBlockingDep(t, store, dependentWork.ID, blocker.ID)
+	if !mustReadyContains(t, store, dependentWork.ID) {
+		t.Fatalf("dependent item work step %s should be ready once blocker root %s closed", dependentWork.ID, blockerRow.ItemRootID)
+	}
+}
+
 func TestProcessDrainPassesParentRuntimeVarsToItemFormula(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
@@ -860,6 +1226,28 @@ func (s *recordingDrainUnitStore) ListByMetadata(filters map[string]string, limi
 	return s.Store.ListByMetadata(filters, limit, opts...)
 }
 
+type createObservingStore struct {
+	beads.Store
+	onCreate func(beads.Bead)
+}
+
+func (s *createObservingStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.Store.Create(b)
+	if err == nil && s.onCreate != nil {
+		s.onCreate(created)
+	}
+	return created, err
+}
+
+func beadNeedsContains(needs []string, id string) bool {
+	for _, need := range needs {
+		if need == id || need == "blocks:"+id {
+			return true
+		}
+	}
+	return false
+}
+
 func TestEnsureDrainUnitConvoyLooksAcrossBothTiers(t *testing.T) {
 	store := &recordingDrainUnitStore{Store: beads.NewMemStore()}
 	control, err := store.Create(beads.Bead{Title: "drain", Type: "task"})
@@ -982,6 +1370,55 @@ func seedDrainWorkflow(t *testing.T) (*beads.MemStore, beads.Bead) {
 	return store, drain
 }
 
+func seedReverseOrderedDrainWorkflow(t *testing.T) (*beads.MemStore, beads.Bead, beads.Bead, beads.Bead) {
+	t.Helper()
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "parent", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependent, err := store.Create(beads.Bead{Title: "dependent", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range []beads.Bead{dependent, blocker} {
+		if err := convoycore.TrackItem(store, parent.ID, member.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.input_convoy_id":  parent.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain, err := store.Create(beads.Bead{
+		Title: "drain",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "drain",
+			"gc.root_bead_id":        root.ID,
+			"gc.drain_context":       "separate",
+			"gc.drain_formula":       "drain-item",
+			"gc.drain_member_access": "read",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, drain, blocker, dependent
+}
+
 func writeDrainItemFormula(t *testing.T, dir string) {
 	t.Helper()
 	content := `
@@ -1081,4 +1518,46 @@ func assertFormulaStepMetadata(t *testing.T, store beads.Store, rootID, key, wan
 		}
 	}
 	t.Fatalf("no child of %s has metadata %s=%q; beads=%+v", rootID, key, want, all)
+}
+
+func mustFindDrainItemWorkStep(t *testing.T, store beads.Store, rootID string) beads.Bead {
+	t.Helper()
+	all, err := listByWorkflowRoot(store, rootID)
+	if err != nil {
+		t.Fatalf("listByWorkflowRoot(%s): %v", rootID, err)
+	}
+	for _, bead := range all {
+		if bead.ID != rootID && strings.HasPrefix(bead.Title, "Work ") {
+			return bead
+		}
+	}
+	t.Fatalf("no drain item work step found under %s; beads=%+v", rootID, all)
+	return beads.Bead{}
+}
+
+func assertHasBlockingDep(t *testing.T, store beads.Store, issueID, dependsOnID string) {
+	t.Helper()
+	deps, err := store.DepList(issueID, "down")
+	if err != nil {
+		t.Fatalf("DepList(%s): %v", issueID, err)
+	}
+	for _, dep := range deps {
+		if dep.Type == "blocks" && dep.DependsOnID == dependsOnID {
+			return
+		}
+	}
+	t.Fatalf("dependencies for %s = %+v, want blocks dependency on %s", issueID, deps, dependsOnID)
+}
+
+func assertNoBlockingDep(t *testing.T, store beads.Store, issueID, dependsOnID string) {
+	t.Helper()
+	deps, err := store.DepList(issueID, "down")
+	if err != nil {
+		t.Fatalf("DepList(%s): %v", issueID, err)
+	}
+	for _, dep := range deps {
+		if beads.IsReadyBlockingDependencyType(dep.Type) && dep.DependsOnID == dependsOnID {
+			t.Fatalf("dependencies for %s = %+v, want no blocking dependency on %s", issueID, deps, dependsOnID)
+		}
+	}
 }

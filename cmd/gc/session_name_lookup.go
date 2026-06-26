@@ -24,6 +24,7 @@ type poolSessionCreateIdentity struct {
 	AgentName string
 	Alias     string
 	Slot      int
+	Metadata  map[string]string
 }
 
 func isPoolManagedSessionBead(bead beads.Bead) bool {
@@ -55,8 +56,8 @@ func resolveLegacyPoolTemplate(cfg *config.City, storedTemplate string) string {
 	if cfg == nil || storedTemplate == "" {
 		return ""
 	}
-	if findAgentByTemplate(cfg, storedTemplate) != nil {
-		return storedTemplate
+	if agent := findAgentByTemplate(cfg, storedTemplate); agent != nil {
+		return agent.QualifiedName()
 	}
 	match := ""
 	for i := range cfg.Agents {
@@ -89,8 +90,8 @@ func resolvedTemplateForIdentity(identity string, cfg *config.City) string {
 	if cfg == nil || identity == "" {
 		return ""
 	}
-	if findAgentByTemplate(cfg, identity) != nil {
-		return identity
+	if agent := findAgentByTemplate(cfg, identity); agent != nil {
+		return agent.QualifiedName()
 	}
 	if resolved := resolveLegacyPoolTemplate(cfg, identity); resolved != "" {
 		return resolved
@@ -119,7 +120,10 @@ func resolvedTemplateForIdentity(identity string, cfg *config.City) string {
 func resolvedSessionTemplate(bead beads.Bead, cfg *config.City) string {
 	template := normalizedSessionTemplate(bead, cfg)
 	if template != "" && (cfg == nil || findAgentByTemplate(cfg, template) != nil) {
-		return template
+		// normalizedSessionTemplate already returns the canonical qualified name
+		// when an agent resolves, so this re-normalization is a defensive no-op
+		// on that value (and still canonicalizes a non-canonical input).
+		return normalizeAgentTemplateIdentity(cfg, template)
 	}
 	storedTemplate := sessionBeadStoredTemplate(bead)
 	if storedTemplate == "" {
@@ -137,7 +141,7 @@ func storedTemplateMatchesPoolTemplate(storedTemplate, template string, cfg *con
 	if storedTemplate == "" || template == "" {
 		return false
 	}
-	if storedTemplate == template {
+	if agentTemplateIdentitiesEquivalent(cfg, storedTemplate, template) {
 		return true
 	}
 	return resolveLegacyPoolTemplate(cfg, storedTemplate) == template
@@ -204,6 +208,13 @@ func createPoolSessionBeadWithAlias(
 	}
 	if identity.Slot > 0 {
 		meta["pool_slot"] = strconv.Itoa(identity.Slot)
+	}
+	for key, value := range identity.Metadata {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		meta[key] = strings.TrimSpace(value)
 	}
 	bead, err := store.Create(beads.Bead{
 		ID:       explicitID,
@@ -368,13 +379,92 @@ func sessionBeadAgentName(bead beads.Bead) string {
 	return ""
 }
 
+// sessionAgentMetricIdentity resolves the stable agent-identity label for the
+// gc.agent.* lifecycle counters from a session bead. It mirrors the start
+// path's tp.DisplayName() value space so stop and quarantine metrics join the
+// start, crash, idle-kill, and max-age-kill counters:
+//
+//  1. agent_name metadata (the pool instance or qualified agent identity),
+//  2. the agent: label (legacy aliased beads),
+//  3. the configured pool-instance identity for legacy aliasless pooled beads
+//     (namepool-aware via pooledFallbackIdentity when cfg resolves the agent),
+//  4. the bare template as a last resort.
+//
+// cfg may be nil on call paths that only ever see beads carrying agent_name
+// (manual kill, handoff); step 3 then degrades to the "<template>-<pool_slot>"
+// synthesis, which already joins the start path for non-themed pools.
+//
+// The runtime session_name is intentionally excluded: it lives in a sanitized
+// value space (/ -> --, . -> __) that cannot be joined against the agent
+// identity used by starts, crashes, idle kills, and max-age kills.
+func sessionAgentMetricIdentity(bead beads.Bead, cfg *config.City) string {
+	if identity := sessionBeadAgentName(bead); identity != "" {
+		return identity
+	}
+	if pooled := pooledFallbackIdentity(bead, cfg); pooled != "" {
+		return pooled
+	}
+	return bead.Metadata["template"]
+}
+
+// pooledFallbackIdentity reconstructs the start-path instance identity for a
+// legacy aliasless pooled session bead (template + pool_slot, no agent_name and
+// no agent: label). When cfg resolves the bead's configured agent it reuses
+// poolInstanceIdentity — the same derivation buildDesiredState uses for the
+// start counter — so a namepool-themed pool instance records its themed
+// identity (e.g. "rig/fenrir") instead of a non-joinable "rig/dog-3", and a
+// canonical-singleton pool records its base identity instead of a phantom
+// "rig/dog-1". Without cfg it falls back to the "<template>-<pool_slot>"
+// synthesis, which already joins the start path for non-themed pools. Returns
+// "" when the bead carries no pool_slot (it is not a pooled bead).
+func pooledFallbackIdentity(bead beads.Bead, cfg *config.City) string {
+	template := bead.Metadata["template"]
+	slot := bead.Metadata["pool_slot"]
+	if template == "" || slot == "" {
+		return ""
+	}
+	if cfg != nil {
+		if agent := findAgentByTemplate(cfg, template); agent != nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(slot)); err == nil {
+				if _, qualifiedInstance := poolInstanceIdentity(agent, n, nil); qualifiedInstance != "" {
+					return qualifiedInstance
+				}
+			}
+		}
+	}
+	return template + "-" + slot
+}
+
+// sessionAgentMetricIdentityByName resolves the gc.agent.* identity label for a
+// session referenced by its runtime session name, loading the session bead to
+// read its identity metadata. Returns "" when the store is unavailable or the
+// bead cannot be resolved. The handoff caller operates on a named session whose
+// bead carries agent_name, so the namepool-aware pooled fallback is unreachable
+// and cfg is intentionally nil here.
+func sessionAgentMetricIdentityByName(store beads.Store, sessionName string) string {
+	if store == nil {
+		return ""
+	}
+	id, err := resolveSessionID(store, sessionName)
+	if err != nil {
+		return ""
+	}
+	bead, err := store.Get(id)
+	if err != nil {
+		return ""
+	}
+	return sessionAgentMetricIdentity(bead, nil)
+}
+
 func normalizedSessionTemplate(bead beads.Bead, cfg *config.City) string {
 	template := bead.Metadata["template"]
 	if cfg == nil {
 		return template
 	}
-	if template != "" && findAgentByTemplate(cfg, template) != nil {
-		return template
+	if template != "" {
+		if agent := findAgentByTemplate(cfg, template); agent != nil {
+			return agent.QualifiedName()
+		}
 	}
 	agentName := sessionBeadAgentName(bead)
 	if agentName != "" {

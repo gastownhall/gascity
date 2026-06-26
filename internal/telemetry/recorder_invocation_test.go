@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel"
@@ -13,8 +12,8 @@ import (
 
 func resetInvocationInstruments(t *testing.T) {
 	t.Helper()
-	invInstOnce = sync.Once{}
-	t.Cleanup(func() { invInstOnce = sync.Once{} })
+	ResetInstrumentsForTest()
+	t.Cleanup(ResetInstrumentsForTest)
 }
 
 func TestInvocationLabels_OTelAttributes(t *testing.T) {
@@ -193,5 +192,53 @@ func TestInvocationInstrumentsCarryExpectedAttributes(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no token-counter datapoints inspected; verify SDK setup")
+	}
+}
+
+// TestRecordAgentStop_DropsBlankAgentLabel verifies the central backstop: a
+// stop with an unresolved (blank) agent identity records no gc.agent.stops.total
+// datapoint, because a blank "agent" label cannot join the start/crash/kill
+// counters and only pollutes the metric with an unattributable series. A
+// non-blank identity still records normally.
+func TestRecordAgentStop_DropsBlankAgentLabel(t *testing.T) {
+	resetInvocationInstruments(t)
+
+	reader := metric.NewManualReader()
+	provider := metric.NewMeterProvider(metric.WithReader(reader))
+	prevProvider := otel.GetMeterProvider()
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prevProvider)
+	})
+
+	ctx := context.Background()
+	RecordAgentStop(ctx, "s-blank", "", "drain-ack", nil)
+	RecordAgentStop(ctx, "s-spaces", "   ", "drain-ack", nil)
+	RecordAgentStop(ctx, "s-real", "gascity/gc.worker", "drain-ack", nil)
+
+	var out metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &out); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	var agents []string
+	for _, sm := range out.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "gc.agent.stops.total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("gc.agent.stops.total data type = %T", m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				val, _ := dp.Attributes.Value(attribute.Key("agent"))
+				agents = append(agents, val.AsString())
+			}
+		}
+	}
+
+	if len(agents) != 1 || agents[0] != "gascity/gc.worker" {
+		t.Fatalf("gc.agent.stops.total agent labels = %+v, want exactly [gascity/gc.worker] (blank identities dropped)", agents)
 	}
 }

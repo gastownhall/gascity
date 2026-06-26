@@ -51,6 +51,8 @@ type AgentPatch struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Upstream overrides the model-serving endpoint selection (Phase C).
+	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
 	// the pack-defined args; set to an empty list to clear them; set to a
 	// populated list to replace them entirely (full replace, not append).
@@ -276,6 +278,8 @@ type GitHubPRMonitorPatch struct {
 	NotifyAppend []string `toml:"notify_append,omitempty"`
 	// RepairRoute overrides the repair route target.
 	RepairRoute *string `toml:"repair_route,omitempty"`
+	// RepairWorkflow overrides the formula attached to repair beads.
+	RepairWorkflow *string `toml:"repair_workflow,omitempty"`
 	// WebhookSecretEnv overrides the env var containing the webhook secret.
 	WebhookSecretEnv *string `toml:"webhook_secret_env,omitempty"`
 	// WebhookSecretKey overrides the stable webhook secret key.
@@ -450,6 +454,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.Provider != nil {
 		a.Provider = *p.Provider
+	}
+	if p.Upstream != nil {
+		a.Upstream = *p.Upstream
 	}
 	if p.Args != nil {
 		a.Args = append([]string(nil), (*p.Args)...)
@@ -677,6 +684,9 @@ func applyGitHubPRMonitorPatch(cfg *City, patch *GitHubPRMonitorPatch) error {
 		}
 		if patch.RepairRoute != nil {
 			monitor.RepairRoute = *patch.RepairRoute
+		}
+		if patch.RepairWorkflow != nil {
+			monitor.RepairWorkflow = *patch.RepairWorkflow
 		}
 		if patch.WebhookSecretEnv != nil {
 			monitor.WebhookSecretEnv = *patch.WebhookSecretEnv

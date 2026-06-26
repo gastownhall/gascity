@@ -650,19 +650,33 @@ func printLogEntry(w io.Writer, e *worker.TranscriptEntry) {
 	// Try content as array of blocks.
 	var blocks []worker.TranscriptContentBlock
 	if json.Unmarshal(mc.Content, &blocks) == nil && len(blocks) > 0 {
+		printed := false
 		for _, b := range blocks {
 			switch b.Type {
 			case "text":
 				if b.Text != "" {
 					fmt.Fprintf(w, "%s[%s] %s\n", ts, typeStr, b.Text) //nolint:errcheck
+					printed = true
 				}
 			case "tool_use":
 				fmt.Fprintf(w, "%s[%s] tool_use: %s\n", ts, typeStr, b.Name) //nolint:errcheck
+				printed = true
 			case "tool_result":
 				if b.IsError {
 					fmt.Fprintf(w, "%s[%s] tool_result: error\n", ts, typeStr) //nolint:errcheck
+				} else {
+					fmt.Fprintf(w, "%s[%s] tool_result: ok\n", ts, typeStr) //nolint:errcheck
 				}
+				printed = true
 			}
+		}
+		// Invariant: every transcript entry that occupies a tail slot renders at
+		// least one line. Without this, a `--tail N` window landing on entries
+		// whose blocks are all non-rendering (empty text, thinking, or any block
+		// type not handled above) yields empty stdout with exit 0 -- the source
+		// of the "session logs --tail N output is empty" flake.
+		if !printed {
+			fmt.Fprintf(w, "%s[%s] (no displayable content)\n", ts, typeStr) //nolint:errcheck
 		}
 		return
 	}

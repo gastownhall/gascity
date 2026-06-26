@@ -1,5 +1,5 @@
 ---
-title: Dolt Bloat Recovery
+title: Recover from Dolt Bloat
 description: Recover a Gas City beads store whose Dolt noms directory has grown out of proportion.
 ---
 

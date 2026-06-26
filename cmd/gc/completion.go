@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
@@ -75,6 +76,39 @@ func completeOrderNames(_ *cobra.Command, args []string, toComplete string) ([]s
 	return candidates, cobra.ShellCompDirectiveNoFileComp
 }
 
+// completeCityNames completes registered city names for commands whose first
+// positional is a city path-or-name. It uses ShellCompDirectiveDefault (not
+// NoFileComp) because these commands also accept a directory path, so the
+// shell should still offer filesystem paths alongside the registered names.
+func completeCityNames(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	return cityNameCandidates(toComplete), cobra.ShellCompDirectiveDefault
+}
+
+// cityNameCandidates returns registered city names (with their paths as
+// descriptions) as cobra completion entries, filtered by the prefix being
+// typed. Reads only the supervisor registry, so it works from any cwd.
+func cityNameCandidates(toComplete string) []string {
+	var candidates []string
+	quietDefaultLogger(func() {
+		entries, err := supervisor.NewRegistry(supervisor.RegistryPath()).List()
+		if err != nil {
+			return
+		}
+		candidates = make([]string, 0, len(entries))
+		for _, e := range entries {
+			name := e.EffectiveName()
+			if name == "" || !strings.HasPrefix(name, toComplete) {
+				continue
+			}
+			candidates = append(candidates, name+"\t"+e.Path)
+		}
+	})
+	return candidates
+}
+
 // quietDefaultLogger runs fn with the default log.Logger's output redirected
 // to io.Discard, then restores it. Needed because some internal paths (e.g.,
 // orders discovery) write migration warnings via log.Printf, which would
@@ -125,7 +159,7 @@ func resolveCityForCompletion() (string, error) {
 
 func resolveCityForCompletionContext(honorRigFlag bool) (string, error) {
 	if city := strings.TrimSpace(cityFlag); city != "" {
-		return validateCityPath(city)
+		return resolveCityFlagValue(city)
 	}
 	if honorRigFlag {
 		if rig := strings.TrimSpace(rigFlag); rig != "" {

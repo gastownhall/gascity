@@ -55,7 +55,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test", Includes: []string{".gc/system/packs/core"}},
+		Workspace: config.Workspace{},
 		Beads:     config.BeadsConfig{Provider: "file"},
 		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
 	}
@@ -67,6 +67,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeBuiltinImportsFixture(t, dir, "core")
 	if got := controllerSocketPath(dir); got == filepath.Join(dir, ".gc", "controller.sock") {
 		t.Fatalf("controllerSocketPath(%q) = legacy path %q, want short fallback", dir, got)
 	}

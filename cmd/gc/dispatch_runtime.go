@@ -19,54 +19,60 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
-	"github.com/gastownhall/gascity/internal/sling"
 )
 
-// graphExecutionRouteMetaKey is an alias for beadmeta.ExecutionRoutedToMetadataKey.
-const graphExecutionRouteMetaKey = beadmeta.ExecutionRoutedToMetadataKey
-
-// graphExecutionRigContextMetaKey is an alias for beadmeta.ExecutionRigContextMetadataKey.
-const graphExecutionRigContextMetaKey = beadmeta.ExecutionRigContextMetadataKey
-
-// isControlDispatcherKind delegates to sling.IsControlDispatcherKind.
-func isControlDispatcherKind(kind string) bool {
-	return sling.IsControlDispatcherKind(kind)
-}
-
-// workflowExecutionRoute delegates to sling.WorkflowExecutionRoute.
-func workflowExecutionRoute(bead beads.Bead) string {
-	return sling.WorkflowExecutionRoute(bead)
-}
-
-// controlDispatcherBinding delegates to sling.ControlDispatcherBinding.
-func controlDispatcherBinding(store beads.Store, cityName string, cfg *config.City, rigContext string) (sling.GraphRouteBinding, error) {
-	deps := sling.SlingDeps{
-		CityName: cityName,
-		Store:    store,
-		Cfg:      cfg,
-		Resolver: cliAgentResolver{},
-	}
-	return sling.ControlDispatcherBinding(store, cityName, cfg, rigContext, deps)
-}
-
-// assignGraphStepRoute delegates to sling.AssignGraphStepRoute.
-func assignGraphStepRoute(step *formula.RecipeStep, executionBinding sling.GraphRouteBinding, controlBinding *sling.GraphRouteBinding) {
-	sling.AssignGraphStepRoute(step, executionBinding, controlBinding)
-}
-
-// applyGraphRouting delegates to sling.ApplyGraphRouting with CLI interfaces.
-func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
-	deps := sling.SlingDeps{
-		CityName:              cityName,
+// cliGraphrouteDeps builds the graphroute dependencies used by CLI
+// graph-routing call sites.
+func cliGraphrouteDeps(cityPath string) graphroute.Deps {
+	return graphroute.Deps{
 		CityPath:              cityPath,
-		Store:                 store,
-		StoreRef:              storeRef,
-		Cfg:                   cfg,
 		Resolver:              cliAgentResolver{},
 		DirectSessionResolver: cliDirectSessionResolver,
+		ControlDispatcherRuntimeMissing: func(qualifiedName string) bool {
+			return controlDispatcherSessionRuntimeMissing(cityPath, qualifiedName)
+		},
 	}
-	return sling.ApplyGraphRouting(recipe, a, routedTo, vars, "", scopeKind, scopeRef, storeRef, store, cityName, cfg, deps)
+}
+
+// controlDispatcherSessionRuntimeMissing reports whether the control-dispatcher
+// agent's session is asleep with reason runtime-missing. Session beads are
+// city-scoped, so it reads the city store directly (the rig-scoped routing
+// store cannot see them). It powers the rig→city control-dispatcher fallback
+// (#3454); any lookup failure returns false so routing falls back to the normal
+// rig-local binding rather than mis-routing on a transient store error.
+func controlDispatcherSessionRuntimeMissing(cityPath, qualifiedName string) bool {
+	if cityPath == "" || strings.TrimSpace(qualifiedName) == "" {
+		return false
+	}
+	// Only consult the city store for a real, initialized city. Mirrors the
+	// pool-nudge guard in doSling: a bare working dir (no city.toml) has no
+	// session beads to read, and opening a store there would needlessly
+	// spin up a managed Dolt backend on the routing hot path.
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		return false
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil || store == nil {
+		return false
+	}
+	return sessionRuntimeMissingInStore(store, qualifiedName)
+}
+
+// sessionRuntimeMissingInStore reports whether any open session bead for the
+// agent (selected by its agent:<qualified> label) projects the runtime-missing
+// lifecycle reason in the given store. The projection lives in internal/session
+// so the API sling path can share it without importing package main.
+func sessionRuntimeMissingInStore(store beads.Store, qualifiedName string) bool {
+	return sessionpkg.RuntimeMissingInStore(store, qualifiedName)
+}
+
+// applyGraphRouting delegates to graphroute.ApplyGraphRouting with CLI
+// dependencies.
+func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+	return graphroute.ApplyGraphRouting(recipe, a, routedTo, vars, "", scopeKind, scopeRef, storeRef, store, cityName, cfg, cliGraphrouteDeps(cityPath))
 }
 
 var (
@@ -82,9 +88,30 @@ var (
 	workflowServeIdlePollInterval  = 100 * time.Millisecond
 	workflowServeIdlePollAttempts  = 3
 	workflowServeWakeSweepInterval = 1 * time.Second
-	workflowServeMaxIdleSleep      = 30 * time.Second
-	workflowServeWaitForWake       = waitForRelevantWorkflowWakeWithTrace
-	workflowTraceNow               = time.Now
+	// Cap the --follow idle backoff at 5s. A worker that closes a step bead
+	// with a raw bd write does not publish a city BeadClosed event, so the
+	// control-dispatcher only notices the next ready step on its idle re-poll.
+	// At the former 30s cap each graph hop could wait up to ~30s, so a
+	// multi-step workflow accumulated minutes of pure wake latency (the bulk of
+	// the TestGraphWorkflowSuccessPath flake). 5s keeps the loop responsive
+	// across hops while still backing off from the 1s base; the cost is one
+	// serve loop polling every 5s rather than 30s when a city is fully idle.
+	// (Complementary to the wake-debounce coalescing below, which only helps
+	// the event-arrival path; a raw-bd-write close publishes no event.)
+	workflowServeMaxIdleSleep = 5 * time.Second
+	// workflowServeWakeDebounce is the coalescing window opened once the first
+	// relevant event wakes the --follow loop. Additional buffered events that
+	// arrive during the window are drained and folded into the same wake so a
+	// burst of N bead.* events (e.g. an mc-wisp-* event storm) collapses into a
+	// single work/ready re-scan instead of N heavy per-event Dolt scans. This is
+	// a fixed (max-wait) window, so a lone relevant wake also waits out the
+	// window before its drain; the delay is intentional and small relative to
+	// the 1–5s idle sleeps it replaces. Set it to 0 to disable coalescing and
+	// restore one-event-one-drain. Injectable so tests can shrink it. Fixes
+	// gastownhall/gascity#3206.
+	workflowServeWakeDebounce = 250 * time.Millisecond
+	workflowServeWaitForWake  = waitForRelevantWorkflowWakeWithTrace
+	workflowTraceNow          = time.Now
 	// The trace helper is intentionally process-global because workflowTracef
 	// does not carry per-invocation context. Nested installs (serve ->
 	// runControlDispatcherWithStore) reuse the active dedup map so one bad trace
@@ -183,6 +210,7 @@ func workflowTracef(format string, args ...any) {
 	if path == "" {
 		return
 	}
+	maybeRotateWorkflowTrace(path)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		workflowTraceWarnOpenFailure(path, err)
@@ -496,6 +524,8 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			processedThisCycle = true
 		}
 		if processedThisCycle {
+			// Signal workers to skip their poll sleep: new step beads may be ready.
+			writeDispatchWakeFile(cityPath)
 			continue
 		}
 		if pendingCount > 0 {
@@ -528,6 +558,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	go pumpWorkflowEvents(done, watcher, eventCh)
 
 	idleSweeps := 0
+	var pendingWakeErr error
 	for {
 		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
 		if err != nil {
@@ -546,6 +577,13 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 			workflowTracef("serve drain-transient-retry agent=%s err=%v", agentCfg.QualifiedName(), err)
 			drainResult = workflowServeDrainResult{}
 		}
+		if pendingWakeErr != nil {
+			// The previous wait observed a relevant event and then a fatal
+			// watcher error in the same coalescing window. The drain above is
+			// the one re-scan that wake promised, so the observed work is now
+			// serviced; surface the watcher error to end the loop.
+			return pendingWakeErr
+		}
 		if drainResult.processedAny || drainResult.pendingAny {
 			idleSweeps = 0
 		}
@@ -560,7 +598,17 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 		)
 		eventWake, err := workflowServeWaitForWake(eventCh, sleepDur, idleSweeps)
 		if err != nil {
-			return err
+			if !eventWake {
+				// Fatal stream error with no relevant event observed: nothing to
+				// re-scan, so terminate immediately.
+				return err
+			}
+			// A relevant event was observed just before the fatal error. Loop
+			// once more so the next drain services that wake, then surface the
+			// error on the following iteration.
+			pendingWakeErr = err
+			idleSweeps = 0
+			continue
 		}
 		switch {
 		case eventWake, drainResult.pendingAny:
@@ -614,7 +662,23 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 				} else {
 					workflowTracef("serve wake-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
 				}
-				return true, nil
+				// Coalesce a burst: keep draining buffered events for a short
+				// debounce window so N relevant events collapse into one drain.
+				// runWorkflowServeFollow does exactly one drain per return=true,
+				// so the trailing events are already covered by that single
+				// re-scan — no event is dropped, only batched.
+				coalesced, coalesceErr := coalesceWorkflowWakeBurst(eventCh)
+				if coalesced > 0 {
+					workflowTracef("serve wake-coalesce extra=%d debounce=%s", coalesced, workflowServeWakeDebounce)
+				}
+				// Report the wake even when a fatal stream error arrived during
+				// the coalescing window: a relevant event was already observed,
+				// so runWorkflowServeFollow must still perform the one re-scan it
+				// promised for that wake before terminating. Surfacing
+				// (true, err) lets the caller drain the observed wake and then
+				// exit on the error, instead of stranding newly-ready work until
+				// a dispatcher restart re-scans.
+				return true, coalesceErr
 			}
 			workflowTracef("serve ignore-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
 		case <-timer.C:
@@ -624,6 +688,36 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 				workflowTracef("serve wake-sweep")
 			}
 			return false, nil
+		}
+	}
+}
+
+// coalesceWorkflowWakeBurst drains additional buffered events from eventCh for
+// the workflowServeWakeDebounce window after a relevant event has already
+// decided to wake the loop. It returns the number of extra events it folded
+// into this wake so the caller emits a single drain for the whole burst, plus
+// any watcher error encountered while draining. The caller pairs that error
+// with the already-observed wake (returning true, err) so the serve loop still
+// performs the one promised re-scan before terminating on a fatal stream
+// failure. Events are only batched here, never dropped: the caller's single
+// re-scan already reflects every drained event.
+func coalesceWorkflowWakeBurst(eventCh <-chan workflowWatchResult) (int, error) {
+	if workflowServeWakeDebounce <= 0 {
+		return 0, nil
+	}
+	debounce := time.NewTimer(workflowServeWakeDebounce)
+	defer debounce.Stop()
+
+	coalesced := 0
+	for {
+		select {
+		case res := <-eventCh:
+			if res.err != nil {
+				return coalesced, res.err
+			}
+			coalesced++
+		case <-debounce.C:
+			return coalesced, nil
 		}
 	}
 }
@@ -660,7 +754,8 @@ func workflowServeWorkQuery(agentCfg config.Agent, expandedWorkQuery ...string) 
 func isWorkflowServeControlDispatcherAgent(agentCfg config.Agent) bool {
 	qualified := strings.TrimSpace(agentCfg.QualifiedName())
 	return qualified == config.ControlDispatcherAgentName ||
-		strings.HasSuffix(qualified, "/"+config.ControlDispatcherAgentName)
+		strings.HasSuffix(qualified, "/"+config.ControlDispatcherAgentName) ||
+		strings.HasSuffix(qualified, "."+config.ControlDispatcherAgentName)
 }
 
 func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames ...string) string {
@@ -677,6 +772,13 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	if beadsCfg.UsesBD105ReadySemantics() {
 		includeEphemeral = " --include-ephemeral"
 	}
+	jqFilter := fmt.Sprintf(
+		`reduce add[] as $item ([]; if (($item.metadata // {})[%q] // "") != "" then . elif any(.[]; .id == $item.id) then . else . + [$item] end)`,
+		beadmeta.InstantiatingMetadataKey,
+	)
+	jqFilter = strings.ReplaceAll(jqFilter, `\`, `\\`)
+	jqFilter = strings.ReplaceAll(jqFilter, `"`, `\"`)
+	jqFilter = strings.ReplaceAll(jqFilter, `$`, `\$`)
 	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target)
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
@@ -688,6 +790,9 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	}
 	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
 		queryPrefix += ` GC_CONTROL_LEGACY_TARGET=` + shellquote.Quote(legacy)
+	}
+	if bare := controlDispatcherBareRoute(target); bare != "" {
+		queryPrefix += ` GC_CONTROL_BARE_TARGET=` + shellquote.Quote(bare)
 	}
 	query := queryPrefix + ` sh -c '` +
 		`set -e; ` +
@@ -709,7 +814,8 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`done; ` +
 		`routed_ready "$GC_CONTROL_TARGET"; ` +
 		`routed_ready "${GC_CONTROL_LEGACY_TARGET:-}"; ` +
-		`if [ -s "$tmp" ]; then jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp"; else printf "[]"; fi` + `'`
+		`routed_ready "${GC_CONTROL_BARE_TARGET:-}"; ` +
+		`if [ -s "$tmp" ]; then jq -s "` + jqFilter + `" "$tmp"; else printf "[]"; fi` + `'`
 	return query
 }
 
@@ -723,6 +829,32 @@ func workflowServeLegacyControlRoute(target string) string {
 		return strings.TrimSuffix(target, suffix) + "/workflow-control"
 	}
 	return ""
+}
+
+// controlDispatcherBareRoute returns the binding-stripped alias of a control
+// dispatcher's qualified name, e.g. "core.control-dispatcher" ->
+// "control-dispatcher" and "rig/core.control-dispatcher" ->
+// "rig/control-dispatcher". Pre-1.3 builds routed control beads to this bare
+// form (see the pre-migration controlDispatcherTargetForExecutionTarget), so
+// the qualified-name consumers must still claim/scale them after an upgrade.
+// Returns "" when target is already bare (no distinct alias) or is not a
+// control-dispatcher route.
+func controlDispatcherBareRoute(target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" || target == config.ControlDispatcherAgentName {
+		return ""
+	}
+	dir, name := config.ParseQualifiedName(target)
+	if name == config.ControlDispatcherAgentName {
+		return "" // already bare (possibly rig-scoped); the target itself matches
+	}
+	if !strings.HasSuffix(name, "."+config.ControlDispatcherAgentName) {
+		return ""
+	}
+	if dir != "" {
+		return dir + "/" + config.ControlDispatcherAgentName
+	}
+	return config.ControlDispatcherAgentName
 }
 
 func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hookBead, error) {
@@ -746,4 +878,23 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 		return []hookBead{bead}, nil
 	}
 	return nil, fmt.Errorf("unexpected work query output: %s", trimmed)
+}
+
+// dispatchWakeFile returns the path of the dispatch-wake sentinel file.
+// The control dispatcher touches it after each successful batch so workers
+// can skip their poll sleep and call gc hook immediately.
+func dispatchWakeFile(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "dispatch-wake")
+}
+
+// writeDispatchWakeFile updates the mtime of the dispatch-wake sentinel file.
+// Best-effort: if the write fails the dispatch cycle continues normally;
+// workers fall back to their standard poll interval.
+func writeDispatchWakeFile(cityPath string) {
+	path := dispatchWakeFile(cityPath)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	_ = f.Close()
 }

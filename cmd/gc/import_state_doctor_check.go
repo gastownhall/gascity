@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
+	"github.com/gastownhall/gascity/internal/remotesource"
 )
 
 type importStateDoctorCheck struct {
@@ -58,6 +59,13 @@ func (c *importStateDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("%d legacy public built-in pack import(s)", len(details))
 		r.FixHint = `run "gc doctor --fix" to rewrite legacy gastown imports and remove legacy maintenance imports`
+		r.Details = details
+		return r
+	}
+	if details := supersededBundledPinDetails(c.cityPath, imports); len(details) > 0 {
+		r.Status = doctor.StatusError
+		r.Message = fmt.Sprintf("%d bundled import(s) pinned at a superseded canonical version", len(details))
+		r.FixHint = `run "gc doctor --fix" to re-pin superseded canonical bundled imports to the current canonical version`
 		r.Details = details
 		return r
 	}
@@ -121,6 +129,15 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 			return fmt.Errorf("reading migrated imports: %w", err)
 		}
 	}
+	if len(supersededBundledPinDetails(c.cityPath, imports)) > 0 {
+		if err := rewriteSupersededBundledPinsFS(fsys.OSFS{}, c.cityPath); err != nil {
+			return err
+		}
+		imports, err = collectAllImportsFS(fsys.OSFS{}, c.cityPath)
+		if err != nil {
+			return fmt.Errorf("reading re-pinned imports: %w", err)
+		}
+	}
 	lock, err := syncImports(c.cityPath, imports, packman.InstallResolveIfNeeded)
 	if err != nil {
 		return err
@@ -132,6 +149,149 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 		return err
 	}
 	return nil
+}
+
+// supersededBundledPinDetails reports bundled imports pinned at a
+// superseded canonical version (a pin an older gc release wrote as
+// canonical). Deliberate pins at other commits are not flagged.
+func supersededBundledPinDetails(cityPath string, imports map[string]config.Import) []string {
+	lockTargets := supersededBundledLockTargets(fsys.OSFS{}, cityPath)
+	var names []string
+	for name, imp := range imports {
+		if current, _ := supersededBundledTarget(imp, lockTargets); current != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	details := make([]string, 0, len(names))
+	for _, name := range names {
+		imp := imports[name]
+		current, version := supersededBundledTarget(imp, lockTargets)
+		details = append(details, fmt.Sprintf("superseded-canonical-pin | %s | %s | pinned at superseded canonical %s; current canonical is %s", name, imp.Source, version, current))
+	}
+	return details
+}
+
+func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) error {
+	lockTargets := supersededBundledLockTargets(fs, cityPath)
+	bump := func(imports map[string]config.Import) bool {
+		changed := false
+		for name, imp := range imports {
+			if current, _ := supersededBundledTarget(imp, lockTargets); current != "" {
+				imp.Version = current
+				imports[name] = imp
+				changed = true
+			}
+		}
+		return changed
+	}
+
+	packTomlPath := filepath.Join(cityPath, "pack.toml")
+	cityTomlPath := filepath.Join(cityPath, "city.toml")
+	packSnap, err := snapshotResolvedFile(fs, packTomlPath)
+	if err != nil {
+		return fmt.Errorf("snapshotting pack.toml: %w", err)
+	}
+	citySnap, err := snapshotResolvedFile(fs, cityTomlPath)
+	if err != nil {
+		return fmt.Errorf("snapshotting city.toml: %w", err)
+	}
+	snapshots := []fileSnapshot{packSnap, citySnap}
+
+	rollback := func(action string, cause error) error {
+		if restoreErr := restoreSnapshots(fs, snapshots); restoreErr != nil {
+			return fmt.Errorf("%s: %w (rollback failed: %w)", action, cause, restoreErr)
+		}
+		return fmt.Errorf("%s: %w", action, cause)
+	}
+
+	// Compute every pack.toml and city.toml change before writing anything, so
+	// a post-detection city.toml read failure cannot leave pack.toml
+	// half-rewritten (the rollback snapshots only cover writes we reach).
+	manifest, err := loadCityPackManifestFS(fs, cityPath)
+	if err != nil {
+		return err
+	}
+	packChanged := bump(manifest.Imports)
+	defaultRigChanged := bump(manifest.Defaults.Rig.Imports)
+
+	var cfg *config.City
+	cityChanged := false
+	cityExists := true
+	if _, err := fs.Stat(cityTomlPath); err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		cityExists = false
+	}
+	if cityExists {
+		cfg, err = loadCityImportManifestFS(fs, cityPath)
+		if err != nil {
+			return err
+		}
+		// Top-level [imports.*] overrides are part of the effective import set
+		// the check detects (see applyCityRootImportOverridesFS), so they must
+		// be re-pinned too or doctor --fix re-reports the same violation.
+		if bump(cfg.Imports) {
+			cityChanged = true
+		}
+		for i := range cfg.Rigs {
+			if bump(cfg.Rigs[i].Imports) {
+				cityChanged = true
+			}
+		}
+		if bump(cfg.Defaults.Rig.Imports) {
+			cityChanged = true
+		}
+	}
+
+	if packChanged || defaultRigChanged {
+		if err := writeCityPackManifest(fs, cityPath, manifest); err != nil {
+			return rollback("writing pack.toml", err)
+		}
+	}
+	if cityChanged {
+		if err := writeCityImportManifestFS(fs, cityPath, cfg); err != nil {
+			return rollback("writing city.toml", err)
+		}
+	}
+	return nil
+}
+
+type supersededBundledPin struct {
+	current string
+	version string
+}
+
+func supersededBundledLockTargets(fs fsys.FS, cityPath string) map[string]supersededBundledPin {
+	lock, err := readImportLockfile(fs, cityPath)
+	if err != nil || len(lock.Packs) == 0 {
+		return nil
+	}
+	targets := make(map[string]supersededBundledPin)
+	for source, locked := range lock.Packs {
+		version := strings.TrimSpace(locked.Version)
+		if version == "" && strings.TrimSpace(locked.Commit) != "" {
+			version = "sha:" + strings.TrimSpace(locked.Commit)
+		}
+		if current, ok := config.SupersededBundledPinTarget(source, version); ok {
+			targets[source] = supersededBundledPin{current: current, version: version}
+		}
+	}
+	return targets
+}
+
+func supersededBundledTarget(imp config.Import, lockTargets map[string]supersededBundledPin) (current, version string) {
+	version = strings.TrimSpace(imp.Version)
+	if current, ok := config.SupersededBundledPinTarget(imp.Source, version); ok {
+		return current, version
+	}
+	if version == "" {
+		if target, ok := lockTargets[imp.Source]; ok {
+			return target.current, target.version
+		}
+	}
+	return "", ""
 }
 
 func defaultWave1PublicPackImports(packNames []string) (map[string]wave1PublicPackImportTarget, error) {
@@ -216,7 +376,11 @@ func legacyPublicPackNames(imports map[string]config.Import, cityPath string) []
 func legacyPublicPackForSource(cityPath, source string) (string, bool) {
 	source = strings.TrimSpace(source)
 	if isRemoteImportSource(source) {
-		return "", false
+		parsed := remotesource.Parse(source)
+		if normalizeGascityRepoURL(parsed.CloneURL) != "https://github.com/gastownhall/gascity" {
+			return "", false
+		}
+		return legacyPublicPackSubpath(parsed.Subpath)
 	}
 	source = strings.TrimSpace(filepath.Clean(source))
 	if source == "." || source == "" {
@@ -243,6 +407,20 @@ func legacyPublicPackForSource(cityPath, source string) (string, bool) {
 	return "", false
 }
 
+func normalizeGascityRepoURL(raw string) string {
+	return strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(raw), "/"), ".git")
+}
+
+func legacyPublicPackSubpath(subpath string) (string, bool) {
+	subpath = filepath.ToSlash(filepath.Clean(strings.TrimSpace(subpath)))
+	for _, pack := range []string{"gastown", "maintenance"} {
+		if subpath == "examples/gastown/packs/"+pack {
+			return pack, true
+		}
+	}
+	return "", false
+}
+
 func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[string]wave1PublicPackImportTarget) (bool, error) {
 	for packName, target := range targets {
 		if strings.TrimSpace(packName) == "" || strings.TrimSpace(target.Binding) == "" {
@@ -252,6 +430,26 @@ func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[s
 			return false, fmt.Errorf("wave 1 public pack migration target for %q is missing source", packName)
 		}
 	}
+
+	packTomlPath := filepath.Join(cityPath, "pack.toml")
+	cityTomlPath := filepath.Join(cityPath, "city.toml")
+	packSnap, err := snapshotResolvedFile(fs, packTomlPath)
+	if err != nil {
+		return false, fmt.Errorf("snapshotting pack.toml: %w", err)
+	}
+	citySnap, err := snapshotResolvedFile(fs, cityTomlPath)
+	if err != nil {
+		return false, fmt.Errorf("snapshotting city.toml: %w", err)
+	}
+	snapshots := []fileSnapshot{packSnap, citySnap}
+
+	rollback := func(action string, cause error) error {
+		if restoreErr := restoreSnapshots(fs, snapshots); restoreErr != nil {
+			return fmt.Errorf("%s: %w (rollback failed: %w)", action, cause, restoreErr)
+		}
+		return fmt.Errorf("%s: %w", action, cause)
+	}
+
 	changed := false
 
 	manifest, err := loadCityPackManifestFS(fs, cityPath)
@@ -269,14 +467,14 @@ func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[s
 
 	var cfg *config.City
 	cityChanged := false
-	if _, err := fs.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+	if _, err := fs.Stat(cityTomlPath); err != nil {
 		if os.IsNotExist(err) {
 			if packChanged || defaultRigChanged {
 				if defaultRigChanged {
 					manifest.DefaultRigImportOrder = replaceImportOrderWithTargets(manifest.DefaultRigImportOrder, defaultRigRewrites)
 				}
 				if err := writeCityPackManifest(fs, cityPath, manifest); err != nil {
-					return false, err
+					return false, rollback("writing pack.toml", err)
 				}
 				changed = true
 			}
@@ -288,6 +486,14 @@ func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[s
 	if err != nil {
 		return false, err
 	}
+	// Top-level [imports.*] overrides are part of the effective import set the
+	// check detects (see applyCityRootImportOverridesFS), so legacy public-pack
+	// sources there must be rewritten too or doctor --fix re-reports them.
+	cityRootChanged, _, err := rewriteLegacyPublicPackImportMap(cityPath, cfg.Imports, targets)
+	if err != nil {
+		return false, fmt.Errorf("city.toml imports: %w", err)
+	}
+	cityChanged = cityChanged || cityRootChanged
 	for i := range cfg.Rigs {
 		rigChanged, _, err := rewriteLegacyPublicPackImportMap(cityPath, cfg.Rigs[i].Imports, targets)
 		if err != nil {
@@ -305,13 +511,13 @@ func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[s
 			manifest.DefaultRigImportOrder = replaceImportOrderWithTargets(manifest.DefaultRigImportOrder, defaultRigRewrites)
 		}
 		if err := writeCityPackManifest(fs, cityPath, manifest); err != nil {
-			return false, err
+			return false, rollback("writing pack.toml", err)
 		}
 		changed = true
 	}
 	if cityChanged {
 		if err := writeCityImportManifestFS(fs, cityPath, cfg); err != nil {
-			return false, err
+			return false, rollback("writing city.toml", err)
 		}
 		changed = true
 	}

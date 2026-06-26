@@ -16,10 +16,11 @@ import (
 	"time"
 )
 
-// testSocketName is the dedicated tmux socket used by all integration tests.
-// Using a separate socket ensures tests never interfere with the user's
-// running tmux server.
-const testSocketName = "gc-test"
+// testSocketName is the dedicated tmux socket used by this integration test
+// process. It uses the tmuxtest cleanup prefix and a per-process suffix so
+// reused CI runners cannot inherit a stale fixed test socket from an aborted
+// run.
+var testSocketName = fmt.Sprintf("gctest-%d-%d", os.Getpid(), time.Now().UnixNano())
 
 func hasTmux() bool {
 	_, err := exec.LookPath("tmux")

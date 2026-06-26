@@ -1100,8 +1100,11 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		t.FailNow()
 	}
 
-	if liveSetup.Profile == workerpkg.ProfileAntigravityTmuxCLI {
-		reporter.Record(workertest.Unsupported(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "Antigravity CLI does not currently cancel an in-flight turn for interrupt_now").WithEvidence(map[string]string{
+	if liveSetup.Profile == workerpkg.ProfileAntigravityTmuxCLI || liveSetup.Profile == workerpkg.ProfileMimoCodeTmuxCLI {
+		// Both CLIs deliver the replacement input but let the interrupted
+		// turn run to completion (mimocode verified live 2026-06-12, same
+		// behavior the Antigravity conformance runs recorded).
+		reporter.Record(workertest.Unsupported(profileID, workertest.RequirementInferenceInterruptRecoverContinue, fmt.Sprintf("%s CLI does not currently cancel an in-flight turn for interrupt_now", liveSetup.Provider)).WithEvidence(map[string]string{
 			"profile":       string(liveSetup.Profile),
 			"provider":      liveSetup.Provider,
 			"submit_intent": "interrupt_now",
@@ -1500,7 +1503,13 @@ func installLiveProviderCommandOverrideWithArgs(cityDir, provider, command strin
 		if provider == "antigravity" {
 			return appendLiveProviderEnvOverridesIfMissing(cityPath, text, provider, provider)
 		}
-		return fmt.Errorf("city.toml already defines %s", header)
+		// gc init writes a thin builtin alias for the selected provider
+		// (#2949); replace it with the live override instead of failing.
+		stripped, ok := stripThinBuiltinAliasSection(text, provider)
+		if !ok {
+			return fmt.Errorf("city.toml already defines %s", header)
+		}
+		data = []byte(stripped)
 	}
 
 	var b strings.Builder
@@ -1537,6 +1546,43 @@ func installLiveProviderCommandOverrideWithArgs(cityDir, provider, command strin
 	}
 	writeLiveProviderEnvOverrides(&b, provider, provider)
 	return os.WriteFile(cityPath, []byte(b.String()), 0o644)
+}
+
+// stripThinBuiltinAliasSection removes the `[providers.<name>]` section that
+// `gc init` emits as a thin builtin alias (base = "builtin:<name>" plus
+// zero-value scalars). It returns ok=false when the section carries any other
+// configuration, so genuinely customized provider sections still fail loudly.
+func stripThinBuiltinAliasSection(text, provider string) (string, bool) {
+	header := fmt.Sprintf("[providers.%s]", provider)
+	lines := strings.Split(text, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == header {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		return text, false
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "[") {
+			end = i
+			break
+		}
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		switch trimmed {
+		case fmt.Sprintf("base = %s", strconv.Quote("builtin:"+provider)), "ready_delay_ms = 0":
+			continue
+		default:
+			return text, false
+		}
+	}
+	return strings.Join(append(append([]string(nil), lines[:start]...), lines[end:]...), "\n"), true
 }
 
 func appendLiveProviderEnvOverridesIfMissing(cityPath, text, blockProvider, sourceProvider string) error {
@@ -1631,6 +1677,8 @@ func noSkillLiveProviderDefaults(provider string) (promptMode, promptFlag string
 		return "arg", "", 5000, []string{"--approval-mode", "yolo"}
 	case "opencode":
 		return "flag", "--prompt", 8000, nil
+	case "mimocode":
+		return "flag", "--prompt", 8000, []string{"--never-ask-questions"}
 	case "antigravity":
 		return "flag", "--prompt-interactive", 5000, []string{"--dangerously-skip-permissions"}
 	default:
@@ -1726,8 +1774,17 @@ prompt_template = %q
 default_sling_formula = "mol-do-work"
 min_active_sessions = 0
 max_active_sessions = 2
-`, provider, citylayout.SystemPacksRoot+"/core/assets/prompts/pool-worker.md")
+`, provider, "agents/"+name+"/prompt.template.md")
 	if err := os.MkdirAll(filepath.Dir(agentPath), 0o755); err != nil {
+		return err
+	}
+	promptPath := filepath.Join(helpers.FindModuleRoot(), "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.md")
+	prompt, err := os.ReadFile(promptPath)
+	if err != nil {
+		return fmt.Errorf("reading canonical pool-worker prompt: %w", err)
+	}
+	prompt = append(prompt, []byte("\n## Worker Inference Fixture\n\nFor file-writing tasks in this live inference test, create or update the requested file before closing the work bead.\n")...)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(agentPath), "prompt.template.md"), []byte(prompt), 0o644); err != nil {
 		return err
 	}
 	return os.WriteFile(agentPath, []byte(b.String()), 0o644)
@@ -2681,7 +2738,7 @@ func runFreshInitSlingWorkForTarget(t *testing.T, provider, slingTarget, prompt,
 		"--delivery",
 		hookNudgeDelivery,
 		spawnedSession.SessionName,
-		"Check your hook for work assignments, complete the assigned work, and close the work bead.",
+		"Run gc hook --claim --drain-ack --json, complete the claimed work, close the work bead, and acknowledge drain.",
 	)
 	var lastWorkBead beadJSON
 	completed := false
@@ -2816,6 +2873,8 @@ func liveProviderArgsAppend() []string {
 	switch liveSetup.Profile {
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return []string{"--model", liveOpenCodeModel()}
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return []string{"--model", liveMimoCodeModel()}
 	case workerpkg.ProfilePiTmuxCLI:
 		return []string{"-e", "npm:pi-ollama-cloud", "--provider", "ollama-cloud", "--model", livePiModel()}
 	default:
@@ -2827,6 +2886,14 @@ func liveOpenCodeModel() string {
 	model := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_OPENCODE_MODEL"))
 	if model == "" {
 		return defaultOpenCodeGeminiModel
+	}
+	return model
+}
+
+func liveMimoCodeModel() string {
+	model := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_MIMOCODE_MODEL"))
+	if model == "" {
+		return defaultMimoCodeModel
 	}
 	return model
 }
@@ -3616,7 +3683,7 @@ func inferenceProbeSessionLine(data []byte) (string, error) {
 		return "", err
 	}
 	switch strings.TrimSpace(cfg.Workspace.Provider) {
-	case "kimi", "opencode", "pi", "antigravity":
+	case "kimi", "opencode", "mimocode", "pi", "antigravity":
 		return `session = "tmux"` + "\n", nil
 	}
 	return "", nil
@@ -3628,7 +3695,7 @@ func ensureInferenceProbeProviderHooks(data []byte) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	provider := strings.TrimSpace(cfg.Workspace.Provider)
-	if provider != "gemini" && provider != "opencode" && provider != "pi" && provider != "antigravity" {
+	if provider != "gemini" && provider != "opencode" && provider != "mimocode" && provider != "pi" && provider != "antigravity" {
 		return data, false, nil
 	}
 	if stringListContains(cfg.Workspace.InstallAgentHooks, provider) {

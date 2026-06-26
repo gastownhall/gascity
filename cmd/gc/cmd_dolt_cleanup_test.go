@@ -486,6 +486,64 @@ func TestRunDoltCleanup_ForceDoesNotProtectLegacyFallbackPort(t *testing.T) {
 	}
 }
 
+func TestRunDoltCleanup_ForceReapsBareDeletedCwd(t *testing.T) {
+	// The highest-stakes new behavior (ga-10wmzh): a bare `dolt sql-server`
+	// (no --config) whose working directory is an unlinked inode was always
+	// protected before this change and is now reaped under --force. Drive it
+	// through the real SIGTERM→SIGKILL revalidation path and assert the signal
+	// ordering, the empty-ConfigPath revalidation contract, and that exactly
+	// one process was reaped.
+	var signals []syscall.Signal
+	proc := DoltProcInfo{
+		PID:            5150,
+		Argv:           []string{"dolt", "sql-server"},
+		CWDState:       procPathStateDeleted,
+		StartTimeTicks: 42,
+	}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:      fsys.NewFake(),
+		JSON:    true,
+		Force:   true,
+		HomeDir: "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			return []DoltProcInfo{proc}, nil
+		},
+		KillProcess: func(_ int, sig syscall.Signal) error {
+			signals = append(signals, sig)
+			return nil
+		},
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if len(signals) != 2 || signals[0] != syscall.SIGTERM || signals[1] != syscall.SIGKILL {
+		t.Fatalf("signals = %v, want [SIGTERM SIGKILL] for bare deleted-cwd reap", signals)
+	}
+	if r.Reaped.Count != 1 {
+		t.Errorf("Reaped.Count = %d, want 1", r.Reaped.Count)
+	}
+	if len(r.Reaped.Targets) != 1 || r.Reaped.Targets[0].PID != proc.PID {
+		t.Fatalf("Reaped.Targets = %+v, want one target PID %d", r.Reaped.Targets, proc.PID)
+	}
+	if r.Reaped.Targets[0].ConfigPath != "" {
+		t.Errorf("ConfigPath = %q, want empty for bare server", r.Reaped.Targets[0].ConfigPath)
+	}
+	if !strings.Contains(r.Reaped.Targets[0].Reason, "deleted") {
+		t.Errorf("Reason = %q, want deleted-cwd reason", r.Reaped.Targets[0].Reason)
+	}
+	if len(r.Reaped.ProtectedPIDs) != 0 {
+		t.Errorf("ProtectedPIDs = %v, want none", r.Reaped.ProtectedPIDs)
+	}
+}
+
 func TestRunDoltCleanup_SQLClientOpenFailureIsTypedAndFatal(t *testing.T) {
 	fs := fsys.NewFake()
 	putFakeDirTree(fs, "/city/.beads/dolt/.dolt_dropped_databases", map[string]int64{
@@ -1190,6 +1248,65 @@ func TestRunDoltCleanup_RigsProtectedReadsDoltDatabaseFromMetadata(t *testing.T)
 	}
 }
 
+func TestRunDoltCleanup_SkipsNonDoltBackedRig(t *testing.T) {
+	// az-374: a rig whose metadata.json declares a non-dolt backend (e.g.
+	// mysql) has no dolt database for dolt-cleanup to verify, drop, or purge.
+	// It MUST be skipped — excluded from rigs_protected and never counted as a
+	// rig-protection force_blocker — rather than being treated as one for
+	// lacking dolt_database. A dolt-backed rig in the same city is unaffected.
+	fs := fsys.NewFake()
+	fs.Files["/city/.beads/metadata.json"] = []byte(`{"backend":"mysql","database":"anthony_beads"}`)
+	fs.Files["/rigs/doltrig/.beads/metadata.json"] = []byte(`{"dolt_database":"doltrig_db"}`)
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs: []resolverRig{
+			{Name: "city", Path: "/city", HQ: true},
+			{Name: "doltrig", Path: "/rigs/doltrig"},
+		},
+		FS:                fs,
+		JSON:              true,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+
+	// The mysql-backed rig must not trip rig-protection.
+	if len(r.ForceBlockers) != 0 {
+		t.Fatalf("ForceBlockers = %+v, want none (mysql-backed rig must be skipped)", r.ForceBlockers)
+	}
+	if hasRigProtectionError(&r) {
+		t.Fatalf("unexpected rig-protection error; mysql-backed rig must be skipped: %+v", r.Errors)
+	}
+	if r.Summary.ErrorsTotal != 0 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 0; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+
+	// The mysql-backed rig is skipped (absent from rigs_protected); the
+	// dolt-backed rig is still protected with its metadata dolt_database.
+	for _, rp := range r.RigsProtected {
+		if rp.Rig == "city" {
+			t.Errorf("mysql-backed rig 'city' must be skipped, but found in RigsProtected: %+v", rp)
+		}
+	}
+	want := CleanupRigProtection{Rig: "doltrig", DB: "doltrig_db"}
+	found := false
+	for _, rp := range r.RigsProtected {
+		if rp == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("dolt-backed rig %+v missing from RigsProtected; got %+v", want, r.RigsProtected)
+	}
+}
+
 func TestRunDoltCleanup_DryRunReportsUnsafeRigDatabaseName(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/rigs/foo/.beads/metadata.json"] = []byte(`{"dolt_database":"foo db"}`)
@@ -1475,4 +1592,70 @@ func equalIntSlice(a, b []int) bool {
 		}
 	}
 	return true
+}
+
+func TestRunDoltCleanup_DryRunReportsDeletedScopeTargets(t *testing.T) {
+	// Deleted-scope servers (ga-10wmzh): reaping requires the deleted-cwd
+	// signal. A bare server with a deleted cwd reaps, and a configured server
+	// whose cwd is unlinked reaps with its --config echoed. A server whose
+	// --config has merely vanished while its cwd is still live is protected
+	// (the missing-config signal alone is not proof of scope deletion), as is
+	// a fully live external server. The JSON envelope carries each reap reason.
+	procs := []DoltProcInfo{
+		{
+			PID:      6201,
+			Argv:     []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "33420"},
+			CWDState: procPathStateDeleted,
+		},
+		{
+			PID:             6202,
+			Argv:            []string{"dolt", "sql-server", "--config", "/data/worktrees/gone/.gc/runtime/packs/dolt/dolt-config.yaml"},
+			CWDState:        procPathStateDeleted,
+			ConfigPathState: procPathStateDeleted,
+		},
+		{
+			PID:             6203,
+			Argv:            []string{"dolt", "sql-server", "--config", "/var/lib/external-app/dolt-config.yaml"},
+			CWDState:        procPathStateLive,
+			ConfigPathState: procPathStateLive,
+		},
+		{
+			PID:             6204,
+			Argv:            []string{"dolt", "sql-server", "--config", "/data/worktrees/maybe-gone/.gc/runtime/packs/dolt/dolt-config.yaml"},
+			CWDState:        procPathStateLive,
+			ConfigPathState: procPathStateDeleted,
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:                fsys.NewFake(),
+		JSON:              true,
+		HomeDir:           "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+
+	if len(r.Reaped.Targets) != 2 {
+		t.Fatalf("Reaped.Targets = %+v, want the two deleted-cwd PIDs", r.Reaped.Targets)
+	}
+	if r.Reaped.Targets[0].PID != 6201 || r.Reaped.Targets[0].Reason == "" {
+		t.Errorf("Targets[0] = %+v, want PID 6201 with a deleted-cwd reason", r.Reaped.Targets[0])
+	}
+	if r.Reaped.Targets[1].PID != 6202 || r.Reaped.Targets[1].Reason == "" {
+		t.Errorf("Targets[1] = %+v, want PID 6202 with a deleted-cwd reason", r.Reaped.Targets[1])
+	}
+	if r.Reaped.Targets[1].ConfigPath != "/data/worktrees/gone/.gc/runtime/packs/dolt/dolt-config.yaml" {
+		t.Errorf("Targets[1].ConfigPath = %q, want the config echoed", r.Reaped.Targets[1].ConfigPath)
+	}
+	if !equalIntSlice(r.Reaped.ProtectedPIDs, []int{6203, 6204}) {
+		t.Errorf("ProtectedPIDs = %v, want [6203 6204] (live external + missing-config-but-live-cwd both protected)", r.Reaped.ProtectedPIDs)
+	}
 }

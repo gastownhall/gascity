@@ -54,6 +54,35 @@ func TestJSONSchemaManifestForSupportedCommand(t *testing.T) {
 	}
 }
 
+func TestJSONSchemaManifestForHookClaim(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hook", "--json-schema"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(hook --json-schema) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var manifest struct {
+		Command       []string                   `json:"command"`
+		JSONSupported bool                       `json:"json_supported"`
+		Schemas       map[string]json.RawMessage `json:"schemas"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+		t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got := strings.Join(manifest.Command, " "); got != "hook" {
+		t.Fatalf("command = %q, want hook", got)
+	}
+	if !manifest.JSONSupported {
+		t.Fatalf("hook manifest does not declare JSON support: %+v", manifest)
+	}
+	if !json.Valid(manifest.Schemas["result"]) || !json.Valid(manifest.Schemas["failure"]) {
+		t.Fatalf("manifest schemas = %+v", manifest.Schemas)
+	}
+}
+
 func TestJSONResultSchemasRequireSuccessDiscriminator(t *testing.T) {
 	var missing []string
 	var nonObject []string

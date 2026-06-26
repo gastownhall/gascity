@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -70,6 +71,9 @@ type State interface {
 
 	// EventProvider returns the event provider, or nil if events are disabled.
 	EventProvider() events.Provider
+
+	// UsageSink returns the usage-fact sink (never nil; usage.Discard when off).
+	UsageSink() usage.Sink
 
 	// CityName returns the city name.
 	CityName() string

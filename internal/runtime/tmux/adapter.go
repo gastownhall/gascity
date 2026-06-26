@@ -85,7 +85,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return err
 	}
 
-	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm}, name, cfg, p.cfg.SetupTimeout)
+	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm, runtimeDir: p.cfg.RuntimeDir}, name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
 		return nil
@@ -100,7 +100,7 @@ func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
 	// V2 per-provider overlay support: StageProviderOverlayDir copies universal
 	// files then flattened per-provider/<provider>/ slots for ProviderOverlayName
 	// with ProviderName fallback, plus any InstallAgentHooks entries.
-	overlayProviders := runtime.OverlayProviderNames(cfg)
+	overlayProviders := runtime.EffectiveOverlayProviderNames(cfg)
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {
 			if err := runtime.StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
@@ -212,6 +212,23 @@ func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 // Called by the reconciler when only session_live config has changed.
 func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 	runSessionLive(context.Background(), &tmuxStartOps{tm: p.tm}, name, cfg, os.Stderr, p.cfg.SetupTimeout)
+	return nil
+}
+
+// Relaunch re-launches the agent inside an already-provisioned (warm) tmux
+// session without re-creating it: the box, its session environment, and any
+// staged overlay/copy files are left intact; only the agent command is respawned
+// (respawn-pane -k) and the post-launch orchestration re-run. This is the
+// agent-half of the runtime/transport un-weld (B1) — it lets the reconciler apply
+// a launch-only config change without the full reprovision a Stop+Start forces.
+// Unlike Start it does NOT regenerate the instance token, re-inject env hints, or
+// re-stage files (those are provision-half and unchanged on a launch-only change),
+// and on failure it leaves the warm box in place rather than tearing it down.
+func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := doRelaunchSession(ctx, &tmuxStartOps{tm: p.tm}, name, cfg, p.cfg.SetupTimeout); err != nil {
+		return err
+	}
+	p.cache.Invalidate()
 	return nil
 }
 
@@ -730,6 +747,7 @@ func (p *Provider) TeardownServer() error {
 // This enables unit testing without a real tmux server.
 type startOps interface {
 	createSession(name, workDir, command string, env map[string]string) error
+	respawnAgent(name, workDir, command string) error
 	isSessionRunning(name string) bool
 	isRuntimeRunning(name string, processNames []string) bool
 	killSession(name string) error
@@ -738,14 +756,20 @@ type startOps interface {
 	waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error
 	hasSession(name string) (bool, error)
 	capturePane(name string, lines int) (string, error)
+	recordStartCrash(name, paneContent string) string
 	sendKeys(name, text string) error
 	setRemainOnExit(name string) error
 	disableMouseAndActivity(name string) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
 }
 
-// tmuxStartOps adapts [*Tmux] to the [startOps] interface.
-type tmuxStartOps struct{ tm *Tmux }
+// tmuxStartOps adapts [*Tmux] to the [startOps] interface. runtimeDir is the
+// city runtime root under which start-crash diagnostics are persisted; empty
+// disables the durable capture.
+type tmuxStartOps struct {
+	tm         *Tmux
+	runtimeDir string
+}
 
 const (
 	defaultReadyProbeTimeout = 15 * time.Second
@@ -753,6 +777,8 @@ const (
 	maxReadyProbeTimeout     = 60 * time.Second
 	readyProbeSlack          = 5 * time.Second
 	startupPaneCaptureLines  = 80
+	setupCommandOutputLimit  = 4096
+	setupCommandWaitDelay    = 2 * time.Second
 )
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
@@ -760,6 +786,13 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 		return o.tm.NewSessionWithCommandAndEnv(name, workDir, command, env)
 	}
 	return o.tm.NewSession(name, workDir)
+}
+
+// respawnAgent relaunches the agent command in the session's existing pane
+// (respawn-pane -k), reusing the warm box and its session environment. The
+// launch-half of the un-weld relaunch path.
+func (o *tmuxStartOps) respawnAgent(name, workDir, command string) error {
+	return o.tm.RespawnPaneWithWorkDir(name, workDir, command)
 }
 
 func (o *tmuxStartOps) isSessionRunning(name string) bool {
@@ -804,6 +837,43 @@ func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 	return o.tm.CapturePane(name, lines)
 }
 
+// recordStartCrash persists a per-session start-crash diagnostic so an
+// immediate start-crash leaves a durable on-disk artifact (the transient
+// start error is otherwise lost). It records the dead pane's exit status and
+// terminating signal alongside the captured pane output. Best-effort: a
+// disabled capture (empty runtimeDir) or any I/O error returns "" without
+// affecting startup. Returns the artifact path when written.
+func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
+	if o.runtimeDir == "" {
+		return ""
+	}
+	status, signal := o.tm.PaneDeadInfo(name)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "session: %s\n", name)
+	if status != "" {
+		fmt.Fprintf(&b, "exit-status: %s\n", status)
+	}
+	if signal != "" {
+		fmt.Fprintf(&b, "signal: %s\n", signal)
+	}
+	b.WriteString("--- last pane output ---\n")
+	b.WriteString(paneContent)
+	if paneContent != "" && !strings.HasSuffix(paneContent, "\n") {
+		b.WriteByte('\n')
+	}
+
+	dir := filepath.Join(o.runtimeDir, "sessions", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	path := filepath.Join(dir, "start-stderr.log")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		return ""
+	}
+	return path
+}
+
 func (o *tmuxStartOps) sendKeys(name, text string) error {
 	return o.tm.NudgeSession(name, text)
 }
@@ -834,7 +904,80 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	if o.tm.cfg.SocketName != "" {
 		c.Env = append(c.Env, "GC_TMUX_SOCKET="+o.tm.cfg.SocketName)
 	}
-	return c.Run()
+	stdout := newCommandOutputTail(setupCommandOutputLimit)
+	stderr := newCommandOutputTail(setupCommandOutputLimit)
+	c.Stdout = stdout
+	c.Stderr = stderr
+	// WaitDelay ensures Go forcibly closes the capture pipes after the
+	// command exits or the timeout fires, even if background descendants
+	// spawned by the command still hold them open.
+	c.WaitDelay = setupCommandWaitDelay
+	if err := c.Run(); err != nil {
+		// ErrWaitDelay means the command itself exited successfully and
+		// only the force-closed pipes ended the wait: a setup command that
+		// daemonizes a child holding inherited stdio and exits 0 succeeded.
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = fmt.Errorf("%w: %w", ctxErr, err)
+		}
+		return setupCommandFailure(err, stdout, stderr)
+	}
+	return nil
+}
+
+type commandOutputTail struct {
+	limit   int
+	written int
+	buf     []byte
+}
+
+func newCommandOutputTail(limit int) *commandOutputTail {
+	return &commandOutputTail{limit: limit}
+}
+
+func (b *commandOutputTail) Write(p []byte) (int, error) {
+	b.written += len(p)
+	if b.limit <= 0 {
+		return len(p), nil
+	}
+	if len(p) >= b.limit {
+		b.buf = append(b.buf[:0], p[len(p)-b.limit:]...)
+		return len(p), nil
+	}
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.limit {
+		copy(b.buf, b.buf[len(b.buf)-b.limit:])
+		b.buf = b.buf[:b.limit]
+	}
+	return len(p), nil
+}
+
+func (b *commandOutputTail) Detail(label string) string {
+	text := strings.TrimSpace(string(b.buf))
+	if text == "" {
+		return ""
+	}
+	if b.written > len(b.buf) {
+		text = "... " + text
+	}
+	return label + ": " + text
+}
+
+func setupCommandFailure(err error, stdout, stderr *commandOutputTail) error {
+	stderrDetail := stderr.Detail("stderr")
+	stdoutDetail := stdout.Detail("stdout")
+	switch {
+	case stderrDetail != "" && stdoutDetail != "":
+		return fmt.Errorf("%w; %s; %s", err, stderrDetail, stdoutDetail)
+	case stderrDetail != "":
+		return fmt.Errorf("%w; %s", err, stderrDetail)
+	case stdoutDetail != "":
+		return fmt.Errorf("%w; %s", err, stdoutDetail)
+	default:
+		return err
+	}
 }
 
 func startupReadyProbeTimeout(cfg runtime.Config) time.Duration {
@@ -874,13 +1017,28 @@ func ignoreDeadlineIfSessionAlive(ops startOps, name string, err error) error {
 func startupDeadSessionError(ops startOps, name string) error {
 	pane, err := ops.capturePane(name, startupPaneCaptureLines)
 	if err != nil {
+		pane = ""
+	} else {
+		pane = strings.TrimSpace(pane)
+	}
+	// Persist a durable crash diagnostic (exit status + signal + pane output)
+	// so the immediate-exit reason survives the transient start error. Recorded
+	// even when the pane is empty, so an exit-before-render crash still leaves
+	// the exit status/signal on disk. Best-effort: "" when capture is disabled.
+	diagPath := ops.recordStartCrash(name, pane)
+	switch {
+	case pane != "" && diagPath != "":
+		return fmt.Errorf("%w: session %q; diagnostic written to %s; last pane output:\n%s",
+			runtime.ErrSessionDiedDuringStartup, name, diagPath, pane)
+	case pane != "":
+		return fmt.Errorf("%w: session %q; last pane output:\n%s",
+			runtime.ErrSessionDiedDuringStartup, name, pane)
+	case diagPath != "":
+		return fmt.Errorf("%w: session %q; diagnostic written to %s",
+			runtime.ErrSessionDiedDuringStartup, name, diagPath)
+	default:
 		return startupSessionDiedError(name)
 	}
-	pane = strings.TrimSpace(pane)
-	if pane == "" {
-		return startupSessionDiedError(name)
-	}
-	return fmt.Errorf("%w: session %q; last pane output:\n%s", runtime.ErrSessionDiedDuringStartup, name, pane)
 }
 
 func startupSessionDiedError(name string) error {
@@ -934,6 +1092,17 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return err
 	}
 
+	// Apply the lifecycle gating and (for a managed, non-one-shot session) run
+	// the post-creation orchestration. Shared with the relaunch path.
+	return finishLaunch(ctx, ops, name, cfg, setupTimeout)
+}
+
+// finishLaunch applies the lifecycle gating (one-shot / no-managed-hints) and,
+// for a managed non-one-shot session, runs the post-launch orchestration. It is
+// the shared tail of doStartSession (after box creation) and doRelaunchSession
+// (after respawning the agent in a warm box): both reach a session whose agent
+// pane has just been launched and need identical readiness/setup handling.
+func finishLaunch(ctx context.Context, ops startOps, name string, cfg runtime.Config, setupTimeout time.Duration) error {
 	if cfg.Lifecycle == runtime.LifecycleOneShot {
 		return nil
 	}
@@ -947,6 +1116,55 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return nil
 	}
 
+	// Steps 2-6.5: the post-creation launch orchestration. Extracted so the
+	// un-weld's relaunch path (respawn the agent in a warm session, then re-run
+	// this) can reuse it without re-creating the session.
+	return launchOrchestration(ctx, ops, name, cfg, setupTimeout)
+}
+
+// doRelaunchSession relaunches the agent inside an ALREADY-PROVISIONED (warm) box
+// without re-creating it: it respawns the agent pane with the (possibly changed)
+// launch command, then re-runs the post-launch orchestration. This is the in-repo
+// pragmatic half of the runtime/transport un-weld (B1) — Provision still owns box
+// creation; this owns the agent's launch into a box that already exists. The box
+// MUST exist: a missing session is an error, not a silent re-provision (the
+// reconciler decides whether to Provision first). On a respawn failure the warm
+// box is left in place so the caller can retry or reprovision.
+func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runtime.Config, setupTimeout time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	alive, err := ops.hasSession(name)
+	if err != nil {
+		return fmt.Errorf("relaunch: verifying session %q: %w", name, err)
+	}
+	if !alive {
+		return fmt.Errorf("relaunch: %w: %s (box must be provisioned first)", runtime.ErrSessionNotFound, name)
+	}
+
+	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
+	if err != nil {
+		return err
+	}
+	if err := ops.respawnAgent(name, cfg.WorkDir, fullCommand); err != nil {
+		return cleanupPromptFileOnError(promptFile, fmt.Errorf("relaunch: respawning agent in session %q: %w", name, err))
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return finishLaunch(ctx, ops, name, cfg, setupTimeout)
+}
+
+// launchOrchestration runs the post-agent-launch startup steps against a session
+// whose agent pane has just been created (doStartSession) or respawned (the
+// un-weld relaunch path): wait for the agent command, accept startup dialogs
+// (before and after readiness), wait for readiness, verify the session survived,
+// run session_setup, send the startup nudge, and apply session_live. The caller
+// is responsible for the lifecycle gating (one-shot / no-managed-hints) before
+// invoking this — these steps assume a managed, non-one-shot session.
+func launchOrchestration(ctx context.Context, ops startOps, name string, cfg runtime.Config, setupTimeout time.Duration) error {
 	// Step 2: Wait for agent command to appear (not still in shell).
 	if len(cfg.ProcessNames) > 0 {
 		_ = ops.waitForCommand(ctx, name, 30*time.Second) // best-effort, non-fatal
@@ -1113,35 +1331,44 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 // (~2KB) so large prompts cause "command too long" errors.
 const maxInlinePromptLen = 1024
 
-func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
-	fullCommand := cfg.Command
-	promptFile := ""
-	if cfg.PromptSuffix != "" {
-		if len(cfg.PromptSuffix) > maxInlinePromptLen {
-			// Large prompt — write to temp file and use $(cat ...) expansion
-			// inside the tmux session's shell to avoid the protocol limit and
-			// prevent the quoted prompt from leaking into the exec command
-			// line (which triggers ENAMETOOLONG / exit 126 when the total
-			// command overflows kernel argv/exec buffers).
-			var err error
-			promptFile, err = writePromptFile(cfg.WorkDir, name, cfg.PromptSuffix)
-			if err != nil {
-				// No silent fallback: the inline path would produce the
-				// "File name too long" tmux pane death that this helper
-				// exists to prevent. Surface the failure so the reconciler
-				// records it and the operator can diagnose the cause.
-				return fmt.Errorf("writing prompt temp file for session %q: %w", name, err)
-			}
-			fullCommand = longPromptCommand(cfg.Command, cfg.PromptFlag, promptFile)
-		} else {
-			if cfg.PromptFlag != "" {
-				fullCommand = fullCommand + " " + cfg.PromptFlag + " " + cfg.PromptSuffix
-			} else {
-				fullCommand = fullCommand + " " + cfg.PromptSuffix
-			}
-		}
+// buildLaunchCommand computes the full agent command line for a session, writing
+// a prompt temp file when the inline prompt would overflow the exec command line.
+// Returns the command, the prompt file path (empty when none was written), and
+// any error. Shared by ensureFreshSession (box creation) and doRelaunchSession
+// (relaunch into a warm box) so both produce an identical agent command.
+func buildLaunchCommand(name string, cfg runtime.Config) (fullCommand, promptFile string, err error) {
+	fullCommand = cfg.Command
+	if cfg.PromptSuffix == "" {
+		return fullCommand, "", nil
 	}
-	err := ops.createSession(name, cfg.WorkDir, fullCommand, cfg.Env)
+	if len(cfg.PromptSuffix) > maxInlinePromptLen {
+		// Large prompt — write to temp file and use $(cat ...) expansion inside
+		// the tmux session's shell to avoid the protocol limit and prevent the
+		// quoted prompt from leaking into the exec command line (which triggers
+		// ENAMETOOLONG / exit 126 when the total command overflows kernel
+		// argv/exec buffers).
+		promptFile, err = writePromptFile(cfg.WorkDir, name, cfg.PromptSuffix)
+		if err != nil {
+			// No silent fallback: the inline path would produce the "File name
+			// too long" tmux pane death that this helper exists to prevent.
+			// Surface the failure so the reconciler records it and the operator
+			// can diagnose the cause.
+			return "", "", fmt.Errorf("writing prompt temp file for session %q: %w", name, err)
+		}
+		return longPromptCommand(cfg.Command, cfg.PromptFlag, promptFile), promptFile, nil
+	}
+	if cfg.PromptFlag != "" {
+		return fullCommand + " " + cfg.PromptFlag + " " + cfg.PromptSuffix, "", nil
+	}
+	return fullCommand + " " + cfg.PromptSuffix, "", nil
+}
+
+func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
+	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
+	if err != nil {
+		return err
+	}
+	err = ops.createSession(name, cfg.WorkDir, fullCommand, cfg.Env)
 	if err == nil {
 		return nil // created successfully
 	}

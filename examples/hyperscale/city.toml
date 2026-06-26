@@ -13,7 +13,6 @@
 [workspace]
 name = "hyperscale"
 provider = "claude"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 isolation = "none"
 
 [providers.claude]
@@ -43,3 +42,15 @@ shutdown_timeout = "10s"
 # for fewer bd subprocess fans-out when the reconciler is being poked
 # rapidly. Recommended starting value when tuning: 500ms.
 tick_debounce = "500ms"
+
+# Builtin packs compose through explicit imports; the gc binary pre-seeds
+# these pinned versions offline from its embedded content. Pinning a
+# different commit fetches that commit from git like any remote import.
+# The builtin-pack-imports doctor check repairs missing entries.
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"

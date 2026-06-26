@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
 type wakeEvaluation struct {
@@ -486,18 +488,77 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 	return work
 }
 
-// findAgentByTemplate looks up a config agent by template name.
+// findAgentByTemplate looks up a config agent by template name. Exact
+// identity matches (canonical qualified name or V1 dir+name form, via
+// config.AgentMatchesIdentity) win over all fallbacks; when nothing matches
+// exactly, a legacy bound form ("dir/binding.name") resolves to the unbound
+// agent "dir/name" so sessions and work persisted before a bound→unbound
+// migration stay attributed. Callers that need strict exact-match lookup
+// (e.g. uniqueness validation) must not use this resolver.
 // Returns nil if not found.
 func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
+	template = strings.TrimSpace(template)
 	if cfg == nil || template == "" {
 		return nil
 	}
 	for i := range cfg.Agents {
-		if cfg.Agents[i].QualifiedName() == template {
+		if config.AgentMatchesIdentity(&cfg.Agents[i], template) {
+			return &cfg.Agents[i]
+		}
+	}
+	for i := range cfg.Agents {
+		if legacyBoundTemplateMatchesUnboundAgent(&cfg.Agents[i], template) {
 			return &cfg.Agents[i]
 		}
 	}
 	return nil
+}
+
+func legacyBoundTemplateMatchesUnboundAgent(agent *config.Agent, template string) bool {
+	if agent == nil || strings.TrimSpace(agent.BindingName) != "" {
+		return false
+	}
+	dir, local := config.ParseQualifiedName(strings.TrimSpace(template))
+	if strings.TrimSpace(dir) != strings.TrimSpace(agent.Dir) {
+		return false
+	}
+	binding, unbound, ok := strings.Cut(local, ".")
+	if !ok || strings.TrimSpace(binding) == "" {
+		return false
+	}
+	return strings.TrimSpace(unbound) == strings.TrimSpace(agent.Name)
+}
+
+// normalizeAgentTemplateIdentity maps a persisted template identity to the
+// matching agent's current canonical qualified name. It resolves through
+// findAgentByTemplate, so a legacy bound form ("dir/binding.name") left by a
+// bound→unbound migration normalizes to the unbound agent's canonical name.
+// Identities that resolve to no configured agent pass through unchanged.
+func normalizeAgentTemplateIdentity(cfg *config.City, template string) string {
+	template = strings.TrimSpace(template)
+	if template == "" {
+		return ""
+	}
+	if agent := findAgentByTemplate(cfg, template); agent != nil {
+		return agent.QualifiedName()
+	}
+	return template
+}
+
+// agentTemplateIdentitiesEquivalent reports whether two template identities
+// name the same configured agent after normalization. Distinct configured
+// agents stay distinct: each exact identity normalizes to itself, so a bound
+// agent and a same-named unbound agent never merge while both exist.
+func agentTemplateIdentitiesEquivalent(cfg *config.City, a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return normalizeAgentTemplateIdentity(cfg, a) == normalizeAgentTemplateIdentity(cfg, b)
 }
 
 // healExpiredTimers clears expired held_until and quarantined_until.
@@ -544,7 +605,7 @@ func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drain
 	if sessionpkg.DecideSessionExit(sessionExitFacts(session, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
 		return false
 	}
-	recordWakeFailure(session, store, clk)
+	recordWakeFailure(session, store, clk, sessionAgentMetricIdentity(*session, cfg))
 	clearLastWokeAt(session, store)
 	return true
 }
@@ -625,7 +686,10 @@ func recordRateLimitQuarantine(session *beads.Bead, store beads.Store, clk clock
 }
 
 // recordWakeFailure increments wake_attempts and quarantines if threshold exceeded.
-func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) {
+// agentIdentity is the start-path-joinable agent label for gc.agent.quarantines.total,
+// resolved by the caller from its authoritative source (the cfg-aware metric
+// resolver for reconcile paths, tp.DisplayName() for the start-failure path).
+func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock, agentIdentity string) {
 	attempts, _ := strconv.Atoi(session.Metadata["wake_attempts"])
 
 	if session.Metadata == nil {
@@ -655,6 +719,7 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 			for k, v := range accrual.Patch {
 				session.Metadata[k] = v
 			}
+			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
 		}
 	} else {
 		next := accrual.Patch["wake_attempts"]
@@ -695,7 +760,7 @@ func clearWakeFailures(session *beads.Bead, store beads.Store) {
 func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, store beads.Store, clk clock.Clock) bool {
 	switch sessionpkg.DecideSessionExit(sessionExitFacts(session, cfg, alive, dt, clk)) {
 	case sessionpkg.ExitChurn:
-		recordChurn(session, store, clk)
+		recordChurn(session, store, clk, sessionAgentMetricIdentity(*session, cfg))
 		// Clear last_woke_at so this death is not re-counted next tick
 		// (edge-triggered, same pattern as checkStability).
 		_ = store.SetMetadata(session.ID, "last_woke_at", "")
@@ -719,7 +784,9 @@ func isDeliberateSleepReason(reason string) bool {
 // recordChurn increments the churn counter and clears session_key on
 // every churn event to force a fresh conversation on next wake. When
 // the counter reaches defaultMaxChurnCycles, the session is quarantined.
-func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock) {
+// agentIdentity is the start-path-joinable agent label for
+// gc.agent.quarantines.total, resolved by the caller.
+func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock, agentIdentity string) {
 	count, _ := strconv.Atoi(session.Metadata["churn_count"])
 
 	if session.Metadata == nil {
@@ -743,6 +810,7 @@ func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock) {
 			for k, v := range accrual.Patch {
 				session.Metadata[k] = v
 			}
+			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
 		}
 		return
 	}

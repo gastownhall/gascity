@@ -38,6 +38,15 @@ const (
 	managedSessionHookEnv     = "GC_MANAGED_SESSION_HOOK"
 )
 
+// resolvedProviderName returns the resolved harness/provider name, nil-safe (for
+// diagnostics on the upstream-binding render path).
+func resolvedProviderName(r *config.ResolvedProvider) string {
+	if r == nil {
+		return ""
+	}
+	return r.Name
+}
+
 // TemplateParams holds all resolved values needed to start a session.
 // This is a pure data type — no side effects, no provider references.
 type TemplateParams struct {
@@ -47,6 +56,11 @@ type TemplateParams struct {
 	Prompt string
 	// Env is the merged environment (passthrough + provider + agent + passthrough vars).
 	Env map[string]string
+	// Upstream is the selected model-serving endpoint name (a key in [upstreams],
+	// Phase C). Carried to runtime.Config.Upstream (launch-half fingerprint) so a
+	// switch relaunches the warm box; the resolved serving env is already merged
+	// into Env (and is not fingerprinted).
+	Upstream string
 	// Hints contains startup behavior (pre_start, session_setup, etc.).
 	Hints agent.StartupHints
 	// WorkDir is the resolved absolute working directory.
@@ -418,6 +432,59 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	prependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
+	// Step 10b: Upstream axis (Phase C). Inject the selected upstream's serving
+	// env LAST so it is authoritative for the model-serving keys, and after
+	// ScrubTokenEnv so its credential refs survive. The env-ref values ($VAR)
+	// resolve from the controller environment via expandEnvMap; the resolved
+	// credentials are NOT fingerprinted (the Config.Env allow-list excludes
+	// them), only the selected NAME — carried to runtime.Config.Upstream
+	// (launch-half) so switching upstream relaunches the agent in the warm box.
+	if upstreamName := cfgAgent.Upstream; upstreamName != "" {
+		var upstreams map[string]config.UpstreamSpec
+		if p.city != nil {
+			upstreams = p.city.Upstreams
+		}
+		spec, ok := upstreams[upstreamName]
+		if !ok {
+			return TemplateParams{}, fmt.Errorf("agent %q selects upstream %q which is not declared in [upstreams]", qualifiedName, upstreamName)
+		}
+		// Render the abstract serving fields onto the agent's HARNESS env-var
+		// names (the resolved provider's upstream_env binding), so one upstream is
+		// portable across harnesses. An abstract field with no matching binding is
+		// a hard error — never a silent no-op (config-surface §4). $VAR refs in the
+		// values resolve from the controller environment.
+		if spec.HasAbstractServing() {
+			var binding config.UpstreamEnvBinding
+			if resolved != nil {
+				binding = resolved.UpstreamEnv
+			}
+			// Per field, the target env-var name is the upstream's override if set
+			// (for gateway harnesses), else the harness binding, else a hard error.
+			for _, r := range []struct{ value, override, bound, field string }{
+				{spec.BaseURL, spec.BaseURLEnv, binding.BaseURL, "base_url"},
+				{spec.APIKey, spec.APIKeyEnv, binding.APIKey, "api_key"},
+				{spec.AuthToken, spec.AuthTokenEnv, binding.AuthToken, "auth_token"},
+			} {
+				if r.value == "" {
+					continue
+				}
+				envName := r.override
+				if envName == "" {
+					envName = r.bound
+				}
+				if envName == "" {
+					return TemplateParams{}, fmt.Errorf("agent %q upstream %q sets %s, but its harness %q declares no upstream_env.%s binding (set %s_env on the upstream, or upstream_env.%s on the harness)", qualifiedName, upstreamName, r.field, resolvedProviderName(resolved), r.field, r.field, r.field)
+				}
+				env[envName] = os.ExpandEnv(r.value)
+			}
+		}
+		// Raw env is the harness-specific escape hatch, merged LAST (wins over the
+		// abstract render and ambient/agent env for the keys it sets).
+		for k, v := range expandEnvMap(spec.Env) {
+			env[k] = v
+		}
+	}
+
 	// Step 11: Expand session setup templates.
 	configDir := p.cityPath
 	if cfgAgent.SourceDir != "" {
@@ -559,10 +626,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	nudge := cfgAgent.Nudge
 	acceptStartupDialogs := resolved.AcceptStartupDialogs
 	if suppressStartupPrompt {
-		// Implicit start-command infrastructure agents are deterministic
-		// subprocesses, not interactive model providers. Keep ProcessNames for
-		// liveness without routing startup through prompt, nudge, or
-		// trust-dialog handling.
+		// Deterministic control-dispatcher workers are subprocesses, not
+		// interactive model providers. Keep ProcessNames for liveness without
+		// routing startup through prompt, nudge, or trust-dialog handling.
 		nudge = ""
 		accept := false
 		acceptStartupDialogs = &accept
@@ -592,6 +658,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		Command:          command,
 		Prompt:           prompt,
 		Env:              env,
+		Upstream:         cfgAgent.Upstream,
 		Hints:            hints,
 		WorkDir:          workDir,
 		SessionName:      sessName,
@@ -647,10 +714,7 @@ func appendKimiHookConfigArg(command string) string {
 }
 
 func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {
-	return cfgAgent != nil &&
-		cfgAgent.Implicit &&
-		strings.TrimSpace(cfgAgent.StartCommand) != "" &&
-		strings.TrimSpace(cfgAgent.Provider) == ""
+	return config.IsDeterministicControlDispatcher(cfgAgent)
 }
 
 func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {
@@ -662,6 +726,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	}
 	applyBdCLIRemoteSyncOptOut(env)
 	applyBdAutoBackupOptOut(env)
+	applyBdContributorRoutingOptOut(env)
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
@@ -747,47 +812,36 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		}
 		env[startupPromptDeliveredEnv] = "1"
 	}
-	cfg := runtime.Config{
-		Command:      tp.Command,
-		PromptSuffix: promptSuffix,
-		PromptFlag:   promptFlag,
-		Env:          env,
-		MCPServers: func() []runtime.MCPServerConfig {
-			if tp.IsACP {
-				return tp.MCPServers
-			}
-			return nil
-		}(),
-		WorkDir:                tp.WorkDir,
-		Lifecycle:              tp.Hints.Lifecycle,
-		ReadyPromptPrefix:      tp.Hints.ReadyPromptPrefix,
-		ReadyDelayMs:           tp.Hints.ReadyDelayMs,
-		ProcessNames:           tp.Hints.ProcessNames,
-		EmitsPermissionWarning: tp.Hints.EmitsPermissionWarning,
-		AcceptStartupDialogs:   tp.Hints.AcceptStartupDialogs,
-		// ga-c4w: interactive `gc session new` sessions (session_origin=manual)
-		// resolve mouse-on so the tmux wheel drives copy-mode scrollback, even
-		// when the agent config sets no mouse_mode. This is the managed,
-		// reconciler-deferred start seam the original API-only fix missed. Scoped
-		// to manual on purpose: MouseOn is a core-fingerprint field (locked by
-		// runtime.TestConfigFingerprintIncludesMouseOn), so auto-flipping it for
-		// long-lived config-declared/named sessions would force a one-time drift
-		// restart — they follow their resolved Hints.MouseOn (mouse_mode) instead.
-		// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
-		MouseOn:             tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual",
-		Nudge:               nudge,
-		PreStart:            tp.Hints.PreStart,
-		SessionSetup:        tp.Hints.SessionSetup,
-		SessionSetupScript:  tp.Hints.SessionSetupScript,
-		SessionLive:         tp.Hints.SessionLive,
-		ProviderName:        tp.Hints.ProviderName,
-		ProviderOverlayName: tp.Hints.ProviderOverlayName,
-		InstallAgentHooks:   tp.Hints.InstallAgentHooks,
-		PackOverlayDirs:     tp.Hints.PackOverlayDirs,
-		OverlayDir:          tp.Hints.OverlayDir,
-		CopyFiles:           tp.Hints.CopyFiles,
-		FingerprintExtra:    tp.FPExtra,
+	// Startup-hint fields project through the single StartupHints →
+	// runtime.Config mapping (agent.StartupHints.ToRuntimeConfig) so a hint
+	// added to StartupHints reaches this path automatically instead of being
+	// threaded by hand here — the gc-wuofg / gc-0tna7 field-omission class.
+	// The reflective guard is agent.TestStartupHintsToRuntimeConfigPropagatesEveryField.
+	// Caller-owned, non-hint fields and the path-specific Nudge/MouseOn
+	// overrides below are layered on top.
+	cfg := tp.Hints.ToRuntimeConfig()
+	cfg.Command = tp.Command
+	cfg.Upstream = tp.Upstream
+	cfg.PromptSuffix = promptSuffix
+	cfg.PromptFlag = promptFlag
+	cfg.Env = env
+	if tp.IsACP {
+		cfg.MCPServers = tp.MCPServers
 	}
+	cfg.WorkDir = tp.WorkDir
+	cfg.FingerprintExtra = tp.FPExtra
+	// Prompt delivery may prepend the startup prompt to the configured nudge.
+	cfg.Nudge = nudge
+	// ga-c4w: interactive `gc session new` sessions (session_origin=manual)
+	// resolve mouse-on so the tmux wheel drives copy-mode scrollback, even
+	// when the agent config sets no mouse_mode. This is the managed,
+	// reconciler-deferred start seam the original API-only fix missed. Scoped
+	// to manual on purpose: MouseOn is a core-fingerprint field (locked by
+	// runtime.TestConfigFingerprintIncludesMouseOn), so auto-flipping it for
+	// long-lived config-declared/named sessions would force a one-time drift
+	// restart — they follow their resolved Hints.MouseOn (mouse_mode) instead.
+	// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
+	cfg.MouseOn = tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual"
 	applyT3BridgeRuntimeConfig(tp, env)
 	return cfg
 }

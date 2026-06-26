@@ -17,6 +17,10 @@ type Recipe struct {
 	// Description is the formula's description field.
 	Description string
 
+	// Metadata is formula-level metadata preserved for inspection APIs.
+	// It is not copied into bead metadata.
+	Metadata map[string]any
+
 	// Steps is the flattened, ordered step list. Steps[0] is always the
 	// root workflow bead. Subsequent entries are in creation order (parent
 	// before children, depth-first).

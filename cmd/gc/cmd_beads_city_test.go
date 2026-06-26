@@ -309,8 +309,8 @@ func TestDoBeadsCityUseExternalStopsManagedLocalProvider(t *testing.T) {
 		t.Fatalf("reading call log: %v", err)
 	}
 	ops := strings.TrimSpace(string(data))
-	if ops != "stop||" {
-		t.Fatalf("provider call log = %q, want stop with managed env captured before external rewrite", ops)
+	if ops != "stop||" && ops != "stop||33123" {
+		t.Fatalf("provider call log = %q, want stop without the rewritten external endpoint", ops)
 	}
 	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
 		t.Fatalf("published managed runtime state still present, stat err = %v", err)
@@ -877,4 +877,24 @@ func writeCityEndpointCityConfig(t *testing.T, cityDir string, rigs []config.Rig
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Regression test for the ga-lurp5d follow-up: a failed topology change must
+// roll back a symlinked city.toml by restoring the link target, not by
+// replacing the link with a regular file.
+func TestCityTopologyRollbackRestoresThroughCityTomlSymlink(t *testing.T) {
+	fs := fsys.OSFS{}
+	cityDir, link, target := setupSymlinkedCityToml(t)
+
+	snapshots, err := snapshotCityTopologyFiles(fs, cityDir, nil)
+	if err != nil {
+		t.Fatalf("snapshotCityTopologyFiles: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("[workspace]\nname = \"mutated\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreSnapshots(fs, snapshots); err != nil {
+		t.Fatalf("restoreSnapshots: %v", err)
+	}
+	assertCityTomlSymlinkRestored(t, link, target, symlinkedCityTomlOriginal)
 }

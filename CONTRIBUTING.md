@@ -20,7 +20,7 @@ contributors. Before making changes, read:
 
 `make setup` installs a pre-commit hook at `.githooks/pre-commit` that
 auto-formats staged Go files and, when any Go file is staged,
-regenerates `internal/api/openapi.json` and `docs/schema/openapi.json`
+regenerates `internal/api/openapi.json` and `docs/reference/schema/openapi.json`
 from the live supervisor. The hook stages both spec copies so the
 committed spec never drifts from what the server actually serves. It also
 runs the fast CI-equivalent gates for local changes: `make lint`,
@@ -111,6 +111,37 @@ When updating docs:
 - Updating `GastownCity()`'s `Imports` or `DefaultRigImports` map requires
   updating the auto-import table in `engdocs/design/packv2/migration.mdx`
 
+### Docs link conventions
+
+`docs/` is published to **[docs.gascityhall.com](https://docs.gascityhall.com)**
+via Mintlify — it is **not** meant to be read directly on GitHub. The published
+site serves **route-based, extensionless URLs**, so internal page links must be
+written that way:
+
+| Context | Correct | Wrong |
+|---|---|---|
+| `docs/` page link (Mintlify) | `/tutorials/01-beads` | `/tutorials/01-beads.md` |
+| `engdocs/` and root `.md` (GitHub-only) | `engdocs/architecture/index.md` | `engdocs/architecture/index` |
+
+**Why this matters — and why you usually do _not_ want to "fix" a docs path:**
+a `.md`/`.mdx` suffix on a `docs/` page link breaks Mintlify navigation on the
+live site **even though the file exists on disk**. A link that looks "broken" on
+GitHub is very often correct for the deployed site, so reformatting `docs/` links
+to be GitHub-friendly is the most common way to *silently break the published
+docs*.
+
+Two checks enforce this, both failing **only on net-new** breakage your change
+introduces (pre-existing issues won't block you):
+
+- `make check-docs` (`test/docsync`) — on-disk check that `docs/` page links are
+  extensionless and that `engdocs/`/root links resolve.
+- The **Docs render check** CI Action (`.github/workflows/docs-render.yml`) —
+  runs Mintlify's own `broken-links` against your branch vs `main`.
+
+If a `docs/` link is **genuinely** broken on the live site, note it in your PR
+and a maintainer will fix it Mintlify-side — don't change the on-disk path to
+work around GitHub rendering.
+
 ## Make Targets
 
 Run `make help` for the full list. The most useful targets are:
@@ -121,7 +152,7 @@ Run `make help` for the full list. The most useful targets are:
 | `make build` | Build `gc` with version metadata |
 | `make install` | Install `gc` into `$(go env GOPATH)/bin` |
 | `make check` | Fast Go quality gates |
-| `make check-docs` | Docs sync tests plus Mintlify broken-link checks |
+| `make check-docs` | Docs sync tests (on-disk link checker; does not run `mint broken-links`) |
 | `make check-all` | Extended quality gates including integration tests |
 | `make test` | Unit and repo-level Go tests |
 | `make test-integration` | Integration tests |
@@ -130,6 +161,17 @@ Run `make help` for the full list. The most useful targets are:
 | `make dashboard-dev` | Vite dev server for SPA iteration |
 | `make dashboard-check` | Typecheck + build + test the dashboard |
 | `make cover` | Coverage run |
+
+> **`make install` writes to the shared `$(go env GOPATH)/bin`.** It (and
+> `go install ./cmd/gc`) install `gc` there, and `make install` also re-points
+> an existing `~/.local/bin/gc` at the result — so when that path is the binary
+> a running deployment uses (commonly `~/.local/bin/gc` → `~/go/bin/gc`),
+> installing from any checkout silently replaces the live `gc`, and every later
+> `gc` exec runs the just-installed build. To redirect when that isn't
+> intended, run `make install INSTALL_DIR=<dir>` (the `install` target writes
+> `$(go env GOPATH)/bin` and ignores `GOBIN`), or for a plain
+> `go install ./cmd/gc` set `GOBIN=<dir>`. `make build` (→ `./bin/gc`) is
+> unaffected.
 
 ## macOS Local Development
 

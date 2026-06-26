@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // DeprecatedAttachmentFieldsCheck scans user-editable city TOML files
@@ -186,7 +188,9 @@ func findDeprecatedAttachmentFieldLines(source string) []deprecatedAttachmentLin
 // removing every assignment whose key is one of the tombstone names.
 // Multi-line arrays are removed in full. Surrounding lines, comments,
 // and section headers are preserved verbatim. Trailing-newline shape
-// is preserved when present.
+// is preserved when present. The write lands on the resolved symlink
+// target with the original file mode, so a symlinked config keeps its
+// link and its permissions.
 //
 // Mirrors findDeprecatedAttachmentFieldLines's multi-line string
 // state tracking: lines inside a `"""..."""` or `”'...”'` block
@@ -228,21 +232,22 @@ func rewriteWithoutDeprecatedAttachmentFields(path string) error {
 		rendered += "\n"
 	}
 
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-")
+	// Resolve-only, like the formulas-dir strip: the rewrite is a lossless
+	// textual removal, so the key-loss guard in config.ResolveCityRewritePath
+	// would falsely refuse it whenever unrelated unknown keys are present.
+	// Renaming over the unresolved path would replace a symlinked
+	// city.toml/pack.toml with a regular file and strand the stale content
+	// in the checked-in target. The write keeps the original file mode —
+	// a temp file's default 0600 must not survive the rename.
+	writePath, err := fsys.ResolveSymlinks(fsys.OSFS{}, path)
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath) //nolint:errcheck // best-effort cleanup
-	if _, err := tmp.WriteString(rendered); err != nil {
-		tmp.Close() //nolint:errcheck
+	info, err := os.Stat(writePath)
+	if err != nil {
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return fsys.WriteFileAtomic(fsys.OSFS{}, writePath, []byte(rendered), info.Mode().Perm())
 }
 
 // tomlStringState tracks whether the scanner is currently inside an

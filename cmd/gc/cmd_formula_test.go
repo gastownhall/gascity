@@ -262,6 +262,13 @@ func TestFormulaShowJSONFromRecipe(t *testing.T) {
 		Name:        "mol-build",
 		Description: "Build {{branch}}",
 		Phase:       "liquid",
+		Metadata: map[string]any{
+			"gc": map[string]any{
+				"methodology": map[string]any{
+					"interaction_modes": []string{"headless", "autonomous"},
+				},
+			},
+		},
 		Vars: map[string]*formula.VarDef{
 			"branch": {
 				Description: "branch to build",
@@ -291,12 +298,20 @@ func TestFormulaShowJSONFromRecipe(t *testing.T) {
 	if err := writeCLIJSONLine(&stdout, payload); err != nil {
 		t.Fatalf("writeCLIJSONLine: %v", err)
 	}
+	validateJSONAgainstResultSchema(t, []string{"formula", "show"}, stdout.Bytes())
 
 	var got struct {
 		SchemaVersion string `json:"schema_version"`
 		Name          string `json:"name"`
 		Description   string `json:"description"`
-		Vars          []struct {
+		Metadata      struct {
+			GC struct {
+				Methodology struct {
+					InteractionModes []string `json:"interaction_modes"`
+				} `json:"methodology"`
+			} `json:"gc"`
+		} `json:"metadata"`
+		Vars []struct {
 			Name       string  `json:"name"`
 			RigDefault *string `json:"rig_default"`
 		} `json:"vars"`
@@ -310,6 +325,9 @@ func TestFormulaShowJSONFromRecipe(t *testing.T) {
 	}
 	if got.SchemaVersion != "1" || got.Name != "mol-build" || got.Description != "Build main" {
 		t.Fatalf("payload = %+v", got)
+	}
+	if want := []string{"headless", "autonomous"}; !reflect.DeepEqual(got.Metadata.GC.Methodology.InteractionModes, want) {
+		t.Fatalf("metadata.gc.methodology.interaction_modes = %+v, want %+v", got.Metadata.GC.Methodology.InteractionModes, want)
 	}
 	if len(got.Vars) != 2 || got.Vars[1].Name != "target" || got.Vars[1].RigDefault == nil || *got.Vars[1].RigDefault != "fast" {
 		t.Fatalf("vars = %+v", got.Vars)
@@ -639,7 +657,7 @@ func TestFormulaCookHonorsFormulaV2DisabledCityBeforeCreatingBeads(t *testing.T)
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BOOTSTRAP", "skip")
 	t.Cleanup(func() {
-		applyFeatureFlags(&config.City{Daemon: config.DaemonConfig{FormulaV2: true}})
+		applyFeatureFlags(&config.City{Daemon: config.DaemonConfig{FormulaV2: boolPtr(true)}})
 	})
 
 	cityDir := t.TempDir()
@@ -734,7 +752,7 @@ provider = "claude"
 
 [daemon]
 formula_v2 = true
-`, "claude")), 0o644); err != nil {
+`, "claude")+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	formulaDir := filepath.Join(cityDir, "formulas")
@@ -831,7 +849,7 @@ provider = "claude"
 
 [daemon]
 formula_v2 = true
-`, "claude")), 0o644); err != nil {
+`, "claude")+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	formulaDir := filepath.Join(cityDir, "formulas")
@@ -900,7 +918,7 @@ provider = "claude"
 
 [daemon]
 formula_v2 = true
-`, "claude")), 0o644); err != nil {
+`, "claude")+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	formulaDir := filepath.Join(cityDir, "formulas")

@@ -438,14 +438,46 @@ func writeDoltPortFileStrict(fs fsys.FS, dir, port string) error {
 	if err := ensureBeadsDir(fs, filepath.Dir(portFile)); err != nil {
 		return err
 	}
-	return fsys.WriteFileAtomic(fs, portFile, []byte(strings.TrimSpace(port)+"\n"), 0o644)
+	writePath, err := resolveDoltPortFileWritePath(fs, portFile)
+	if err != nil {
+		return err
+	}
+	if err := ensureBeadsDir(fs, filepath.Dir(writePath)); err != nil {
+		return err
+	}
+	return fsys.WriteFileAtomic(fs, writePath, []byte(strings.TrimSpace(port)+"\n"), 0o644)
+}
+
+func resolveDoltPortFileWritePath(fs fsys.FS, portFile string) (string, error) {
+	writePath, err := fsys.ResolveSymlinks(fs, portFile)
+	if err != nil {
+		return "", fmt.Errorf("resolving managed dolt port file %q for rewrite: %w", portFile, err)
+	}
+	return writePath, nil
 }
 
 func removeDoltPortFileStrict(dir string) error {
 	if strings.TrimSpace(dir) == "" {
 		return nil
 	}
-	if err := os.Remove(filepath.Join(dir, ".beads", "dolt-server.port")); err != nil && !os.IsNotExist(err) {
+	return removeResolvedDoltPortFile(fsys.OSFS{}, dir)
+}
+
+// removeResolvedDoltPortFile clears the managed dolt port mirror under dir,
+// resolving an operator symlink to its target first so the link entry is
+// preserved and only the resolved target is removed. This mirrors the
+// symlink-preserving write path (resolveDoltPortFileWritePath); removing the
+// unresolved link instead would delete the operator's symlink and make the
+// next port publication recreate a regular file at the link path (the
+// ga-lurp5d clobber class). Missing files, including dangling links, are not
+// an error.
+func removeResolvedDoltPortFile(fs fsys.FS, dir string) error {
+	portFile := filepath.Join(dir, ".beads", "dolt-server.port")
+	target, err := fsys.ResolveSymlinks(fs, portFile)
+	if err != nil {
+		return fmt.Errorf("resolving managed dolt port file %q for cleanup: %w", portFile, err)
+	}
+	if err := fs.Remove(target); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
@@ -662,7 +694,7 @@ func snapshotRigCanonicalFiles(fs fsys.FS, scopeRoot string) ([]fileSnapshot, er
 	}
 	snapshots := make([]fileSnapshot, 0, len(paths))
 	for _, path := range paths {
-		snap, err := snapshotOptionalFile(fs, path)
+		snap, err := snapshotResolvedFile(fs, path)
 		if err != nil {
 			return nil, err
 		}
@@ -684,21 +716,43 @@ func syncRigEndpointCompatConfig(fs fsys.FS, cityPath string, cfg *config.City, 
 }
 
 func snapshotRigEndpointFiles(fs fsys.FS, cityPath, scopeRoot string) ([]fileSnapshot, error) {
+	cityToml, err := snapshotResolvedFile(fs, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return nil, err
+	}
 	paths := []string{
-		filepath.Join(cityPath, "city.toml"),
 		config.SiteBindingPath(cityPath),
 		filepath.Join(scopeRoot, ".beads", "metadata.json"),
 		filepath.Join(scopeRoot, ".beads", "config.yaml"),
 	}
-	snapshots := make([]fileSnapshot, 0, len(paths))
+	snapshots := make([]fileSnapshot, 0, len(paths)+1)
+	snapshots = append(snapshots, cityToml)
 	for _, path := range paths {
-		snap, err := snapshotOptionalFile(fs, path)
+		snap, err := snapshotResolvedFile(fs, path)
 		if err != nil {
 			return nil, err
 		}
 		snapshots = append(snapshots, snap)
 	}
 	return snapshots, nil
+}
+
+// snapshotResolvedFile snapshots path for rollback through any symlink
+// chain: restoring at the link path would replace the link with a regular
+// file (the ga-lurp5d failure mode), so the snapshot records the resolved
+// target and the restore writes there instead. Resolve-only by design — a
+// rollback writes the original bytes back, so the key-loss rewrite guard
+// does not apply. A path blocked by a regular-file intermediate cannot
+// exist; it snapshots as missing, matching snapshotOptionalFile.
+func snapshotResolvedFile(fs fsys.FS, path string) (fileSnapshot, error) {
+	resolved, err := fsys.ResolveSymlinks(fs, path)
+	if err != nil {
+		if errors.Is(err, syscall.ENOTDIR) {
+			return fileSnapshot{path: path}, nil
+		}
+		return fileSnapshot{}, err
+	}
+	return snapshotOptionalFile(fs, resolved)
 }
 
 func snapshotOptionalFile(fs fsys.FS, path string) (fileSnapshot, error) {
@@ -711,6 +765,19 @@ func snapshotOptionalFile(fs fsys.FS, path string) (fileSnapshot, error) {
 	}
 	cp := append([]byte(nil), data...)
 	return fileSnapshot{path: path, data: cp, exists: true}, nil
+}
+
+// cityTomlRollbackPath returns the symlink-resolved city.toml path that a
+// rollback snapshot must read and later restore. Resolving first means an
+// atomic restore rewrites the real target file and leaves a live city.toml
+// symlink intact, instead of replacing the link with a regular file (the
+// failure ResolveCityRewritePath/ResolveCityAppendPath exist to prevent). When
+// city.toml is a plain file (or not yet created), resolution is a no-op and the
+// path is unchanged. The controller config-mutation snapshot
+// (captureConfigMutationSnapshot) routes through this so it stays symlink-aware,
+// matching the CLI rollback snapshots that resolve via snapshotResolvedFile.
+func cityTomlRollbackPath(fs fsys.FS, cityPath string) (string, error) {
+	return fsys.ResolveSymlinks(fs, filepath.Join(cityPath, "city.toml"))
 }
 
 func writeRigEndpointRollbackError(fs fsys.FS, stderr io.Writer, snapshots []fileSnapshot, action string, cause error) {

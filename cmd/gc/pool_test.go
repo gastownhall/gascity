@@ -813,6 +813,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Nudge:                        "nudge text",
 		Session:                      "acp",
 		Provider:                     "claude",
+		Upstream:                     "anthropic",
 		InheritedProvider:            "codex",
 		StartCommand:                 "claude --dangerously",
 		Lifecycle:                    config.AgentLifecycleOneShot,
@@ -1389,4 +1390,52 @@ func findPreferredBinary(name string, preferred ...string) (string, error) {
 func isTestscriptShim(path string) bool {
 	clean := filepath.Clean(path)
 	return strings.Contains(clean, string(filepath.Separator)+"testscript-")
+}
+
+func TestParseBDProbeTimeout_DefaultWhenUnset(t *testing.T) {
+	t.Setenv("GC_BD_PROBE_TIMEOUT", "")
+	var buf bytes.Buffer
+	got := parseBDProbeTimeout(&buf)
+	if got != 180*1e9 {
+		t.Errorf("parseBDProbeTimeout() = %v, want 180s", got)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("unexpected stderr output: %q", buf.String())
+	}
+}
+
+func TestParseBDProbeTimeout_ValidDuration(t *testing.T) {
+	t.Setenv("GC_BD_PROBE_TIMEOUT", "30s")
+	var buf bytes.Buffer
+	got := parseBDProbeTimeout(&buf)
+	if got != 30*1e9 {
+		t.Errorf("parseBDProbeTimeout() = %v, want 30s", got)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("unexpected stderr output: %q", buf.String())
+	}
+}
+
+func TestParseBDProbeTimeout_BelowFloor(t *testing.T) {
+	t.Setenv("GC_BD_PROBE_TIMEOUT", "1s")
+	var buf bytes.Buffer
+	got := parseBDProbeTimeout(&buf)
+	if got != 5*1e9 {
+		t.Errorf("parseBDProbeTimeout() = %v, want 5s (floor)", got)
+	}
+	if !strings.Contains(buf.String(), "below minimum") {
+		t.Errorf("expected floor warning, got: %q", buf.String())
+	}
+}
+
+func TestParseBDProbeTimeout_InvalidDuration(t *testing.T) {
+	t.Setenv("GC_BD_PROBE_TIMEOUT", "notaduration")
+	var buf bytes.Buffer
+	got := parseBDProbeTimeout(&buf)
+	if got != 180*1e9 {
+		t.Errorf("parseBDProbeTimeout() = %v, want 180s (parse-error default)", got)
+	}
+	if !strings.Contains(buf.String(), "invalid") || !strings.Contains(buf.String(), "GC_BD_PROBE_TIMEOUT") {
+		t.Errorf("expected parse error warning, got: %q", buf.String())
+	}
 }

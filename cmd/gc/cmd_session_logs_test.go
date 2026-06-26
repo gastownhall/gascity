@@ -296,6 +296,58 @@ func TestDoSessionLogsToolResultError(t *testing.T) {
 	}
 }
 
+// TestDoSessionLogsTailNeverRendersEmpty pins the invariant that every tail-slot
+// entry renders at least one line. A block-array entry whose blocks are all
+// non-rendering (a non-error tool_result, or an unknown/thinking block) used to
+// print nothing and return before the raw fallback, so a `--tail N` window
+// landing on such entries produced empty stdout with exit 0 -- the
+// TestTutorial03Sessions "session logs --tail 2 output is empty" RC flake.
+func TestDoSessionLogsTailNeverRendersEmpty(t *testing.T) {
+	cases := []struct {
+		name      string
+		lastEntry string
+		wantSub   string
+	}{
+		{
+			name:      "non_error_tool_result",
+			lastEntry: `{"uuid":"2","parentUuid":"1","type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":false,"content":"ok"}]},"timestamp":"2025-01-01T00:00:01Z"}`,
+			wantSub:   "tool_result: ok",
+		},
+		{
+			name:      "unknown_block_type",
+			lastEntry: `{"uuid":"2","parentUuid":"1","type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"}]},"timestamp":"2025-01-01T00:00:01Z"}`,
+			wantSub:   "no displayable content",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			searchBase := t.TempDir()
+			workDir := t.TempDir()
+			writeTestSession(t, searchBase, workDir,
+				`{"uuid":"1","parentUuid":"","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]},"timestamp":"2025-01-01T00:00:00Z"}`,
+				tc.lastEntry,
+			)
+			path := sessionlog.FindSessionFile([]string{searchBase}, workDir)
+			if path == "" {
+				t.Fatal("session file not found")
+			}
+
+			// --tail 1 lands entirely on the non-rendering last entry.
+			var stdout, stderr bytes.Buffer
+			code := doSessionLogs(path, "", false, 1, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if strings.TrimSpace(stdout.String()) == "" {
+				t.Fatalf("`--tail 1` produced empty output; every tail-slot entry must render at least one line")
+			}
+			if !strings.Contains(stdout.String(), tc.wantSub) {
+				t.Errorf("output = %q, want it to contain %q", stdout.String(), tc.wantSub)
+			}
+		})
+	}
+}
+
 func TestResolveSessionLogPathPrefersKeyedTranscriptWhenPresent(t *testing.T) {
 	searchBase := t.TempDir()
 	workDir := t.TempDir()
@@ -632,14 +684,19 @@ func TestCmdSessionLogsJSONSuccessIsJSONOnly(t *testing.T) {
 	workDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(fmt.Sprintf(`[workspace]
-name = "test"
-includes = [".gc/system/packs/core"]
 
 [daemon]
 observe_paths = [%q]
 `, searchBase)), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte("workspace_name = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write site.toml: %v", err)
+	}
+	writeBuiltinImportsFixture(t, cityDir, "core")
 
 	store, err := openCityStoreAt(cityDir)
 	if err != nil {

@@ -114,14 +114,26 @@ lands, its Atomic Command Contract section defers to this document.
 
 ### Step 5 — Read-only target classification
 
-The design's Slice 1: a side-effect-free classifier for API query-side session
-lookup preserving the eight-step `resolveSessionTargetIDWithContext`
-precedence exactly, with `repair-needed` returned instead of write-on-read.
-Scoped contract: parity fixtures for the precedence rows and error rendering;
-no universal route inventory.
+The design's Slice 1: a side-effect-free classifier
+(`internal/session/target_classifier.go`, `DecideSessionTarget`) owning the
+`resolveSessionTargetIDWithContext` precedence, with the API resolver as its
+gather/execute adapter. All resolver surfaces — read-only, allow-closed, and
+materializing — adopt at once because they share one resolver function; the
+design's shared-resolver sequencing rule is satisfied by construction rather
+than by anti-drift tests.
 
-Exit: one query endpoint adopts the classifier; wire output is byte-identical
-under the existing API tests; remaining endpoints follow one at a time.
+Two deliberate scope reductions from the original slice description: the
+classifier ships without repair vocabulary — the gather lookups keep the
+empty-type normalization behavior of the inline resolver as the parity
+baseline until the read-path repair fix (PR #3289) lands and this branch
+rebases over it — and ambiguity is not a distinct result kind; ambiguous
+lookups surface as the carried step error, preserving existing conflict
+projections.
+
+Exit: classifier owns the ladder; wire output is byte-identical under the
+existing API tests plus the precedence fixtures
+(`internal/api/session_resolution_precedence_test.go`). CLI, mail, and
+extmsg surfaces remain on their own paths and follow one at a time.
 
 ### Step 6 — First mutating extraction: wake eligibility, then close
 

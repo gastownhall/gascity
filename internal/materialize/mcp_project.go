@@ -26,6 +26,11 @@ const (
 	MCPProviderGemini = "gemini"
 	// MCPProviderOpenCode projects to OpenCode's project-native JSON config.
 	MCPProviderOpenCode = "opencode"
+	// MCPProviderMimoCode projects to MiMo Code's project-native JSON config.
+	// MiMo Code is an OpenCode fork: it honors a root-level
+	// <workdir>/mimocode.json with the same `mcp` document schema (verified
+	// live via `mimo mcp list` against a root-level config).
+	MCPProviderMimoCode = "mimocode"
 	// MCPProviderCursor projects to Cursor Agent's project-native MCP file.
 	MCPProviderCursor = "cursor"
 )
@@ -48,6 +53,7 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 	case MCPProviderCodex:
 	case MCPProviderGemini:
 	case MCPProviderOpenCode:
+	case MCPProviderMimoCode:
 	case MCPProviderCursor:
 	default:
 		return MCPProjection{}, fmt.Errorf("unsupported MCP provider %q", providerKind)
@@ -69,6 +75,8 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 		out.Target = filepath.Join(workdir, ".gemini", "settings.json")
 	case MCPProviderOpenCode:
 		out.Target = filepath.Join(workdir, "opencode.json")
+	case MCPProviderMimoCode:
+		out.Target = filepath.Join(workdir, "mimocode.json")
 	case MCPProviderCursor:
 		out.Target = filepath.Join(workdir, ".cursor", "mcp.json")
 	}
@@ -89,8 +97,8 @@ func (p MCPProjection) Hash() string {
 // managed marker gates later cleanup when the effective catalog becomes
 // empty so GC does not remove an unmanaged file it never adopted.
 //
-// Claude owns the whole file; Gemini, Codex, Cursor, and OpenCode preserve
-// unrelated config while replacing the MCP subtree.
+// Claude owns the whole file; Gemini, Codex, Cursor, OpenCode, and MiMo Code
+// preserve unrelated config while replacing the MCP subtree.
 //
 // Apply is safe against concurrent writers for the same target: when the
 // backing FS is the real OS filesystem, the read-validate-write sequence
@@ -148,6 +156,10 @@ func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
 		case MCPProviderGemini:
 			return p.applyGemini(fs)
 		case MCPProviderOpenCode:
+			return p.applyOpenCode(fs)
+		case MCPProviderMimoCode:
+			// MiMo Code is an OpenCode fork sharing the same `mcp` document
+			// schema; only the target file name differs (set at build time).
 			return p.applyOpenCode(fs)
 		case MCPProviderCursor:
 			return p.applyCursor(fs)

@@ -100,6 +100,7 @@ func TestVendorSink(t *testing.T) {
 		{"codex", ".codex/skills", true},
 		{"gemini", ".gemini/skills", true},
 		{"opencode", ".opencode/skills", true},
+		{"mimocode", ".mimocode/skills", true},
 		{"copilot", "", false},
 		{"cursor", "", false},
 		{"pi", "", false},
@@ -122,7 +123,7 @@ func TestVendorSink(t *testing.T) {
 func TestSupportedVendorsStable(t *testing.T) {
 	t.Parallel()
 	got := SupportedVendors()
-	want := []string{"claude", "codex", "gemini", "opencode"}
+	want := []string{"claude", "codex", "gemini", "mimocode", "opencode"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("SupportedVendors() = %v, want %v", got, want)
 	}

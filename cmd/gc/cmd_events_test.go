@@ -80,6 +80,7 @@ func TestDoEventsSupervisorDefaultUsesTaggedJSONLItems(t *testing.T) {
 }
 
 func TestEventsJSONFlagIsSilentNoOp(t *testing.T) {
+	clearGCEnv(t)
 	t.Chdir(t.TempDir())
 
 	items := []cliWireTaggedEvent{

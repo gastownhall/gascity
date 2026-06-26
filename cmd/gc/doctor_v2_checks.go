@@ -283,7 +283,16 @@ func rewriteWithoutDefaultFormulasDir(path string) error {
 	if !changed {
 		return fmt.Errorf("could not locate [formulas].dir assignment")
 	}
-	return fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, path, []byte(rendered), 0o644)
+	// Resolve-only, like the rollback snapshots: the rewrite is a lossless
+	// textual strip of one declaration, so the key-loss guard in
+	// config.ResolveCityRewritePath would falsely refuse it whenever
+	// unrelated unknown keys are present. Writing at the unresolved path
+	// would replace a symlinked config with a regular file.
+	writePath, err := fsys.ResolveSymlinks(fsys.OSFS{}, path)
+	if err != nil {
+		return err
+	}
+	return fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, writePath, []byte(rendered), 0o644)
 }
 
 func stripDefaultFormulasDirDeclaration(source string) (string, bool) {
@@ -1169,6 +1178,14 @@ func (v2WorkspaceNameCheck) Fix(ctx *doctor.CheckContext) error {
 		prefix = rawPrefix
 	}
 
+	// Resolve where the rewrite must land before touching anything:
+	// city.toml may be a symlink that the rename must write through, and
+	// the rewrite is refused outright if it would drop unrecognized keys
+	// (ga-lurp5d).
+	writePath, err := config.ResolveCityRewritePath(fsys.OSFS{}, filepath.Join(ctx.CityPath, "city.toml"))
+	if err != nil {
+		return err
+	}
 	// Write the site binding first. If the city.toml rewrite fails
 	// afterwards, runtime identity remains stable and `gc doctor` will
 	// continue warning about the still-present legacy fields rather than
@@ -1182,7 +1199,7 @@ func (v2WorkspaceNameCheck) Fix(ctx *doctor.CheckContext) error {
 	if err != nil {
 		return err
 	}
-	return fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, filepath.Join(ctx.CityPath, "city.toml"), content, 0o644)
+	return fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, writePath, content, 0o644)
 }
 
 func (v2WorkspaceNameCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {

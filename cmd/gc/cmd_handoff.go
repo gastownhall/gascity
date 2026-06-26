@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
 )
 
@@ -414,6 +415,10 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 		fmt.Fprintf(stdout, "Handoff: sent mail %s to %s (session not running; will be delivered on next start)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout
 		return 0
 	}
+	// Resolve the agent identity before the kill, while the session bead is
+	// still live. The metric label uses the agent identity (not the sanitized
+	// runtime session name) so handoff stops join the start/crash/kill counters.
+	agentIdentity := sessionAgentMetricIdentityByName(store, sessionName)
 	if err := workerKillSessionTargetWithConfig("", store, sp, nil, sessionName); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: killing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -432,6 +437,7 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 		Message: "handoff",
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "handoff"),
 	})
+	telemetry.RecordAgentStop(context.Background(), sessionName, agentIdentity, "handoff", nil)
 
 	fmt.Fprintf(stdout, "Handoff: sent mail %s to %s, killed session (reconciler will restart)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout
 	return 0

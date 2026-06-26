@@ -56,6 +56,180 @@ esac
 `
 }
 
+// separableScript declares proc.exec + proc.provision and logs each op (and the
+// exec command from stdin) to logFile. The `exec` op simulates the in-box tmux:
+// has-session exits 1 (no session yet) so launch picks new-session.
+func separableScript(logFile string) string {
+	return `
+op="$1"; name="$2"
+case "$op" in
+  protocol)  echo '{"version":0,"capabilities":["proc.exec","proc.provision"]}' ;;
+  provision) cat >/dev/null; echo "provision $name" >> "` + logFile + `" ;;
+  start)     cat >/dev/null; echo "start $name"     >> "` + logFile + `" ;;
+  exec)      cmd="$(cat)"; echo "exec: $cmd" >> "` + logFile + `"
+             case "$cmd" in *has-session*) exit 1 ;; *) exit 0 ;; esac ;;
+  is-running) echo true ;;
+  stop)      ;;
+  *) exit 2 ;;
+esac
+`
+}
+
+// separableWarmScript is separableScript but the in-box tmux session ALREADY
+// exists (has-session exits 0), so launchAgent takes the WARM-box relaunch path
+// (respawn-pane -k) instead of new-session.
+func separableWarmScript(logFile string) string {
+	return `
+op="$1"; name="$2"
+case "$op" in
+  protocol)  echo '{"version":0,"capabilities":["proc.exec","proc.provision"]}' ;;
+  provision) cat >/dev/null; echo "provision $name" >> "` + logFile + `" ;;
+  start)     cat >/dev/null; echo "start $name"     >> "` + logFile + `" ;;
+  exec)      cmd="$(cat)"; echo "exec: $cmd" >> "` + logFile + `"; exit 0 ;;
+  is-running) echo true ;;
+  stop)      ;;
+  *) exit 2 ;;
+esac
+`
+}
+
+// weldedScript declares proc.exec only (NOT proc.provision): the welded `start`
+// op provisions and launches, so the controller must not provision/launch.
+func weldedScript(logFile string) string {
+	return `
+op="$1"; name="$2"
+case "$op" in
+  protocol)  echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  provision) cat >/dev/null; echo "provision $name" >> "` + logFile + `" ;;
+  start)     cat >/dev/null; echo "start $name"     >> "` + logFile + `" ;;
+  exec)      cmd="$(cat)"; echo "exec: $cmd" >> "` + logFile + `"; exit 0 ;;
+  is-running) echo true ;;
+  stop)      ;;
+  *) exit 2 ;;
+esac
+`
+}
+
+func readLog(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "" // not yet written
+	}
+	return string(b)
+}
+
+// A pack that declares proc.provision un-welds: a full Start through the seam
+// adapter provisions the box (the `provision` op, NOT welded `start`) and then
+// launches the agent via `tmux new-session` over the `exec` op.
+func TestSeparableLaunch_ProvisionsThenLaunchesAgent(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableScript(logf)))
+
+	_, tp := p.Seams()
+	if !tp.Capabilities().SeparableLaunch {
+		t.Fatal("SeparableLaunch = false; want true for a proc.provision pack")
+	}
+
+	prov := runtime.NewProviderFromSeams(p.Seams())
+	if err := prov.Start(context.Background(), "s", runtime.Config{Command: "agent --serve"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	log := readLog(t, logf)
+	if !strings.Contains(log, "provision s") {
+		t.Errorf("missing box-only provision op:\n%s", log)
+	}
+	if strings.Contains(log, "start s") {
+		t.Errorf("welded start op must NOT be used for a separable pack:\n%s", log)
+	}
+	if !strings.Contains(log, "has-session") {
+		t.Errorf("launch should probe has-session first:\n%s", log)
+	}
+	if !strings.Contains(log, "new-session") || !strings.Contains(log, "agent --serve") {
+		t.Errorf("launch should new-session the agent command:\n%s", log)
+	}
+	if pi, ni := strings.Index(log, "provision s"), strings.Index(log, "new-session"); pi < 0 || ni < 0 || pi > ni {
+		t.Errorf("Provision must precede Launch:\n%s", log)
+	}
+}
+
+// A welded pack (no proc.provision) keeps the old behavior: the `start` op
+// provisions+launches, and the controller issues no provision/launch.
+func TestSeparableLaunch_WeldedPackUsesStartOnly(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, weldedScript(logf)))
+
+	_, tp := p.Seams()
+	if tp.Capabilities().SeparableLaunch {
+		t.Fatal("SeparableLaunch = true; want false for a welded pack")
+	}
+
+	prov := runtime.NewProviderFromSeams(p.Seams())
+	if err := prov.Start(context.Background(), "s", runtime.Config{Command: "agent"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	log := readLog(t, logf)
+	if !strings.Contains(log, "start s") {
+		t.Errorf("welded pack must use the start op:\n%s", log)
+	}
+	if strings.Contains(log, "provision s") {
+		t.Errorf("welded pack must not use the provision op:\n%s", log)
+	}
+	if strings.Contains(log, "new-session") {
+		t.Errorf("welded pack: controller must not launch the agent:\n%s", log)
+	}
+}
+
+// Relaunch on a separable pack respawns/launches the agent over the exec op
+// (warm-box relaunch) — it does NOT reprovision the box (no provision/start op).
+func TestRelaunch_SeparablePackLaunchesOverExec(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableScript(logf)))
+
+	if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent --resume"}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	log := readLog(t, logf)
+	if !strings.Contains(log, "new-session") || !strings.Contains(log, "agent --resume") {
+		t.Errorf("Relaunch should launch the agent over exec:\n%s", log)
+	}
+	if strings.Contains(log, "provision s") || strings.Contains(log, "start s") {
+		t.Errorf("separable Relaunch must not reprovision the box:\n%s", log)
+	}
+}
+
+// Relaunch when the in-box tmux session ALREADY exists takes the warm-box path:
+// it RESPAWNS the pane (respawn-pane -k) rather than creating a new session, and
+// still does not reprovision. Guards the B2/B3b warm-relaunch payoff — the
+// cold-path tests (has-session exit 1) never reach respawn-pane.
+func TestRelaunch_WarmBoxRespawnsPane(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableWarmScript(logf)))
+
+	if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent --resume"}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	log := readLog(t, logf)
+	if !strings.Contains(log, "has-session") {
+		t.Errorf("Relaunch should probe has-session first:\n%s", log)
+	}
+	if !strings.Contains(log, "respawn-pane") || !strings.Contains(log, "-k") || !strings.Contains(log, "agent --resume") {
+		t.Errorf("warm-box Relaunch should respawn-pane -k the agent command:\n%s", log)
+	}
+	if strings.Contains(log, "new-session") {
+		t.Errorf("warm-box Relaunch must NOT create a new session:\n%s", log)
+	}
+	if strings.Contains(log, "provision s") || strings.Contains(log, "start s") {
+		t.Errorf("warm-box Relaunch must not reprovision the box:\n%s", log)
+	}
+}
+
 func TestStart(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, allOpsScript())
@@ -865,6 +1039,8 @@ func TestNudge(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "nudge.txt")
 
+	// This pack implements only the dedicated nudge op (no exec), so Nudge falls
+	// back to it after the carrier reports the exec op unsupported.
 	script := writeScript(t, dir, `
 case "$1" in
   nudge) cat > "`+outFile+`" ;;
@@ -883,6 +1059,42 @@ esac
 	}
 	if string(data) != "wake up!" {
 		t.Errorf("nudge message = %q, want %q", string(data), "wake up!")
+	}
+}
+
+func TestDrivingOverExecWhenSupported(t *testing.T) {
+	// A pack that implements the exec op (tmux-in-box) is driven over the
+	// carrier: the verbs ship tmux commands through exec, never the dedicated
+	// nudge/peek/... ops (which here fail loudly if mistakenly used).
+	dir := t.TempDir()
+	execLog := filepath.Join(dir, "exec.log")
+	script := writeScript(t, dir, `
+case "$1" in
+  exec) cmd=$(cat); echo "$cmd" >> "`+execLog+`"
+        case "$cmd" in *capture-pane*) echo "PANE" ;; esac ;;
+  nudge|peek|send-keys|interrupt|clear-scrollback) echo "legacy op used" >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	if err := p.Nudge("s", runtime.TextContent("hi")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	out, err := p.Peek("s", 5)
+	if err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	if !strings.Contains(out, "PANE") {
+		t.Errorf("Peek over exec = %q, want capture-pane output", out)
+	}
+	data, _ := os.ReadFile(execLog)
+	logged := string(data)
+	if !strings.Contains(logged, "send-keys") || !strings.Contains(logged, "hi") {
+		t.Errorf("exec log = %q, want a send-keys carrying the message", logged)
+	}
+	if !strings.Contains(logged, "capture-pane") {
+		t.Errorf("exec log = %q, want a capture-pane for Peek", logged)
 	}
 }
 
@@ -1242,6 +1454,49 @@ func TestExecConformance(t *testing.T) {
 		name := fmt.Sprintf("exec-conform-%d", id)
 		return p, runtime.Config{WorkDir: t.TempDir()}, name
 	})
+}
+
+func TestProcessAlive_unimplemented(t *testing.T) {
+	dir := t.TempDir()
+	// A pack that does not implement process-alive (exit 2) must read as ALIVE,
+	// not dead — liveness for such packs is gated by IsRunning, and a false
+	// "dead" would make ObserveLiveness reap a live session.
+	script := writeScript(t, dir, `exit 2`)
+	p := NewProvider(script)
+	if !p.ProcessAlive("test-sess", []string{"claude", "node"}) {
+		t.Error("ProcessAlive on a pack without process-alive should be true")
+	}
+}
+
+func TestExec_ExitTwoIsCommandCodeWhenExecDeclared(t *testing.T) {
+	dir := t.TempDir()
+	// protocol declares proc.exec, so an exec-op exit of 2 is the in-box
+	// command's own exit code (2), NOT ErrExecUnsupported.
+	script := writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  exec) echo "out"; exit 2 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+	_, code, err := p.Exec(context.Background(), "s", []string{"cmd"})
+	if err != nil {
+		t.Fatalf("Exec with exec declared + command exit 2 should not error, got %v", err)
+	}
+	if code != 2 {
+		t.Errorf("code = %d, want 2 (the in-box command's exit code)", code)
+	}
+}
+
+func TestExec_ExitTwoIsUnsupportedWhenExecNotDeclared(t *testing.T) {
+	dir := t.TempDir()
+	// No protocol/exec op: exit 2 means the op is unimplemented -> fall back.
+	script := writeScript(t, dir, `exit 2`)
+	p := NewProvider(script)
+	if _, _, err := p.Exec(context.Background(), "s", []string{"cmd"}); !errors.Is(err, runtime.ErrExecUnsupported) {
+		t.Errorf("err = %v, want ErrExecUnsupported when exec is not declared", err)
+	}
 }
 
 // --- Compile-time interface check ---

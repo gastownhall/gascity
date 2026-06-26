@@ -1,4 +1,7 @@
-# CLI Reference
+---
+title: "CLI Reference"
+description: "Every gc command, flag, and example, generated from the CLI definitions."
+---
 
 > **Auto-generated** — do not edit. Run `go run ./cmd/genschema` to regenerate.
 
@@ -31,6 +34,7 @@ gc [flags]
 | [gc config](#gc-config) | Inspect and validate city configuration |
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
+| [gc costs](#gc-costs) | Show per-run usage and estimated cost for this city |
 | [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the supervisor and managed cities |
 | [gc doctor](#gc-doctor) | Check workspace health |
 | [gc dolt-cleanup](#gc-dolt-cleanup) | Find and remove orphaned Dolt databases (Go-side core) |
@@ -113,8 +117,8 @@ gc agent add --name <name> [flags]
 
 ```
 gc agent add --name mayor
-  gc agent add --name polecat
-  gc agent add --name worker --prompt-template ./worker.md --suspended
+gc agent add --name polecat
+gc agent add --name worker --prompt-template ./worker.md --suspended
 ```
 
 | Flag | Type | Default | Description |
@@ -252,6 +256,11 @@ rig directory to find the correct .beads database. This command resolves
 the rig automatically from the --rig flag or by detecting the bead prefix
 in the arguments.
 
+Use --rig &lt;name&gt; to pin a specific rig store, or --city &lt;path&gt; to pin the
+city (HQ) store. An explicit --city is a true scope override: it forces the
+city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
+deliberate city-scoped query is never silently downgraded to a rig store.
+
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
 "update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
@@ -271,11 +280,12 @@ gc bd [bd-args...]
 
 ```
 gc bd --rig my-project list
-  gc bd --rig my-project create "New task"
-  gc bd show my-project-abc          # auto-detects rig from bead prefix
-  gc bd list --rig my-project -s open
-  gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
-  gc bd release-if-current my-project-abc worker-1
+gc bd --rig my-project create "New task"
+gc bd show my-project-abc          # auto-detects rig from bead prefix
+gc bd list --rig my-project -s open
+gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
+gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+gc bd release-if-current my-project-abc worker-1
 ```
 
 ## gc beads
@@ -359,8 +369,8 @@ gc beads health [flags]
 
 ```
 gc beads health
-  gc beads health --quiet
-  gc beads health --json
+gc beads health --quiet
+gc beads health --json
 ```
 
 | Flag | Type | Default | Description |
@@ -386,9 +396,9 @@ gc beads list
 
 ```
 gc beads list
-  gc beads list --label ready-to-build
-  gc beads list --status open --json
-  gc beads list --format=toon
+gc beads list --label ready-to-build
+gc beads list --status open --json
+gc beads list --format=toon
 ```
 
 ## gc beads show
@@ -408,7 +418,7 @@ gc beads show <bead-id>
 
 ```
 gc beads show ga-abc
-  gc beads show ga-abc --json
+gc beads show ga-abc --json
 ```
 
 ## gc build-image
@@ -431,16 +441,16 @@ gc build-image [city-path] [flags]
 
 ```
 # Build context only (no docker build)
-  gc build-image ~/bright-lights --context-only
+gc build-image ~/bright-lights --context-only
 
-  # Build and tag image
-  gc build-image ~/bright-lights --tag my-city:latest
+# Build and tag image
+gc build-image ~/bright-lights --tag my-city:latest
 
-  # Build with rig content baked in
-  gc build-image ~/bright-lights --tag my-city:latest --rig-path demo:/path/to/demo
+# Build with rig content baked in
+gc build-image ~/bright-lights --tag my-city:latest --rig-path demo:/path/to/demo
 
-  # Build and push to registry
-  gc build-image ~/bright-lights --tag registry.io/my-city:latest --push
+# Build and push to registry
+gc build-image ~/bright-lights --tag registry.io/my-city:latest --push
 ```
 
 | Flag | Type | Default | Description |
@@ -641,11 +651,11 @@ gc config explain [flags]
 
 ```
 gc config explain
-  gc config explain --agent mayor
-  gc config explain --rig my-project
-  gc config explain --provider codex-max
-  gc config explain --provider codex-max --json
-  gc config explain -f overlay.toml --agent polecat
+gc config explain --agent mayor
+gc config explain --rig my-project
+gc config explain --provider codex-max
+gc config explain --provider codex-max --json
+gc config explain -f overlay.toml --agent polecat
 ```
 
 | Flag | Type | Default | Description |
@@ -673,10 +683,10 @@ gc config show [flags]
 
 ```
 gc config show
-  gc config show --validate
-  gc config show --provenance
-  gc config show --json
-  gc config show -f overlay.toml
+gc config show --validate
+gc config show --provenance
+gc config show --json
+gc config show -f overlay.toml
 ```
 
 | Flag | Type | Default | Description |
@@ -841,9 +851,13 @@ Manage convoys — graphs of related work beads.
 A convoy is a named graph of beads with dependencies. Convoys
 group related issues via tracks dependencies.
 
-Convoys are distinct from workflows (compiler-v2 formula-compiled
-DAGs managed by the dispatch subsystem) — gc convoy commands do
-not operate on workflow roots.
+Convoys are distinct from workflows — the DAGs compiled from
+v2 formulas and managed by the dispatch
+subsystem. The convoy lifecycle subcommands (create, list, status,
+target, add, close, check, stranded, land) do not operate on
+workflow roots; the dispatch subcommands (control, delete,
+delete-source, reopen-source) manage workflow trees and their
+control beads.
 
 ```
 gc convoy
@@ -940,9 +954,9 @@ gc convoy create <name> [issue-ids...] [flags]
 
 ```
 gc convoy create sprint-42
-  gc convoy create sprint-42 issue-1 issue-2 issue-3
-  gc convoy create deploy --owner mayor --notify mayor --merge mr
-  gc convoy create auth-rewrite --owned --target integration/auth-rewrite
+gc convoy create sprint-42 issue-1 issue-2 issue-3
+gc convoy create deploy --owner mayor --notify mayor --merge mr
+gc convoy create auth-rewrite --owned --target integration/auth-rewrite
 ```
 
 | Flag | Type | Default | Description |
@@ -1006,8 +1020,8 @@ gc convoy land <convoy-id> [flags]
 
 ```
 gc convoy land gc-42
-  gc convoy land gc-42 --force
-  gc convoy land gc-42 --dry-run
+gc convoy land gc-42 --force
+gc convoy land gc-42 --dry-run
 ```
 
 | Flag | Type | Default | Description |
@@ -1089,6 +1103,30 @@ gc convoy target <convoy-id> <branch> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
 
+## gc costs
+
+Aggregate recorded usage facts (model tokens and compute wall-seconds)
+by run for local cost insight.
+
+Reads .gc/usage.jsonl (the local usage sink) and groups facts by run id. This
+reflects facts only under the default "local" usage provider; with an "exec:"
+or "discard" provider the facts are forwarded out of process or dropped, so
+gc costs shows nothing local.
+
+Cost is a list-price estimate for decision support, not an authoritative
+charge; invocations with no pricing are flagged "unpriced" and excluded from
+the cost total.
+
+```
+gc costs
+```
+
+**Example:**
+
+```
+gc costs
+```
+
 ## gc dashboard
 
 Open the static GC dashboard against the machine-wide supervisor API.
@@ -1133,10 +1171,13 @@ Run diagnostic health checks on the city workspace.
 
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
-bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix for the canonical remediation path, including any
-safe mechanical PackV1-to-PackV2 rewrites that are available on this
-branch.
+bead stores, Dolt server health, event log integrity, formula compiler
+requirements (deprecated contract = "graph.v2" opt-ins, missing
+[requires] formula_compiler = "&gt;=2.0.0" declarations, and requirements
+the host's [daemon] formula_v2 setting cannot satisfy), v2 config
+deprecations such as legacy [formulas].dir, and per-rig health. Use
+--fix for the canonical remediation path, including any safe mechanical
+legacy-to-current pack rewrites that are available on this branch.
 
 ```
 gc doctor [flags]
@@ -1146,10 +1187,10 @@ gc doctor [flags]
 
 ```
 gc doctor
-  gc doctor --fix
-  gc doctor --verbose
-  gc doctor --json
-  gc doctor --explain-postgres-auth
+gc doctor --fix
+gc doctor --verbose
+gc doctor --json
+gc doctor --explain-postgres-auth
 ```
 
 | Flag | Type | Default | Description |
@@ -1177,10 +1218,16 @@ Pass --max-orphan-dbs with --force to refuse all destructive cleanup
 stages if the live apply-time stale database count exceeds the
 scan-time threshold. The default 0 disables this guard; negative values
 are rejected before any city lookup or cleanup stage runs.
-Active rig dolt servers, registered rig databases, active test temp roots,
-and processes outside the test-config-path allowlist (/tmp/Test*,
-os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*) are always
-protected — see the PROTECTED section of the
+Protection is conservative and checked first: active rig dolt servers (matched
+by listening port), registered rig databases, and active test temp roots are
+always protected, and any process whose state cannot be determined degrades to
+protected. A dolt sql-server is reaped only when its scope is provably gone —
+its working directory is an unlinked inode (the kernel "(deleted)" cwd marker),
+or its --config path is on the test-config-path allowlist (/tmp/Test*,
+os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*). A server
+whose --config has merely vanished while its working directory is still live is
+protected, not reaped, until an operator confirms; a lone missing-config
+observation is not proof of scope deletion. See the PROTECTED section of the
 report. Destructive drops are limited to known stale test database name
 shapes and conservative SQL identifier characters; skipped stale matches
 are reported in dropped.skipped. Rig dolt_database names used for purge
@@ -1264,11 +1311,11 @@ gc events [flags]
 
 ```
 gc events
-  gc events --type bead.created --since 1h
-  gc events --watch --type convoy.closed --timeout 5m
-  gc events --follow
-  gc events --seq
-  gc events --follow --after-cursor city-a:12,city-b:9
+gc events --type bead.created --since 1h
+gc events --watch --type convoy.closed --timeout 5m
+gc events --follow
+gc events --seq
+gc events --follow --after-cursor city-a:12,city-b:9
 ```
 
 | Flag | Type | Default | Description |
@@ -1302,8 +1349,8 @@ gc events rotate [flags]
 
 ```
 gc events rotate
-  gc events rotate --wait
-  gc --city /path/to/city events rotate --api http://127.0.0.1:8080
+gc events rotate --wait
+gc --city /path/to/city events rotate --api http://127.0.0.1:8080
 ```
 
 | Flag | Type | Default | Description |
@@ -1313,7 +1360,12 @@ gc events rotate
 
 ## gc formula
 
-Manage and inspect formulas
+Manage and inspect formulas.
+
+A formula is a reusable TOML method for how multi-step work should be done
+(a bead is the work itself). See docs/reference/specs/formula-spec-v2.md for
+the file format, the formulas v2 contract, and the [requires]
+formula_compiler opt-in.
 
 ```
 gc formula
@@ -1339,6 +1391,12 @@ close until the sub-DAG completes. This is the core primitive for late-bound
 DAG expansion — any agent, script, or workflow step can call it to expand a
 bead into a sub-workflow at runtime.
 
+With --attach on a v2 formula — one declaring
+[requires] formula_compiler = "&gt;=2.0.0" — the invocation runs under a
+per-source workflow lock and is idempotent: a repeat cook for the same
+source bead reuses the live workflow instead of duplicating it, and a
+conflicting live workflow from the same source is an error.
+
 ```
 gc formula cook <formula-name> [flags]
 ```
@@ -1355,8 +1413,10 @@ gc formula cook <formula-name> [flags]
 
 List all formulas available in the city's formula search paths.
 
-Formulas are discovered from city-level and rig-level formula directories
-configured via packs and formulas_dir settings.
+Formulas are discovered from the well-known formulas/ directories of
+city and rig pack layers, the city's own formulas/ directory, and the
+rig-local formulas_dir directory. Later layers win for same-named
+formulas.
 
 ```
 gc formula list [flags]
@@ -1475,9 +1535,9 @@ gc graph <bead-ids|convoy-id...> [flags]
 
 ```
 gc graph gc-42               # expand convoy children
-  gc graph gc-1 gc-2 gc-3     # arbitrary beads
-  gc graph gc-42 --tree        # dependency tree
-  gc graph gc-42 --mermaid     # Mermaid.js diagram
+gc graph gc-1 gc-2 gc-3     # arbitrary beads
+gc graph gc-42 --tree        # dependency tree
+gc graph gc-42 --mermaid     # Mermaid.js diagram
 ```
 
 | Flag | Type | Default | Description |
@@ -1566,6 +1626,27 @@ gc hook [agent] [flags]
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 | `--json` | bool |  | with --claim, emit a JSON protocol result |
 
+| Subcommand | Description |
+|------------|-------------|
+| [gc hook run](#gc-hook-run) | Run a managed hook command with a hard timeout |
+
+## gc hook run
+
+Runs a managed gc hook command in a child process with a hard timeout.
+
+This protects provider hook callbacks from wedged data-plane commands. The
+child process is the current gc executable, and &lt;gc args...&gt; are passed to it
+verbatim.
+
+```
+gc hook run -- <gc args...> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--timeout` | duration | `15s` | hard timeout for the managed hook command |
+| `--timeout-exit-code` | int | `124` | exit code to return when the managed hook command times out |
+
 ## gc import
 
 Manage pack imports
@@ -1580,7 +1661,9 @@ gc import
 | [gc import check](#gc-import-check) | Validate installed pack import state |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
+| [gc import prune](#gc-import-prune) | Remove unreferenced clones from the global pack cache |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
+| [gc import status](#gc-import-status) | Report declared imports and packs.lock pins |
 | [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
 | [gc import why](#gc-import-why) | Explain why an import is present |
 
@@ -1602,6 +1685,9 @@ entry using source plus optional version. Supported sources are:
 Registry catalog handles are lookup shortcuts in this wave, not durable
 [imports.*] field values. After lookup, authored TOML stores the resolved
 source and optional version.
+
+The [imports.&lt;name&gt;] table key is the local binding name. Imported package
+names are display/advisory metadata and never become registry identity.
 
 ```
 gc import add <source> [flags]
@@ -1651,6 +1737,32 @@ gc import list [flags]
 |------|------|---------|-------------|
 | `--tree` | bool |  | Show the import dependency tree |
 
+## gc import prune
+
+Remove unreferenced clones from the machine-wide pack cache.
+
+The pack cache (~/.gc/cache/repos) is shared by every city on the machine and
+is keyed by (source, commit), so commit churn accumulates stale clones over
+time. A clone is "referenced" when some city's packs.lock still pins it; prune
+keeps every referenced clone and removes only the rest.
+
+By default prune considers every city in the supervisor registry plus the city
+resolved from the current directory; pass --all-cities to reference the full
+registry set and ignore the current directory. Prune is a dry run unless
+--apply is given. The --keep-days guard never removes an unreferenced clone
+whose directory was modified more recently than N days ago, protecting
+in-flight installs from a race.
+
+```
+gc import prune [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all-cities` | bool |  | Reference every city in the supervisor registry, ignoring the current directory |
+| `--apply` | bool |  | Delete unreferenced clones (default: dry run) |
+| `--keep-days` | int | `7` | Never prune unreferenced clones modified within this many days |
+
 ## gc import remove
 
 Remove a pack import
@@ -1658,6 +1770,23 @@ Remove a pack import
 ```
 gc import remove <name>
 ```
+
+## gc import status
+
+Report declared imports and packs.lock pins.
+
+Covers every import scope (root pack [imports.*], [defaults.rig.imports.*],
+and rig-scoped [rigs.imports.*]) plus the full packs.lock closure and the
+lockfile content hash. With --json the output is a stable machine-readable
+document for drift checkers.
+
+```
+gc import status [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON result |
 
 ## gc import upgrade
 
@@ -1681,10 +1810,10 @@ Create a new Gas City workspace in the given directory (or cwd).
 
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
-the standard top-level directories, and .template.md prompt templates, then
-materializes builtin packs under .gc/system/packs. Use --template with
---default-provider to create a city non-interactively, or --file to initialize
-from an existing TOML config file.
+the standard top-level directories, and .template.md prompt templates, and
+pins the builtin pack imports (resolved from the user-global pack cache).
+Use --template with --default-provider to create a city non-interactively,
+or --file to initialize from an existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
@@ -1698,15 +1827,15 @@ gc init [path] [flags]
 
 ```
 gc init
-  gc init ~/my-city
-  gc init --default-provider codex ~/my-city
-  gc init --template gastown --default-provider codex ~/my-city
-  gc init --providers claude,codex --default-provider codex ~/my-city
-  gc init --default-provider codex --bootstrap-profile k8s-cell /city
-  gc init --name my-city
-  gc init --from ~/elan --name elan /city
-  gc init --file ./my-city.toml ~/bright-lights
-  gc init --file city.toml --preserve-existing .
+gc init ~/my-city
+gc init --default-provider codex ~/my-city
+gc init --template gastown --default-provider codex ~/my-city
+gc init --providers claude,codex --default-provider codex ~/my-city
+gc init --default-provider codex --bootstrap-profile k8s-cell /city
+gc init --name my-city
+gc init --from ~/elan --name elan /city
+gc init --file ./my-city.toml ~/bright-lights
+gc init --file city.toml --preserve-existing .
 ```
 
 | Flag | Type | Default | Description |
@@ -1717,10 +1846,11 @@ gc init
 | `--from` | string |  | path to an example city directory to copy |
 | `--json` | bool |  | emit JSON summary |
 | `--name` | string |  | workspace name (default: target directory basename) |
+| `--no-start` | bool |  | initialize files and imports without registering or starting the city |
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
-| `--template` | string |  | non-interactive template to write: minimal, gastown, or custom |
+| `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, or custom |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
 ## gc lint
@@ -1813,8 +1943,8 @@ gc mail check [session] [flags]
 
 ```
 gc mail check
-  gc mail check --inject
-  gc mail check mayor
+gc mail check --inject
+gc mail check mayor
 ```
 
 | Flag | Type | Default | Description |
@@ -1956,12 +2086,12 @@ gc mail send [<to>] [<body>] [flags]
 
 ```
 gc mail send mayor "Build is green"
-  gc mail send mayor -s "Build is green"
-  gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
-  gc mail send --to mayor "Build is green"
-  gc mail send human "Review needed for PR #42"
-  gc mail send polecat "Priority task" --notify
-  gc mail send --all "Status update: tests passing"
+gc mail send mayor -s "Build is green"
+gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
+gc mail send --to mayor "Build is green"
+gc mail send human "Review needed for PR #42"
+gc mail send polecat "Priority task" --notify
+gc mail send --all "Status update: tests passing"
 ```
 
 | Flag | Type | Default | Description |
@@ -2159,9 +2289,11 @@ gc order list [flags]
 
 Execute an order manually, bypassing its trigger conditions.
 
-Instantiates a wisp from the order's formula and routes it to the
-configured target (if any). Useful for testing orders or triggering
-them outside their normal schedule.
+Formula orders instantiate a wisp from the order's formula and route it
+to the configured target (if any). Exec orders run their script directly
+— no wisp is created, and --json is rejected because the exec body may
+write arbitrary stdout. Useful for testing orders or triggering them
+outside their normal schedule.
 Use --rig to disambiguate same-name orders in different rigs.
 
 ```
@@ -2170,7 +2302,7 @@ gc order run <name> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--json` | bool |  | JSON output |
+| `--json` | bool |  | JSON output (formula orders only; rejected for exec orders) |
 | `--rig` | string |  | rig name to disambiguate same-name orders |
 
 ## gc order show
@@ -2235,6 +2367,7 @@ gc order sweep-tracking [order ...] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--dry-run` | bool |  | report stale order-tracking and order wisp beads without closing them |
 | `--include-wisps` | bool |  | also close stale order-run wisp subtrees with open descendants |
 | `--quiet` | bool |  | suppress success output |
 | `--stale-after` | duration | `10m0s` | minimum age for an open tracking bead to be closed |
@@ -2293,10 +2426,13 @@ gc pack registry
 |------------|-------------|
 | [gc pack registry add](#gc-pack-registry-add) | Add a pack registry |
 | [gc pack registry list](#gc-pack-registry-list) | List configured pack registries |
+| [gc pack registry login](#gc-pack-registry-login) | Log in to Gas City Registry |
+| [gc pack registry publish](#gc-pack-registry-publish) | Submit a pack publish request |
 | [gc pack registry refresh](#gc-pack-registry-refresh) | Refresh cached pack registry catalogs |
 | [gc pack registry remove](#gc-pack-registry-remove) | Remove a pack registry |
 | [gc pack registry search](#gc-pack-registry-search) | Search cached pack registry catalogs |
 | [gc pack registry show](#gc-pack-registry-show) | Show one pack registry entry |
+| [gc pack registry whoami](#gc-pack-registry-whoami) | Show the authenticated registry account |
 
 ## gc pack registry add
 
@@ -2322,6 +2458,53 @@ gc pack registry list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
+
+## gc pack registry login
+
+Log in to Gas City Registry and store a local API token.
+
+By default this opens a browser for GitHub or Google Workspace sign-in. Use
+--device for headless shells, or --token to store an existing registry token.
+
+```
+gc pack registry login [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--device` | bool |  | use device-code login instead of browser callback login |
+| `--label` | string | `GC CLI login` | label for the registry API token |
+| `--no-browser` | bool |  | print the browser login URL instead of opening it |
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
+| `--timeout` | duration | `15m0s` | maximum time to wait for interactive login |
+| `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN |
+
+## gc pack registry publish
+
+Submit a pack publish request to Gas City Registry.
+
+The command requires a clean Git checkout whose current HEAD matches its
+configured upstream branch, then submits the GitHub repository, commit, pack
+path, pack name, and version to the registry API.
+
+```
+gc pack registry publish <path-to-pack-root> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--csrf-token` | string |  | registry CSRF token; defaults to GC_REGISTRY_CSRF_TOKEN |
+| `--description` | string |  | release description; defaults to [pack].description |
+| `--dev-auth` | bool |  | create a local dev-auth session before submitting; localhost only |
+| `--dev-auth-handle` | string | `local-cli` | dev-auth handle when --dev-auth is used |
+| `--dry-run` | bool |  | print the publish request without submitting |
+| `--name` | string |  | registry pack name; defaults to [pack].name |
+| `--ref` | string |  | release ref label; defaults to the upstream branch name |
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
+| `--session-cookie` | string |  | registry_session cookie value or Cookie header; defaults to GC_REGISTRY_SESSION |
+| `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN |
+| `--validate` | bool | `true` | ask the registry to validate the request immediately; a rejected validation exits non-zero |
+| `--version` | string |  | release version; defaults to [pack].version |
 
 ## gc pack registry refresh
 
@@ -2375,6 +2558,19 @@ gc pack registry show <pack-name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
 | `--refresh` | bool |  | refresh catalogs before showing |
+
+## gc pack registry whoami
+
+Show the authenticated registry account
+
+```
+gc pack registry whoami [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
+| `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN or stored login |
 
 ## gc pack release
 
@@ -2531,7 +2727,7 @@ Baseline:
   baseline so the LLM iterates on a known-good shape rather than
   designing from scratch. Resolution priority:
     1. &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md     (user customization)
-    2. &lt;city&gt;/.gc/system/packs/*/agents/&lt;role&gt;/    (pack default)
+    2. &lt;composed pack dirs&gt;/agents/&lt;role&gt;/         (pack default)
     3. embedded prompts/&lt;role&gt;.md                  (built-in fallback)
     4. embedded prompts/mayor.md                   (structural reference,
                                                      used only when no
@@ -2622,7 +2818,7 @@ maps to a configured agent are NOT updated; normal orphan/suspended
 drain handles them on the next tick.
 
 ```
-gc reload [path] [flags]
+gc reload [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -2641,7 +2837,7 @@ mode this unregisters the city, then re-registers it and triggers an
 immediate reconcile.
 
 ```
-gc restart [path] [flags]
+gc restart [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -2659,7 +2855,7 @@ gc hook/prime will return work. Use "gc agent resume" to resume
 individual agents, or "gc rig resume" for rigs.
 
 ```
-gc resume [path] [flags]
+gc resume [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -2723,13 +2919,13 @@ gc rig add <path> [flags]
 
 ```
 gc rig add /path/to/project
-  gc rig add /path/to/project --name myrig
-  gc rig add /path/to/project --prefix r1
-  gc rig add /path/to/master-repo --default-branch master
-  gc rig add ./my-project --include packs/gastown
-  gc rig add ./my-project --include packs/planner --include packs/architect
-  gc rig add ./my-project --include packs/gastown --start-suspended
-  gc rig add /path/to/existing --adopt
+gc rig add /path/to/project --name myrig
+gc rig add /path/to/project --prefix r1
+gc rig add /path/to/master-repo --default-branch master
+gc rig add ./my-project --include gastown
+gc rig add ./my-project --include packs/planner --include packs/architect
+gc rig add ./my-project --include gastown --start-suspended
+gc rig add /path/to/existing --adopt
 ```
 
 | Flag | Type | Default | Description |
@@ -2827,10 +3023,10 @@ gc rig set-endpoint <rig> [flags]
 
 ```
 gc rig set-endpoint frontend --inherit
-  gc rig set-endpoint frontend --external --host db.example.com --port 3307
-  gc rig set-endpoint frontend --external --host db.example.com --port 3307 --user agent --adopt-unverified
-  gc rig set-endpoint frontend --self --port 28232 --force
-  gc rig set-endpoint frontend --inherit --dry-run
+gc rig set-endpoint frontend --external --host db.example.com --port 3307
+gc rig set-endpoint frontend --external --host db.example.com --port 3307 --user agent --adopt-unverified
+gc rig set-endpoint frontend --self --port 28232 --force
+gc rig set-endpoint frontend --inherit --dry-run
 ```
 
 | Flag | Type | Default | Description |
@@ -2886,17 +3082,77 @@ These commands read and write session metadata to coordinate lifecycle
 events (drain, restart) between agents and the controller. They are
 designed to be called from within running agent sessions, not by humans.
 
+The exception is "gc runtime check", which validates a Runtime Provider
+Protocol executable — run by humans and runtime-pack CIs.
+
 ```
 gc runtime
 ```
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc runtime check](#gc-runtime-check) | Validate a runtime executable against the Runtime Provider Protocol |
+| [gc runtime conformance](#gc-runtime-conformance) | Run the golden RPP conformance suite against a runtime executable |
 | [gc runtime drain](#gc-runtime-drain) | Signal a session to drain (wind down gracefully) |
 | [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
 | [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
 | [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (waits to be killed) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
+
+## gc runtime check
+
+Validate a runtime executable against the Runtime Provider Protocol (RPP v0).
+
+Runs the protocol handshake, the required lifecycle round-trip
+(start, is-running, stop, idempotent stop), exercises every capability
+the handshake declares, and probes optional operations. Optional
+operations that are absent (exit 2) are reported but never fail the
+run; everything else that misbehaves does. Exits non-zero if any check
+fails, so a runtime pack's CI can gate on it directly.
+
+The argument is an executable (path or PATH name) or a pack-declared
+runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current
+city's packs, the check runs against that pack's declared command.
+Arguments containing a path separator, or matching an existing file,
+are always treated as the executable itself.
+
+The protocol contract is docs/reference/exec-session-provider.md.
+
+```
+gc runtime check <name|executable> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--command` | string |  | session command sent in the start config (default "sleep 300") |
+| `--session-name` | string |  | session name for the conformance round-trip (default: generated unique name) |
+
+## gc runtime conformance
+
+Run the golden Runtime Provider Protocol conformance suite against an
+executable. Every requirement is requirement-coded (RPP-&lt;GROUP&gt;-NNN) and
+mirrors the in-tree provider contract (RunProviderTests); a run that passes
+every required requirement is guaranteed to behave like a gascity runtime.
+
+Unlike "gc runtime check" (a lighter smoke test), each requirement is
+proven to gate: the suite is kept honest by negative tests in which a
+broken reference fails exactly its requirement's check.
+
+The argument is an executable (path or PATH name) or a pack-declared
+runtime name from the current city's packs. Path-like or existing-file
+arguments are always the executable itself.
+
+Use --json for a machine-readable report (CI artifacts). Exits non-zero if
+any required requirement fails.
+
+```
+gc runtime conformance <name|executable> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--env` | bool |  | also run the environment-plane capability suite (env.* guarantees) |
+| `--json` | bool |  | emit a machine-readable JSON report |
 
 ## gc runtime drain
 
@@ -3164,10 +3420,10 @@ gc session logs <session> [flags]
 
 ```
 gc session logs mayor
-  gc session logs mayor --tail 2
-  gc session logs gc-123 --tail 20
-  gc session logs gc-123 --tail 0
-  gc session logs s-gc-123 -f
+gc session logs mayor --tail 2
+gc session logs gc-123 --tail 20
+gc session logs gc-123 --tail 0
+gc session logs s-gc-123 -f
 ```
 
 | Flag | Type | Default | Description |
@@ -3197,10 +3453,10 @@ gc session new <template> [flags]
 
 ```
 gc session new helper
-  gc session new helper --alias sky
-  gc session new helper --title "debugging auth"
-  gc session new helper --title-hint "fix the login redirect loop"
-  gc session new helper --no-attach
+gc session new helper --alias sky
+gc session new helper --title "debugging auth"
+gc session new helper --title-hint "fix the login redirect loop"
+gc session new helper --no-attach
 ```
 
 | Flag | Type | Default | Description |
@@ -3274,8 +3530,8 @@ gc session prune [flags]
 
 ```
 gc session prune --before 7d
-  gc session prune --before 24h
-  gc session prune --state asleep,suspended,drained --before 1h
+gc session prune --before 24h
+gc session prune --state asleep,suspended,drained --before 1h
 ```
 
 | Flag | Type | Default | Description |
@@ -3331,8 +3587,8 @@ gc session submit <id-or-alias> <message...> [flags]
 
 ```
 gc session submit mayor "status update"
-  gc session submit mayor "after this run, handle docs" --intent follow_up
-  gc session submit mayor "stop and do this instead" --intent interrupt_now
+gc session submit mayor "after this run, handle docs" --intent follow_up
+gc session submit mayor "stop and do this instead" --intent interrupt_now
 ```
 
 | Flag | Type | Default | Description |
@@ -3403,7 +3659,7 @@ gc session wake <session-id-or-alias> [flags]
 
 ```
 gc session wake gc-42
-  gc session wake mayor
+gc session wake mayor
 ```
 
 | Flag | Type | Default | Description |
@@ -3510,13 +3766,21 @@ When target is omitted, the bead's rig prefix is used to look up the rig's
 default_sling_target from config. Requires --formula to have an explicit target.
 Inline text also requires an explicit target.
 
-With --formula, a wisp (ephemeral molecule) is instantiated from the formula
-and its root bead is routed to the target.
+With --formula, the formula is instantiated and its root bead is routed to
+the target. v2 formulas — those declaring [requires]
+formula_compiler = "&gt;=2.0.0" — start a workflow; v1 formulas
+instantiate a wisp (ephemeral molecule). A v2 formula that references
+&#123;&#123;convoy_id&#125;&#125; or contains a drain step requires a target convoy: route it
+with gc sling &lt;target&gt; &lt;bead&gt; --on &lt;formula&gt;, or attach it with gc formula
+cook --attach. Formula slings to a pool (multi-session) target are rejected
+unless the compiled root is Ready-visible — a v2 workflow root or a
+root-only wisp. See docs/reference/specs/formula-spec-v2.md for the formula
+format and contract details.
 
 Examples:
   gc sling my-rig/claude BL-42              # route existing bead
   gc sling my-rig/claude "write a README"   # create bead from text, then route
-  gc sling mayor code-review --formula      # instantiate formula, route wisp
+  gc sling mayor code-review --formula      # instantiate formula, route its root
   echo "fix login" | gc sling mayor --stdin # read bead text from stdin
 
 ```
@@ -3526,7 +3790,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-n`, `--dry-run` | bool |  | show what would be done without executing |
-| `--force` | bool |  | suppress warnings, allow cross-rig routing, allow graph workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store |
+| `--force` | bool |  | suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store |
 | `-f`, `--formula` | bool |  | treat argument as formula name |
 | `--json` | bool |  | Output dispatch result in JSON format |
 | `--merge` | string |  | merge strategy: direct, mr, or local |
@@ -3536,8 +3800,8 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `--on` | string |  | attach wisp from formula to bead before routing |
 | `--owned` | bool |  | mark auto-convoy as owned (skip auto-close) |
 | `--reassign` | bool |  | clear any existing human assignee before routing (for human→pool handoff) |
-| `--scope-kind` | string |  | logical workflow scope kind for compiler-v2 launches |
-| `--scope-ref` | string |  | logical workflow scope ref for compiler-v2 launches |
+| `--scope-kind` | string |  | logical workflow scope kind for formulas v2 launches |
+| `--scope-ref` | string |  | logical workflow scope ref for formulas v2 launches |
 | `--stdin` | bool |  | read bead text from stdin (first line = title, rest = description) |
 | `-t`, `--title` | string |  | wisp root bead title (with --formula or --on) |
 | `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |
@@ -3552,16 +3816,16 @@ ensures the supervisor is running, and triggers immediate reconciliation.
 Use "gc supervisor run" for foreground operation.
 
 ```
-gc start [path] [flags]
+gc start [path|name] [flags]
 ```
 
 **Example:**
 
 ```
 gc start
-  gc start ~/my-city
-  gc start --dry-run
-  gc supervisor run
+gc start ~/my-city
+gc start --dry-run
+gc supervisor run
 ```
 
 | Flag | Type | Default | Description |
@@ -3577,7 +3841,7 @@ Shows a city-wide overview: controller state, suspension,
 all agents with running status, rigs, and a summary count.
 
 ```
-gc status [path] [flags]
+gc status [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -3601,7 +3865,7 @@ cleanup pass. Use --force to skip the interrupt grace period and go
 straight to kill.
 
 ```
-gc stop [path] [flags]
+gc stop [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -3652,6 +3916,11 @@ Tail the machine-wide supervisor log file.
 
 Shows recent log output from background and service-managed supervisor runs.
 
+When GC_SUPERVISOR_LOG_TEE=0 is set in this shell, the supervisor may be
+writing only to the service manager's log: an existing log file is still
+tailed (with a staleness warning), and when the file is absent the command
+points at the service manager's log instead.
+
 ```
 gc supervisor logs [flags]
 ```
@@ -3683,6 +3952,12 @@ Run the machine-wide supervisor in the foreground.
 This is the canonical long-running control loop. It reads ~/.gc/cities.toml
 for registered cities, manages them from one process, and hosts the shared
 API server.
+
+Output is teed into ~/.gc/supervisor.log so 'gc supervisor logs' works
+regardless of how the supervisor was invoked. Set GC_SUPERVISOR_LOG_TEE=0
+in the supervisor's environment to disable the tee when the service manager
+already captures output (e.g. a hand-managed systemd unit with
+StandardOutput=journal).
 
 ```
 gc supervisor run
@@ -3725,6 +4000,13 @@ most callers that need deterministic cleanup want (e.g., integration
 tests that then expect to remove temp directories without racing
 against lingering supervisor / controller subprocesses).
 
+When GC_SUPERVISOR_SYSTEMD_UNIT is set, stop is delegated to
+'systemctl [--user] stop &lt;unit&gt;' instead of the control-socket stop.
+The systemctl invocation is synchronous and bounded by --wait-timeout
+whether or not --wait is set, gc then verifies a previously-running
+supervisor actually exited (failing with its PID when the unit does
+not manage it), and stop with nothing running still exits 1.
+
 ```
 gc supervisor stop [flags]
 ```
@@ -3733,7 +4015,7 @@ gc supervisor stop [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL summary |
 | `--wait` | bool |  | Wait for the supervisor to finish stopping all managed cities and release its socket before returning |
-| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set |
+| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set (in delegated mode, bounds the synchronous systemctl stop regardless of --wait) |
 
 ## gc supervisor uninstall
 
@@ -3760,7 +4042,7 @@ The reconciler won't spawn agents, gc hook/prime return empty.
 Use "gc resume" to restore.
 
 ```
-gc suspend [path] [flags]
+gc suspend [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -3888,11 +4170,18 @@ gc trace tail [flags]
 
 Remove a city from the machine-wide supervisor registry.
 
-If no path is given, unregisters the current city (discovered from cwd).
-If the supervisor is running, it immediately stops managing the city.
+The argument may be a path to a city directory or a registered city name (as
+shown by 'gc cities'); a name is resolved against the supervisor registry. An
+existing local city directory of the same name takes precedence over a
+registration; if a local city directory and a different registration both
+exist, the name is reported as ambiguous.
+If no argument is given, unregisters the current city (discovered from cwd).
+If the supervisor is running, it immediately stops managing the city. Unlike
+'gc register' (which is idempotent), this errors when the resolved path is not
+a registered city, so it is not a silent no-op on an unknown target.
 
 ```
-gc unregister [path] [flags]
+gc unregister [path|name] [flags]
 ```
 
 | Flag | Type | Default | Description |

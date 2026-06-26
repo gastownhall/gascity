@@ -62,6 +62,13 @@ func ReadOpenCodeFile(path string, tailCompactions int) (*Session, error) {
 // FindOpenCodeSessionFile searches OpenCode JSON export directories for the
 // most recently modified export whose embedded info.directory matches workDir.
 func FindOpenCodeSessionFile(searchPaths []string, workDir string) string {
+	return findOpenCodeExportInRoots(mergeOpenCodeSearchPaths(searchPaths), workDir)
+}
+
+// findOpenCodeExportInRoots searches pre-merged export roots for the most
+// recently modified OpenCode-shaped export whose embedded info.directory
+// matches workDir. Shared by the OpenCode and MiMo Code session finders.
+func findOpenCodeExportInRoots(roots []string, workDir string) string {
 	workDir = cleanOpenCodeWorkDir(workDir)
 	if workDir == "" {
 		return ""
@@ -71,7 +78,7 @@ func FindOpenCodeSessionFile(searchPaths []string, workDir string) string {
 		bestPath string
 		bestTime time.Time
 	)
-	for _, root := range mergeOpenCodeSearchPaths(searchPaths) {
+	for _, root := range roots {
 		path := findOpenCodeSessionFileIn(root, workDir)
 		if path == "" {
 			continue

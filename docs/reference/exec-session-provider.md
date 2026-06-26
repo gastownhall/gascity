@@ -18,6 +18,42 @@ export GC_SESSION=exec:/path/to/gc-session-screen
 export GC_SESSION=exec:gc-session-screen
 ```
 
+## Pack-Declared Runtimes
+
+A pack can ship (or install) a runtime executable and bind it to a
+selection name in `pack.toml`:
+
+```toml
+[runtimes.cloudflare]
+command = "scripts/gc-runtime-cloudflare"   # pack-relative, or PATH name
+protocol = 0
+```
+
+City composition registers the name into the runtime selection
+registry, so `city.toml` selects it like a builtin:
+
+```toml
+[session]
+provider = "cloudflare"
+```
+
+Rules:
+
+- A `command` containing a path separator resolves relative to the pack
+  directory; a bare name resolves on PATH at session start.
+- `protocol` declares the RPP version the executable speaks (version 0
+  is the only version today); any other value fails composition.
+- Name collisions with builtin runtimes or other packs are composition
+  errors — no silent shadowing. Identical re-declarations of the same
+  pack reached through a diamond import graph dedupe.
+- The `pack-runtimes` doctor check verifies each declared executable is
+  installed and answers the `protocol` handshake.
+- Config reload enforces the same registration rules, and rebuilds the
+  session provider when the declaration behind the selected name changes
+  (the executable binding is fixed at provider construction).
+- `gc runtime check <name>` resolves the declared name and runs the
+  full conformance suite against the pack's executable.
+
 ## Calling Convention
 
 The script receives the operation name as its first argument:
@@ -58,6 +94,67 @@ care about.
 | `peek` | `script peek <name> <lines>` | — | captured text |
 | `list-running` | `script list-running <prefix>` | — | one name per line |
 | `get-last-activity` | `script get-last-activity <name>` | — | RFC3339 or empty |
+| `protocol` | `script protocol` | — | handshake JSON (see below) |
+| `is-attached` | `script is-attached <name>` | — | `true` or `false` |
+| `exec` | `script exec <name>` | command | combined output (op exit == command exit) |
+| `provision` | `script provision <name>` | JSON config | — |
+
+**Box without agent (the un-weld).** `provision` is `start` MINUS the agent
+launch: it creates/prepares the box (PreStart, SessionSetup, SessionSetupScript,
+SessionLive — every box step `start` runs EXCEPT spawning the agent in tmux) and
+returns. The controller then launches the agent itself by exec-ing `tmux
+new-session` / `respawn-pane -k` over the `exec` op, so a launch-only config
+change relaunches the agent in the warm box instead of reprovisioning (B2.3). A
+pack opts in by declaring `proc.provision` (and `proc.exec`, since the controller
+drives the launch over `exec`); without it, the welded `start` op provisions and
+launches as before, and the controller issues no `provision`/launch. The op is
+gated by the `RPP-PROVISION-001` conformance requirement.
+
+**The connection primitive (slim RPP).** `exec` is the connection op
+(`RPP-CONN-001`): a carrier drives a box *through* `exec` rather than via
+dedicated driving ops, and any runtime that declares an `env.*` capability
+already implements it. It is **optional for now** — conformance verifies it
+only when present (the output reaches the caller and the op exit mirrors the
+command's exit code) — and becomes required as Gas City moves its own input
+delivery and observation onto `exec`. The dedicated driving ops (`interrupt`,
+`nudge`, `peek`, `clear-scrollback`, `send-keys`) are reproducible over `exec`
+and are deliberately NOT conformance requirements: gc now drives input and reads
+output **over `exec`** (via the tmux carrier) when a runtime implements it, and
+**falls back** to the dedicated driving ops when `exec` is unsupported
+(`RPP-CONN-001` answered exit 2). So a runtime that ships `exec` + tmux-in-box
+needs none of the driving ops, while one that implements only the driving ops
+keeps working via the fallback. (`watch-startup` is a streaming op the
+request/response `exec` connection cannot carry, so it stays a dedicated op.)
+
+### Protocol Handshake (`protocol`)
+
+The `protocol` operation declares which Runtime Provider Protocol version
+the script speaks and which optional capabilities it implements:
+
+```json
+{"version": 0, "capabilities": ["report-attachment", "report-activity"]}
+```
+
+Scripts that do not implement `protocol` (exit 2) are treated as version 0
+with no optional capabilities — every pre-handshake script remains valid.
+Unknown capability strings are ignored, so scripts may declare
+capabilities for newer Gas City versions without breaking older ones.
+Malformed handshake JSON is an error: capability probes fall back to the
+no-capability behavior and the failure is reported by conformance and
+doctor checks.
+
+Capabilities:
+
+| Capability | Effect |
+|------------|--------|
+| `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. |
+| `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. |
+| `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). |
+| `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
+| `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
+| `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
+
+The handshake runs once per provider instance and is cached.
 
 ### Start Config (JSON on stdin)
 
@@ -113,7 +210,7 @@ hints or ignore them:
   '<cmd>'` for Docker, or plain `sh -c '<cmd>'` for local providers).
   Non-fatal: warn on stderr if a command fails, but don't abort start.
 
-- **`session_setup_script`** — path to a script on the controller
+- **`session_setup_script`** — path to a script on the orchestrator
   filesystem, run after `session_setup` commands. For remote providers
   (K8s, Docker), read the file locally and pipe its contents into the
   session (e.g. `kubectl exec -i -- sh < script`). For local providers,
@@ -130,7 +227,7 @@ the exec protocol):
 
 The distinction: readiness polling and delay are the *caller's*
 responsibility. Session setup commands are the *script's* responsibility
-— they run on the target filesystem, not the controller.
+— they run on the target filesystem, not the orchestrator.
 
 ### Conventions
 
@@ -150,7 +247,12 @@ responsibility. Session setup commands are the *script's* responsibility
 1. Start with `contrib/session-scripts/gc-session-screen` as a template.
 2. Implement the operations your backend supports.
 3. Return exit 2 for operations you don't support.
-4. Test with `GC_SESSION=exec:./your-script gc start <city>`.
+4. Validate with `gc runtime check ./your-script` — it runs the protocol
+   handshake, the required lifecycle round-trip (start, is-running, stop,
+   idempotent stop), exercises every capability the handshake declares,
+   and probes optional operations (absent ones are reported, not failed).
+   It exits non-zero if any check fails, so CI can gate on it.
+5. Test with `GC_SESSION=exec:./your-script gc start <city>`.
 
 ### Minimal script (start/stop/is-running only)
 

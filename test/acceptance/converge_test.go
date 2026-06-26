@@ -19,7 +19,7 @@ import (
 
 func TestConvergeCommands(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	// --- gc converge list ---
 

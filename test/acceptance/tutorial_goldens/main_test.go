@@ -16,6 +16,7 @@ import (
 	"time"
 
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 const canonicalTutorialRoot = "docs/tutorials"
@@ -42,7 +43,7 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", tmpRoot); err != nil {
 		panic("tutorial-goldens: setting TMPDIR: " + err.Error())
 	}
-	tmpDir, err := os.MkdirTemp(tmpRoot, "gctutorial-*")
+	tmpDir, err := os.MkdirTemp(tmpRoot, fmt.Sprintf("gctutorial-%d-*", os.Getpid()))
 	if err != nil {
 		panic("tutorial-goldens: creating temp dir: " + err.Error())
 	}
@@ -60,7 +61,14 @@ func TestMain(m *testing.M) {
 		panic("tutorial-goldens: bd not found")
 	}
 
-	os.Exit(m.Run())
+	// Reap dolt orphans left by prior crashed runs, then guard this run so an
+	// interrupt / timeout / OOM does not leak a dolt sql-server (issue #3640).
+	dolttest.SweepStale(tmpRoot, "gctutorial-")
+	stopGuard := dolttest.Guard(tmpDir)
+
+	code := m.Run()
+	stopGuard()
+	os.Exit(code)
 }
 
 type tutorialEnv struct {
@@ -602,6 +610,22 @@ func tutorialReviewerProvider() string {
 		return "claude"
 	}
 	return "codex"
+}
+
+// registerTutorialReviewerProvider mirrors the tutorial-02 page step that
+// registers the reviewer's provider in city.toml's explicit provider catalog
+// ([providers.<name>] base = "builtin:<name>"). Without it, any agent
+// referencing an unregistered provider fails config load with "provider
+// catalog is missing referenced providers". Skipped when the reviewer rides
+// the init-registered claude provider, which is already in the catalog.
+func registerTutorialReviewerProvider(t *testing.T, cityPath string) {
+	t.Helper()
+	provider := tutorialReviewerProvider()
+	if provider == "claude" {
+		return
+	}
+	appendFile(t, filepath.Join(cityPath, "city.toml"),
+		"\n[providers."+provider+"]\nbase = \"builtin:"+provider+"\"\n")
 }
 
 func claudeStatusOutputLoggedIn(out []byte) bool {

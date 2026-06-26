@@ -50,7 +50,7 @@ func AliveWithCmdline(pid int, match func([]string) bool) bool {
 	if runtime.GOOS != "linux" {
 		return true
 	}
-	argv, err := procCmdline(pid)
+	argv, err := Cmdline(pid)
 	if err != nil {
 		return false
 	}
@@ -97,24 +97,35 @@ func ArgvHasFlagValue(argv []string, flag, value string) bool {
 	return false
 }
 
-func procCmdline(pid int) ([]string, error) {
+// Cmdline returns a PID's command line from /proc, normalized through
+// NormalizeArgv. It returns an error on hosts without /proc cmdline support
+// or when the process record is unreadable.
+func Cmdline(pid int) ([]string, error) {
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
 	if err != nil {
 		return nil, err
 	}
-	data = []byte(strings.TrimRight(string(data), "\x00"))
-	if len(data) == 0 {
+	trimmed := strings.TrimRight(string(data), "\x00")
+	if trimmed == "" {
 		return nil, nil
 	}
-	parts := strings.Split(string(data), "\x00")
-	out := parts[:0]
-	for _, part := range parts {
-		if strings.TrimSpace(part) == "" {
+	return NormalizeArgv(strings.Split(trimmed, "\x00")), nil
+}
+
+// NormalizeArgv returns argv with empty and whitespace-only arguments
+// dropped — the rule Cmdline applies to /proc command lines. Callers
+// comparing a configured argv against Cmdline output must pass the
+// configured side through this helper first so both sides share the same
+// argument shape.
+func NormalizeArgv(argv []string) []string {
+	out := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		if strings.TrimSpace(arg) == "" {
 			continue
 		}
-		out = append(out, part)
+		out = append(out, arg)
 	}
-	return out, nil
+	return out
 }
 
 func psReportsZombie(pid int) bool {

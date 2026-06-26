@@ -63,9 +63,24 @@ type BeadWorktreeReapSkippedPayload struct {
 // IsEventPayload marks BeadWorktreeReapSkippedPayload as an events.Payload variant.
 func (BeadWorktreeReapSkippedPayload) IsEventPayload() {}
 
+// BeadClaimRejectedPayload is the typed payload for bead.claim_rejected events
+// (ADR-0009). Emitted when AttemptedClaimant tries to claim BeadID while it is
+// already live-claimed by ExistingClaimant; the second claim is rejected as an
+// idempotent no-op. The payload makes the lost-claim race observable for
+// eval/audit (RCA gc-typpc: one bead concurrently claimed by four workers).
+type BeadClaimRejectedPayload struct {
+	BeadID            string `json:"bead_id"`
+	ExistingClaimant  string `json:"existing_claimant"`
+	AttemptedClaimant string `json:"attempted_claimant"`
+}
+
+// IsEventPayload marks BeadClaimRejectedPayload as an events.Payload variant.
+func (BeadClaimRejectedPayload) IsEventPayload() {}
+
 func init() {
 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
+	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
 }
 
 // StoreDiskWarnPayload is the typed payload for gc.store.disk_warn events.

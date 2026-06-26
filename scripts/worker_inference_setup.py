@@ -10,8 +10,13 @@ import subprocess
 NPM_PACKAGE_BY_PROVIDER = {
     "codex": ("@openai/codex", "CODEX_CLI_VERSION", "0.125.0"),
     "gemini": ("@google/gemini-cli", "GEMINI_CLI_VERSION", "0.40.0"),
+    "mimocode": ("@mimo-ai/cli", "MIMOCODE_CLI_VERSION", "0.1.0"),
     "opencode": ("opencode-ai", "OPENCODE_CLI_VERSION", "1.14.33"),
     "pi": ("@earendil-works/pi-coding-agent", "PI_CODING_AGENT_VERSION", "0.74.0"),
+}
+# Providers whose installed binary name differs from the provider name.
+BINARY_BY_PROVIDER = {
+    "mimocode": "mimo",
 }
 CLAUDE_CODE_VERSION = "2.1.123"
 KIMI_CLI_VERSION = "1.42.0"
@@ -39,9 +44,10 @@ def main() -> int:
             raise SystemExit("agy was not found in PATH; install Antigravity CLI before running antigravity/tmux-cli worker inference")
         print("agy already present in PATH; skipping install")
         return 0
-    already_present = shutil.which(provider) is not None
+    binary = BINARY_BY_PROVIDER.get(provider, provider)
+    already_present = shutil.which(binary) is not None
     if already_present and not args.force and provider != "pi":
-        print(f"{provider} already present in PATH; skipping install")
+        print(f"{binary} already present in PATH; skipping install")
         return 0
 
     if provider == "claude":
@@ -61,8 +67,8 @@ def main() -> int:
             plugin_version = os.environ.get("PI_OLLAMA_CLOUD_VERSION", PI_OLLAMA_CLOUD_VERSION)
             subprocess.run(["pi", "install", f"npm:pi-ollama-cloud@{plugin_version}"], check=True)
 
-    if not shutil.which(provider):
-        raise SystemExit(f"{provider} was not found in PATH after installation")
+    if not shutil.which(binary):
+        raise SystemExit(f"{binary} was not found in PATH after installation")
     return 0
 
 

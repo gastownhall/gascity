@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // FormulaListBody is the response body for GET /v0/formulas.
@@ -152,16 +153,34 @@ func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawSc
 		return nil, huma.Error400BadRequest(msg)
 	}
 
+	// Workflow roots persist the routed agent identity as gc.routed_to
+	// (ga-eld2x / #2763), and run-detail clients echo that identity back as
+	// the preview target. A configured agent identity has no bead-store
+	// entry, so resolve it against the city config and let the graph.v2
+	// preview substitute a synthetic input convoy instead of failing the
+	// bead lookup. Targets that match neither a bead nor a configured agent
+	// keep the existing not-found error. Resolved only after
+	// formulaSearchPaths succeeds so the config-unavailable state keeps
+	// returning the typed 503 above.
+	_, targetIsRoutingIdentity := findAgentByQualifiedTemplate(s.state.Config(), target)
+
 	store := s.state.CityBeadStore()
 	if scopeKind == "rig" {
 		store = s.state.BeadStore(scopeRef)
 	}
-	detail, err := buildFormulaDetail(ctx, store, name, paths, target, vars, validateRuntimeVars)
+	detail, err := buildFormulaDetail(ctx, store, name, paths, target, targetIsRoutingIdentity, vars, validateRuntimeVars)
 	if err != nil {
 		if errors.Is(err, errFormulaNotWorkflow) || errors.Is(err, errFormulaNotFound) {
 			return nil, huma.Error404NotFound(err.Error())
 		}
-		return nil, huma.Error400BadRequest(err.Error())
+		errMsg := err.Error()
+		// A not-found target already failed the configured-agent identity
+		// match above, so say so: without this context a stale or mistyped
+		// agent identity reads as a bead-store problem.
+		if !targetIsRoutingIdentity && errors.Is(err, beads.ErrNotFound) {
+			errMsg += "; target matches neither a bead/convoy nor a configured agent identity"
+		}
+		return nil, huma.Error400BadRequest(errMsg)
 	}
 
 	return &struct {

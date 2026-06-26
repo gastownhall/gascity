@@ -7,7 +7,7 @@ title: "Config System"
 
 > **PackV2 format source of truth:** The public PackV2 format and loader
 > semantics are specified in
-> [Gas City Pack Specification (2.0)](../../docs/specs/pack-spec.md). This
+> [Gas City Pack Specification (2.0)](../../docs/reference/specs/pack-spec.md). This
 > page describes config loading and should defer to that specification for
 > PackV2 file-format details.
 
@@ -393,7 +393,8 @@ overall testing philosophy.
 - [Glossary](glossary.md) -- authoritative definitions of all Gas City
   terms, including Config, Pack, Rig, and Provider
 - [CLAUDE.md](https://github.com/gastownhall/gascity/blob/main/CLAUDE.md) -- progressive capability model (Levels
-  0-8), design principles (ZFC, Bitter Lesson), and the "Adding agent
+  0-8), design principles (keep judgment out of Go; a primitive must
+  become more useful as models improve), and the "Adding agent
   config fields" convention
 - [TESTING.md](https://github.com/gastownhall/gascity/blob/main/TESTING.md) -- testing philosophy and tier
   boundaries for config tests

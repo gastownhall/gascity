@@ -39,7 +39,14 @@ func ReadLockfile(fs fsys.FS, cityRoot string) (*Lockfile, error) {
 	if err != nil {
 		return emptyLockfileIfMissing(err)
 	}
+	return ParseLockfile(data)
+}
 
+// ParseLockfile decodes packs.lock contents. Empty data returns an
+// empty lock. Callers that need both the raw bytes and the pins (e.g.
+// to hash and parse one consistent snapshot) read the file once and
+// pass the same bytes here.
+func ParseLockfile(data []byte) (*Lockfile, error) {
 	var lock Lockfile
 	if _, err := toml.Decode(string(data), &lock); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", LockfileName, err)

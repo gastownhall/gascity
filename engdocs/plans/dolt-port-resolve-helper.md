@@ -117,7 +117,7 @@ this slice:
 - `git diff` confined to: `.gc/system/packs/bd/dolt/assets/scripts/port_resolve.sh`
   (new), `runtime.sh`, `dolt-target.sh`, `test/packlint/no_dolt_3307_fallback_test.go`
   (new), and the new helper test driver. No other files modified.
-- ZFC: no role names in the diff.
+- No judgment logic in Go: no role names in the diff.
 - No new third-party Go modules; no new env vars.
 - POSIX `/bin/sh` discipline (CI shellcheck pass).
 

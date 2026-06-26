@@ -741,8 +741,8 @@ max_active_sessions = 1
 	if claude.ID == "" {
 		t.Fatal("review-claude child not created")
 	}
-	if got := claude.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("review-claude gc.routed_to = %q, want empty direct dispatcher assignee", got)
+	if got := claude.Metadata["gc.routed_to"]; got != "gascity/control-dispatcher" {
+		t.Fatalf("review-claude gc.routed_to = %q, want gascity/control-dispatcher", got)
 	}
 	if claude.Metadata["gc.execution_routed_to"] != "gascity/claude" {
 		t.Fatalf("review-claude gc.execution_routed_to = %q, want gascity/claude", claude.Metadata["gc.execution_routed_to"])
@@ -750,16 +750,16 @@ max_active_sessions = 1
 	if containsString(claude.Labels, "pool:gascity/claude") {
 		t.Fatalf("review-claude labels = %v, should not contain legacy pool label", claude.Labels)
 	}
-	if claude.Assignee != "gascity--control-dispatcher" {
-		t.Fatalf("review-claude assignee = %q, want gascity--control-dispatcher", claude.Assignee)
+	if claude.Assignee != "" {
+		t.Fatalf("review-claude assignee = %q, want empty routed control-dispatcher queue", claude.Assignee)
 	}
 
 	codex := findAttemptByRef(t, store, root.ID, "mol-adopt-pr-v2.review-loop.iteration.2.review-codex")
 	if codex.ID == "" {
 		t.Fatal("review-codex child not created")
 	}
-	if got := codex.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("review-codex gc.routed_to = %q, want empty direct dispatcher assignee", got)
+	if got := codex.Metadata["gc.routed_to"]; got != "gascity/control-dispatcher" {
+		t.Fatalf("review-codex gc.routed_to = %q, want gascity/control-dispatcher", got)
 	}
 	if codex.Metadata["gc.execution_routed_to"] != "gascity/codex" {
 		t.Fatalf("review-codex gc.execution_routed_to = %q, want gascity/codex", codex.Metadata["gc.execution_routed_to"])
@@ -770,8 +770,8 @@ max_active_sessions = 1
 	if containsString(codex.Labels, "pool:gascity/claude") {
 		t.Fatalf("review-codex labels = %v, should not contain pool:gascity/claude", codex.Labels)
 	}
-	if codex.Assignee != "gascity--control-dispatcher" {
-		t.Fatalf("review-codex assignee = %q, want gascity--control-dispatcher", codex.Assignee)
+	if codex.Assignee != "" {
+		t.Fatalf("review-codex assignee = %q, want empty routed control-dispatcher queue", codex.Assignee)
 	}
 
 	synthesize := findAttemptByRef(t, store, root.ID, "mol-adopt-pr-v2.review-loop.iteration.2.synthesize")
@@ -1002,7 +1002,7 @@ func (s *countingAttemptRouteStore) List(query beads.ListQuery) ([]beads.Bead, e
 	return s.MemStore.List(query)
 }
 
-func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesSessionName(t *testing.T) {
+func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMetadataRoute(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
@@ -1026,20 +1026,21 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesSe
 	if binding.directSessionID != "" {
 		t.Fatalf("directSessionID = %q, want empty without canonical bead", binding.directSessionID)
 	}
-	if binding.sessionName != "worker" {
-		t.Fatalf("sessionName = %q, want worker", binding.sessionName)
+	if binding.sessionName != "" {
+		t.Fatalf("sessionName = %q, want empty so future runtime names are not assigned", binding.sessionName)
 	}
-	if binding.qualifiedName != "" || binding.metadataOnly {
-		t.Fatalf("binding = %+v, want concrete session-name route", binding)
+	if binding.qualifiedName != "worker" || !binding.metadataOnly {
+		t.Fatalf("binding = %+v, want metadata-only worker route", binding)
 	}
 }
 
-func TestApplyAttemptControlStepRoute_ImplicitControlDispatcherUsesConcreteAssignee(t *testing.T) {
+func TestApplyAttemptControlStepRoute_ConfiguredControlDispatcherUsesMetadataRoute(t *testing.T) {
 	t.Parallel()
 
+	maxActive := 1
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "maintainer-city"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		Rigs: []config.Rig{{
 			Name: "gascity",
 			Path: t.TempDir(),
@@ -1047,9 +1048,14 @@ func TestApplyAttemptControlStepRoute_ImplicitControlDispatcherUsesConcreteAssig
 		Agents: []config.Agent{{
 			Name: "claude",
 			Dir:  "gascity",
+		}, {
+			Name:              config.ControlDispatcherAgentName,
+			Dir:               "gascity",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			ProcessNames:      []string{"gc"},
+			MaxActiveSessions: &maxActive,
 		}},
 	}
-	config.InjectImplicitAgents(cfg)
 
 	step := &formula.RecipeStep{
 		Metadata: map[string]string{
@@ -1058,14 +1064,114 @@ func TestApplyAttemptControlStepRoute_ImplicitControlDispatcherUsesConcreteAssig
 	}
 	applyAttemptControlStepRoute(step, "gascity/claude", cfg, beads.NewMemStore())
 
-	if step.Assignee != "gascity--control-dispatcher" {
-		t.Fatalf("assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	if step.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
 	}
-	if got := step.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("gc.routed_to = %q, want empty for concrete control dispatcher assignee", got)
+	if got := step.Metadata["gc.routed_to"]; got != "gascity/control-dispatcher" {
+		t.Fatalf("gc.routed_to = %q, want gascity/control-dispatcher", got)
 	}
 	if got := step.Metadata["gc.execution_routed_to"]; got != "gascity/claude" {
 		t.Fatalf("gc.execution_routed_to = %q, want gascity/claude", got)
+	}
+}
+
+func TestApplyAttemptControlStepRoute_UsesExecutionRigContextForDirectSessionTarget(t *testing.T) {
+	t.Parallel()
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "maintainer-city"},
+		Rigs: []config.Rig{{
+			Name: "frontend",
+			Path: t.TempDir(),
+		}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			Dir:               "frontend",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			ProcessNames:      []string{"gc"},
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "frontend reviewer",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "reviewer-1",
+			"template":     "frontend/reviewer",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.execution_rig_context": "frontend",
+			"gc.routed_to":             "stale-route",
+		},
+	}
+
+	applyAttemptControlStepRoute(step, sessionBead.ID, cfg, store)
+
+	if step.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "frontend/control-dispatcher" {
+		t.Fatalf("gc.routed_to = %q, want frontend/control-dispatcher", got)
+	}
+	if got := step.Metadata["gc.execution_routed_to"]; got != sessionBead.ID {
+		t.Fatalf("gc.execution_routed_to = %q, want direct session id %q", got, sessionBead.ID)
+	}
+}
+
+func TestApplyAttemptControlStepRoute_ImportQualifiedControlDispatcherUsesScope(t *testing.T) {
+	t.Parallel()
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "maintainer-city"},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
+		Rigs: []config.Rig{{
+			Name: "fixture",
+			Path: t.TempDir(),
+		}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			ProcessNames:      []string{"gc"},
+			MaxActiveSessions: &maxActive,
+		}, {
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			ProcessNames:      []string{"gc"},
+			MaxActiveSessions: &maxActive,
+		}, {
+			Name: "superpowers.brainstorming",
+			Dir:  "fixture",
+		}},
+	}
+
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.routed_to": "stale-route",
+		},
+	}
+	applyAttemptControlStepRoute(step, "fixture/superpowers.brainstorming", cfg, beads.NewMemStore())
+
+	if step.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("gc.routed_to = %q, want fixture/core.control-dispatcher", got)
+	}
+	if got := step.Metadata["gc.execution_routed_to"]; got != "fixture/superpowers.brainstorming" {
+		t.Fatalf("gc.execution_routed_to = %q, want fixture/superpowers.brainstorming", got)
 	}
 }
 
@@ -1160,15 +1266,15 @@ max_active_sessions = 1
 	if got := review.Metadata["gc.execution_routed_to"]; got != "frontend/reviewer" {
 		t.Fatalf("review gc.execution_routed_to = %q, want frontend/reviewer", got)
 	}
-	if got := review.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("review gc.routed_to = %q, want empty direct dispatcher assignee", got)
+	if got := review.Metadata["gc.routed_to"]; got != "frontend/control-dispatcher" {
+		t.Fatalf("review gc.routed_to = %q, want frontend/control-dispatcher", got)
 	}
-	if review.Assignee != "frontend--control-dispatcher" {
-		t.Fatalf("review assignee = %q, want frontend--control-dispatcher", review.Assignee)
+	if review.Assignee != "" {
+		t.Fatalf("review assignee = %q, want empty routed control-dispatcher queue", review.Assignee)
 	}
 }
 
-func TestApplyAttemptControlStepRoute_ConfiguredControlDispatcherNeverUsesMetadataRoute(t *testing.T) {
+func TestApplyAttemptControlStepRoute_MinimalRigScopedDispatcherUsesMetadataRoute(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.City{
@@ -1192,11 +1298,11 @@ func TestApplyAttemptControlStepRoute_ConfiguredControlDispatcherNeverUsesMetada
 	}
 	applyAttemptControlStepRoute(step, "gascity/claude", cfg, beads.NewMemStore())
 
-	if step.Assignee != "gascity--control-dispatcher" {
-		t.Fatalf("assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	if step.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
 	}
-	if got := step.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("gc.routed_to = %q, want empty for concrete control dispatcher assignee", got)
+	if got := step.Metadata["gc.routed_to"]; got != "gascity/control-dispatcher" {
+		t.Fatalf("gc.routed_to = %q, want gascity/control-dispatcher", got)
 	}
 }
 
@@ -1219,7 +1325,7 @@ func TestApplyAttemptControlStepRoute_KeepsControlBeadsOnDispatcherForNamedExecu
 	}); err != nil {
 		t.Fatalf("create named session: %v", err)
 	}
-	dispatcher, err := store.Create(beads.Bead{
+	_, err := store.Create(beads.Bead{
 		Title:  "control-dispatcher",
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
@@ -1242,13 +1348,17 @@ func TestApplyAttemptControlStepRoute_KeepsControlBeadsOnDispatcherForNamedExecu
 		Agents: []config.Agent{{
 			Name:              "worker",
 			MaxActiveSessions: &maxActive,
+		}, {
+			Name:              config.ControlDispatcherAgentName,
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			ProcessNames:      []string{"gc"},
+			MaxActiveSessions: &maxActive,
 		}},
 		NamedSessions: []config.NamedSession{{
 			Template: "worker",
 			Mode:     "always",
 		}},
 	}
-	config.InjectImplicitAgents(cfg)
 
 	step := &formula.RecipeStep{
 		ID:       "review-scope-check",
@@ -1262,11 +1372,11 @@ func TestApplyAttemptControlStepRoute_KeepsControlBeadsOnDispatcherForNamedExecu
 	if got := step.Metadata["gc.execution_routed_to"]; got != "worker" {
 		t.Fatalf("gc.execution_routed_to = %q, want worker", got)
 	}
-	if got := step.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("gc.routed_to = %q, want empty for concrete control-dispatcher assignee", got)
+	if got := step.Metadata["gc.routed_to"]; got != "control-dispatcher" {
+		t.Fatalf("gc.routed_to = %q, want control-dispatcher", got)
 	}
-	if step.Assignee != dispatcher.ID {
-		t.Fatalf("assignee = %q, want canonical control-dispatcher bead %q", step.Assignee, dispatcher.ID)
+	if step.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
 	}
 }
 

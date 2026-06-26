@@ -3,44 +3,35 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
-
-	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// beadEventHooksEnabled reports whether the per-write bead event-forwarding
-// hooks should be installed for cityPath. Defaults to true; a city opts out
-// with [beads] event_hooks = false once it has confirmed the controller's
-// native cache-events cover bead observation. Failure to load config falls
-// back to the safe default (install) so a transient read error never silently
-// drops event forwarding.
-func beadEventHooksEnabled(cityPath string) bool {
-	if strings.TrimSpace(cityPath) == "" {
-		return true
-	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil || cfg == nil {
-		return true
-	}
-	return cfg.Beads.EventHooksEnabled()
-}
+// beadEventHookNames lists the gc-installed bd event-forwarding hook names
+// removed by installBeadHooks. These hooks previously spawned a gc subprocess
+// per bead write; the controller's CachingStore now emits the same events
+// in-process and runs convoy/wisp/molecule autoclose natively.
+var beadEventHookNames = []string{"on_create", "on_update", "on_close"}
 
-// beadHooks maps bd hook filenames to the Gas City event types they emit.
-var beadHooks = map[string]string{
-	"on_create": "bead.created",
-	"on_close":  "bead.closed",
-	"on_update": "bead.updated",
-}
-
-// hookStampLine returns a version-stamp comment for hook scripts. The stamp
-// embeds the build date and commit so that installBeadHooks can enforce
-// forward-only writes — a stale gc binary will not overwrite hooks installed
-// by a newer binary.
+// hookStampLine returns the version-stamp comment embedded in gc-managed hook
+// scripts so that installBeadHooks can distinguish them from user-authored hooks.
 func hookStampLine() string {
 	return fmt.Sprintf("# gc-hook-stamp: %s %s", date, commit)
+}
+
+// isGCManagedHook reports whether the hook content was written by gc.
+// It recognizes both the current gc-hook-stamp format and the legacy
+// "# Installed by gc" marker used before stamping was introduced.
+// Only gc-managed hooks are removed during cleanup; user-authored hooks
+// with the same filename are left untouched.
+func isGCManagedHook(content []byte) bool {
+	if parseHookStampDate(content) != "" {
+		return true
+	}
+	// Legacy hooks written by older gc versions use "# Installed by gc"
+	// as the first marker line and invoke "$GC_BIN" event emit per write.
+	return bytes.Contains(content, []byte("# Installed by gc")) &&
+		bytes.Contains(content, []byte(`"$GC_BIN" event emit`))
 }
 
 // parseHookStampDate extracts the build date from a hook script's stamp line.
@@ -58,163 +49,31 @@ func parseHookStampDate(content []byte) string {
 	return ""
 }
 
-// hookCityBlock returns the shell fragment that defines CITY_PATH and the
-// matching --city argument to gc event emit. When cityPath is empty the
-// fragment is empty — preserving the original "walk up from cwd" behavior
-// for callers that have not yet been updated to thread the city path.
+// installBeadHooks removes any gc-installed bead event-forwarding hooks from
+// dir/.beads/hooks/. The hook subprocess chain (gc event emit + gc convoy
+// autoclose + gc wisp autoclose + gc molecule autoclose) is replaced by the
+// controller's in-process CachingStore event path, which emits the same events
+// via its onChange callback and runs autoclose in runBeadCloseAutoclose.
 //
-// The cityPath is embedded at install time so the hook script does not
-// depend on the bd write's cwd being a descendant of the city. Sibling-rig
-// topologies (rig at /Code/foo, city at /Code/bar) used to silently drop
-// events because findCity walked up from the rig and never reached the city.
-func hookCityBlock(cityPath string) (def, arg string) {
-	if cityPath == "" {
-		return "", ""
-	}
-	return fmt.Sprintf("CITY_PATH=%s\n", shellSingleQuote(cityPath)), ` --city "$CITY_PATH"`
-}
-
-func shellSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
-}
-
-// hookScript returns the shell script content for a bd hook that forwards
-// events to the Gas City event log via gc event emit. Failures are
-// captured to ${BEADS_DIR}/hooks.log so silent breakage (missing gc on
-// PATH, store-resolution errors) is diagnosable after the fact.
-//
-// When cityPath is non-empty it is baked into the script as
-// a shell-quoted CITY_PATH and gc event emit is invoked with --city
-// "$CITY_PATH". This avoids the findCity walk-up that fails when
-// the bd write's cwd is a sibling (not a descendant) of the city.
-func hookScript(eventType, cityPath string) string {
-	cityDef, cityArg := hookCityBlock(cityPath)
-	return fmt.Sprintf(`#!/bin/sh
-%[1]s
-# Installed by gc — forwards bd events to Gas City event log.
-# Args: $1=issue_id  $2=event_type  stdin=issue JSON
-GC_BIN="${GC_BIN:-gc}"
-HOOK_LOG="${BEADS_DIR:-.beads}/hooks.log"
-%[5]sDATA=$(cat)
-PAYLOAD=$(printf '{"bead":%%s}' "$DATA")
-title=$(echo "$DATA" | grep -o '"title":"[^"]*"' | head -1 | cut -d'"' -f4)
-# Tag subprocess bd calls so the bd-trace can attribute them to the
-# hook cascade (best-effort; ignored when GC_BD_TRACE is unset).
-export GC_BD_TRACE_SCOPE="hook:%[2]s"
-(
-  "$GC_BIN"%[6]s event emit %[2]s --subject "$1" --message "$title" --payload "$PAYLOAD" --bead-payload "$1" 2>>"$HOOK_LOG" \
-    || echo "[$(date -u +%%FT%%TZ)] %[3]s $1: gc event emit %[2]s failed (gc=$GC_BIN)" >>"$HOOK_LOG" 2>/dev/null \
-    || true
-) </dev/null >/dev/null 2>&1 &
-`, hookStampLine(), eventType, hookNameFromEventType(eventType), "", cityDef, cityArg)
-}
-
-// hookNameFromEventType maps event types back to the hook filename
-// (e.g. "bead.created" → "on_create") so diagnostic log lines name the
-// hook the operator can grep for.
-func hookNameFromEventType(eventType string) string {
-	for hook, evt := range beadHooks {
-		if evt == eventType {
-			return hook
-		}
-	}
-	return "hook"
-}
-
-// closeHookScript returns the on_close hook script. It forwards the
-// bead.closed event, triggers convoy autoclose for the closed bead's
-// parent convoy (if any), and auto-closes any open molecule/wisp
-// children attached to the closed bead. Workflow-control watches the city
-// event stream directly, so the close hook no longer sends a separate poke.
-//
-// Failures of any of the three gc invocations are logged with a dated
-// diagnostic line to ${BEADS_DIR}/hooks.log. Without this, missing gc
-// or a store-resolution error here leaves no record at all and the
-// cascade-close of sling scaffolding fails invisibly.
-//
-// When cityPath is non-empty it is baked into the script as
-// a shell-quoted CITY_PATH and the gc invocations carry --city "$CITY_PATH".
-func closeHookScript(cityPath string) string {
-	cityDef, cityArg := hookCityBlock(cityPath)
-	return fmt.Sprintf(`#!/bin/sh
-%[1]s
-# Installed by gc — forwards bd close events, auto-closes completed convoys,
-# and auto-closes orphaned wisps.
-# Args: $1=issue_id  $2=event_type  stdin=issue JSON
-GC_BIN="${GC_BIN:-gc}"
-HOOK_LOG="${BEADS_DIR:-.beads}/hooks.log"
-%[2]sDATA=$(cat)
-PAYLOAD=$(printf '{"bead":%%s}' "$DATA")
-title=$(echo "$DATA" | grep -o '"title":"[^"]*"' | head -1 | cut -d'"' -f4)
-# Tag subprocess bd calls so the bd-trace can attribute them to the
-# hook cascade (best-effort; ignored when GC_BD_TRACE is unset).
-export GC_BD_TRACE_SCOPE="hook:bead.closed"
-(
-  "$GC_BIN"%[3]s event emit bead.closed --subject "$1" --message "$title" --payload "$PAYLOAD" --bead-payload "$1" 2>>"$HOOK_LOG" \
-    || echo "[$(date -u +%%FT%%TZ)] on_close $1: gc event emit bead.closed failed (gc=$GC_BIN)" >>"$HOOK_LOG" 2>/dev/null \
-    || true
-  # Auto-close parent convoy if all siblings are now closed.
-  "$GC_BIN"%[3]s convoy autoclose "$1" 2>>"$HOOK_LOG" \
-    || echo "[$(date -u +%%FT%%TZ)] on_close $1: gc convoy autoclose failed (gc=$GC_BIN)" >>"$HOOK_LOG" 2>/dev/null \
-    || true
-  # Auto-close open molecule/wisp children so they don't outlive the parent.
-  "$GC_BIN"%[3]s wisp autoclose "$1" 2>>"$HOOK_LOG" \
-    || echo "[$(date -u +%%FT%%TZ)] on_close $1: gc wisp autoclose failed (gc=$GC_BIN)" >>"$HOOK_LOG" 2>/dev/null \
-    || true
-  # Auto-close parent molecule when all step children are terminal (#1039).
-  "$GC_BIN"%[3]s molecule autoclose "$1" 2>>"$HOOK_LOG" \
-    || echo "[$(date -u +%%FT%%TZ)] on_close $1: gc molecule autoclose failed (gc=$GC_BIN)" >>"$HOOK_LOG" 2>/dev/null \
-    || true
-) </dev/null >/dev/null 2>&1 &
-`, hookStampLine(), cityDef, cityArg)
-}
-
-// installBeadHooks writes bd hook scripts into dir/.beads/hooks/ so that
-// bd mutations (create, close, update) emit events to the Gas City event
-// log. Forward-only — a stale gc binary will not overwrite hooks installed
-// by a newer binary. Returns nil on success.
-//
-// cityPath is baked into each generated hook script so gc event emit
-// can resolve the city without walking up from the bd write's cwd. When
-// cityPath is "" the scripts are generated without the --city flag,
-// preserving the legacy "walk up from cwd" behavior; this is appropriate
-// for tests and for callers that genuinely don't know the city yet.
-func installBeadHooks(dir, cityPath string) error {
+// Only hooks that carry a gc-hook-stamp are removed; user-authored hooks with
+// the same filename are left untouched. This function is idempotent: it is
+// safe to call when the hooks do not exist.
+func installBeadHooks(dir, _ string) error {
 	hooksDir := filepath.Join(dir, ".beads", "hooks")
-	if !beadEventHooksEnabled(cityPath) {
-		// Opted out: ensure the event-forwarding hooks are absent so the
-		// native store's bd_hooks gate can clear and no per-write `gc`
-		// subprocess fires. Only the event hooks (beadHooks) are removed;
-		// git hooks and anything else in the directory are left untouched.
-		for filename := range beadHooks {
-			if err := os.Remove(filepath.Join(hooksDir, filename)); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("removing disabled bead event hook %s: %w", filename, err)
-			}
+	for _, filename := range beadEventHookNames {
+		hookPath := filepath.Join(hooksDir, filename)
+		content, err := os.ReadFile(hookPath)
+		if os.IsNotExist(err) {
+			continue
 		}
-		return nil
-	}
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
-		return fmt.Errorf("creating hooks directory: %w", err)
-	}
-
-	for filename, eventType := range beadHooks {
-		path := filepath.Join(hooksDir, filename)
-		content := hookScript(eventType, cityPath)
-		if filename == "on_close" {
-			content = closeHookScript(cityPath)
+		if err != nil {
+			return fmt.Errorf("reading bead event hook %s: %w", filename, err)
 		}
-
-		if existing, err := os.ReadFile(path); err == nil {
-			if date != "unknown" {
-				onDiskDate := parseHookStampDate(existing)
-				if onDiskDate != "" && onDiskDate != "unknown" && date < onDiskDate {
-					continue
-				}
-			}
+		if !isGCManagedHook(content) {
+			continue
 		}
-
-		if err := fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, path, []byte(content), 0o755); err != nil {
-			return fmt.Errorf("writing hook %s: %w", filename, err)
+		if err := os.Remove(hookPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing bead event hook %s: %w", filename, err)
 		}
 	}
 	return nil

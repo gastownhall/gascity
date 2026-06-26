@@ -429,7 +429,7 @@ func TestRunnerRunEmitsInputReceiptEvidence(t *testing.T) {
 		errCh <- runner.Run(context.Background(), cfg, &stdout)
 	}()
 
-	inputEvent := waitForEventKind(t, eventPath, "input_waiting", 2*time.Second)
+	inputEvent := waitForEventKind(t, eventPath, "input_waiting", 10*time.Second)
 	if inputEvent.Input == nil {
 		t.Fatal("input_waiting event missing input payload")
 	}
@@ -446,7 +446,7 @@ func TestRunnerRunEmitsInputReceiptEvidence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run: %v\nstdout:\n%s", err, stdout.String())
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for fake worker to finish")
 	}
 

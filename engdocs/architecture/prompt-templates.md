@@ -142,8 +142,9 @@ prompt dynamically customized to its deployment context.
   promptFuncMap (141 LOC)
 - `cmd/gc/cmd_prime.go` — `gc prime` command (outputs rendered prompt)
 
-Template files are user-supplied pack content, not SDK code. See example templates
-in `examples/gastown/packs/gastown/prompts/`.
+Template files are user-supplied pack content, not SDK code. See the example
+templates in the gastown pack's `prompts/` directory in the
+[gascity-packs repository](https://github.com/gastownhall/gascity-packs).
 
 ## Configuration
 

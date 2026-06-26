@@ -5,7 +5,7 @@
 # beads, backup freshness, orphan databases, and zombie Dolt processes.
 #
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_HOST, GC_DOLT_USER,
-#              GC_DOLT_PASSWORD
+#              GC_DOLT_PASSWORD, GC_DOLT_RIG_LIST_TIMEOUT_SECS
 set -e
 
 : "${GC_DOLT_USER:=root}"
@@ -18,8 +18,12 @@ metadata_files() {
   if command -v gc >/dev/null 2>&1; then
     # Bound the gc rig list call: if gc is itself in a bad state (the
     # failure mode this patrol is meant to detect) we must not block
-    # here. Degrade to the fallback rig scan below.
-    rig_paths=$(run_bounded 5 gc rig list --json 2>/dev/null \
+    # here. Degrade to the fallback rig scan below. The bound (default in
+    # runtime.sh, shared with the compact command) must absorb a
+    # slow-but-healthy gc on a busy host (~16s observed) because the
+    # fallback scan only sees the city directory and silently drops
+    # external rig databases (gascity#2740).
+    rig_paths=$(run_bounded "$GC_DOLT_RIG_LIST_TIMEOUT_SECS" gc rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else
@@ -88,11 +92,29 @@ now_ms() {
   esac
 }
 
-# Find dolt PID by port.
-pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
-if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
-  server_running=true
-  [ -n "$pid" ] && server_pid="$pid"
+is_local_probe_host() {
+  case "$1" in
+    ""|0.0.0.0|127.*|localhost|::1|"[::1]") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Find dolt PID by port for local managed servers. External Dolt endpoints do
+# not listen on 127.0.0.1, so do not let the local TCP precheck suppress the
+# real SQL ping to GC_DOLT_HOST:GC_DOLT_PORT.
+should_probe_sql=false
+if is_local_probe_host "$host"; then
+  pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
+  if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
+    server_running=true
+    [ -n "$pid" ] && server_pid="$pid"
+    should_probe_sql=true
+  fi
+else
+  should_probe_sql=true
+fi
+
+if [ "$should_probe_sql" = true ]; then
   # Measure query latency.
   start_ms=$(now_ms)
   conn_args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"

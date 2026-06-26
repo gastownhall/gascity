@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +20,16 @@ import (
 type doltDriftCheck struct {
 	cityPath string
 	cfg      *config.City
+
+	// repinnablePortDrift is set by Run when at least one rig's
+	// .beads/dolt-server.port disagrees with the managed city port (Case B) —
+	// drift that re-pinning the configured port files repairs.
+	repinnablePortDrift bool
+	// liveRigLocalBlocking is set by Run when a rig configured inherited_city
+	// still has a live rig-local Dolt (Case A). Re-pinning a port file while a
+	// rig-local server is listening would point the file at the wrong server,
+	// so it suppresses the auto-fix until the operator resolves ownership.
+	liveRigLocalBlocking bool
 }
 
 func newDoltDriftCheck(cityPath string, cfg *config.City) *doltDriftCheck {
@@ -29,6 +40,10 @@ func (c *doltDriftCheck) Name() string { return "dolt-drift" }
 
 func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
+	// Reset fix-eligibility state; Run may be invoked again (the doctor re-runs
+	// it after a successful Fix to verify), so stale flags must not persist.
+	c.repinnablePortDrift = false
+	c.liveRigLocalBlocking = false
 	if c.cfg == nil || !workspaceUsesManagedBdStoreContract(c.cityPath, c.cfg.Rigs) {
 		r.Status = doctor.StatusOK
 		r.Message = "not using bd-backed Dolt topology"
@@ -75,6 +90,7 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 
 		// Case A: rig is inherited_city but has a live rig-local Dolt.
 		if liveRigLocal {
+			c.liveRigLocalBlocking = true
 			errors = append(errors, fmt.Sprintf(
 				"rig %q endpoint_origin=inherited_city but rig-local Dolt pid %d is listening on port %d (.dolt/sql-server.info); stop the rig-local server or acknowledge it with `gc rig set-endpoint %s --self --port %d --force`",
 				rig.Name, livePID, livePort, rig.Name, livePort,
@@ -94,8 +110,9 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			if data, err := os.ReadFile(rigPortFile); err == nil {
 				got := strings.TrimSpace(string(data))
 				if got != "" && got != managedPort {
+					c.repinnablePortDrift = true
 					errors = append(errors, fmt.Sprintf(
-						"rig %q .beads/dolt-server.port=%s disagrees with managed city port %s; next `gc start` will overwrite the rig port file",
+						"rig %q .beads/dolt-server.port=%s disagrees with managed city port %s; `gc doctor --fix` re-pins it (or next `gc start` overwrites it)",
 						rig.Name, got, managedPort,
 					))
 				}
@@ -116,7 +133,7 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		}
 		r.Message = fmt.Sprintf("%d drift issue%s between rig-local Dolt state and managed city topology", len(errors), plural)
 		r.Details = append(append([]string{}, errors...), warnings...)
-		r.FixHint = "stop the rig-local Dolt server, or acknowledge explicit rig-local ownership with `gc rig set-endpoint <rig> --self --port <port> --force`; use --external for non-local servers; remove stale .dolt/sql-server.info files"
+		r.FixHint = "`gc doctor --fix` re-pins rig port-file drift; for a live rig-local Dolt, stop it or acknowledge explicit ownership with `gc rig set-endpoint <rig> --self --port <port> --force` (use --external for non-local servers); remove stale .dolt/sql-server.info files"
 		return r
 	}
 	plural := ""
@@ -130,9 +147,34 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	return r
 }
 
-func (c *doltDriftCheck) CanFix() bool { return false }
+// CanFix reports whether the detected drift is the re-pinnable kind: at least
+// one rig port file disagrees with the managed city port (Case B), and no rig
+// has a conflicting live rig-local Dolt (Case A). Re-pinning while a rig-local
+// server is listening would point the file at the wrong server, so that case is
+// left for the operator (the FixHint covers it). Run populates these flags and
+// is always invoked before CanFix by the doctor framework.
+func (c *doltDriftCheck) CanFix() bool {
+	return c.repinnablePortDrift && !c.liveRigLocalBlocking
+}
 
-func (c *doltDriftCheck) Fix(_ *doctor.CheckContext) error { return nil }
+// Fix re-pins the configured .beads/dolt-server.port files to the managed city
+// port, repairing Case-B drift. It reuses the same syncConfiguredDoltPortFiles
+// path that `gc start` runs at startup, so a stale rig port file no longer
+// requires a full restart to correct. The doctor framework re-runs Run
+// afterward to verify (and to surface any remaining non-re-pinnable drift).
+func (c *doltDriftCheck) Fix(ctx *doctor.CheckContext) error {
+	if c.cfg == nil {
+		return fmt.Errorf("dolt-drift: no city config available to re-pin port files")
+	}
+	// Thread the framework's output writer so re-pin diagnostics are captured
+	// with the rest of doctor output (and discarded on the JSON-collect path);
+	// fall back to stderr for direct out-of-framework calls.
+	warn := io.Writer(os.Stderr)
+	if ctx != nil && ctx.Output != nil {
+		warn = ctx.Output
+	}
+	return syncConfiguredDoltPortFiles(c.cityPath, c.cfg.Dolt, config.EffectiveHQPrefix(c.cfg), c.cfg.Rigs, warn)
+}
 
 // rigLocalDoltPIDFromSQLServerInfo reads the colon-separated PID:PORT:UUID
 // content of rigPath/.dolt/sql-server.info (written by dolt sql-server). It

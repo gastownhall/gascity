@@ -66,7 +66,7 @@ func TestHelp_ListsSubcommands(t *testing.T) {
 // using a single shared city.
 func TestHookAndStop(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("Hook_NoAgent_ReturnsError", func(t *testing.T) {
 		out, err := c.GC("hook")

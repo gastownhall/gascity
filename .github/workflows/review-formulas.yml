@@ -1,6 +1,4 @@
-name: CI
-# Keep the historical check name `CI / Integration / review-formulas` even
-# though the shard now lives in a dedicated workflow.
+name: Review Formulas
 
 on:
   push:
@@ -38,8 +36,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  DOLT_VERSION: "2.1.4"
-  BD_VERSION: "v1.0.5"
+  DOLT_VERSION: "2.1.7"
+  BD_VERSION: "v1.0.4"
 
 jobs:
   runner-policy:
@@ -91,7 +89,7 @@ jobs:
               - 'cmd/gc/**'
               - 'examples/bd/**'
               - 'examples/dolt/**'
-              - 'examples/gastown/packs/**'
+              - 'examples/gastown/**'
               - 'scripts/test-integration-shard'
               - 'test/agents/**'
               - 'test/integration/**'
@@ -146,7 +144,7 @@ jobs:
       - gate
     if: needs.gate.outputs.run_shard == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

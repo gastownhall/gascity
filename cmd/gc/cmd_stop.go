@@ -22,7 +22,7 @@ func newStopCmd(stdout, stderr io.Writer) *cobra.Command {
 	var force bool
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "stop [path]",
+		Use:   "stop [path|name]",
 		Short: "Stop all agent sessions in the city",
 		Long: `Stop all agent sessions in the city with graceful shutdown.
 
@@ -36,7 +36,8 @@ before giving up; the default budgets configured session interrupt and
 stop waves, the configured shutdown grace wait, and a second orphan
 cleanup pass. Use --force to skip the interrupt grace period and go
 straight to kill.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdStopJSON(args, stdout, stderr, wallClockTimeout, force, jsonOut) != 0 {
 				return errExit
@@ -155,7 +156,29 @@ func resolveStopCityPath(args []string) (string, error) {
 	if len(args) == 0 {
 		return resolveCommandCity(nil)
 	}
-	abs, err := filepath.Abs(args[0])
+	// A name-shaped positional may be a registered city name or a local rig
+	// directory; route it through the shared name resolver so a slashless rig
+	// dir still resolves to its owning city without reopening the bare-name
+	// walk-up footgun. Path-shaped args keep the exact stop path resolver.
+	if classifyCityRef(args[0]) == cityRefName {
+		ctx, err := resolveCityNameContext(args[0], func(name string) (resolvedContext, error) {
+			cp, perr := stopCityPathFromArg(name)
+			return resolvedContext{CityPath: cp}, perr
+		})
+		if err != nil {
+			return "", err
+		}
+		return ctx.CityPath, nil
+	}
+	return stopCityPathFromArg(args[0])
+}
+
+// stopCityPathFromArg resolves a path-shaped stop argument (or a local city) to
+// a city path, trying an exact city path, then a rig path, then an upward city
+// walk — the original path-only behavior, now invoked as resolveCityRef's path
+// resolver.
+func stopCityPathFromArg(ref string) (string, error) {
+	abs, err := filepath.Abs(ref)
 	if err != nil {
 		return "", err
 	}

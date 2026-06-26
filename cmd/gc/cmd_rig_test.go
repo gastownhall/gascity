@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -105,6 +106,48 @@ func TestDoRigAdd_Basic(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "my-frontend") {
 		t.Errorf("city.toml should contain rig name:\n%s", data)
+	}
+}
+
+func TestDoRigAdd_PreservesComments(t *testing.T) {
+	cityPath := t.TempDir()
+	cityToml := `# This is a city-level rationale comment.
+[workspace]
+name = "my-city"
+
+# Pack rationale: core tools are required.
+[packs.core]
+source = ".gc/system/packs/core"
+`
+	writeSchema2RigCity(t, cityPath, "my-city", cityToml, "")
+
+	rigPath := filepath.Join(t.TempDir(), "backend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		"# This is a city-level rationale comment.",
+		"# Pack rationale: core tools are required.",
+		"backend",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("city.toml missing %q:\n%s", want, got)
+		}
 	}
 }
 
@@ -1029,6 +1072,43 @@ func TestDoRigListJSONShowsDefaultBranch(t *testing.T) {
 	t.Fatalf("rig my-frontend not found in JSON:\n%s", stdout.String())
 }
 
+// TestDoRigListJSONBuildsSessionProviderOnce guards against the rig-list --json
+// N+1: the running-status probe must build a single session provider and reuse
+// it across all rigs, not reconstruct one per rig.
+func TestDoRigListJSONBuildsSessionProviderOnce(t *testing.T) {
+	cityPath := t.TempDir()
+
+	var rigBlocks strings.Builder
+	for _, name := range []string{"rig-a", "rig-b", "rig-c"} {
+		rigPath := filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(rigPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&rigBlocks, "\n[[rigs]]\nname = %q\npath = %q\n", name, rigPath)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n" + rigBlocks.String()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int
+	orig := rigListSessionProvider
+	rigListSessionProvider = func() runtime.Provider {
+		calls++
+		return &fakeAdoptionProvider{}
+	}
+	t.Cleanup(func() { rigListSessionProvider = orig })
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigList(fsys.OSFS{}, cityPath, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
+	}
+
+	if calls != 1 {
+		t.Fatalf("session provider constructed %d times across 3 rigs, want exactly 1", calls)
+	}
+}
+
 func TestDoRigList_Empty(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -1244,6 +1324,14 @@ func TestDoRigListShowsSuspended(t *testing.T) {
 func TestDoRigAdd_WithPack(t *testing.T) {
 	cityPath := t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	// A real local pack at packs/gastown: the include token must stay a
+	// local import instead of canonicalizing to the bundled source.
+	if err := os.MkdirAll(filepath.Join(cityPath, "packs", "gastown"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "packs", "gastown", "pack.toml"), []byte("[pack]\nname = \"gastown\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	rigPath := filepath.Join(t.TempDir(), "my-project")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -1734,7 +1822,10 @@ func TestDoRigAdd_RealGastownExampleRootPackDefaultRigImport(t *testing.T) {
 		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
 	}
 
-	if !strings.Contains(stdout.String(), "Import: gastown=packs/gastown (default)") {
+	// The example city composes gastown via the pinned public import, not a
+	// checked-in packs/gastown copy, so the default rig import carries the
+	// public source.
+	if !strings.Contains(stdout.String(), "Import: gastown="+config.PublicGastownPackSource+" (default)") {
 		t.Fatalf("output missing gastown default import: %s", stdout.String())
 	}
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
@@ -1744,8 +1835,11 @@ func TestDoRigAdd_RealGastownExampleRootPackDefaultRigImport(t *testing.T) {
 	if len(cfg.Rigs) != 1 {
 		t.Fatalf("len(Rigs) = %d, want 1", len(cfg.Rigs))
 	}
-	if got := cfg.Rigs[0].Imports["gastown"].Source; got != "packs/gastown" {
-		t.Fatalf("rig gastown import source = %q, want %q", got, "packs/gastown")
+	if got := cfg.Rigs[0].Imports["gastown"].Source; got != config.PublicGastownPackSource {
+		t.Fatalf("rig gastown import source = %q, want %q", got, config.PublicGastownPackSource)
+	}
+	if got := cfg.Rigs[0].Imports["gastown"].Version; got != config.PublicGastownPackVersion {
+		t.Fatalf("rig gastown import version = %q, want %q", got, config.PublicGastownPackVersion)
 	}
 }
 
@@ -2773,11 +2867,14 @@ func TestDoRigAdd_AdoptWithBdContractInvokesInitAndHook(t *testing.T) {
 	// init path was invoked with the adopted rig dir.
 	origEnsure := initDirIfReadyEnsureBeadsProvider
 	origInit := initDirIfReadyInitAndHookDir
+	origWait := initDirIfReadyWaitForManagedDolt
 	t.Cleanup(func() {
 		initDirIfReadyEnsureBeadsProvider = origEnsure
 		initDirIfReadyInitAndHookDir = origInit
+		initDirIfReadyWaitForManagedDolt = origWait
 	})
 	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
+	initDirIfReadyWaitForManagedDolt = func(_ string, _ time.Duration) error { return nil }
 
 	var initCalls []string
 	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {
@@ -2833,11 +2930,14 @@ func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *test
 
 	origEnsure := initDirIfReadyEnsureBeadsProvider
 	origInit := initDirIfReadyInitAndHookDir
+	origWait := initDirIfReadyWaitForManagedDolt
 	t.Cleanup(func() {
 		initDirIfReadyEnsureBeadsProvider = origEnsure
 		initDirIfReadyInitAndHookDir = origInit
+		initDirIfReadyWaitForManagedDolt = origWait
 	})
 	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
+	initDirIfReadyWaitForManagedDolt = func(_ string, _ time.Duration) error { return nil }
 
 	var initCalls []string
 	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {
@@ -3257,4 +3357,24 @@ func TestRouteRigList_StaleBannerOver30s(t *testing.T) {
 	if !strings.Contains(stdout.String(), "cache age: 45s") {
 		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
 	}
+}
+
+// Regression test for the ga-lurp5d follow-up: a failed rig add must roll
+// back a symlinked city.toml by restoring the link target, not by replacing
+// the link with a regular file.
+func TestRigAddRollbackRestoresThroughCityTomlSymlink(t *testing.T) {
+	fs := fsys.OSFS{}
+	cityDir, link, target := setupSymlinkedCityToml(t)
+
+	snapshots, err := snapshotRigAddTopologyFiles(fs, cityDir, &config.City{})
+	if err != nil {
+		t.Fatalf("snapshotRigAddTopologyFiles: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("[workspace]\nname = \"mutated\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreSnapshots(fs, snapshots); err != nil {
+		t.Fatalf("restoreSnapshots: %v", err)
+	}
+	assertCityTomlSymlinkRestored(t, link, target, symlinkedCityTomlOriginal)
 }

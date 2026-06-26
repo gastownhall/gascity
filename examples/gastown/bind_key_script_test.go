@@ -34,7 +34,7 @@ import (
 // is no way for the script to install if-shell, so re-runs cannot
 // nest layers.
 func TestBindKeyScriptDirectBind(t *testing.T) {
-	bindKey := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "bind-key.sh")
+	bindKey := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "bind-key.sh")
 	if _, err := os.Stat(bindKey); err != nil {
 		t.Fatalf("bind-key.sh not found at %s: %v", bindKey, err)
 	}
@@ -162,7 +162,7 @@ exit 0
 // that hq-5vw7 (recursive wrapping) and hq-w1qlv ("command too long")
 // both manifest under the prior shape.
 func TestBindKeyScriptNoRecursiveWrapping(t *testing.T) {
-	bindKey := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "bind-key.sh")
+	bindKey := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "bind-key.sh")
 	if _, err := os.Stat(bindKey); err != nil {
 		t.Fatalf("bind-key.sh not found: %v", err)
 	}

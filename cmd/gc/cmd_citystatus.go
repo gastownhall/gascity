@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
@@ -115,11 +116,12 @@ func newStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonFlag bool
 	var formatFlag string
 	cmd := &cobra.Command{
-		Use:   "status [path]",
+		Use:   "status [path|name]",
 		Short: "Show city-wide status overview",
 		Long: `Shows a city-wide overview: controller state, suspension,
 all agents with running status, rigs, and a summary count.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
 			format := strings.ToLower(strings.TrimSpace(formatFlag))
 			switch format {
@@ -404,7 +406,7 @@ func loadStatusSessionSnapshot(store beads.Store, stderr io.Writer) *sessionBead
 			if stderr != nil {
 				fmt.Fprintf(stderr, "gc status: loading session snapshot: %v\n", result.err) //nolint:errcheck // best-effort stderr
 			}
-			return newSessionBeadSnapshotWithError(nil, fmt.Errorf("loading session snapshot: %w", result.err))
+			return newSessionBeadSnapshotWithError(fmt.Errorf("loading session snapshot: %w", result.err))
 		}
 		if result.snapshot == nil {
 			return newSessionBeadSnapshot(nil)
@@ -414,7 +416,7 @@ func loadStatusSessionSnapshot(store beads.Store, stderr io.Writer) *sessionBead
 		if stderr != nil {
 			fmt.Fprintf(stderr, "gc status: loading session snapshot timed out after %s; continuing with runtime-only status\n", statusSessionSnapshotTimeout) //nolint:errcheck // best-effort stderr
 		}
-		return newSessionBeadSnapshotWithError(nil, fmt.Errorf("loading session snapshot timed out after %s", statusSessionSnapshotTimeout))
+		return newSessionBeadSnapshotWithError(fmt.Errorf("loading session snapshot timed out after %s", statusSessionSnapshotTimeout))
 	}
 }
 
@@ -449,11 +451,11 @@ func statusObservationTargetForIdentity(
 	}
 }
 
-func namedSessionBlockedBySuspension(cfg *config.City, agentCfg *config.Agent, suspendedRigs map[string]bool) bool {
+func namedSessionBlockedBySuspension(cfg *config.City, agentCfg *config.Agent, suspState suspensionstate.State, suspendedRigs map[string]bool) bool {
 	if cfg == nil {
 		return false
 	}
-	if citySuspended(cfg) {
+	if citySuspendedWithState(cfg, suspState) {
 		return true
 	}
 	if agentCfg == nil {

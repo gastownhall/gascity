@@ -22,7 +22,6 @@
 [workspace]
 name = "lifecycle-demo"
 start_command = "true"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 # No workspace pack — all agents are rig-scoped.
 
 [defaults.rig.imports.lifecycle]
@@ -33,3 +32,15 @@ patrol_interval = "10s"
 max_restarts = 3
 restart_window = "5m"
 shutdown_timeout = "5s"
+
+# Builtin packs compose through explicit imports; the gc binary pre-seeds
+# these pinned versions offline from its embedded content. Pinning a
+# different commit fetches that commit from git like any remote import.
+# The builtin-pack-imports doctor check repairs missing entries.
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"

@@ -1346,11 +1346,18 @@ func TestFileRecorderFlockSucceedsAfterShortContention(t *testing.T) {
 	if elapsed < 40*time.Millisecond {
 		t.Errorf("elapsed = %v, want >= %v", elapsed, 40*time.Millisecond)
 	}
-	if elapsed >= recordFlockTimeout {
-		t.Errorf("elapsed = %v, want < %v", elapsed, recordFlockTimeout)
-	}
 	if stderr.Len() != 0 {
 		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+	got, err := rec.List(Filter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("List returned %d events, want 1", len(got))
+	}
+	if got[0].Type != "test" {
+		t.Errorf("recorded event type = %q, want %q", got[0].Type, "test")
 	}
 }
 

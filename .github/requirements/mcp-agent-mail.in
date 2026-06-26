@@ -20,6 +20,11 @@ urllib3>=2.7.0
 # carry the patched version themselves.
 idna>=3.15
 
+# Security floor: CVE-2026-49468 (CRITICAL, authentication bypass via Host
+# Header Injection) in litellm < 1.84.0. Drop once mcp-agent-mail's
+# transitive constraint carries the patched version itself.
+litellm>=1.84.0
+
 # Authlib and FastMCP security floors live in
 # .github/requirements/mcp-agent-mail.overrides.txt because mcp-agent-mail
 # v0.3.2 still caps Authlib below the fixed release.

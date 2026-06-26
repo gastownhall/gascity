@@ -58,7 +58,7 @@ func startStandaloneBdDoltLikeProcess(t *testing.T, dataDir string) *exec.Cmd {
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatalf("Mkfifo(sql-server): %v", err)
 	}
-	cmd := exec.Command("bash", "-c", "exec -a dolt cat sql-server")
+	cmd := exec.Command("bash", "-c", `exec -a dolt cat sql-server -- --data-dir "$1"`, "fake-dolt", dataDir)
 	cmd.Dir = dataDir
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
@@ -69,7 +69,9 @@ func startStandaloneBdDoltLikeProcess(t *testing.T, dataDir string) *exec.Cmd {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	deadline := time.Now().Add(time.Second)
+	// 30s: must outlast a worst-case processArgsPSTimeout (10s) ps fallback plus
+	// process-exec/proc-reflection latency under heavy parallel CI load.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if cmd.Process.Signal(syscall.Signal(0)) == nil && processLooksLikeDoltSQLServer(cmd.Process.Pid, dataDir) {
 			return cmd
@@ -339,7 +341,7 @@ func TestStartBeadsLifecycleIgnoresStaleStandaloneBdPID(t *testing.T) {
 func TestInitDirIfReadyDetectsStandaloneBdDoltAtProviderConvergence(t *testing.T) {
 	cityPath := t.TempDir()
 	writeManagedBdCityFixture(t, cityPath)
-	MaterializeBuiltinPacks(cityPath) //nolint:errcheck
+	materializeBuiltinPacksForTest(t, cityPath)
 
 	callLog := filepath.Join(cityPath, "provider-start.log")
 	script := gcBeadsBdScriptPath(cityPath)

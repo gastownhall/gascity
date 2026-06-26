@@ -21,7 +21,7 @@ if [ -n "$staged_go_files" ]; then
   # Mintlify schema in lockstep with whatever the server actually
   # serves.
   go run ./cmd/genspec
-  git add internal/api/openapi.json docs/schema/openapi.json docs/schema/openapi.txt
+  git add internal/api/openapi.json docs/reference/schema/openapi.json docs/reference/schema/openapi.txt
 
   go generate ./internal/api/genclient
   git add internal/api/genclient/client_gen.go
@@ -30,10 +30,14 @@ if [ -n "$staged_go_files" ]; then
   # stage every generated artifact so commits do not leave the
   # worktree dirty.
   go run ./cmd/genschema
-  git add docs/schema/city-schema.json docs/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
+  git add docs/reference/schema/city-schema.json docs/reference/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
 
   make vet
-  make test-fast-parallel
+  # Heavy `go test` fan-out runs in .githooks/pre-push, not here (#3628).
+  # Invoking `make test-fast-parallel` on every commit fired an
+  # `xargs -P<nproc>` storm of ~2.8 GB test-binary compiles (~17 GB pressure,
+  # load >100 on constrained hosts such as WSL). Format, lint, vet, and codegen
+  # stay in pre-commit; the test suite gates at push time instead.
 fi
 
 if [ -n "$staged_docs" ]; then

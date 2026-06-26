@@ -84,6 +84,29 @@ func TestForkRateCheck_ReadErrorSkips(t *testing.T) {
 	}
 }
 
+func TestForkRateCheck_FastUnitSleepIsNoop(t *testing.T) {
+	t.Setenv("GC_FAST_UNIT", "1")
+	c := newForkRateCheck()
+	c.readProcStat = func() (string, error) { return "processes 1000\n", nil }
+	start := time.Now()
+	c.Run(nil)
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("Run took %v with GC_FAST_UNIT=1, want <100ms (sleep must be no-op)", elapsed)
+	}
+}
+
+func TestForkRateCheck_DefaultSleepRetained(t *testing.T) {
+	t.Setenv("GC_FAST_UNIT", "")
+	c := newForkRateCheck()
+	var slept time.Duration
+	c.sleep = func(d time.Duration) { slept = d }
+	c.readProcStat = func() (string, error) { return "processes 1000\n", nil }
+	c.Run(nil)
+	if slept != defaultForkRateSampleInterval {
+		t.Fatalf("sleep called with %v, want %v (default 1s must be retained without GC_FAST_UNIT)", slept, defaultForkRateSampleInterval)
+	}
+}
+
 func TestParseProcessesCounter(t *testing.T) {
 	if n, ok := parseProcessesCounter("cpu 1 2\nprocesses 4242\nctxt 99\n"); !ok || n != 4242 {
 		t.Fatalf("parseProcessesCounter = (%d,%v), want (4242,true)", n, ok)

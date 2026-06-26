@@ -52,6 +52,7 @@ type recorderInstruments struct {
 	nudgeTotal           metric.Int64Counter
 	configReloadTotal    metric.Int64Counter
 	controllerTotal      metric.Int64Counter
+	supervisorTotal      metric.Int64Counter
 	bdTotal              metric.Int64Counter
 	slingTotal           metric.Int64Counter
 
@@ -79,6 +80,17 @@ var (
 	instOnce sync.Once
 	inst     recorderInstruments
 )
+
+// ResetInstrumentsForTest re-arms the lazy instrument bindings (recorder and
+// invocation instruments) so the next Record* call re-registers them against
+// the current global MeterProvider. It exists so tests can swap in a
+// manual-reader SDK provider and observe emissions (mirroring ResetForTest).
+// Must be called only from tests, after swapping the global provider, and
+// again after restoring it.
+func ResetInstrumentsForTest() {
+	instOnce = sync.Once{}
+	invInstOnce = sync.Once{}
+}
 
 // initInstruments registers all recorder metric instruments against the current
 // global MeterProvider. Must be called after telemetry.Init so the real
@@ -117,6 +129,9 @@ func initInstruments() {
 		)
 		inst.controllerTotal, _ = m.Int64Counter("gc.controller.lifecycle.total",
 			metric.WithDescription("Total controller lifecycle events"),
+		)
+		inst.supervisorTotal, _ = m.Int64Counter("gc.supervisor.lifecycle.total",
+			metric.WithDescription("Total supervisor lifecycle events"),
 		)
 		inst.bdTotal, _ = m.Int64Counter("gc.bd.calls.total",
 			metric.WithDescription("Total bd CLI command invocations"),
@@ -275,18 +290,32 @@ func RecordAgentStart(ctx context.Context, sessionName, agentName string, err er
 }
 
 // RecordAgentStop records an agent session stop (metrics + log event).
-func RecordAgentStop(ctx context.Context, sessionName, reason string, err error) {
+// agentName is the stable agent identity (the pool instance name or qualified
+// agent name) and is used for the agent metric label so gc.agent.stops.total
+// joins gc.agent.starts.total and the crash/idle-kill/max-age-kill siblings on
+// one value space. sessionName is the runtime session name; it stays a
+// log-only field because it lives in a sanitized value space (/ -> --, . -> __)
+// that cannot be joined against the agent identity.
+func RecordAgentStop(ctx context.Context, sessionName, agentName, reason string, err error) {
 	initInstruments()
 	status := statusStr(err)
-	inst.agentStopTotal.Add(ctx, 1,
-		metric.WithAttributes(
-			attribute.String("agent", sessionName),
-			attribute.String("reason", reason),
-			attribute.String("status", status),
-		),
-	)
+	// A blank agent identity cannot be joined against the start/crash/kill
+	// counters and only pollutes gc.agent.stops.total with an unattributable
+	// series, so skip the metric when identity resolution failed. The log
+	// event below still records the stop (keyed by the session name) so the
+	// stop itself is never lost.
+	if strings.TrimSpace(agentName) != "" {
+		inst.agentStopTotal.Add(ctx, 1,
+			metric.WithAttributes(
+				attribute.String("agent", agentName),
+				attribute.String("reason", reason),
+				attribute.String("status", status),
+			),
+		)
+	}
 	emit(ctx, "agent.stop", severity(err),
 		otellog.String("session", sessionName),
+		otellog.String("agent", agentName),
 		otellog.String("reason", reason),
 		otellog.String("status", status),
 		errKV(err),
@@ -338,20 +367,19 @@ func RecordAgentMaxAgeKill(ctx context.Context, agentName string) {
 	)
 }
 
-// RecordReconcileCycle records a reconciliation cycle with counts (metrics + log event).
-func RecordReconcileCycle(ctx context.Context, started, stopped, skipped int) {
+// RecordReconcileCycle records a reconciliation cycle (metrics + log event).
+// The metric carries only the cycle count and the started attribute: stops
+// are applied asynchronously and skips are per-session decisions, so no
+// honest per-tick counts exist for them.
+func RecordReconcileCycle(ctx context.Context, started int) {
 	initInstruments()
 	inst.reconcileCycleTotal.Add(ctx, 1,
 		metric.WithAttributes(
 			attribute.Int("started", started),
-			attribute.Int("stopped", stopped),
-			attribute.Int("skipped", skipped),
 		),
 	)
 	emit(ctx, "reconcile.cycle", otellog.SeverityInfo,
 		otellog.Int("started", started),
-		otellog.Int("stopped", stopped),
-		otellog.Int("skipped", skipped),
 	)
 }
 
@@ -402,6 +430,22 @@ func RecordControllerLifecycle(ctx context.Context, event string) {
 	)
 	emit(ctx, "controller.lifecycle", otellog.SeverityInfo,
 		otellog.String("event", event),
+	)
+}
+
+// RecordSupervisorStarted records a supervisor startup with restart-cause
+// attribution (metrics + log event). previousExit classifies how the
+// previous supervisor instance exited: "clean", "crash", or "unknown".
+func RecordSupervisorStarted(ctx context.Context, previousExit string) {
+	initInstruments()
+	inst.supervisorTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("event", "started"),
+			attribute.String("previous_exit", previousExit),
+		),
+	)
+	emit(ctx, "supervisor.started", otellog.SeverityInfo,
+		otellog.String("previous_exit", previousExit),
 	)
 }
 
@@ -500,6 +544,28 @@ func RecordBDSlow(ctx context.Context, args []string, dir, agentID string) {
 		kvs = append(kvs, otellog.String("agent_id", event.AgentID))
 	}
 	emit(ctx, "bd.slow", otellog.SeverityWarn, kvs...)
+}
+
+// RecordCacheScanLarge records a beads-cache reconcile full scan whose
+// result size crossed the caller's warn threshold. The reconcile scan is
+// O(active beads) by design and is otherwise silent, so this event makes
+// store growth visible before it degrades every reconcile cycle. rig is the
+// cache's bead ID prefix; an empty prefix is recorded as "(no-prefix)" to
+// match the reconciler's success-log label, so prefix-less stores group
+// cleanly in telemetry backends. beadCount is the number of beads the scan
+// returned; threshold is the warn threshold that fired; elapsed is the
+// wall-clock duration of the backing list call.
+func RecordCacheScanLarge(ctx context.Context, rig string, beadCount, threshold int, elapsed time.Duration) {
+	rig = strings.TrimSpace(rig)
+	if rig == "" {
+		rig = "(no-prefix)"
+	}
+	emit(ctx, "beads.cache.scan_large", otellog.SeverityWarn,
+		otellog.String("rig", rig),
+		otellog.Int64("bead_count", int64(beadCount)),
+		otellog.Int64("threshold", int64(threshold)),
+		otellog.Int64("elapsed_ms", elapsed.Milliseconds()),
+	)
 }
 
 // ── Phase 2 recording functions ──────────────────────────────────────────

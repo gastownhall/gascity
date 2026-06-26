@@ -186,7 +186,7 @@ func newServer(state State, readOnly bool) *Server {
 // feature flags based on the city's daemon config. Called from New
 // and NewReadOnly so both modes observe the same flag state.
 func syncFeatureFlags(cfg *config.City) {
-	enabled := cfg != nil && cfg.Daemon.FormulaV2
+	enabled := cfg != nil && cfg.Daemon.FormulaV2Enabled()
 	if formula.IsFormulaV2Enabled() != enabled {
 		formula.SetFormulaV2Enabled(enabled)
 	}

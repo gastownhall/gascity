@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 16 built-in providers.
-	if len(providers) != 16 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 16", len(providers))
+	// Must have exactly 17 built-in providers.
+	if len(providers) != 17 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 17", len(providers))
 	}
-	if len(order) != 16 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 16", len(order))
+	if len(order) != 17 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 17", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -392,18 +392,15 @@ func TestBuiltinProvidersResumeFlags(t *testing.T) {
 	}
 }
 
-// TestBuiltinProvidersSessionIDFlag pins which providers populate
-// SessionIDFlag. Claude is the only provider with a documented "start a new
-// session with this id" flag (--session-id). Codex exposes session ids only
-// through `codex resume <id>` (a resume path, not a fresh-start path), so it
-// stays empty — populating it would make resolveSessionCommand emit
-// `codex --session-id <key>` on first start, which codex rejects.
+// TestBuiltinProvidersSessionIDFlag pins that built-in providers only populate
+// SessionIDFlag when their CLI supports caller-supplied fresh session IDs.
+// Claude and Codex expose session ids through resume paths, not fresh-start
+// creation flags; populating this field makes resolveSessionCommand emit an
+// unsupported first-start command and prevents hook-time provider session IDs
+// from becoming the durable session_key.
 func TestBuiltinProvidersSessionIDFlag(t *testing.T) {
 	providers := BuiltinProviders()
-	if got := providers["claude"].SessionIDFlag; got != "--session-id" {
-		t.Errorf("claude SessionIDFlag = %q, want --session-id", got)
-	}
-	for _, name := range []string{"codex", "gemini", "cursor", "copilot", "amp", "opencode", "auggie", "pi", "omp"} {
+	for _, name := range []string{"claude", "codex", "gemini", "cursor", "copilot", "amp", "opencode", "auggie", "pi", "omp"} {
 		if got := providers[name].SessionIDFlag; got != "" {
 			t.Errorf("%s SessionIDFlag = %q, want empty (no documented start-with-id flag)", name, got)
 		}
@@ -785,6 +782,56 @@ func TestProviderSessionCreateTransportBuiltinKiroStaysOnCLIByDefault(t *testing
 	}
 	if got := rp.ACPCommandString(); got != "kiro-cli acp --agent gascity" {
 		t.Fatalf("ACPCommandString() = %q, want explicit Kiro ACP command", got)
+	}
+}
+
+func TestProviderSessionCreateTransportBuiltinMimoCodeStaysOnCLIByDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		rp   ResolvedProvider
+	}{
+		{
+			name: "direct builtin name",
+			rp: ResolvedProvider{
+				Name:        "mimocode",
+				Command:     "mimo",
+				Args:        []string{"--never-ask-questions"},
+				SupportsACP: true,
+				ACPArgs:     []string{"acp"},
+			},
+		},
+		{
+			name: "builtin ancestor",
+			rp: ResolvedProvider{
+				Name:            "custom-mimocode",
+				BuiltinAncestor: "mimocode",
+				Command:         "mimo",
+				Args:            []string{"--never-ask-questions"},
+				SupportsACP:     true,
+				ACPArgs:         []string{"acp"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rp := tt.rp
+			if got := rp.ProviderSessionCreateTransport(); got != "" {
+				t.Fatalf("ProviderSessionCreateTransport() = %q, want empty default transport", got)
+			}
+			if got := ResolveSessionCreateTransport("", &rp); got != "" {
+				t.Fatalf("ResolveSessionCreateTransport(empty) = %q, want empty default transport", got)
+			}
+			if got := ResolveSessionCreateTransport("acp", &rp); got != "acp" {
+				t.Fatalf("ResolveSessionCreateTransport(acp) = %q, want acp", got)
+			}
+			if got := rp.CommandString(); got != "mimo --never-ask-questions" {
+				t.Fatalf("CommandString() = %q, want headless MiMo CLI command", got)
+			}
+			if got := rp.ACPCommandString(); got != "mimo acp" {
+				t.Fatalf("ACPCommandString() = %q, want explicit MiMo ACP command", got)
+			}
+		})
 	}
 }
 

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc hook --claim --json result",
+  "description": "One JSON record describing the routed-work claim result for a session startup hook.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "command",
+    "action",
+    "reason"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "command": {
+      "const": "hook"
+    },
+    "action": {
+      "enum": [
+        "work",
+        "drain"
+      ]
+    },
+    "reason": {
+      "enum": [
+        "claimed",
+        "existing_assignment",
+        "ready_assignment",
+        "no_work"
+      ]
+    },
+    "bead_id": {
+      "type": "string"
+    },
+    "assignee": {
+      "type": "string"
+    },
+    "route": {
+      "type": "string"
+    },
+    "continuation_assigned": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "drain_acknowledged": {
+      "type": "boolean"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "work"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "required": [
+          "bead_id",
+          "assignee"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "drain"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "const": "no_work"
+          }
+        }
+      }
+    }
+  ]
+}

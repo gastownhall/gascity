@@ -23,6 +23,9 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 source "$repo_root/scripts/lib/common.sh"
+# shellcheck source=lib/test-slice.sh
+source "$repo_root/scripts/lib/test-slice.sh"
+gc_test_slice_reexec "$repo_root/scripts/test-go-test-shard" "$@"
 
 timeout="${GO_TEST_TIMEOUT:-20m}"
 
@@ -100,7 +103,16 @@ if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
   go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
 fi
 
-list_output="$(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^Test' 2>&1)"
+# Capture the enumeration separately so a build/compile failure here surfaces
+# its output. `go test -list` builds the test binary; if that fails, the bare
+# assignment's non-zero status is swallowed by `set -e` (the script dies before
+# the "no tests discovered" branch below), producing an undebuggable empty
+# shard failure. Check the status explicitly and print what go printed.
+if ! list_output="$(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^Test' 2>&1)"; then
+  echo "go test -list failed for ${test_pkg} (build/compile error); output:" >&2
+  printf '%s\n' "$list_output" >&2
+  exit 1
+fi
 tests=()
 while IFS= read -r line; do
   [[ "$line" == Test* ]] || continue

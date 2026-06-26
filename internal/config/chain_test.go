@@ -376,8 +376,8 @@ func TestResolveProviderChain_KiroInheritsFromClaude(t *testing.T) {
 	if r.ResumeFlag != "--resume" {
 		t.Errorf("ResumeFlag = %q, want --resume (inherited from claude)", r.ResumeFlag)
 	}
-	if r.SessionIDFlag != "--session-id" {
-		t.Errorf("SessionIDFlag = %q, want --session-id (inherited from claude)", r.SessionIDFlag)
+	if r.SessionIDFlag != "" {
+		t.Errorf("SessionIDFlag = %q, want empty (inherited from modern claude)", r.SessionIDFlag)
 	}
 	// PermissionModes inherited from builtin claude.
 	if r.PermissionModes == nil {

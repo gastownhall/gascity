@@ -8,13 +8,17 @@
 # producing false latency WARNs (and MEDIUM advisory mail) at a 1s threshold.
 
 # _now_ms_plausible VALUE — exit 0 when VALUE looks like an epoch-millisecond
-# reading: all digits, at least 13 of them (epoch-ms is 13 digits from
-# 2001-09-09 through 2286-11-20).
+# reading: all digits, 13 or 14 of them (epoch-ms is 13 digits from 2001-09-09
+# through 2286-11-20, 14 thereafter). The upper bound rejects a 19-digit
+# epoch-NANOSECOND reading, which a 'date +%s%3N' that ignores the %3 width
+# (some coreutils builds, e.g. WSL2) emits — otherwise it would pass as ms and
+# inflate latency ~1e6×, falsely tripping the advisory threshold. Over-long
+# readings fall through to the perl/python3 fallbacks, which return real ms.
 _now_ms_plausible() {
   case "${1:-}" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  [ "${#1}" -ge 13 ]
+  [ "${#1}" -ge 13 ] && [ "${#1}" -le 14 ]
 }
 
 # now_ms — echo the current time in epoch milliseconds.

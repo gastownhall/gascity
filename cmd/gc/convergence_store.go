@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -19,11 +20,13 @@ import (
 // It maintains an in-memory index of active convergence beads (bead ID →
 // target agent) to avoid O(n) scans on every tick. The index is populated
 // once at startup and maintained on state transitions via SetMetadata.
-// No mutex is needed — single-writer event loop.
+// No mutex is needed — single-writer event loop. indexReady is an atomic
+// flag for safe cross-goroutine reads of the ready state (e.g. test pollers).
 type convergenceStoreAdapter struct {
 	store              beads.Store
 	formulaSearchPaths []string          // search paths for formula compilation in PourWisp
 	activeIndex        map[string]string // bead ID → target agent; nil until populateIndex
+	indexReady         atomic.Bool       // true once populateIndex has completed
 }
 
 var _ convergence.Store = (*convergenceStoreAdapter)(nil)
@@ -50,6 +53,7 @@ func (a *convergenceStoreAdapter) populateIndex() error {
 		}
 	}
 	a.activeIndex = idx
+	a.indexReady.Store(true)
 	return nil
 }
 
@@ -185,10 +189,10 @@ func (a *convergenceStoreAdapter) pourWisp(parentID, formula, idempotencyKey str
 	}
 	isGraphV2, _, err := graphv2.IsGraphV2Formula(formula, a.formulaSearchPaths)
 	if err != nil {
-		return "", fmt.Errorf("checking graph.v2 contract for convergence wisp %q: %w", formula, err)
+		return "", fmt.Errorf("checking formulas v2 contract for convergence wisp %q: %w", formula, err)
 	}
 	if isGraphV2 {
-		return "", fmt.Errorf("convergence wisps do not support graph.v2 formula %q; use a non-graph formula until convergence has an explicit input convoy target", formula)
+		return "", fmt.Errorf("convergence wisps do not support v2 formula %q; use a v1 formula until convergence has an explicit input convoy target", formula)
 	}
 	result, err := molecule.Cook(context.Background(), a.store, formula, a.formulaSearchPaths, molecule.Options{
 		Vars:           cookVars,

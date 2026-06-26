@@ -19,8 +19,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -83,13 +83,21 @@ When target is omitted, the bead's rig prefix is used to look up the rig's
 default_sling_target from config. Requires --formula to have an explicit target.
 Inline text also requires an explicit target.
 
-With --formula, a wisp (ephemeral molecule) is instantiated from the formula
-and its root bead is routed to the target.
+With --formula, the formula is instantiated and its root bead is routed to
+the target. v2 formulas — those declaring [requires]
+formula_compiler = ">=2.0.0" — start a workflow; v1 formulas
+instantiate a wisp (ephemeral molecule). A v2 formula that references
+{{convoy_id}} or contains a drain step requires a target convoy: route it
+with gc sling <target> <bead> --on <formula>, or attach it with gc formula
+cook --attach. Formula slings to a pool (multi-session) target are rejected
+unless the compiled root is Ready-visible — a v2 workflow root or a
+root-only wisp. See docs/reference/specs/formula-spec-v2.md for the formula
+format and contract details.
 
 Examples:
   gc sling my-rig/claude BL-42              # route existing bead
   gc sling my-rig/claude "write a README"   # create bead from text, then route
-  gc sling mayor code-review --formula      # instantiate formula, route wisp
+  gc sling mayor code-review --formula      # instantiate formula, route its root
   echo "fix login" | gc sling mayor --stdin # read bead text from stdin`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -130,7 +138,7 @@ Examples:
 	}
 	cmd.Flags().BoolVarP(&formula, "formula", "f", false, "treat argument as formula name")
 	cmd.Flags().BoolVar(&nudge, "nudge", false, "nudge target after routing")
-	cmd.Flags().BoolVar(&force, "force", false, "suppress warnings, allow cross-rig routing, allow graph workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store")
+	cmd.Flags().BoolVar(&force, "force", false, "suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store")
 	cmd.Flags().StringVarP(&title, "title", "t", "", "wisp root bead title (with --formula or --on)")
 	cmd.Flags().StringArrayVar(&vars, "var", nil, "variable substitution for formula (key=value, repeatable)")
 	cmd.Flags().StringVar(&merge, "merge", "", "merge strategy: direct, mr, or local")
@@ -141,8 +149,8 @@ Examples:
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "show what would be done without executing")
 	cmd.Flags().BoolVar(&noFormula, "no-formula", false, "suppress default formula (route raw bead)")
 	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read bead text from stdin (first line = title, rest = description)")
-	cmd.Flags().StringVar(&scopeKind, "scope-kind", "", "logical workflow scope kind for compiler-v2 launches")
-	cmd.Flags().StringVar(&scopeRef, "scope-ref", "", "logical workflow scope ref for compiler-v2 launches")
+	cmd.Flags().StringVar(&scopeKind, "scope-kind", "", "logical workflow scope kind for formulas v2 launches")
+	cmd.Flags().StringVar(&scopeRef, "scope-ref", "", "logical workflow scope ref for formulas v2 launches")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output dispatch result in JSON format")
 	cmd.MarkFlagsMutuallyExclusive("formula", "on")
 	cmd.MarkFlagsMutuallyExclusive("no-formula", "formula")
@@ -556,10 +564,21 @@ func populateSlingDepsCallbacks(deps *slingDeps) {
 	deps.Notify = &cliNotifier{}
 	deps.DirectSessionResolver = cliDirectSessionResolver
 	deps.Router = cliBeadRouter{deps: deps}
+	// Wire the rig→city control-dispatcher fallback (#3454) into the sling
+	// graph-routing path. deps.CityPath is read lazily at routing time, and the
+	// closure short-circuits before opening a store when no city.toml exists, so
+	// it never spins up a managed Dolt backend on a bare working dir.
+	deps.ControlDispatcherRuntimeMissing = func(qualifiedName string) bool {
+		return controlDispatcherSessionRuntimeMissing(deps.CityPath, qualifiedName)
+	}
 }
 
 func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
 	if cfg == nil {
+		return "", false, nil
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
 		return "", false, nil
 	}
 	if cityName == "" {
@@ -853,6 +872,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 			SkipPoke:   opts.SkipPoke,
 			DryRun:     opts.DryRun,
 			InlineText: opts.InlineText,
+			NoFormula:  opts.NoFormula,
 		}, querier)
 	}
 	// Print warnings before error check so they're visible on failure.
@@ -1135,89 +1155,6 @@ func printCrossRigSection(w func(string), beadID string, a config.Agent, cfg *co
 	}
 }
 
-func graphWorkflowRouteVars(recipe *formula.Recipe, provided map[string]string) map[string]string {
-	routeVars := make(map[string]string, len(provided))
-	if recipe != nil {
-		for name, def := range recipe.Vars {
-			if def != nil && def.Default != nil {
-				routeVars[name] = *def.Default
-			}
-		}
-	}
-	maps.Copy(routeVars, provided)
-	return routeVars
-}
-
-func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]string, routedTo, sessionName string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
-	if recipe == nil {
-		return fmt.Errorf("workflow recipe is nil")
-	}
-	defaultRoute := graphRouteBinding{QualifiedName: routedTo}
-	if sessionName != "" {
-		defaultRoute.SessionName = sessionName
-	} else {
-		defaultRoute.MetadataOnly = true
-	}
-	routingRigContext := graphRouteRigContext(defaultRoute.QualifiedName)
-	controlRoute, err := controlDispatcherBinding(store, cityName, cfg, routingRigContext)
-	if err != nil {
-		return err
-	}
-	stepByID := make(map[string]*formula.RecipeStep, len(recipe.Steps))
-	stepAlias := make(map[string]string, len(recipe.Steps))
-	for i := range recipe.Steps {
-		stepByID[recipe.Steps[i].ID] = &recipe.Steps[i]
-		if short, ok := strings.CutPrefix(recipe.Steps[i].ID, recipe.Name+"."); ok {
-			stepAlias[short] = recipe.Steps[i].ID
-		}
-	}
-	depsByStep := make(map[string][]string, len(recipe.Deps))
-	for _, dep := range recipe.Deps {
-		if dep.Type != "blocks" && dep.Type != "waits-for" && dep.Type != "conditional-blocks" {
-			continue
-		}
-		depsByStep[dep.StepID] = append(depsByStep[dep.StepID], dep.DependsOnID)
-	}
-	bindingCache := make(map[string]graphRouteBinding, len(recipe.Steps))
-	resolving := make(map[string]bool, len(recipe.Steps))
-	for i := range recipe.Steps {
-		step := &recipe.Steps[i]
-		if step.Metadata == nil {
-			step.Metadata = make(map[string]string)
-		} else {
-			step.Metadata = maps.Clone(step.Metadata)
-		}
-		if step.IsRoot {
-			// Mirror of graphroute.DecorateGraphWorkflowRecipe: the root persists
-			// gc.routed_to (the sole canonical key the worker claim path reads)
-			// so a pool-routed root is claimable rather than idle-reaped
-			// (fixes #2763; gc.run_target retired as a wire field — ga-eld2x).
-			step.Metadata[beadmeta.RoutedToMetadataKey] = routedTo
-			delete(step.Metadata, beadmeta.RunTargetMetadataKey)
-			if sessionName != "" {
-				// Mirror graphroute's root #2843 session stamp so this CLI-local
-				// decorator stays in sync. Non-root steps already delegate to
-				// graphroute via assignGraphStepRoute.
-				step.Metadata[beadmeta.SessionNameMetadataKey] = sessionName
-			}
-			continue
-		}
-		if sling.IsWorkflowTopologyKind(step.Metadata[beadmeta.KindMetadataKey]) {
-			continue
-		}
-		binding, err := resolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, routeVars, defaultRoute, routingRigContext, store, cityName, cityPath, cfg)
-		if err != nil {
-			return err
-		}
-		if isControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
-			assignGraphStepRoute(step, binding, &controlRoute)
-			continue
-		}
-		assignGraphStepRoute(step, binding, nil)
-	}
-	return nil
-}
-
 func workflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.City) string {
 	if strings.TrimSpace(storeDir) == "" || strings.TrimSpace(cityPath) == "" {
 		return ""
@@ -1243,8 +1180,8 @@ func workflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.Cit
 	return ""
 }
 
-// graphRouteBinding is an alias for sling.GraphRouteBinding.
-type graphRouteBinding = sling.GraphRouteBinding
+// graphRouteBinding is an alias for graphroute.GraphRouteBinding.
+type graphRouteBinding = graphroute.GraphRouteBinding
 
 type graphStepTarget struct {
 	value        string
@@ -1263,7 +1200,7 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		return binding, nil
 	}
 	if resolving[stepID] {
-		return graphRouteBinding{}, fmt.Errorf("graph.v2 routing cycle while resolving %s", stepID)
+		return graphRouteBinding{}, fmt.Errorf("formulas v2 routing cycle while resolving %s", stepID)
 	}
 	step := stepByID[stepID]
 	if step == nil {
@@ -1354,10 +1291,10 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	}
 
 	if cfg == nil {
-		return graphRouteBinding{}, fmt.Errorf("graph.v2 routing for %s requires config", stepID)
+		return graphRouteBinding{}, fmt.Errorf("formulas v2 routing for %s requires config", stepID)
 	}
 	if target.fromAssignee {
-		binding, ok, err := resolveGraphDirectSessionBinding(store, cityName, cityPath, cfg, target.value, rigContext)
+		binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(store, cityName, cfg, target.value, rigContext, cliGraphrouteDeps(cityPath))
 		if err != nil {
 			return graphRouteBinding{}, fmt.Errorf("step %s: %w", stepID, err)
 		}
@@ -1369,7 +1306,7 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	}
 	agentCfg, ok := resolveAgentIdentity(cfg, target.value, rigContext)
 	if !ok {
-		return graphRouteBinding{}, fmt.Errorf("step %s: unknown graph.v2 target %q", stepID, target.value)
+		return graphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q", stepID, target.value)
 	}
 	binding := graphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
 	if agentCfg.SupportsInstanceExpansion() {
@@ -1398,84 +1335,6 @@ func graphStepRouteTarget(step *formula.RecipeStep, routeVars map[string]string)
 		return graphStepTarget{}
 	}
 	return graphStepTarget{value: strings.TrimSpace(formula.Substitute(step.Metadata[beadmeta.RunTargetMetadataKey], routeVars))}
-}
-
-func resolveGraphDirectSessionBinding(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (graphRouteBinding, bool, error) {
-	target = strings.TrimSpace(target)
-	if store == nil || target == "" {
-		return graphRouteBinding{}, false, nil
-	}
-	if cfg == nil {
-		id, err := session.ResolveSessionID(store, target)
-		if err != nil {
-			return graphRouteBinding{}, false, nil
-		}
-		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
-			return graphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
-		}
-		return graphRouteBinding{}, false, nil
-	}
-	if cityName == "" {
-		cityName = config.EffectiveCityName(cfg, filepath.Base(cityPath))
-	}
-	spec, ok, err := resolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
-	if err != nil {
-		return graphRouteBinding{}, false, err
-	}
-	if !ok {
-		// Exact session bead IDs are unambiguous and must win even when they
-		// collide with a config target name.
-		if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
-			if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
-				return graphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
-			}
-		}
-		if _, ok := resolveAgentIdentity(cfg, target, rigContext); ok {
-			return graphRouteBinding{}, false, nil
-		}
-		if id, err := session.ResolveSessionID(store, target); err == nil {
-			if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
-				return graphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
-			}
-		}
-		return graphRouteBinding{}, false, nil
-	}
-	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, spec.Identity)
-	if err != nil {
-		return graphRouteBinding{}, false, err
-	}
-	return graphRouteBinding{DirectSessionID: id, RigContext: graphRouteRigContext(spec.Identity)}, true, nil
-}
-
-func graphRouteRigContext(route string) string {
-	route = strings.TrimSpace(route)
-	if route == "" {
-		return ""
-	}
-	idx := strings.LastIndex(route, "/")
-	if idx <= 0 {
-		return ""
-	}
-	return route[:idx]
-}
-
-func graphDirectSessionRigContext(target, rigContext string, bead beads.Bead) string {
-	if rigContext = strings.TrimSpace(rigContext); rigContext != "" {
-		return rigContext
-	}
-	if rigContext = graphRouteRigContext(target); rigContext != "" {
-		return rigContext
-	}
-	for _, candidate := range []string{
-		bead.Metadata[namedSessionIdentityMetadata],
-		bead.Metadata["alias"],
-		bead.Metadata["template"],
-	} {
-		if rigContext = graphRouteRigContext(candidate); rigContext != "" {
-			return rigContext
-		}
-	}
-	return ""
 }
 
 // targetType returns "pool" or "agent" for telemetry attributes.

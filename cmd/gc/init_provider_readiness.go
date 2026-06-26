@@ -30,6 +30,7 @@ type initFinalizeOptions struct {
 	skipProviderReadiness bool
 	showProgress          bool
 	commandName           string
+	noStart               bool
 }
 
 type initProviderTarget struct {
@@ -39,7 +40,7 @@ type initProviderTarget struct {
 }
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
-	MaterializeBuiltinPacks(cityPath) //nolint:errcheck // best-effort; needed before dependency and provider checks
+	EnsureBuiltinRuntimeAssets(cityPath, os.Stderr) //nolint:errcheck // best-effort; needed before dependency and provider checks
 
 	// Check hard binary dependencies before handing off to the supervisor.
 	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
@@ -108,6 +109,17 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err)        //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, `hint: run "gc doctor" for diagnostics`) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if opts.noStart {
+		if opts.showProgress {
+			logInitProgress(stdout, 7, "Skipping supervisor startup")
+		} else if stdout != nil {
+			fmt.Fprintln(stdout, "Skipping supervisor startup.") //nolint:errcheck // best-effort stdout
+		}
+		if stdout != nil {
+			fmt.Fprintf(stdout, "Next: cd %s && gc start\n", shellQuotePath(cityPath)) //nolint:errcheck // best-effort stdout
+		}
+		return 0
 	}
 	if opts.showProgress {
 		logInitProgress(stdout, 7, "Registering city with supervisor")

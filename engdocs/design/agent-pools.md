@@ -11,8 +11,8 @@ title: "Agent Pools & Autoscaling"
 | Supersedes | — |
 
 Design document for elastic agent pools in Gas City. Covers the full
-picture: upscaling, downscaling, drain mode, and the ZFC-compliant
-scaling signal mechanism.
+picture: upscaling, downscaling, drain mode, and the scaling signal
+mechanism that keeps judgment out of Go.
 
 ## Problem
 
@@ -119,9 +119,9 @@ signal is a **user-supplied shell command** (field name: `check`):
 - Clamps to `[min, max]`
 - Starts or drains agents to match
 
-This is ZFC-compliant: all policy is in the shell command (user-supplied
-config), Go is the state machine that executes it. No judgment calls in
-Go code.
+This keeps judgment out of Go: all policy is in the shell command
+(user-supplied config), Go is the state machine that executes it. No
+judgment calls in Go code.
 
 ### Examples
 
@@ -139,9 +139,9 @@ check = "/path/to/my-scaler.sh"
 check = "echo $(( $(bd ready --json | jq length) + $(bd list --status hooked --json | jq length) ))"
 ```
 
-### ZFC analysis
+### Keeping judgment out of Go
 
-| Concern | Where | ZFC role |
+| Concern | Where | Role |
 |---------|-------|----------|
 | min/max bounds | TOML config | User-supplied policy |
 | Scaling signal | Shell command in config | User-supplied policy |
@@ -181,9 +181,9 @@ desired count, starts new agents if `desired > current`.
 5. Each new agent gets: name, session, prompt, env, hook
 ```
 
-New agents immediately enter the GUPP loop: check hook, claim work,
-execute, repeat. The prompt template tells them what to do. No framework
-intelligence needed.
+New agents immediately enter the work loop: if you find work on your
+hook, you run it — check hook, claim work, execute, repeat. The prompt
+template tells them what to do. No framework intelligence needed.
 
 ## Downscaling (full design — implement later)
 
@@ -214,8 +214,8 @@ run `gc done`, and exit. Do NOT claim new beads.
 {{end}}
 ```
 
-This is ZFC: the agent decides how to wrap up (cognition). Go just
-flips the flag (transport).
+This keeps judgment out of Go: the agent decides how to wrap up
+(cognition). Go just flips the flag (transport).
 
 ### The hard deadline
 
@@ -224,7 +224,8 @@ If an agent ignores the drain signal or a formula runs too long:
 1. `drain_timeout` expires (default 15m)
 2. Go force-kills the session
 3. Any hooked bead is re-queued (unhook without close)
-4. Another agent picks it up (NDI — work survives sessions)
+4. Another agent picks it up (the system converges because work
+   persists — work survives sessions)
 
 ### Scale-down sequence
 

@@ -12,17 +12,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/testfixtures/reviewworkflows"
 )
 
 // reviewWorkflowTimeout bounds waits for review-formula workflow beads to
 // close. Successful runs on CI average ~5 min per test, but runner variance
-// is high: the transient-retry test (soft-fail after 3 attempts) runs 3
-// full polecat cycles back-to-back, each ~3 min on a busy runner, plus
-// synthesis. The earlier 12-minute budget left no headroom and produced
-// intermittent timeout flakes; 18 min keeps a healthy margin for runner
-// contention without letting a genuinely stuck workflow loiter.
-const reviewWorkflowTimeout = 18 * time.Minute
+// is high: mol-personal-work-v2 has 18+ steps across two Ralph loops (6
+// polecat in design-review, 2 in code-review), taking ~20 min on busy
+// runners. The transient-retry tests add extra polecat cycles on top. The
+// earlier 12-minute budget produced intermittent flakes; 18 min still left
+// no headroom for personal-work and retry tests (~38 s from done at cutoff
+// in CI run 27788351365). 24 min leaves ~4 min margin while staying under
+// the 30-minute job ceiling.
+const reviewWorkflowTimeout = 24 * time.Minute
 
 // reviewWorkflowSlingTimeout only covers formula instantiation and convoy
 // routing. The personal-work graph is large enough that bd-backed graph apply
@@ -44,7 +47,7 @@ ROOT_ID=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].meta
 [ -n "$ATTEMPT" ] && [ -n "$ROOT_ID" ] || exit 1
 
 VERDICT=$(
-  gc bd list --all --json --limit=0 2>/dev/null |
+  gc bd list --all --json --limit=0 --metadata-field "gc.root_bead_id=$ROOT_ID" 2>/dev/null |
     jq -r --arg attempt "$ATTEMPT" --arg root "$ROOT_ID" '
       [
         .[]
@@ -78,7 +81,7 @@ ROOT_ID=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].meta
 [ -n "$ATTEMPT" ] && [ -n "$ROOT_ID" ] || exit 1
 
 VERDICT=$(
-  gc bd list --all --json --limit=0 2>/dev/null |
+  gc bd list --all --json --limit=0 --metadata-field "gc.root_bead_id=$ROOT_ID" 2>/dev/null |
     jq -r --arg attempt "$ATTEMPT" --arg root "$ROOT_ID" '
       [
         .[]
@@ -112,7 +115,7 @@ ROOT_ID=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].meta
 [ -n "$ATTEMPT" ] && [ -n "$ROOT_ID" ] || exit 1
 
 VERDICT=$(
-  gc bd list --all --json --limit=0 2>/dev/null |
+  gc bd list --all --json --limit=0 --metadata-field "gc.root_bead_id=$ROOT_ID" 2>/dev/null |
     jq -r --arg attempt "$ATTEMPT" --arg root "$ROOT_ID" '
       [
         .[]
@@ -348,6 +351,9 @@ on_exhausted = "hard_fail"
 func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]string) string {
 	t.Helper()
 	env := newIsolatedCommandEnv(t, true)
+	// Reduce bd probe timeout so pool respawn gaps don't stall CI runners.
+	// 30s is well above the floor (5s) and well below the 180s production default.
+	env = append(env, "GC_BD_PROBE_TIMEOUT=30s")
 
 	var cityName string
 	if usingSubprocess() {
@@ -358,9 +364,19 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
 	startCommand := workflowAgentStartCommand(mode, extraEnv)
-	polecatScaleCheck := `ready_json=$(bd ready --include-ephemeral --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=0) && printf '%s\n' "$ready_json" | jq 'length'`
+	// The scale_check only needs to know whether routed polecat work exists up
+	// to the pool ceiling (max_active_sessions=3), so bound it with --limit=8
+	// instead of an unbounded --limit=0 scan. patrol_interval is 1s (not a
+	// sub-second cadence) so patrol-driven store reads — including this
+	// metadata-filtered probe, which scale_check excludes from the
+	// demand-snapshot cache — stay at ~1/s rather than ~10/s. Together these
+	// keep the single managed Dolt server from saturating under the
+	// design-review fan-out. Polecat work created by the fan-out is discovered
+	// by the next patrol scale_check (~1s here), well within the workflow's time
+	// budget.
+	polecatScaleCheck := `ready_json=$(bd ready --include-ephemeral --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=8) && printf '%s\n' "$ready_json" | jq 'length'`
 	cityToml := fmt.Sprintf(
-		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n"+
+		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"1s\"\n\n"+
 			"[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n"+
 			"[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n\n"+
 			"[[agent]]\nname = \"polecat\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\nscale_check = %q\n",
@@ -558,9 +574,21 @@ func dumpReviewFormulaCityState(t *testing.T, cityDir string) {
 	t.Helper()
 	out, _ := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
 	t.Logf("all beads:\n%s", out)
+	sessionList, _ := gcDolt(cityDir, "session", "list")
+	t.Logf("sessions:\n%s", sessionList)
 	if traceFile := filepath.Join(cityDir, "graph-workflow-trace.log"); fileExists(traceFile) {
 		data, _ := os.ReadFile(traceFile)
 		t.Logf("agent trace:\n%s", string(data))
+	}
+	for _, traceFile := range []string{
+		citylayout.ControlDispatcherTraceDefaultPath(cityDir),
+		citylayout.ControlDispatcherTraceDefaultPathFor(cityDir, "core.control-dispatcher"),
+	} {
+		if !fileExists(traceFile) {
+			continue
+		}
+		data, _ := os.ReadFile(traceFile)
+		t.Logf("control dispatcher trace %s:\n%s", traceFile, string(data))
 	}
 }
 

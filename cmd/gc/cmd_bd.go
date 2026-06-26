@@ -79,6 +79,11 @@ rig directory to find the correct .beads database. This command resolves
 the rig automatically from the --rig flag or by detecting the bead prefix
 in the arguments.
 
+Use --rig <name> to pin a specific rig store, or --city <path> to pin the
+city (HQ) store. An explicit --city is a true scope override: it forces the
+city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
+deliberate city-scoped query is never silently downgraded to a rig store.
+
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat <issue-id>" subcommand, which rewrites to
 "update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC now>"
@@ -93,6 +98,7 @@ auto-export behavior, invoke bd directly.`,
   gc bd --rig my-project create "New task"
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
+  gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
   gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
   gc bd release-if-current my-project-abc worker-1`,
 		DisableFlagParsing: true,
@@ -212,7 +218,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs)
+	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "")
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -229,6 +235,59 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {
 			fmt.Fprintf(stderr, "  hint: %s\n", hint) //nolint:errcheck // best-effort stderr
 		}
+		return 1
+	}
+
+	// Pre-flight exact-ID guard for write-mutating subcommands (gcy-g4o).
+	// bd's fuzzy/substring resolver can silently match a longer ID that
+	// contains the supplied ID as a substring (e.g. "gcy-dv7" → "gcy-wisp-dv78").
+	// Verify via BdStore.Get — which already enforces an exact-ID match —
+	// before forwarding any mutation to the bd subprocess.
+	//
+	// Fail-closed: if the arg scanner reports ambiguity (unrecognized
+	// value-consuming flag), the command is rejected rather than forwarded
+	// unguarded.
+	//
+	// Tradeoff: only a genuine ErrIDCollision (bd returned a *different* bead
+	// than requested) blocks the write. ErrNotFound and store-unavailable are
+	// non-fatal — the write falls through to bd, which will produce its own
+	// error if the bead truly does not exist. This preserves correctness for
+	// legitimate flows (heartbeat metadata writes, silent-fallback paths,
+	// ephemeral/wisp rows, projection-lag writes) that proceed even when the
+	// bead isn't yet visible through the read seam.
+	//
+	// Note: gc bd show (read passthrough) does NOT have this guard and still
+	// substring-resolves. That is intentional — reads are non-destructive.
+	if writeIDs, writeOK, ambiguous := bdMutationWriteIDs(bdArgs); writeOK {
+		if ambiguous {
+			fmt.Fprintf(stderr, "gc bd: cannot safely verify bead IDs (unrecognized flag in args %v); aborting to prevent substring-resolution mutation of the wrong bead\n", bdArgs) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if len(writeIDs) > 0 {
+			store, storeErr := openStoreAtForCity(target.ScopeRoot, cityPath)
+			// Store-unavailable: we cannot verify, but we must not block
+			// legitimate writes. Fall through; bd will error on actual problems.
+			if storeErr == nil {
+				for _, id := range writeIDs {
+					_, getErr := store.Get(id)
+					if errors.Is(getErr, beads.ErrIDCollision) {
+						// bd resolved a different bead — block the write to prevent
+						// mutating the wrong bead via substring resolution.
+						fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
+						return 1
+					}
+					// ErrNotFound or any other error: bead may be absent, ephemeral,
+					// or the read seam differs from the write seam — fall through.
+				}
+			}
+		}
+	}
+
+	// Work-record close gate (ADR-0009): a close routed through the SDK seam
+	// must satisfy the typed work-record contract (gc.work_outcome present;
+	// shipped ⇒ gc.work_commit reachable on gc.work_branch). Warn-only by default;
+	// blocks the close only when GC_WORK_RECORD_ENFORCE is set.
+	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, stderr) {
 		return 1
 	}
 
@@ -314,6 +373,212 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 	return value == "" || strings.IndexFunc(value, unicode.IsSpace) >= 0
 }
 
+// bdMutationWriteIDs extracts all positional bead IDs from a bd write-mutation
+// command (update, close, reopen, delete) and reports whether the scan was
+// unambiguous.
+//
+// Returns:
+//   - ids: all positional (non-flag) tokens after the subcommand; may be empty.
+//   - ok: false if args is empty or the subcommand is not a write-mutation.
+//   - ambiguous: true if the scanner encountered an unrecognized flag that
+//     might consume the next argument as its value. In that case the caller
+//     must fail-closed — forwarding the command unguarded risks the original
+//     substring-resolution bug (gcy-g4o).
+//
+// The scanner has complete knowledge of every value-consuming flag for each
+// subcommand (sourced from `bd <sub> --help`). Unknown flags that start with
+// "-" and do not contain "=" are treated as potentially value-consuming, which
+// triggers ambiguous=true. Boolean flags (no value) are fine to ignore.
+// The "--" terminator is respected: everything after it is positional.
+//
+// All returned IDs must be verified via BdStore.Get (exact-ID guard) before
+// the mutation is forwarded to the bd subprocess.
+func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
+	if len(args) == 0 {
+		return nil, false, false
+	}
+	sub := args[0]
+	switch sub {
+	case "update", "close", "reopen", "delete":
+	default:
+		return nil, false, false
+	}
+
+	// valueFlags is the complete set of flags that consume the next argument as
+	// their value for this subcommand, in both long and short form.
+	// Sourced from `bd <sub> --help` (2026-06-10).
+	valueFlags := bdSubcmdValueFlags(sub)
+
+	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags
+	// not in either set trigger ambiguous=true.
+	boolFlags := bdSubcmdBoolFlags(sub)
+
+	positional := false // true after "--"
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if positional {
+			if arg != "" {
+				ids = append(ids, arg)
+			}
+			continue
+		}
+		if arg == "--" {
+			positional = true
+			continue
+		}
+		if !strings.HasPrefix(arg, "-") {
+			// Positional token — a bead ID (or batch of IDs).
+			if arg != "" {
+				ids = append(ids, arg)
+			}
+			continue
+		}
+		// Flag token.
+		// --flag=value form: value is embedded, no next-arg consumed.
+		if strings.Contains(arg, "=") {
+			continue
+		}
+		// Strip leading dashes to get the flag name for lookup.
+		flagName := strings.TrimLeft(arg, "-")
+		// Reconstruct the canonical long or short form for set membership.
+		longForm := "--" + flagName
+		shortForm := "-" + flagName // only meaningful when flagName is 1 char
+
+		if valueFlags[longForm] || (len(flagName) == 1 && valueFlags[shortForm]) {
+			// Known value-consuming flag: skip its value argument.
+			i++
+			continue
+		}
+		if boolFlags[longForm] || (len(flagName) == 1 && boolFlags[shortForm]) {
+			// Known boolean flag: no value to skip.
+			continue
+		}
+		// Unknown flag. It might consume a value argument that looks like a
+		// bead ID. Fail-closed: report ambiguity so the caller can reject.
+		return nil, true, true
+	}
+	return ids, true, false
+}
+
+// bdSubcmdValueFlags returns the set of value-consuming flag names (in
+// "--long" / "-s" form) for the given bd write-mutation subcommand.
+// Sourced from `bd <sub> --help` output (2026-06-10).
+func bdSubcmdValueFlags(sub string) map[string]bool {
+	// Global flags shared by all bd subcommands that take a value.
+	global := map[string]bool{
+		"--actor": true, "--db": true, "--directory": true, "-C": true,
+		"--dolt-auto-commit": true,
+	}
+	var subFlags map[string]bool
+	switch sub {
+	case "update":
+		subFlags = map[string]bool{
+			"--acceptance": true,
+			"--add-label":  true, "--append-notes": true,
+			"-a": true, "--assignee": true,
+			"--await-id":  true,
+			"--body-file": true,
+			"--defer":     true,
+			"-d":          true, "--description": true,
+			"--design": true, "--design-file": true,
+			"--due": true,
+			"-e":    true, "--estimate": true,
+			"--external-ref": true,
+			"--metadata":     true,
+			"--notes":        true,
+			"--parent":       true,
+			"-p":             true, "--priority": true,
+			"--remove-label": true,
+			"--session":      true,
+			"--set-labels":   true,
+			"--set-metadata": true,
+			"-s":             true, "--status": true,
+			"-t": true, "--type": true,
+			"--title":          true,
+			"--spec-id":        true,
+			"--unset-metadata": true,
+		}
+	case "close":
+		subFlags = map[string]bool{
+			"-r": true, "--reason": true,
+			"--reason-file": true,
+			"--session":     true,
+		}
+	case "reopen":
+		subFlags = map[string]bool{
+			"-r": true, "--reason": true,
+		}
+	case "delete":
+		subFlags = map[string]bool{
+			"--from-file": true,
+		}
+	}
+	merged := make(map[string]bool, len(global)+len(subFlags))
+	for k := range global {
+		merged[k] = true
+	}
+	for k := range subFlags {
+		merged[k] = true
+	}
+	return merged
+}
+
+// bdSubcmdBoolFlags returns the set of boolean (no-value) flag names for the
+// given bd write-mutation subcommand.
+// Sourced from `bd <sub> --help` output (2026-06-10).
+func bdSubcmdBoolFlags(sub string) map[string]bool {
+	// Global boolean flags shared by all bd subcommands.
+	global := map[string]bool{
+		"--global": true, "--ignore-schema-skew": true,
+		"--json": true, "--profile": true,
+		"-q": true, "--quiet": true,
+		"--readonly": true, "--sandbox": true,
+		"-v": true, "--verbose": true,
+		"-h": true, "--help": true,
+	}
+	var subFlags map[string]bool
+	switch sub {
+	case "update":
+		subFlags = map[string]bool{
+			"--allow-empty-description": true,
+			"--claim":                   true, "--ephemeral": true,
+			"--history": true, "--no-history": true,
+			"--persistent": true, "--stdin": true,
+		}
+	case "close":
+		subFlags = map[string]bool{
+			"--claim-next": true, "--continue": true,
+			"-f": true, "--force": true,
+			"--no-auto": true, "--suggest-next": true,
+		}
+	case "reopen":
+		subFlags = map[string]bool{}
+	case "delete":
+		subFlags = map[string]bool{
+			"--cascade": true, "--dry-run": true,
+			"-f": true, "--force": true,
+		}
+	}
+	merged := make(map[string]bool, len(global)+len(subFlags))
+	for k := range global {
+		merged[k] = true
+	}
+	for k := range subFlags {
+		merged[k] = true
+	}
+	return merged
+}
+
+// bdMutationWriteID is a compatibility shim retained for callers that only
+// need the first ID. Prefer bdMutationWriteIDs for new code.
+func bdMutationWriteID(args []string) (string, bool) {
+	ids, ok, ambiguous := bdMutationWriteIDs(args)
+	if !ok || ambiguous || len(ids) == 0 {
+		return "", false
+	}
+	return ids[0], true
+}
+
 func doBdReleaseIfCurrent(cityPath string, target execStoreTarget, id, expectedAssignee string, stdout, stderr io.Writer) int {
 	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
 	if err != nil {
@@ -394,8 +659,8 @@ func extractRigFlag(args []string) (string, []string) {
 }
 
 // resolveBdScopeTarget determines the canonical scope root for a bd command.
-// Priority: explicit rig name > bead prefix auto-detection > enclosing rig > city root.
-func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string) (execStoreTarget, error) {
+// Priority: explicit rig name > explicit city > bead prefix auto-detection > GC_RIG env > enclosing rig > city root.
+func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string, cityExplicit bool) (execStoreTarget, error) {
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if rigName != "" {
 		rig, ok := rigByName(cfg, rigName)
@@ -409,6 +674,16 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	}
 
 	cityTarget := bdCityScopeTarget(cityPath, cfg)
+
+	// An explicit --city pins the city store, symmetric with explicit --rig:
+	// a deliberate city scope must never be silently downgraded to a rig store
+	// by bead-prefix / GC_RIG-env / cwd auto-detection below. Without this,
+	// `gc bd --city <path> list` returned cwd/rig-scoped results, mis-scoping
+	// scripts that trusted the flag. (gastownhall/gascity#3410)
+	if cityExplicit {
+		return cityTarget, nil
+	}
+
 	cityPrefix := config.EffectiveHQPrefix(cfg)
 	if cityPrefix != "" {
 		for _, arg := range args {
@@ -438,6 +713,21 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 				return target, nil
 			}
 		}
+	}
+
+	// Honor GC_RIG env (set by the controller on every rig agent) when no
+	// explicit --rig flag was given and no bead-ID in the args matched a
+	// specific store. This is a weaker signal than an explicit flag or a
+	// bead-prefix hit, but a stronger default than cwd: the controller sets
+	// GC_RIG reliably, while cwd detection fails for polecat worktrees (they
+	// live under .gc/worktrees/, not the configured rig path).
+	// Priority: explicit --rig > bead-prefix detect > GC_RIG env > cwd > city.
+	if gcRig := strings.TrimSpace(os.Getenv("GC_RIG")); gcRig != "" {
+		if rig, ok := rigByName(cfg, gcRig); ok && strings.TrimSpace(rig.Path) != "" {
+			return bdRigScopeTarget(cityPath, rig), nil
+		}
+		// GC_RIG names an unknown or unbound rig — fall through to cwd/city
+		// rather than erroring, so cross-city queries still work from rig agents.
 	}
 
 	if rig, ok, err := bdRigFromCwd(cfg, cityPath); err != nil {

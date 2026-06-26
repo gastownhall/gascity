@@ -424,6 +424,7 @@ func TestResolveEventsPath_CityFlagComputesPath(t *testing.T) {
 }
 
 func TestResolveEventsPath_NoSourceReturnsError(t *testing.T) {
+	clearGCEnv(t)
 	t.Setenv("GC_CITY", "")
 	t.Setenv("GC_CITY_PATH", "")
 	t.Setenv("GC_CITY_ROOT", "")

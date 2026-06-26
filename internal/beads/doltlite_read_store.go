@@ -43,25 +43,30 @@ type doltliteMetadata struct {
 }
 
 type doltliteTableSet struct {
-	issues    string
-	labels    string
-	deps      string
-	ephemeral bool
+	issues string
+	labels string
+	deps   string
+	// wisps marks the wisp-backed table set. Snapshots written before the
+	// storage-flag columns existed have no per-row discriminator there, in
+	// which case every row in the set is ephemeral.
+	wisps bool
 }
 
 var (
 	doltliteIssueTables = doltliteTableSet{issues: "issues", labels: "labels", deps: "dependencies"}
-	doltliteWispTables  = doltliteTableSet{issues: "wisps", labels: "wisp_labels", deps: "wisp_dependencies", ephemeral: true}
+	doltliteWispTables  = doltliteTableSet{issues: "wisps", labels: "wisp_labels", deps: "wisp_dependencies", wisps: true}
 )
 
+// doltliteTableSetsForMode maps a TierMode to the storage tables that can hold
+// matching rows. TierIssues spans both tables because non-ephemeral
+// (no_history) wisps rows belong to the durable tier (query.go TierMode
+// contract, #3444); queryIssueTable applies the per-row storage-flag filter.
 func doltliteTableSetsForMode(mode TierMode) []doltliteTableSet {
 	switch mode {
 	case TierWisps:
 		return []doltliteTableSet{doltliteWispTables}
-	case TierBoth:
+	default: // TierIssues, TierBoth
 		return []doltliteTableSet{doltliteIssueTables, doltliteWispTables}
-	default:
-		return []doltliteTableSet{doltliteIssueTables}
 	}
 }
 
@@ -309,7 +314,20 @@ func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	readyWhere, readyArgs := s.doltliteReadyIssueWhere(doltliteIssueTables)
 	// The id tiebreaker keeps a LIMIT deterministic when rows share
 	// (priority, created_at) — same bug class as queryIssueTable (#3208).
-	out, err := s.queryIssuesOrdered(q, readyWhere, readyArgs, q.Limit, "ORDER BY COALESCE(i.priority, 2) ASC, i.created_at ASC, i.id ASC")
+	//
+	// This read is issues-only and does NOT honor a policy-expanded
+	// rq.TierMode. A default (TierIssues) Ready is correctly history-backed per
+	// the ReadyQuery.TierMode policy in query.go. But policy-aware callers
+	// expand default Ready to TierBoth (bead_policy_store.go), and
+	// NativeDoltStore.Ready / BdStore.Ready surface ready no-history/ephemeral
+	// rows for that expansion while this path still returns issues-only — a
+	// known backend parity gap, not behavior the policy endorses. It is
+	// pre-existing (the internal Ready query was already issues-only before the
+	// TierIssues List span), and out of scope for the #3444/#3449 List+Count
+	// alignment because honoring rq.TierMode here also needs the wisp
+	// dependency graph modeled in the ready blocker predicate. Tracked as
+	// follow-up ga-4ax9bj.
+	out, err := s.queryIssuesOrderedInTables(q, []doltliteTableSet{doltliteIssueTables}, readyWhere, readyArgs, q.Limit, "ORDER BY COALESCE(i.priority, 2) ASC, i.created_at ASC, i.id ASC")
 	if err != nil {
 		return nil, err
 	}
@@ -747,13 +765,44 @@ func (s *DoltliteReadStore) queryIssues(query ListQuery, extraWhere string, extr
 }
 
 func (s *DoltliteReadStore) queryIssuesOrdered(query ListQuery, extraWhere string, extraArgs []any, limit int, orderBy string) ([]Bead, error) {
+	return s.queryIssuesOrderedInTables(query, doltliteTableSetsForMode(query.TierMode), extraWhere, extraArgs, limit, orderBy)
+}
+
+// queryIssuesOrderedInTables runs the query against an explicit list of table
+// sets. Callers passing a custom orderBy must pass a single table set: the
+// merged path re-sorts only when orderBy is empty.
+func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []doltliteTableSet, extraWhere string, extraArgs []any, limit int, orderBy string) ([]Bead, error) {
 	if err := query.Validate(); err != nil {
 		return nil, err
 	}
-	sets := doltliteTableSetsForMode(query.TierMode)
+	// A custom orderBy is applied per table in SQL, and the cross-table Go
+	// re-sort below runs only for the empty-orderBy default order, so a custom
+	// orderBy across more than one table set would concatenate independently
+	// ordered tables. Reject that shape explicitly rather than silently
+	// returning cross-table-unsorted results; the only custom-orderBy caller
+	// (Ready) correctly passes a single issues-only table set (#3449 review).
+	if orderBy != "" && len(sets) > 1 {
+		return nil, fmt.Errorf("doltlite: custom orderBy requires a single table set, got %d", len(sets))
+	}
+	// A bounded multi-table read can resolve its exact global top-N by
+	// selecting ids in one SQL statement and hydrating only those ids, instead
+	// of reading every matching row from both tables and cutting in Go. This
+	// keeps the default TierIssues bounded path O(limit) rather than spanning
+	// full matching history (#3449 review).
+	if doltliteCanSelectBoundedTopN(query, sets, extraWhere, limit, orderBy) {
+		return s.queryBoundedTopN(query, sets, limit)
+	}
 	merged := make([]Bead, 0)
 	seen := make(map[string]struct{})
 	for _, tables := range sets {
+		// A per-table SQL LIMIT is an exact prefix of the merged result only
+		// for a single table set. Across multiple tables the cross-table id
+		// dedupe below can drop a table's whole limited prefix (an id that
+		// also appears in an earlier set), so a later unique row that belongs
+		// in the global top-N may never be fetched. Read every matching row
+		// for multi-table merges and let the Go sort+limit cut the exact
+		// top-N (#3444); the bounded fast path above avoids this full read for
+		// the common limited case.
 		tableLimit := limit
 		if len(sets) > 1 {
 			tableLimit = 0
@@ -783,11 +832,217 @@ func (s *DoltliteReadStore) queryIssuesOrdered(query ListQuery, extraWhere strin
 	return merged, nil
 }
 
+// doltliteCanSelectBoundedTopN reports whether a bounded multi-table read can
+// resolve its exact global top-N by selecting ids in one SQL statement (then
+// hydrating only those ids). It is restricted to the shapes whose result is
+// fully determined by SQL-expressible predicates and the standard
+// (created_at, id) sort, so the SQL LIMIT is exact. A custom orderBy, caller
+// extraWhere, or a ParentID/metadata/before-time filter all need post-SQL Go
+// work that a bounded SQL selection could truncate incorrectly, so those fall
+// back to the full-read merge.
+func doltliteCanSelectBoundedTopN(query ListQuery, sets []doltliteTableSet, extraWhere string, limit int, orderBy string) bool {
+	return limit > 0 &&
+		len(sets) > 1 &&
+		orderBy == "" &&
+		extraWhere == "" &&
+		query.ParentID == "" &&
+		len(query.Metadata) == 0 &&
+		query.CreatedBefore.IsZero() &&
+		query.UpdatedBefore.IsZero()
+}
+
+// queryBoundedTopN resolves a bounded multi-table read by selecting the exact
+// global top-N ids in one SQL statement and hydrating only those ids.
+func (s *DoltliteReadStore) queryBoundedTopN(query ListQuery, sets []doltliteTableSet, limit int) ([]Bead, error) {
+	ids, err := s.selectBoundedTopNIDs(query, sets, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return []Bead{}, nil
+	}
+	merged, err := s.hydrateBeadsByID(query, sets, ids)
+	if err != nil {
+		return nil, err
+	}
+	sortBeadsForQuery(merged, doltliteSortOrder(query.Sort))
+	if limit > 0 && len(merged) > limit {
+		merged = merged[:limit]
+	}
+	return merged, nil
+}
+
+// selectBoundedTopNIDs returns the ids of the exact global top-N rows for a
+// bounded multi-table read, ordered by the query's (created_at, id) sort. It
+// selects ids from the issues table plus the non-duplicate non-ephemeral wisps
+// rows — anti-joined against the matching issues set exactly as List dedupes
+// and as countDurableWisps counts — under one global ORDER BY/LIMIT, so the
+// SQL bound stays O(limit) instead of hydrating full matching history (#3449).
+func (s *DoltliteReadStore) selectBoundedTopNIDs(query ListQuery, sets []doltliteTableSet, limit int) ([]string, error) {
+	// The issues-table predicates back both the issues union leg and the wisps
+	// dedupe anti-join, so the wisp leg excludes exactly the ids a matching
+	// issues row already contributes (List's "issues win" cross-table dedupe).
+	issuesTQ, err := s.buildDoltliteTableQuery(query, doltliteIssueTables, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	unionParts := make([]string, 0, len(sets))
+	args := make([]any, 0)
+	for _, tables := range sets {
+		if tables.wisps && !s.tableExists(tables.issues) {
+			continue
+		}
+		tq := issuesTQ
+		if tables.wisps {
+			tq, err = s.buildDoltliteTableQuery(query, tables, "", nil)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if tq.skipTable {
+			continue
+		}
+		legWhere := append([]string{}, tq.where...)
+		legArgs := append([]any{}, tq.args...)
+		if tables.wisps && !issuesTQ.skipTable {
+			antiJoin, antiArgs := doltliteMatchingIssuesAntiJoin(issuesTQ.where, issuesTQ.args)
+			legWhere = append(legWhere, antiJoin)
+			legArgs = append(legArgs, antiArgs...)
+		}
+		// Select created_at truncated to whole seconds, not the raw sub-second
+		// text: the outer LIMIT must cut on the same second-granular key the Go
+		// merge and post-hydration re-sort compare, or the bounded prefix can
+		// diverge from the unbounded merge for same-second rows (#3449 review).
+		leg := "SELECT i.id AS id, " + doltliteCreatedAtSortKey("i") + " AS created_at FROM " + tables.issues + " i"
+		if len(legWhere) > 0 {
+			leg += " WHERE " + strings.Join(legWhere, " AND ")
+		}
+		unionParts = append(unionParts, leg)
+		args = append(args, legArgs...)
+	}
+	if len(unionParts) == 0 {
+		return nil, nil
+	}
+	// The id tiebreaker matches sortBeadsForQuery's (created_at, id) total
+	// order so the LIMIT cuts the same deterministic prefix the Go merge would
+	// (#3208). created_at here is already the second-granular sort key.
+	order := "DESC"
+	if query.Sort == SortCreatedAsc {
+		order = "ASC"
+	}
+	sqlText := "SELECT id FROM (" + strings.Join(unionParts, " UNION ALL ") +
+		") ORDER BY created_at " + order + ", id " + order +
+		fmt.Sprintf(" LIMIT %d", limit)
+	rows, err := s.db.Query(sqlText, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// doltliteMaxHydrateIDsPerChunk bounds how many id placeholders a single
+// hydrateBeadsByID query may bind. The native DoltLite driver
+// (modernc.org/sqlite) caps a statement at SQLITE_MAX_VARIABLE_NUMBER = 32766
+// bound parameters. A bounded read's id selection is limited only by the query
+// limit, and the API derives that limit from an uncapped cursor offset
+// (internal/api/pagination.go), so a deep page can select tens of thousands of
+// ids. Hydrate the IN (...) clause in chunks well under the driver cap, leaving
+// headroom for the query's own tier/status/label/assignee predicate parameters,
+// so a deep cursor walk over a large rig cannot overflow the statement variable
+// limit (#3449 review).
+const doltliteMaxHydrateIDsPerChunk = 16000
+
+// hydrateBeadsByID fetches full bead rows for ids from each table set, applying
+// query's filters and deduping by id (issues-table rows win), exactly as the
+// full-read merge does. The id set is hydrated in chunks bounded by
+// doltliteMaxHydrateIDsPerChunk so a large bounded selection cannot exceed the
+// SQLite bound-parameter limit. The dedupe spans every chunk and table set, so
+// an issues-table row still wins over its wisp twin regardless of where the
+// chunk boundaries fall.
+func (s *DoltliteReadStore) hydrateBeadsByID(query ListQuery, sets []doltliteTableSet, ids []string) ([]Bead, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	merged := make([]Bead, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, tables := range sets {
+		for start := 0; start < len(ids); start += doltliteMaxHydrateIDsPerChunk {
+			end := start + doltliteMaxHydrateIDsPerChunk
+			if end > len(ids) {
+				end = len(ids)
+			}
+			chunk := ids[start:end]
+			placeholders := strings.TrimRight(strings.Repeat("?,", len(chunk)), ",")
+			args := make([]any, len(chunk))
+			for i, id := range chunk {
+				args[i] = id
+			}
+			rows, err := s.queryIssueTable(query, tables, "i.id IN ("+placeholders+")", args, 0, "")
+			if err != nil {
+				return nil, err
+			}
+			for _, row := range rows {
+				if _, ok := seen[row.ID]; ok {
+					continue
+				}
+				seen[row.ID] = struct{}{}
+				merged = append(merged, row)
+			}
+		}
+	}
+	return merged, nil
+}
+
 func doltliteSortOrder(order SortOrder) SortOrder {
 	if order == SortCreatedAsc {
 		return SortCreatedAsc
 	}
 	return SortCreatedDesc
+}
+
+// doltliteCreatedAtSortKey returns the SQL expression for a row's created_at
+// truncated to whole seconds for the given table alias, matching scanBead's
+// parseDBTime(...).Truncate(time.Second). SQL LIMIT cuts that feed a bounded
+// read must order by this key, not the raw sub-second created_at text: the Go
+// merge and post-hydration re-sort compare the truncated CreatedAt, so cutting
+// on raw sub-second precision could select a different same-second prefix than
+// the unbounded merge (#3449 review). The first 19 chars span
+// "YYYY-MM-DD?HH:MM:SS" for every layout parseTimeString accepts, where the 11th
+// char is the date/time separator: RFC3339 stores 'T' (0x54) and
+// time.Time.String() stores ' ' (0x20). Both are valid on-disk layouts, so a raw
+// prefix sorts every space-separated row before every 'T' row that shares a date
+// regardless of the actual time, cutting a different bounded prefix than the Go
+// merge's instant comparison. Normalizing 'T' to ' ' makes the prefix sort by
+// second exactly as the parsed, truncated time does for either layout (#3449
+// post-merge review).
+func doltliteCreatedAtSortKey(alias string) string {
+	return "replace(substr(" + alias + ".created_at, 1, 19), 'T', ' ')"
+}
+
+// doltliteMatchingIssuesAntiJoin returns the "i.id NOT IN (SELECT i.id FROM
+// issues i ...)" predicate and its args that drop every wisp whose durable
+// issue twin the issues-table pass already contributes, reproducing List's
+// "issues win" cross-table dedupe. The inner query re-aliases the issues table
+// as i so its predicates resolve against issues, shadowing the outer wisps i.
+// issuesWhere must be the issues-table pass before any post-List excludeTypes
+// filter, because List dedupes wisps against the merged issues set before
+// excludeTypes runs (#3449 review). Shared by the bounded List id selection and
+// countDurableWisps so the dedupe shape has one source of truth.
+func doltliteMatchingIssuesAntiJoin(issuesWhere []string, issuesArgs []any) (string, []any) {
+	dedupe := "SELECT i.id FROM " + doltliteIssueTables.issues + " i"
+	if len(issuesWhere) > 0 {
+		dedupe += " WHERE " + strings.Join(issuesWhere, " AND ")
+	}
+	return "i.id NOT IN (" + dedupe + ")", append([]any{}, issuesArgs...)
 }
 
 // doltliteMetadataFilterPredicates narrows metadata queries in SQL without
@@ -865,13 +1120,37 @@ func filterDoltliteMetadata(rows []Bead, filters map[string]string) []Bead {
 	return out
 }
 
-func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTableSet, extraWhere string, extraArgs []any, limit int, orderBy string) ([]Bead, error) {
-	if tables.ephemeral && !s.tableExists(tables.issues) {
-		return nil, nil
+// doltliteTableQuery holds the resolved per-table-set SQL fragments shared by
+// full-row reads (queryIssueTable) and id-only top-N selection
+// (selectBoundedTopNIDs), so both apply identical filters from one source of
+// truth and cannot drift.
+type doltliteTableQuery struct {
+	flags      doltliteStorageFlagExprs
+	where      []string
+	args       []any
+	parentJoin string
+	// skipTable reports that this table set cannot hold any rows for the
+	// query's tier (e.g. a legacy ephemeral-only wisps table under TierIssues).
+	skipTable bool
+}
+
+// buildDoltliteTableQuery resolves the storage-flag expressions, WHERE
+// clauses, args, and parent join for one storage table set. It returns
+// skipTable=true when the tier predicate excludes the whole table.
+func (s *DoltliteReadStore) buildDoltliteTableQuery(query ListQuery, tables doltliteTableSet, extraWhere string, extraArgs []any) (doltliteTableQuery, error) {
+	flags, err := s.storageFlagExprsFor(tables)
+	if err != nil {
+		return doltliteTableQuery{}, err
+	}
+	tierWhere, skipTable := doltliteTierPredicate(query.TierMode, tables, flags)
+	if skipTable {
+		return doltliteTableQuery{skipTable: true}, nil
 	}
 	where := []string{}
 	args := []any{}
-	needParent := true
+	if tierWhere != "" {
+		where = append(where, tierWhere)
+	}
 	if !query.IncludeClosed && query.Status != "closed" {
 		where = append(where, "i.status != 'closed'")
 	}
@@ -890,7 +1169,7 @@ func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTabl
 	if len(query.Assignees) > 0 {
 		assignees := compactStrings(query.Assignees)
 		if len(assignees) == 0 {
-			return nil, nil
+			return doltliteTableQuery{skipTable: true}, nil
 		}
 		placeholders := strings.TrimRight(strings.Repeat("?,", len(assignees)), ",")
 		where = append(where, "i.assignee IN ("+placeholders+")")
@@ -923,40 +1202,53 @@ func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTabl
 		where = append(where, extraWhere)
 		args = append(args, extraArgs...)
 	}
-	parentColumn := "''"
-	parentJoin := ""
-	if needParent {
-		parentColumn = doltliteQualifiedDependsOnExpr("pc")
-		parentJoin = " LEFT JOIN " + tables.deps + " pc ON pc.issue_id = i.id AND pc.type = 'parent-child'"
+	parentJoin := " LEFT JOIN " + tables.deps + " pc ON pc.issue_id = i.id AND pc.type = 'parent-child'"
+	return doltliteTableQuery{flags: flags, where: where, args: args, parentJoin: parentJoin}, nil
+}
+
+func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTableSet, extraWhere string, extraArgs []any, limit int, orderBy string) ([]Bead, error) {
+	if tables.wisps && !s.tableExists(tables.issues) {
+		return nil, nil
 	}
+	tq, err := s.buildDoltliteTableQuery(query, tables, extraWhere, extraArgs)
+	if err != nil {
+		return nil, err
+	}
+	if tq.skipTable {
+		return nil, nil
+	}
+	parentColumn := doltliteQualifiedDependsOnExpr("pc")
 	sqlText := `SELECT i.id, COALESCE(i.title, ''), COALESCE(i.status, ''), COALESCE(i.issue_type, ''), i.priority, i.created_at,
 		COALESCE(i.updated_at, ''), COALESCE(i.assignee, ''), COALESCE(i.description, ''), COALESCE(i.metadata, '{}'),
-		` + parentColumn + `
-		FROM ` + tables.issues + ` i` + parentJoin
-	if len(where) > 0 {
-		sqlText += " WHERE " + strings.Join(where, " AND ")
+		` + parentColumn + `, ` + tq.flags.ephemeral + `, ` + tq.flags.noHistory + `
+		FROM ` + tables.issues + ` i` + tq.parentJoin
+	if len(tq.where) > 0 {
+		sqlText += " WHERE " + strings.Join(tq.where, " AND ")
 	}
 	// The id tiebreaker matches sortBeadsForQuery's (created_at, id) total
 	// order so a SQL LIMIT cuts a deterministic prefix even when rows share
-	// a created_at timestamp (#3208).
+	// a created_at timestamp (#3208). Order on the second-granular created_at
+	// key, not the raw sub-second text, so a single-table bounded read cuts the
+	// same prefix the Go re-sort over the truncated CreatedAt would (#3449
+	// review).
 	if orderBy != "" {
 		sqlText += " " + orderBy
 	} else if query.Sort == SortCreatedAsc {
-		sqlText += " ORDER BY i.created_at ASC, i.id ASC"
+		sqlText += " ORDER BY " + doltliteCreatedAtSortKey("i") + " ASC, i.id ASC"
 	} else {
-		sqlText += " ORDER BY i.created_at DESC, i.id DESC"
+		sqlText += " ORDER BY " + doltliteCreatedAtSortKey("i") + " DESC, i.id DESC"
 	}
 	if limit > 0 {
 		sqlText += fmt.Sprintf(" LIMIT %d", limit)
 	}
-	rows, err := s.db.Query(sqlText, args...)
+	rows, err := s.db.Query(sqlText, tq.args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var beads []Bead
 	for rows.Next() {
-		b, err := scanBead(rows, tables.ephemeral)
+		b, err := scanBead(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -971,6 +1263,73 @@ func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTabl
 		}
 	}
 	return beads, nil
+}
+
+// doltliteStorageFlagExprs holds SQL expressions yielding the per-row
+// ephemeral and no_history storage flags for one storage table, accounting
+// for snapshots whose schema predates those columns.
+type doltliteStorageFlagExprs struct {
+	ephemeral string
+	noHistory string
+	// hasColumns reports whether the table carries at least one storage-flag
+	// column, i.e. whether per-row tier classification is possible.
+	hasColumns bool
+}
+
+// storageFlagExprsFor resolves the storage-flag expressions for tables.
+// Legacy snapshots wrote wisps tables without the flag columns; every row
+// there is ephemeral, so the wisps fallback is the constant 1 while the
+// issues-table fallback is the constant 0 (durable history rows). A probe
+// failure is propagated rather than treated as an absent column, so a
+// transient DB error cannot silently downgrade tier classification.
+func (s *DoltliteReadStore) storageFlagExprsFor(tables doltliteTableSet) (doltliteStorageFlagExprs, error) {
+	flags := doltliteStorageFlagExprs{ephemeral: "0", noHistory: "0"}
+	if tables.wisps {
+		flags.ephemeral = "1"
+	}
+	hasEphemeral, err := s.tableHasColumn(tables.issues, "ephemeral")
+	if err != nil {
+		return doltliteStorageFlagExprs{}, err
+	}
+	if hasEphemeral {
+		flags.ephemeral = "COALESCE(i.ephemeral, 0)"
+		flags.hasColumns = true
+	}
+	hasNoHistory, err := s.tableHasColumn(tables.issues, "no_history")
+	if err != nil {
+		return doltliteStorageFlagExprs{}, err
+	}
+	if hasNoHistory {
+		flags.noHistory = "COALESCE(i.no_history, 0)"
+		flags.hasColumns = true
+	}
+	return flags, nil
+}
+
+// doltliteTierPredicate translates query.go's TierMode row filter (Matches)
+// into a SQL predicate for one storage table. It returns skipTable=true when
+// the table cannot hold rows for the tier at all (a legacy wisps table is
+// ephemeral-only, so the durable tier never reads it).
+func doltliteTierPredicate(mode TierMode, tables doltliteTableSet, flags doltliteStorageFlagExprs) (string, bool) {
+	switch mode {
+	case TierWisps:
+		if !flags.hasColumns {
+			// Legacy wisps rows are all ephemeral; issues-table rows never
+			// reach TierWisps because doltliteTableSetsForMode excludes them.
+			return "", false
+		}
+		return "(" + flags.ephemeral + " = 1 OR " + flags.noHistory + " = 1)", false
+	case TierBoth:
+		return "", false
+	default: // TierIssues keeps history and no-history rows, drops ephemeral.
+		if tables.wisps && !flags.hasColumns {
+			return "", true
+		}
+		if flags.ephemeral == "0" {
+			return "", false
+		}
+		return flags.ephemeral + " = 0", false
+	}
 }
 
 func doltliteSQLiteTime(t time.Time) string {
@@ -994,15 +1353,17 @@ func filterDoltliteBeforeTimes(rows []Bead, query ListQuery) []Bead {
 	return out
 }
 
-func scanBead(rows interface{ Scan(...any) error }, ephemeral bool) (Bead, error) {
+func scanBead(rows interface{ Scan(...any) error }) (Bead, error) {
 	var (
 		b           Bead
 		priority    sql.NullInt64
 		createdRaw  any
 		updatedRaw  any
 		metadataRaw string
+		ephemeral   int64
+		noHistory   int64
 	)
-	if err := rows.Scan(&b.ID, &b.Title, &b.Status, &b.Type, &priority, &createdRaw, &updatedRaw, &b.Assignee, &b.Description, &metadataRaw, &b.ParentID); err != nil {
+	if err := rows.Scan(&b.ID, &b.Title, &b.Status, &b.Type, &priority, &createdRaw, &updatedRaw, &b.Assignee, &b.Description, &metadataRaw, &b.ParentID, &ephemeral, &noHistory); err != nil {
 		return b, err
 	}
 	if priority.Valid {
@@ -1013,7 +1374,8 @@ func scanBead(rows interface{ Scan(...any) error }, ephemeral bool) (Bead, error
 	b.CreatedAt = parseDBTime(createdRaw).Truncate(time.Second)
 	b.UpdatedAt = parseDBTime(updatedRaw).Truncate(time.Second)
 	b.Metadata = parseMetadata(metadataRaw)
-	b.Ephemeral = ephemeral
+	b.Ephemeral = ephemeral != 0
+	b.NoHistory = noHistory != 0
 	if b.From == "" {
 		b.From = b.Metadata["from"]
 	}
@@ -1074,6 +1436,26 @@ func (s *DoltliteReadStore) tableExists(name string) bool {
 	var found string
 	err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&found)
 	return err == nil
+}
+
+// tableHasColumn reports whether the table's schema includes the named
+// column. Snapshot schemas vary by writer generation (the storage-flag
+// columns arrived with the upstream wisps/no-history migrations), so read
+// paths probe before referencing them. A genuinely absent column reports
+// (false, nil); an unexpected probe failure is returned so the caller fails
+// the read instead of silently downgrading tier classification to legacy
+// semantics, which would drop the whole wisps table from TierIssues and
+// misclassify no-history rows (#3449 review).
+func (s *DoltliteReadStore) tableHasColumn(table, column string) (bool, error) {
+	var found string
+	err := s.db.QueryRow(`SELECT name FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&found)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("doltlite probe %s.%s: %w", table, column, err)
+	}
+	return true, nil
 }
 
 func (s *DoltliteReadStore) hydrateLabels(beads []Bead, labelTable string) error {

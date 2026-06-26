@@ -165,11 +165,12 @@ func TestResolveBdScopeTarget(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		rigName   string
-		args      []string
-		want      execStoreTarget
-		wantError string
+		name         string
+		rigName      string
+		args         []string
+		cityExplicit bool
+		want         execStoreTarget
+		wantError    string
 	}{
 		{
 			name:    "explicit rig name",
@@ -230,11 +231,49 @@ func TestResolveBdScopeTarget(t *testing.T) {
 				Prefix:    "ga",
 			},
 		},
+		{
+			// gastownhall/gascity#3410: an explicit --city must pin the city
+			// store and not be silently downgraded to a rig store, even when a
+			// rig-prefixed bead id is present in the args.
+			name:         "explicit city pins city over bead-prefix",
+			rigName:      "",
+			args:         []string{"show", "projectwrenunity-0xk"},
+			cityExplicit: true,
+			want: execStoreTarget{
+				ScopeRoot: cityDir,
+				ScopeKind: "city",
+				Prefix:    "ga",
+			},
+		},
+		{
+			name:         "explicit city pins city for list",
+			rigName:      "",
+			args:         []string{"list", "--status", "open"},
+			cityExplicit: true,
+			want: execStoreTarget{
+				ScopeRoot: cityDir,
+				ScopeKind: "city",
+				Prefix:    "ga",
+			},
+		},
+		{
+			// An explicit --rig still wins over an explicit --city.
+			name:         "explicit rig wins over explicit city",
+			rigName:      "wren",
+			args:         []string{"list"},
+			cityExplicit: true,
+			want: execStoreTarget{
+				ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+				ScopeKind: "rig",
+				Prefix:    "projectwrenunity",
+				RigName:   "wren",
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveBdScopeTarget(cfgForTest(), cityDir, tt.rigName, tt.args)
+			got, err := resolveBdScopeTarget(cfgForTest(), cityDir, tt.rigName, tt.args, tt.cityExplicit)
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 					t.Fatalf("resolveBdScopeTarget() error = %v, want %q", err, tt.wantError)
@@ -269,7 +308,7 @@ func TestResolveBdScopeTargetUsesRedirectedWorktreeRig(t *testing.T) {
 		Workspace: config.Workspace{Name: "gascity"},
 		Rigs:      []config.Rig{{Name: "frontend", Path: filepath.Join("rigs", "frontend"), Prefix: "fr"}},
 	}
-	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"})
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false)
 	if err != nil {
 		t.Fatalf("resolveBdScopeTarget() error = %v", err)
 	}
@@ -282,6 +321,98 @@ func TestResolveBdScopeTargetUsesRedirectedWorktreeRig(t *testing.T) {
 	if got != want {
 		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
 	}
+}
+
+// TestResolveBdScopeTargetUsesGCRIGEnv covers the bug where GC_RIG env (set by
+// the controller on every rig agent) was silently ignored, causing gc bd list to
+// hit the city HQ database and return empty results instead of rig-scoped results.
+// See gastownhall/gascity#gcy-6ul.
+func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
+	setCwd(t, t.TempDir())
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(_ string, _ execStoreTarget, _ string) bool { return false }
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gascity"},
+		Rigs: []config.Rig{
+			{Name: "chatehr", Path: filepath.Join("rigs", "chatehr"), Prefix: "ch"},
+			{Name: "wren", Path: filepath.Join("rigs", "wren"), Prefix: "projectwrenunity"},
+		},
+	}
+
+	t.Run("GC_RIG env routes to rig when no flag and no bead-id args", func(t *testing.T) {
+		t.Setenv("GC_RIG", "chatehr")
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list", "--assignee=chatehr/gastown.refinery", "--status=open"}, false)
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		want := execStoreTarget{
+			ScopeRoot: filepath.Join(cityDir, "rigs", "chatehr"),
+			ScopeKind: "rig",
+			Prefix:    "ch",
+			RigName:   "chatehr",
+		}
+		if got != want {
+			t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("explicit --rig flag overrides GC_RIG env", func(t *testing.T) {
+		t.Setenv("GC_RIG", "chatehr")
+		got, err := resolveBdScopeTarget(cfg, cityDir, "wren", []string{"list"}, false)
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		want := execStoreTarget{
+			ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+			ScopeKind: "rig",
+			Prefix:    "projectwrenunity",
+			RigName:   "wren",
+		}
+		if got != want {
+			t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("bead-id prefix detection wins over GC_RIG env", func(t *testing.T) {
+		t.Setenv("GC_RIG", "chatehr")
+		// Restore bdBeadExists to return true for a wren bead
+		origProbe2 := bdBeadExists
+		defer func() { bdBeadExists = origProbe2 }()
+		bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
+			return beadID == "projectwrenunity-0xk" && target.RigName == "wren"
+		}
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "projectwrenunity-0xk"}, false)
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		want := execStoreTarget{
+			ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+			ScopeKind: "rig",
+			Prefix:    "projectwrenunity",
+			RigName:   "wren",
+		}
+		if got != want {
+			t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("unknown GC_RIG env falls through to city root", func(t *testing.T) {
+		t.Setenv("GC_RIG", "nonexistent-rig")
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false)
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget() error = %v", err)
+		}
+		// Must land on city root, not the (unknown) GC_RIG rig.
+		if got.ScopeKind != "city" {
+			t.Fatalf("resolveBdScopeTarget() ScopeKind = %q, want %q", got.ScopeKind, "city")
+		}
+		if got.ScopeRoot != cityDir {
+			t.Fatalf("resolveBdScopeTarget() ScopeRoot = %q, want %q", got.ScopeRoot, cityDir)
+		}
+	})
 }
 
 func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
@@ -302,7 +433,7 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 		Workspace: config.Workspace{Name: "gascity"},
 		Rigs:      []config.Rig{{Name: "frontend", Path: filepath.Join("rigs", "frontend"), Prefix: "fr"}},
 	}
-	_, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"})
+	_, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false)
 	if err == nil || !strings.Contains(err.Error(), "points outside declared city rigs") {
 		t.Fatalf("resolveBdScopeTarget() error = %v, want foreign redirect error", err)
 	}
@@ -578,12 +709,10 @@ func TestGcBdSuppressesBdAutoExportInChildEnv(t *testing.T) {
 	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
 	// `.beads/redirect` in the ambient working tree doesn't surface here.
 	setCwd(t, cityDir)
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-name = "demo"
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
-`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeBuiltinImportsFixture(t, cityDir, "core", "bd")
 
 	binDir := t.TempDir()
 	script := filepath.Join(binDir, "bd")
@@ -1556,7 +1685,7 @@ func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 	}
 	setCwd(t, filepath.Join(rigDir, "nested"))
 
-	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"context", "--json"})
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"context", "--json"}, false)
 	if err != nil {
 		t.Fatalf("resolveBdScopeTarget() error = %v", err)
 	}
@@ -1589,7 +1718,7 @@ func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
 	}
 	setCwd(t, filepath.Join(rigDir, "nested"))
 
-	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "mc-city1"})
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "mc-city1"}, false)
 	if err != nil {
 		t.Fatalf("resolveBdScopeTarget() error = %v", err)
 	}
@@ -2175,6 +2304,253 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 			t.Fatalf("rewriteBdHeartbeatArgs(%q) = %q, want passthrough", in, out)
 		}
 	})
+}
+
+// TestBdMutationWriteID covers the compatibility shim (first-ID extraction).
+func TestBdMutationWriteID(t *testing.T) {
+	t.Run("extracts id from write subcommands", func(t *testing.T) {
+		cases := []struct {
+			args []string
+			want string
+		}{
+			{[]string{"update", "gcy-dv7", "--title", "x"}, "gcy-dv7"},
+			{[]string{"update", "--title", "x", "gcy-dv7"}, "gcy-dv7"},
+			{[]string{"close", "gcy-dv7"}, "gcy-dv7"},
+			{[]string{"close", "--reason", "done", "gcy-dv7"}, "gcy-dv7"},
+			{[]string{"close", "--force", "--json", "gcy-dv7"}, "gcy-dv7"},
+			{[]string{"reopen", "gcy-dv7"}, "gcy-dv7"},
+			{[]string{"delete", "--force", "gcy-dv7"}, "gcy-dv7"},
+			{[]string{"delete", "--force", "--json", "gcy-dv7"}, "gcy-dv7"},
+			// double-dash separator
+			{[]string{"update", "--", "gcy-dv7"}, "gcy-dv7"},
+		}
+		for _, tc := range cases {
+			got, ok := bdMutationWriteID(tc.args)
+			if !ok || got != tc.want {
+				t.Errorf("bdMutationWriteID(%q) = (%q, %v), want (%q, true)", tc.args, got, ok, tc.want)
+			}
+		}
+	})
+	t.Run("returns false for read or unrecognized subcommands", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"show", "gcy-dv7"},
+			{"list", "-s", "open"},
+			{"query", "gcy-dv7"},
+			{},
+			{"create", "new task"},
+		} {
+			if _, ok := bdMutationWriteID(args); ok {
+				t.Errorf("bdMutationWriteID(%q) returned ok=true, want false", args)
+			}
+		}
+	})
+	// Regression: short ID "gcy-dv7" must NOT be confused for "gcy-wisp-dv78"
+	// by the caller — the returned token is the exact string in args.
+	t.Run("returns the exact supplied token (gcy-g4o regression)", func(t *testing.T) {
+		got, ok := bdMutationWriteID([]string{"update", "gcy-dv7", "--status", "open"})
+		if !ok || got != "gcy-dv7" {
+			t.Errorf("bdMutationWriteID: got (%q, %v), want (\"gcy-dv7\", true)", got, ok)
+		}
+	})
+}
+
+// TestBdMutationWriteIDs covers the full scanner used by the pre-flight guard.
+func TestBdMutationWriteIDs(t *testing.T) {
+	type result struct {
+		ids       []string
+		ok        bool
+		ambiguous bool
+	}
+	cases := []struct {
+		name string
+		args []string
+		want result
+	}{
+		// --- Basic extraction ---
+		{
+			name: "single id, no flags",
+			args: []string{"close", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "id before flags",
+			args: []string{"update", "gcy-dv7", "--title", "x"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "id after long value flag",
+			args: []string{"update", "--title", "new title", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+
+		// --- Short flags (previously broken) ---
+		{
+			name: "short -s value flag before id",
+			args: []string{"update", "-s", "closed", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -a value flag before id",
+			args: []string{"update", "-a", "alice", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -t value flag before id",
+			args: []string{"update", "-t", "task", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -p value flag before id",
+			args: []string{"update", "-p", "P2", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -d value flag before id",
+			args: []string{"update", "-d", "description text", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -e value flag before id",
+			args: []string{"update", "-e", "60", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -r reason flag for close before id",
+			args: []string{"close", "-r", "done", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "short -C directory flag before id",
+			args: []string{"close", "-C", "/some/path", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+
+		// --- --flag=value form ---
+		{
+			name: "--flag=value does not consume next token",
+			args: []string{"update", "--status=closed", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "--title=value with id after",
+			args: []string{"update", "--title=new title", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+
+		// --- Message / notes flags whose values may contain bead tokens ---
+		{
+			name: "notes value contains bead token",
+			args: []string{"update", "--notes", "see gcy-dv7 for context", "gcy-real"},
+			want: result{ids: []string{"gcy-real"}, ok: true},
+		},
+		{
+			name: "append-notes value contains bead token",
+			args: []string{"update", "--append-notes", "related: gcy-dv7", "gcy-real"},
+			want: result{ids: []string{"gcy-real"}, ok: true},
+		},
+
+		// --- Batch IDs ---
+		{
+			name: "batch close multiple ids",
+			args: []string{"close", "id1", "id2", "id3"},
+			want: result{ids: []string{"id1", "id2", "id3"}, ok: true},
+		},
+		{
+			name: "batch delete multiple ids with --force",
+			args: []string{"delete", "--force", "id1", "id2", "id3"},
+			want: result{ids: []string{"id1", "id2", "id3"}, ok: true},
+		},
+		{
+			name: "batch update with flags interspersed",
+			args: []string{"update", "--status", "closed", "id1", "id2"},
+			want: result{ids: []string{"id1", "id2"}, ok: true},
+		},
+
+		// --- Double-dash terminator ---
+		{
+			name: "double-dash: everything after is positional",
+			args: []string{"update", "--", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "double-dash: multiple ids after",
+			args: []string{"close", "--force", "--", "id1", "id2"},
+			want: result{ids: []string{"id1", "id2"}, ok: true},
+		},
+
+		// --- Fail-closed: ambiguous unknown flags ---
+		// gcy-g4o demonstrated break: `close --session gcy-realbead gcy-dv7`
+		// Previously the hand-rolled scanner lacked --session → returned
+		// "gcy-realbead" as the ID, leaving gcy-dv7 unguarded. Now --session
+		// is in the known set so it is correctly handled, but an *unknown*
+		// value flag must trigger ambiguous.
+		{
+			name: "known --session flag handled correctly for close",
+			args: []string{"close", "--session", "sess-id-abc", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "unknown value flag triggers fail-closed",
+			args: []string{"close", "--unknown-future-flag", "gcy-realbead", "gcy-dv7"},
+			want: result{ok: true, ambiguous: true},
+		},
+		{
+			name: "unknown short flag triggers fail-closed",
+			args: []string{"update", "-z", "something", "gcy-dv7"},
+			want: result{ok: true, ambiguous: true},
+		},
+
+		// --- Non-write subcommands ---
+		{
+			name: "show is not a write command",
+			args: []string{"show", "gcy-dv7"},
+			want: result{ok: false},
+		},
+		{
+			name: "list is not a write command",
+			args: []string{"list", "-s", "open"},
+			want: result{ok: false},
+		},
+		{
+			name: "empty args",
+			args: []string{},
+			want: result{ok: false},
+		},
+
+		// --- No IDs supplied (e.g. "last touched" fallback) ---
+		{
+			name: "update with no ids (last-touched fallback)",
+			args: []string{"update", "--status", "closed"},
+			want: result{ids: nil, ok: true},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ids, ok, ambiguous := bdMutationWriteIDs(tc.args)
+			if ok != tc.want.ok {
+				t.Errorf("ok = %v, want %v", ok, tc.want.ok)
+			}
+			if ambiguous != tc.want.ambiguous {
+				t.Errorf("ambiguous = %v, want %v", ambiguous, tc.want.ambiguous)
+			}
+			if !bdTestSlicesEqual(ids, tc.want.ids) {
+				t.Errorf("ids = %v, want %v", ids, tc.want.ids)
+			}
+		})
+	}
+}
+
+func bdTestSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestParseBdReleaseIfCurrentArgs(t *testing.T) {

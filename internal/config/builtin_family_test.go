@@ -5,7 +5,7 @@ import "testing"
 // TestBuiltinFamily_DirectBuiltinReturnsItself covers the identity
 // branch: any name that IS a built-in resolves to itself.
 func TestBuiltinFamily_DirectBuiltinReturnsItself(t *testing.T) {
-	cases := []string{"claude", "codex", "gemini", "opencode"}
+	cases := []string{"claude", "codex", "gemini", "opencode", "mimocode"}
 	for _, name := range cases {
 		if got := BuiltinFamily(name, nil); got != name {
 			t.Errorf("BuiltinFamily(%q, nil) = %q, want %q", name, got, name)

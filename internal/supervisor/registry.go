@@ -190,6 +190,49 @@ func (r *Registry) Unregister(cityPath string) error {
 	return r.saveLocked(filtered)
 }
 
+// LookupCityByName finds a registered city by its effective name. Returns the
+// matching entry and true, or a zero entry and false if no registered city has
+// that name (or on a registry read error). The match is exact and
+// case-sensitive, mirroring the uniqueness Register enforces on names and the
+// LookupRigByName behavior; because Register rejects duplicate names, at most
+// one entry can match. Callers that must distinguish an unreadable registry
+// from a genuine miss should use LookupCityByNameE.
+func (r *Registry) LookupCityByName(name string) (CityEntry, bool) {
+	entry, ok, _ := r.LookupCityByNameE(name)
+	return entry, ok
+}
+
+// LookupCityByNameE is like LookupCityByName but also returns any registry read
+// error, so callers can surface a corrupt or unreadable registry instead of
+// silently collapsing it into a "not registered" miss. The bool is true only on
+// an exact, case-sensitive name match; on a read error it is false and the
+// error is non-nil.
+func (r *Registry) LookupCityByNameE(name string) (CityEntry, bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	entries, err := r.loadLocked()
+	if err != nil {
+		return CityEntry{}, false, err
+	}
+	for _, e := range entries {
+		if e.EffectiveName() == name {
+			return e, true, nil
+		}
+	}
+	return CityEntry{}, false, nil
+}
+
+// IsValidCityName reports whether s is shaped like a registered city name and
+// therefore can never denote a filesystem path: city names match validCityName
+// (a leading alphanumeric followed by alphanumerics, dots, underscores, and
+// hyphens), so they contain no path separators, leading dot, or tilde. CLI
+// callers use this to classify a city reference as a name vs a path before
+// resolving it. Surrounding whitespace is ignored.
+func IsValidCityName(s string) bool {
+	return validCityName.MatchString(strings.TrimSpace(s))
+}
+
 // StorePendingCityRequestID records a request_id for later supervisor
 // reconciliation. The entry is persisted in the supervisor registry so a
 // restarted supervisor can still emit the terminal async result event.

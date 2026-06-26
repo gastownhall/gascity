@@ -2,22 +2,19 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"testing/fstest"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 )
 
 // TestPeekEventsProvider asserts the fast city.toml read path used by
@@ -69,126 +66,69 @@ func TestPeekEventsProvider(t *testing.T) {
 	})
 }
 
+// TestBuiltinPacksUseCanonicalRegistry pins the canonical registry surface
+// cmd/gc depends on: the bundled pack set, and a registered source plus
+// embedded FS for every name requiredBuiltinPackNames can return.
 func TestBuiltinPacksUseCanonicalRegistry(t *testing.T) {
-	got := make([]string, 0, len(builtinPacks))
-	for _, bp := range builtinPacks {
-		got = append(got, bp.Name)
-	}
-
+	want := []string{"core", "bd", "dolt", "gastown", "gascity"}
 	registry := builtinpacks.All()
-	want := make([]string, 0, len(registry))
+	got := make([]string, 0, len(registry))
 	for _, pack := range registry {
-		want = append(want, pack.Name)
+		got = append(got, pack.Name)
 	}
-
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("builtinPacks = %v, want builtinpacks.All names %v", got, want)
+		t.Fatalf("builtinpacks.All names = %v, want %v", got, want)
+	}
+	for _, name := range want {
+		if _, ok := builtinpacks.Source(name); !ok {
+			t.Errorf("builtinpacks.Source(%q) not registered", name)
+		}
+		pack, ok := builtinpacks.ByName(name)
+		if !ok {
+			t.Errorf("builtinpacks.ByName(%q) not found", name)
+			continue
+		}
+		if pack.FS == nil {
+			t.Errorf("builtinpacks.ByName(%q).FS is nil", name)
+		}
 	}
 }
 
-func TestMaterializeBuiltinPacks(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+// readBundledPackFileForTest reads a file from a bundled pack's embedded FS.
+// rel must use forward slashes.
+func readBundledPackFileForTest(t *testing.T, packName, rel string) string {
+	t.Helper()
+	pack, ok := builtinpacks.ByName(packName)
+	if !ok {
+		t.Fatalf("bundled %s pack is not registered", packName)
 	}
-
-	// Verify bd pack.toml exists.
-	bdToml := filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "pack.toml")
-	if _, err := os.Stat(bdToml); err != nil {
-		t.Errorf("bd pack.toml missing: %v", err)
-	}
-
-	// Verify dolt pack.toml exists.
-	doltToml := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "pack.toml")
-	if _, err := os.Stat(doltToml); err != nil {
-		t.Errorf("dolt pack.toml missing: %v", err)
-	}
-
-	// Verify doctor scripts are executable.
-	for _, script := range []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "doctor", "check-bd", "run.sh"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "doctor", "check-dolt", "run.sh"),
-	} {
-		info, err := os.Stat(script)
-		if err != nil {
-			t.Errorf("script missing: %v", err)
-			continue
-		}
-		if info.Mode()&0o111 == 0 {
-			t.Errorf("script %s not executable: mode %v", filepath.Base(script), info.Mode())
-		}
-	}
-
-	// Verify dolt commands have executable run.sh entrypoints.
-	cmds := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands")
-	entries, err := os.ReadDir(cmds)
+	data, err := fs.ReadFile(pack.FS, rel)
 	if err != nil {
-		t.Fatalf("reading dolt commands dir: %v", err)
+		t.Fatalf("reading bundled %s pack file %s: %v", packName, rel, err)
 	}
-	if len(entries) == 0 {
-		t.Fatal("dolt commands dir is empty")
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		run := filepath.Join(cmds, e.Name(), "run.sh")
-		info, err := os.Stat(run)
-		if err != nil {
-			t.Errorf("dolt command %s/run.sh missing: %v", e.Name(), err)
-			continue
-		}
-		if info.Mode()&0o111 == 0 {
-			t.Errorf("dolt command %s/run.sh not executable: mode %v", e.Name(), info.Mode())
-		}
-	}
+	return string(data)
+}
 
-	// Verify dolt assets/scripts/runtime.sh exists and is executable.
-	runtimeSh := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "assets", "scripts", "runtime.sh")
-	if info, err := os.Stat(runtimeSh); err != nil {
-		t.Errorf("dolt assets/scripts/runtime.sh missing: %v", err)
-	} else if info.Mode()&0o111 == 0 {
-		t.Errorf("dolt assets/scripts/runtime.sh not executable: mode %v", info.Mode())
+// bundledPackDirForTest hydrates the user-global cache for a bundled pack's
+// source (the same packman path EnsureBuiltinRuntimeAssets takes) and
+// returns the on-disk pack directory inside the cache. Use it for tests
+// that exec bundled scripts; content-only assertions should read the
+// embedded FS via readBundledPackFileForTest instead.
+func bundledPackDirForTest(t testing.TB, packName string) string {
+	t.Helper()
+	source, ok := builtinpacks.Source(packName)
+	if !ok {
+		t.Fatalf("bundled %s pack is not registered", packName)
 	}
-
-	healthSchema := filepath.Join(cmds, "health", "schemas", "result.schema.json")
-	if _, err := os.Stat(healthSchema); err != nil {
-		t.Errorf("dolt command health result schema missing: %v", err)
+	cachePath, err := packman.EnsureRepoInCache(source, bundledPackImportCommit())
+	if err != nil {
+		t.Fatalf("EnsureRepoInCache(%s): %v", packName, err)
 	}
-
-	// Verify formulas exist.
-	formulasDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "formulas")
-	if _, err := os.Stat(formulasDir); err != nil {
-		t.Errorf("dolt formulas dir missing: %v", err)
-	}
-
-	// Verify embedded order files are materialized alongside formulas.
-	for _, order := range []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "jsonl-export.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "reaper.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "gate-sweep.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "dolt-health.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "orders", "digest-generate.toml"),
-	} {
-		if _, err := os.Stat(order); err != nil {
-			t.Errorf("embedded order missing: %v", err)
-		}
-	}
-
-	// Verify TOML files are not executable.
-	info, err := os.Stat(bdToml)
-	if err == nil && info.Mode()&0o111 != 0 {
-		t.Errorf("pack.toml should not be executable: mode %v", info.Mode())
-	}
+	pack, _ := builtinpacks.ByName(packName)
+	return filepath.Join(cachePath, filepath.FromSlash(pack.Subpath))
 }
 
 func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
-	dir := t.TempDir()
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
 	doltSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe"
 	maintenanceScratchNeedle := "benchdb|testdb_*|beads_pt*|beads_vr*|beads_test_bench_*|doctest_*|doctortest_*"
 	maintenanceTempNeedle := "beads_t[0-9a-f]"
@@ -198,32 +138,30 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 		needle   string
 		minCount int
 	}{
-		{"core", filepath.Join("assets", "scripts", "jsonl-export.sh"), doltSystemNeedle, 1},
-		{"core", filepath.Join("assets", "scripts", "jsonl-export.sh"), maintenanceScratchNeedle, 1},
-		{"core", filepath.Join("assets", "scripts", "jsonl-export.sh"), maintenanceTempNeedle, 1},
-		{"core", filepath.Join("assets", "scripts", "reaper.sh"), doltSystemNeedle, 1},
-		{"core", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceScratchNeedle, 1},
-		{"core", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceTempNeedle, 1},
-		{"core", filepath.Join("assets", "scripts", "reaper.sh"), "expires_at", 1},
-		{"dolt", filepath.Join("commands", "list", "run.sh"), doltSystemNeedle, 1},
-		{"dolt", filepath.Join("commands", "cleanup", "run.sh"), doltSystemNeedle, 1},
-		{"dolt", filepath.Join("commands", "health", "run.sh"), doltSystemNeedle, 2},
-		{"dolt", filepath.Join("commands", "sync", "run.sh"), doltSystemNeedle, 2},
-		{"dolt", filepath.Join("assets", "scripts", "mol-dog-doctor.sh"), "__gc_probe", 1},
-		{"dolt", filepath.Join("formulas", "mol-dog-stale-db.toml"), "__gc_probe", 1},
+		{"core", "assets/scripts/jsonl-export.sh", doltSystemNeedle, 1},
+		{"core", "assets/scripts/jsonl-export.sh", maintenanceScratchNeedle, 1},
+		{"core", "assets/scripts/jsonl-export.sh", maintenanceTempNeedle, 1},
+		{"core", "assets/scripts/reaper.sh", doltSystemNeedle, 1},
+		{"core", "assets/scripts/reaper.sh", maintenanceScratchNeedle, 1},
+		{"core", "assets/scripts/reaper.sh", maintenanceTempNeedle, 1},
+		{"core", "assets/scripts/reaper.sh", "expires_at", 1},
+		{"dolt", "commands/list/run.sh", doltSystemNeedle, 1},
+		{"dolt", "commands/cleanup/run.sh", doltSystemNeedle, 1},
+		{"dolt", "commands/health/run.sh", doltSystemNeedle, 2},
+		{"dolt", "commands/sync/run.sh", doltSystemNeedle, 2},
+		{"dolt", "assets/scripts/mol-dog-doctor.sh", "__gc_probe", 1},
+		{"dolt", "formulas/mol-dog-stale-db.toml", "__gc_probe", 1},
 	} {
-		path := filepath.Join(dir, citylayout.SystemPacksRoot, tt.pack, tt.rel)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("ReadFile(%s/%s): %v", tt.pack, tt.rel, err)
-		}
-		if got := strings.Count(string(data), tt.needle); got < tt.minCount {
+		data := readBundledPackFileForTest(t, tt.pack, tt.rel)
+		if got := strings.Count(data, tt.needle); got < tt.minCount {
 			t.Fatalf("%s/%s database enumeration must contain %q at least %d time(s), got %d", tt.pack, tt.rel, tt.needle, tt.minCount, got)
 		}
 	}
 }
 
 func TestDoltSyncRejectsManagedProbeDatabaseFilter(t *testing.T) {
+	packDir := bundledPackDirForTest(t, "dolt")
+	script := filepath.Join(packDir, "commands", "sync", "run.sh")
 	for _, dbName := range []string{
 		managedDoltProbeDatabase,
 		strings.ToUpper(managedDoltProbeDatabase),
@@ -236,11 +174,6 @@ func TestDoltSyncRejectsManagedProbeDatabaseFilter(t *testing.T) {
 	} {
 		t.Run(dbName, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := MaterializeBuiltinPacks(dir); err != nil {
-				t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-			}
-			packDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt")
-			script := filepath.Join(packDir, "commands", "sync", "run.sh")
 			cmd := exec.Command(script, "--db", dbName)
 			cmd.Env = sanitizedBaseEnv("GC_CITY_PATH="+dir, "GC_PACK_DIR="+packDir)
 			out, err := cmd.CombinedOutput()
@@ -255,11 +188,6 @@ func TestDoltSyncRejectsManagedProbeDatabaseFilter(t *testing.T) {
 }
 
 func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) {
-	dir := t.TempDir()
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
 	binDir := t.TempDir()
 	for _, tool := range []struct {
 		name string
@@ -274,7 +202,7 @@ func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) 
 		}
 	}
 
-	script := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "doctor", "check-dolt", "run.sh")
+	script := filepath.Join(bundledPackDirForTest(t, "dolt"), "doctor", "check-dolt", "run.sh")
 	cmd := exec.Command(script)
 	cmd.Env = append(sanitizedBaseEnv(), "PATH="+binDir+":"+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
@@ -287,11 +215,6 @@ func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) 
 }
 
 func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
-	dir := t.TempDir()
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
 	binDir := t.TempDir()
 	capturePath := filepath.Join(t.TempDir(), "timeout-argv")
 	for _, tool := range []struct {
@@ -315,7 +238,7 @@ func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
 		}
 	}
 
-	script := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "doctor", "check-dolt", "run.sh")
+	script := filepath.Join(bundledPackDirForTest(t, "dolt"), "doctor", "check-dolt", "run.sh")
 	cmd := exec.Command(script)
 	cmd.Env = append(
 		sanitizedBaseEnv(),
@@ -337,11 +260,6 @@ func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
 }
 
 func TestBuiltinDoltDoctorReportsTimedOutVersionProbe(t *testing.T) {
-	dir := t.TempDir()
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
 	binDir := t.TempDir()
 	for _, tool := range []struct {
 		name string
@@ -359,7 +277,7 @@ func TestBuiltinDoltDoctorReportsTimedOutVersionProbe(t *testing.T) {
 		}
 	}
 
-	script := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "doctor", "check-dolt", "run.sh")
+	script := filepath.Join(bundledPackDirForTest(t, "dolt"), "doctor", "check-dolt", "run.sh")
 	cmd := exec.Command(script)
 	cmd.Env = append(sanitizedBaseEnv(), "PATH="+binDir+":"+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
@@ -372,11 +290,6 @@ func TestBuiltinDoltDoctorReportsTimedOutVersionProbe(t *testing.T) {
 }
 
 func TestBuiltinDoltDoctorFailsClosedWithoutBoundedRunner(t *testing.T) {
-	dir := t.TempDir()
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
 	binDir := t.TempDir()
 	bashPath, err := exec.LookPath("bash")
 	if err != nil {
@@ -398,7 +311,7 @@ func TestBuiltinDoltDoctorFailsClosedWithoutBoundedRunner(t *testing.T) {
 		}
 	}
 
-	script := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "doctor", "check-dolt", "run.sh")
+	script := filepath.Join(bundledPackDirForTest(t, "dolt"), "doctor", "check-dolt", "run.sh")
 	cmd := exec.Command(script)
 	cmd.Env = append(sanitizedBaseEnv(), "PATH="+binDir)
 	out, err := cmd.CombinedOutput()
@@ -410,31 +323,8 @@ func TestBuiltinDoltDoctorFailsClosedWithoutBoundedRunner(t *testing.T) {
 	}
 }
 
-func TestMaterializeBuiltinPacks_Idempotent(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatal(err)
-	}
-	// Second call should succeed without error.
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("second call failed: %v", err)
-	}
-
-	// Files should still exist.
-	if _, err := os.Stat(filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "pack.toml")); err != nil {
-		t.Error("bd pack.toml missing after second call")
-	}
-}
-
-func TestMaterializeBuiltinPacksPiHookUsesCurrentExtensionAPI(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	data := readMaterializedPiHook(t, dir)
+func TestBundledPiHookUsesCurrentExtensionAPI(t *testing.T) {
+	data := readBundledPackFileForTest(t, "core", "overlay/per-provider/pi/.pi/extensions/gc-hooks.js")
 	for _, want := range []string{
 		"module.exports = function gascityPiExtension(pi)",
 		`pi.on("session_start"`,
@@ -453,7 +343,7 @@ func TestMaterializeBuiltinPacksPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		"gc-hooks mirrorTranscript:",
 	} {
 		if !strings.Contains(data, want) {
-			t.Errorf("materialized Pi hook missing current extension API marker %q:\n%s", want, data)
+			t.Errorf("bundled Pi hook missing current extension API marker %q:\n%s", want, data)
 		}
 	}
 	for _, legacy := range []string{
@@ -464,63 +354,13 @@ func TestMaterializeBuiltinPacksPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`"experimental.chat.system.transform"`,
 	} {
 		if strings.Contains(data, legacy) {
-			t.Errorf("materialized Pi hook still contains legacy API marker %q:\n%s", legacy, data)
+			t.Errorf("bundled Pi hook still contains legacy API marker %q:\n%s", legacy, data)
 		}
 	}
 }
 
-// TestMaterializeBuiltinPacksReplacesStaleMaterializedPiHook pins the
-// canonical-sync contract for required packs under Option B
-// (gastownhall/gascity#2429): the operator-edit-protection introduced for
-// that issue is scoped to non-required packs, so a stale correct-mode file in
-// the required core pack is refreshed to the embedded content rather than
-// preserved. This keeps required packs (core, bd/dolt) in
-// lockstep with the binary while still protecting operator-authored formula
-// TOMLs and command scripts in non-required packs (covered by
-// TestMaterializeFS_PreservesExistingFiles).
-func TestMaterializeBuiltinPacksReplacesStaleMaterializedPiHook(t *testing.T) {
-	dir := t.TempDir()
-	hookPath := materializedPiHookPath(dir)
-	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll(%s): %v", filepath.Dir(hookPath), err)
-	}
-	stale := []byte(`// Gas City hooks for Pi Coding Agent.
-module.exports = {
-  name: "gascity",
-  events: { "session.created": () => "" },
-  hooks: { "experimental.chat.system.transform": (system) => system },
-};
-`)
-	if err := os.WriteFile(hookPath, stale, 0o644); err != nil {
-		t.Fatalf("WriteFile(%s): %v", hookPath, err)
-	}
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	// The Pi hook lives in the required core pack. Under Option B
-	// (gastownhall/gascity#2429) operator-edit preservation is scoped to
-	// non-required packs; required packs are kept in lockstep with the binary,
-	// so a stale correct-mode hook is refreshed to the embedded content rather
-	// than preserved.
-	data := readMaterializedPiHook(t, dir)
-	if data == string(stale) {
-		t.Fatalf("stale Pi hook in required core pack was preserved — required packs must be refreshed.\ngot:\n%s", data)
-	}
-	if !strings.Contains(data, `pi.on("session_start"`) {
-		t.Fatalf("refreshed Pi hook does not use current extension API:\n%s", data)
-	}
-}
-
-func TestMaterializeBuiltinPacksOmpHookPublishesProviderSessionID(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	data := readMaterializedOmpHook(t, dir)
+func TestBundledOmpHookPublishesProviderSessionID(t *testing.T) {
+	data := readBundledPackFileForTest(t, "core", "overlay/per-provider/omp/.omp/hooks/gc-hook.ts")
 	for _, want := range []string{
 		`import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent"`,
 		`const GC_OMP_HOOK_VERSION = 2`,
@@ -535,7 +375,7 @@ func TestMaterializeBuiltinPacksOmpHookPublishesProviderSessionID(t *testing.T) 
 		`logRunFailure`,
 	} {
 		if !strings.Contains(data, want) {
-			t.Errorf("materialized OMP hook missing provider-session marker %q:\n%s", want, data)
+			t.Errorf("bundled OMP hook missing provider-session marker %q:\n%s", want, data)
 		}
 	}
 	for _, legacy := range []string{
@@ -545,139 +385,20 @@ func TestMaterializeBuiltinPacksOmpHookPublishesProviderSessionID(t *testing.T) 
 		`"experimental.chat.system.transform"`,
 	} {
 		if strings.Contains(data, legacy) {
-			t.Errorf("materialized OMP hook still contains legacy API marker %q:\n%s", legacy, data)
+			t.Errorf("bundled OMP hook still contains legacy API marker %q:\n%s", legacy, data)
 		}
 	}
 }
 
-func materializedPiHookPath(dir string) string {
-	return filepath.Join(dir, citylayout.SystemPacksRoot, "core", "overlay", "per-provider", "pi", ".pi", "extensions", "gc-hooks.js")
-}
-
-func materializedOmpHookPath(dir string) string {
-	return filepath.Join(dir, citylayout.SystemPacksRoot, "core", "overlay", "per-provider", "omp", ".omp", "hooks", "gc-hook.ts")
-}
-
-func readMaterializedOmpHook(t *testing.T, dir string) string {
-	t.Helper()
-	path := materializedOmpHookPath(dir)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile(%s): %v", path, err)
-	}
-	return string(data)
-}
-
-func readMaterializedPiHook(t *testing.T, dir string) string {
-	t.Helper()
-	path := materializedPiHookPath(dir)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile(%s): %v", path, err)
-	}
-	return string(data)
-}
-
-func TestMaterializeBuiltinPacks_DoesNotRewriteUnchangedFiles(t *testing.T) {
+func TestBundledBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
 	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	path := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "skills", "gc-dashboard", "SKILL.md")
-	past := time.Unix(123456789, 0)
-	if err := os.Chtimes(path, past, past); err != nil {
-		t.Fatalf("Chtimes(%s): %v", path, err)
-	}
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() second call error: %v", err)
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat(%s): %v", path, err)
-	}
-	if !info.ModTime().Equal(past) {
-		t.Fatalf("unchanged file was rewritten: modtime = %s, want %s", info.ModTime(), past)
-	}
-}
-
-func TestMaterializeBuiltinPacks_RestoresModeWhenContentUnchanged(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	path := filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "doctor", "check-bd", "run.sh")
-	if err := os.Chmod(path, 0o644); err != nil {
-		t.Fatalf("Chmod(%s): %v", path, err)
-	}
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() second call error: %v", err)
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat(%s): %v", path, err)
-	}
-	if info.Mode().Perm() != 0o755 {
-		t.Fatalf("script mode was not restored: %v", info.Mode().Perm())
-	}
-}
-
-func TestMaterializeBuiltinPacks_ReplacesMatchingSymlink(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	path := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "skills", "gc-dashboard", "SKILL.md")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile(%s): %v", path, err)
-	}
-	target := filepath.Join(dir, "outside-skill.md")
-	if err := os.WriteFile(target, data, 0o644); err != nil {
-		t.Fatalf("WriteFile(%s): %v", target, err)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("Remove(%s): %v", path, err)
-	}
-	if err := os.Symlink(target, path); err != nil {
-		t.Skipf("Symlink: %v", err)
-	}
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() second call error: %v", err)
-	}
-
-	info, err := os.Lstat(path)
-	if err != nil {
-		t.Fatalf("Lstat(%s): %v", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		t.Fatalf("matching symlink was preserved, want regular file")
-	}
-}
-
-func TestMaterializedBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
 
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
 			City: []string{
-				filepath.Join(dir, citylayout.SystemPacksRoot, "core", "formulas"),
-				filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "formulas"),
-				filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "formulas"),
+				filepath.Join(bundledPackDirForTest(t, "core"), "formulas"),
+				filepath.Join(bundledPackDirForTest(t, "dolt"), "formulas"),
+				filepath.Join(bundledPackDirForTest(t, "gastown"), "formulas"),
 			},
 		},
 	}
@@ -688,7 +409,7 @@ func TestMaterializedBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
 		t.Fatalf("scanAllOrders: %v", err)
 	}
 	if strings.Contains(stderr.String(), "deprecated order path") {
-		t.Fatalf("unexpected deprecation warning while scanning materialized builtin packs:\n%s", stderr.String())
+		t.Fatalf("unexpected deprecation warning while scanning bundled builtin packs:\n%s", stderr.String())
 	}
 
 	names := make(map[string]bool, len(aa))
@@ -702,240 +423,635 @@ func TestMaterializedBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
 	}
 }
 
-func TestMaterializeBuiltinPacks_PrunesLegacyOrderDirs(t *testing.T) {
-	dir := t.TempDir()
-
-	legacyPaths := []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "formulas", "orders", "gate-sweep", "order.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "formulas", "orders", "dolt-health", "order.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "formulas", "orders", "digest-generate", "order.toml"),
+func TestBundledWorkerPromptsIncludeFilesystemSearchGuidance(t *testing.T) {
+	for _, name := range []string{"pool-worker.md", "graph-worker.md"} {
+		t.Run(name, func(t *testing.T) {
+			data := readBundledPackFileForTest(t, "core", "assets/prompts/"+name)
+			if !strings.Contains(data, formulaFilesystemSearchGuidance) {
+				t.Fatalf("bundled %s missing filesystem search guidance", name)
+			}
+		})
 	}
-	for _, path := range legacyPaths {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("mkdir legacy path: %v", err)
+}
+
+func writeBuiltinPackLoadTestCity(dir string) error {
+	return os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644)
+}
+
+func assertPackNamesForTest(t *testing.T, got, want []string) {
+	t.Helper()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("requiredBuiltinPackNames = %v, want %v", got, want)
+	}
+}
+
+func TestRequiredBuiltinPackNames(t *testing.T) {
+	t.Run("default_provider", func(t *testing.T) {
+		clearGCEnv(t)
+		dir := t.TempDir()
+
+		// Default provider (no env, no city.toml) → core and bd.
+		assertPackNamesForTest(t, requiredBuiltinPackNames(dir), []string{"core", "bd"})
+
+		// The matching [imports.<name>] entries carry the bundled source
+		// and the canonical bundled pin.
+		imports, ordered := requiredBuiltinImports(dir)
+		if strings.Join(ordered, ",") != "core,bd" {
+			t.Fatalf("requiredBuiltinImports order = %v, want [core bd]", ordered)
 		}
-		if err := os.WriteFile(path, []byte("legacy"), 0o644); err != nil {
-			t.Fatalf("write legacy path: %v", err)
+		for _, name := range ordered {
+			source, ok := builtinpacks.Source(name)
+			if !ok {
+				t.Fatalf("builtinpacks.Source(%q) not registered", name)
+			}
+			imp, ok := imports[name]
+			if !ok {
+				t.Fatalf("requiredBuiltinImports missing %q: %#v", name, imports)
+			}
+			if imp.Source != source {
+				t.Errorf("imports[%q].Source = %q, want %q", name, imp.Source, source)
+			}
+			if imp.Version != config.BundledPackImportVersion {
+				t.Errorf("imports[%q].Version = %q, want %q", name, imp.Version, config.BundledPackImportVersion)
+			}
 		}
-	}
+	})
 
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
+	t.Run("env_file_provider", func(t *testing.T) {
+		clearGCEnv(t)
+		dir := t.TempDir()
+		t.Setenv("GC_BEADS", "file")
+		assertPackNamesForTest(t, requiredBuiltinPackNames(dir), []string{"core"})
+	})
 
-	for _, path := range legacyPaths {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("legacy order path still exists: %s", path)
+	t.Run("city_toml_file_provider", func(t *testing.T) {
+		clearGCEnv(t)
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+			t.Fatal(err)
 		}
-	}
+		assertPackNamesForTest(t, requiredBuiltinPackNames(dir), []string{"core"})
+	})
 
-	for _, path := range []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "gate-sweep.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "dolt-health.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "orders", "digest-generate.toml"),
-	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("flat order missing after materialization: %v", err)
+	t.Run("city_toml_bd_provider", func(t *testing.T) {
+		clearGCEnv(t)
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		assertPackNamesForTest(t, requiredBuiltinPackNames(dir), []string{"core", "bd"})
+	})
+
+	t.Run("exec_gc_beads_bd_override_adds_dolt", func(t *testing.T) {
+		clearGCEnv(t)
+		dir := t.TempDir()
+		// An exec:gc-beads-bd provider that is NOT the city's own shim is a
+		// direct exec lifecycle: it satisfies the bd store contract AND needs
+		// the dolt pack for lifecycle tooling.
+		t.Setenv("GC_BEADS", "exec:/tmp/gc-beads-bd")
+		assertPackNamesForTest(t, requiredBuiltinPackNames(dir), []string{"core", "bd", "dolt"})
+	})
+
+	t.Run("city_shim_exec_normalizes_to_bd", func(t *testing.T) {
+		clearGCEnv(t)
+		dir := t.TempDir()
+		// The city's own stable shim path normalizes back to the logical
+		// "bd" provider, so it must NOT trigger the direct-exec dolt
+		// requirement.
+		t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(dir))
+		assertPackNamesForTest(t, requiredBuiltinPackNames(dir), []string{"core", "bd"})
+	})
+}
+
+func TestBuiltinImportsForNames(t *testing.T) {
+	imports, ordered := builtinImportsForNames([]string{"core", "bd", "dolt", "not-a-pack"})
+
+	// Unknown names are skipped; known names keep their input order.
+	if strings.Join(ordered, ",") != "core,bd,dolt" {
+		t.Fatalf("builtinImportsForNames order = %v, want [core bd dolt]", ordered)
+	}
+	if len(imports) != 3 {
+		t.Fatalf("builtinImportsForNames imports = %#v, want 3 entries", imports)
+	}
+	for _, name := range ordered {
+		source, ok := builtinpacks.Source(name)
+		if !ok {
+			t.Fatalf("builtinpacks.Source(%q) not registered", name)
+		}
+		imp := imports[name]
+		if imp.Source != source {
+			t.Errorf("imports[%q].Source = %q, want %q", name, imp.Source, source)
+		}
+		if imp.Version != config.BundledPackImportVersion {
+			t.Errorf("imports[%q].Version = %q, want %q", name, imp.Version, config.BundledPackImportVersion)
 		}
 	}
 }
 
-func TestMaterializeBuiltinPacks_RepairsLegacyGcBeadsBdScript(t *testing.T) {
-	dir := t.TempDir()
-	legacyScript := filepath.Join(dir, ".gc", "scripts", "gc-beads-bd.sh")
-	if err := os.MkdirAll(filepath.Dir(legacyScript), 0o755); err != nil {
-		t.Fatal(err)
+func TestBuiltinImportsForInit(t *testing.T) {
+	t.Run("provider_resolution", func(t *testing.T) {
+		clearGCEnv(t)
+		for _, tt := range []struct {
+			provider string
+			want     string
+		}{
+			{provider: "", want: "core,bd"},
+			{provider: "bd", want: "core,bd"},
+			{provider: "file", want: "core"},
+			{provider: "exec:/tmp/custom-store", want: "core"},
+			{provider: "exec:/tmp/gc-beads-bd", want: "core,bd"},
+		} {
+			_, ordered := builtinImportsForInit(tt.provider)
+			if got := strings.Join(ordered, ","); got != tt.want {
+				t.Errorf("builtinImportsForInit(%q) = %v, want %s", tt.provider, ordered, tt.want)
+			}
+		}
+	})
+
+	t.Run("gc_beads_env_wins_over_city_provider", func(t *testing.T) {
+		clearGCEnv(t)
+		t.Setenv("GC_BEADS", "file")
+		_, ordered := builtinImportsForInit("bd")
+		if got := strings.Join(ordered, ","); got != "core" {
+			t.Errorf("builtinImportsForInit with GC_BEADS=file = %v, want core only", ordered)
+		}
+	})
+}
+
+func TestNoMaintenanceBuiltinPack(t *testing.T) {
+	// The maintenance pack was folded into core: it must not exist in the
+	// registry, and its housekeeping orders must ship with core instead.
+	if _, ok := builtinpacks.ByName("maintenance"); ok {
+		t.Error("builtinpacks.ByName(\"maintenance\") found, want absent")
 	}
-	stale := `#!/bin/sh
-# gc-beads-bd - exec: beads provider for Dolt-backed beads (bd).
-run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null || true
-run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
-`
-	if err := os.WriteFile(legacyScript, []byte(stale), 0o755); err != nil {
-		t.Fatalf("write legacy script: %v", err)
+	for _, pack := range builtinpacks.All() {
+		if pack.Name == "maintenance" {
+			t.Error("builtinpacks.All contains retired maintenance pack")
+		}
+	}
+	for _, rel := range []string{
+		"orders/gate-sweep.toml",
+		"orders/orphan-sweep.toml",
+		"orders/wisp-compact.toml",
+		"assets/scripts/gate-sweep.sh",
+		"doctor/check-binaries/run.sh",
+	} {
+		// readBundledPackFileForTest fatals if the asset is missing.
+		if data := readBundledPackFileForTest(t, "core", rel); data == "" {
+			t.Errorf("core pack folded maintenance asset %s is empty", rel)
+		}
+	}
+}
+
+func TestEnsureBuiltinRuntimeAssetsHydratesCacheAndShim(t *testing.T) {
+	clearGCEnv(t) // fresh GC_HOME → hydration starts from a cold cache
+	city := t.TempDir()
+
+	materializeBuiltinPacksForTest(t, city)
+
+	// The default-provider city requires core and bd; both bundled-source
+	// caches must validate against the running binary's embedded content.
+	commit := bundledPackImportCommit()
+	for _, name := range []string{"core", "bd"} {
+		source, ok := builtinpacks.Source(name)
+		if !ok {
+			t.Fatalf("builtinpacks.Source(%q) not registered", name)
+		}
+		cachePath, err := packman.RepoCachePath(source, commit)
+		if err != nil {
+			t.Fatalf("RepoCachePath(%s): %v", name, err)
+		}
+		if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+			t.Errorf("%s cache invalid after hydration: %v", name, err)
+		}
 	}
 
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	data, err := os.ReadFile(legacyScript)
+	// The stable shim exists, is executable, and execs the cache-resolved
+	// bundled bd lifecycle script.
+	target := bundledGcBeadsBdScriptForTest(t)
+	shimPath := gcBeadsBdScriptPath(city)
+	info, err := os.Stat(shimPath)
 	if err != nil {
-		t.Fatalf("read repaired legacy script: %v", err)
-	}
-	body := string(data)
-	if strings.Contains(body, "config set") {
-		t.Fatalf("legacy script still contains config mutation:\n%s", body)
-	}
-	if !strings.Contains(body, ".gc/system/packs/bd/assets/scripts/gc-beads-bd.sh") {
-		t.Fatalf("legacy script was not repaired to system-pack shim:\n%s", body)
-	}
-	info, err := os.Stat(legacyScript)
-	if err != nil {
-		t.Fatalf("stat repaired legacy script: %v", err)
+		t.Fatalf("Stat(shim): %v", err)
 	}
 	if info.Mode()&0o111 == 0 {
-		t.Fatalf("repaired legacy script is not executable: mode %v", info.Mode())
+		t.Errorf("shim not executable: mode %v", info.Mode())
+	}
+	shim, err := os.ReadFile(shimPath)
+	if err != nil {
+		t.Fatalf("ReadFile(shim): %v", err)
+	}
+	if !strings.HasPrefix(string(shim), "#!/bin/sh") {
+		t.Errorf("shim missing shebang:\n%s", shim)
+	}
+	if !strings.Contains(string(shim), target) {
+		t.Errorf("shim does not exec bundled target %s:\n%s", target, shim)
+	}
+
+	// Idempotence: a second call succeeds and does not rewrite the shim.
+	materializeBuiltinPacksForTest(t, city)
+	after, err := os.Stat(shimPath)
+	if err != nil {
+		t.Fatalf("Stat(shim) after second call: %v", err)
+	}
+	if !after.ModTime().Equal(info.ModTime()) {
+		t.Errorf("unchanged shim was rewritten: modtime %s → %s", info.ModTime(), after.ModTime())
 	}
 }
 
-func TestMaterializeBuiltinPacks_PrunesStaleGeneratedPackFiles(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+func TestEnsureBuiltinRuntimeAssetsSkipsShimForNonBdCity(t *testing.T) {
+	clearGCEnv(t)
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	stalePaths := []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "removed-order.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "removed-command", "run.sh"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "assets", "scripts", "removed-helper.sh"),
-	}
-	for _, path := range stalePaths {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("mkdir stale path: %v", err)
-		}
-		if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
-			t.Fatalf("write stale path: %v", err)
-		}
+	materializeBuiltinPacksForTest(t, city)
+
+	if _, err := os.Stat(gcBeadsBdScriptPath(city)); !os.IsNotExist(err) {
+		t.Errorf("stat gc-beads-bd shim err = %v, want IsNotExist for non-bd city", err)
 	}
 
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() second call error: %v", err)
+	// Core (always required) is still hydrated for a file-provider city.
+	commit := bundledPackImportCommit()
+	coreSource, _ := builtinpacks.Source("core")
+	coreCache, err := packman.RepoCachePath(coreSource, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath(core): %v", err)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(coreCache, commit); err != nil {
+		t.Errorf("core cache invalid after hydration: %v", err)
+	}
+}
+
+func TestEnsureBuiltinRuntimeAssetsPrunesRetiredSystemPacks(t *testing.T) {
+	city := t.TempDir()
+
+	// Simulate the retired materialized tree left behind by an older binary.
+	stale := filepath.Join(city, citylayout.SystemPacksRoot, "maintenance")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "pack.toml"), []byte("[pack]\nname = \"maintenance\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	for _, path := range stalePaths {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("stale generated pack file still exists: %s", path)
-		}
+	materializeBuiltinPacksForTest(t, city)
+
+	if _, err := os.Stat(filepath.Join(city, citylayout.SystemPacksRoot)); !os.IsNotExist(err) {
+		t.Errorf("stat retired %s err = %v, want IsNotExist", citylayout.SystemPacksRoot, err)
+	}
+}
+
+// TestPruneRetiredSystemPacksWaitsForLegacyIncludeMigration pins the legacy
+// upgrade window ordering: on a city whose city.toml still composes builtin
+// packs through .gc/system/packs includes, pruning must NOT delete the tree.
+// Deleting it before the include migration leaves the city silently
+// composing without those packs (dangling V1 includes skip with only a log
+// line) until someone runs "gc doctor --fix". The tree is preserved and a
+// once-per-city warning points at the doctor migration; once the includes
+// are migrated the next prune removes the tree.
+func TestPruneRetiredSystemPacksWaitsForLegacyIncludeMigration(t *testing.T) {
+	city := t.TempDir()
+	legacyToml := "[workspace]\nincludes = [\".gc/system/packs/core\"]\n\n[beads]\nprovider = \"file\"\n"
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(legacyToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(city, citylayout.SystemPacksRoot, "core")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "pack.toml"), []byte("[pack]\nname = \"core\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	for _, path := range []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact", "run.sh"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "mol-dog-compactor.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "gate-sweep.toml"),
+	var warnings bytes.Buffer
+	pruneRetiredSystemPacks(city, &warnings)
+
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("stat %s err = %v; the prune ran before the include migration", stale, err)
+	}
+	if !strings.Contains(warnings.String(), `run "gc doctor --fix"`) {
+		t.Errorf("preserved-tree warning does not point at the doctor migration: %q", warnings.String())
+	}
+
+	// Once per city per process: a second gated prune does not re-warn.
+	var second bytes.Buffer
+	pruneRetiredSystemPacks(city, &second)
+	if second.Len() != 0 {
+		t.Errorf("second gated prune re-warned: %q", second.String())
+	}
+
+	// After the migration strips the legacy includes, the prune proceeds.
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pruneRetiredSystemPacks(city, io.Discard)
+	if _, err := os.Stat(filepath.Join(city, citylayout.SystemPacksRoot)); !os.IsNotExist(err) {
+		t.Errorf("stat retired %s err = %v, want IsNotExist after migration", citylayout.SystemPacksRoot, err)
+	}
+}
+
+// TestPruneRetiredSystemPacksGatesOnEveryCompositionRoute pins the widened
+// prune gate: city config can compose through the retired tree on more
+// routes than root workspace.includes — default-rig includes, rig includes,
+// city / rig / default-rig import sources, the same surfaces in pack.toml,
+// and any of these hosted in a local config fragment (fragments merge
+// workspace includes / default-rig includes additively and concatenate
+// [[rigs]]). The post-prune failure mode for rig includes and local-path
+// import sources is a citywide hard config-load failure, and for workspace
+// routes a silent core drop, so the gate must preserve the tree for every
+// route until the reference is migrated.
+func TestPruneRetiredSystemPacksGatesOnEveryCompositionRoute(t *testing.T) {
+	const fragmentName = "legacy-fragment.toml"
+	cases := []struct {
+		name     string
+		cityToml string
+		packToml string
+		fragment string
+		wantKept bool
+	}{
+		{
+			name:     "workspace-default-rig-includes",
+			cityToml: "[workspace]\ndefault_rig_includes = [\".gc/system/packs/core\"]\n",
+			wantKept: true,
+		},
+		{
+			name:     "rig-includes",
+			cityToml: "[workspace]\n\n[[rigs]]\nname = \"demo\"\npath = \"demo\"\nincludes = [\".gc/system/packs/core\"]\n",
+			wantKept: true,
+		},
+		{
+			name:     "rig-import-source",
+			cityToml: "[workspace]\n\n[[rigs]]\nname = \"demo\"\npath = \"demo\"\n\n[rigs.imports.core]\nsource = \".gc/system/packs/core\"\n",
+			wantKept: true,
+		},
+		{
+			name:     "city-import-source",
+			cityToml: "[workspace]\n\n[imports.core]\nsource = \".gc/system/packs/core\"\n",
+			wantKept: true,
+		},
+		{
+			name:     "default-rig-import-source",
+			cityToml: "[workspace]\n\n[defaults.rig.imports.core]\nsource = \".gc/system/packs/core\"\n",
+			wantKept: true,
+		},
+		{
+			name:     "pack-toml-import-source",
+			cityToml: "[workspace]\n",
+			packToml: "[pack]\nname = \"demo\"\nschema = 2\n\n[imports.core]\nsource = \".gc/system/packs/core\"\n",
+			wantKept: true,
+		},
+		{
+			name:     "pack-toml-pack-includes",
+			cityToml: "[workspace]\n",
+			packToml: "[pack]\nname = \"demo\"\nschema = 2\nincludes = [\".gc/system/packs/core\"]\n",
+			wantKept: true,
+		},
+		{
+			name:     "fragment-workspace-includes",
+			cityToml: "include = [\"" + fragmentName + "\"]\n\n[workspace]\n",
+			fragment: "[workspace]\nincludes = [\".gc/system/packs/core\"]\n",
+			wantKept: true,
+		},
+		{
+			name:     "fragment-rig-import-source",
+			cityToml: "include = [\"" + fragmentName + "\"]\n\n[workspace]\n",
+			fragment: "[[rigs]]\nname = \"demo\"\npath = \"demo\"\n\n[rigs.imports.core]\nsource = \".gc/system/packs/core\"\n",
+			wantKept: true,
+		},
+		{
+			name:     "clean-fragment-and-rig-prunes",
+			cityToml: "include = [\"" + fragmentName + "\"]\n\n[workspace]\n\n[[rigs]]\nname = \"demo\"\npath = \"demo\"\n",
+			fragment: "[workspace]\n",
+			wantKept: false,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			city := t.TempDir()
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(tt.cityToml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tt.packToml != "" {
+				if err := os.WriteFile(filepath.Join(city, "pack.toml"), []byte(tt.packToml), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.fragment != "" {
+				if err := os.WriteFile(filepath.Join(city, fragmentName), []byte(tt.fragment), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stale := filepath.Join(city, citylayout.SystemPacksRoot, "core")
+			if err := os.MkdirAll(stale, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			var warnings bytes.Buffer
+			pruneRetiredSystemPacks(city, &warnings)
+
+			if tt.wantKept {
+				if _, err := os.Stat(stale); err != nil {
+					t.Fatalf("stat %s err = %v; the prune deleted a tree this route still composes through", stale, err)
+				}
+				if !strings.Contains(warnings.String(), `run "gc doctor --fix"`) {
+					t.Errorf("preserved-tree warning does not point at the doctor migration: %q", warnings.String())
+				}
+				return
+			}
+			if _, err := os.Stat(filepath.Join(city, citylayout.SystemPacksRoot)); !os.IsNotExist(err) {
+				t.Errorf("stat retired %s err = %v, want IsNotExist for a config without legacy references", citylayout.SystemPacksRoot, err)
+			}
+			if warnings.Len() != 0 {
+				t.Errorf("clean config emitted a preserved-tree warning: %q", warnings.String())
+			}
+		})
+	}
+}
+
+// TestPruneRetiredSystemPacksFailsClosedOnUninspectableFragment pins the
+// fail-closed contract for config fragments: when city.toml references a
+// fragment the gate cannot inspect — missing, unreadable, or a remote
+// include entry — the prune must preserve the (inert) tree silently. The
+// fragment may declare legacy .gc/system/packs references the gate cannot
+// see, and deleting the tree on a guess would reproduce the silent
+// degraded window the gate exists to prevent.
+func TestPruneRetiredSystemPacksFailsClosedOnUninspectableFragment(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		include string
+	}{
+		{name: "missing-local-fragment", include: "missing-fragment.toml"},
+		{name: "remote-fragment", include: "https://github.com/example/config//fragment.toml"},
 	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("embedded pack file missing after stale prune: %v", err)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			city := t.TempDir()
+			cityToml := "include = [\"" + tt.include + "\"]\n\n[workspace]\n"
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cityToml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			stale := filepath.Join(city, citylayout.SystemPacksRoot, "core")
+			if err := os.MkdirAll(stale, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			var warnings bytes.Buffer
+			pruneRetiredSystemPacks(city, &warnings)
+
+			if _, err := os.Stat(stale); err != nil {
+				t.Fatalf("stat %s err = %v; prune must fail closed for a fragment it cannot inspect", stale, err)
+			}
+			if warnings.Len() != 0 {
+				t.Errorf("uninspectable fragment emitted a warning (expected silent preserve): %q", warnings.String())
+			}
+		})
 	}
 }
 
-func TestMaterializeBuiltinPacks_PruneIgnoresAtomicTempFilesForDesiredAssets(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+// TestPruneRetiredSystemPacksKeepsTreeWhenManifestUnreadable pins the
+// fail-closed contract for the destructive prune: when city.toml exists but
+// cannot be parsed, the prune must leave the retired tree alone (it is
+// inert) rather than risk stripping composition state it cannot inspect.
+func TestPruneRetiredSystemPacksKeepsTreeWhenManifestUnreadable(t *testing.T) {
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace\nnot toml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(city, citylayout.SystemPacksRoot, "core")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	finalPath := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact", "run.sh")
-	tempPath := finalPath + ".tmp.foreign-writer"
-	if err := os.WriteFile(tempPath, []byte("#!/bin/sh\necho temp\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(%s): %v", tempPath, err)
-	}
+	pruneRetiredSystemPacks(city, io.Discard)
 
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() second call error: %v", err)
-	}
-
-	if _, err := os.Stat(tempPath); err != nil {
-		t.Fatalf("atomic temp file was pruned: %v", err)
-	}
-	if _, err := os.Stat(finalPath); err != nil {
-		t.Fatalf("final embedded file missing after prune: %v", err)
+	if _, err := os.Stat(stale); err != nil {
+		t.Errorf("stat %s err = %v; prune must not delete the tree under an unreadable manifest", stale, err)
 	}
 }
 
-func TestPruneStaleGeneratedPackFiles_PreservesPackHashManifestFiles(t *testing.T) {
-	dst := t.TempDir()
+// TestEnsureBuiltinRuntimeAssetsRehydratesCorruptedCache pins the
+// self-healing contract that replaced per-city materialization refresh:
+// stale or corrupted bundled-source cache content is detected on the next
+// EnsureBuiltinRuntimeAssets call — even after the per-city ready cache
+// reported success, because the ready fast path revalidates via
+// requiredBuiltinSourcesUsable — and rehydrated from the embedded packs.
+func TestEnsureBuiltinRuntimeAssetsRehydratesCorruptedCache(t *testing.T) {
+	clearGCEnv(t) // isolated GC_HOME so the corruption never touches the shared test cache
+	city := t.TempDir()
 
-	writeFileForTest(t, filepath.Join(dst, "kept.txt"), []byte("embedded"), 0o644)
-	writeFileForTest(t, filepath.Join(dst, testPackHashManifestFile), []byte(`{"kept.txt":"hash"}`), 0o644)
-	writeFileForTest(t, filepath.Join(dst, testPackHashManifestFile+".tmp.123.456"), []byte(`{"partial":true}`), 0o644)
-	writeFileForTest(t, filepath.Join(dst, "stale.txt"), []byte("stale"), 0o644)
+	materializeBuiltinPacksForTest(t, city)
 
-	desired := map[string]struct{}{"kept.txt": {}}
-	if err := pruneStaleGeneratedPackFiles(dst, desired); err != nil {
-		t.Fatalf("pruneStaleGeneratedPackFiles: %v", err)
+	target := bundledGcBeadsBdScriptForTest(t)
+	if err := os.WriteFile(target, []byte("#!/bin/sh\necho corrupted\n"), 0o755); err != nil {
+		t.Fatalf("corrupting cached script: %v", err)
 	}
 
-	for _, path := range []string{
-		filepath.Join(dst, "kept.txt"),
-		filepath.Join(dst, testPackHashManifestFile),
-		filepath.Join(dst, testPackHashManifestFile+".tmp.123.456"),
-	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("expected prune to preserve %s: %v", filepath.Base(path), err)
-		}
+	if err := EnsureBuiltinRuntimeAssets(city, io.Discard); err != nil {
+		t.Fatalf("EnsureBuiltinRuntimeAssets after corruption: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dst, "stale.txt")); !os.IsNotExist(err) {
-		t.Fatalf("stale generated file still exists: %v", err)
+
+	want := readBundledPackFileForTest(t, "bd", "assets/scripts/gc-beads-bd.sh")
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile(rehydrated script): %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("corrupted cached script was not rehydrated to embedded content; got:\n%s", got)
 	}
 }
 
-func TestLoadCityConfigMaterializesBuiltinPacks(t *testing.T) {
+// TestEnsureBuiltinRuntimeAssetsRehydratesEvictedOptionalLockedBundledCache
+// pins the ready-fast-path repair of optional locked bundled imports. Once a
+// city is readied, EnsureBuiltinRuntimeAssets short-circuits on the ready fast
+// path, and that fast path validates only the required builtin sources
+// (core/bd). gastown is bundled but never required, so an eviction of its
+// synthetic cache after the city is ready would otherwise be skipped by the
+// fast path, leaving config load to fail on the locked-but-missing cache. The
+// fast path must also validate every canonical bundled source pinned in
+// packs.lock and re-hydrate gastown here.
+func TestEnsureBuiltinRuntimeAssetsRehydratesEvictedOptionalLockedBundledCache(t *testing.T) {
+	clearGCEnv(t) // isolated GC_HOME so eviction never touches the shared test cache
+	city := t.TempDir()
+
+	// Pin the optional gastown bundled source in packs.lock at its canonical
+	// commit; the runtime preflight hydrates it as a locked bundled import
+	// even though a default bd-provider city requires only core and bd.
+	source := config.PublicGastownPackSource
+	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
+	writePreflightImportLock(t, city, commit)
+
+	// Ready the city: hydrate required core/bd plus the locked bundled
+	// gastown source and mark the runtime state ready.
+	materializeBuiltinPacksForTest(t, city)
+
+	cachePath, err := packman.RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath(gastown): %v", err)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+		t.Fatalf("gastown cache invalid after ready: %v", err)
+	}
+
+	// Evict only the optional bundled cache. The required core/bd caches stay
+	// valid, so the ready fast path's requiredBuiltinSourcesUsable check still
+	// passes — the only thing that can force re-hydration is validating the
+	// locked bundled sources too.
+	if err := os.RemoveAll(cachePath); err != nil {
+		t.Fatalf("evicting gastown cache: %v", err)
+	}
+
+	if err := EnsureBuiltinRuntimeAssets(city, io.Discard); err != nil {
+		t.Fatalf("EnsureBuiltinRuntimeAssets after optional cache eviction: %v", err)
+	}
+
+	if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+		t.Fatalf("optional locked bundled cache not rehydrated after ready fast path: %v", err)
+	}
+}
+
+func TestConfigLoadBoundarySkipsWithoutGCHome(t *testing.T) {
+	// Under `go test` ImplicitGCHome returns "" when GC_HOME is unset
+	// (hermetic-test guard on os.Args[0] suffix ".test"), so
+	// config.GlobalRepoCacheRoot errors. HOME points at a throwaway dir so
+	// that even if the guard ever regressed, the fallback could not touch
+	// the developer's real ~/.gc.
+	t.Setenv("GC_HOME", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
 	dir := t.TempDir()
 	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
 		t.Fatal(err)
 	}
-
-	if _, err := loadCityConfig(dir); err != nil {
-		t.Fatalf("loadCityConfig() error: %v", err)
+	legacy := filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance")
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	for _, path := range []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "pack.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact", "run.sh"),
-	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("builtin pack file missing after loadCityConfig: %v", err)
-		}
+	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, filepath.Join(dir, "city.toml"), io.Discard); err != nil {
+		t.Fatalf("ensureBuiltinPacksForConfigLoad without GC_HOME: %v", err)
+	}
+
+	// The retired tree is still pruned, but nothing is hydrated or written.
+	if _, err := os.Stat(filepath.Join(dir, citylayout.SystemPacksRoot)); !os.IsNotExist(err) {
+		t.Errorf("stat retired %s err = %v, want IsNotExist", citylayout.SystemPacksRoot, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gc", "scripts")); !os.IsNotExist(err) {
+		t.Errorf("stat .gc/scripts err = %v, want IsNotExist (no shim without GC_HOME)", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gc")); !os.IsNotExist(err) {
+		t.Errorf("stat HOME/.gc err = %v, want IsNotExist (no cache without GC_HOME)", err)
 	}
 }
 
-func TestLoadCityConfigForRegistryMaterializesBuiltinPacks(t *testing.T) {
+func TestLoadCityConfigWithoutBuiltinPackRefreshFSDoesNotTouchDisk(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
 		t.Fatal(err)
 	}
-
-	if _, err := loadCityConfig(dir, io.Discard); err != nil {
-		t.Fatalf("loadCityConfig() error: %v", err)
-	}
-
-	for _, path := range []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "pack.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "pack.toml"),
-	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("builtin pack file missing after suppress-warnings load: %v", err)
-		}
-	}
-}
-
-func TestLoadCityConfigFSMaterializesBuiltinPacksForOSFS(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(dir, "city.toml")); err != nil {
-		t.Fatalf("loadCityConfigFS(OSFS) error: %v", err)
-	}
-
-	for _, path := range []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "pack.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "pack.toml"),
-	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("builtin pack file missing after loadCityConfigFS(OSFS): %v", err)
-		}
-	}
-}
-
-func TestLoadCityConfigWithoutBuiltinPackRefreshFSDoesNotMaterializeBuiltinPacks(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+	legacy := filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance")
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -946,813 +1062,44 @@ func TestLoadCityConfigWithoutBuiltinPackRefreshFSDoesNotMaterializeBuiltinPacks
 	if cfg == nil {
 		t.Fatal("loadCityConfigWithoutBuiltinPackRefreshFS returned nil config")
 	}
-	if _, err := os.Stat(filepath.Join(dir, citylayout.SystemPacksRoot)); !os.IsNotExist(err) {
-		t.Fatalf("builtin packs were materialized on read-only load path: %v", err)
+
+	// The read-only loader must neither write the shim nor prune the
+	// retired tree.
+	if _, err := os.Stat(filepath.Join(dir, ".gc", "scripts")); !os.IsNotExist(err) {
+		t.Errorf("stat .gc/scripts err = %v, want IsNotExist on read-only load path", err)
+	}
+	if _, err := os.Stat(legacy); err != nil {
+		t.Errorf("retired tree was pruned on read-only load path: %v", err)
 	}
 }
 
-func TestLoadCityConfigFallsBackToExistingBuiltinPacksWhenRefreshFails(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	// dolt is a non-required pack, so a failed refresh is non-fatal:
-	// loadCityConfig falls back to the existing materialized packs and emits a
-	// warning. Under Option B (gastownhall/gascity#2429) a correct-mode edited
-	// file is preserved with no write attempt, so the refresh failure is driven
-	// by a missing file the materializer must rewrite (scaffolding) while the
-	// directory is read-only.
-	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact")
-	targetFile := filepath.Join(targetDir, "run.sh")
-	wantContent, err := os.ReadFile(targetFile)
-	if err != nil {
-		t.Fatalf("ReadFile(initial run.sh): %v", err)
-	}
-	if err := os.Remove(targetFile); err != nil {
-		t.Fatalf("Remove(run.sh): %v", err)
-	}
-	if err := os.Chmod(targetDir, 0o555); err != nil {
-		t.Fatalf("Chmod(%s): %v", targetDir, err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chmod(targetDir, 0o755)
-	})
-
-	var stderr bytes.Buffer
-	if _, err := loadCityConfig(dir, &stderr); err != nil {
-		t.Fatalf("loadCityConfig() fallback error: %v", err)
-	}
-	if !strings.Contains(stderr.String(), "builtin pack refresh incomplete") {
-		t.Fatalf("expected suppressed refresh warning, got %q", stderr.String())
-	}
-
-	if _, err := os.Stat(targetFile); !os.IsNotExist(err) {
-		t.Fatalf("run.sh should remain missing during read-only fallback; stat err=%v", err)
-	}
-
-	if err := os.Chmod(targetDir, 0o755); err != nil {
-		t.Fatalf("Chmod(%s): %v", targetDir, err)
-	}
-	stderr.Reset()
-	if _, err := loadCityConfig(dir, &stderr); err != nil {
-		t.Fatalf("loadCityConfig() retry error: %v", err)
-	}
-	got, err := os.ReadFile(targetFile)
-	if err != nil {
-		t.Fatalf("ReadFile(run.sh) after retry: %v", err)
-	}
-	if !bytes.Equal(got, wantContent) {
-		t.Fatalf("run.sh did not refresh after retry; got %q", got)
-	}
-	if strings.Contains(stderr.String(), "builtin pack refresh incomplete") {
-		t.Fatalf("unexpected refresh warning after retry: %q", stderr.String())
-	}
-}
-
-func TestLoadCityConfigDeduplicatesBuiltinPackRefreshWarningsPerProcess(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	// Missing non-required file forces a scaffolding write that fails while the
-	// directory is read-only (see Option B note in
-	// TestLoadCityConfigFallsBackToExistingBuiltinPacksWhenRefreshFails).
-	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact")
-	targetFile := filepath.Join(targetDir, "run.sh")
-	if err := os.Remove(targetFile); err != nil {
-		t.Fatalf("Remove(run.sh): %v", err)
-	}
-	if err := os.Chmod(targetDir, 0o555); err != nil {
-		t.Fatalf("Chmod(%s): %v", targetDir, err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chmod(targetDir, 0o755)
-	})
-
-	var stderr bytes.Buffer
-	for i := 0; i < 2; i++ {
-		if _, err := loadCityConfig(dir, &stderr); err != nil {
-			t.Fatalf("loadCityConfig() fallback attempt %d error: %v", i+1, err)
-		}
-	}
-
-	if got := strings.Count(stderr.String(), "builtin pack refresh incomplete"); got != 1 {
-		t.Fatalf("warning count = %d, want 1; stderr=%q", got, stderr.String())
-	}
-}
-
-func TestLoadCityConfigForRegistryDoesNotSuppressBuiltinPackRefreshWarnings(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	// Missing non-required file forces a scaffolding write that fails while the
-	// directory is read-only (see Option B note in
-	// TestLoadCityConfigFallsBackToExistingBuiltinPacksWhenRefreshFails).
-	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact")
-	targetFile := filepath.Join(targetDir, "run.sh")
-	if err := os.Remove(targetFile); err != nil {
-		t.Fatalf("Remove(run.sh): %v", err)
-	}
-	if err := os.Chmod(targetDir, 0o555); err != nil {
-		t.Fatalf("Chmod(%s): %v", targetDir, err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chmod(targetDir, 0o755)
-	})
-
-	origDefaultWarningWriter := loadCityConfigDefaultWarningWriter
-	var stderr bytes.Buffer
-	loadCityConfigDefaultWarningWriter = func() io.Writer { return &stderr }
-	t.Cleanup(func() {
-		loadCityConfigDefaultWarningWriter = origDefaultWarningWriter
-	})
-
-	if _, err := loadCityConfig(dir); err != nil {
-		t.Fatalf("loadCityConfig() fallback error: %v", err)
-	}
-	if !strings.Contains(stderr.String(), "builtin pack refresh incomplete") {
-		t.Fatalf("expected builtin pack refresh warning, got %q", stderr.String())
-	}
-}
-
-func TestLoadCityConfigFailsWhenRequiredBuiltinPackRefreshFails(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "bd")
-	targetFile := filepath.Join(targetDir, "pack.toml")
-	if err := os.Remove(targetFile); err != nil {
-		t.Fatalf("Remove(%s): %v", targetFile, err)
-	}
-	if err := os.Chmod(targetDir, 0o555); err != nil {
-		t.Fatalf("Chmod(%s): %v", targetDir, err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chmod(targetDir, 0o755)
-	})
-
-	if _, err := loadCityConfig(dir); err == nil {
-		t.Fatal("loadCityConfig() error = nil, want required builtin pack refresh failure")
-	} else if !strings.Contains(err.Error(), "materializing builtin packs") {
-		t.Fatalf("loadCityConfig() error = %v, want materialization failure", err)
-	}
-}
-
-func TestLoadCityConfigFailsWhenRequiredBuiltinPackRemainsPartiallyMaterialized(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "assets", "prompts")
-	targetFile := filepath.Join(targetDir, "pool-worker.md")
-	if err := os.Remove(targetFile); err != nil {
-		t.Fatalf("Remove(%s): %v", targetFile, err)
-	}
-	if err := os.Chmod(targetDir, 0o555); err != nil {
-		t.Fatalf("Chmod(%s): %v", targetDir, err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chmod(targetDir, 0o755)
-	})
-
-	if _, err := loadCityConfig(dir); err == nil {
-		t.Fatal("loadCityConfig() error = nil, want partial required builtin pack failure")
-	} else if !strings.Contains(err.Error(), "required builtin packs remain unusable (core)") {
-		t.Fatalf("loadCityConfig() error = %v, want unusable core pack failure", err)
-	}
-}
-
-func TestLoadCityConfigFailsWhenRequiredBuiltinPackRefreshLeavesStaleContent(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "assets", "prompts")
-	targetFile := filepath.Join(targetDir, "pool-worker.md")
-	if err := os.WriteFile(targetFile, []byte("stale core prompt\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(%s): %v", targetFile, err)
-	}
-	if err := os.Chmod(targetDir, 0o555); err != nil {
-		t.Fatalf("Chmod(%s): %v", targetDir, err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chmod(targetDir, 0o755)
-	})
-
-	if _, err := loadCityConfig(dir); err == nil {
-		t.Fatal("loadCityConfig() error = nil, want stale required builtin pack failure")
-	} else if !strings.Contains(err.Error(), "required builtin packs remain unusable (core)") {
-		t.Fatalf("loadCityConfig() error = %v, want unusable core pack failure", err)
-	}
-}
-
-func TestLoadCityConfigFallsBackWhenRequiredBuiltinPackHasOnlyExtraStaleFiles(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	staleDir := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "stale")
-	if err := os.MkdirAll(staleDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(%s): %v", staleDir, err)
-	}
-	staleFile := filepath.Join(staleDir, "leftover.txt")
-	if err := os.WriteFile(staleFile, []byte("obsolete\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(%s): %v", staleFile, err)
-	}
-	if err := os.Chmod(staleDir, 0o555); err != nil {
-		t.Fatalf("Chmod(%s): %v", staleDir, err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chmod(staleDir, 0o755)
-	})
-
-	var stderr bytes.Buffer
-	if _, err := loadCityConfig(dir, &stderr); err != nil {
-		t.Fatalf("loadCityConfig() fallback error = %v, want warning-only fallback", err)
-	}
-	if !strings.Contains(stderr.String(), "builtin pack refresh incomplete") {
-		t.Fatalf("expected builtin pack refresh warning, got %q", stderr.String())
-	}
-	if _, err := os.Stat(staleFile); err != nil {
-		t.Fatalf("expected extra stale file to remain after fallback, got stat error %v", err)
-	}
-}
-
-func TestLoadCityConfigRevalidatesRequiredBuiltinPacksAfterReadyCacheSuccess(t *testing.T) {
+func TestLoadCityConfigFSHydratesBuiltinRuntimeAssets(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := loadCityConfig(dir); err != nil {
-		t.Fatalf("loadCityConfig() initial error: %v", err)
+	if _, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(dir, "city.toml"), io.Discard); err != nil {
+		t.Fatalf("loadCityConfigFS(OSFS) error: %v", err)
 	}
 
-	targetFile := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "pack.toml")
-	if err := os.Remove(targetFile); err != nil {
-		t.Fatalf("Remove(%s): %v", targetFile, err)
+	// The config-load boundary self-heals the bundled caches and shim for
+	// the default bd-provider city.
+	if _, err := os.Stat(gcBeadsBdScriptPath(dir)); err != nil {
+		t.Errorf("gc-beads-bd shim missing after loadCityConfigFS: %v", err)
 	}
-
-	if _, err := loadCityConfig(dir); err != nil {
-		t.Fatalf("loadCityConfig() repair error: %v", err)
-	}
-	if _, err := os.Stat(targetFile); err != nil {
-		t.Fatalf("required pack file missing after ready-cache revalidation: %v", err)
-	}
-}
-
-func TestLoadCityConfigRevalidatesRequiredBuiltinPackContentsAfterReadyCacheSuccess(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := loadCityConfig(dir); err != nil {
-		t.Fatalf("loadCityConfig() initial error: %v", err)
-	}
-
-	targetFile := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "assets", "prompts", "pool-worker.md")
-	if err := os.Remove(targetFile); err != nil {
-		t.Fatalf("Remove(%s): %v", targetFile, err)
-	}
-
-	if _, err := loadCityConfig(dir); err != nil {
-		t.Fatalf("loadCityConfig() repair error: %v", err)
-	}
-	if _, err := os.Stat(targetFile); err != nil {
-		t.Fatalf("required builtin asset missing after ready-cache content revalidation: %v", err)
-	}
-}
-
-func TestMaterializeBuiltinPacksIncludesWorkerFilesystemSearchGuidance(t *testing.T) {
-	dir := t.TempDir()
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
-	}
-
-	for _, name := range []string{"pool-worker.md", "graph-worker.md"} {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "assets", "prompts", name)
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("ReadFile(%s): %v", path, err)
-			}
-			if !strings.Contains(string(data), formulaFilesystemSearchGuidance) {
-				t.Fatalf("materialized %s missing filesystem search guidance", name)
-			}
-		})
-	}
-}
-
-func writeBuiltinPackLoadTestCity(dir string) error {
-	return os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644)
-}
-
-func TestRequiredBuiltinIncludePaths_DefaultProvider(t *testing.T) {
-	dir := t.TempDir()
-
-	// Default provider (empty) → core and bd are required.
-	t.Setenv("GC_BEADS", "")
-	includes := requiredBuiltinIncludePaths(dir)
-
-	want := []string{
-		citylayout.SystemPacksRoot + "/core",
-		citylayout.SystemPacksRoot + "/bd",
-	}
-	if len(includes) != len(want) {
-		t.Fatalf("requiredBuiltinIncludePaths() = %v, want %v", includes, want)
-	}
-	for i := range want {
-		if includes[i] != want[i] {
-			t.Errorf("includes[%d] = %q, want %q", i, includes[i], want[i])
+	commit := bundledPackImportCommit()
+	for _, name := range []string{"core", "bd"} {
+		source, ok := builtinpacks.Source(name)
+		if !ok {
+			t.Fatalf("builtinpacks.Source(%q) not registered", name)
 		}
-	}
-}
-
-func TestRequiredBuiltinIncludePaths_NonBdProvider(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_BEADS", "")
-	includes := requiredBuiltinIncludePaths(dir)
-
-	// Core is always required; bd/dolt are gated on a bd-compatible provider.
-	if len(includes) != 1 || includes[0] != citylayout.SystemPacksRoot+"/core" {
-		t.Fatalf("requiredBuiltinIncludePaths() = %v, want core only", includes)
-	}
-}
-
-func TestRequiredBuiltinIncludePaths_ExecGcBeadsBdOverrideIncludesBdAndDolt(t *testing.T) {
-	dir := t.TempDir()
-
-	t.Setenv("GC_BEADS", "exec:/tmp/gc-beads-bd")
-	includes := requiredBuiltinIncludePaths(dir)
-	// core + bd + dolt: core is always required; bd and dolt arrive via the
-	// exec-override path.
-	want := []string{
-		citylayout.SystemPacksRoot + "/core",
-		citylayout.SystemPacksRoot + "/bd",
-		citylayout.SystemPacksRoot + "/dolt",
-	}
-	if len(includes) != len(want) {
-		t.Fatalf("requiredBuiltinIncludePaths() = %v, want %v", includes, want)
-	}
-	for i := range want {
-		if includes[i] != want[i] {
-			t.Errorf("includes[%d] = %q, want %q", i, includes[i], want[i])
-		}
-	}
-}
-
-func TestBuiltinIncludesForProvider(t *testing.T) {
-	for _, tt := range []struct {
-		provider string
-		want     []string
-	}{
-		{provider: "", want: []string{citylayout.SystemPacksRoot + "/core", citylayout.SystemPacksRoot + "/bd"}},
-		{provider: "bd", want: []string{citylayout.SystemPacksRoot + "/core", citylayout.SystemPacksRoot + "/bd"}},
-		{provider: "file", want: []string{citylayout.SystemPacksRoot + "/core"}},
-		{provider: "exec:/tmp/custom-store", want: []string{citylayout.SystemPacksRoot + "/core"}},
-	} {
-		got := builtinIncludesForProvider(tt.provider)
-		if len(got) != len(tt.want) {
-			t.Errorf("builtinIncludesForProvider(%q) = %v, want %v", tt.provider, got, tt.want)
-			continue
-		}
-		for i := range tt.want {
-			if got[i] != tt.want[i] {
-				t.Errorf("builtinIncludesForProvider(%q)[%d] = %q, want %q", tt.provider, i, got[i], tt.want[i])
-			}
-		}
-	}
-}
-
-func TestMaterializeBuiltinPacks_NoMaintenancePack(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatal(err)
-	}
-
-	// The maintenance pack was folded into core: it must not materialize,
-	// and its housekeeping orders must ship with core instead.
-	if _, err := os.Stat(filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance")); !os.IsNotExist(err) {
-		t.Errorf("stat .gc/system/packs/maintenance err = %v, want IsNotExist", err)
-	}
-	for _, rel := range []string{
-		"orders/gate-sweep.toml",
-		"orders/orphan-sweep.toml",
-		"orders/wisp-compact.toml",
-		"assets/scripts/gate-sweep.sh",
-		"doctor/check-binaries/run.sh",
-	} {
-		if _, err := os.Stat(filepath.Join(dir, citylayout.SystemPacksRoot, "core", filepath.FromSlash(rel))); err != nil {
-			t.Errorf("core pack missing folded maintenance asset %s: %v", rel, err)
-		}
-	}
-}
-
-func TestMaterializeBuiltinPacks_PrunesRetiredMaintenanceDir(t *testing.T) {
-	dir := t.TempDir()
-
-	// Simulate a stale maintenance dir left behind by an older binary.
-	stale := filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance")
-	if err := os.MkdirAll(stale, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stale, "pack.toml"), []byte("[pack]\nname = \"maintenance\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := MaterializeBuiltinPacks(dir); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Errorf("stat retired maintenance dir err = %v, want IsNotExist", err)
-	}
-}
-
-const testPackHashManifestFile = ".gc-pack-hashes.json"
-
-func TestEmbedShadowingRefreshesUnmodifiedNonRequiredPackFile(t *testing.T) {
-	dst := t.TempDir()
-	const rel = "commands/health/run.sh"
-	const v1 = "#!/bin/sh\necho old-health\n"
-	const v2 = "#!/bin/sh\necho new-health\n"
-
-	materializeFSForTest(t, fstest.MapFS{
-		rel: {Data: []byte(v1), Mode: 0o755},
-	}, dst, true, nil)
-	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), v1)
-
-	var warnings bytes.Buffer
-	materializeFSForTest(t, fstest.MapFS{
-		rel: {Data: []byte(v2), Mode: 0o755},
-	}, dst, true, &warnings)
-
-	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), v2)
-	assertNoWarningForTest(t, warnings.String())
-	manifest := readPackHashManifestForTest(t, dst)
-	if got, want := manifest[rel], sha256HexForTest([]byte(v2)); got != want {
-		t.Fatalf("manifest[%q] = %q, want %q", rel, got, want)
-	}
-}
-
-func TestEmbedShadowingRequiredPackRefreshes(t *testing.T) {
-	dst := t.TempDir()
-	const rel = "skills/gc-work/SKILL.md"
-	const v1 = "old required content\n"
-	const v2 = "new required content\n"
-
-	materializeFSForTest(t, fstest.MapFS{
-		rel: {Data: []byte(v1), Mode: 0o644},
-	}, dst, false, nil)
-
-	var warnings bytes.Buffer
-	materializeFSForTest(t, fstest.MapFS{
-		rel: {Data: []byte(v2), Mode: 0o644},
-	}, dst, false, &warnings)
-
-	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), v2)
-	assertNoWarningForTest(t, warnings.String())
-}
-
-func TestMaterializeFS_ManifestSeedsOnFirstWrite(t *testing.T) {
-	dst := t.TempDir()
-	embedded := fstest.MapFS{
-		"a.txt":     {Data: []byte("embedded-a"), Mode: 0o644},
-		"sub/b.txt": {Data: []byte("embedded-b"), Mode: 0o644},
-	}
-
-	desired := materializeFSForTest(t, embedded, dst, true, nil)
-	if _, ok := desired[testPackHashManifestFile]; ok {
-		t.Fatalf("desired set includes manifest metadata file %q", testPackHashManifestFile)
-	}
-
-	manifest := readPackHashManifestForTest(t, dst)
-	want := map[string]string{
-		"a.txt":     sha256HexForTest([]byte("embedded-a")),
-		"sub/b.txt": sha256HexForTest([]byte("embedded-b")),
-	}
-	assertManifestEqualsForTest(t, manifest, want)
-}
-
-func TestMaterializeFS_ManifestPreservesOperatorEdit(t *testing.T) {
-	dst := t.TempDir()
-	const rel = "commands/run.sh"
-	const original = "#!/bin/sh\necho original\n"
-	const updated = "#!/bin/sh\necho updated\n"
-	const operatorEdit = "#!/bin/sh\necho operator\n"
-
-	materializeFSForTest(t, fstest.MapFS{
-		rel: {Data: []byte(original), Mode: 0o755},
-	}, dst, true, nil)
-	originalHash := readPackHashManifestForTest(t, dst)[rel]
-
-	writeFileForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), []byte(operatorEdit), 0o755)
-
-	var warnings bytes.Buffer
-	materializeFSForTest(t, fstest.MapFS{
-		rel: {Data: []byte(updated), Mode: 0o755},
-	}, dst, true, &warnings)
-
-	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), operatorEdit)
-	warningText := warnings.String()
-	for _, want := range []string{"local edits", "newer version available", rel} {
-		if !strings.Contains(warningText, want) {
-			t.Fatalf("warning = %q, want substring %q", warningText, want)
-		}
-	}
-
-	manifest := readPackHashManifestForTest(t, dst)
-	if got := manifest[rel]; got != originalHash {
-		t.Fatalf("manifest[%q] = %q, want original embedded hash %q", rel, got, originalHash)
-	}
-	for _, forbidden := range []string{sha256HexForTest([]byte(operatorEdit)), sha256HexForTest([]byte(updated))} {
-		if manifest[rel] == forbidden {
-			t.Fatalf("manifest[%q] was updated to %q, want preserved original hash %q", rel, forbidden, originalHash)
-		}
-	}
-}
-
-func TestMaterializeFS_ManifestConservativePreserveWithoutEntry(t *testing.T) {
-	dst := t.TempDir()
-	const rel = "config/default.toml"
-	const local = "operator-or-pre-fix-content\n"
-	writeFileForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), []byte(local), 0o644)
-
-	var warnings bytes.Buffer
-	materializeFSForTest(t, fstest.MapFS{
-		rel: {Data: []byte("current embedded content\n"), Mode: 0o644},
-	}, dst, true, &warnings)
-
-	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), local)
-	assertNoWarningForTest(t, warnings.String())
-	manifest := readPackHashManifestForTest(t, dst)
-	if _, ok := manifest[rel]; ok {
-		t.Fatalf("manifest contains conservative-preserved file %q: %#v", rel, manifest)
-	}
-	if len(manifest) != 0 {
-		t.Fatalf("manifest = %#v, want empty map for conservative preserve without entries", manifest)
-	}
-}
-
-func TestMaterializeFS_ManifestEmitsNoWarningOnStaleEmbed(t *testing.T) {
-	dst := t.TempDir()
-	const rel = "commands/sync/run.sh"
-	const v1 = "#!/bin/sh\necho sync-v1\n"
-	const v2 = "#!/bin/sh\necho sync-v2\n"
-
-	materializeFSForTest(t, fstest.MapFS{
-		rel: {Data: []byte(v1), Mode: 0o755},
-	}, dst, true, nil)
-
-	var warnings bytes.Buffer
-	materializeFSForTest(t, fstest.MapFS{
-		rel: {Data: []byte(v2), Mode: 0o755},
-	}, dst, true, &warnings)
-
-	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), v2)
-	assertNoWarningForTest(t, warnings.String())
-	manifest := readPackHashManifestForTest(t, dst)
-	if got, want := manifest[rel], sha256HexForTest([]byte(v2)); got != want {
-		t.Fatalf("manifest[%q] = %q, want refreshed hash %q", rel, got, want)
-	}
-}
-
-func TestMaterializeFS_ManifestCorruptTreatedAsEmpty(t *testing.T) {
-	dst := t.TempDir()
-	const rel = "commands/doctor/run.sh"
-	const local = "#!/bin/sh\necho local\n"
-
-	writeFileForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), []byte(local), 0o755)
-	writeFileForTest(t, filepath.Join(dst, testPackHashManifestFile), []byte("{not-json"), 0o644)
-
-	var warnings bytes.Buffer
-	materializeFSForTest(t, fstest.MapFS{
-		rel: {Data: []byte("#!/bin/sh\necho embedded\n"), Mode: 0o755},
-	}, dst, true, &warnings)
-
-	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), local)
-	assertNoWarningForTest(t, warnings.String())
-	manifest := readPackHashManifestForTest(t, dst)
-	if len(manifest) != 0 {
-		t.Fatalf("manifest = %#v, want corrupt manifest treated as empty", manifest)
-	}
-}
-
-func TestMaterializeFS_ManifestWriteFailureIsNonFatal(t *testing.T) {
-	dst := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dst, testPackHashManifestFile), 0o755); err != nil {
-		t.Fatalf("Mkdir manifest path: %v", err)
-	}
-
-	var warnings bytes.Buffer
-	materializeFSForTest(t, fstest.MapFS{
-		"a.txt": {Data: []byte("embedded-a"), Mode: 0o644},
-	}, dst, true, &warnings)
-
-	assertFileContentForTest(t, filepath.Join(dst, "a.txt"), "embedded-a")
-	if !strings.Contains(warnings.String(), "pack hash manifest") {
-		t.Fatalf("warning = %q, want manifest write failure warning", warnings.String())
-	}
-}
-
-func TestMaterializeFS_ManifestPrunesStaleEntriesWhenEmbedFileRemoved(t *testing.T) {
-	dst := t.TempDir()
-	materializeFSForTest(t, fstest.MapFS{
-		"a.txt": {Data: []byte("embedded-a"), Mode: 0o644},
-		"b.txt": {Data: []byte("embedded-b"), Mode: 0o644},
-	}, dst, true, nil)
-
-	materializeFSForTest(t, fstest.MapFS{
-		"a.txt": {Data: []byte("embedded-a"), Mode: 0o644},
-	}, dst, true, nil)
-
-	manifest := readPackHashManifestForTest(t, dst)
-	want := map[string]string{"a.txt": sha256HexForTest([]byte("embedded-a"))}
-	assertManifestEqualsForTest(t, manifest, want)
-	if _, err := os.Stat(filepath.Join(dst, "b.txt")); err != nil {
-		t.Fatalf("b.txt should remain on disk for pruneStaleGeneratedPackFiles to handle: %v", err)
-	}
-}
-
-func materializeFSForTest(t *testing.T, embedded fstest.MapFS, dstDir string, preserveOperatorEdits bool, warnings io.Writer) map[string]struct{} {
-	t.Helper()
-	desired, err := materializeFS(embedded, dstDir, preserveOperatorEdits, warnings)
-	if err != nil {
-		t.Fatalf("materializeFS: %v", err)
-	}
-	return desired
-}
-
-func readPackHashManifestForTest(t *testing.T, dstDir string) map[string]string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(dstDir, testPackHashManifestFile))
-	if err != nil {
-		t.Fatalf("ReadFile(%s): %v", testPackHashManifestFile, err)
-	}
-	var manifest map[string]string
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatalf("manifest JSON = %q, want object: %v", data, err)
-	}
-	if manifest == nil {
-		return map[string]string{}
-	}
-	return manifest
-}
-
-func assertManifestEqualsForTest(t *testing.T, got, want map[string]string) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("manifest = %#v, want %#v", got, want)
-	}
-	for key, wantHash := range want {
-		if gotHash := got[key]; gotHash != wantHash {
-			t.Fatalf("manifest[%q] = %q, want %q; full manifest %#v", key, gotHash, wantHash, got)
-		}
-	}
-}
-
-func sha256HexForTest(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-func writeFileForTest(t *testing.T, path string, data []byte, mode os.FileMode) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("MkdirAll(%s): %v", filepath.Dir(path), err)
-	}
-	if err := os.WriteFile(path, data, mode); err != nil {
-		t.Fatalf("WriteFile(%s): %v", path, err)
-	}
-}
-
-func assertFileContentForTest(t *testing.T, path, want string) {
-	t.Helper()
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile(%s): %v", path, err)
-	}
-	if string(got) != want {
-		t.Fatalf("content %s = %q, want %q", filepath.Base(path), got, want)
-	}
-}
-
-func assertNoWarningForTest(t *testing.T, got string) {
-	t.Helper()
-	if got != "" {
-		t.Fatalf("warning = %q, want none", got)
-	}
-}
-
-// TestMaterializeFS_PreservesExistingFiles asserts that an existing on-disk
-// file is not overwritten by a subsequent materialize call. This is the
-// regression guard for gastownhall/gascity#2429 — `gc bd …` subcommands
-// were silently reverting operator-edited pack files via materializeFS's
-// blind overwrite on every invocation.
-//
-// Without the fix, the second materializeFS call rewrites b.txt back to
-// the embedded "embedded-b" bytes and the assertion fails.
-func TestMaterializeFS_PreservesExistingFiles(t *testing.T) {
-	dst := t.TempDir()
-	embedded := fstest.MapFS{
-		"a.txt":     {Data: []byte("embedded-a"), Mode: 0o644},
-		"b.txt":     {Data: []byte("embedded-b"), Mode: 0o644},
-		"sub/c.txt": {Data: []byte("embedded-c"), Mode: 0o644},
-	}
-
-	// Initial materialize: writes all three files since dst is empty.
-	desired := materializeFSForTest(t, embedded, dst, true, nil)
-	for _, wantPath := range []string{"a.txt", "b.txt", "sub/c.txt"} {
-		if _, ok := desired[wantPath]; !ok {
-			t.Fatalf("desired set missing %q", wantPath)
-		}
-		got, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(wantPath)))
+		cachePath, err := packman.RepoCachePath(source, commit)
 		if err != nil {
-			t.Fatalf("read %s after first materialize: %v", wantPath, err)
+			t.Fatalf("RepoCachePath(%s): %v", name, err)
 		}
-		wantBytes := []byte("embedded-" + strings.TrimSuffix(filepath.Base(wantPath), ".txt"))
-		if !bytes.Equal(got, wantBytes) {
-			t.Fatalf("first materialize content %s = %q, want %q", wantPath, got, wantBytes)
+		if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+			t.Errorf("%s cache invalid after loadCityConfigFS: %v", name, err)
 		}
-	}
-
-	// Operator edits b.txt — the data-loss scenario in the bug report.
-	const operatorBytes = "OPERATOR EDIT — must survive next materializeFS"
-	if err := os.WriteFile(filepath.Join(dst, "b.txt"), []byte(operatorBytes), 0o644); err != nil {
-		t.Fatalf("operator edit: %v", err)
-	}
-
-	// Second materialize: should NOT overwrite the operator's edit.
-	materializeFSForTest(t, embedded, dst, true, nil)
-	got, err := os.ReadFile(filepath.Join(dst, "b.txt"))
-	if err != nil {
-		t.Fatalf("read b.txt after second materialize: %v", err)
-	}
-	if !bytes.Equal(got, []byte(operatorBytes)) {
-		t.Fatalf("operator edit lost: got %q, want %q", got, operatorBytes)
-	}
-
-	// Unchanged files (a.txt, sub/c.txt) remain present and intact.
-	for _, want := range []string{"a.txt", "sub/c.txt"} {
-		got, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(want)))
-		if err != nil {
-			t.Fatalf("read %s after second materialize: %v", want, err)
-		}
-		expected := []byte("embedded-" + strings.TrimSuffix(filepath.Base(want), ".txt"))
-		if !bytes.Equal(got, expected) {
-			t.Fatalf("unrelated file %s content drifted: got %q, want %q", want, got, expected)
-		}
-	}
-
-	// Delete the operator-edited file; the next materialize should rewrite
-	// the embedded content (initial-scaffolding semantics still apply when
-	// a file is missing).
-	if err := os.Remove(filepath.Join(dst, "b.txt")); err != nil {
-		t.Fatalf("remove b.txt: %v", err)
-	}
-	materializeFSForTest(t, embedded, dst, true, nil)
-	got, err = os.ReadFile(filepath.Join(dst, "b.txt"))
-	if err != nil {
-		t.Fatalf("read b.txt after third materialize: %v", err)
-	}
-	if !bytes.Equal(got, []byte("embedded-b")) {
-		t.Fatalf("missing-file rescaffold failed: got %q, want %q", got, "embedded-b")
 	}
 }

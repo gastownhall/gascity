@@ -1,5 +1,5 @@
 ---
-title: gc start failure walkthrough
+title: "Diagnose a Failed gc start"
 description: Match a failure symptom to its cause and resolution.
 ---
 
@@ -117,6 +117,12 @@ systemctl --user restart gascity-supervisor
 gc start
 ```
 
+If the supervisor lifecycle is delegated to an operator-managed unit via
+`GC_SUPERVISOR_SYSTEMD_UNIT` (see "Delegating the Supervisor Lifecycle"
+in the troubleshooting guide), restart that unit instead:
+`systemctl restart <unit>`, with `--user` for user-scope units. The
+drift messages print the exact command for the configured unit.
+
 Verify after restart:
 
 ```bash
@@ -132,15 +138,15 @@ The reported `buildID` should match `gc version`.
 ```text
 FATAL: agent 'mayor': duplicate name
        (from packs/mypack/pack.toml [agent #2]
-        and packs/gastown/agents/mayor/agent.toml)
+        and the imported gastown pack's agents/mayor/agent.toml)
        pack v1 → v2 mismatch
 ```
 
 **Cause**
 
-Your pack declares `[[agent]]` blocks (pack v1 layout) for an agent
+Your pack declares `[[agent]]` blocks (legacy inline layout) for an agent
 name that another included pack declares in
-`agents/<name>/agent.toml` (pack v2 layout). Both contribute the same
+`agents/<name>/agent.toml` (current directory layout). Both contribute the same
 agent name; cross-pack agent name collisions are hard errors, so the
 validator refuses the ambiguity.
 
@@ -261,7 +267,7 @@ Add the pack to `city.toml`'s `includes` list:
 
 ```toml
 [city]
-includes = ["packs/gastown"]   # or the path to the pack that declares the agent
+includes = ["packs/my-pack"]   # or the path to the pack that declares the agent
 ```
 
 If the template name is misspelled, fix the spelling. Verify with:

@@ -33,7 +33,7 @@ else
 fi
 DOLT_PROVIDER_STATE_FILE="$DOLT_STATE_DIR/dolt-provider-state.json"
 
-GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh"
+GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/scripts/gc-beads-bd.sh"
 
 read_runtime_state_flag() (
   state_file="$1"
@@ -205,7 +205,7 @@ managed_runtime_port() (
 # Resolve GC_DOLT_PORT. The shared helper prefers validated live managed
 # runtime state over stale inherited env, then falls back to GC_DOLT_PORT as an
 # operator seed, and exits 78 if neither yields a port.
-. "${GC_PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}/assets/scripts/port_resolve.sh"
+. "${GC_PACK_DIR:-${PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}}/assets/scripts/port_resolve.sh"
 GC_DOLT_PORT=$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$DOLT_DATA_DIR" "$GC_CITY_PATH") || exit $?
 
 # Resolve a bounded-execution helper. Prefer gtimeout (coreutils on
@@ -222,6 +222,14 @@ else
 fi
 
 _run_bounded_warned_no_timeout=""
+
+# Wall-clock bound (seconds) for `gc rig list --json` rig discovery, shared
+# by the compact and health commands and tunable via
+# GC_DOLT_RIG_LIST_TIMEOUT_SECS. The bound must absorb a slow-but-healthy gc
+# on a busy host (~16s observed): discovery callers degrade to a city-only
+# filesystem scan on timeout, which silently drops external rig databases
+# (gascity#2740).
+GC_DOLT_RIG_LIST_TIMEOUT_SECS="${GC_DOLT_RIG_LIST_TIMEOUT_SECS:-30}"
 
 # run_bounded SECS CMD...  — Run CMD with a wall-clock timeout. Exits
 # 124 on timeout (coreutils convention). Uses --kill-after=2 so an

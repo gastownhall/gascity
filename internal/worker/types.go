@@ -16,6 +16,7 @@ const ( //nolint:revive // exported enum values are documented by the enclosing 
 	ProfileGeminiTmuxCLI      Profile = "gemini/tmux-cli"
 	ProfileKimiTmuxCLI        Profile = "kimi/tmux-cli"
 	ProfileOpenCodeTmuxCLI    Profile = "opencode/tmux-cli"
+	ProfileMimoCodeTmuxCLI    Profile = "mimocode/tmux-cli"
 	ProfilePiTmuxCLI          Profile = "pi/tmux-cli"
 	ProfileAntigravityTmuxCLI Profile = "antigravity/tmux-cli"
 )

@@ -2,6 +2,7 @@ package core
 
 import (
 	"io/fs"
+	"reflect"
 	"testing"
 
 	"github.com/BurntSushi/toml"
@@ -33,6 +34,45 @@ func TestCoreMaintenanceExecAssets(t *testing.T) {
 		if _, err := fs.Stat(PackFS, path); err == nil {
 			t.Fatalf("core pack must not carry retired Dog maintenance asset %s", path)
 		}
+	}
+}
+
+func TestCoreControlDispatcherAgent(t *testing.T) {
+	type agentFile struct {
+		Description       string   `toml:"description"`
+		StartCommand      string   `toml:"start_command"`
+		PromptMode        string   `toml:"prompt_mode"`
+		ProcessNames      []string `toml:"process_names"`
+		MaxActiveSessions *int     `toml:"max_active_sessions"`
+		Scope             string   `toml:"scope"`
+	}
+
+	data, err := fs.ReadFile(PackFS, "agents/control-dispatcher/agent.toml")
+	if err != nil {
+		t.Fatalf("core pack missing control-dispatcher agent: %v", err)
+	}
+	var agent agentFile
+	if _, err := toml.Decode(string(data), &agent); err != nil {
+		t.Fatalf("Decode(control-dispatcher agent.toml): %v", err)
+	}
+	if agent.Description == "" {
+		t.Fatal("control-dispatcher description is empty")
+	}
+	if agent.Scope != "" {
+		t.Fatalf("control-dispatcher scope = %q, want empty so it expands at city and rig scope", agent.Scope)
+	}
+	wantStartCommand := `sh -c 'export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-${GC_CITY}/.gc/runtime/control-dispatcher-trace.log}}"; trace_dir="${GC_WORKFLOW_TRACE%/*}"; if [ "$trace_dir" = "$GC_WORKFLOW_TRACE" ]; then trace_dir="."; elif [ -z "$trace_dir" ]; then trace_dir="/"; fi; mkdir -p "$trace_dir"; exec "${GC_BIN:-gc}" convoy control --serve --follow {{.Agent}}'`
+	if agent.StartCommand != wantStartCommand {
+		t.Fatalf("control-dispatcher start_command = %q, want templated dispatcher command", agent.StartCommand)
+	}
+	if agent.PromptMode != "none" {
+		t.Fatalf("control-dispatcher prompt_mode = %q, want none", agent.PromptMode)
+	}
+	if !reflect.DeepEqual(agent.ProcessNames, []string{"gc"}) {
+		t.Fatalf("control-dispatcher process_names = %v, want [gc]", agent.ProcessNames)
+	}
+	if agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != 1 {
+		t.Fatalf("control-dispatcher max_active_sessions = %v, want 1", agent.MaxActiveSessions)
 	}
 }
 

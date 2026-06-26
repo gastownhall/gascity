@@ -915,6 +915,7 @@ func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	fs := newSessionFakeState(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
 		t.Fatalf("MkdirAll default codex sessions: %v", err)
 	}
@@ -970,6 +971,7 @@ func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	fs := newSessionFakeState(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
 		t.Fatalf("MkdirAll default codex sessions: %v", err)
 	}

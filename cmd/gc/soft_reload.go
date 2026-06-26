@@ -162,9 +162,15 @@ func softReloadAcceptedHashMetadata(agentCfg runtime.Config, currentHash string)
 	if err != nil {
 		return nil, err
 	}
+	// Stamp the partition sub-hashes (B2) alongside started_config_hash: every
+	// writer of started_config_hash must keep started_provision_hash/
+	// started_launch_hash consistent with it, or a later launch-only drift check
+	// would compare against a stale baseline.
 	return map[string]string{
-		"started_config_hash": currentHash,
-		"core_hash_breakdown": string(breakdown),
+		"started_config_hash":    currentHash,
+		"started_provision_hash": runtime.ProvisionFingerprint(agentCfg),
+		"started_launch_hash":    runtime.LaunchFingerprint(agentCfg),
+		"core_hash_breakdown":    string(breakdown),
 	}, nil
 }
 

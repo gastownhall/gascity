@@ -73,7 +73,7 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantCommand:           "codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.5 -c model_reasoning_effort=xhigh",
 			wantReadyDelayMs:      3000,
 			wantReadyPromptPrefix: "› ",
-			wantProcessNames:      []string{"codex"},
+			wantProcessNames:      []string{"codex", "codex-raw"},
 			wantEmitsPermission:   false,
 			wantModelOverride:     "o3",
 			wantModelOverrideArgs: []string{"--model", "o3"},
@@ -111,6 +111,17 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantProcessNames:      []string{"opencode", "node", "bun"},
 			wantModelOverride:     "opencode/deepseek-v4-flash-free",
 			wantModelOverrideArgs: []string{"--model", "opencode/deepseek-v4-flash-free"},
+		},
+		{
+			profileID:             "mimocode/tmux-cli",
+			family:                "mimocode",
+			wantCommand:           "mimo --never-ask-questions",
+			wantPromptMode:        "flag",
+			wantPromptFlag:        "--prompt",
+			wantReadyDelayMs:      8000,
+			wantProcessNames:      []string{"mimo", ".mimocode", "node", "bun"},
+			wantModelOverride:     "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+			wantModelOverrideArgs: []string{"--model", "xiaomi-token-plan-sgp/mimo-v2.5-pro"},
 		},
 		{
 			profileID:             "antigravity/tmux-cli",
@@ -192,6 +203,63 @@ func resolvePhase2Template(t *testing.T, tc phase2ProviderCase) TemplateParams {
 		t.Fatalf("resolveTemplate(%s): %v", tc.profileID, err)
 	}
 	return tp
+}
+
+func resolveMimoCodeDefaultTransportTemplate(t *testing.T, session string) TemplateParams {
+	t.Helper()
+
+	params := &agentBuildParams{
+		cityName:   "default-transport-city",
+		cityPath:   t.TempDir(),
+		workspace:  &config.Workspace{Provider: "mimocode"},
+		providers:  builtinProviderAliasesForTest("mimocode"),
+		lookPath:   func(name string) (string, error) { return filepath.Join("/usr/bin", name), nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agentCfg := &config.Agent{
+		Name:     "worker",
+		Provider: "mimocode",
+		Session:  session,
+		WorkDir:  filepath.Join(".gc", "agents", "default-transport", "mimocode"),
+	}
+
+	tp, err := resolveTemplate(params, agentCfg, agentCfg.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate(mimocode, session=%q): %v", session, err)
+	}
+	return tp
+}
+
+// TestResolveTemplateMimoCodeDefaultTransportStaysOnCLI pins the out-of-box
+// launch for `provider = "mimocode"` with no session override. The headless
+// gate suppression flag (--never-ask-questions) is a TUI-surface flag that
+// the `mimo acp` subcommand does not take, and live conformance coverage for
+// mimocode exists only on the CLI transport, so the default launch must be
+// the CLI command, not `mimo acp`.
+func TestResolveTemplateMimoCodeDefaultTransportStaysOnCLI(t *testing.T) {
+	tp := resolveMimoCodeDefaultTransportTemplate(t, "")
+	if tp.IsACP {
+		t.Fatal("IsACP = true for default mimocode session, want CLI transport")
+	}
+	if tp.Command != "mimo --never-ask-questions" {
+		t.Fatalf("Command = %q, want %q", tp.Command, "mimo --never-ask-questions")
+	}
+}
+
+// TestResolveTemplateMimoCodeExplicitACPOptInComposesACPCommand pins the
+// composed command for an explicit `session = "acp"` override, which remains
+// supported for users who accept the gate-suppression gap on that transport.
+func TestResolveTemplateMimoCodeExplicitACPOptInComposesACPCommand(t *testing.T) {
+	tp := resolveMimoCodeDefaultTransportTemplate(t, "acp")
+	if !tp.IsACP {
+		t.Fatal("IsACP = false for explicit acp mimocode session, want ACP transport")
+	}
+	if tp.Command != "mimo acp" {
+		t.Fatalf("Command = %q, want %q", tp.Command, "mimo acp")
+	}
 }
 
 func phase2TemplateParams(t *testing.T, tc phase2ProviderCase, prompt string) TemplateParams {

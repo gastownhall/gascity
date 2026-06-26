@@ -1,0 +1,5 @@
+description = "Deterministic compiler-v2 workflow control worker"
+start_command = "sh -c 'export GC_WORKFLOW_TRACE=\"${GC_WORKFLOW_TRACE:-${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-${GC_CITY}/.gc/runtime/control-dispatcher-trace.log}}\"; trace_dir=\"${GC_WORKFLOW_TRACE%/*}\"; if [ \"$trace_dir\" = \"$GC_WORKFLOW_TRACE\" ]; then trace_dir=\".\"; elif [ -z \"$trace_dir\" ]; then trace_dir=\"/\"; fi; mkdir -p \"$trace_dir\"; exec \"${GC_BIN:-gc}\" convoy control --serve --follow {{.Agent}}'"
+prompt_mode = "none"
+process_names = ["gc"]
+max_active_sessions = 1

@@ -11,6 +11,42 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+// TestDropRedundantControlDispatcherNamedSession pins the stale-city cleanup:
+// gc doctor --fix (via migrate.Apply) drops the auto-created control-dispatcher
+// named session (bare or core-qualified backing template) that older gc init
+// versions injected, leaves user-defined named sessions untouched, and is
+// idempotent.
+func TestDropRedundantControlDispatcherNamedSession(t *testing.T) {
+	t.Parallel()
+	in := []config.NamedSession{
+		{Name: "control-dispatcher", Template: "control-dispatcher", Mode: "on_demand"},      // pre-1.3 bare (the stale case)
+		{Name: "mayor", Template: "mayor", Mode: "always"},                                   // user-defined: keep
+		{Name: "control-dispatcher", Template: "core.control-dispatcher", Mode: "on_demand"}, // rc1/rc2 qualified
+	}
+	out, removed := dropRedundantControlDispatcherNamedSession(in)
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	if len(out) != 1 || out[0].Name != "mayor" {
+		t.Fatalf("remaining = %+v, want only the user-defined mayor session", out)
+	}
+	// Idempotent: a second pass removes nothing.
+	if out2, removed2 := dropRedundantControlDispatcherNamedSession(out); removed2 != 0 || len(out2) != 1 {
+		t.Fatalf("second pass removed=%d len=%d, want 0 removed / 1 remaining", removed2, len(out2))
+	}
+	// User-authored control-dispatcher sessions express intent and must be
+	// left alone: a non-core template, an always mode, or an explicit
+	// scope/dir all disqualify the auto-created match.
+	keep := []config.NamedSession{
+		{Name: "control-dispatcher", Template: "myrig/custom-dispatcher", Mode: "always"},                  // custom template
+		{Name: "control-dispatcher", Template: "core.control-dispatcher", Mode: "always"},                  // always mode
+		{Name: "control-dispatcher", Template: "core.control-dispatcher", Mode: "on_demand", Scope: "rig"}, // explicit scope
+	}
+	if out, n := dropRedundantControlDispatcherNamedSession(keep); n != 0 || len(out) != len(keep) {
+		t.Fatalf("dropped a user-authored control-dispatcher session (removed=%d); all must be kept", n)
+	}
+}
+
 func TestMigrateCityCommonCase(t *testing.T) {
 	t.Parallel()
 
@@ -303,6 +339,36 @@ legacy_unknown = "silently dropped before strict migration validation"
 	}
 }
 
+func TestMigrateRejectsUnknownCityTomlKeys(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["../packs/gastown"]
+
+[agent_defaults]
+future_unknown = "written by a newer gc, silently dropped by this rewrite"
+`)
+
+	beforeCity := readFile(t, filepath.Join(cityDir, "city.toml"))
+
+	_, err := Apply(cityDir, Options{})
+	if err == nil {
+		t.Fatal("expected Apply to refuse a city.toml with unknown keys")
+	}
+	if !strings.Contains(err.Error(), "agent_defaults.future_unknown") {
+		t.Fatalf("error = %v, want the unknown key named", err)
+	}
+	if !strings.Contains(err.Error(), "refusing to rewrite") {
+		t.Fatalf("error = %v, want key-loss refusal with remediation", err)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "city.toml")); got != beforeCity {
+		t.Fatalf("city.toml changed after refusal:\n%s", got)
+	}
+}
+
 func TestMigrateMovesExistingRootDefaultRigImportsToCityToml(t *testing.T) {
 	t.Parallel()
 
@@ -548,6 +614,123 @@ schema = 2
 				}
 			}
 		})
+	}
+}
+
+// TestMigrateMovesPackAgentDefaultsUpstream guards the AgentDefaults.Upstream
+// field through pack→city migration. The "upstream only" case proves
+// isZeroAgentDefaults no longer treats an upstream-only defaults block as zero
+// (else the whole merge is skipped and the city loses its upstream default);
+// the mixed and legacy-alias cases prove mergeMigratedAgentDefaults and
+// mergeAgentDefaultsAliasForMigration both carry Upstream through.
+func TestMigrateMovesPackAgentDefaultsUpstream(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		pack string
+		want []string
+	}{
+		{
+			name: "upstream only",
+			pack: `
+[agent_defaults]
+upstream = "bedrock"
+`,
+			want: []string{
+				"[agent_defaults]",
+				`upstream = "bedrock"`,
+			},
+		},
+		{
+			name: "upstream mixed with provider",
+			pack: `
+[agent_defaults]
+provider = "codex"
+upstream = "bedrock"
+`,
+			want: []string{
+				`provider = "codex"`,
+				`upstream = "bedrock"`,
+			},
+		},
+		{
+			name: "legacy agents upstream fills canonical defaults",
+			pack: `
+[agent_defaults]
+provider = "codex"
+
+[agents]
+upstream = "bedrock"
+`,
+			want: []string{
+				`provider = "codex"`,
+				`upstream = "bedrock"`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityDir := t.TempDir()
+			writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+`)
+			writeFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 2
+`+tt.pack)
+
+			if _, err := Apply(cityDir, Options{}); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+
+			cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
+			for _, want := range tt.want {
+				if !strings.Contains(cityToml, want) {
+					t.Fatalf("city.toml missing migrated upstream default %q:\n%s", want, cityToml)
+				}
+			}
+
+			packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+			for _, forbidden := range []string{"[agent_defaults]", "[agents]"} {
+				if strings.Contains(packToml, forbidden) {
+					t.Fatalf("pack.toml still contains %s after migration:\n%s", forbidden, packToml)
+				}
+			}
+		})
+	}
+}
+
+// TestMigrateWritesAgentTomlForUpstreamOnlyAgent guards isZeroAgentConfig: an
+// agent whose only non-default field is upstream must still get its per-agent
+// agent.toml written. If isZeroAgentConfig omits cfg.Upstream it judges the
+// agent "zero", skips the write, and the per-agent upstream selection is lost.
+func TestMigrateWritesAgentTomlForUpstreamOnlyAgent(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "worker"
+upstream = "bedrock"
+`)
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	agentToml := readFile(t, filepath.Join(cityDir, "agents", "worker", "agent.toml"))
+	if !strings.Contains(agentToml, `upstream = "bedrock"`) {
+		t.Fatalf("worker agent.toml missing upstream:\n%s", agentToml)
 	}
 }
 
@@ -876,6 +1059,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		Nudge:                  "nudge text",
 		Session:                "acp",
 		Provider:               "claude",
+		Upstream:               "anthropic",
 		StartCommand:           "claude --dangerously",
 		Lifecycle:              config.AgentLifecycleOneShot,
 		Args:                   []string{"--arg1"},

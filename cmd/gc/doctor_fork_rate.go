@@ -52,7 +52,7 @@ const (
 )
 
 func newForkRateCheck() *forkRateCheck {
-	return &forkRateCheck{
+	fr := &forkRateCheck{
 		sampleInterval: defaultForkRateSampleInterval,
 		warnPerSec:     defaultForkRateWarnPerSec,
 		readProcStat: func() (string, error) {
@@ -61,6 +61,14 @@ func newForkRateCheck() *forkRateCheck {
 		},
 		sleep: time.Sleep,
 	}
+	// Unit-cover lane (GC_FAST_UNIT=1): skip the 1s /proc/stat sample wait.
+	// The check is still registered and still emits its result; the rate
+	// it reports is irrelevant in CI. ~27 doDoctor() call sites × 1s = ~27s
+	// of otherwise-wasted budget in the 8-minute cmd/gc cover run.
+	if strings.TrimSpace(os.Getenv("GC_FAST_UNIT")) == "1" {
+		fr.sleep = func(time.Duration) {}
+	}
+	return fr
 }
 
 func (c *forkRateCheck) Name() string                     { return "fork-rate" }

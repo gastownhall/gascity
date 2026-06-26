@@ -4,9 +4,9 @@
 //
 // Before beadmeta, these keys were ~126 raw string literals scattered across
 // ~70 files with no central declaration: the real interface between modules was
-// folklore. This package makes the seam named and compiler-checked. It is a
-// zero-dependency leaf (it imports nothing) so every workflow package can import
-// it without risk of an import cycle, mirroring internal/events.
+// folklore. This package makes the seam named and compiler-checked. It imports
+// only the standard library, so every workflow package can import it without
+// risk of an import cycle, mirroring internal/events.
 //
 // Scope: this package owns engine-touched bead-metadata KEY NAMES only. It
 // deliberately excludes (each a separate owner): gc.* event-type names
@@ -49,6 +49,7 @@ const (
 	CityPathMetadataKey                  = "gc.city_path"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
+	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
 	ControlEpochMetadataKey              = "gc.control_epoch"
 	ControlForMetadataKey                = "gc.control_for"
 	ControlQuarantineReasonMetadataKey   = "gc.control_quarantine_reason"
@@ -57,6 +58,7 @@ const (
 	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
+	CurrentRunIDMetadataKey              = "gc.current_run_id"
 	DeferredAssigneeMetadataKey          = "gc.deferred_assignee"
 	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
@@ -97,9 +99,11 @@ const (
 	FormulaHashMetadataKey               = "gc.formula_hash"
 	FormulaNameMetadataKey               = "gc.formula_name"
 	FormulaSourceMetadataKey             = "gc.formula_source"
+	GCExemptMetadataKey                  = "gc.gc_exempt"
 	Graphv2RootKeyMetadataKey            = "gc.graphv2_root_key"
 	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
 	InputConvoyIDMetadataKey             = "gc.input_convoy_id"
+	InstantiatingMetadataKey             = "gc.instantiating"
 	ItemRootKeyMetadataKey               = "gc.item_root_key"
 	KindMetadataKey                      = "gc.kind"
 	LastFailureClassMetadataKey          = "gc.last_failure_class"
@@ -121,6 +125,9 @@ const (
 	ParentConvoyIDMetadataKey            = "gc.parent_convoy_id"
 	PartialFragmentMetadataKey           = "gc.partial_fragment"
 	PartialRetryMetadataKey              = "gc.partial_retry"
+	PackMetadataKey                      = "gc.pack"
+	PackRootMetadataKey                  = "gc.pack_root"
+	PackWorkspaceMetadataKey             = "gc.pack_workspace"
 	PerDispatchModelMetadataKey          = "gc.per_dispatch_model"
 	PhaseHistoryMetadataKey              = "gc.phase_history"
 	PhaseMetadataKey                     = "gc.phase"
@@ -161,11 +168,39 @@ const (
 	TallyResultMetadataKey               = "gc.tally_result"
 	TemplateMetadataKey                  = "gc.template"
 	TerminalMetadataKey                  = "gc.terminal"
+	TriggerBeadIDMetadataKey             = "gc.trigger_bead_id"
+	TriggerBeadStoreRefMetadataKey       = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey                 = "gc.truncated"
 	VoteFieldMetadataKey                 = "gc.vote_field"
+	WorkBranchMetadataKey                = "gc.work_branch"
+	WorkCommitMetadataKey                = "gc.work_commit"
 	WorkDirMetadataKey                   = "gc.work_dir"
+	WorkOutcomeMetadataKey               = "gc.work_outcome"
+	WorkVerificationMetadataKey          = "gc.work_verification"
 	WorkflowIDMetadataKey                = "gc.workflow_id"
 )
+
+// Work-record metadata keys (ADR-0009). These bind a work bead to its claim
+// and its outcome so observability/eval can answer "what work was done, by
+// whom, with what artifact, to what end":
+//
+//   - WorkBranchMetadataKey ("gc.work_branch") — the git branch the claiming
+//     worker is on; the durable handle from the bead to its work. Stamped at
+//     claim time alongside WorkDirMetadataKey and read by the close gate.
+//   - WorkOutcomeMetadataKey ("gc.work_outcome") — the typed close disposition,
+//     one of "shipped" | "no-op" | "blocked" | "abandoned". Deliberately NOT
+//     OutcomeMetadataKey ("gc.outcome"): that key is the control-plane step
+//     result ("pass"/"fail"/"skipped") read by internal/dispatch, a disjoint
+//     vocabulary that must not be overloaded.
+//   - WorkCommitMetadataKey ("gc.work_commit") — the commit SHA that satisfied
+//     the bead; required when the outcome is "shipped" and validated reachable
+//     on WorkBranchMetadataKey by the close gate. Named in the gc.work_* family
+//     (not a bare "gc.commit") to avoid collision with future commit concepts.
+//   - WorkVerificationMetadataKey ("gc.work_verification") — the verification
+//     record (gate result, "manual", or a link) backing a shipped outcome.
+//
+// The set of valid WorkOutcomeMetadataKey values and the "shipped requires a
+// commit on the branch" rule live with the close gate in cmd/gc.
 
 // FormulaVarPrefix is the dynamic key prefix under which formula-supplied
 // variables are written as gc.var.<name>. The suffix is open-world (a
@@ -215,6 +250,7 @@ var KnownMetadataKeys = []string{
 	ControllerErrorClassMetadataKey,
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
+	CurrentRunIDMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
@@ -255,9 +291,11 @@ var KnownMetadataKeys = []string{
 	FormulaHashMetadataKey,
 	FormulaNameMetadataKey,
 	FormulaSourceMetadataKey,
+	GCExemptMetadataKey,
 	Graphv2RootKeyMetadataKey,
 	IdempotencyKeyMetadataKey,
 	InputConvoyIDMetadataKey,
+	InstantiatingMetadataKey,
 	ItemRootKeyMetadataKey,
 	KindMetadataKey,
 	LastFailureClassMetadataKey,
@@ -279,6 +317,9 @@ var KnownMetadataKeys = []string{
 	ParentConvoyIDMetadataKey,
 	PartialFragmentMetadataKey,
 	PartialRetryMetadataKey,
+	PackMetadataKey,
+	PackRootMetadataKey,
+	PackWorkspaceMetadataKey,
 	PerDispatchModelMetadataKey,
 	PhaseHistoryMetadataKey,
 	PhaseMetadataKey,
@@ -319,9 +360,15 @@ var KnownMetadataKeys = []string{
 	TallyResultMetadataKey,
 	TemplateMetadataKey,
 	TerminalMetadataKey,
+	TriggerBeadIDMetadataKey,
+	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
 	VoteFieldMetadataKey,
+	WorkBranchMetadataKey,
+	WorkCommitMetadataKey,
 	WorkDirMetadataKey,
+	WorkOutcomeMetadataKey,
+	WorkVerificationMetadataKey,
 	WorkflowIDMetadataKey,
 }
 
@@ -330,4 +377,24 @@ var KnownMetadataKeys = []string{
 // not enumerable.
 var KnownMetadataPrefixes = []string{
 	FormulaVarPrefix,
+}
+
+// SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a
+// particular live session through continuation-group routing. They must be
+// cleared together whenever work is rerouted off its original session without a
+// preserved assignee (retry-to-pool, reopen-source, orphan/closed/retired-session
+// release); otherwise a later claim re-vacuums the bead onto an unrelated
+// session via the stale group. Both cmd/gc and internal/dispatch consume this
+// single list so a new affinity key cannot silently fix one clear path while
+// leaving another stale.
+//
+// Of these keys, ContinuationGroupMetadataKey is the active routing vector: the
+// hook claim path reads it to vacuum open, unassigned sibling work onto the
+// claiming session. SessionAffinityMetadataKey is currently an advisory marker —
+// it is written (e.g. internal/dispatch/drain.go) but no Go routing path reads
+// it yet, so it is cleared alongside the group for hygiene and future-proofing
+// rather than because it gates routing today.
+var SessionAffinityMetadataKeys = []string{
+	SessionAffinityMetadataKey,
+	ContinuationGroupMetadataKey,
 }

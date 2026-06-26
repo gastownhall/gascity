@@ -25,8 +25,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/emergency"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -896,6 +898,15 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := ensureLegacyNamedPacksCached(cityRoot); err != nil {
 		return nil, fmt.Errorf("fetching packs: %w", err)
 	}
+	// Re-materialize any bundled pack synthetic caches that were written by a
+	// different binary version. The config loader's strict content-hash check
+	// rejects caches whose hash was produced by a binary whose embedded pack
+	// content differs from the running controller (e.g., after "gc import install"
+	// runs with a newer on-disk binary). EnsureBundledPacksCurrent repairs stale
+	// caches from the running binary's embedded packs before the loader validates.
+	if err := packman.EnsureBundledPacksCurrent(cityRoot); err != nil {
+		return nil, fmt.Errorf("refreshing bundled pack caches: %w", err)
+	}
 
 	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter()); err != nil {
 		return nil, err
@@ -939,6 +950,9 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	}
 	if err := workspacesvc.ValidateRuntimeSupport(newCfg.Services); err != nil {
 		return failWithWarnings(fmt.Errorf("validating services: %w", err))
+	}
+	if err := validatePackRuntimeRegistrations(newCfg); err != nil {
+		return failWithWarnings(fmt.Errorf("validating pack runtimes: %w", err))
 	}
 	newName := loadedCityName(newCfg, filepath.Dir(tomlPath))
 	if newName != lockedWorkspaceName {
@@ -1053,7 +1067,7 @@ func gracefulStopAllWithForceSignal(
 			// variable, which is the session_name. ResolveSessionID
 			// canonicalizes session_name → bead ID for any consumer.
 			sessionID := name
-			var template string
+			var template, agentIdentity string
 			if target, ok := targetByName[name]; ok {
 				if target.subject != "" {
 					subject = target.subject
@@ -1062,6 +1076,7 @@ func gracefulStopAllWithForceSignal(
 					sessionID = target.sessionID
 				}
 				template = target.template
+				agentIdentity = target.agentName
 				if cityStopSessionMarked(store, target.sessionID) {
 					markCityStopSessionAsAsleep(store, target.sessionID, stderr)
 				}
@@ -1070,6 +1085,7 @@ func gracefulStopAllWithForceSignal(
 				Type: events.SessionStopped, Actor: "gc", Subject: subject,
 				Payload: api.SessionLifecyclePayloadJSON(sessionID, template, "exited gracefully"),
 			})
+			telemetry.RecordAgentStop(context.Background(), name, firstNonEmptyGCString(agentIdentity, template), "graceful-exit", nil)
 			continue
 		}
 		survivors = append(survivors, name)
@@ -1313,8 +1329,10 @@ func runController(
 	cs.pokeCh = pokeCh
 	cs.configDirty = configDirty
 	cs.services = cr.svc
+	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
 	cs.startBeadEventWatcher(ctx)
+	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)
 
 	// Start API server if configured. Standalone city mode wraps the
