@@ -99,12 +99,15 @@ now_ms() {
 marker_epoch() {
   _ts="$1"
   case "$_ts" in
-    ''|*[!0-9TZ:.+-]*) return ;;
+    ''|*[!0-9TZ:.+-]*) return 0 ;;
   esac
   # GNU date parses the RFC3339 string directly; BSD/macOS date needs an
   # explicit input format and the -j (do-not-set-clock) flag.
-  _e=$(date -u -d "$_ts" +%s 2>/dev/null) && { printf '%s' "$_e"; return; }
-  _e=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$_ts" +%s 2>/dev/null) && { printf '%s' "$_e"; return; }
+  # Use `if` rather than `&&` so a failed date(1) doesn't set a non-zero
+  # exit status that would trigger `set -e` in the caller's subshell.
+  if _e=$(date -u -d "$_ts" +%s 2>/dev/null); then printf '%s' "$_e"; return 0; fi
+  if _e=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$_ts" +%s 2>/dev/null); then printf '%s' "$_e"; return 0; fi
+  return 0
 }
 
 # human_duration — format a whole-second count as a compact age string
