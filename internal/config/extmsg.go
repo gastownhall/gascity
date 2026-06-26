@@ -33,8 +33,15 @@ type ExtMsgDefaultRoute struct {
 // conversations of (provider, accountID), or "" when no route matches. An
 // account-specific route takes precedence over the provider-wide route
 // (empty account_id); account-specific routes never match other accounts.
+//
+// Provider names are matched case-insensitively (lowercased on both the
+// incoming and configured side) to mirror extmsg ConversationRef
+// canonicalization, so a normalized inbound posted as "Discord" still matches
+// a route configured as provider = "discord". Account IDs are matched
+// case-sensitively, also matching ConversationRef normalization, which trims
+// but does not lowercase the account ID.
 func (c *City) ExtMsgDefaultRouteAgent(provider, accountID string) string {
-	provider = strings.TrimSpace(provider)
+	provider = strings.ToLower(strings.TrimSpace(provider))
 	accountID = strings.TrimSpace(accountID)
 	if provider == "" {
 		return ""
@@ -42,7 +49,7 @@ func (c *City) ExtMsgDefaultRouteAgent(provider, accountID string) string {
 	providerWide := ""
 	for i := range c.ExtMsg.DefaultRoutes {
 		route := &c.ExtMsg.DefaultRoutes[i]
-		if strings.TrimSpace(route.Provider) != provider {
+		if strings.ToLower(strings.TrimSpace(route.Provider)) != provider {
 			continue
 		}
 		switch strings.TrimSpace(route.AccountID) {

@@ -42,11 +42,13 @@ func (r *InboundResult) routed() bool {
 // the orchestrator independent of the State interface.
 //
 // DefaultAgentForConversation returns the configured default agent
-// identity for an inbound conversation that resolved to no binding and
-// no group route ("" = no route configured). The API layer supplies the
-// config lookup; extmsg stays config-free. When it names an agent, the
-// pipeline binds the conversation to that agent (a sticky agent-name
-// binding) and routes the message to it.
+// identity for an inbound conversation that has no binding and belongs to
+// no group ("" = no route configured). The API layer supplies the config
+// lookup; extmsg stays config-free. When it names an agent, the pipeline
+// binds the conversation to that agent (a sticky agent-name binding) and
+// routes the message to it. A grouped conversation is never default-routed,
+// even when its own routing finds no target, so the sticky binding cannot
+// shadow the room.
 type InboundDeps struct {
 	Services                    Services
 	Registry                    *AdapterRegistry
@@ -54,10 +56,11 @@ type InboundDeps struct {
 	DefaultAgentForConversation func(ref ConversationRef) string
 }
 
-// applyDefaultRoute binds an unrouted conversation to its configured
-// default agent and marks the result as routed to it. A concurrent bind
-// races benignly: on conflict the freshly active binding wins, whatever
-// its kind.
+// applyDefaultRoute binds an unrouted, ungrouped conversation to its
+// configured default agent and marks the result as routed to it. The caller
+// restricts this to conversations with no group so the sticky binding cannot
+// shadow a room's own routing. A concurrent bind races benignly: on conflict
+// the freshly active binding wins, whatever its kind.
 func applyDefaultRoute(ctx context.Context, deps InboundDeps, result *InboundResult, ref ConversationRef, now time.Time) error {
 	if deps.DefaultAgentForConversation == nil {
 		return nil
@@ -93,6 +96,54 @@ func applyDefaultRoute(ctx context.Context, deps InboundDeps, result *InboundRes
 	return nil
 }
 
+// resolveInboundTarget resolves the delivery target for an inbound message and
+// records it on result: an existing binding first, then a group route, then the
+// configured default route. result is left unrouted when nothing matches. Both
+// inbound entry points share this helper so the binding -> group -> default
+// precedence stays identical across the raw and pre-normalized paths.
+//
+// The default route applies only to conversations that belong to no group. A
+// grouped conversation whose message finds no routable participant stays
+// unrouted rather than being rebound to the default agent — a durable binding
+// there would resolve before group routing and shadow the room on every later
+// message.
+func resolveInboundTarget(ctx context.Context, deps InboundDeps, result *InboundResult, msg ExternalInboundMessage, now time.Time) error {
+	binding, err := deps.Services.Bindings.ResolveByConversation(ctx, msg.Conversation)
+	if err != nil {
+		return fmt.Errorf("resolving binding: %w", err)
+	}
+	if binding != nil {
+		result.Binding = binding
+		result.TargetSessionID = binding.SessionID
+		result.TargetAgentName = binding.AgentName
+	}
+
+	// No binding — try group routing.
+	grouped := false
+	if !result.routed() {
+		route, err := deps.Services.Groups.ResolveInbound(ctx, msg)
+		if err != nil {
+			if !errors.Is(err, ErrGroupNotFound) && !errors.Is(err, ErrGroupRouteNotFound) {
+				return fmt.Errorf("resolving group route: %w", err)
+			}
+		} else {
+			result.GroupRoute = route
+			result.TargetSessionID = route.TargetSessionID
+			grouped = route.Match != GroupRouteNoGroup
+		}
+	}
+
+	// Still no target — try the configured default route, but only for an
+	// ungrouped conversation. A grouped conversation that missed routing keeps
+	// the prior behavior of staying unrouted.
+	if !result.routed() && !grouped {
+		if err := applyDefaultRoute(ctx, deps, result, msg.Conversation, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // HandleInbound processes a raw inbound payload through the full pipeline:
 //  1. Look up adapter by key.
 //  2. Verify and normalize the payload.
@@ -123,34 +174,10 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 
 	result := &InboundResult{Message: *msg}
 
-	// Step 3: Resolve binding.
-	binding, err := deps.Services.Bindings.ResolveByConversation(ctx, msg.Conversation)
-	if err != nil {
-		return nil, fmt.Errorf("resolving binding: %w", err)
-	}
-
-	if binding != nil {
-		result.Binding = binding
-		result.TargetSessionID = binding.SessionID
-		result.TargetAgentName = binding.AgentName
-	}
-
-	// Step 4: If no binding, try group routing, then the default route.
-	if !result.routed() {
-		route, err := deps.Services.Groups.ResolveInbound(ctx, *msg)
-		if err != nil {
-			if !errors.Is(err, ErrGroupNotFound) && !errors.Is(err, ErrGroupRouteNotFound) {
-				return nil, fmt.Errorf("resolving group route: %w", err)
-			}
-		} else {
-			result.GroupRoute = route
-			result.TargetSessionID = route.TargetSessionID
-		}
-	}
-	if !result.routed() {
-		if err := applyDefaultRoute(ctx, deps, result, msg.Conversation, msg.ReceivedAt); err != nil {
-			return nil, err
-		}
+	// Steps 3-4: Resolve the delivery target — existing binding, else group
+	// route, else the configured default route.
+	if err := resolveInboundTarget(ctx, deps, result, *msg, msg.ReceivedAt); err != nil {
+		return nil, err
 	}
 	if !result.routed() {
 		// No binding, no group route, no default route — empty target.
@@ -215,34 +242,10 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 		now = time.Now()
 	}
 
-	// Step 1: Resolve binding.
-	binding, err := deps.Services.Bindings.ResolveByConversation(ctx, msg.Conversation)
-	if err != nil {
-		return nil, fmt.Errorf("resolving binding: %w", err)
-	}
-
-	if binding != nil {
-		result.Binding = binding
-		result.TargetSessionID = binding.SessionID
-		result.TargetAgentName = binding.AgentName
-	}
-
-	// Step 2: If no binding, try group routing, then the default route.
-	if !result.routed() {
-		route, err := deps.Services.Groups.ResolveInbound(ctx, msg)
-		if err != nil {
-			if !errors.Is(err, ErrGroupNotFound) && !errors.Is(err, ErrGroupRouteNotFound) {
-				return nil, fmt.Errorf("resolving group route: %w", err)
-			}
-		} else {
-			result.GroupRoute = route
-			result.TargetSessionID = route.TargetSessionID
-		}
-	}
-	if !result.routed() {
-		if err := applyDefaultRoute(ctx, deps, result, msg.Conversation, now); err != nil {
-			return nil, err
-		}
+	// Steps 1-2: Resolve the delivery target — existing binding, else group
+	// route, else the configured default route.
+	if err := resolveInboundTarget(ctx, deps, result, msg, now); err != nil {
+		return nil, err
 	}
 	if !result.routed() {
 		// No binding, no group route, no default route — empty target.

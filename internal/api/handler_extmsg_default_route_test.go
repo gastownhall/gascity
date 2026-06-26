@@ -65,6 +65,50 @@ func TestHandleExtMsgInboundDefaultRouteBindsAndColdWakes(t *testing.T) {
 	}
 }
 
+func TestHandleExtMsgInboundDefaultRouteMatchesMixedCaseProvider(t *testing.T) {
+	fs, srv, services, ref := newExtMsgAgentBindingFixture(t)
+	fs.cfg.ExtMsg = config.ExtMsgConfig{
+		DefaultRoutes: []config.ExtMsgDefaultRoute{
+			{Provider: "discord", Agent: "myrig/worker"},
+		},
+	}
+
+	// The inbound conversation carries a mixed-case provider ("Discord"),
+	// which extmsg canonicalizes to lowercase. The default-route lookup must
+	// match the lowercase configured route regardless of the incoming casing,
+	// otherwise the conversation stays unrouted.
+	mixedCase := ref
+	mixedCase.Provider = "Discord"
+
+	rec := postExtMsg(t, fs, srv, "/extmsg/inbound", map[string]any{
+		"message": map[string]any{
+			"provider_message_id": "msg-default-mixedcase-1",
+			"conversation":        conversationBody(mixedCase),
+			"actor":               map[string]any{"id": "user-1", "display_name": "User One", "is_bot": false},
+			"text":                "hello from a mixed-case provider",
+			"received_at":         time.Now().UTC().Format(time.RFC3339),
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var result extmsg.InboundResult
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode inbound result: %v", err)
+	}
+	if result.TargetAgentName != "myrig/worker" {
+		t.Fatalf("TargetAgentName = %q, want myrig/worker (mixed-case provider must match lowercase route)", result.TargetAgentName)
+	}
+
+	binding, err := services.Bindings.ResolveByConversation(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("ResolveByConversation: %v", err)
+	}
+	if binding == nil || binding.AgentName != "myrig/worker" {
+		t.Fatalf("binding = %#v, want sticky agent binding myrig/worker", binding)
+	}
+}
+
 func TestHandleExtMsgInboundDefaultRouteUnknownAgentStaysUnbound(t *testing.T) {
 	fs, srv, services, ref := newExtMsgAgentBindingFixture(t)
 	fs.cfg.ExtMsg = config.ExtMsgConfig{

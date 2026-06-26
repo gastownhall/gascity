@@ -73,3 +73,33 @@ func TestExtMsgDefaultRouteAgentPrecedence(t *testing.T) {
 		t.Fatalf("agent on empty config = %q, want empty", got)
 	}
 }
+
+func TestExtMsgDefaultRouteAgentNormalizesProviderCase(t *testing.T) {
+	cfg := &City{
+		ExtMsg: ExtMsgConfig{
+			DefaultRoutes: []ExtMsgDefaultRoute{
+				{Provider: "Discord", Agent: "myrig/helper"},
+				{Provider: "telegram", AccountID: "Ops", Agent: "myrig/operator"},
+			},
+		},
+	}
+
+	// Provider matching is case-insensitive on both sides, mirroring extmsg
+	// ConversationRef canonicalization: a normalized inbound posted as
+	// "discord"/"DISCORD" must match the route configured as "Discord".
+	if got := cfg.ExtMsgDefaultRouteAgent("discord", "any"); got != "myrig/helper" {
+		t.Fatalf("agent(discord, any) = %q, want myrig/helper", got)
+	}
+	if got := cfg.ExtMsgDefaultRouteAgent("DISCORD", "any"); got != "myrig/helper" {
+		t.Fatalf("agent(DISCORD, any) = %q, want myrig/helper", got)
+	}
+
+	// Account IDs stay case-sensitive (ConversationRef trims but does not
+	// lowercase account_id), so only the exact-case account matches its route.
+	if got := cfg.ExtMsgDefaultRouteAgent("Telegram", "Ops"); got != "myrig/operator" {
+		t.Fatalf("agent(Telegram, Ops) = %q, want myrig/operator", got)
+	}
+	if got := cfg.ExtMsgDefaultRouteAgent("telegram", "ops"); got != "" {
+		t.Fatalf("agent(telegram, ops) = %q, want empty (account_id is case-sensitive)", got)
+	}
+}

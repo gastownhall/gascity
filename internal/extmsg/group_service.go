@@ -348,7 +348,7 @@ func (s *groupService) ResolveInbound(ctx context.Context, event ExternalInbound
 		return nil, err
 	}
 	if group == nil {
-		return &GroupRouteDecision{Match: GroupRouteNoMatch}, nil
+		return &GroupRouteDecision{Match: GroupRouteNoGroup}, nil
 	}
 	participants, err := s.listParticipants(group.ID)
 	if err != nil {
