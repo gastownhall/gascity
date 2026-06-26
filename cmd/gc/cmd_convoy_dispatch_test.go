@@ -1497,8 +1497,11 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 	if control.Assignee != "" {
 		t.Fatalf("control assignee = %q, want empty routed control-dispatcher queue", control.Assignee)
 	}
-	if got := control.Metadata["gc.routed_to"]; got != "frontend/control-dispatcher" {
-		t.Fatalf("control gc.routed_to = %q, want frontend/control-dispatcher", got)
+	// The control step routes to the city-level singleton control-dispatcher
+	// (the one whose session actually runs, given max_active_sessions=1), not
+	// the rig-scoped frontend/control-dispatcher copy that no session claims.
+	if got := control.Metadata["gc.routed_to"]; got != "control-dispatcher" {
+		t.Fatalf("control gc.routed_to = %q, want city-level control-dispatcher", got)
 	}
 	if control.Metadata[graphroute.GraphExecutionRouteMetaKey] != "frontend/reviewer" {
 		t.Fatalf("control execution route = %q, want frontend/reviewer", control.Metadata[graphroute.GraphExecutionRouteMetaKey])
@@ -1578,8 +1581,10 @@ func TestDecorateDynamicFragmentRecipeUsesDirectExecutionRoute(t *testing.T) {
 	if check.Assignee != "" {
 		t.Fatalf("check assignee = %q, want empty routed control-dispatcher queue", check.Assignee)
 	}
-	if got := check.Metadata["gc.routed_to"]; got != "frontend/control-dispatcher" {
-		t.Fatalf("check gc.routed_to = %q, want frontend/control-dispatcher", got)
+	// Control routes to the city-level singleton control-dispatcher, not the
+	// rig-scoped frontend/control-dispatcher copy (which no session claims).
+	if got := check.Metadata["gc.routed_to"]; got != "control-dispatcher" {
+		t.Fatalf("check gc.routed_to = %q, want city-level control-dispatcher", got)
 	}
 	if got := check.Metadata[graphroute.GraphExecutionRouteMetaKey]; got != direct.ID {
 		t.Fatalf("check execution route = %q, want direct session %s", got, direct.ID)

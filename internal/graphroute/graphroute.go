@@ -326,25 +326,50 @@ func resolveControlDispatcherBinding(_ beads.Store, _ string, cfg *config.City, 
 	if deps.Resolver == nil {
 		return GraphRouteBinding{}, fmt.Errorf("ResolveAgent not configured")
 	}
-	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, config.ControlDispatcherAgentName, rigContext)
-	if !ok {
-		agentCfg, ok = configuredControlDispatcherForScope(cfg, rigContext)
+	// Primary lookup: find the deterministic control-dispatcher directly, by
+	// behavior (IsDeterministicControlDispatcher) rather than bare-name string
+	// match. Since 9fa6b7fec the dispatcher ships bound (core.control-dispatcher),
+	// so AgentMatchesIdentity rejects the bare-name fallback for it and the
+	// per-rig fleet makes the bare-name scan ambiguous — both break a
+	// Resolver-based lookup. Preferring the city-level singleton (Dir == "")
+	// across every scope also keeps the stamped route on the one session that
+	// actually runs (max_active_sessions=1), curing the stranded-control-bead.
+	if agentCfg, ok := configuredControlDispatcherForScope(cfg, rigContext); ok {
+		return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
 	}
+	// Fallback for configs without a deterministic dispatcher (e.g. a plain
+	// control-dispatcher agent carrying no convoy-control StartCommand): defer
+	// to the name-based resolver path, preserving the rig-context preference.
+	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, config.ControlDispatcherAgentName, rigContext)
 	if !ok {
 		return GraphRouteBinding{}, fmt.Errorf("control-dispatcher agent %q not found", config.ControlDispatcherAgentName)
 	}
 	return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
 }
 
+// configuredControlDispatcherForScope returns the deterministic control-
+// dispatcher for a scope, binding-agnostic. The city-level singleton (Dir == "")
+// is preferred for every scope — it is the one whose session actually runs given
+// max_active_sessions=1 — and a rig-scoped instance (Dir == rigContext) is used
+// only when no city-level deterministic dispatcher is configured.
 func configuredControlDispatcherForScope(cfg *config.City, rigContext string) (config.Agent, bool) {
 	rigContext = strings.TrimSpace(rigContext)
+	var rigScoped config.Agent
+	haveRigScoped := false
 	for _, a := range cfg.Agents {
 		if !config.IsDeterministicControlDispatcher(&a) {
 			continue
 		}
-		if strings.TrimSpace(a.Dir) == rigContext {
+		if strings.TrimSpace(a.Dir) == "" {
 			return a, true
 		}
+		if !haveRigScoped && strings.TrimSpace(a.Dir) == rigContext {
+			rigScoped = a
+			haveRigScoped = true
+		}
+	}
+	if haveRigScoped {
+		return rigScoped, true
 	}
 	return config.Agent{}, false
 }
