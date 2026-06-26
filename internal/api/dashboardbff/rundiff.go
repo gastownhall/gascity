@@ -198,14 +198,12 @@ func (e runExecutionPath) resolve() (cwd string, errMsg string) {
 // allowedRoots is the effective run-cwd allowlist (configured roots plus the
 // resolved city dir); every git read is gated against it.
 //
-// Simplification vs the BFF: the BFF additionally walks UNTRACKED files via the
-// `untracked` git view (git ls-files --others) and synthesizes per-file patches
-// via execRunGitNewFileDiff. Neither helper is exposed on this plane's exec
-// runner, so the untracked-patch and "??"-status changedFiles sub-path is not
-// ported here. Untracked files still surface in the `status` array because the
-// `status` view passes --untracked-files=all; only their synthesized patch
-// bodies and changedFiles entries are omitted. The tracked-diff path — the core
-// of the endpoint — is ported faithfully.
+// Both tracked changes (vs the comparison base) and UNTRACKED files are
+// represented: untracked files appear in changedFiles with a "??" status and as
+// synthesized new-file blocks in the patch (readUntracked), matching the BFF
+// and the SPA's "changes relative to HEAD plus untracked files" contract.
+// Without this, a run that only creates new files renders as "0 changed files"
+// even though `git status` lists "??" entries.
 func (p *Plane) readRunGitDiff(ctx context.Context, cwd string, allowedRoots []string) (runDiffResponse, error) {
 	if cwd == "" {
 		return emptyDiff("path_unknown"), nil
@@ -244,17 +242,104 @@ func (p *Plane) readRunGitDiff(ctx context.Context, cwd string, allowedRoots []s
 		return runDiffResponse{}, cerr
 	}
 
-	patch := filterReviewablePatch(trackedPatch)
+	untrackedFiles, untrackedPatch, untrackedTrunc, uerr := p.readUntracked(ctx, cwd, allowedRoots)
+	if uerr != nil {
+		return runDiffResponse{}, uerr
+	}
+
+	patch := filterReviewablePatch(joinPatchSources(trackedPatch, untrackedPatch))
 
 	return runDiffResponse{
 		Kind:         "ok",
 		RootPath:     runDiffRootPath{Kind: "known", Path: rootPath},
 		Comparison:   comparison,
 		Status:       status,
-		ChangedFiles: mergeChangedFiles(changedFiles),
+		ChangedFiles: mergeChangedFiles(append(changedFiles, untrackedFiles...)),
 		Patch:        sanitizeTerminalOutput(patch),
-		Truncated:    statusRes.truncated || patchTrunc,
+		Truncated:    statusRes.truncated || patchTrunc || untrackedTrunc,
 	}, nil
+}
+
+// maxUntrackedNewFileDiffs caps how many untracked files get a synthesized
+// new-file patch in one run diff. A run that drops thousands of new files would
+// otherwise spawn one `git diff --no-index` per file; files beyond the cap are
+// dropped from changedFiles and get no patch body — they remain visible only in
+// the raw git status output — and the diff is marked truncated.
+const maxUntrackedNewFileDiffs = 100
+
+// readUntracked lists untracked reviewable files and synthesizes a new-file
+// diff for each, porting the BFF's untracked path (git ls-files --others +
+// execRunGitNewFileDiff). It returns the "??"-status changedFiles entries and
+// the concatenated new-file patch blocks. A non-zero ls-files exit degrades to
+// "no untracked" (the tracked diff is still returned). Hitting the file cap, or
+// a per-file diff truncation, sets truncated so the UI shows the diff is
+// partial.
+func (p *Plane) readUntracked(ctx context.Context, cwd string, allowedRoots []string) ([]runChangedFile, string, bool, error) {
+	res, err := p.exec.execRunGitUntracked(ctx, cwd, allowedRoots)
+	if err != nil {
+		return nil, "", false, err
+	}
+	if res.exitCode != 0 {
+		return nil, "", res.truncated, nil
+	}
+
+	truncated := res.truncated
+	files := []runChangedFile{}
+	var patches []string
+	for _, rel := range splitNUL(res.stdout) {
+		if !isReviewableRunDiffPath(rel) {
+			continue
+		}
+		if len(files) >= maxUntrackedNewFileDiffs {
+			truncated = true
+			break
+		}
+		files = append(files, runChangedFile{Path: rel, Status: "??", Kind: classifyRunDiffFile(rel)})
+
+		diff, derr := p.exec.execRunGitNewFileDiff(ctx, cwd, rel, allowedRoots)
+		if derr != nil {
+			// A single unreadable untracked file (e.g. raced away between listing
+			// and diff) is non-fatal: it still counts in changedFiles via status.
+			continue
+		}
+		// --no-index exits 1 on differences; treat 0 and 1 as success, and keep a
+		// truncated (capped) body too.
+		if diff.exitCode != 0 && diff.exitCode != 1 && !diff.truncated {
+			continue
+		}
+		if strings.TrimSpace(diff.stdout) != "" {
+			patches = append(patches, diff.stdout)
+		}
+		if diff.truncated {
+			truncated = true
+		}
+	}
+	return files, strings.Join(patches, "\n"), truncated, nil
+}
+
+// joinPatchSources concatenates the tracked and untracked raw patch texts with a
+// newline between, dropping empties, so filterReviewablePatch can re-split the
+// combined text on "diff --git" block boundaries.
+func joinPatchSources(tracked, untracked string) string {
+	switch {
+	case strings.TrimSpace(tracked) == "":
+		return untracked
+	case strings.TrimSpace(untracked) == "":
+		return tracked
+	default:
+		return tracked + "\n" + untracked
+	}
+}
+
+// splitNUL splits NUL-delimited output (git -z) and drops empty fields.
+func splitNUL(s string) []string {
+	out := []string{}
+	for _, part := range strings.Split(s, "\x00") {
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // emptyDiff builds the not_git / path_unknown response: an unavailable rootPath

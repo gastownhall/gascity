@@ -70,6 +70,11 @@ func dashboardDeps(resolver api.CityResolver, readOnly bool, bind string, port i
 		OperatorWireAlias:  os.Getenv("DASHBOARD_OPERATOR_WIRE_ALIAS"),
 		DecisionLabel:      os.Getenv("DASHBOARD_DECISION_LABEL"),
 		DefaultView:        os.Getenv("DEFAULT_VIEW"),
+		// EnabledModules is intentionally left unset: every shipped dashboard view
+		// module is core (always on), and no first-party (gated) module exists yet,
+		// so the config projection emits an empty enabledModules list by design.
+		// When the first gated module lands, wire its enable source here (mirroring
+		// runCwdAllowedRootsFromEnv) and update TestDashboardDepsModulesCoreOnly.
 	}
 }
 

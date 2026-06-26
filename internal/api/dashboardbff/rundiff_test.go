@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -135,6 +137,134 @@ func TestRunDiffPathUnderConfiguredRootAccepted(t *testing.T) {
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// gitRepoWithTrackedFile inits a repo with a stable identity and one committed
+// tracked file (src/run.ts), so a test can then modify it and add untracked
+// files to exercise the full run-diff (tracked + untracked) path.
+func gitRepoWithTrackedFile(t *testing.T, dir string) {
+	t.Helper()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@example.com")
+	run("config", "user.name", "t")
+	writeTestFile(t, dir, "src/run.ts", "old session\n")
+	run("add", "src/run.ts")
+	run("commit", "-q", "-m", "init")
+}
+
+// writeTestFile writes content to dir/rel, creating parent dirs as needed.
+func writeTestFile(t *testing.T, dir, rel, content string) {
+	t.Helper()
+	full := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatalf("mkdir for %s: %v", rel, err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", rel, err)
+	}
+}
+
+// TestRunDiffIncludesUntrackedNewFiles is the regression guard for the major
+// behavioral finding: a run that creates new (untracked) files must surface
+// them in both changedFiles ("??") and the patch (synthesized new-file block),
+// not just the status array, while control-plane untracked files stay hidden.
+func TestRunDiffIncludesUntrackedNewFiles(t *testing.T) {
+	dir := t.TempDir()
+	gitRepoWithTrackedFile(t, dir)
+	writeTestFile(t, dir, "src/run.ts", "new session\n")   // tracked modification
+	writeTestFile(t, dir, "docs/plan.md", "plan output\n") // untracked, reviewable
+	writeTestFile(t, dir, ".gc/secret.txt", "nope\n")      // untracked, control-plane
+
+	p := New(Deps{Resolver: mapResolver{"alpha": dir}})
+	rec := postRunDiff(t, p, "/api/city/alpha/runs/gc-run-1/diff",
+		`{"executionPath":{"kind":"known","path":`+jsonString(dir)+`}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %s), want 200", rec.Code, rec.Body.String())
+	}
+	var got runDiffResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var planEntry *runChangedFile
+	for i := range got.ChangedFiles {
+		if got.ChangedFiles[i].Path == "docs/plan.md" {
+			planEntry = &got.ChangedFiles[i]
+		}
+		if strings.HasPrefix(got.ChangedFiles[i].Path, ".gc/") {
+			t.Errorf("control-plane untracked file leaked into changedFiles: %+v", got.ChangedFiles[i])
+		}
+	}
+	if planEntry == nil {
+		t.Fatalf("untracked docs/plan.md missing from changedFiles: %+v", got.ChangedFiles)
+	}
+	if planEntry.Status != "??" {
+		t.Errorf("untracked status = %q, want ??", planEntry.Status)
+	}
+	if planEntry.Kind != "docs" {
+		t.Errorf("untracked kind = %q, want docs", planEntry.Kind)
+	}
+
+	// The synthesized new-file block renders the untracked file's content.
+	if !strings.Contains(got.Patch, "diff --git a/docs/plan.md b/docs/plan.md") ||
+		!strings.Contains(got.Patch, "new file mode") ||
+		!strings.Contains(got.Patch, "+plan output") {
+		t.Errorf("synthesized untracked new-file patch missing:\n%s", got.Patch)
+	}
+	// The tracked modification is still present alongside the untracked block.
+	if !strings.Contains(got.Patch, "a/src/run.ts") || !strings.Contains(got.Patch, "+new session") {
+		t.Errorf("tracked patch missing:\n%s", got.Patch)
+	}
+	// Control-plane untracked content never reaches the patch.
+	if strings.Contains(got.Patch, ".gc/secret") {
+		t.Errorf("control-plane untracked file leaked into patch:\n%s", got.Patch)
+	}
+}
+
+// TestRunDiffReachableInReadOnlyMode is the regression guard for the major
+// behavioral finding: the run-diff POST is a pure read and must stay reachable
+// on a read-only supervisor, while CSRF still applies to it and genuine
+// mutations are still refused.
+func TestRunDiffReachableInReadOnlyMode(t *testing.T) {
+	dir := t.TempDir()
+	gitRepoWithTrackedFile(t, dir)
+	p := New(Deps{Resolver: mapResolver{"alpha": dir}, ReadOnly: true})
+
+	body := `{"executionPath":{"kind":"known","path":` + jsonString(dir) + `}}`
+
+	// Read-only must NOT 405 the run-diff read (postRunDiff carries X-GC-Request).
+	rec := postRunDiff(t, p, "/api/city/alpha/runs/gc-run-1/diff", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("read-only run-diff status = %d (body %s), want 200", rec.Code, rec.Body.String())
+	}
+
+	// CSRF is still enforced on the read-only-safe POST: no X-GC-Request -> 403.
+	recNoHeader := httptest.NewRecorder()
+	reqNoHeader := httptest.NewRequest(http.MethodPost, "/api/city/alpha/runs/gc-run-1/diff", strings.NewReader(body))
+	reqNoHeader.Header.Set("Content-Type", "application/json")
+	p.Handler().ServeHTTP(recNoHeader, reqNoHeader)
+	if recNoHeader.Code != http.StatusForbidden {
+		t.Errorf("read-only run-diff without X-GC-Request = %d, want 403 (CSRF still applies)", recNoHeader.Code)
+	}
+
+	// A genuine mutation (client-error telemetry) is still refused in read-only mode.
+	recMutation := httptest.NewRecorder()
+	reqMutation := httptest.NewRequest(http.MethodPost, "/api/client-errors",
+		strings.NewReader(`{"component":"x","operation":"y","message":"z"}`))
+	reqMutation.Header.Set("X-GC-Request", "dashboard")
+	reqMutation.Header.Set("Content-Type", "application/json")
+	p.Handler().ServeHTTP(recMutation, reqMutation)
+	if recMutation.Code != http.StatusMethodNotAllowed {
+		t.Errorf("read-only client-errors POST = %d, want 405 (genuine mutation refused)", recMutation.Code)
+	}
 }
 
 // A missing/empty execution path is a malformed body, rejected at parse time.

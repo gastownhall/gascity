@@ -364,6 +364,51 @@ func (r *execRunner) execRunGitNameStatusFrom(ctx context.Context, cwd, baseRevi
 	return r.run(ctx, "git", gitArgs(cwd, nameStatusArgs...), runGitTimeout, maxBytes)
 }
 
+// execRunGitUntracked lists untracked, non-ignored files under the reviewable
+// pathspec, NUL-separated and unquoted (-z + core.quotePath=false) so paths
+// with spaces or non-ASCII bytes parse cleanly. The reviewable pathspec keeps
+// the control-plane dirs (.beads/.gc) out at the git layer; the caller
+// re-checks each path with isReviewableRunDiffPath. This is the listing half of
+// the BFF's untracked path, which the original Go port had omitted.
+func (r *execRunner) execRunGitUntracked(ctx context.Context, cwd string, allowedRoots []string) (*execResult, error) {
+	if !isValidRunCwd(cwd, allowedRoots) {
+		return nil, validationErr("invalid run cwd")
+	}
+	args := append([]string{"-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "-z"}, runReviewablePaths...)
+	return r.run(ctx, "git", gitArgs(cwd, args...), runGitTimeout, maxBytes)
+}
+
+// execRunGitNewFileDiff synthesizes a new-file unified diff for one untracked
+// file via `git diff --no-index -- /dev/null <relPath>`, producing the
+// `diff --git a/<path> b/<path>` + `new file mode` block the SPA's diff viewer
+// renders. relPath comes from execRunGitUntracked (relative, under cwd) and is
+// re-validated here as a defensive shape check. --no-index exits 1 when the two
+// inputs differ (always, vs an empty /dev/null), so exit 0 and 1 are both
+// success; any other code is a real failure the caller skips.
+func (r *execRunner) execRunGitNewFileDiff(ctx context.Context, cwd, relPath string, allowedRoots []string) (*execResult, error) {
+	if !isValidRunCwd(cwd, allowedRoots) || !isValidUntrackedRelPath(relPath) {
+		return nil, validationErr("invalid run git new-file diff args")
+	}
+	args := []string{"diff", "--no-ext-diff", "--no-color", "--no-index", "--", "/dev/null", relPath}
+	return r.run(ctx, "git", gitArgs(cwd, args...), runGitTimeout, maxRunDiffBytes)
+}
+
+// isValidUntrackedRelPath validates a git-listed untracked path before it is
+// passed to `git diff --no-index`. The path is git's own output (relative, under
+// cwd), but it is re-checked defensively: non-empty, relative, NUL-free, and
+// with no ".." traversal segment.
+func isValidUntrackedRelPath(p string) bool {
+	if p == "" || strings.HasPrefix(p, "/") || strings.ContainsRune(p, 0) {
+		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // execBdDoctor runs a read-only `bd doctor` health probe of a rig's embedded
 // dolt .beads store. The path is supervisor-reported and validated here; --fix
 // is never passed, so the probe only inspects.

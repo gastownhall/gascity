@@ -5,10 +5,12 @@
 // samplers) into Go. The bulk of the old BFF — the supervisor proxy and every
 // per-city data read — is gone: the SPA calls /v0/* directly, same-origin.
 //
-// This plane is registered as a non-Huma handler on the supervisor mux (the
-// documented exception, like the /svc/ proxy), so it adds no operations to the
-// OpenAPI contract. Because it bypasses Huma's CSRF/read-only middleware, it
-// self-enforces both through one shared guard (see guard).
+// This plane is registered as a non-Huma handler on the supervisor mux — one of
+// the three sanctioned non-typed surfaces documented in
+// engdocs/architecture/api-control-plane.md §3.9 (alongside the /svc/ proxy and
+// the embedded SPA) — so it adds no operations to the OpenAPI contract. Because
+// it bypasses Huma's CSRF/read-only middleware, it self-enforces both through
+// one shared guard (see guard).
 package dashboardbff
 
 import (
@@ -16,6 +18,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -95,18 +98,34 @@ func (p *Plane) Stop() {
 	p.wg.Wait()
 }
 
-// guard enforces the plane's write policy: when read-only, every mutation is
-// refused; otherwise every mutation must (a) be same-origin and (b) carry a
-// non-empty X-GC-Request header (the supervisor's CSRF convention). Safe
-// methods pass through. The same-origin assertion is defense-in-depth so a CORS
-// regression elsewhere cannot reopen CSRF on its own. One shared gate so no
-// per-handler check can be forgotten.
+// readOnlySafePostRE matches the run-diff endpoint — the one POST on the plane
+// that only READS git state. It carries its execution path in the request body
+// (so it cannot be a GET) but mutates nothing, so it must stay reachable on a
+// read-only supervisor; classifying the plane's write policy by HTTP method
+// alone would otherwise 405 the SPA's run Diff tab on every non-loopback bind.
+var readOnlySafePostRE = regexp.MustCompile(`^/api/city/[^/]+/runs/[^/]+/diff$`)
+
+// isReadOnlySafeRequest reports whether an unsafe-method request is in fact a
+// pure read that must survive the read-only gate. Only the run-diff POST
+// qualifies today; it is still subject to the CSRF checks in guard.
+func isReadOnlySafeRequest(r *http.Request) bool {
+	return r.Method == http.MethodPost && readOnlySafePostRE.MatchString(r.URL.Path)
+}
+
+// guard enforces the plane's write policy. Unsafe-method requests must (a) be
+// same-origin and (b) carry a non-empty X-GC-Request header (the supervisor's
+// CSRF convention); the same-origin assertion is defense-in-depth so a CORS
+// regression elsewhere cannot reopen CSRF on its own. In read-only mode a
+// genuine mutation is refused outright, but a read-only-SAFE request (run-diff,
+// which only reads git) is classified by semantics rather than method, so it
+// passes the read-only gate while staying behind CSRF. Safe methods pass
+// straight through. One shared gate so no per-handler check can be forgotten.
 func (p *Plane) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 		default:
-			if p.deps.ReadOnly {
+			if p.deps.ReadOnly && !isReadOnlySafeRequest(r) {
 				writeError(w, http.StatusMethodNotAllowed, "dashboard is read-only")
 				return
 			}
@@ -150,7 +169,7 @@ func sameOriginMutation(r *http.Request) bool {
 // file next to the logic it serves.
 func (p *Plane) registerRoutes() {
 	p.mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ts": time.Now().UTC().Format(time.RFC3339Nano)})
+		writeJSON(w, http.StatusOK, apiHealthResponse{OK: true, TS: time.Now().UTC().Format(time.RFC3339Nano)})
 	})
 	p.registerConfig()
 	p.registerGit()
@@ -182,6 +201,23 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// apiHealthResponse is the GET /api/health body. Typed (not map[string]any) so
+// every knowable wire shape on this non-typed plane is still a named struct;
+// the genuinely-dynamic supervisor-status pass-through (samplers.go) is the
+// only json.RawMessage on the plane (see the §3.9 non-typed-plane note in
+// engdocs/architecture/api-control-plane.md).
+type apiHealthResponse struct {
+	OK bool   `json:"ok"`
+	TS string `json:"ts"`
+}
+
+// apiErrorBody is the shared { "error": msg } shape every plane handler returns
+// on failure. Typed so the error wire shape is named like the success shapes
+// (the SPA's parseApiErrorBody reads the `error` field).
+type apiErrorBody struct {
+	Error string `json:"error"`
+}
+
 func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	writeJSON(w, status, apiErrorBody{Error: msg})
 }

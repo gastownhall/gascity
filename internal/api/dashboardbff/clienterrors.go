@@ -80,11 +80,23 @@ func decodeClientErrorReports(body []byte) ([]clientErrorReport, error) {
 
 // clientErrorField normalizes a single field for logging: terminal/control
 // sequences are stripped (no log injection from untrusted browser input),
-// whitespace is collapsed, and the result is capped at maxClientErrorField.
+// whitespace is collapsed, and the result is capped at maxClientErrorField
+// runes.
 func clientErrorField(v string) string {
 	v = strings.Join(strings.Fields(sanitizeTerminalOutput(v)), " ")
-	if len(v) > maxClientErrorField {
-		return v[:maxClientErrorField]
+	return truncateRunes(v, maxClientErrorField)
+}
+
+// truncateRunes caps s at maxRunes runes (not bytes), so a multi-byte rune is
+// never split mid-encoding in the logged field. The byte-length fast path
+// avoids the []rune allocation for the common short field.
+func truncateRunes(s string, maxRunes int) string {
+	if len(s) <= maxRunes {
+		return s
 	}
-	return v
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes])
 }

@@ -39,31 +39,10 @@ export function runSessionLinkFor(
 ): RunSessionLink | undefined {
   if (status === 'pending' || status === 'ready') return undefined;
   const assignee = nonEmpty(bead.assignee);
-  // The bead's recorded session id can be a pool-qualified session NAME
-  // (e.g. a polecat run records `polecat-gc-333573`, whose real supervisor
-  // session id is `gc-333573`). Normalize every candidate through
-  // supervisorSessionIdFrom so the link carries the id the session routes
-  // expect — otherwise a completed session (absent from the live index, so
-  // unresolvable by name) leaks its name into the id slot and the Session
-  // tab rejects it as "invalid session id".
-  const rawSessionId =
-    meta(bead, 'session_id') ??
-    meta(bead, 'gc.session_id') ??
-    meta(bead, 'gc.sessionId') ??
-    assignee;
-  const sessionId = supervisorSessionIdFrom(rawSessionId) ?? rawSessionId;
-  const sessionName =
-    meta(bead, 'session_name') ??
-    meta(bead, 'gc.session_name') ??
-    meta(bead, 'gc.sessionName') ??
-    assignee ??
-    sessionId;
+  const sessionId = sessionIdFromBead(bead, assignee);
+  const sessionName = sessionNameFromBead(bead, assignee, sessionId);
   if (!sessionId && !sessionName) return undefined;
-  const rawLink: RunSessionLink = {
-    sessionId: sessionId ?? sessionName ?? '',
-    sessionName: sessionName ?? sessionId ?? '',
-    assignee: assignee ?? sessionName ?? sessionId ?? '',
-  };
+  const rawLink = rawLinkFrom(sessionId, sessionName, assignee);
   const link = resolveRunSessionLink(rawLink, context.sessionIndex);
   // Final gate: link.sessionId is fed straight to the supervisor session
   // routes, which reject anything outside SESSION_ID_RE as "invalid session
@@ -74,6 +53,52 @@ export function runSessionLinkFor(
   // leaking an unvalidated handle into the route.
   if (!SESSION_ID_RE.test(link.sessionId)) return undefined;
   return link;
+}
+
+// The bead's recorded session id can be a pool-qualified session NAME
+// (e.g. a polecat run records `polecat-gc-333573`, whose real supervisor
+// session id is `gc-333573`). Normalize every candidate through
+// supervisorSessionIdFrom so the link carries the id the session routes
+// expect — otherwise a completed session (absent from the live index, so
+// unresolvable by name) leaks its name into the id slot and the Session
+// tab rejects it as "invalid session id".
+function sessionIdFromBead(
+  bead: RunSnapshotBead,
+  assignee: string | undefined,
+): string | undefined {
+  const rawSessionId =
+    meta(bead, 'session_id') ??
+    meta(bead, 'gc.session_id') ??
+    meta(bead, 'gc.sessionId') ??
+    assignee;
+  return supervisorSessionIdFrom(rawSessionId) ?? rawSessionId;
+}
+
+function sessionNameFromBead(
+  bead: RunSnapshotBead,
+  assignee: string | undefined,
+  sessionId: string | undefined,
+): string | undefined {
+  return (
+    meta(bead, 'session_name') ??
+    meta(bead, 'gc.session_name') ??
+    meta(bead, 'gc.sessionName') ??
+    assignee ??
+    sessionId
+  );
+}
+
+function rawLinkFrom(
+  sessionId: string | undefined,
+  sessionName: string | undefined,
+  assignee: string | undefined,
+): RunSessionLink {
+  const name = sessionName ?? sessionId ?? '';
+  return {
+    sessionId: sessionId ?? sessionName ?? '',
+    sessionName: name,
+    assignee: assignee ?? name,
+  };
 }
 
 function supervisorSessionIdFrom(value: string | undefined): string | undefined {

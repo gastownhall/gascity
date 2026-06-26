@@ -2,6 +2,7 @@ package dashboardbff
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -61,7 +62,7 @@ func (p *Plane) registerBuilds() {
 
 		items := []deployRecord{}
 		var source *string
-		if data, err := os.ReadFile(logPath); err == nil {
+		if data, err := readDeployLogTail(logPath); err == nil {
 			src := logPath
 			source = &src
 			items = parseDeployLog(string(data))
@@ -81,6 +82,36 @@ func (p *Plane) registerBuilds() {
 			FailedMarker: failedMarker,
 		})
 	})
+}
+
+// maxDeployLogTailBytes bounds how much of the deploy log GET /api/builds reads
+// per request. Only the newest maxDeployRecords are ever returned, so reading
+// the entire append-only (never-rotated) log on every dashboard poll would be an
+// unbounded per-request allocation; a fixed tail window caps it while still
+// covering far more than maxDeployRecords lines.
+const maxDeployLogTailBytes = 256 << 10
+
+// readDeployLogTail reads at most the last maxDeployLogTailBytes of the deploy
+// log. Starting the window mid-line is harmless: parseDeployLog walks newest
+// line first and skips any line that is not a well-formed "[ts] rest" entry, so
+// a partial leading line is dropped and the newest records (the ones actually
+// returned) are intact at the end of the file.
+func readDeployLogTail(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // read-only handle
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if size := info.Size(); size > maxDeployLogTailBytes {
+		if _, err := f.Seek(size-maxDeployLogTailBytes, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	return io.ReadAll(f)
 }
 
 // parseDeployLog parses deploy-log text newest-first, capping at

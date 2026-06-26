@@ -50,6 +50,18 @@ func TestDashboardDepsWiresSupervisorBaseURL(t *testing.T) {
 	}
 }
 
+// TestDashboardDepsModulesCoreOnly records that core-only dashboard modules are
+// the intentional steady state: dashboardDeps leaves EnabledModules unset
+// because no first-party (gated) view module ships yet, so the omission is a
+// tested decision rather than an oversight. When a gated module is added, wire
+// its enable source in dashboardDeps and update this test.
+func TestDashboardDepsModulesCoreOnly(t *testing.T) {
+	deps := dashboardDeps(fakeDashResolver{}, false, "127.0.0.1", 8372)
+	if len(deps.EnabledModules) != 0 {
+		t.Errorf("EnabledModules = %v, want empty: core-only is the intentional default; wire the enable source and update this test when a gated module ships", deps.EnabledModules)
+	}
+}
+
 func TestRunCwdAllowedRootsFromEnv(t *testing.T) {
 	t.Setenv("RUN_CWD_ALLOWED_ROOTS", "/srv/a:/srv/b: :relative:/srv/c")
 	got := runCwdAllowedRootsFromEnv()

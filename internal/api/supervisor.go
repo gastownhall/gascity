@@ -99,10 +99,11 @@ type cachedCityServer struct {
 //   - Per-city (registerCityRoutes): every operation at
 //     /v0/city/{cityName}/..., resolved at request time via bindCity.
 //
-// The only non-Huma registration on humaMux is serveCitySvcProxy at
-// "/v0/city/{cityName}/svc/", which forwards workspace-service traffic
-// to per-city Server.mux. Workspace services own their own HTTP
-// contracts and are explicitly excluded from the typed control plane.
+// The non-Huma registrations on humaMux are the three sanctioned non-typed
+// surfaces (api-control-plane.md §3.9): serveCitySvcProxy at
+// "/v0/city/{cityName}/svc/" (workspace-service pass-through), and — when the
+// dashboard is attached — the embedded SPA at "/" and the host-side dashboard
+// plane at "/api/". Everything else is a typed Huma operation.
 type SupervisorMux struct {
 	resolver       CityResolver
 	initializer    cityInitializer
@@ -160,12 +161,13 @@ func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOn
 	// the header at runtime; the spec describes the contract. Must run
 	// after all routes are registered.
 	registerFrameworkHeaders(sm.humaAPI)
-	// /svc/* workspace-service pass-through. This is the single remaining
-	// non-Huma registration on the supervisor — untyped by design (the
-	// proxy passes bodies through to external service processes, which
-	// own their own HTTP contracts). Go 1.22+ mux: "/v0/city/{cityName}/svc/"
-	// as a prefix pattern only matches that subtree; everything else is
-	// a typed Huma operation registered at its real scoped path.
+	// /svc/* workspace-service pass-through — one of the sanctioned non-Huma
+	// surfaces (api-control-plane.md §3.9), untyped by design (the proxy passes
+	// bodies through to external service processes, which own their own HTTP
+	// contracts). The dashboard SPA ("/") and host-side plane ("/api/") are the
+	// other two, attached later via WithStaticHandler/WithAPIPlane. Go 1.22+
+	// mux: "/v0/city/{cityName}/svc/" as a prefix pattern only matches that
+	// subtree; everything else is a typed Huma operation at its real scoped path.
 	humaMux.HandleFunc("/v0/city/{cityName}/svc/", sm.serveCitySvcProxy)
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
@@ -226,10 +228,12 @@ func (sm *SupervisorMux) WithAllowedHosts(hosts []string) *SupervisorMux {
 }
 
 // WithStaticHandler registers the embedded dashboard SPA as the "/" catch-all
-// and rebuilds the internal http.Server handler. Go 1.22 mux specificity keeps
-// the typed /v0 operations, /health, the OpenAPI document, and the /svc/ proxy
-// winning over "/", so only unmatched paths reach the SPA. Must be called
-// before Serve. Passing nil is a no-op.
+// and rebuilds the internal http.Server handler. This is one of the sanctioned
+// non-Huma surfaces (api-control-plane.md §3.9): it serves the SPA shell and
+// static assets, not domain JSON. Go 1.22 mux specificity keeps the typed /v0
+// operations, /health, the OpenAPI document, and the /svc/ proxy winning over
+// "/", so only unmatched paths reach the SPA. Must be called before Serve.
+// Passing nil is a no-op.
 func (sm *SupervisorMux) WithStaticHandler(h http.Handler) *SupervisorMux {
 	if h == nil {
 		return sm
@@ -240,11 +244,11 @@ func (sm *SupervisorMux) WithStaticHandler(h http.Handler) *SupervisorMux {
 }
 
 // WithAPIPlane registers the host-side dashboard "/api/" plane and rebuilds the
-// internal http.Server handler. Like serveCitySvcProxy, this is a non-Huma
-// registration: it is intentionally excluded from the typed OpenAPI contract,
-// so it adds no operations to the spec. The plane self-enforces CSRF and the
-// read-only posture (it does not inherit Huma's middleware). Must be called
-// before Serve. Passing nil is a no-op.
+// internal http.Server handler. Like serveCitySvcProxy, this is a sanctioned
+// non-Huma surface (api-control-plane.md §3.9): it is intentionally excluded
+// from the typed OpenAPI contract, so it adds no operations to the spec. The
+// plane self-enforces CSRF and the read-only posture (it does not inherit
+// Huma's middleware). Must be called before Serve. Passing nil is a no-op.
 func (sm *SupervisorMux) WithAPIPlane(h http.Handler) *SupervisorMux {
 	if h == nil {
 		return sm
@@ -313,11 +317,12 @@ func (sm *SupervisorMux) Shutdown(ctx context.Context) error {
 
 // ServeHTTP delegates every request to humaMux. Every typed
 // operation — supervisor-scope and city-scoped — is registered on the
-// supervisor's single Huma API. The only non-Huma registration is
-// serveCitySvcProxy at "/v0/city/{cityName}/svc/" for the
-// workspace-service pass-through; Go 1.22+ mux specificity routes
+// supervisor's single Huma API. The non-Huma registrations are the
+// sanctioned §3.9 surfaces: serveCitySvcProxy at "/v0/city/{cityName}/svc/"
+// and, when the dashboard is attached, the SPA at "/" and the host-side
+// plane at "/api/". Go 1.22+ mux specificity routes
 // /v0/city/{cityName}/<typed-op> requests to the matching Huma
-// operation rather than the prefix handler.
+// operation rather than a prefix handler.
 func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sm.humaMux.ServeHTTP(w, r)
 }
