@@ -56,8 +56,14 @@ RUN /tmp/install-dolt-archive.sh "${DOLT_VERSION}" \
 # treated as hostile, pass --build-arg BURST_HARDENED=true to OMIT the sudo
 # grant entirely (the gcagent user is created either way). Removing sudo is
 # opt-in so it cannot silently break other consumers.
+#
+# UID is pinned to 1001 explicitly (-u 1001): pod.go forces RunAsUser:1001 for the
+# hardened agent path, so gcagent must own its $HOME at that exact UID. Without the
+# pin, gcagent only lands on 1001 by accident (ubuntu:24.04 ships a default user at
+# 1000); a future base-image change could shift it and break $HOME writes under a
+# forced 1001. The pin makes the Go constant gcagentUID and the image agree.
 ARG BURST_HARDENED=false
-RUN useradd -m -s /bin/bash gcagent \
+RUN useradd -m -u 1001 -s /bin/bash gcagent \
     && if [ "$BURST_HARDENED" != "true" ]; then \
          echo "gcagent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/gcagent \
          && chmod 0440 /etc/sudoers.d/gcagent; \

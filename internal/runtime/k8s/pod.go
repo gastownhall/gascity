@@ -394,10 +394,10 @@ func cloneTolerations(in []corev1.Toleration) []corev1.Toleration {
 }
 
 // gcagentUID is the UID/GID of the baked-in gcagent user in the agent base
-// image (contrib/k8s/Dockerfile.base). Ubuntu 24.04 ships a default "ubuntu"
-// user at UID 1000, so `useradd gcagent` lands on UID 1001. This matches the
-// runAsUser/runAsGroup hardening already applied to the controller and the
-// beads/session helper-script manifests.
+// image (contrib/k8s/Dockerfile.base), where it is pinned explicitly via
+// `useradd -u 1001`. The two must agree: this constant forces RunAsUser:1001
+// and gcagent owns its $HOME at exactly that UID. (1001 also matches the
+// runAsUser hardening on the controller and the beads/session helper manifests.)
 const gcagentUID int64 = 1001
 
 // agentSecurityContext returns a container security context for the agent pod.
@@ -489,6 +489,16 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 		"AWS_SECRET_ACCESS_KEY": true,
 		"AWS_ACCESS_KEY_ID":     true,
 		"AWS_SESSION_TOKEN":     true,
+		// GCP / Azure infra credentials (defensive — typically absent today, added
+		// so the deny-list keeps pace as deployments grow). GOOGLE_APPLICATION_
+		// CREDENTIALS strips the env var, not any file it points at (env blast-radius).
+		"GOOGLE_APPLICATION_CREDENTIALS": true,
+		"AZURE_CLIENT_SECRET":            true,
+		"AZURE_CLIENT_ID":                true,
+		"AZURE_TENANT_ID":                true,
+		// NOTE: GITHUB_TOKEN / GH_TOKEN are intentionally NOT denied — agents
+		// legitimately use git auth, and GITHUB_TOKEN is projected on purpose via
+		// an explicit git-credentials secretKeyRef below (not through cfg.Env).
 	}
 
 	ctrlCity := controllerCityPath(cfgEnv)
