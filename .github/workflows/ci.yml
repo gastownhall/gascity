@@ -60,7 +60,7 @@ jobs:
       mail: ${{ steps.filter.outputs.mail == 'true' || steps.filter.outputs.shared == 'true' }}
       docker: ${{ steps.filter.outputs.docker == 'true' || steps.filter.outputs.shared == 'true' }}
       k8s: ${{ steps.filter.outputs.k8s == 'true' || steps.filter.outputs.shared == 'true' }}
-      beads: ${{ steps.filter.outputs.beads }}
+      beads: ${{ steps.filter.outputs.beads == 'true' || steps.filter.outputs.shared == 'true' }}
       packs: ${{ steps.filter.outputs.packs == 'true' || steps.filter.outputs.shared == 'true' }}
       worker: ${{ steps.filter.outputs.worker == 'true' || steps.filter.outputs.shared == 'true' }}
       worker_phase2: ${{ steps.filter.outputs.worker_phase2 == 'true' || steps.filter.outputs.shared == 'true' }}
@@ -300,7 +300,7 @@ jobs:
   # BD_CURRENT_REF (deps.env) — the bleeding-edge rc has no release tarball —
   # and runs the same live acceptance suite, so a bd change that breaks gc's
   # decoder/classifier surface against the newer bd is caught before merge.
-  # Path-gated on the beads filter; tolerated as a skip by ci-required.
+  # Path-gated on the beads filter; tolerated as a skip by the Check gate.
   contract-acceptance-current:
     name: Contract / acceptance A (bd current)
     needs:
@@ -320,8 +320,15 @@ jobs:
       - name: Resolve bd current pin
         id: bd
         run: |
-          echo "ref=$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)" >> "$GITHUB_OUTPUT"
-          echo "ver=$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
+          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
+          if [ -z "$ref" ] || [ -z "$ver" ]; then
+            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
       - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
         run: |
           set -euo pipefail
@@ -394,8 +401,12 @@ jobs:
       - name: OpenAPI spec + client drift check
         run: make spec-ci
 
-  # Historical fan-in name. During the Blacksmith proof, branch protection can
-  # move to `CI / required`; this job keeps the old name meaningful.
+  # Historical fan-in name and the branch-protection-enforced required status.
+  # Branch protection requires `Check`, so the cross-version contract matrix
+  # must gate here: the `prev` cell is preflight-acceptance above, and the
+  # path-gated `current` cell (contract-acceptance-current) is folded in below.
+  # During the Blacksmith proof, branch protection can move to `CI / required`;
+  # this job keeps the old name meaningful either way.
   check:
     name: Check
     needs:
@@ -403,6 +414,7 @@ jobs:
       - preflight-static
       - preflight-acceptance
       - preflight-generated
+      - contract-acceptance-current
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -415,12 +427,19 @@ jobs:
           import os
           import sys
 
+          # contract-acceptance-current is path-gated on the beads filter: it
+          # skips on PRs that touch no beads/contract path, which is the
+          # expected pass case. Every other dependency runs unconditionally.
+          allow_skipped = {"contract-acceptance-current"}
           needs = json.loads(os.environ["NEEDS_JSON"])
-          failures = {
-              job: meta.get("result", "unknown")
-              for job, meta in sorted(needs.items())
-              if meta.get("result") != "success"
-          }
+          failures = {}
+          for job, meta in sorted(needs.items()):
+              result = meta.get("result", "unknown")
+              if result == "success":
+                  continue
+              if result == "skipped" and job in allow_skipped:
+                  continue
+              failures[job] = result
           summary_path = os.environ["GITHUB_STEP_SUMMARY"]
           with open(summary_path, "a", encoding="utf-8") as handle:
               handle.write("## CI Preflight\n\n")
@@ -1318,7 +1337,6 @@ jobs:
       - docker-session
       - k8s-session
       - openclaw-bridge
-      - contract-acceptance-current
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -1338,9 +1356,6 @@ jobs:
               "docker-session",
               "k8s-session",
               "openclaw-bridge",
-              # Path-gated on the beads filter: skips on PRs that touch no
-              # beads/contract path, which is the expected pass case.
-              "contract-acceptance-current",
           }
           failed = {}
           for job, meta in sorted(needs.items()):
