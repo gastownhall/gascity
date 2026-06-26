@@ -271,7 +271,24 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 		return wfResult, wfErr
 	}
 	result := SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula, Deprecations: inv.Deprecations}
+	if hint := rootOnlyVaporPourHint(opts.BeadOrFormula, recipe); hint != "" {
+		result.BeadWarnings = append(result.BeadWarnings, hint)
+	}
 	return finalize(opts, deps, mResult.RootID, method, result)
+}
+
+// rootOnlyVaporPourHint returns a sling-time diagnostic when a formula compiled
+// to a root-only wisp specifically because it is a vapor formula without
+// pour = true (cause (a) of the compile.go rootOnly rule). It deliberately stays
+// silent for the genuinely step-less formula (cause (b), len(steps) == 0): there
+// is no pour override to suggest there, so conflating the two would mislead. The
+// hint surfaces via SlingResult.BeadWarnings; it changes neither routing nor the
+// materialized wisp.
+func rootOnlyVaporPourHint(formulaName string, recipe *formula.Recipe) string {
+	if recipe == nil || !recipe.RootOnly || recipe.Pour || recipe.Phase != "vapor" {
+		return ""
+	}
+	return fmt.Sprintf("note: %q is a vapor formula without `pour = true`; only the root step was materialized. Add `pour = true` for eager child-step expansion (see internal/formula/compile.go rootOnly rule).", formulaName)
 }
 
 // slingOnFormula handles the --on formula attachment path.
