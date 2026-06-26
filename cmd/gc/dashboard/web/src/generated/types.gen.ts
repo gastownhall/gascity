@@ -810,7 +810,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1815,6 +1815,45 @@ export type Message = {
     subject: string;
     thread_id?: string;
     to: string;
+};
+
+export type MoleculeResolvedPayload = {
+    /**
+     * Identity that triggered the close (eventActor).
+     */
+    actor: string;
+    /**
+     * close_reason stamped on the root.
+     */
+    close_reason?: string;
+    /**
+     * Root status captured before the close mutated it.
+     */
+    from_status: string;
+    /**
+     * Molecule root bead ID that resolved.
+     */
+    issue_id: string;
+    /**
+     * Resolving session ID from gc.session_id. Empty if unstamped.
+     */
+    session_id?: string;
+    /**
+     * Resolving session name from gc.session_name. Empty if unstamped.
+     */
+    session_name?: string;
+    /**
+     * Terminal status after resolution. Always "closed".
+     */
+    to_status: string;
+    /**
+     * Resolution timestamp (UTC).
+     */
+    ts: string;
+    /**
+     * Resolving session work dir from gc.work_dir. Empty if unstamped.
+     */
+    work_dir?: string;
 };
 
 export type MonitorFeedItemResponse = {
@@ -3543,6 +3582,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeMailReplied) | ({
     type: 'mail.sent';
 } & TypedEventStreamEnvelopeMailSent) | ({
+    type: 'molecule.resolved';
+} & TypedEventStreamEnvelopeMoleculeResolved) | ({
     type: 'order.completed';
 } & TypedEventStreamEnvelopeOrderCompleted) | ({
     type: 'order.failed';
@@ -4143,6 +4184,20 @@ export type TypedEventStreamEnvelopeMailSent = {
 };
 
 /**
+ * TypedEventStreamEnvelope molecule.resolved
+ */
+export type TypedEventStreamEnvelopeMoleculeResolved = {
+    actor: string;
+    message?: string;
+    payload: MoleculeResolvedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'molecule.resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope order.completed
  */
 export type TypedEventStreamEnvelopeOrderCompleted = {
@@ -4670,6 +4725,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeMailReplied) | ({
     type: 'mail.sent';
 } & TypedTaggedEventStreamEnvelopeMailSent) | ({
+    type: 'molecule.resolved';
+} & TypedTaggedEventStreamEnvelopeMoleculeResolved) | ({
     type: 'order.completed';
 } & TypedTaggedEventStreamEnvelopeOrderCompleted) | ({
     type: 'order.failed';
@@ -5304,6 +5361,21 @@ export type TypedTaggedEventStreamEnvelopeMailSent = {
     subject?: string;
     ts: string;
     type: 'mail.sent';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope molecule.resolved
+ */
+export type TypedTaggedEventStreamEnvelopeMoleculeResolved = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: MoleculeResolvedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'molecule.resolved';
     workflow?: WorkflowEventProjection;
 };
 

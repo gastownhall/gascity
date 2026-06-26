@@ -2223,6 +2223,9 @@
             "$ref": "#/components/schemas/MailEventPayload"
           },
           {
+            "$ref": "#/components/schemas/MoleculeResolvedPayload"
+          },
+          {
             "$ref": "#/components/schemas/NoPayload"
           },
           {
@@ -4356,6 +4359,56 @@
           "body",
           "created_at",
           "read"
+        ],
+        "type": "object"
+      },
+      "MoleculeResolvedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "description": "Identity that triggered the close (eventActor).",
+            "type": "string"
+          },
+          "close_reason": {
+            "description": "close_reason stamped on the root.",
+            "type": "string"
+          },
+          "from_status": {
+            "description": "Root status captured before the close mutated it.",
+            "type": "string"
+          },
+          "issue_id": {
+            "description": "Molecule root bead ID that resolved.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Resolving session ID from gc.session_id. Empty if unstamped.",
+            "type": "string"
+          },
+          "session_name": {
+            "description": "Resolving session name from gc.session_name. Empty if unstamped.",
+            "type": "string"
+          },
+          "to_status": {
+            "description": "Terminal status after resolution. Always \"closed\".",
+            "type": "string"
+          },
+          "ts": {
+            "description": "Resolution timestamp (UTC).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_dir": {
+            "description": "Resolving session work dir from gc.work_dir. Empty if unstamped.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "issue_id",
+          "from_status",
+          "to_status",
+          "actor",
+          "ts"
         ],
         "type": "object"
       },
@@ -8022,6 +8075,7 @@
             "mail.read": "#/components/schemas/TypedEventStreamEnvelopeMailRead",
             "mail.replied": "#/components/schemas/TypedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedEventStreamEnvelopeMailSent",
+            "molecule.resolved": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved",
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
@@ -8168,6 +8222,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeMailSent"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted"
@@ -8976,6 +9033,7 @@
                 "worker.operation",
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
+                "molecule.resolved",
                 "supervisor.started",
                 "supervisor.shutdown_requested",
                 "supervisor.request",
@@ -9935,6 +9993,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope mail.sent",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeMoleculeResolved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/MoleculeResolvedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "molecule.resolved",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope molecule.resolved",
         "type": "object"
       },
       "TypedEventStreamEnvelopeOrderCompleted": {
@@ -11322,6 +11422,7 @@
             "mail.read": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailRead",
             "mail.replied": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailSent",
+            "molecule.resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved",
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
@@ -11468,6 +11569,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailSent"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted"
@@ -12339,6 +12443,7 @@
                 "worker.operation",
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
+                "molecule.resolved",
                 "supervisor.started",
                 "supervisor.shutdown_requested",
                 "supervisor.request",
@@ -13387,6 +13492,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope mail.sent",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeMoleculeResolved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/MoleculeResolvedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "molecule.resolved",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope molecule.resolved",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeOrderCompleted": {

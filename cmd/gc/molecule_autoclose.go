@@ -5,9 +5,11 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -235,6 +237,9 @@ func subtreeTerminalExcludingRoot(store beads.Store, rootID string) (terminal bo
 // by the step-terminal and source-bead-close triggers. Best-effort: a close
 // failure aborts silently without recording or announcing.
 func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Bead, reason string, stdout io.Writer) bool {
+	// Capture the pre-close status before closeMoleculeWithReason transitions
+	// the root to closed — it is the from_status of the resolution record.
+	fromStatus := mol.Status
 	if err := closeMoleculeWithReason(store, mol.ID, reason); err != nil {
 		return false
 	}
@@ -243,6 +248,29 @@ func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Be
 		Type:    events.BeadClosed,
 		Actor:   eventActor(),
 		Subject: mol.ID,
+	})
+
+	// Additive attribution record: join the resolved molecule to the session
+	// that produced it, read from the identity the reconciler stamped onto the
+	// root (gc.session_* / gc.work_dir). A root closed before any reconcile
+	// stamped it — or hand-closed by a human — degrades to empty session
+	// fields rather than failing. Honesty-gate C.0 backbone for C.1/C.2/C.3.
+	actor := eventActor()
+	rec.Record(events.Event{
+		Type:    events.MoleculeResolved,
+		Actor:   actor,
+		Subject: mol.ID,
+		Payload: api.MoleculeResolvedPayloadJSON(api.MoleculeResolvedPayload{
+			IssueID:     mol.ID,
+			FromStatus:  fromStatus,
+			ToStatus:    "closed",
+			Actor:       actor,
+			SessionName: mol.Metadata[beadmeta.SessionNameMetadataKey],
+			SessionID:   mol.Metadata[beadmeta.SessionIDMetadataKey],
+			WorkDir:     mol.Metadata[beadmeta.WorkDirMetadataKey],
+			CloseReason: reason,
+			Ts:          time.Now().UTC(),
+		}),
 	})
 
 	fmt.Fprintf(stdout, "Auto-closed molecule %s %q\n", mol.ID, mol.Title) //nolint:errcheck // best-effort stdout

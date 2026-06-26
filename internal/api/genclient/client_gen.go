@@ -1910,6 +1910,36 @@ type Message struct {
 	To        string    `json:"to"`
 }
 
+// MoleculeResolvedPayload defines model for MoleculeResolvedPayload.
+type MoleculeResolvedPayload struct {
+	// Actor Identity that triggered the close (eventActor).
+	Actor string `json:"actor"`
+
+	// CloseReason close_reason stamped on the root.
+	CloseReason *string `json:"close_reason,omitempty"`
+
+	// FromStatus Root status captured before the close mutated it.
+	FromStatus string `json:"from_status"`
+
+	// IssueId Molecule root bead ID that resolved.
+	IssueId string `json:"issue_id"`
+
+	// SessionId Resolving session ID from gc.session_id. Empty if unstamped.
+	SessionId *string `json:"session_id,omitempty"`
+
+	// SessionName Resolving session name from gc.session_name. Empty if unstamped.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// ToStatus Terminal status after resolution. Always "closed".
+	ToStatus string `json:"to_status"`
+
+	// Ts Resolution timestamp (UTC).
+	Ts time.Time `json:"ts"`
+
+	// WorkDir Resolving session work dir from gc.work_dir. Empty if unstamped.
+	WorkDir *string `json:"work_dir,omitempty"`
+}
+
 // MonitorFeedItemResponse defines model for MonitorFeedItemResponse.
 type MonitorFeedItemResponse struct {
 	AttachedBeadId     *string `json:"attached_bead_id,omitempty"`
@@ -3777,6 +3807,18 @@ type TypedEventStreamEnvelopeMailSent struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeMoleculeResolved defines model for TypedEventStreamEnvelopeMoleculeResolved.
+type TypedEventStreamEnvelopeMoleculeResolved struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MoleculeResolvedPayload  `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeOrderCompleted defines model for TypedEventStreamEnvelopeOrderCompleted.
 type TypedEventStreamEnvelopeOrderCompleted struct {
 	Actor    string                   `json:"actor"`
@@ -4653,6 +4695,19 @@ type TypedTaggedEventStreamEnvelopeMailSent struct {
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
 	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeMoleculeResolved defines model for TypedTaggedEventStreamEnvelopeMoleculeResolved.
+type TypedTaggedEventStreamEnvelopeMoleculeResolved struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MoleculeResolvedPayload  `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -6627,6 +6682,32 @@ func (t *EventPayload) MergeMailEventPayload(v MailEventPayload) error {
 	return err
 }
 
+// AsMoleculeResolvedPayload returns the union data inside the EventPayload as a MoleculeResolvedPayload
+func (t EventPayload) AsMoleculeResolvedPayload() (MoleculeResolvedPayload, error) {
+	var body MoleculeResolvedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromMoleculeResolvedPayload overwrites any union data inside the EventPayload as the provided MoleculeResolvedPayload
+func (t *EventPayload) FromMoleculeResolvedPayload(v MoleculeResolvedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeMoleculeResolvedPayload performs a merge with any union data inside the EventPayload, using the provided MoleculeResolvedPayload
+func (t *EventPayload) MergeMoleculeResolvedPayload(v MoleculeResolvedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsNoPayload returns the union data inside the EventPayload as a NoPayload
 func (t EventPayload) AsNoPayload() (NoPayload, error) {
 	var body NoPayload
@@ -8411,6 +8492,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMailSent(v Typed
 	return err
 }
 
+// AsTypedEventStreamEnvelopeMoleculeResolved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeMoleculeResolved
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeMoleculeResolved() (TypedEventStreamEnvelopeMoleculeResolved, error) {
+	var body TypedEventStreamEnvelopeMoleculeResolved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeMoleculeResolved overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeMoleculeResolved
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeMoleculeResolved(v TypedEventStreamEnvelopeMoleculeResolved) error {
+	v.Type = "molecule.resolved"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeMoleculeResolved performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeMoleculeResolved
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMoleculeResolved(v TypedEventStreamEnvelopeMoleculeResolved) error {
+	v.Type = "molecule.resolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeOrderCompleted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderCompleted
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderCompleted() (TypedEventStreamEnvelopeOrderCompleted, error) {
 	var body TypedEventStreamEnvelopeOrderCompleted
@@ -9425,6 +9534,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeMailReplied()
 	case "mail.sent":
 		return t.AsTypedEventStreamEnvelopeMailSent()
+	case "molecule.resolved":
+		return t.AsTypedEventStreamEnvelopeMoleculeResolved()
 	case "order.completed":
 		return t.AsTypedEventStreamEnvelopeOrderCompleted()
 	case "order.failed":
@@ -10540,6 +10651,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMail
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeMoleculeResolved returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeMoleculeResolved
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeMoleculeResolved() (TypedTaggedEventStreamEnvelopeMoleculeResolved, error) {
+	var body TypedTaggedEventStreamEnvelopeMoleculeResolved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeMoleculeResolved overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeMoleculeResolved
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeMoleculeResolved(v TypedTaggedEventStreamEnvelopeMoleculeResolved) error {
+	v.Type = "molecule.resolved"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeMoleculeResolved performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeMoleculeResolved
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMoleculeResolved(v TypedTaggedEventStreamEnvelopeMoleculeResolved) error {
+	v.Type = "molecule.resolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeOrderCompleted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOrderCompleted
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOrderCompleted() (TypedTaggedEventStreamEnvelopeOrderCompleted, error) {
 	var body TypedTaggedEventStreamEnvelopeOrderCompleted
@@ -11554,6 +11693,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeMailReplied()
 	case "mail.sent":
 		return t.AsTypedTaggedEventStreamEnvelopeMailSent()
+	case "molecule.resolved":
+		return t.AsTypedTaggedEventStreamEnvelopeMoleculeResolved()
 	case "order.completed":
 		return t.AsTypedTaggedEventStreamEnvelopeOrderCompleted()
 	case "order.failed":
