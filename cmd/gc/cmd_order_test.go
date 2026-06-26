@@ -4094,3 +4094,43 @@ prefix = "ct"
 		t.Fatalf("stderr = %q, want GC_BULK_DELETE_CONFIRM_THRESHOLD in message", got)
 	}
 }
+
+// TestOrderSweepTrackingConfirmGateFailsClosedOnCountError verifies that when
+// countClosedOrderTrackingRetentionEligible fails (store read error), the confirm
+// gate returns exit 1 with a descriptive message rather than proceeding unguarded.
+func TestOrderSweepTrackingConfirmGateFailsClosedOnCountError(t *testing.T) {
+	// A failing exec script makes store.List() return an error, exercising the
+	// countErr != nil fail-closed path without requiring a real beads provider.
+	failScript := filepath.Join(t.TempDir(), "gc-beads-fail")
+	if err := os.WriteFile(failScript, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write fail script: %v", err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+failScript)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdOrderSweepTrackingWithOptions (count error) = %d, want 1; stderr: %s stdout: %s", code, stderr.String(), stdout.String())
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "cannot count eligible beads for confirm gate") {
+		t.Fatalf("stderr = %q, want 'cannot count eligible beads for confirm gate' in message", got)
+	}
+}
