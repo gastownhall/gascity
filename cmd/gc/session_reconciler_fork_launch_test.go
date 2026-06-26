@@ -61,6 +61,18 @@ func TestResolveSessionCommand_ForkLaunch(t *testing.T) {
 			forceFresh: true,
 			want:       "claude --session-id gc-key",
 		},
+		{
+			// Self-guard (HIGH): forceFresh contradicts forking (which resumes the
+			// parent brain), so even a firstStart with a parent must take the fresh
+			// form, not the fork form. validateForkLaunch fails loud on this upstream;
+			// the resolver stays self-consistent in isolation regardless.
+			name:       "fresh first start with a parent does not fork",
+			parentSID:  "brain-abc",
+			rp:         forkClaude(),
+			firstStart: true,
+			forceFresh: true,
+			want:       "claude --session-id gc-key",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,6 +136,33 @@ func TestValidateForkLaunch(t *testing.T) {
 			errContains: "wake_mode=fresh",
 		},
 		{
+			// MEDIUM: a provider advertising fork support but resuming via a custom
+			// resume_command (which the hardcoded fork form bypasses) would build a
+			// malformed fork CLI. Reject it rather than emit a broken command.
+			name:      "fork support but custom resume_command is not fork-safe",
+			parentSID: "brain-abc",
+			rp: &config.ResolvedProvider{
+				Name: "futureprov", ForkFlag: "--fork-session", SessionIDFlag: "--session-id",
+				ResumeFlag: "--resume", ResumeCommand: "futureprov chat --continue {{.SessionKey}}",
+			},
+			firstStart:  true,
+			wantErr:     true,
+			errContains: "fork-safe resume form",
+		},
+		{
+			// MEDIUM: subcommand-style resume places the resume token differently
+			// from the fork form's flag-style assumption.
+			name:      "fork support but subcommand resume_style is not fork-safe",
+			parentSID: "brain-abc",
+			rp: &config.ResolvedProvider{
+				Name: "futureprov", ForkFlag: "--fork-session", SessionIDFlag: "--session-id",
+				ResumeFlag: "resume", ResumeStyle: "subcommand",
+			},
+			firstStart:  true,
+			wantErr:     true,
+			errContains: "fork-safe resume form",
+		},
+		{
 			name:        "stale parent brain fails loud, no fresh fallback",
 			parentSID:   "brain-gone",
 			rp:          forkClaude(),
@@ -169,6 +208,124 @@ func TestUnsupportedProviderErrorNamesProvider(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing %q", err.Error(), want)
 		}
+	}
+}
+
+// newForkSessionCandidate builds a later-wake fork session whose own keyed
+// transcript is stale: started_config_hash is set (not a first start) and a
+// session_key is present but will probe absent. This is the exact state in which
+// clearStaleResumeKeyMetadata clears started_config_hash and flips firstStart
+// back to true mid-launch.
+func newForkSessionCandidate(t *testing.T, rp *config.ResolvedProvider, parentSID, wakeMode string) (startCandidate, *config.City, beads.Store) {
+	t.Helper()
+	store := beads.NewMemStore()
+	meta := map[string]string{
+		"session_name":                     "worker",
+		"template":                         "worker",
+		"state":                            "asleep",
+		"work_dir":                         t.TempDir(),
+		"session_key":                      "gc-stale-key",
+		"started_config_hash":              "deadbeef",
+		beadmeta.BrainParentSIDMetadataKey: parentSID,
+	}
+	if wakeMode != "" {
+		meta["wake_mode"] = wakeMode
+	}
+	session, err := store.Create(beads.Bead{
+		Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta,
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	tp := TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker", ResolvedProvider: rp}
+	return startCandidate{session: &session, tp: tp, order: 0}, cfg, store
+}
+
+// TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery is the
+// regression for the CRITICAL fork-validation bypass: on a later wake whose own
+// keyed transcript is stale, the pre-flight guard clears started_config_hash and
+// the launcher recomputes firstStart=true, which can reach the fork branch in
+// resolveSessionCommand. Fork validation must run against that recovered
+// firstStart so an unsupported provider, a stale parent, or wake_mode=fresh still
+// fails loud — never silently re-forks unchecked or downgrades a warm arm to a
+// fresh (cold) session. The success case pins that a present parent re-forks off
+// the brain rather than falling through to a bare fresh --session-id.
+func TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery(t *testing.T) {
+	const parentSID = "brain-xyz"
+	codexLikeNoFork := &config.ResolvedProvider{
+		Name: "codex", Command: "codex", SessionIDFlag: "--session-id",
+		ResumeFlag: "resume", ResumeStyle: "subcommand",
+	}
+	tests := []struct {
+		name            string
+		rp              *config.ResolvedProvider
+		wakeMode        string
+		parentPresent   bool
+		wantErr         bool
+		errContains     string
+		wantCmdContains string
+	}{
+		{
+			name:          "unsupported provider after recovery fails loud, not silent fresh",
+			rp:            codexLikeNoFork,
+			parentPresent: true,
+			wantErr:       true,
+			errContains:   "fork_flag",
+		},
+		{
+			name:          "stale parent after recovery fails loud, not silent fresh",
+			rp:            forkClaude(),
+			parentPresent: false,
+			wantErr:       true,
+			errContains:   "missing on disk",
+		},
+		{
+			name:          "wake_mode fresh after recovery fails loud (Q2)",
+			rp:            forkClaude(),
+			wakeMode:      "fresh",
+			parentPresent: true,
+			wantErr:       true,
+			errContains:   "wake_mode=fresh",
+		},
+		{
+			name:            "present parent re-forks off the brain, never a bare fresh start",
+			rp:              forkClaude(),
+			parentPresent:   true,
+			wantCmdContains: "--resume " + parentSID + " --fork-session --session-id ",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate, cfg, store := newForkSessionCandidate(t, tc.rp, parentSID, tc.wakeMode)
+			prevProbe := staleResumeKeyProbe
+			// The own session_key is stale (transcript gone) so recovery fires; the
+			// parent's presence is controlled per case.
+			staleResumeKeyProbe = func(_, _, key string) (present, probeable bool) {
+				if key == parentSID {
+					return tc.parentPresent, true
+				}
+				return false, true
+			}
+			t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+			prepared, err := buildPreparedStart(candidate, cfg, store)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("buildPreparedStart = nil error, want loud failure; command=%q", prepared.cfg.Command)
+				}
+				if !strings.Contains(err.Error(), tc.errContains) {
+					t.Errorf("error %q does not contain %q", err.Error(), tc.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildPreparedStart: %v", err)
+			}
+			if !strings.Contains(prepared.cfg.Command, tc.wantCmdContains) {
+				t.Errorf("command %q should re-fork (contain %q), not silently go fresh", prepared.cfg.Command, tc.wantCmdContains)
+			}
+		})
 	}
 }
 

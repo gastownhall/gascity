@@ -4169,7 +4169,12 @@ func rebaselineLaunchDriftHashes(session *beads.Bead, store beads.Store, agentCf
 // wake_mode) are validated upstream in buildPreparedStartWithWorkDirResolver,
 // which fails loud rather than ever silently degrading a fork to a fresh start.
 func resolveSessionCommand(command, sessionKey, parentSID string, rp *config.ResolvedProvider, firstStart, forceFresh bool) string {
-	if firstStart && parentSID != "" && rp.ForkFlag != "" && rp.SessionIDFlag != "" {
+	// forceFresh is part of the fork guard so this branch is self-contained: a
+	// fork resumes the parent brain, which contradicts the "discard context, start
+	// new" intent of wake_mode=fresh. validateForkLaunch already fails loud on a
+	// forceFresh fork upstream, but keeping the guard here means the function
+	// honors its own docstring in isolation and is not a trap for future callers.
+	if firstStart && !forceFresh && parentSID != "" && rp.ForkFlag != "" && rp.SessionIDFlag != "" {
 		return command + " " + rp.ResumeFlag + " " + parentSID +
 			" " + rp.ForkFlag + " " + rp.SessionIDFlag + " " + sessionKey
 	}
