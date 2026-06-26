@@ -1282,7 +1282,7 @@ func closeGeneratedSpecBeadsForAttempt(store beads.Store, control, attempt beads
 		return err
 	}
 	for _, bead := range all {
-		if bead.Status == beadmeta.KindClosed || bead.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindSpec {
+		if bead.Status == "closed" || bead.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindSpec {
 			continue
 		}
 		ref := strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey])
@@ -1314,7 +1314,7 @@ func closeSpecBeadsByRefs(store beads.Store, rootID string, refs []string) error
 		return err
 	}
 	for _, bead := range all {
-		if bead.Status == beadmeta.KindClosed || bead.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindSpec {
+		if bead.Status == "closed" || bead.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindSpec {
 			continue
 		}
 		ref := strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey])

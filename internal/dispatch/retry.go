@@ -459,11 +459,15 @@ func persistRetryEvalResult(store beads.Store, beadID string, result retryEvalRe
 	batch := map[string]string{
 		beadmeta.FailureReasonMetadataKey: result.Reason,
 	}
+	// result.Outcome is the internal retryEvalResult domain {pass, transient,
+	// hard} produced by classifyRetryAttempt, not the gc.outcome /
+	// gc.failure_class vocabularies it maps onto below. Match it raw so the two
+	// vocabularies cannot silently drift into a miscompare.
 	switch result.Outcome {
-	case beadmeta.OutcomePass:
+	case "pass":
 		batch[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomePass
 		batch[beadmeta.FailureClassMetadataKey] = ""
-	case beadmeta.FailureClassTransient:
+	case "transient":
 		batch[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomeFail
 		batch[beadmeta.FailureClassMetadataKey] = beadmeta.FailureClassTransient
 	default:

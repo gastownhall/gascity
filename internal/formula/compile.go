@@ -571,7 +571,7 @@ func ApplyDrainControlMetadata(metadata map[string]string, spec *DrainSpec) {
 	metadata[beadmeta.DrainFormulaMetadataKey] = spec.Formula
 	memberAccess := strings.TrimSpace(spec.MemberAccess)
 	if memberAccess == "" {
-		memberAccess = "read"
+		memberAccess = beadmeta.DrainMemberAccessRead
 	}
 	metadata[beadmeta.DrainMemberAccessMetadataKey] = memberAccess
 	if spec.MaxUnits != nil {
