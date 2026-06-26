@@ -91,6 +91,41 @@ func IsDeterministicControlDispatcher(agent *Agent) bool {
 		strings.Contains(agent.StartCommand, "convoy control --serve")
 }
 
+// PreferredDeterministicControlDispatcher returns the deterministic control-
+// dispatcher to route a scope's control beads to, binding-agnostic. The
+// city-level singleton (Dir == "") is preferred for every scope — given
+// max_active_sessions=1, it is the one whose session actually runs and claims
+// the control queue — and a rig-scoped instance (Dir == rigContext) is used only
+// when no city-level deterministic dispatcher is configured. Routing to a
+// rig-scoped copy when a city singleton exists strands the control bead, since
+// the singleton session never claims a <rig>/... route. This is the canonical
+// selection shared by the graph.v2 decoration path (internal/graphroute) and the
+// attempt-time control re-route path (internal/dispatch); keep them in lockstep.
+func PreferredDeterministicControlDispatcher(cfg *City, rigContext string) (Agent, bool) {
+	if cfg == nil {
+		return Agent{}, false
+	}
+	rigContext = strings.TrimSpace(rigContext)
+	var rigScoped Agent
+	haveRigScoped := false
+	for _, a := range cfg.Agents {
+		if !IsDeterministicControlDispatcher(&a) {
+			continue
+		}
+		if strings.TrimSpace(a.Dir) == "" {
+			return a, true
+		}
+		if !haveRigScoped && strings.TrimSpace(a.Dir) == rigContext {
+			rigScoped = a
+			haveRigScoped = true
+		}
+	}
+	if haveRigScoped {
+		return rigScoped, true
+	}
+	return Agent{}, false
+}
+
 // BindingQualifiedName returns the binding-qualified agent identity without a
 // rig prefix. Examples: "polecat", "gastown.polecat", or "gastown.mayor".
 func (a *Agent) BindingQualifiedName() string {

@@ -1127,7 +1127,14 @@ func TestApplyAttemptControlStepRoute_UsesExecutionRigContextForDirectSessionTar
 	}
 }
 
-func TestApplyAttemptControlStepRoute_ImportQualifiedControlDispatcherUsesScope(t *testing.T) {
+// TestApplyAttemptControlStepRoute_PrefersCitySingletonOverRigScoped covers the
+// attempt-time analog of the graph.v2 decoration fix: with a bound city-level
+// singleton (core.control-dispatcher, Dir="", max_active_sessions=1) plus a
+// per-rig copy (fixture/core.control-dispatcher), an attempt-kind control bead
+// whose execution target lives in the rig must still route to the city singleton
+// — the session that actually runs — not the rig-scoped copy that no session
+// claims (which would re-strand the control bead at attempt time).
+func TestApplyAttemptControlStepRoute_PrefersCitySingletonOverRigScoped(t *testing.T) {
 	t.Parallel()
 
 	maxActive := 1
@@ -1167,8 +1174,8 @@ func TestApplyAttemptControlStepRoute_ImportQualifiedControlDispatcherUsesScope(
 	if step.Assignee != "" {
 		t.Fatalf("assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
 	}
-	if got := step.Metadata["gc.routed_to"]; got != "fixture/core.control-dispatcher" {
-		t.Fatalf("gc.routed_to = %q, want fixture/core.control-dispatcher", got)
+	if got := step.Metadata["gc.routed_to"]; got != "core.control-dispatcher" {
+		t.Fatalf("gc.routed_to = %q, want city-level singleton core.control-dispatcher", got)
 	}
 	if got := step.Metadata["gc.execution_routed_to"]; got != "fixture/superpowers.brainstorming" {
 		t.Fatalf("gc.execution_routed_to = %q, want fixture/superpowers.brainstorming", got)

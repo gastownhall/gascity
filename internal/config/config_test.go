@@ -7704,6 +7704,84 @@ printf 'TRACE=%%s\nARGS=%%s\n' "$GC_WORKFLOW_TRACE" "$*" > %q
 	return tracePath, args
 }
 
+// TestPreferredDeterministicControlDispatcher locks the singleton-first
+// selection both graphroute and dispatch route control beads with. The city-
+// level singleton (Dir == "") must win for every scope; a rig-scoped instance is
+// used only when no city-level deterministic dispatcher exists. Non-deterministic
+// control-dispatcher agents (no convoy-control StartCommand) are ignored.
+func TestPreferredDeterministicControlDispatcher(t *testing.T) {
+	deterministic := func(dir string) Agent {
+		return Agent{
+			Name:         ControlDispatcherAgentName,
+			BindingName:  "core",
+			Dir:          dir,
+			StartCommand: ControlDispatcherStartCommandFor("{{.Agent}}"),
+		}
+	}
+
+	citySingleton := deterministic("")
+	rigCopy := deterministic("fixture")
+	plain := Agent{Name: ControlDispatcherAgentName, Dir: "fixture"} // no StartCommand
+
+	tests := []struct {
+		name       string
+		agents     []Agent
+		rigContext string
+		wantQN     string
+		wantOK     bool
+	}{
+		{
+			name:       "singleton preferred over rig copy for rig scope",
+			agents:     []Agent{rigCopy, citySingleton},
+			rigContext: "fixture",
+			wantQN:     "core.control-dispatcher",
+			wantOK:     true,
+		},
+		{
+			name:       "singleton preferred for empty scope",
+			agents:     []Agent{rigCopy, citySingleton},
+			rigContext: "",
+			wantQN:     "core.control-dispatcher",
+			wantOK:     true,
+		},
+		{
+			name:       "rig-scoped fallback when no singleton",
+			agents:     []Agent{rigCopy},
+			rigContext: "fixture",
+			wantQN:     "fixture/core.control-dispatcher",
+			wantOK:     true,
+		},
+		{
+			name:       "no match when only a non-deterministic dispatcher exists",
+			agents:     []Agent{plain},
+			rigContext: "fixture",
+			wantOK:     false,
+		},
+		{
+			name:       "no match when rig scope has no matching rig-scoped dispatcher",
+			agents:     []Agent{rigCopy},
+			rigContext: "other",
+			wantOK:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := PreferredDeterministicControlDispatcher(&City{Agents: tt.agents}, tt.rigContext)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && got.QualifiedName() != tt.wantQN {
+				t.Fatalf("QualifiedName = %q, want %q", got.QualifiedName(), tt.wantQN)
+			}
+		})
+	}
+
+	if _, ok := PreferredDeterministicControlDispatcher(nil, ""); ok {
+		t.Fatal("nil cfg should return ok=false")
+	}
+}
+
 // TestAllPackDirs covers (*City).AllPackDirs() — the union of PackDirs and
 // RigPackDirs that the prompt renderer relies on. Regression: rig-imported
 // pack template fragments were silently dropped before gascity#2676.

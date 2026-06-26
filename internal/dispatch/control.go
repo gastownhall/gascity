@@ -1037,16 +1037,16 @@ func controlDispatcherTargetForExecutionTarget(executionTarget, rigContext strin
 			rigContext = executionTarget[:slash]
 		}
 	}
-	if cfg != nil {
-		for _, agentCfg := range cfg.Agents {
-			if !config.IsDeterministicControlDispatcher(&agentCfg) {
-				continue
-			}
-			if strings.TrimSpace(agentCfg.Dir) == rigContext {
-				return agentCfg.QualifiedName()
-			}
-		}
+	// Prefer the city-level singleton deterministic dispatcher for every scope
+	// (the one whose session actually runs given max_active_sessions=1), falling
+	// back to a rig-scoped instance only when no city-level dispatcher exists.
+	// This keeps attempt-time control re-routing in lockstep with the graph.v2
+	// decoration path; without it an attempt-kind control bead would re-stamp a
+	// <rig>/control-dispatcher route the lone singleton session never claims.
+	if agentCfg, ok := config.PreferredDeterministicControlDispatcher(cfg, rigContext); ok {
+		return agentCfg.QualifiedName()
 	}
+	// String fallbacks for configs with no deterministic dispatcher at all.
 	if rigContext != "" {
 		return rigContext + "/" + config.ControlDispatcherAgentName
 	}

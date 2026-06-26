@@ -331,10 +331,11 @@ func resolveControlDispatcherBinding(_ beads.Store, _ string, cfg *config.City, 
 	// match. Since 9fa6b7fec the dispatcher ships bound (core.control-dispatcher),
 	// so AgentMatchesIdentity rejects the bare-name fallback for it and the
 	// per-rig fleet makes the bare-name scan ambiguous — both break a
-	// Resolver-based lookup. Preferring the city-level singleton (Dir == "")
-	// across every scope also keeps the stamped route on the one session that
-	// actually runs (max_active_sessions=1), curing the stranded-control-bead.
-	if agentCfg, ok := configuredControlDispatcherForScope(cfg, rigContext); ok {
+	// Resolver-based lookup. PreferredDeterministicControlDispatcher prefers the
+	// city-level singleton (Dir == "") across every scope, keeping the stamped
+	// route on the one session that actually runs (max_active_sessions=1) and
+	// curing the stranded-control-bead.
+	if agentCfg, ok := config.PreferredDeterministicControlDispatcher(cfg, rigContext); ok {
 		return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
 	}
 	// Fallback for configs without a deterministic dispatcher (e.g. a plain
@@ -345,33 +346,6 @@ func resolveControlDispatcherBinding(_ beads.Store, _ string, cfg *config.City, 
 		return GraphRouteBinding{}, fmt.Errorf("control-dispatcher agent %q not found", config.ControlDispatcherAgentName)
 	}
 	return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
-}
-
-// configuredControlDispatcherForScope returns the deterministic control-
-// dispatcher for a scope, binding-agnostic. The city-level singleton (Dir == "")
-// is preferred for every scope — it is the one whose session actually runs given
-// max_active_sessions=1 — and a rig-scoped instance (Dir == rigContext) is used
-// only when no city-level deterministic dispatcher is configured.
-func configuredControlDispatcherForScope(cfg *config.City, rigContext string) (config.Agent, bool) {
-	rigContext = strings.TrimSpace(rigContext)
-	var rigScoped config.Agent
-	haveRigScoped := false
-	for _, a := range cfg.Agents {
-		if !config.IsDeterministicControlDispatcher(&a) {
-			continue
-		}
-		if strings.TrimSpace(a.Dir) == "" {
-			return a, true
-		}
-		if !haveRigScoped && strings.TrimSpace(a.Dir) == rigContext {
-			rigScoped = a
-			haveRigScoped = true
-		}
-	}
-	if haveRigScoped {
-		return rigScoped, true
-	}
-	return config.Agent{}, false
 }
 
 // ResolveGraphStepBinding resolves the routing binding for a graph step
