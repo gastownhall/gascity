@@ -1201,6 +1201,10 @@
           "type": "string",
           "description": "SessionIDFlag is the CLI flag for providers that support creating a\nfresh session with a caller-supplied ID. Empty means fresh starts cannot\nreceive a preselected provider session ID; resume metadata must come from\nthe provider after startup."
         },
+        "fork_flag": {
+          "type": "string",
+          "description": "ForkFlag is the CLI flag that forks a resumed conversation into a new\nbranch (claude's \"--fork-session\"). With ResumeFlag + SessionIDFlag it\nforms the fork-launch command (resume a parent brain session, fork off it,\nbind gc's own session id). Empty means the provider has no fork verb, in\nwhich case a launch carrying a parent sid fails loud rather than silently\ndegrading to a fresh session."
+        },
         "permission_modes": {
           "additionalProperties": {
             "type": "string"

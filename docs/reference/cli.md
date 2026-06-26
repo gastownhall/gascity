@@ -3466,6 +3466,7 @@ gc session new helper --no-attach
 | `--no-attach` | bool |  | create session without attaching |
 | `--title` | string |  | human-readable session title |
 | `--title-hint` | string |  | text to auto-generate a session title from |
+| `--wait-timeout` | duration | `2m0s` | max time to wait for the reconciler to start the session before attaching |
 
 ## gc session nudge
 

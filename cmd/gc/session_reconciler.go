@@ -4159,10 +4159,20 @@ func rebaselineLaunchDriftHashes(session *beads.Bead, store beads.Store, agentCf
 }
 
 // resolveSessionCommand returns the command to use when starting a session.
-// On a fresh provider start (first boot or wake_mode=fresh), it uses
-// SessionIDFlag to create a new provider conversation with the given key as
-// its ID. Otherwise it resumes the existing conversation.
-func resolveSessionCommand(command, sessionKey string, rp *config.ResolvedProvider, firstStart, forceFresh bool) string {
+// Precedence on a first start: fork (parentSID present + provider supports it)
+// > fresh (SessionIDFlag) > resume. The fork form resumes a parent brain
+// session, forks it into a new conversation, and binds gc's own session key so
+// all downstream tracking treats the child as a normal session. On any
+// subsequent wake (firstStart=false) the fork branch is skipped and the forked
+// child resumes via its own key. wake_mode=fresh still mints a new conversation
+// via SessionIDFlag. Fork preconditions (provider support, parent staleness,
+// wake_mode) are validated upstream in buildPreparedStartWithWorkDirResolver,
+// which fails loud rather than ever silently degrading a fork to a fresh start.
+func resolveSessionCommand(command, sessionKey, parentSID string, rp *config.ResolvedProvider, firstStart, forceFresh bool) string {
+	if firstStart && parentSID != "" && rp.ForkFlag != "" && rp.SessionIDFlag != "" {
+		return command + " " + rp.ResumeFlag + " " + parentSID +
+			" " + rp.ForkFlag + " " + rp.SessionIDFlag + " " + sessionKey
+	}
 	if (firstStart || forceFresh) && rp.SessionIDFlag != "" {
 		return command + " " + rp.SessionIDFlag + " " + sessionKey
 	}

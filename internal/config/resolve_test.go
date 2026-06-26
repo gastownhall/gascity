@@ -102,6 +102,31 @@ func TestResolveProviderAgentStartCommandHonorsExplicitPromptMode(t *testing.T) 
 	}
 }
 
+func TestResolveProviderForkFlag(t *testing.T) {
+	// claude carries the fork verb; the resolved provider must surface it so the
+	// fork-launch command form (--resume <parent> --fork-session --session-id) is
+	// available.
+	claude := &Agent{Name: "warm", Provider: "claude"}
+	rp, err := ResolveProvider(claude, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(claude): %v", err)
+	}
+	if rp.ForkFlag != "--fork-session" {
+		t.Errorf("claude ForkFlag = %q, want --fork-session", rp.ForkFlag)
+	}
+
+	// codex has no fork verb; ForkFlag must stay empty so a fork launch on codex
+	// fails loud rather than silently degrading to fresh.
+	codex := &Agent{Name: "cold", Provider: "codex"}
+	rpc, err := ResolveProvider(codex, nil, explicitBuiltins("codex"), lookPathOnly("codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(codex): %v", err)
+	}
+	if rpc.ForkFlag != "" {
+		t.Errorf("codex ForkFlag = %q, want empty", rpc.ForkFlag)
+	}
+}
+
 func TestResolveProviderAgentProvider(t *testing.T) {
 	agent := &Agent{Name: "mayor", Provider: "claude"}
 	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
@@ -2166,6 +2191,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		ResumeStyle:            "flag",
 		ResumeCommand:          "custom-cmd --resume {{.SessionKey}}",
 		SessionIDFlag:          "--session-id",
+		ForkFlag:               "--fork-session",
 		PermissionModes:        map[string]string{"yolo": "--yolo"},
 		OptionDefaults:         map[string]string{"permission_mode": "yolo"},
 		OptionsSchema:          []ProviderOption{{Key: "model"}},

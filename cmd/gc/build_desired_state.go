@@ -94,6 +94,10 @@ type scaleCheckDemand struct {
 	Packs       map[string]string
 	Workspaces  map[string]string
 	StoreRefs   map[string]string
+	// ParentSIDs maps work-bead id → gc.brain_parent_sid, carrying the fork
+	// parent through to the new pool session bead so the launch path can fork
+	// the warm arm off its pre-built brain.
+	ParentSIDs map[string]string
 }
 
 var (
@@ -1433,6 +1437,12 @@ func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget) (map[st
 				entry.StoreRefs = make(map[string]string)
 			}
 			entry.StoreRefs[b.ID] = group.storeKey
+			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
+				if entry.ParentSIDs == nil {
+					entry.ParentSIDs = make(map[string]string)
+				}
+				entry.ParentSIDs[b.ID] = parentSID
+			}
 			demand[template] = entry
 		}
 	}
@@ -1459,6 +1469,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.Workspaces == nil && len(incoming.Workspaces) > 0 {
 		existing.Workspaces = make(map[string]string, len(incoming.Workspaces))
 	}
+	if existing.ParentSIDs == nil && len(incoming.ParentSIDs) > 0 {
+		existing.ParentSIDs = make(map[string]string, len(incoming.ParentSIDs))
+	}
 	for _, id := range incoming.WorkBeadIDs[:limit] {
 		if strings.TrimSpace(id) == "" {
 			continue
@@ -1475,6 +1488,11 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 		}
 		if incoming.StoreRefs != nil {
 			existing.StoreRefs[id] = incoming.StoreRefs[id]
+		}
+		if incoming.ParentSIDs != nil {
+			if sid := incoming.ParentSIDs[id]; sid != "" {
+				existing.ParentSIDs[id] = sid
+			}
 		}
 	}
 	existing.Count = len(existing.WorkBeadIDs)
@@ -2476,6 +2494,12 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 		if strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]) != "" {
 			metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = ""
 		}
+		// Q1: a re-pointed session is a new work item; it must not silently
+		// inherit the prior fork's "warm" provenance. Clear the parent sid so the
+		// selection layer must re-stamp it deterministically to stay warm.
+		if strings.TrimSpace(sessionBead.Metadata[beadmeta.BrainParentSIDMetadataKey]) != "" {
+			metadata[beadmeta.BrainParentSIDMetadataKey] = ""
+		}
 		if len(metadata) == 0 {
 			return sessionBead, nil
 		}
@@ -2493,6 +2517,13 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	oldWorkBeadID := strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadIDMetadataKey])
 	if oldWorkBeadID != workBeadID {
 		metadata[beadmeta.TriggerBeadIDMetadataKey] = workBeadID
+		// Q1: on a genuine reassign to a different work bead, reconcile the fork
+		// parent to the new work's value (set when the new bead carries one,
+		// clear otherwise) so a re-pointed session never inherits the old fork.
+		newParentSID := strings.TrimSpace(request.BrainParentSID)
+		if strings.TrimSpace(sessionBead.Metadata[beadmeta.BrainParentSIDMetadataKey]) != newParentSID {
+			metadata[beadmeta.BrainParentSIDMetadataKey] = newParentSID
+		}
 	}
 	workStoreRef := strings.TrimSpace(request.WorkStoreRef)
 	if workStoreRef != "" && strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]) != workStoreRef {
@@ -3318,6 +3349,9 @@ func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualified
 	}
 	if storeRef := strings.TrimSpace(request.WorkStoreRef); storeRef != "" {
 		metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = storeRef
+	}
+	if parentSID := strings.TrimSpace(request.BrainParentSID); parentSID != "" {
+		metadata[beadmeta.BrainParentSIDMetadataKey] = parentSID
 	}
 	if pack := strings.TrimSpace(request.WorkPack); pack != "" {
 		metadata[beadmeta.PackMetadataKey] = pack

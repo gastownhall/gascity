@@ -127,6 +127,13 @@ type ProviderSpec struct {
 	// receive a preselected provider session ID; resume metadata must come from
 	// the provider after startup.
 	SessionIDFlag string `toml:"session_id_flag,omitempty"`
+	// ForkFlag is the CLI flag that forks a resumed conversation into a new
+	// branch (claude's "--fork-session"). With ResumeFlag + SessionIDFlag it
+	// forms the fork-launch command (resume a parent brain session, fork off it,
+	// bind gc's own session id). Empty means the provider has no fork verb, in
+	// which case a launch carrying a parent sid fails loud rather than silently
+	// degrading to a fresh session.
+	ForkFlag string `toml:"fork_flag,omitempty"`
 	// PermissionModes maps permission mode names to CLI flags.
 	// Example: {"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"}
 	// This is a config-only lookup table consumed by external clients
@@ -224,6 +231,7 @@ type ResolvedProvider struct {
 	ResumeStyle            string
 	ResumeCommand          string
 	SessionIDFlag          string
+	ForkFlag               string
 	PermissionModes        map[string]string
 	OptionsSchema          []ProviderOption
 	UpstreamEnv            UpstreamEnvBinding
@@ -462,6 +470,7 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		ResumeStyle:            spec.ResumeStyle,
 		ResumeCommand:          spec.ResumeCommand,
 		SessionIDFlag:          spec.SessionIDFlag,
+		ForkFlag:               spec.ForkFlag,
 		PermissionModes:        cloneStringMap(spec.PermissionModes),
 		OptionDefaults:         cloneStringMap(spec.OptionDefaults),
 		OptionsSchema:          providerOptionsFromWorker(spec.OptionsSchema),

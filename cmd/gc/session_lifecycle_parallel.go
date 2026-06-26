@@ -844,6 +844,27 @@ func buildPreparedStartWithWorkDirResolver(
 	} else if wd := session.Metadata["work_dir"]; wd != "" {
 		agentCfg.WorkDir = wd
 	}
+	// Fork-launch validation (fail loud, never silent fresh). A session carrying
+	// gc.brain_parent_sid is a warm arm that must fork off a pre-built brain on
+	// its first launch; degrading it to a fresh start would mislabel it cold and
+	// invert the experiment's headline metric. This runs before the stale-resume
+	// guard below so a missing parent errors here instead of being cleared and
+	// downgraded to fresh.
+	parentSID := strings.TrimSpace(session.Metadata[beadmeta.BrainParentSIDMetadataKey])
+	if parentSID != "" {
+		forkFirstStart := session.Metadata["started_config_hash"] == ""
+		forkForceFresh := session.Metadata["wake_mode"] == "fresh"
+		parentStale := false
+		if forkFirstStart && !forkForceFresh && tp.ResolvedProvider != nil && agentCfg.WorkDir != "" {
+			provider := sessionTranscriptProvider(tp.ResolvedProvider, session.Metadata)
+			if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, parentSID); probeable && !present {
+				parentStale = true
+			}
+		}
+		if err := validateForkLaunch(parentSID, tp.ResolvedProvider, forkFirstStart, forkForceFresh, parentStale); err != nil {
+			return nil, err
+		}
+	}
 	// Pre-flight stale-resume guard: if the bead carries a session_key whose
 	// keyed transcript is no longer on disk (provider session retention
 	// disabled, manual cleanup, worktree rebuild), a resume would hard-fail
@@ -882,7 +903,7 @@ func buildPreparedStartWithWorkDirResolver(
 	if sk := session.Metadata["session_key"]; sk != "" && tp.ResolvedProvider != nil && !tp.IsACP {
 		firstStart := session.Metadata["started_config_hash"] == ""
 		forceFresh := session.Metadata["wake_mode"] == "fresh"
-		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, tp.ResolvedProvider, firstStart, forceFresh)
+		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, parentSID, tp.ResolvedProvider, firstStart, forceFresh)
 	}
 	firstStart := session.Metadata["started_config_hash"] == ""
 	forceFresh := session.Metadata["wake_mode"] == "fresh"
@@ -1665,6 +1686,46 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 // claude/kimi/pi each probe their real location.
 var staleResumeKeyProbe = func(provider, workDir, sessionKey string) (present, probeable bool) {
 	return workertranscript.HasKeyedTranscript(worker.DefaultSearchPaths(), provider, workDir, sessionKey)
+}
+
+// validateForkLaunch enforces fork-launch invariants before command resolution.
+// It fails loud rather than ever silently degrading a brain-forked (warm) arm to
+// a fresh (cold-equivalent) session — the single worst outcome for the warm/cold
+// experiment, since it mislabels a cold run as warm. parentSID is
+// gc.brain_parent_sid on the session bead; an empty parentSID is not a fork
+// launch and is a no-op. parentStale reports that the parent brain's transcript
+// is provably absent on disk (probeable && !present).
+func validateForkLaunch(parentSID string, rp *config.ResolvedProvider, firstStart, forceFresh, parentStale bool) error {
+	if parentSID == "" {
+		return nil
+	}
+	providerName := ""
+	if rp != nil {
+		providerName = rp.Name
+	}
+	// Q2 hard guard: a brain_parent_sid-carrying session must never wake fresh. A
+	// fresh bounce mints a new key and uses SessionIDFlag, discarding the fork and
+	// turning a warm arm cold while it is still labeled warm. Fail at the earliest
+	// launch rather than waiting for a mid-task bounce to downgrade it silently.
+	if forceFresh {
+		return fmt.Errorf("fork-launch: session carries %s=%q but wake_mode=fresh would discard the fork (warm->cold mislabel); set wake_mode=resume", beadmeta.BrainParentSIDMetadataKey, parentSID)
+	}
+	// The fork form is only emitted on the initial launch; later wakes resume the
+	// forked child via its own key, so provider/staleness gating is firstStart-only.
+	if !firstStart {
+		return nil
+	}
+	if rp == nil || rp.ForkFlag == "" || rp.SessionIDFlag == "" {
+		forkFlag, sessionIDFlag := "", ""
+		if rp != nil {
+			forkFlag, sessionIDFlag = rp.ForkFlag, rp.SessionIDFlag
+		}
+		return fmt.Errorf("fork-launch requested (parent_sid=%q) but provider %q lacks fork support (fork_flag=%q session_id_flag=%q)", parentSID, providerName, forkFlag, sessionIDFlag)
+	}
+	if parentStale {
+		return fmt.Errorf("fork-launch: parent brain session %q (provider %q) is missing on disk; gc-core does not regenerate brains - regen is owned by brains/mem", parentSID, providerName)
+	}
+	return nil
 }
 
 // sessionTranscriptProvider resolves the provider-family identifier consumed by

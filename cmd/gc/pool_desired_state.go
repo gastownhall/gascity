@@ -24,6 +24,9 @@ type SessionRequest struct {
 	WorkPack      string // pack route key from the work bead, when known
 	WorkWorkspace string // explicit pack workspace route key from the work bead, when known
 	WorkStoreRef  string // city or rig:<name> store reference for WorkBeadID when known
+	// BrainParentSID is gc.brain_parent_sid from the driving work bead, when
+	// set: the parent session to fork this launch off of (warm-arm fork-launch).
+	BrainParentSID string
 	// FloorGuarantee marks a "new" request created to satisfy an agent's
 	// min_active_sessions floor (as opposed to elastic scale-check demand).
 	// The per-tick create-budget allocator reserves a token for each
@@ -189,13 +192,14 @@ func computePoolDesiredStates(
 					continue
 				}
 				resumeRequests = append(resumeRequests, SessionRequest{
-					Template:      template,
-					BeadPriority:  beadPriority(wb),
-					Tier:          "resume",
-					SessionBeadID: sessionBeadID,
-					WorkBeadID:    wb.ID,
-					WorkPack:      strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
-					WorkWorkspace: strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+					Template:       template,
+					BeadPriority:   beadPriority(wb),
+					Tier:           "resume",
+					SessionBeadID:  sessionBeadID,
+					WorkBeadID:     wb.ID,
+					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+					BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
 				})
 				continue
 			}
@@ -213,12 +217,13 @@ func computePoolDesiredStates(
 			}
 			wakeRequestedTemplates[template] = struct{}{}
 			resumeRequests = append(resumeRequests, SessionRequest{
-				Template:      template,
-				BeadPriority:  beadPriority(wb),
-				Tier:          "wake-known-identity",
-				WorkBeadID:    wb.ID,
-				WorkPack:      strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
-				WorkWorkspace: strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+				Template:       template,
+				BeadPriority:   beadPriority(wb),
+				Tier:           "wake-known-identity",
+				WorkBeadID:     wb.ID,
+				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+				WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+				BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
 			})
 			if trace != nil {
 				trace.recordDecision(string(TraceSitePoolWakeKnownIdentity), template, "", "assigned_work", "scheduled", traceRecordPayload{
@@ -282,6 +287,7 @@ func computePoolDesiredStates(
 				workPack := ""
 				workWorkspace := ""
 				workStoreRef := ""
+				workParentSID := ""
 				if demand := scaleCheckDemand[template]; len(demand.WorkBeadIDs) > j {
 					workBeadID = strings.TrimSpace(demand.WorkBeadIDs[j])
 					if demand.Titles != nil {
@@ -296,15 +302,19 @@ func computePoolDesiredStates(
 					if demand.StoreRefs != nil {
 						workStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
 					}
+					if demand.ParentSIDs != nil {
+						workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
+					}
 				}
 				req := SessionRequest{
-					Template:      template,
-					Tier:          "new",
-					WorkBeadID:    workBeadID,
-					WorkBeadTitle: workBeadTitle,
-					WorkPack:      workPack,
-					WorkWorkspace: workWorkspace,
-					WorkStoreRef:  workStoreRef,
+					Template:       template,
+					Tier:           "new",
+					WorkBeadID:     workBeadID,
+					WorkBeadTitle:  workBeadTitle,
+					WorkPack:       workPack,
+					WorkWorkspace:  workWorkspace,
+					WorkStoreRef:   workStoreRef,
+					BrainParentSID: workParentSID,
 				}
 				allRequests = append(allRequests, req)
 				usage.accept(req, limits)
@@ -380,11 +390,12 @@ func poolInFlightNewRequests(cfg *config.City, sessionBeads []beads.Bead, resume
 				continue
 			}
 			requests[template] = append(requests[template], SessionRequest{
-				Template:      template,
-				Tier:          "new",
-				SessionBeadID: sb.ID,
-				WorkBeadID:    strings.TrimSpace(sb.Metadata[beadmeta.TriggerBeadIDMetadataKey]),
-				WorkStoreRef:  strings.TrimSpace(sb.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]),
+				Template:       template,
+				Tier:           "new",
+				SessionBeadID:  sb.ID,
+				WorkBeadID:     strings.TrimSpace(sb.Metadata[beadmeta.TriggerBeadIDMetadataKey]),
+				WorkStoreRef:   strings.TrimSpace(sb.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]),
+				BrainParentSID: strings.TrimSpace(sb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
 			})
 		}
 	}
