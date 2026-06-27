@@ -17,36 +17,48 @@ import (
 // type assertions (GraphApplyFor, HandlesFor, StorageCreateStore, Counter, ...)
 // keep working.
 
-// graphBeadStore returns the store that owns graph (workflow/v2) beads.
-// Identity: the city-level bead store today.
+// graphBeadStore returns the store that owns graph (workflow/v2) beads. It
+// delegates to the exported GraphBeadStore() accessor so the api.State surface
+// and the controller's own callers share one resolver. Identity to the work
+// store at the default bd backend.
 func (cs *controllerState) graphBeadStore() beads.Store {
-	return cs.CityBeadStore()
+	return cs.GraphBeadStore()
 }
 
 // sessionsBeadStore returns the store that owns session and session-wait beads.
-// Identity: the city-level bead store today.
+// It delegates to the exported SessionsBeadStore() accessor so the api.State
+// surface and the controller's own callers share one resolver. Identity to the
+// work store at the default bd backend.
 func (cs *controllerState) sessionsBeadStore() beads.Store {
-	return cs.CityBeadStore()
+	return cs.SessionsBeadStore()
 }
 
-// mailBeadStore returns the store that owns mail (message) beads.
-// Identity: the city-level bead store today.
+// mailBeadStore returns the store that owns mail (message) beads: the configured
+// messaging class store when [beads.classes.messaging] relocates messaging, else
+// the work store. Identity to the work store at the default bd backend.
 func (cs *controllerState) mailBeadStore() beads.Store {
-	return cs.CityBeadStore()
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return resolveMailMessagesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
 }
 
-// nudgesBeadStore returns the store that owns nudge beads.
-// Identity: the city-level bead store today.
+// nudgesBeadStore returns the store that owns nudge beads. It delegates to the
+// exported NudgesBeadStore() accessor so the api.State surface and the
+// controller's own callers share one resolver. Identity to the work store at the
+// default bd backend.
 func (cs *controllerState) nudgesBeadStore() beads.Store {
-	return cs.CityBeadStore()
+	return cs.NudgesBeadStore()
 }
 
 // ordersBeadStore returns the store that owns order-tracking bookkeeping beads
-// for the given scope (rig name, or "" for the city). Identity: the city-level
-// bead store today; the scope is accepted so a future per-scope orders backend
-// can route without a call-site change.
+// for the given scope (rig name, or "" for the city): the configured orders class
+// store when [beads.classes.orders] relocates orders, else the work store. The
+// scope is accepted so a future per-scope orders backend can route without a
+// call-site change. Identity to the work store at the default bd backend.
 func (cs *controllerState) ordersBeadStore(_ string) beads.Store {
-	return cs.CityBeadStore()
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return resolveOrderStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
 }
 
 // cityWorkStore returns the city-level store for ordinary work beads that are
@@ -61,35 +73,41 @@ func (cs *controllerState) workBeadStores() map[string]beads.Store {
 	return cs.BeadStores()
 }
 
-// graphBeadStore returns the runtime's graph (workflow/v2) bead store.
-// Identity: the city-level bead store today.
+// graphBeadStore returns the runtime's graph (workflow/v2) bead store: the
+// dedicated graph store when [beads.classes.graph] relocates graph, else the
+// work store. Byte-identical to cityBeadStore() at the default bd backend.
 func (cr *CityRuntime) graphBeadStore() beads.Store {
-	return cr.cityBeadStore()
+	return resolveGraphStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
 }
 
-// sessionsBeadStore returns the runtime's session/session-wait bead store.
-// Identity: the city-level bead store today.
+// sessionsBeadStore returns the runtime's session/session-wait bead store: the
+// configured session class store (with the controller recorder so relocated
+// session writes emit bead.*) when [beads.classes.sessions] relocates sessions,
+// else the work store. Byte-identical to cityBeadStore() at the default bd backend.
 func (cr *CityRuntime) sessionsBeadStore() beads.Store {
-	return cr.cityBeadStore()
+	return resolveSessionStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
 }
 
-// mailBeadStore returns the runtime's mail (message) bead store.
-// Identity: the city-level bead store today.
+// mailBeadStore returns the runtime's mail (message) bead store: the configured
+// messaging class store when [beads.classes.messaging] relocates messaging, else
+// the work store. Byte-identical to cityBeadStore() at the default bd backend.
 func (cr *CityRuntime) mailBeadStore() beads.Store {
-	return cr.cityBeadStore()
+	return resolveMailMessagesStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
 }
 
-// nudgesBeadStore returns the runtime's nudge bead store.
-// Identity: the city-level bead store today.
+// nudgesBeadStore returns the runtime's nudge bead store: the configured nudges
+// class store when [beads.classes.nudges] relocates nudges, else the work store.
+// Byte-identical to cityBeadStore() at the default bd backend.
 func (cr *CityRuntime) nudgesBeadStore() beads.Store {
-	return cr.cityBeadStore()
+	return resolveNudgesStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
 }
 
 // ordersBeadStore returns the runtime's order-tracking bead store for the given
-// scope. Identity: the city-level bead store today; the scope is accepted for
-// forward compatibility.
+// scope: the configured orders class store when [beads.classes.orders] relocates
+// orders, else the work store. The scope is accepted for forward compatibility.
+// Byte-identical to cityBeadStore() at the default bd backend.
 func (cr *CityRuntime) ordersBeadStore(_ string) beads.Store {
-	return cr.cityBeadStore()
+	return resolveOrderStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
 }
 
 // cityWorkStore returns the runtime's city-level work bead store.
