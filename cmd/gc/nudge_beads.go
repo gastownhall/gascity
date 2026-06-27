@@ -8,12 +8,16 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
 const (
-	nudgeBeadType    = "chore"
-	nudgeBeadLabel   = "gc:nudge"
+	nudgeBeadType = "chore"
+	// nudgeBeadLabel re-aliases the canonical nudge-bead label, which moved
+	// to coordclass so the bead classifier can read it without importing
+	// cmd/gc. Existing string references stay valid.
+	nudgeBeadLabel   = coordclass.MarkerNudgeLabel
 	nudgeLookupLimit = nudgequeue.NudgeLookupLimit
 
 	// nudgeEnqueueRollbackCloseReason is the close_reason metadata value

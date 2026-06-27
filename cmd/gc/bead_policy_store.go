@@ -3,13 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 const (
@@ -220,49 +219,11 @@ func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.G
 }
 
 func policyNameForGraphPlan(plan *beads.GraphApplyPlan) string {
-	for _, node := range plan.Nodes {
-		if isWispPolicyMetadata(node.Metadata) || hasBeadLabel(node.Labels, "gc:wisp") || hasBeadLabel(node.Labels, "wisp") {
-			return beadPolicyWisp
-		}
-	}
-	for _, node := range plan.Nodes {
-		if isWorkflowPolicyMetadata(node.Metadata) || isWorkflowPolicyMetadata(node.MetadataRefs) {
-			return beadPolicyWorkflow
-		}
-	}
-	return ""
+	return string(coordclass.ClassifyGraphPlan(plan))
 }
 
 func policyNameForBead(b beads.Bead) string {
-	switch {
-	case isWispPolicyMetadata(b.Metadata) || b.Type == "wisp" || hasBeadLabel(b.Labels, "gc:wisp") || hasBeadLabel(b.Labels, "wisp"):
-		return beadPolicyWisp
-	case hasBeadLabel(b.Labels, labelOrderTracking):
-		return beadPolicyOrderTracking
-	case hasBeadLabel(b.Labels, session.LabelSession) || b.Type == session.BeadType:
-		return beadPolicySession
-	case hasBeadLabel(b.Labels, session.WaitBeadLabel):
-		return beadPolicyWait
-	case hasBeadLabel(b.Labels, nudgeBeadLabel):
-		return beadPolicyNudge
-	case isWorkflowPolicyMetadata(b.Metadata):
-		return beadPolicyWorkflow
-	default:
-		return ""
-	}
-}
-
-func isWispPolicyMetadata(metadata map[string]string) bool {
-	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWisp
-}
-
-func isWorkflowPolicyMetadata(metadata map[string]string) bool {
-	if metadata == nil {
-		return false
-	}
-	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow ||
-		metadata[beadmeta.FormulaContractMetadataKey] == beadmeta.FormulaContractGraphV2 ||
-		strings.TrimSpace(metadata[beadmeta.RootBeadIDMetadataKey]) != ""
+	return string(coordclass.Classify(b))
 }
 
 func effectiveBeadStorage(cfg *config.City, policyName string) string {
@@ -392,8 +353,4 @@ func policyTierFromOpts(opts []beads.QueryOpt) beads.TierMode {
 		return beads.TierBoth
 	}
 	return tier
-}
-
-func hasBeadLabel(labels []string, label string) bool {
-	return slices.Contains(labels, label)
 }

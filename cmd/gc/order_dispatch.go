@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -35,7 +36,10 @@ import (
 )
 
 const (
-	labelOrderTracking    = "order-tracking"
+	// labelOrderTracking re-aliases the canonical order-tracking label,
+	// which moved to coordclass so the bead classifier can read it without
+	// importing cmd/gc. Existing string references stay valid.
+	labelOrderTracking    = coordclass.MarkerOrderTrackingLabel
 	labelTriggerEnvFailed = "trigger-env-failed"
 
 	orderTrackingSweepOrder                = "order-tracking-sweep"
