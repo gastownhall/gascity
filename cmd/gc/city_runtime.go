@@ -2772,7 +2772,10 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 	if !nudgeDispatcherIsSupervisor(cr.cfg) {
 		return
 	}
-	store := cr.cityBeadStore()
+	// Nudge ops route through the nudges accessor; the session snapshot it pairs
+	// them with is loaded via the sessions accessor inside loadSessionBeadSnapshot.
+	// Both collapse to the city store today.
+	store := cr.nudgesBeadStore()
 	if store == nil {
 		return
 	}
@@ -2786,8 +2789,14 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
-	store := cr.cityBeadStore()
-	if store == nil || cr.sessionDrains == nil {
+	// The control-dispatcher tick threads one city store as three roles at once:
+	// the dispatch/desired-state primary (graph), the session-sync/reconcile
+	// store (sessions), and the per-rig work tail (work). Split the single
+	// variable into the class accessors so a future per-class backend routes
+	// each role independently; all three collapse to the same store today, so
+	// the tick is byte-identical.
+	graphStore := cr.graphBeadStore()
+	if graphStore == nil || cr.sessionDrains == nil {
 		return
 	}
 
@@ -2805,8 +2814,8 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		time.Now(),
 		filteredCfg,
 		cr.sp,
-		store,
-		cr.rigBeadStores(),
+		graphStore,
+		cr.workBeadStores(),
 		sessionBeads,
 		nil,
 		cr.stderr,
@@ -2815,8 +2824,8 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	cfgNames := configuredSessionNamesWithSnapshot(filteredCfg, cr.cityName, sessionBeads)
 	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
 		cr.cityPath,
-		store,
-		cr.rigBeadStores(),
+		cr.sessionsBeadStore(),
+		cr.workBeadStores(),
 		desiredState,
 		cr.sp,
 		cfgNames,
@@ -2847,10 +2856,10 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cfgNames,
 		filteredCfg,
 		cr.sp,
-		store,
+		cr.sessionsBeadStore(),
 		cr.dops,
 		nil,
-		cr.rigBeadStores(),
+		cr.workBeadStores(),
 		nil, // control-dispatcher ticks only need ownership continuity, not main-tick assigned/ready snapshots
 		cr.sessionDrains,
 		cr.providerHealthGate,
@@ -2966,7 +2975,9 @@ func (cr *CityRuntime) loadSessionBeadSnapshot() *sessionBeadSnapshot {
 }
 
 func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapshot, bool) {
-	store := cr.cityBeadStore()
+	// The session-bead snapshot is a sessions-class read, so route it through the
+	// sessions accessor (identity to the city store today).
+	store := cr.sessionsBeadStore()
 	if store == nil {
 		return nil, false
 	}
@@ -2992,12 +3003,16 @@ func filterSessionBeadsByName(snapshot *sessionBeadSnapshot, names map[string]bo
 }
 
 func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
-	store := cr.cityBeadStore()
-	rigStores := cr.rigBeadStores()
+	// The desired-state build threads two store roles: the graph/dispatch
+	// primary (the build-fn's leading store, also the session arm inside
+	// buildDesiredStateWithSessionBeads) and the per-rig work tail. Split the
+	// single city store into the class accessors so a future per-class backend
+	// routes each role independently; both collapse to the same store today.
+	graphStore := cr.graphBeadStore()
 	if cr.buildFnWithSessionBeads != nil {
-		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, store, rigStores, sessionBeads, trace)
+		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, graphStore, cr.workBeadStores(), sessionBeads, trace)
 	}
-	return cr.buildFn(cr.cfg, cr.sp, store)
+	return cr.buildFn(cr.cfg, cr.sp, graphStore)
 }
 
 func (cr *CityRuntime) loadDemandSnapshot(
