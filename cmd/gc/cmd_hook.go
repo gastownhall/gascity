@@ -345,7 +345,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 
 	runner := func(command, _ string) (string, error) {
-		out, err := firstStoreWithWork(command, stores, shellWorkQueryWithEnv)
+		out, _, err := firstStoreWithWork(command, stores, shellWorkQueryWithEnv)
 		if err != nil && emitFailureEvent {
 			// A killed/timed-out work query strands the session with no
 			// output and no cause on the event bus; emit one so the
@@ -378,7 +378,28 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			DrainAck:     opts.DrainAck,
 			JSON:         opts.JSON,
 		}
-		return doHookClaim(workQuery, workDir, claimOpts, hookClaimOps{Runner: runner}, stdout, stderr)
+		_, selectedStore, err := firstStoreWithWork(workQuery, stores, shellWorkQueryWithEnv)
+		if err != nil {
+			if emitFailureEvent {
+				emitCityWorkQueryFailure(cityPath, stderr,
+					os.Getenv("GC_SESSION_ID"), failureTemplate, workQuery, err)
+			}
+			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		storeDir := workDir
+		storeEnv := queryEnv
+		if strings.TrimSpace(selectedStore.dir) != "" {
+			storeDir = selectedStore.dir
+		}
+		if len(selectedStore.env) > 0 {
+			storeEnv = selectedStore.env
+		}
+		claimOpts.Env = storeEnv
+		claimRunner := func(command, _ string) (string, error) {
+			return shellWorkQueryWithEnv(command, storeDir, storeEnv)
+		}
+		return doHookClaim(workQuery, storeDir, claimOpts, hookClaimOps{Runner: claimRunner}, stdout, stderr)
 	}
 	return doHook(workQuery, workDir, false, runner, stdout, stderr)
 }

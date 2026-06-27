@@ -77,12 +77,15 @@ func TestFirstStoreWithWorkReturnsFirstStoreThatHasWork(t *testing.T) {
 		}
 		return `[]`, nil
 	}
-	out, err := firstStoreWithWork("q", stores, run)
+	out, gotStore, err := firstStoreWithWork("q", stores, run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if out != `[{"id":"va-1"}]` {
 		t.Fatalf("out = %q, want riga work", out)
+	}
+	if gotStore.dir != "riga" {
+		t.Fatalf("store.dir = %q, want riga", gotStore.dir)
 	}
 	// Stops at the first store with work — does not query rigb.
 	if len(calls) != 2 || calls[0] != "city" || calls[1] != "riga" {
@@ -93,12 +96,15 @@ func TestFirstStoreWithWorkReturnsFirstStoreThatHasWork(t *testing.T) {
 func TestFirstStoreWithWorkReturnsLastWhenNoneHasWork(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	run := func(_, _ string, _ []string) (string, error) { return `[]`, nil }
-	out, err := firstStoreWithWork("q", stores, run)
+	out, gotStore, err := firstStoreWithWork("q", stores, run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if out != `[]` {
 		t.Fatalf("out = %q, want []", out)
+	}
+	if gotStore.dir != "" || len(gotStore.env) != 0 {
+		t.Fatalf("store = %#v, want zero value when no work is found", gotStore)
 	}
 }
 
@@ -113,7 +119,7 @@ func TestFirstStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
 		}
 		return `[]`, nil
 	}
-	if _, err := firstStoreWithWork("q", stores, run); !errors.Is(err, errTestStoreTimeout) {
+	if _, _, err := firstStoreWithWork("q", stores, run); !errors.Is(err, errTestStoreTimeout) {
 		t.Fatalf("own-store error must be surfaced when no store has work; got %v", err)
 	}
 }
@@ -128,12 +134,15 @@ func TestFirstStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.
 		}
 		return "", errTestStoreTimeout
 	}
-	out, err := firstStoreWithWork("q", stores, run)
+	out, gotStore, err := firstStoreWithWork("q", stores, run)
 	if err != nil {
 		t.Fatalf("rig-store error must not surface when own store is healthy; got %v", err)
 	}
 	if out != `[]` {
 		t.Fatalf("out = %q, want city store's no-work output", out)
+	}
+	if gotStore.dir != "" || len(gotStore.env) != 0 {
+		t.Fatalf("store = %#v, want zero value when no work is found", gotStore)
 	}
 }
 
@@ -146,11 +155,14 @@ func TestFirstStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
 		}
 		return `[{"id":"va-2"}]`, nil
 	}
-	out, err := firstStoreWithWork("q", stores, run)
+	out, gotStore, err := firstStoreWithWork("q", stores, run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if out != `[{"id":"va-2"}]` {
 		t.Fatalf("out = %q, want riga work (city row was unready)", out)
+	}
+	if gotStore.dir != "riga" {
+		t.Fatalf("store.dir = %q, want riga", gotStore.dir)
 	}
 }
