@@ -21,10 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     jq \
+    lsof \
     procps \
     python3 \
     sudo \
     tmux \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 COPY .github/scripts/install-claude-native.sh /tmp/install-claude-native.sh
