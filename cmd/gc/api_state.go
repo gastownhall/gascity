@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -542,22 +543,21 @@ func (cs *controllerState) beadEventStoresLocked(evt events.Event) []beads.Store
 }
 
 func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Store, bool) {
-	var matchedStore beads.Store
-	matchedLen := -1
-	match := func(prefix string, store beads.Store) {
-		if prefix == "" || !strings.HasPrefix(id, prefix+"-") {
-			return
-		}
-		if len(prefix) > matchedLen {
-			matchedLen = len(prefix)
-			matchedStore = store
-		}
-	}
-	match(config.EffectiveHQPrefix(cs.cfg), cs.cityBeadStore)
+	// A configured prefix owns the id even when its store is not loaded: the
+	// caller treats a (nil, true) result as "owned but absent here" and skips
+	// the all-stores fallback, so nil stores are passed in as candidates.
+	candidates := make([]storeref.Candidate, 0, len(cs.cfg.Rigs)+1)
+	candidates = append(candidates, storeref.Candidate{
+		Prefix: config.EffectiveHQPrefix(cs.cfg),
+		Store:  cs.cityBeadStore,
+	})
 	for _, rig := range cs.cfg.Rigs {
-		match(rig.EffectivePrefix(), cs.beadStores[rig.Name])
+		candidates = append(candidates, storeref.Candidate{
+			Prefix: rig.EffectivePrefix(),
+			Store:  cs.beadStores[rig.Name],
+		})
 	}
-	return matchedStore, matchedLen >= 0
+	return storeref.PrefixOwner(id, candidates, storeref.HyphenOnly)
 }
 
 func beadEventID(evt events.Event) string {
