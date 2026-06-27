@@ -284,6 +284,7 @@ type memoryOrderDispatcher struct {
 	cityPath             string
 	cacheMu              sync.Mutex
 	lastRunCache         map[string]time.Time
+	gateBackoffUntil     map[string]time.Time
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -508,13 +509,16 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
 		}
 		scoped := a.ScopedName()
+		if m.gateBackoffActive(scoped, now) {
+			continue
+		}
 		hasOpenTracking, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
 			return trackingIndex.hasOpenTracking(storesForGate, storeKeysForGate, scoped)
 		})
 		if err != nil {
 			if m.gateFailClosed(ctx, a, scoped, err) {
 				if errors.Is(err, errGateTimeout) {
-					m.rememberLastRun(scoped, storeKeysForGate, now)
+					m.setGateBackoff(scoped, now.Add(orderGateTimeout))
 				}
 				continue
 			}
@@ -610,7 +614,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if err != nil {
 			if m.gateFailClosed(ctx, a, scoped, err) {
 				if errors.Is(err, errGateTimeout) {
-					m.rememberLastRun(scoped, storeKeysForGate, now)
+					m.setGateBackoff(scoped, now.Add(orderGateTimeout))
 				}
 				continue
 			}
@@ -1006,6 +1010,62 @@ func (m *memoryOrderDispatcher) carryLastRunCacheFrom(prev *memoryOrderDispatche
 	for key, last := range prev.lastRunCache {
 		if existing, ok := m.lastRunCache[key]; !ok || last.After(existing) {
 			m.lastRunCache[key] = last
+		}
+	}
+}
+
+// gateBackoffActive reports whether the named order is in a gate-timeout
+// backoff window. Call before either open-work gate to suppress re-entry after
+// a prior timeout; the backoff expires naturally so the order resumes once the
+// store recovers.
+func (m *memoryOrderDispatcher) gateBackoffActive(key string, now time.Time) bool {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.gateBackoffUntil == nil {
+		return false
+	}
+	until, ok := m.gateBackoffUntil[key]
+	return ok && now.Before(until)
+}
+
+// setGateBackoff records a gate-timeout backoff for the named order. The
+// backoff suppresses both open-work gates on every subsequent tick until the
+// deadline passes (see gateBackoffActive). Only the latest/furthest deadline
+// is retained.
+func (m *memoryOrderDispatcher) setGateBackoff(key string, until time.Time) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.gateBackoffUntil == nil {
+		m.gateBackoffUntil = make(map[string]time.Time)
+	}
+	if existing, ok := m.gateBackoffUntil[key]; !ok || until.After(existing) {
+		m.gateBackoffUntil[key] = until
+	}
+}
+
+// carryGateBackoffFrom copies non-expired gate-backoff entries from a previous
+// dispatcher so a reload/rescan-triggered rebuild preserves active backoffs.
+// now is used to filter out already-expired entries; only call after draining
+// the previous dispatcher.
+func (m *memoryOrderDispatcher) carryGateBackoffFrom(prev *memoryOrderDispatcher, now time.Time) {
+	if m == nil || prev == nil {
+		return
+	}
+	prev.cacheMu.Lock()
+	defer prev.cacheMu.Unlock()
+	if len(prev.gateBackoffUntil) == 0 {
+		return
+	}
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.gateBackoffUntil == nil {
+		m.gateBackoffUntil = make(map[string]time.Time, len(prev.gateBackoffUntil))
+	}
+	for key, until := range prev.gateBackoffUntil {
+		if until.After(now) {
+			if existing, ok := m.gateBackoffUntil[key]; !ok || until.After(existing) {
+				m.gateBackoffUntil[key] = until
+			}
 		}
 	}
 }

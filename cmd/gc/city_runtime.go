@@ -1302,13 +1302,14 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot 
 }
 
 // replaceOrderDispatcher installs next as the active order dispatcher, carrying
-// warm last-run data from the outgoing dispatcher so a rebuild (reload or
-// rescan) reuses it instead of cold-starting and re-querying every order
-// (#3201). Call after draining the outgoing dispatcher.
+// warm last-run data and active gate-backoff state from the outgoing dispatcher
+// so a rebuild (reload or rescan) reuses them instead of cold-starting (#3201).
+// Call after draining the outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 	if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
 		if nextMem, ok := next.(*memoryOrderDispatcher); ok {
 			nextMem.carryLastRunCacheFrom(prev)
+			nextMem.carryGateBackoffFrom(prev, time.Now())
 		}
 	}
 	cr.od = next

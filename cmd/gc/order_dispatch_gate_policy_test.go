@@ -115,9 +115,9 @@ func (s *openWorkGateCallCountStore) gateCallCount() int {
 
 // TestOrderDispatchGateTimeoutBackoffPreventsRethrash is the gascity#3688
 // regression test: when the open-work gate times out for a non-idempotent
-// order (fail-closed), the dispatcher must stamp a backoff via rememberLastRun
-// so the cooldown trigger suppresses re-dispatch on subsequent ticks — instead
-// of hammering Dolt with a new 8-second gate query every tick.
+// order (fail-closed), the dispatcher must set a gateBackoffUntil deadline so
+// neither gate is reached on subsequent ticks — instead of hammering Dolt with
+// a new 8-second gate query every tick.
 func TestOrderDispatchGateTimeoutBackoffPreventsRethrash(t *testing.T) {
 	prev := orderGateTimeout
 	orderGateTimeout = 20 * time.Millisecond
@@ -135,9 +135,8 @@ func TestOrderDispatchGateTimeoutBackoffPreventsRethrash(t *testing.T) {
 	}
 	cityPath := t.TempDir() // must be stable across ticks so the store-key cache hits
 
-	// Tick 1 at now: gate times out, fail-closed. With the fix, lastRun is
-	// stamped to now so the cooldown trigger sees the order as "not due" on
-	// any tick within the 1m interval.
+	// Tick 1 at now: gate times out, fail-closed. With the fix, a gateBackoffUntil
+	// deadline is set so neither gate is reached on any tick within the backoff window.
 	ad.dispatch(context.Background(), cityPath, now)
 	ad.drain(context.Background())
 
@@ -149,8 +148,8 @@ func TestOrderDispatchGateTimeoutBackoffPreventsRethrash(t *testing.T) {
 		t.Fatal("gate should have been called on tick 1 (to produce the timeout)")
 	}
 
-	// Tick 2 at same now (still within the 1m cooldown): the cooldown trigger
-	// must see lastRun=now and return "not due", so the gate is never reached.
+	// Tick 2 at same now (still within the backoff window): gateBackoffActive
+	// must return true and skip the order before either gate is reached.
 	// Without the fix the gate would be queried again, timing out and adding
 	// another 8s of Dolt load per tick.
 	ad.dispatch(context.Background(), cityPath, now)
