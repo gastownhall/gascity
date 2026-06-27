@@ -117,7 +117,13 @@ type SlingDeps struct {
 	SP       runtime.Provider
 	Runner   SlingRunner
 	Store    beads.Store
-	StoreRef string
+	// GraphStore owns graph (workflow/v2) beads: the workflow molecule a sling
+	// materializes (root + steps + deps) and its graph-routing metadata. The
+	// source bead a workflow is launched from stays in Store (the work-class
+	// store). When nil, graph beads collapse onto Store — the single-store
+	// default — so a single-store caller behaves exactly as before the seam.
+	GraphStore beads.Store
+	StoreRef   string
 	// ValidationQuerier overrides Store for existence checks when a caller has
 	// already resolved the bead through a narrower view.
 	ValidationQuerier BeadQuerier
@@ -142,6 +148,21 @@ type SlingDeps struct {
 	// auto-injected workflow-finalize sink to the city dispatcher when the
 	// rig-local one has decayed, instead of a dead session.
 	ControlDispatcherRuntimeMissing func(qualifiedName string) bool
+}
+
+// graphStore returns the store that owns the graph (workflow/v2) beads this
+// sling materializes. It is the create-side seam for the workflow molecule:
+// InstantiateSlingFormula and doStartGraphWorkflow route graph reads, the
+// molecule create, and graph-routing metadata through it instead of reaching
+// for Store directly. When GraphStore is unset the graph class collapses onto
+// Store, so graphStore returns the exact same concrete store the pre-seam path
+// used — preserving the GraphApplyFor / HandlesFor / StorageCreateStore
+// optional-capability assertions the molecule create relies on.
+func (deps SlingDeps) graphStore() beads.Store {
+	if deps.GraphStore != nil {
+		return deps.GraphStore
+	}
+	return deps.Store
 }
 
 // graphrouteDeps projects the graph-routing subset of SlingDeps into
@@ -1263,17 +1284,18 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		}
 	}
 	SlingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
-	if err := graphroute.ApplyGraphRouting(recipe, &a, a.QualifiedName(), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, deps.Store, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
+	graphStore := deps.graphStore()
+	if err := graphroute.ApplyGraphRouting(recipe, &a, a.QualifiedName(), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, graphStore, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
 	privatizeAttachedRootOnlyWisp(recipe, sourceBeadID)
 	var replacedRootID string
 	if graphWorkflow {
-		if err := closeFailedGraphV2Roots(deps.Store, recipe); err != nil {
+		if err := closeFailedGraphV2Roots(graphStore, recipe); err != nil {
 			return nil, err
 		}
-		if existing, err := existingGraphV2Root(deps.Store, recipe); err != nil {
+		if existing, err := existingGraphV2Root(graphStore, recipe); err != nil {
 			return nil, err
 		} else if existing != nil {
 			if len(forceGraphV2Replace) > 0 && forceGraphV2Replace[0] {
@@ -1288,27 +1310,27 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 	var replacedSnapshots []sourceworkflow.WorkflowBeadSnapshot
 	if replacedRootID != "" {
 		var err error
-		replacedSnapshots, err = closeReplacedGraphV2Root(deps.Store, replacedRootID)
+		replacedSnapshots, err = closeReplacedGraphV2Root(graphStore, replacedRootID)
 		if err != nil {
 			return nil, err
 		}
 	}
-	result, err := molecule.Instantiate(ctx, deps.Store, recipe, opts)
+	result, err := molecule.Instantiate(ctx, graphStore, recipe, opts)
 	if err != nil {
 		SlingTracef("instantiate molecule-error formula=%s dur=%s err=%v", formulaName, time.Since(instantiateStart), err)
 		if len(replacedSnapshots) > 0 {
 			var rollbackErr error
-			if cleanupErr := closeFailedGraphV2Roots(deps.Store, recipe); cleanupErr != nil {
+			if cleanupErr := closeFailedGraphV2Roots(graphStore, recipe); cleanupErr != nil {
 				rollbackErr = errors.Join(rollbackErr, cleanupErr)
 			}
-			if restoreErr := sourceworkflow.RestoreWorkflowBeads(deps.Store, replacedSnapshots); restoreErr != nil {
+			if restoreErr := sourceworkflow.RestoreWorkflowBeads(graphStore, replacedSnapshots); restoreErr != nil {
 				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore replaced formulas v2 root %s: %w", replacedRootID, restoreErr))
 			}
 			if rollbackErr != nil {
 				return nil, errors.Join(err, rollbackErr)
 			}
 		} else if graphWorkflow {
-			if cleanupErr := closeFailedGraphV2Roots(deps.Store, recipe); cleanupErr != nil {
+			if cleanupErr := closeFailedGraphV2Roots(graphStore, recipe); cleanupErr != nil {
 				return nil, errors.Join(err, cleanupErr)
 			}
 		}

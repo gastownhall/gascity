@@ -645,15 +645,18 @@ func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method st
 
 	SlingTracef("workflow-start begin root=%s source=%s agent=%s method=%s", rootID, sourceBeadID, a.QualifiedName(), method)
 
-	if err := PromoteWorkflowLaunchBead(deps.Store, rootID); err != nil {
+	// The workflow root and its graph-routing metadata live in the graph store;
+	// the source bead it was launched from stays in the work store (deps.Store).
+	graphStore := deps.graphStore()
+	if err := PromoteWorkflowLaunchBead(graphStore, rootID); err != nil {
 		return result, fmt.Errorf("setting workflow root %s in_progress: %w", rootID, err)
 	}
 	if sourceBeadID != "" {
-		if err := deps.Store.SetMetadata(rootID, beadmeta.SourceBeadIDMetadataKey, sourceBeadID); err != nil {
+		if err := graphStore.SetMetadata(rootID, beadmeta.SourceBeadIDMetadataKey, sourceBeadID); err != nil {
 			return result, fmt.Errorf("setting gc.source_bead_id on workflow %s: %w", rootID, err)
 		}
 		if sourceStoreRef := strings.TrimSpace(deps.StoreRef); sourceStoreRef != "" {
-			if err := deps.Store.SetMetadata(rootID, sourceworkflow.SourceStoreRefMetadataKey, sourceStoreRef); err != nil {
+			if err := graphStore.SetMetadata(rootID, sourceworkflow.SourceStoreRefMetadataKey, sourceStoreRef); err != nil {
 				return result, fmt.Errorf("setting %s on workflow %s: %w", sourceworkflow.SourceStoreRefMetadataKey, rootID, err)
 			}
 		}

@@ -81,7 +81,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 	if itemFormula == "" {
 		return ControlResult{}, fmt.Errorf("%s: missing gc.drain_formula", bead.ID)
 	}
-	manifest, members, err := loadOrBuildDrainManifest(store, bead, parentConvoyID, itemFormula)
+	manifest, members, err := loadOrBuildDrainManifest(store, bead, parentConvoyID, itemFormula, opts)
 	if err != nil {
 		if errors.Is(err, errDrainLimitExceeded) {
 			scopeResult, scopeErr := reconcileClosedDrainScope(store, bead.ID, opts)
@@ -195,7 +195,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 	return ControlResult{Processed: true, Action: "drain-expanded", Created: totalCreated}, nil
 }
 
-func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID, itemFormula string) (drainManifest, []beads.Bead, error) {
+func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID, itemFormula string, opts ProcessOptions) (drainManifest, []beads.Bead, error) {
 	if strings.TrimSpace(bead.Metadata[drainManifestMetadataKey]) != "" {
 		manifest, err := parseDrainManifest(bead.Metadata[drainManifestMetadataKey])
 		if err != nil {
@@ -207,7 +207,7 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 		}
 		return manifest, members, nil
 	}
-	members, err := convoycore.Members(store, parentConvoyID, false)
+	members, err := convoycore.Members(store, parentConvoyID, false, opts.MemberStores...)
 	if err != nil {
 		return drainManifest{}, nil, fmt.Errorf("%s: loading convoy members for %s: %w", bead.ID, parentConvoyID, err)
 	}
