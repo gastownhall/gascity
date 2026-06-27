@@ -368,5 +368,3 @@ until validated, then defaults flipped.
   `internal/orders/triggers.go:~238-258`, `cmd/gc/session_reconciler.go` (idle/
   restart paths), `internal/beads/bdstore.go:~64` (`ExecCommandRunnerWithEnv`),
   `internal/beads/caching_store_reconcile.go`, `internal/beads/factory.go:42-150`.
-</content>
-</invoke>
