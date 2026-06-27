@@ -16,6 +16,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
@@ -144,34 +145,26 @@ func (s *Server) resolveStoreByConfiguredIDPrefix(id string) beads.Store {
 		return nil
 	}
 
-	var bestStore beads.Store
-	bestLen := -1
-	if prefix := strings.TrimSpace(config.EffectiveHQPrefix(cfg)); beadIDHasConfiguredPrefix(id, prefix) {
-		if cityStore := s.state.CityBeadStore(); cityStore != nil {
-			bestStore = cityStore
-			bestLen = len(prefix)
-		}
+	// Only stores that are actually loaded are candidates: a configured prefix
+	// whose store is missing must not win the slot, so a shorter loaded prefix
+	// can still own the id (and otherwise the id is left to the legacy scan).
+	candidates := make([]storeref.Candidate, 0, len(cfg.Rigs)+1)
+	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+		candidates = append(candidates, storeref.Candidate{
+			Prefix: strings.TrimSpace(config.EffectiveHQPrefix(cfg)),
+			Store:  cityStore,
+		})
 	}
 	for _, rig := range cfg.Rigs {
-		prefix := strings.TrimSpace(rig.EffectivePrefix())
-		if !beadIDHasConfiguredPrefix(id, prefix) || len(prefix) <= bestLen {
-			continue
+		if store := s.state.BeadStore(rig.Name); store != nil {
+			candidates = append(candidates, storeref.Candidate{
+				Prefix: strings.TrimSpace(rig.EffectivePrefix()),
+				Store:  store,
+			})
 		}
-		store := s.state.BeadStore(rig.Name)
-		if store == nil {
-			continue
-		}
-		bestStore = store
-		bestLen = len(prefix)
 	}
-	return bestStore
-}
-
-func beadIDHasConfiguredPrefix(id, prefix string) bool {
-	if prefix == "" {
-		return false
-	}
-	return id == prefix || strings.HasPrefix(id, prefix+"-")
+	store, _ := storeref.PrefixOwner(id, candidates, storeref.ExactOrHyphen)
+	return store
 }
 
 // resolveStoreByPrefix finds the store that owns a bead prefix by checking
