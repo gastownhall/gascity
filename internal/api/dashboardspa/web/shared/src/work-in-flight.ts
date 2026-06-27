@@ -28,8 +28,6 @@
  * session ids are hyphen-free after the prefix dash (`gc-335825`, `td-9abc`),
  * so this loses nothing real.
  */
-const ASSIGNEE_SESSION_ID_RX = /[-_/]((?:gc|td|th|[a-z]{4})-[a-z0-9]{1,32})$/;
-
 // A bare session handle (the assignee IS a session id, no role prefix). Same
 // alphabet as ASSIGNEE_SESSION_ID_RX but whole-string. NOT SESSION_ID_RE: that
 // validator permits internal hyphens in the body, which would let a composite
@@ -39,7 +37,17 @@ const ASSIGNEE_SESSION_ID_RX = /[-_/]((?:gc|td|th|[a-z]{4})-[a-z0-9]{1,32})$/;
 // numeric handle (`gc-335825`, `td-9abc`); a plain 4-letter-prefixed *role* like
 // `scix-worker` would otherwise match (`scix` prefix + `worker` body) and be
 // misparsed as a bare session id. Requiring a digit keeps roles out.
-const BARE_SESSION_ID_RX = /^(?:gc|td|th|[a-z]{4})-[a-z0-9]*[0-9][a-z0-9]*$/;
+function isBareSessionId(value: string): boolean {
+  const dash = value.indexOf('-');
+  if (dash <= 0) return false;
+  const prefix = value.slice(0, dash);
+  const body = value.slice(dash + 1);
+  if (!body || !/^[a-z0-9]+$/.test(body)) return false;
+  if (!(prefix === 'gc' || prefix === 'td' || prefix === 'th' || /^[a-z]{4}$/.test(prefix))) {
+    return false;
+  }
+  return /[0-9]/.test(body);
+}
 
 export interface ParsedAssignee {
   /** The extracted live session id (e.g. `gc-335825`), or undefined when the
@@ -62,17 +70,18 @@ export function parseAssignee(assignee: string): ParsedAssignee {
   const trimmed = assignee.trim();
   // Bare handle: the assignee IS a session id with no role prefix. Name the row
   // with the id itself so it still reads.
-  if (BARE_SESSION_ID_RX.test(trimmed)) {
+  if (isBareSessionId(trimmed)) {
     return { role: trimmed, sessionId: trimmed };
   }
-  const match = ASSIGNEE_SESSION_ID_RX.exec(trimmed);
-  const sessionId = match?.[1];
-  if (match === null || sessionId === undefined) {
-    return { role: trimmed };
+  for (let i = trimmed.length - 1; i >= 0; i--) {
+    const ch = trimmed.charAt(i);
+    if (ch !== '-' && ch !== '_' && ch !== '/') continue;
+    const sessionId = trimmed.slice(i + 1);
+    if (!sessionId) continue;
+    if (!/^(?:gc|td|th|[a-z]{4})-[a-z0-9]{1,32}$/.test(sessionId)) continue;
+    return { role: trimmed.slice(0, i), sessionId };
   }
-  // Strip the matched `<sep>gc-…` tail to recover the role. The match starts at
-  // the separator boundary, so slice up to match.index.
-  return { role: trimmed.slice(0, match.index), sessionId };
+  return { role: trimmed };
 }
 
 /**

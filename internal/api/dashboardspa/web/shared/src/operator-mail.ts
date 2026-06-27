@@ -47,7 +47,9 @@ const MAYOR = 'mayor';
 
 export function basename(path: string | null | undefined): string {
   if (!path) return '';
-  const trimmed = path.replace(/\/+$/, '');
+  let end = path.length;
+  while (end > 0 && path.charCodeAt(end - 1) === 47) end--;
+  const trimmed = path.slice(0, end);
   const seg = trimmed.slice(trimmed.lastIndexOf('/') + 1);
   return seg || trimmed;
 }
@@ -92,7 +94,7 @@ export function selectOperatorActionableUnread<T extends OperatorMailItem>(
 export function rigLabel(rig: string | null | undefined): string {
   const base = basename(rig);
   if (!base) return ORCHESTRATION;
-  return base.replace(/_/g, '-').toLowerCase();
+  return base.split('_').join('-').toLowerCase();
 }
 
 /**
