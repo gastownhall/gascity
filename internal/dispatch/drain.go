@@ -297,20 +297,27 @@ func drainMemberProbeSet(store beads.Store, opts ProcessOptions) []beads.Store {
 }
 
 // drainMemberOwningStore returns the store that owns memberID, probing the
-// primary graph store then the work-class member tail. When no probed store has
-// the member (every probe a clean not-found), it falls back to the primary
+// primary graph store then the work-class member tail and returning the first
+// store whose Get succeeds. Because ids are prefix-disjoint across stores the
+// member lives in exactly one, so the first hit is authoritative. A store's
+// not-found probe is skipped; any other error is returned. When no probed store
+// has the member (every probe a clean not-found), it falls back to the primary
 // store so reservation reads/writes preserve their pre-seam not-found handling
 // (reserveDrainMember/releaseDrainReservations treat ErrNotFound as a no-op).
 func drainMemberOwningStore(store beads.Store, memberID string, opts ProcessOptions) (beads.Store, error) {
-	probe := drainMemberProbeSet(store, opts)
-	_, idx, err := storeref.ResolveOwner(memberID, probe)
-	if err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
-			return store, nil
+	for _, probe := range drainMemberProbeSet(store, opts) {
+		if probe == nil {
+			continue
 		}
-		return nil, err
+		if _, err := probe.Get(memberID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		return probe, nil
 	}
-	return probe[idx], nil
+	return store, nil
 }
 
 func loadDrainManifestMembers(store beads.Store, controlID string, manifest drainManifest, opts ProcessOptions) ([]beads.Bead, error) {

@@ -30,7 +30,6 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -561,20 +560,29 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 	// the raw cs fields rather than the class accessors (graphBeadStore /
 	// workBeadStores) because this runs under cs.mu and those accessors take the
 	// same lock.
-	candidates := make([]storeref.Candidate, 0, len(cs.cfg.Rigs)+1)
-	// Graph/non-work class candidate: the city store.
-	candidates = append(candidates, storeref.Candidate{
-		Prefix: config.EffectiveHQPrefix(cs.cfg),
-		Store:  cs.cityBeadStore,
-	})
-	for _, rig := range cs.cfg.Rigs {
-		// Work class candidate: this rig's store.
-		candidates = append(candidates, storeref.Candidate{
-			Prefix: rig.EffectivePrefix(),
-			Store:  cs.beadStores[rig.Name],
-		})
+	//
+	// The scan is a longest-prefix, namespace-only ("prefix-") match over the
+	// configured prefixes, returning known=true when a configured prefix owns id
+	// even if that prefix's store is not loaded (matchedStore stays nil). That
+	// owned-but-unloaded signal is the call-site contract — the caller suppresses
+	// the all-stores fallback on known — so the scan resolves against the
+	// configured prefixes inline rather than each store's own IDPrefix.
+	var matchedStore beads.Store
+	matchedLen := -1
+	match := func(prefix string, store beads.Store) {
+		if prefix == "" || !strings.HasPrefix(id, prefix+"-") {
+			return
+		}
+		if len(prefix) > matchedLen {
+			matchedLen = len(prefix)
+			matchedStore = store
+		}
 	}
-	return storeref.PrefixOwner(id, candidates, storeref.HyphenOnly)
+	match(config.EffectiveHQPrefix(cs.cfg), cs.cityBeadStore)
+	for _, rig := range cs.cfg.Rigs {
+		match(rig.EffectivePrefix(), cs.beadStores[rig.Name])
+	}
+	return matchedStore, matchedLen >= 0
 }
 
 func beadEventID(evt events.Event) string {

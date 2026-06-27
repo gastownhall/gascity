@@ -17,7 +17,6 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
-	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
@@ -157,23 +156,43 @@ func (s *Server) resolveStoreByConfiguredIDPrefix(id string) beads.Store {
 	// Only stores that are actually loaded are candidates: a configured prefix
 	// whose store is missing must not win the slot, so a shorter loaded prefix
 	// can still own the id (and otherwise the id is left to the legacy scan).
-	candidates := make([]storeref.Candidate, 0, len(cfg.Rigs)+1)
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
-		candidates = append(candidates, storeref.Candidate{
-			Prefix: strings.TrimSpace(config.EffectiveHQPrefix(cfg)),
-			Store:  cityStore,
-		})
-	}
-	for _, rig := range cfg.Rigs {
-		if store := s.state.BeadStore(rig.Name); store != nil {
-			candidates = append(candidates, storeref.Candidate{
-				Prefix: strings.TrimSpace(rig.EffectivePrefix()),
-				Store:  store,
-			})
+	//
+	// This caller routes on the configured (rig/HQ) prefixes with a
+	// longest-prefix, exact-or-hyphen match (beadIDHasConfiguredPrefix). It
+	// resolves against the configured prefixes (not each store's own IDPrefix)
+	// and requires the longest configured prefix to win, so it keeps the scan
+	// inline rather than using the namespace-only, first-match by-id resolver.
+	var bestStore beads.Store
+	bestLen := -1
+	if prefix := strings.TrimSpace(config.EffectiveHQPrefix(cfg)); beadIDHasConfiguredPrefix(id, prefix) {
+		if cityStore := s.state.CityBeadStore(); cityStore != nil {
+			bestStore = cityStore
+			bestLen = len(prefix)
 		}
 	}
-	store, _ := storeref.PrefixOwner(id, candidates, storeref.ExactOrHyphen)
-	return store
+	for _, rig := range cfg.Rigs {
+		prefix := strings.TrimSpace(rig.EffectivePrefix())
+		if !beadIDHasConfiguredPrefix(id, prefix) || len(prefix) <= bestLen {
+			continue
+		}
+		store := s.state.BeadStore(rig.Name)
+		if store == nil {
+			continue
+		}
+		bestStore = store
+		bestLen = len(prefix)
+	}
+	return bestStore
+}
+
+// beadIDHasConfiguredPrefix reports whether id falls under prefix, matching a
+// bare id == prefix exactly or the "prefix-" namespace. This is the
+// exact-or-hyphen match the configured-prefix resolver uses.
+func beadIDHasConfiguredPrefix(id, prefix string) bool {
+	if prefix == "" {
+		return false
+	}
+	return id == prefix || strings.HasPrefix(id, prefix+"-")
 }
 
 // resolveStoreByPrefix finds the store that owns a bead prefix by checking
