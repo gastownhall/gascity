@@ -42,6 +42,9 @@ func isComputeTerminalState(state string) bool {
 // when the interval was already recorded. Sink and marker write failures are
 // reported through logf (when non-nil) rather than dropped silently.
 //
+// SessionID is stamped from bead.ID so compute facts carry the same session
+// bead join key as model facts.
+//
 // wall_seconds is measured from awake_started_at to slept_at when present (the
 // graceful-sleep end), else to now (best-effort for other terminal transitions).
 //

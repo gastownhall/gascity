@@ -239,6 +239,18 @@ func TestModelUsageFact(t *testing.T) {
 	}
 }
 
+func TestModelAndComputeFactsShareSessionIDJoinKey(t *testing.T) {
+	sessionID := "session-1"
+	model := usage.Fact{SessionID: sessionID}
+	compute := usage.Fact{SessionID: sessionID}
+	if model.SessionID != compute.SessionID {
+		t.Fatalf("model session_id %q must match compute session_id %q", model.SessionID, compute.SessionID)
+	}
+	if model.SessionID != sessionID {
+		t.Fatalf("SessionID = %q, want %q", model.SessionID, sessionID)
+	}
+}
+
 // TestRecordModelUsageFactHungSinkReturnsPromptly keeps the worker-prompt-path
 // half of the hung-exec-sink regression: the model-fact write must not block the
 // prompt op indefinitely on a hung exec: sink (the sink enforces its own

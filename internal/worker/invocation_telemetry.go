@@ -196,9 +196,9 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // run's model and compute facts carry the same RunID and group together in
 // gc costs. The session bead id is carried verbatim as SessionID (the join key to
 // the manifold spend plane's EIA session_id and to recall transcripts), distinct
-// from the resolved RunID and from Worker (the session name). StepID stays unset:
-// the acting work bead is not recoverable at this per-session seam (see the
-// gc.active_work_bead future option in engdocs/design/usage-facts-v0.md). The dedup identity is the invocation's provider message id (or the
+// from the resolved RunID and from Worker (the session name). StepID carries the
+// session's gc.active_work_bead when present, and is empty only for ad-hoc,
+// manual, or idle sessions. The dedup identity is the invocation's provider message id (or the
 // transcript entry uuid when none), so the best-effort cursor races noted on
 // recordInvocationTelemetry collapse a re-recorded invocation to one fact at the
 // sink via IdempotencyKey. Unpriced is true exactly when the pricing registry
