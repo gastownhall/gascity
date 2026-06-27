@@ -515,10 +515,16 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	if cs.eventProv != nil {
 		rec = cs.eventProv
 	}
+	// The just-closed bead is read from its owning store (store), but its
+	// molecule and wisp GRAPH parents live in the graph-class store, so the
+	// graph-root walks resolve through graphBeadStore() rather than assuming
+	// co-residence with the closed bead. On a single-store city graphBeadStore()
+	// returns the same store, so this is identity today.
+	graphStore := cs.graphBeadStore()
 	beadCloseAutocloseDispatch(func() {
 		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
-		doWispAutocloseWith(store, beadID, os.Stderr)
-		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr)
+		doWispAutocloseWith(store, beadID, os.Stderr, graphStore)
+		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore)
 	})
 }
 

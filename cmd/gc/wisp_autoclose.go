@@ -72,23 +72,35 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 // hook fires for closed and ephemeral-tier beads that cached or tier-narrow
 // raw reads can miss, and an attachment missed here outlives its parent — the
 // leak class this hook exists to drain.
-func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
+// doWispAutocloseWith reads the just-closed bead from store (the store that owns
+// it) and resolves/closes its attached molecule/workflow roots through the
+// graph-class store. A closed work bead in a rig store can own graph-workflow
+// attachments that live in the graph store, so the attachment collection,
+// parked-checkpoint guard, subtree close, and spec-sidecar close all run on the
+// graph store. The graph store is supplied as an optional trailing argument;
+// when omitted it collapses to store, so single-store CLI and test callers
+// behave exactly as before the per-class seam.
+func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, graphStoreOpt ...beads.Store) {
+	graphStore := store
+	if len(graphStoreOpt) > 0 && graphStoreOpt[0] != nil {
+		graphStore = graphStoreOpt[0]
+	}
 	parent, err := beads.HandlesFor(store).Live.Get(beadID)
 	if err != nil {
 		return
 	}
-	attachments, err := collectAttachedBeads(parent, store, beads.HandlesFor(store).Live)
+	attachments, err := collectAttachedBeads(parent, graphStore, beads.HandlesFor(graphStore).Live)
 	seen := make(map[string]bool, len(attachments))
 	for _, attached := range attachments {
 		seen[attached.ID] = true
 	}
-	attachments = append(attachments, collectInputConvoyWorkflowRoots(store, parent, seen)...)
+	attachments = append(attachments, collectInputConvoyWorkflowRoots(graphStore, parent, seen)...)
 	if err == nil || len(attachments) > 0 {
 		for _, attached := range attachments {
-			if attachedMoleculeIsParked(store, attached) {
+			if attachedMoleculeIsParked(graphStore, attached) {
 				continue
 			}
-			closed, err := closeAttachedWispSubtree(store, attached)
+			closed, err := closeAttachedWispSubtree(graphStore, attached)
 			if err != nil || closed == 0 {
 				continue
 			}
@@ -98,7 +110,7 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
 	if parent.Status != "closed" || !sourceworkflow.IsWorkflowRoot(parent) {
 		return
 	}
-	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(store, parent.ID, "")
+	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(graphStore, parent.ID, "")
 	if err != nil || closed == 0 {
 		return
 	}

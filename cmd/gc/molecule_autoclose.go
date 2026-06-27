@@ -112,7 +112,19 @@ func autocloseStoreRef(storeRoot, cityPath string) string {
 // predate the metadata convention. All errors are silently swallowed;
 // this is called from a bd hook script and must not fail loudly. See
 // gastownhall/gascity#1039.
-func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer) {
+// doMoleculeAutocloseWith reads the just-closed bead from store (the store that
+// owns it) and resolves/closes its molecule or graph-workflow root through the
+// graph-class store. A closed bead can be a work/source bead in a rig store
+// while the molecule root it belongs to lives in the graph store, so the
+// source-bead reverse scan and the root walk run on the graph store. The graph
+// store is supplied as an optional trailing argument; when omitted it collapses
+// to store, so single-store CLI and test callers behave exactly as before the
+// per-class seam.
+func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer, graphStoreOpt ...beads.Store) {
+	graphStore := store
+	if len(graphStoreOpt) > 0 && graphStoreOpt[0] != nil {
+		graphStore = graphStoreOpt[0]
+	}
 	bead, err := store.Get(beadID)
 	if err != nil {
 		return
@@ -127,7 +139,7 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 	// orphans and is re-routed to a fresh worker indefinitely. Reverse-
 	// resolve any live workflow roots whose source bead is this bead and
 	// close them once their own subtree is terminal.
-	autocloseRootsForSourceBead(store, storeRef, rec, beadID, stdout)
+	autocloseRootsForSourceBead(graphStore, storeRef, rec, beadID, stdout)
 
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" {
@@ -139,18 +151,18 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 		if bead.Type != "step" || bead.ParentID == "" {
 			return
 		}
-		parent, err := store.Get(bead.ParentID)
+		parent, err := graphStore.Get(bead.ParentID)
 		if err != nil {
 			return
 		}
-		autocloseMoleculeIfComplete(store, rec, parent, stdout)
+		autocloseMoleculeIfComplete(graphStore, rec, parent, stdout)
 		return
 	}
-	root, err := store.Get(rootID)
+	root, err := graphStore.Get(rootID)
 	if err != nil {
 		return
 	}
-	autocloseMoleculeIfComplete(store, rec, root, stdout)
+	autocloseMoleculeIfComplete(graphStore, rec, root, stdout)
 }
 
 func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol beads.Bead, stdout io.Writer) {
