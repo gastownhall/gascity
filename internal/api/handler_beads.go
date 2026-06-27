@@ -13,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
@@ -117,10 +116,8 @@ func (s *Server) findStore(rig string) beads.Store {
 // The result is the per-class by-id candidate set: a successful prefix/route
 // match returns the single store that owns the ID's namespace (which is already
 // the bead's class+rig store), and the unrouted fallback leads with the
-// graph-class store ahead of the per-rig work stores. Routing the lead fallback
-// entry through classStoreFor makes the class seam explicit without changing the
-// resolved slice — on a single-store city the graph-class store and the city
-// store are the same value, so the candidate ordering is byte-identical.
+// city/HQ store ahead of the per-rig work stores. A graph-relocated city adds a
+// class-prefix arm so graph-class ids reach the dedicated graph store.
 func (s *Server) beadStoresForID(id string) []beads.Store {
 	id = strings.TrimSpace(id)
 	if store := s.resolveStoreByConfiguredIDPrefix(id); store != nil {
@@ -132,11 +129,31 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 		}
 	}
 
+	// Class-prefix arm: a graph-relocated city keeps graph-class beads (reserved
+	// id-prefix "gcg") in a dedicated graph store that is NOT reachable via a
+	// rig/HQ prefix or a routes.jsonl entry, so a graph-class id would otherwise
+	// fall through to the candidate scan and miss. Return [graph, work] —
+	// graph-first (prefix-owner first) — so the per-store Get-then-mutate loop in
+	// the by-id handlers federates the graph store ahead of work and pins it on
+	// the first probe. Skipped for a default (non-relocated) city, where
+	// GraphBeadStore() == CityBeadStore(): the arm never fires and this path stays
+	// byte-identical.
+	if graph := s.state.GraphBeadStore(); graph != nil {
+		if city := s.state.CityBeadStore(); graph != city {
+			if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && beadIDHasConfiguredPrefix(id, prefix) {
+				if city != nil {
+					return []beads.Store{graph, city}
+				}
+				return []beads.Store{graph}
+			}
+		}
+	}
+
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
 	candidates := make([]beads.Store, 0, len(rigNames)+1)
-	if graphStore := classStoreFor(s.state, coordclass.ClassGraph, ""); graphStore != nil {
-		candidates = append(candidates, graphStore)
+	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+		candidates = append(candidates, cityStore)
 	}
 	for _, rigName := range rigNames {
 		candidates = append(candidates, stores[rigName])

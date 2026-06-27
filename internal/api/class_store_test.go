@@ -4,67 +4,56 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
-// allCoordClasses is the full set of coordination classes the seam must route.
-var allCoordClasses = coordclass.Classes()
-
-// TestClassStoreForIsIdentity pins the P1 invariant: on a single-store city
-// every per-class accessor returns the exact same concrete store the caller
-// uses today. Non-work classes resolve to CityBeadStore(); work resolves to
-// CityBeadStore() with no rig and to BeadStore(rig) with a rig.
-func TestClassStoreForIsIdentity(t *testing.T) {
+// TestBeadStoresForIDDefaultBackendIsCityLed pins the single-store invariant:
+// when the graph class is NOT relocated (GraphBeadStore() == CityBeadStore()),
+// the class-prefix arm never fires, so the unrouted by-id candidate set leads
+// with the city store ahead of the per-rig work stores — byte-identical to the
+// pre-seam ordering.
+func TestBeadStoresForIDDefaultBackendIsCityLed(t *testing.T) {
 	st := newFakeState(t)
 	city := beads.NewMemStore()
 	st.cityBeadStore = city
-
-	for _, class := range allCoordClasses {
-		if got := classStoreFor(st, class, ""); !sameStore(got, city) {
-			t.Errorf("classStoreFor(%s, no rig) = %p, want CityBeadStore %p", class, got, city)
-		}
-	}
-
-	// Work with a rig resolves to that rig's store; every other class ignores
-	// the rig and still resolves to the city store (today's behavior).
-	rigStore := st.stores["myrig"]
-	if got := classStoreFor(st, coordclass.ClassWork, "myrig"); !sameStore(got, rigStore) {
-		t.Errorf("classStoreFor(work, myrig) = %p, want BeadStore(myrig) %p", got, rigStore)
-	}
-	for _, class := range allCoordClasses {
-		if class == coordclass.ClassWork {
-			continue
-		}
-		if got := classStoreFor(st, class, "myrig"); !sameStore(got, city) {
-			t.Errorf("classStoreFor(%s, myrig) = %p, want CityBeadStore %p", class, got, city)
-		}
-	}
-}
-
-// TestClassBeadStoresForIDDedupesToSingleStore pins that prepending the class
-// store collapses to one entry when the class store is already the sole by-id
-// candidate — the single-store identity case.
-func TestClassBeadStoresForIDDedupesToSingleStore(t *testing.T) {
-	st := newFakeState(t)
-	city := beads.NewMemStore()
-	st.cityBeadStore = city
-	// Drop the rig store so CityBeadStore is the only by-id candidate.
+	// Drop the rig store so the city store is the only by-id candidate.
 	st.stores = map[string]beads.Store{}
 	st.cfg.Rigs = nil
-	srv := &Server{state: st}
+	s := New(st)
 
-	got := srv.classBeadStoresForID(coordclass.ClassSessions, "", "sess-1")
+	got := s.beadStoresForID("gcg-1")
 	if len(got) != 1 {
-		t.Fatalf("classBeadStoresForID returned %d stores, want 1 (dedup); got %v", len(got), got)
+		t.Fatalf("beadStoresForID returned %d stores, want 1 (city-led, no graph arm); got %v", len(got), got)
 	}
-	if !sameStore(got[0], city) {
-		t.Errorf("classBeadStoresForID[0] = %p, want CityBeadStore %p", got[0], city)
+	if got[0] != city {
+		t.Errorf("beadStoresForID[0] = %p, want CityBeadStore %p", got[0], city)
 	}
 }
 
-// sameStore reports pointer identity between two stores.
-func sameStore(a, b beads.Store) bool {
-	ka, oka := storeIdentityKey(a)
-	kb, okb := storeIdentityKey(b)
-	return oka && okb && ka == kb
+// TestBeadStoresForIDClassAwareGraphArm pins the relocated-graph behavior: with a
+// DISTINCT dedicated graph store, a graph-class id (reserved prefix "gcg") that is
+// not reachable via a rig/HQ prefix resolves to [graph, work] — graph-first — so
+// the by-id Get-then-mutate handler loop pins the graph store on the first probe.
+// On a single-store city (graph == city) the arm is skipped, so this path stays
+// byte-identical there (covered by TestBeadStoresForIDDefaultBackendIsCityLed).
+func TestBeadStoresForIDClassAwareGraphArm(t *testing.T) {
+	work := beads.NewMemStore()
+	graph := beads.NewMemStore()
+
+	st := newFakeState(t)
+	st.cityBeadStore = work   // plain work store
+	st.graphBeadStore = graph // dedicated, distinct graph store
+	st.stores = nil
+	st.cfg.Rigs = nil
+
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatalf("ReservedClassPrefix(graph) returned ok=false; expected a reserved prefix")
+	}
+	s := New(st)
+
+	got := s.beadStoresForID(prefix + "-1")
+	if len(got) != 2 || got[0] != s.state.GraphBeadStore() || got[1] != s.state.CityBeadStore() {
+		t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want [graph, work]", prefix, got, len(got))
+	}
 }
