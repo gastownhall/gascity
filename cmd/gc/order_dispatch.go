@@ -408,7 +408,7 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 	return &memoryOrderDispatcher{
 		aa: auto,
 		storeFn: func(target execStoreTarget) (beads.Store, error) {
-			return openStoreAtForCity(target.ScopeRoot, cityPath)
+			return resolveClassStore(coordclass.ClassOrderTracking, target.ScopeRoot, cityPath)
 		},
 		ep:                   ep,
 		execRun:              shellExecRunner,
