@@ -13,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
@@ -641,7 +640,7 @@ conflicting live workflow from the same source is an error.`,
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
-			store, err := resolveClassStore(coordclass.ClassGraph, scope.storeRoot, cityPath)
+			store, err := openStoreAtForCity(scope.storeRoot, cityPath)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
@@ -1142,7 +1141,7 @@ since it was spawned.`,
 				return err
 			}
 
-			store, err := resolveClassStore(coordclass.ClassGraph, scope.storeRoot, cityPath)
+			store, err := openStoreAtForCity(scope.storeRoot, cityPath)
 			if err != nil {
 				return err
 			}

@@ -17,7 +17,6 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -1351,7 +1350,7 @@ func tryOpenCityStore() (beads.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return resolveClassStore(coordclass.ClassMessaging, cityPath, cityPath)
+	return openStoreAtForCity(cityPath, cityPath)
 }
 
 func resolveMailAddressForCommand(identifier string, stderr io.Writer, cmdName string) (string, bool) {
@@ -1692,7 +1691,7 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	cityPath, err := resolveCity()
 	if err == nil {
 		cfg, _ = loadCityConfig(cityPath, stderr)
-		store, err = resolveClassStore(coordclass.ClassMessaging, cityPath, cityPath)
+		store, err = openStoreAtForCity(cityPath, cityPath)
 	}
 	// Narrower than isStorelessMailProvider: exec: providers can legitimately
 	// run without a city store, but fake/fail still require one for alias
@@ -2160,7 +2159,7 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 			cityPath, err = resolveCity()
 			if err == nil {
 				cfg, _ = loadCityConfig(cityPath, stderr)
-				store, err = resolveClassStore(coordclass.ClassMessaging, cityPath, cityPath)
+				store, err = openStoreAtForCity(cityPath, cityPath)
 			}
 			if err != nil {
 				notifySetupErr = err

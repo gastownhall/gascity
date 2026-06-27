@@ -9,7 +9,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/spf13/cobra"
 )
 
@@ -103,7 +102,7 @@ func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
 		cfg, cfgErr := loadCityConfig(cityPath, stderr)
 		if cfgErr == nil {
 			if storeDir := slingDirForBead(cfg, cityPath, args[0]); storeDir != cityPath {
-				store, err := resolveClassStore(coordclass.ClassGraph, storeDir, cityPath)
+				store, err := openStoreAtForCity(storeDir, cityPath)
 				if err != nil {
 					fmt.Fprintf(stderr, "gc graph: %v\n", err)                      //nolint:errcheck // best-effort stderr
 					fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
@@ -114,7 +113,7 @@ func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
 		}
 	}
 
-	store, err := resolveClassStore(coordclass.ClassGraph, cityPath, cityPath)
+	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc graph: %v\n", err)                      //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr

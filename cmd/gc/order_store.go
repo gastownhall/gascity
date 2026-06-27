@@ -14,7 +14,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -49,7 +48,7 @@ func openCityOrderStore(stderr io.Writer, cmdName string) (beads.Store, int) {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	store, err := resolveClassStore(coordclass.ClassOrders, cityPath, cityPath)
+	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
@@ -64,7 +63,7 @@ func openOrderStoreForOrder(cityPath string, cfg *config.City, a orders.Order, s
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	store, err := resolveClassStore(coordclass.ClassOrders, target.ScopeRoot, cityPath)
+	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
@@ -484,7 +483,7 @@ func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresRes
 		if store, ok := stores[key]; ok {
 			return store, nil
 		}
-		store, err := resolveClassStore(coordclass.ClassOrders, target.ScopeRoot, cityPath)
+		store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
 		if err != nil {
 			return nil, err
 		}
@@ -549,7 +548,7 @@ func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City,
 		targets = filtered
 	}
 	return orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
-		return resolveClassStore(coordclass.ClassOrders, sweepTarget.target.ScopeRoot, cityPath)
+		return openStoreAtForCity(sweepTarget.target.ScopeRoot, cityPath)
 	})
 }
 
@@ -584,7 +583,7 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 		if store, ok := stores[key]; ok {
 			return store, nil
 		}
-		store, err := resolveClassStore(coordclass.ClassOrders, target.ScopeRoot, cityPath)
+		store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
 		if err != nil {
 			return nil, err
 		}

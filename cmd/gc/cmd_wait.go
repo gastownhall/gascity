@@ -16,7 +16,6 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -391,7 +390,7 @@ func renderWaitListFromAPI(cityPath string, cr api.CachedRead[[]beads.Bead], sta
 }
 
 func doWaitListFallback(cityPath, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	store, err := resolveClassStore(coordclass.ClassSessions, cityPath, cityPath)
+	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "store_open_failed", fmt.Sprintf("gc wait list: %v", err), 1)
@@ -506,7 +505,7 @@ func renderWaitInspectFromAPI(cityPath string, cr api.CachedRead[beads.Bead], wa
 }
 
 func doWaitInspectFallback(cityPath, waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	store, err := resolveClassStore(coordclass.ClassSessions, cityPath, cityPath)
+	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "store_open_failed", fmt.Sprintf("gc wait inspect: %v", err), 1)
