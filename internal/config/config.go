@@ -1135,6 +1135,18 @@ func (r *Rig) EffectivePrefix() string {
 	return DeriveBeadsPrefix(r.Name)
 }
 
+// Coordination class names, mirroring coordclass.Class.String(). They are part of
+// the [beads.classes.<name>] config contract and must not change without a
+// migration.
+const (
+	BeadClassWork      = "work"
+	BeadClassGraph     = "graph"
+	BeadClassMessaging = "messaging"
+	BeadClassSessions  = "sessions"
+	BeadClassOrders    = "orders"
+	BeadClassNudges    = "nudges"
+)
+
 // EffectiveDefaultBranch returns the rig's recorded default branch, or the
 // empty string if none is set. Callers should fall back to a runtime probe
 // (e.g., git symbolic-ref) when this returns "".
