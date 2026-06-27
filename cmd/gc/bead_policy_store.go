@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 const (
@@ -180,7 +181,7 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
 	if rootID := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" {
-		root, err := s.createTarget(coordclass.ClassWisp).Get(rootID)
+		root, err := s.createTarget(coordclass.ClassGraph).Get(rootID)
 		if err == nil && policyNameForBead(root) == beadPolicyWisp {
 			return beadPolicyWisp, storageFromPersistedWispRoot(root)
 		}
@@ -207,9 +208,8 @@ func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.G
 	if plan == nil {
 		return s.graphApplierFor(coordclass.ClassWork).ApplyGraphPlan(ctx, plan)
 	}
-	class := coordclass.ClassifyGraphPlan(plan)
-	applier := s.graphApplierFor(class)
-	policyName := string(class)
+	applier := s.graphApplierFor(coordclass.ClassifyGraphPlan(plan))
+	policyName := policyNameForGraphPlan(plan)
 	if policyName == "" {
 		return applier.ApplyGraphPlan(ctx, plan)
 	}
@@ -220,8 +220,70 @@ func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.G
 	return applier.ApplyGraphPlan(ctx, plan)
 }
 
+// policyNameForGraphPlan returns the storage-tier policy name for a graph-apply
+// plan: wisp if any node looks like a wisp, then workflow if any node looks like
+// a workflow, else "" (default work, no storage policy). This is the fine-grained
+// tier classifier, kept local to cmd/gc and distinct from coordclass.Classify,
+// which decides only store routing. It is the verbatim pre-lift classifier.
+func policyNameForGraphPlan(plan *beads.GraphApplyPlan) string {
+	for _, node := range plan.Nodes {
+		if isWispPolicyMetadata(node.Metadata) || hasBeadLabel(node.Labels, "gc:wisp") || hasBeadLabel(node.Labels, "wisp") {
+			return beadPolicyWisp
+		}
+	}
+	for _, node := range plan.Nodes {
+		if isWorkflowPolicyMetadata(node.Metadata) || isWorkflowPolicyMetadata(node.MetadataRefs) {
+			return beadPolicyWorkflow
+		}
+	}
+	return ""
+}
+
+// policyNameForBead returns the storage-tier policy name for a bead, in the same
+// precedence the pre-lift classifier used (wisp -> order_tracking -> session ->
+// wait -> nudge -> workflow -> ""). This is the fine-grained tier classifier,
+// kept local to cmd/gc and distinct from coordclass.Classify, which decides only
+// store routing: the tier mapping (effectiveBeadStorage / defaultBeadStorage) is
+// keyed on these names, not on the coordination class.
 func policyNameForBead(b beads.Bead) string {
-	return string(coordclass.Classify(b))
+	switch {
+	case isWispPolicyMetadata(b.Metadata) || b.Type == "wisp" || hasBeadLabel(b.Labels, "gc:wisp") || hasBeadLabel(b.Labels, "wisp"):
+		return beadPolicyWisp
+	case hasBeadLabel(b.Labels, labelOrderTracking):
+		return beadPolicyOrderTracking
+	case hasBeadLabel(b.Labels, session.LabelSession) || b.Type == session.BeadType:
+		return beadPolicySession
+	case hasBeadLabel(b.Labels, session.WaitBeadLabel):
+		return beadPolicyWait
+	case hasBeadLabel(b.Labels, nudgeBeadLabel):
+		return beadPolicyNudge
+	case isWorkflowPolicyMetadata(b.Metadata):
+		return beadPolicyWorkflow
+	default:
+		return ""
+	}
+}
+
+func isWispPolicyMetadata(metadata map[string]string) bool {
+	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWisp
+}
+
+func isWorkflowPolicyMetadata(metadata map[string]string) bool {
+	if metadata == nil {
+		return false
+	}
+	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow ||
+		metadata[beadmeta.FormulaContractMetadataKey] == beadmeta.FormulaContractGraphV2 ||
+		strings.TrimSpace(metadata[beadmeta.RootBeadIDMetadataKey]) != ""
+}
+
+func hasBeadLabel(labels []string, label string) bool {
+	for _, l := range labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
 }
 
 func effectiveBeadStorage(cfg *config.City, policyName string) string {

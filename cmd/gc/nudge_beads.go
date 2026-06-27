@@ -14,10 +14,10 @@ import (
 
 const (
 	nudgeBeadType = "chore"
-	// nudgeBeadLabel re-aliases the canonical nudge-bead label, which moved
-	// to coordclass so the bead classifier can read it without importing
-	// cmd/gc. Existing string references stay valid.
-	nudgeBeadLabel   = coordclass.MarkerNudgeLabel
+	// nudgeBeadLabel is the label applied to queued-nudge beads. coordclass
+	// mirrors this string privately (as labelNudge) for store routing; the two
+	// must stay in sync.
+	nudgeBeadLabel   = "gc:nudge"
 	nudgeLookupLimit = nudgequeue.NudgeLookupLimit
 
 	// nudgeEnqueueRollbackCloseReason is the close_reason metadata value
@@ -39,7 +39,7 @@ type nudgeReference = nudgequeue.Reference
 // per-tick poll helpers close every store they open. Tests that replace this
 // package variable must stay serial; do not use t.Parallel in those tests.
 var openNudgeBeadStore = func(cityPath string) beads.Store {
-	store, err := resolveClassStore(coordclass.ClassNudge, cityPath, cityPath)
+	store, err := resolveClassStore(coordclass.ClassNudges, cityPath, cityPath)
 	if err != nil {
 		return nil
 	}

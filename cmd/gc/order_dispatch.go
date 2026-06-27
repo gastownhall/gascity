@@ -36,10 +36,10 @@ import (
 )
 
 const (
-	// labelOrderTracking re-aliases the canonical order-tracking label,
-	// which moved to coordclass so the bead classifier can read it without
-	// importing cmd/gc. Existing string references stay valid.
-	labelOrderTracking    = coordclass.MarkerOrderTrackingLabel
+	// labelOrderTracking is the label applied to order-dispatch tracking beads.
+	// coordclass mirrors this string privately (as labelOrderTracking) for store
+	// routing; the two must stay in sync.
+	labelOrderTracking    = "order-tracking"
 	labelTriggerEnvFailed = "trigger-env-failed"
 
 	orderTrackingSweepOrder                = "order-tracking-sweep"
@@ -408,7 +408,7 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 	return &memoryOrderDispatcher{
 		aa: auto,
 		storeFn: func(target execStoreTarget) (beads.Store, error) {
-			return resolveClassStore(coordclass.ClassOrderTracking, target.ScopeRoot, cityPath)
+			return resolveClassStore(coordclass.ClassOrders, target.ScopeRoot, cityPath)
 		},
 		ep:                   ep,
 		execRun:              shellExecRunner,
