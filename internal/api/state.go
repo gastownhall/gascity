@@ -48,6 +48,13 @@ type MaintenanceProvider interface {
 
 // State provides read access to controller-managed state.
 // The controller implements this with RWMutex-protected hot-reload.
+//
+// The per-coordination-class store seam is layered over State as free
+// functions in class_store.go (classStoreFor / Server.classBeadStoresForID)
+// rather than as new interface methods, so the interface stays minimal and
+// every implementation and test mock keeps working without churn. Callers that
+// need the store for a specific bead class route through those helpers; today
+// they collapse to the single store the existing accessors return.
 type State interface {
 	// Config returns the current city config snapshot.
 	Config() *config.City
