@@ -411,6 +411,10 @@ jobs:
     name: Check
     needs:
       - runner-policy
+      # `changes` is a hard dependency (kept out of allow_skipped) so a
+      # filter-job flake fails Check directly instead of silently skipping
+      # the path-gated contract-acceptance-current cell. Mirrors ci-required.
+      - changes
       - preflight-static
       - preflight-acceptance
       - preflight-generated
