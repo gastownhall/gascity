@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/hooks"
@@ -943,7 +944,7 @@ func waitForRigStoreAccessible(cityPath, rigPath string, timeout time.Duration) 
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
-		store, err := openStoreAtForCity(rigPath, cityPath)
+		store, err := resolveClassStore(coordclass.ClassWork, rigPath, cityPath)
 		if err == nil {
 			pingErr := store.Ping()
 			if pingErr == nil {
