@@ -47,6 +47,15 @@ const (
 	ClassWait Class = "wait"
 	// ClassNudge marks nudge beads.
 	ClassNudge Class = "nudge"
+	// ClassMail is a route-only class for mail (message) beads. Classify
+	// never returns it — mail beads carry no storage policy and fall through
+	// to ClassWork for the storage-tier mapping — so adding it changes no
+	// classification or storage behavior. It exists solely so the per-class
+	// store seam can label mail-store opens, letting a future per-class mail
+	// backend route without touching every mail call site. The
+	// external-messaging (extmsg) path shares this class because it opens the
+	// same mail store.
+	ClassMail Class = "mail"
 )
 
 const (
