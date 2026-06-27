@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -205,5 +206,73 @@ func TestStoreHasOpenDescendantsSkipsTransientNotifications(t *testing.T) {
 		t.Fatal(err)
 	} else if !has {
 		t.Error("a real open work descendant must still count as open work")
+	}
+}
+
+// trackingGateTimeoutStore makes the first open-work gate
+// (listCanonicalOpenOrderTrackingBeads, which queries Label==labelOrderTracking)
+// block past the per-order gate timeout, reproducing the first-gate timeout
+// path that gateBackoffUntil must suppress on subsequent ticks.
+type trackingGateTimeoutStore struct {
+	beads.Store
+	delay     time.Duration
+	gateCount atomic.Int32
+}
+
+func (s *trackingGateTimeoutStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == labelOrderTracking && query.Status == "open" && !query.IncludeClosed && query.Limit == 0 {
+		s.gateCount.Add(1)
+		time.Sleep(s.delay)
+	}
+	return s.Store.List(query)
+}
+
+// TestOrderDispatchNonIdempotentBackoffOnOpenTrackingTimeout verifies that when
+// the first open-work gate (hasOpenTracking / listCanonicalOpenOrderTrackingBeads)
+// times out for a non-idempotent order, gateBackoffUntil is set and suppresses
+// re-entry into that gate on subsequent ticks (#3688, first-gate site).
+func TestOrderDispatchNonIdempotentBackoffOnOpenTrackingTimeout(t *testing.T) {
+	prev := orderGateTimeout
+	orderGateTimeout = 20 * time.Millisecond
+	defer func() { orderGateTimeout = prev }()
+
+	store := &trackingGateTimeoutStore{Store: beads.NewMemStore(), delay: 50 * time.Millisecond}
+	now := time.Date(2026, 6, 27, 17, 0, 0, 0, time.UTC)
+	orderName := "cascade-nudge-on-blocker-close"
+
+	aa := []orders.Order{{
+		Name:     orderName,
+		Trigger:  "cooldown",
+		Interval: "5m",
+		Exec:     "true",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	cityPath := t.TempDir()
+
+	// Tick 1: gate times out, fail-closed (non-idempotent). gateBackoffUntil
+	// deadline is set so tick 2 is skipped before reaching the gate.
+	ad.dispatch(context.Background(), cityPath, now)
+	ad.drain(context.Background())
+	if got := trackingBeads(t, store.Store, "order-run:"+orderName); len(got) != 0 {
+		t.Fatalf("tick 1: non-idempotent order must be skipped on tracking gate timeout; got %d tracking beads", len(got))
+	}
+	countAfterTick1 := store.gateCount.Load()
+	if countAfterTick1 == 0 {
+		t.Fatal("tick 1 did not reach the open order-tracking gate")
+	}
+
+	// Tick 2 (1ms later, still within backoff window): gateBackoffActive must
+	// return true and skip the order without re-entering the gate.
+	ad.dispatch(context.Background(), cityPath, now.Add(time.Millisecond))
+	ad.drain(context.Background())
+
+	if got := store.gateCount.Load(); got != countAfterTick1 {
+		t.Fatalf("tick 2 re-entered the open order-tracking gate after tick 1 timed out: got %d calls, want %d (#3688 first-gate site)", got, countAfterTick1)
+	}
+	if got := trackingBeads(t, store.Store, "order-run:"+orderName); len(got) != 0 {
+		t.Fatalf("tick 2: no tracking bead expected while gate-timeout backoff is active; got %d", len(got))
 	}
 }
