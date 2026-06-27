@@ -39,7 +39,7 @@ type nudgeReference = nudgequeue.Reference
 // per-tick poll helpers close every store they open. Tests that replace this
 // package variable must stay serial; do not use t.Parallel in those tests.
 var openNudgeBeadStore = func(cityPath string) beads.Store {
-	store, err := openCityStoreAt(cityPath)
+	store, err := resolveClassStore(coordclass.ClassNudge, cityPath, cityPath)
 	if err != nil {
 		return nil
 	}
