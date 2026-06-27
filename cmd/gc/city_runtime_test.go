@@ -1633,6 +1633,129 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	}
 }
 
+// newWispWatchdogRuntime builds a minimal CityRuntime backed by store with the
+// given configured orders, matching the harness used by the tracking-sweep
+// watchdog tests.
+func newWispWatchdogRuntime(store beads.Store, orderSet []orders.Order) *CityRuntime {
+	return &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+		orderSet:            orderSet,
+	}
+}
+
+// abandonedMoleculeSubtree creates a formula-order molecule root (carrying
+// order-run:<order> but never order-tracking) with a single open child step —
+// the abandoned-subtree shape from #3407 that wedges the order's single-flight
+// guard forever and is invisible to the order-tracking-label sweep.
+func abandonedMoleculeSubtree(t *testing.T, store beads.Store) (root, child beads.Bead) {
+	t.Helper()
+	const order = "mol-dog-stale-db"
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-" + order,
+		Type:   "molecule",
+		Labels: []string{"order-run:" + order},
+	})
+	if err != nil {
+		t.Fatalf("Create(molecule root): %v", err)
+	}
+	child, err = store.Create(beads.Bead{
+		Title:    "abandoned-step",
+		ParentID: root.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(open child step): %v", err)
+	}
+	return root, child
+}
+
+func TestOrderWispSubtreeSweepWatchdogReapsAbandonedMoleculeSubtree(t *testing.T) {
+	store := beads.NewMemStore()
+	root, child := abandonedMoleculeSubtree(t, store)
+
+	cr := newWispWatchdogRuntime(store, []orders.Order{{Name: "mol-dog-stale-db"}})
+	cr.runOrderWispSubtreeSweepWatchdog(time.Now().Add(orderWispSubtreeSweepWatchdogStaleAfter + time.Second))
+
+	for _, id := range []string{root.ID, child.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed (abandoned subtree should be reaped)", id, got.Status)
+		}
+		if got.Metadata["close_reason"] != staleOrderWispCloseReason {
+			t.Fatalf("%s close_reason = %q, want %q", id, got.Metadata["close_reason"], staleOrderWispCloseReason)
+		}
+	}
+}
+
+func TestOrderWispSubtreeSweepWatchdogLeavesFreshSubtree(t *testing.T) {
+	store := beads.NewMemStore()
+	root, child := abandonedMoleculeSubtree(t, store)
+
+	cr := newWispWatchdogRuntime(store, []orders.Order{{Name: "mol-dog-stale-db"}})
+	// now is only one minute past creation — far inside the generous stale-after
+	// window, so a still-young (possibly genuinely in-flight) pool subtree must
+	// survive.
+	cr.runOrderWispSubtreeSweepWatchdog(root.CreatedAt.Add(time.Minute))
+
+	for _, id := range []string{root.ID, child.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("%s status = %q, want open (fresh subtree must not be reaped)", id, got.Status)
+		}
+	}
+}
+
+func TestOrderWispSubtreeSweepWatchdogSkipsWhenIntervalNotElapsed(t *testing.T) {
+	store := beads.NewMemStore()
+	root, child := abandonedMoleculeSubtree(t, store)
+
+	cr := newWispWatchdogRuntime(store, []orders.Order{{Name: "mol-dog-stale-db"}})
+	now := time.Now().Add(orderWispSubtreeSweepWatchdogStaleAfter + time.Second)
+	cr.orderWispSweepWatchdogLast = now
+	// Second call well within the interval must early-return before sweeping.
+	cr.runOrderWispSubtreeSweepWatchdog(now.Add(orderWispSubtreeSweepWatchdogInterval / 2))
+
+	for _, id := range []string{root.ID, child.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("%s status = %q, want open (watchdog must skip inside interval)", id, got.Status)
+		}
+	}
+}
+
+func TestOrderWispSubtreeSweepWatchdogNoConfiguredOrdersIsNoop(t *testing.T) {
+	store := beads.NewMemStore()
+	root, child := abandonedMoleculeSubtree(t, store)
+
+	cr := newWispWatchdogRuntime(store, nil)
+	// No configured orders → the reaper's order-name safety gate is unsatisfiable,
+	// so the watchdog must no-op rather than error or close anything.
+	cr.runOrderWispSubtreeSweepWatchdog(time.Now().Add(orderWispSubtreeSweepWatchdogStaleAfter + time.Second))
+
+	for _, id := range []string{root.ID, child.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("%s status = %q, want open (no-op without configured orders)", id, got.Status)
+		}
+	}
+}
+
 func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 	store := beads.NewMemStore()
 	ids := make([]string, 0, orderTrackingSweepCloseBudget+1)

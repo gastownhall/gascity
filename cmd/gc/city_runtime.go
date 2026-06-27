@@ -84,6 +84,7 @@ type CityRuntime struct {
 	trace                   *sessionReconcilerTraceManager
 
 	orderSweepWatchdogLast             time.Time
+	orderWispSweepWatchdogLast         time.Time
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
 	wispIndexMigrationApplied          bool
@@ -1281,6 +1282,7 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 	}
 	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, now)
 	cr.runOrderTrackingSweepWatchdog(now)
+	cr.runOrderWispSubtreeSweepWatchdog(now)
 	cr.runOrderTrackingRetentionWatchdog(now)
 	cr.runNudgeMailSweepWatchdog(now)
 	if cr.od != nil {
@@ -1423,6 +1425,77 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	if n > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// runOrderWispSubtreeSweepWatchdog reaps abandoned order molecule/wisp subtrees
+// whose open descendants have been stale beyond
+// orderWispSubtreeSweepWatchdogStaleAfter. Without it a formula/pool order whose
+// instantiated molecule was left with an open descendant (e.g. the pool agent
+// never executed the step) wedges permanently: the single-flight guard counts
+// the open root as in-flight and skips every dispatch, while
+// runOrderTrackingSweepWatchdog is blind to molecule roots — they carry
+// order-run: but never order-tracking, so they fall outside its label filter.
+// Recovery previously required a manual
+// `gc order sweep-tracking <order> --include-wisps` (#3407).
+//
+// The reaper requires a non-empty order-name set — a deliberate safety gate
+// against closing genuine pool work — so the watchdog passes every configured
+// order's ScopedName. That set, combined with the generous stale-after and the
+// reaper's own whole-subtree age check, keeps in-flight pool work safe while
+// still self-clearing abandoned subtrees.
+func (cr *CityRuntime) runOrderWispSubtreeSweepWatchdog(now time.Time) {
+	if !cr.orderWispSweepWatchdogLast.IsZero() && now.Sub(cr.orderWispSweepWatchdogLast) < orderWispSubtreeSweepWatchdogInterval {
+		return
+	}
+	cr.orderWispSweepWatchdogLast = now
+
+	onlyOrders := scopedOrderNameSet(cr.orderSet)
+	if len(onlyOrders) == 0 {
+		// No configured orders to scope the reaper to; the order-name safety
+		// gate is unsatisfiable, so there is nothing to sweep.
+		return
+	}
+
+	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores()
+	defer closeOpened()
+	if len(stores) == 0 {
+		if storeErr != nil && cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order wisp subtree sweep watchdog: %v\n", cr.logPrefix, storeErr) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+
+	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, now, orderWispSubtreeSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator, true, orderTrackingSweepCloseBudget)
+	if err := errors.Join(storeErr, sweepErr); err != nil {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order wisp subtree sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	if result.wispClosed > 0 && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: order wisp subtree sweep watchdog closed %d abandoned order subtree bead(s)\n", cr.logPrefix, result.wispClosed) //nolint:errcheck // best-effort stderr
+	}
+}
+
+// scopedOrderNameSet returns the set of ScopedName keys for the configured
+// orders, the form used in order-run:<name> labels. It is the all-orders filter
+// the wisp-subtree reaper requires (its include-wisps path rejects an empty
+// order set). Returns nil when no orders are configured.
+func scopedOrderNameSet(orderSet []orders.Order) map[string]struct{} {
+	if len(orderSet) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(orderSet))
+	for i := range orderSet {
+		name := orderSet[i].ScopedName()
+		if name == "" {
+			continue
+		}
+		out[name] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that

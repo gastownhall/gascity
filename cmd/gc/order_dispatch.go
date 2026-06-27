@@ -51,6 +51,19 @@ const (
 	orderTrackingCloseVerifyAttempts       = 3
 	orderTrackingCloseVerifyRetryDelay     = 25 * time.Millisecond
 
+	// orderWispSubtreeSweepWatchdogInterval bounds how often the controller
+	// reaps abandoned order molecule/wisp subtrees. It runs far less often than
+	// the tracking-bead watchdog because the wisp reaper is more aggressive (it
+	// closes whole subtrees), so it stays conservative (#3407).
+	orderWispSubtreeSweepWatchdogInterval = 5 * time.Minute
+	// orderWispSubtreeSweepWatchdogStaleAfter is the generous staleness window
+	// before the controller reaps an abandoned order molecule subtree. It is
+	// deliberately far larger than orderTrackingSweepWatchdogStaleAfter so a
+	// genuinely in-flight pool subtree (whose step a pool agent can legitimately
+	// take many minutes to execute) is never reaped; only subtrees whose open
+	// descendants have been stale beyond this window are closed (#3407).
+	orderWispSubtreeSweepWatchdogStaleAfter = 1 * time.Hour
+
 	// orphanedOrderTrackingCloseReason is the canonical close_reason
 	// stamped on orphan-sweep closes. It satisfies bd's
 	// validation.on-close=error validator (which rejects closes without
