@@ -101,6 +101,33 @@ func (cr *CityRuntime) workBeadStores() map[string]beads.Store {
 	return cr.rigBeadStores()
 }
 
+// createTarget returns the inner store that owns creates of the given
+// coordination class for this policy-wrapped store. It is the create-side seam:
+// the create chokepoint (Create / ApplyGraphPlan / the wisp-root lookup in
+// policyForCreate) routes through it instead of reaching for the embedded store
+// directly, so a future per-class split changes only this method. A
+// beadPolicyStore wraps exactly one underlying store today, so every class
+// collapses to that same embedded store and createTarget is identity — it
+// returns the exact store the create chokepoint already used, preserving the
+// StorageCreateStore / GraphApplyStore optional-capability assertions that the
+// create path relies on.
+func (s *beadPolicyStore) createTarget(_ coordclass.Class) beads.Store {
+	return s.Store
+}
+
+// graphApplierFor returns the graph-apply capability that owns graph creates of
+// the given coordination class for this graph-policy-wrapped store. It is the
+// graph-create arm of the create-side seam: ApplyGraphPlan routes through it
+// instead of reaching for the cached applier directly. A beadPolicyGraphStore
+// wraps exactly one underlying applier today, so every class collapses to that
+// cached instance — graphApplierFor returns the exact GraphApplyStore the apply
+// path already used, preserving the StorageGraphApplyStore optional-capability
+// assertion. A future per-class split derives the applier from
+// createTarget(class) here.
+func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphApplyStore {
+	return s.applier
+}
+
 // resolveClassStoreOpen is the seam resolveClassStore opens through. Tests swap
 // it to avoid opening a real (native Dolt) store. It defaults to the CLI store
 // funnel, so production behavior is unchanged.

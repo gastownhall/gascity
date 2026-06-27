@@ -66,7 +66,7 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
 	_, storage := s.policyForCreate(b)
-	return createWithStoragePolicy(s.Store, b, storage)
+	return createWithStoragePolicy(s.createTarget(coordclass.Classify(b)), b, storage)
 }
 
 func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -180,7 +180,7 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
 	if rootID := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" {
-		root, err := s.Get(rootID)
+		root, err := s.createTarget(coordclass.ClassWisp).Get(rootID)
 		if err == nil && policyNameForBead(root) == beadPolicyWisp {
 			return beadPolicyWisp, storageFromPersistedWispRoot(root)
 		}
@@ -205,21 +205,19 @@ func storageFromPersistedWispRoot(root beads.Bead) string {
 
 func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
 	if plan == nil {
-		return s.applier.ApplyGraphPlan(ctx, plan)
+		return s.graphApplierFor(coordclass.ClassWork).ApplyGraphPlan(ctx, plan)
 	}
-	policyName := policyNameForGraphPlan(plan)
+	class := coordclass.ClassifyGraphPlan(plan)
+	applier := s.graphApplierFor(class)
+	policyName := string(class)
 	if policyName == "" {
-		return s.applier.ApplyGraphPlan(ctx, plan)
+		return applier.ApplyGraphPlan(ctx, plan)
 	}
 	storage := effectiveBeadStorage(s.cfg, policyName)
-	if storageApplier, ok := s.applier.(beads.StorageGraphApplyStore); ok {
+	if storageApplier, ok := applier.(beads.StorageGraphApplyStore); ok {
 		return storageApplier.ApplyGraphPlanWithStorage(ctx, plan, beadStorageClass(storage))
 	}
-	return s.applier.ApplyGraphPlan(ctx, plan)
-}
-
-func policyNameForGraphPlan(plan *beads.GraphApplyPlan) string {
-	return string(coordclass.ClassifyGraphPlan(plan))
+	return applier.ApplyGraphPlan(ctx, plan)
 }
 
 func policyNameForBead(b beads.Bead) string {
