@@ -17,6 +17,7 @@ package storeref
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -126,4 +127,49 @@ func Resolve(id string, stores []beads.Store) (beads.Bead, error) {
 		return b, nil
 	}
 	return beads.Bead{}, beads.ErrNotFound
+}
+
+// ErrAmbiguous reports that a bead ID resolved in more than one candidate store.
+// ResolveOwner returns it (wrapped with both store indices) so callers that
+// require a uniquely addressable bead can reject the ID rather than silently
+// pick one store. Resolve does not surface this case — it stops at the first hit
+// — so callers that must detect a bead present in multiple stores use
+// ResolveOwner instead.
+var ErrAmbiguous = errors.New("bead exists in multiple stores")
+
+// ResolveOwner probes every store in order for the bead with the given ID and
+// returns the index of the single store that owns it. Unlike Resolve, it does
+// not stop at the first hit: it scans all candidates so a bead present in more
+// than one store is rejected with an error wrapping ErrAmbiguous, preserving the
+// "resolution requires a uniquely addressable bead id" contract. Nil stores are
+// skipped. A store returning a not-found error (errors.Is(err, beads.ErrNotFound))
+// is treated as "absent here"; any other error is returned immediately. When no
+// store has the bead and every probe was a clean not-found, ResolveOwner returns
+// beads.ErrNotFound. The returned index addresses the supplied stores slice
+// (including any nil entries), so callers can recover the owning candidate's
+// metadata (e.g. its directory) by indexing a parallel slice.
+func ResolveOwner(id string, stores []beads.Store) (beads.Bead, int, error) {
+	found := beads.Bead{}
+	foundIndex := -1
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		b, err := store.Get(id)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return beads.Bead{}, -1, err
+		}
+		if foundIndex >= 0 {
+			return beads.Bead{}, -1, fmt.Errorf("%w: indices %d and %d", ErrAmbiguous, foundIndex, i)
+		}
+		found = b
+		foundIndex = i
+	}
+	if foundIndex < 0 {
+		return beads.Bead{}, -1, beads.ErrNotFound
+	}
+	return found, foundIndex, nil
 }

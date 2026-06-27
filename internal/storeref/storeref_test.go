@@ -214,3 +214,75 @@ func TestResolveTreatsWrappedNotFoundAsAbsent(t *testing.T) {
 		t.Fatalf("Resolve bead = %q, want %q", got.ID, id)
 	}
 }
+
+func TestResolveOwnerReturnsUniqueOwnerIndex(t *testing.T) {
+	empty := beads.NewMemStore()
+	owner := beads.NewMemStore()
+	id := seed(t, owner)
+	got, idx, err := ResolveOwner(id, []beads.Store{empty, owner})
+	if err != nil {
+		t.Fatalf("ResolveOwner error = %v, want nil", err)
+	}
+	if idx != 1 {
+		t.Fatalf("ResolveOwner index = %d, want 1 (owner is the second candidate)", idx)
+	}
+	if got.ID != id {
+		t.Fatalf("ResolveOwner bead = %q, want %q", got.ID, id)
+	}
+}
+
+// TestResolveOwnerRejectsAmbiguousBead pins the convoy contract: a bead present
+// in more than one candidate store is an error, not a silent first-hit.
+func TestResolveOwnerRejectsAmbiguousBead(t *testing.T) {
+	a := beads.NewMemStore()
+	b := beads.NewMemStore()
+	first, err := a.Create(beads.Bead{ID: "shared-1", Title: "dup", Status: "open"})
+	if err != nil {
+		t.Fatalf("seeding a: %v", err)
+	}
+	if _, err := b.Create(beads.Bead{ID: first.ID, Title: "dup", Status: "open"}); err != nil {
+		t.Fatalf("seeding b: %v", err)
+	}
+	_, idx, err := ResolveOwner(first.ID, []beads.Store{a, b})
+	if !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("ResolveOwner error = %v, want ErrAmbiguous", err)
+	}
+	if idx != -1 {
+		t.Fatalf("ResolveOwner index = %d, want -1 on ambiguity", idx)
+	}
+}
+
+func TestResolveOwnerNotFoundEverywhere(t *testing.T) {
+	a := beads.NewMemStore()
+	b := beads.NewMemStore()
+	_, idx, err := ResolveOwner("missing-1", []beads.Store{a, b})
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("ResolveOwner error = %v, want ErrNotFound", err)
+	}
+	if idx != -1 {
+		t.Fatalf("ResolveOwner index = %d, want -1 when absent", idx)
+	}
+}
+
+func TestResolveOwnerSkipsNilAndPreservesIndex(t *testing.T) {
+	owner := beads.NewMemStore()
+	id := seed(t, owner)
+	// nil at 0, owner at 1, nil at 2: index must address the supplied slice.
+	_, idx, err := ResolveOwner(id, []beads.Store{nil, owner, nil})
+	if err != nil {
+		t.Fatalf("ResolveOwner error = %v, want nil", err)
+	}
+	if idx != 1 {
+		t.Fatalf("ResolveOwner index = %d, want 1 (nil entries counted)", idx)
+	}
+}
+
+func TestResolveOwnerPropagatesHardError(t *testing.T) {
+	boom := errors.New("backend exploded")
+	owner := beads.NewMemStore()
+	id := seed(t, owner)
+	_, _, err := ResolveOwner(id, []beads.Store{errStore{err: boom}, owner})
+	if !errors.Is(err, boom) {
+		t.Fatalf("ResolveOwner error = %v, want %v", err, boom)
+	}
+}

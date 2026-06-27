@@ -16,6 +16,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
 )
 
@@ -532,31 +533,29 @@ func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, open
 // candidate rooted at cityPath. It returns an error when beadID resolves in
 // more than one store (ambiguous) and beads.ErrNotFound when no candidate
 // holds it.
+//
+// The candidate set is the convoy class-store ordering (the graph store the
+// convoy bead lives in, plus the per-rig work stores its members may live in);
+// the probe is delegated to storeref.ResolveOwner, which scans every candidate
+// and enforces the bead-in-multiple-stores=error contract rather than stopping
+// at the first hit. The returned index maps back to the candidate directory.
 func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, string, error) {
-	stores, err := openConvoyStores(cfg, cityPath, beadID, openStore)
+	candidates, err := openConvoyStores(cfg, cityPath, beadID, openStore)
 	if err != nil {
 		return nil, "", err
 	}
-	var foundStore beads.Store
-	foundDir := ""
-	for _, candidate := range stores {
-		store := candidate.store
-		if _, err := store.Get(beadID); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				continue
-			}
-			return nil, "", err
-		}
-		if foundStore != nil {
-			return nil, "", fmt.Errorf("bead %s exists in multiple stores (%s and %s); resolution requires a uniquely addressable bead id", beadID, foundDir, candidate.path)
-		}
-		foundStore = store
-		foundDir = candidate.path
+	stores := make([]beads.Store, len(candidates))
+	for i, candidate := range candidates {
+		stores[i] = candidate.store
 	}
-	if foundStore != nil {
-		return foundStore, foundDir, nil
+	_, idx, err := storeref.ResolveOwner(beadID, stores)
+	if err != nil {
+		if errors.Is(err, storeref.ErrAmbiguous) {
+			return nil, "", fmt.Errorf("bead %s exists in multiple stores; resolution requires a uniquely addressable bead id: %w", beadID, err)
+		}
+		return nil, "", err
 	}
-	return nil, "", beads.ErrNotFound
+	return candidates[idx].store, candidates[idx].path, nil
 }
 
 func openAllConvoyStores(stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
