@@ -2789,14 +2789,16 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
-	// The control-dispatcher tick threads one city store as three roles at once:
-	// the dispatch/desired-state primary (graph), the session-sync/reconcile
-	// store (sessions), and the per-rig work tail (work). Split the single
-	// variable into the class accessors so a future per-class backend routes
-	// each role independently; all three collapse to the same store today, so
-	// the tick is byte-identical.
-	graphStore := cr.graphBeadStore()
-	if graphStore == nil || cr.sessionDrains == nil {
+	// The control-dispatcher tick threads one city store as two roles at once:
+	// the session-bead store the desired-state build creates and updates session
+	// beads through (sessions — the build-fn's leading store param flows into
+	// agentBuildParams.beadStore and the collectAllOpenSessionBeads "city" arm)
+	// and the per-rig work tail (work). The session-sync and reconcile arms below
+	// take the same sessions store. Split into the class accessors so a future
+	// per-class backend routes each role independently; both collapse to the same
+	// store today, so the tick is byte-identical.
+	sessionsStore := cr.sessionsBeadStore()
+	if sessionsStore == nil || cr.sessionDrains == nil {
 		return
 	}
 
@@ -2814,7 +2816,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		time.Now(),
 		filteredCfg,
 		cr.sp,
-		graphStore,
+		sessionsStore,
 		cr.workBeadStores(),
 		sessionBeads,
 		nil,
@@ -3003,16 +3005,17 @@ func filterSessionBeadsByName(snapshot *sessionBeadSnapshot, names map[string]bo
 }
 
 func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
-	// The desired-state build threads two store roles: the graph/dispatch
-	// primary (the build-fn's leading store, also the session arm inside
-	// buildDesiredStateWithSessionBeads) and the per-rig work tail. Split the
+	// The desired-state build threads two store roles: the session-bead store the
+	// build-fn's leading store param flows into (sessions — it becomes
+	// agentBuildParams.beadStore, which creates and updates session beads, and the
+	// collectAllOpenSessionBeads "city" arm) and the per-rig work tail. Split the
 	// single city store into the class accessors so a future per-class backend
 	// routes each role independently; both collapse to the same store today.
-	graphStore := cr.graphBeadStore()
+	sessionsStore := cr.sessionsBeadStore()
 	if cr.buildFnWithSessionBeads != nil {
-		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, graphStore, cr.workBeadStores(), sessionBeads, trace)
+		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore, cr.workBeadStores(), sessionBeads, trace)
 	}
-	return cr.buildFn(cr.cfg, cr.sp, graphStore)
+	return cr.buildFn(cr.cfg, cr.sp, sessionsStore)
 }
 
 func (cr *CityRuntime) loadDemandSnapshot(
