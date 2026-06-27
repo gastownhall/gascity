@@ -2866,12 +2866,12 @@ func sessionHasAwakeAssignedWorkForReachableStore(
 func reachableStoresForSession(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, session beads.Bead) ([]beads.Store, error) {
 	agentCfg := sessionAgentConfig(cfg, session)
 	if agentCfg == nil || agentIsCrossStoreEligible(agentCfg) {
-		stores := make([]beads.Store, 0, 1+len(rigStores))
-		stores = append(stores, store)
-		for _, rs := range rigStores {
-			stores = append(stores, rs)
-		}
-		return stores, nil
+		// Cross-store-eligible work lives in the work-class candidate set: the
+		// primary work store plus every rig work store. The downstream
+		// List{Assignee,Status} probes are work queries, so this is the work
+		// arm; on a single-store city it collapses to the same store the
+		// session probes use (identity).
+		return workAssignmentStores(store, rigStores), nil
 	}
 	storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 	if storeRef == "" {

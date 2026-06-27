@@ -959,20 +959,12 @@ func collectAllOpenSessionBeads(
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 ) ([]beads.Bead, error) {
-	// Use CachingStore-wrapped stores if available.
-	type workStore struct {
-		store beads.Store
-		ref   string
-	}
-	stores := []workStore{{store: cityStore, ref: "city"}}
-	for _, rig := range cfg.Rigs {
-		if suspendedRigPaths[filepath.Clean(rig.Path)] {
-			continue
-		}
-		if s, ok := rigStores[rig.Name]; ok {
-			stores = append(stores, workStore{store: s, ref: rig.Name})
-		}
-	}
+	// Sessions arm of the reconciler frame: iterate the session-class candidate
+	// fan-out (city + non-suspended rigs). CachingStore-wrapped stores are used
+	// when available. On a single-store city this hits the same store the work
+	// arm queries (identity); routing through the shared per-class candidate
+	// builder keeps the work-vs-session split structurally explicit.
+	stores := coordClassStoreCandidates(cfg, cityStore, rigStores, suspendedRigPaths, "city")
 
 	type storeResult struct {
 		beads []beads.Bead
@@ -1090,21 +1082,14 @@ func collectAssignedWorkBeadsWithStores(
 	suspendedRigPaths map[string]bool,
 	sessionBeads *sessionBeadSnapshot,
 ) ([]beads.Bead, []beads.Store, []string, bool) {
-	// Use CachingStore-wrapped stores. Creating raw bdStoreForCity per rig
-	// spawns bd subprocesses on every tick, saturating dolt.
-	type workStore struct {
-		store beads.Store
-		ref   string
-	}
-	stores := []workStore{{store: cityStore}}
-	for _, rig := range cfg.Rigs {
-		if suspendedRigPaths[filepath.Clean(rig.Path)] {
-			continue
-		}
-		if s, ok := rigStores[rig.Name]; ok {
-			stores = append(stores, workStore{store: s, ref: rig.Name})
-		}
-	}
+	// Work arm of the reconciler frame: iterate the work-class candidate fan-out
+	// (city + non-suspended rigs). The city store carries the empty store-ref so
+	// the index-aligned workBeads/workStores slices stay per-bead aligned for the
+	// canonicalize/stamp writers. CachingStore-wrapped stores are used; creating
+	// raw bdStoreForCity per rig spawns bd subprocesses on every tick, saturating
+	// dolt. On a single-store city this is the same store the sessions arm
+	// iterates (identity).
+	stores := coordClassStoreCandidates(cfg, cityStore, rigStores, suspendedRigPaths, "")
 
 	type storeAssignedWorkResult struct {
 		beads     []beads.Bead
@@ -3939,19 +3924,10 @@ func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigSto
 	if cfg == nil {
 		return nil, nil
 	}
-	type workStore struct {
-		store beads.Store
-		ref   string
-	}
-	stores := []workStore{{store: store, ref: "city"}}
-	for _, rig := range cfg.Rigs {
-		if suspendedRigPaths[filepath.Clean(rig.Path)] {
-			continue
-		}
-		if s, ok := rigStores[rig.Name]; ok {
-			stores = append(stores, workStore{store: s, ref: rig.Name})
-		}
-	}
+	// Work arm (unassigned-routed re-home scan): iterate the work-class
+	// candidate fan-out, labeling the city store "city" for the diagnostic
+	// ref. Identity on a single-store city.
+	stores := coordClassStoreCandidates(cfg, store, rigStores, suspendedRigPaths, "city")
 
 	var workBeads []beads.Bead
 	var workStores []beads.Store
