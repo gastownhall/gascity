@@ -8,17 +8,7 @@ import (
 )
 
 // allCoordClasses is the full set of coordination classes the seam must route.
-// ClassGraph is omitted because it is a const alias of ClassWorkflow (same
-// underlying value); including both would just assert the same case twice.
-var allCoordClasses = []coordclass.Class{
-	coordclass.ClassWork,
-	coordclass.ClassWisp,
-	coordclass.ClassWorkflow,
-	coordclass.ClassOrderTracking,
-	coordclass.ClassSession,
-	coordclass.ClassWait,
-	coordclass.ClassNudge,
-}
+var allCoordClasses = coordclass.Classes()
 
 // TestClassStoreForIsIdentity pins the P1 invariant: on a single-store city
 // every per-class accessor returns the exact same concrete store the caller
@@ -31,7 +21,7 @@ func TestClassStoreForIsIdentity(t *testing.T) {
 
 	for _, class := range allCoordClasses {
 		if got := classStoreFor(st, class, ""); !sameStore(got, city) {
-			t.Errorf("classStoreFor(%q, no rig) = %p, want CityBeadStore %p", class, got, city)
+			t.Errorf("classStoreFor(%s, no rig) = %p, want CityBeadStore %p", class, got, city)
 		}
 	}
 
@@ -46,7 +36,7 @@ func TestClassStoreForIsIdentity(t *testing.T) {
 			continue
 		}
 		if got := classStoreFor(st, class, "myrig"); !sameStore(got, city) {
-			t.Errorf("classStoreFor(%q, myrig) = %p, want CityBeadStore %p", class, got, city)
+			t.Errorf("classStoreFor(%s, myrig) = %p, want CityBeadStore %p", class, got, city)
 		}
 	}
 }
@@ -63,7 +53,7 @@ func TestClassBeadStoresForIDDedupesToSingleStore(t *testing.T) {
 	st.cfg.Rigs = nil
 	srv := &Server{state: st}
 
-	got := srv.classBeadStoresForID(coordclass.ClassSession, "", "sess-1")
+	got := srv.classBeadStoresForID(coordclass.ClassSessions, "", "sess-1")
 	if len(got) != 1 {
 		t.Fatalf("classBeadStoresForID returned %d stores, want 1 (dedup); got %v", len(got), got)
 	}

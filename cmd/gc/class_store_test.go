@@ -111,28 +111,21 @@ func TestResolveClassStoreIsClassAgnostic(t *testing.T) {
 		return sentinel, nil
 	}
 
-	for _, class := range []coordclass.Class{
-		coordclass.ClassWork,
-		coordclass.ClassWorkflow,
-		coordclass.ClassSession,
-		coordclass.ClassWait,
-		coordclass.ClassNudge,
-		coordclass.ClassOrderTracking,
-		coordclass.ClassWisp,
-	} {
+	classes := coordclass.Classes()
+	for _, class := range classes {
 		got, err := resolveClassStore(class, "/store", "/city")
 		if err != nil {
-			t.Fatalf("resolveClassStore(%q): %v", class, err)
+			t.Fatalf("resolveClassStore(%s): %v", class, err)
 		}
 		if !sameStorePtr(got, sentinel) {
-			t.Errorf("resolveClassStore(%q) = %p, want funnel store %p", class, got, sentinel)
+			t.Errorf("resolveClassStore(%s) = %p, want funnel store %p", class, got, sentinel)
 		}
 		if sawStorePath != "/store" || sawCityPath != "/city" {
-			t.Errorf("resolveClassStore(%q) opened scope (%q, %q), want (/store, /city)", class, sawStorePath, sawCityPath)
+			t.Errorf("resolveClassStore(%s) opened scope (%q, %q), want (/store, /city)", class, sawStorePath, sawCityPath)
 		}
 	}
-	if calls != 7 {
-		t.Errorf("open funnel called %d times, want 7 (one per class)", calls)
+	if calls != len(classes) {
+		t.Errorf("open funnel called %d times, want %d (one per class)", calls, len(classes))
 	}
 }
 
