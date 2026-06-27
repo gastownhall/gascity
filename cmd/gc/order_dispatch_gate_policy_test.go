@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,6 +84,83 @@ func TestGateFailClosed(t *testing.T) {
 	cancel()
 	if !m.gateFailClosed(canceledCtx, orders.Order{Idempotent: true}, "feeder", gateErr) {
 		t.Error("a canceled dispatch context must block even idempotent orders (no dispatch into a dead context)")
+	}
+}
+
+// openWorkGateCallCountStore is a gateTimeoutStore that also counts how many
+// times the slow open-work gate path (the strict order-run label scan) is
+// entered, so tests can assert the dispatcher avoided the gate on backoff ticks.
+type openWorkGateCallCountStore struct {
+	beads.Store
+	delay     time.Duration
+	mu        sync.Mutex
+	gateCalls int
+}
+
+func (s *openWorkGateCallCountStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if strings.HasPrefix(q.Label, "order-run:") && !q.IncludeClosed && q.Limit == 0 {
+		s.mu.Lock()
+		s.gateCalls++
+		s.mu.Unlock()
+		time.Sleep(s.delay)
+	}
+	return s.Store.List(q)
+}
+
+func (s *openWorkGateCallCountStore) gateCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gateCalls
+}
+
+// TestOrderDispatchGateTimeoutBackoffPreventsRethrash is the gascity#3688
+// regression test: when the open-work gate times out for a non-idempotent
+// order (fail-closed), the dispatcher must stamp a backoff via rememberLastRun
+// so the cooldown trigger suppresses re-dispatch on subsequent ticks — instead
+// of hammering Dolt with a new 8-second gate query every tick.
+func TestOrderDispatchGateTimeoutBackoffPreventsRethrash(t *testing.T) {
+	prev := orderGateTimeout
+	orderGateTimeout = 20 * time.Millisecond
+	defer func() { orderGateTimeout = prev }()
+
+	store := &openWorkGateCallCountStore{Store: beads.NewMemStore(), delay: 300 * time.Millisecond}
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+
+	aa := []orders.Order{
+		{Name: "merge-loop-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true", Idempotent: false},
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	cityPath := t.TempDir() // must be stable across ticks so the store-key cache hits
+
+	// Tick 1 at now: gate times out, fail-closed. With the fix, lastRun is
+	// stamped to now so the cooldown trigger sees the order as "not due" on
+	// any tick within the 1m interval.
+	ad.dispatch(context.Background(), cityPath, now)
+	ad.drain(context.Background())
+
+	if got := trackingBeads(t, store.Store, "order-run:merge-loop-sweep"); len(got) != 0 {
+		t.Errorf("tick 1: non-idempotent order should fail CLOSED on gate timeout; got %d tracking beads", len(got))
+	}
+	afterTick1 := store.gateCallCount()
+	if afterTick1 == 0 {
+		t.Fatal("gate should have been called on tick 1 (to produce the timeout)")
+	}
+
+	// Tick 2 at same now (still within the 1m cooldown): the cooldown trigger
+	// must see lastRun=now and return "not due", so the gate is never reached.
+	// Without the fix the gate would be queried again, timing out and adding
+	// another 8s of Dolt load per tick.
+	ad.dispatch(context.Background(), cityPath, now)
+	ad.drain(context.Background())
+
+	if extra := store.gateCallCount() - afterTick1; extra > 0 {
+		t.Errorf("tick 2 (within backoff window): gate was called %d extra time(s); backoff should have suppressed it (#3688)", extra)
+	}
+	if got := trackingBeads(t, store.Store, "order-run:merge-loop-sweep"); len(got) != 0 {
+		t.Errorf("tick 2: order should not have dispatched during backoff; got %d tracking beads", len(got))
 	}
 }
 

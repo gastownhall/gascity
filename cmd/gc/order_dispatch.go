@@ -513,6 +513,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		})
 		if err != nil {
 			if m.gateFailClosed(ctx, a, scoped, err) {
+				if errors.Is(err, errGateTimeout) {
+					m.rememberLastRun(scoped, storeKeysForGate, now)
+				}
 				continue
 			}
 		}
@@ -606,6 +609,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		})
 		if err != nil {
 			if m.gateFailClosed(ctx, a, scoped, err) {
+				if errors.Is(err, errGateTimeout) {
+					m.rememberLastRun(scoped, storeKeysForGate, now)
+				}
 				continue
 			}
 		}
