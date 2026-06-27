@@ -546,12 +546,23 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 	// A configured prefix owns the id even when its store is not loaded: the
 	// caller treats a (nil, true) result as "owned but absent here" and skips
 	// the all-stores fallback, so nil stores are passed in as candidates.
+	//
+	// The candidate set is class-tagged: the city store under the HQ prefix is
+	// the graph/sessions/mail/nudge/order class store, and each rig store under
+	// its rig prefix is that rig's work-class store. On a single-store city these
+	// all collapse to the same value, so the resolution is identical today; the
+	// tagging marks where a future per-class backend would diverge. These read
+	// the raw cs fields rather than the class accessors (graphBeadStore /
+	// workBeadStores) because this runs under cs.mu and those accessors take the
+	// same lock.
 	candidates := make([]storeref.Candidate, 0, len(cs.cfg.Rigs)+1)
+	// Graph/non-work class candidate: the city store.
 	candidates = append(candidates, storeref.Candidate{
 		Prefix: config.EffectiveHQPrefix(cs.cfg),
 		Store:  cs.cityBeadStore,
 	})
 	for _, rig := range cs.cfg.Rigs {
+		// Work class candidate: this rig's store.
 		candidates = append(candidates, storeref.Candidate{
 			Prefix: rig.EffectivePrefix(),
 			Store:  cs.beadStores[rig.Name],

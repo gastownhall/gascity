@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
@@ -113,6 +114,14 @@ func (s *Server) findStore(rig string) beads.Store {
 // beadStoresForID resolves the authoritative store for a bead ID using its
 // prefix/routes mapping when possible. If there is no routed match, it falls
 // back to the legacy store scan order.
+//
+// The result is the per-class by-id candidate set: a successful prefix/route
+// match returns the single store that owns the ID's namespace (which is already
+// the bead's class+rig store), and the unrouted fallback leads with the
+// graph-class store ahead of the per-rig work stores. Routing the lead fallback
+// entry through classStoreFor makes the class seam explicit without changing the
+// resolved slice — on a single-store city the graph-class store and the city
+// store are the same value, so the candidate ordering is byte-identical.
 func (s *Server) beadStoresForID(id string) []beads.Store {
 	id = strings.TrimSpace(id)
 	if store := s.resolveStoreByConfiguredIDPrefix(id); store != nil {
@@ -127,8 +136,8 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
 	candidates := make([]beads.Store, 0, len(rigNames)+1)
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
-		candidates = append(candidates, cityStore)
+	if graphStore := classStoreFor(s.state, coordclass.ClassGraph, ""); graphStore != nil {
+		candidates = append(candidates, graphStore)
 	}
 	for _, rigName := range rigNames {
 		candidates = append(candidates, stores[rigName])
