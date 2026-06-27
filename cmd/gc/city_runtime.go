@@ -477,7 +477,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			cr.onStatus("adopting_sessions")
 		}
 		if cr.cityBeadStore() != nil {
-			result, passed := runAdoptionBarrier(cr.cityPath, cr.cityBeadStore(), cr.sp, cr.cfg, cr.cityName, clock.Real{}, cr.stderr, false)
+			result, passed := runAdoptionBarrier(cr.cityPath, cr.sessionsBeadStore(), cr.sp, cr.cfg, cr.cityName, clock.Real{}, cr.stderr, false)
 			if result.Adopted > 0 {
 				fmt.Fprintf(cr.stdout, "Adopted %d running session(s) into bead store.\n", result.Adopted) //nolint:errcheck
 			}
@@ -559,17 +559,17 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			}
 		}()
 
-		cleanupDeadRuntimeSessionCorpses(cr.cityBeadStore(), cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
+		cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore(), cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
 		// Reap live runtimes still bound to a closed bead (e.g. a named-session
 		// identity re-minted as a pool slot) so the name's current owner can
 		// rebind it and attach lands on the right runtime.
-		reapRuntimesBoundToClosedBeads(cr.cityBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
-		if swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.cityBeadStore(), cr.cityPath, cr.stderr); swept > 0 {
+		reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+		if swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.sessionsBeadStore(), cr.cityPath, cr.stderr); swept > 0 {
 			fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
 		}
 		// Reap stale session beads from a previous run before building desired
 		// state, so desired state does not reference already-closed beads (#742).
-		if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
+		if reapStaleSessionBeads(cr.sessionsBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
 			sessionBeads = cr.loadSessionBeadSnapshot()
 		}
 		result := cr.buildDesiredState(sessionBeads, startupTrace)
@@ -1113,22 +1113,22 @@ func (cr *CityRuntime) tick(
 	// Reap open session beads whose tmux session is dead before loading demand
 	// so stale names cannot block desired-state computation (#742).
 	phaseStart = time.Now()
-	cleanupDeadRuntimeSessionCorpses(cr.cityBeadStore(), cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
+	cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore(), cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, nil)
 	// Reap live runtimes still bound to a closed bead (e.g. a named-session
 	// identity re-minted as a pool slot) so the name's current owner can rebind
 	// it and attach lands on the right runtime.
 	phaseStart = time.Now()
-	reapRuntimesBoundToClosedBeads(cr.cityBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+	reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, nil)
 	phaseStart = time.Now()
-	swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.cityBeadStore(), cr.cityPath, cr.stderr)
+	swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.sessionsBeadStore(), cr.cityPath, cr.stderr)
 	if swept > 0 {
 		fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
 	}
 	recordPhase(TraceSiteControllerTickPhase, "sweep_process_table_orphans", phaseStart, map[string]any{"reaped": swept})
 	phaseStart = time.Now()
-	reaped := reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
+	reaped := reapStaleSessionBeads(cr.sessionsBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "reap_stale_session_beads", phaseStart, map[string]any{"reaped": reaped})
 	if reaped > 0 {
 		phaseStart = time.Now()
@@ -1276,7 +1276,7 @@ func (cr *CityRuntime) tick(
 	// Chat session auto-suspend: suspend detached idle sessions.
 	if idleTimeout := cr.cfg.ChatSessions.IdleTimeoutDuration(); idleTimeout > 0 {
 		phaseStart = time.Now()
-		autoSuspendChatSessions(cr.cityBeadStore(), cr.sp, idleTimeout, clock.Real{}, cr.stdout, cr.stderr)
+		autoSuspendChatSessions(cr.sessionsBeadStore(), cr.sp, idleTimeout, clock.Real{}, cr.stdout, cr.stderr)
 		recordPhase(TraceSiteControllerTickPhase, "auto_suspend_chat_sessions", phaseStart, map[string]any{"idle_timeout_ms": idleTimeout.Milliseconds()})
 	}
 
