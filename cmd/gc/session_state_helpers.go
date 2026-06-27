@@ -24,13 +24,25 @@ func isDrainedSessionBead(session beads.Bead) bool {
 // no active process and must not suppress the isCold cross-store wake
 // probe.
 func poolSessionIsLive(session beads.Bead) bool {
-	if strings.TrimSpace(session.Metadata["state"]) == "asleep" {
-		return false
-	}
+	return !isDormantSessionBead(session)
+}
+
+// isDormantSessionBead reports whether a session bead represents a dormant
+// worker — asleep (any sleep_reason) or drained — that cannot currently claim
+// or service routed demand. An asleep ephemeral pool session is replaced by a
+// fresh spawn rather than restarted (see selectOrPlanPoolSessionBead), so a
+// dormant bead is not live capacity.
+//
+// Used by the cold-pool detection in buildDesiredState: counting dormant
+// sessions as "running" kept a min=0 pool from ever registering as cold
+// (gc-blo) — isCold stayed false, the cold-wake demand probe never ran, and
+// newly-routed work sat unclaimed while the dormant sessions masked the
+// demand.
+func isDormantSessionBead(session beads.Bead) bool {
 	if isDrainedSessionBead(session) {
-		return false
+		return true
 	}
-	return true
+	return strings.TrimSpace(session.Metadata["state"]) == "asleep"
 }
 
 // isPoolSessionSlotFreeable reports whether a session's bead is in a terminal

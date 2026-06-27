@@ -263,6 +263,100 @@ func TestBuildDesiredState_ScaleFromZero_IncludesRigSessions(t *testing.T) {
 // rig-A/planner's running sessions, so rig-A/planner stays cold and its
 // cold-wake probe still fires. With the bare-name match present, the stray bead
 // would suppress the probe and demand would be 0.
+// TestBuildDesiredState_ScaleFromZero_AsleepSessionDoesNotSuppressCold proves
+// the cold detection counts only LIVE workers: a dormant (asleep) pool session
+// bead must NOT suppress the cold-wake probe (gc-blo). An asleep ephemeral pool
+// session cannot claim or service routed demand and is replaced by a fresh
+// spawn rather than restarted, so a min=0 pool whose only session is asleep is
+// still cold and must probe cross-store demand. Before the fix, the asleep bead
+// kept runningSessions > 0, isCold stayed false, the cold-wake probe never ran,
+// and city-routed work sat unclaimed forever — the pool looked "full" of
+// dormant sessions. This is the active-session mirror of
+// TestBuildDesiredState_ScaleFromZero_IncludesRigSessions: an ACTIVE session
+// suppresses the probe (demand 0); an ASLEEP one must not (demand 1).
+func TestBuildDesiredState_ScaleFromZero_AsleepSessionDoesNotSuppressCold(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := tmpDir + "/rigs/rig-A"
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	maxSess := 5
+	minSess := 0
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:              "planner",
+				MaxActiveSessions: &maxSess,
+				MinActiveSessions: &minSess,
+				ScaleCheck:        "printf 0", // custom check returns 0
+				Dir:               "rig-A",
+				Provider:          "mock",
+			},
+		},
+		Rigs: []config.Rig{
+			{Name: "rig-A", Path: rigPath},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"mock": {
+				Command: "true",
+			},
+		},
+	}
+
+	cityStore := beads.NewMemStore()
+	rigAStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{
+		"rig-A": rigAStore,
+	}
+
+	qualifiedName := "rig-A/planner"
+
+	// A DORMANT (asleep) pool session bead in the rig store — a zombie polecat
+	// parked after going idle. It is not a live worker, so it must not count
+	// toward runningSessions and must not suppress cold detection.
+	if _, err := rigAStore.Create(beads.Bead{
+		ID:     "asleep-session",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     qualifiedName,
+			"session_name": "planner-1",
+			"state":        "asleep",
+			"sleep_reason": "idle",
+			"pool_slot":    "1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Route demand to rig-A/planner in the city store. Only the cross-store
+	// cold-wake probe (gated on isCold) discovers it; the custom check returns 0.
+	if _, err := cityStore.Create(beads.Bead{
+		ID:     "bead-1",
+		Status: "open",
+		Type:   "task",
+		Metadata: map[string]string{
+			"gc.routed_to": qualifiedName,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionBeads := &sessionBeadSnapshot{} // Empty city store snapshot
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore, rigStores, sessionBeads, nil, os.Stderr,
+	)
+
+	// The pool's only session is asleep (not live), so rig-A/planner is cold and
+	// the cold-wake probe fires on the city-routed demand (clamped to 1).
+	if demand := result.ScaleCheckCounts[qualifiedName]; demand != 1 {
+		t.Errorf("expected demand 1 (asleep session must not suppress cold), got %d", demand)
+	}
+}
+
 func TestBuildDesiredState_ScaleFromZero_UnqualifiedTemplateDoesNotSuppressCold(t *testing.T) {
 	tmpDir := t.TempDir()
 	rigPath := tmpDir + "/rigs/rig-A"
