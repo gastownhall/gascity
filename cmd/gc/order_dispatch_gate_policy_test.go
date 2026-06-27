@@ -227,6 +227,59 @@ func (s *trackingGateTimeoutStore) List(query beads.ListQuery) ([]beads.Bead, er
 	return s.Store.List(query)
 }
 
+// TestOrderDispatchEventTriggeredBackoffOnTrackingGateTimeout verifies that
+// the gate-timeout backoff is trigger-agnostic: an event-triggered (non-cron)
+// non-idempotent order whose first open-work gate (hasOpenTracking) times out
+// is suppressed on subsequent ticks via gateBackoffUntil, exactly as for
+// cooldown-triggered orders. With the old rememberLastRun approach this path
+// was unprotected because orderTriggerUsesLastRun returned false for event
+// triggers (#3688, event-trigger gap).
+func TestOrderDispatchEventTriggeredBackoffOnTrackingGateTimeout(t *testing.T) {
+	prev := orderGateTimeout
+	orderGateTimeout = 20 * time.Millisecond
+	defer func() { orderGateTimeout = prev }()
+
+	store := &trackingGateTimeoutStore{Store: beads.NewMemStore(), delay: 50 * time.Millisecond}
+	now := time.Date(2026, 6, 27, 17, 0, 0, 0, time.UTC)
+	orderName := "cascade-nudge-on-event"
+
+	aa := []orders.Order{{
+		Name:    orderName,
+		Trigger: "event",
+		On:      "bead.closed",
+		Exec:    "true",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	cityPath := t.TempDir()
+
+	// Tick 1: first gate times out, fail-closed. gateBackoffUntil is set so
+	// tick 2 skips without re-entering the gate, regardless of trigger type.
+	ad.dispatch(context.Background(), cityPath, now)
+	ad.drain(context.Background())
+	if got := trackingBeads(t, store.Store, "order-run:"+orderName); len(got) != 0 {
+		t.Fatalf("tick 1: event-triggered order must be skipped on tracking gate timeout; got %d tracking beads", len(got))
+	}
+	countAfterTick1 := store.gateCount.Load()
+	if countAfterTick1 == 0 {
+		t.Fatal("tick 1 did not reach the open order-tracking gate")
+	}
+
+	// Tick 2 (1ms later, still within backoff window): gateBackoffActive must
+	// return true and suppress the order before the gate is reached.
+	ad.dispatch(context.Background(), cityPath, now.Add(time.Millisecond))
+	ad.drain(context.Background())
+
+	if got := store.gateCount.Load(); got != countAfterTick1 {
+		t.Fatalf("tick 2 re-entered the tracking gate for event-triggered order: got %d calls, want %d (#3688 event-trigger gap)", got, countAfterTick1)
+	}
+	if got := trackingBeads(t, store.Store, "order-run:"+orderName); len(got) != 0 {
+		t.Fatalf("tick 2: no tracking bead expected while gate-timeout backoff is active; got %d", len(got))
+	}
+}
+
 // TestOrderDispatchNonIdempotentBackoffOnOpenTrackingTimeout verifies that when
 // the first open-work gate (hasOpenTracking / listCanonicalOpenOrderTrackingBeads)
 // times out for a non-idempotent order, gateBackoffUntil is set and suppresses
