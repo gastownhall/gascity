@@ -36,8 +36,11 @@ type fakeState struct {
 	rawCfg        *config.City // optional: raw config for provenance detection
 	sp            *runtime.Fake
 	stores        map[string]beads.Store
-	cityBeadStore beads.Store // city-level store for session beads
-	cityBeadsDiag *beads.BeadsDiagnostic
+	cityBeadStore     beads.Store // city-level store for session beads
+	nudgesBeadStore   beads.Store // relocated nudges store; nil falls back to cityBeadStore (default backend)
+	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
+	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
+	cityBeadsDiag     *beads.BeadsDiagnostic
 	cityMailProv  mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv     events.Provider
 	cityName      string
@@ -103,6 +106,24 @@ func (f *fakeState) StartedAt() time.Time                  { return f.startedAt 
 func (f *fakeState) IsQuarantined(sessionName string) bool { return f.quarantined[sessionName] }
 func (f *fakeState) ClearCrashHistory(sessionName string)  { delete(f.quarantined, sessionName) }
 func (f *fakeState) CityBeadStore() beads.Store            { return f.cityBeadStore }
+func (f *fakeState) NudgesBeadStore() beads.Store {
+	if f.nudgesBeadStore != nil {
+		return f.nudgesBeadStore
+	}
+	return f.cityBeadStore
+}
+func (f *fakeState) SessionsBeadStore() beads.Store {
+	if f.sessionsBeadStore != nil {
+		return f.sessionsBeadStore
+	}
+	return f.cityBeadStore
+}
+func (f *fakeState) GraphBeadStore() beads.Store {
+	if f.graphBeadStore != nil {
+		return f.graphBeadStore
+	}
+	return f.cityBeadStore
+}
 func (f *fakeState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	if f.cityBeadsDiag == nil {
 		return nil

@@ -49,12 +49,12 @@ type MaintenanceProvider interface {
 // State provides read access to controller-managed state.
 // The controller implements this with RWMutex-protected hot-reload.
 //
-// The per-coordination-class store seam is layered over State as free
-// functions in class_store.go (classStoreFor / Server.classBeadStoresForID)
-// rather than as new interface methods, so the interface stays minimal and
-// every implementation and test mock keeps working without churn. Callers that
-// need the store for a specific bead class route through those helpers; today
-// they collapse to the single store the existing accessors return.
+// The per-coordination-class store seam is exposed as named accessors
+// (GraphBeadStore / SessionsBeadStore / NudgesBeadStore) so a future per-class
+// backend becomes a change in the implementation rather than at every call
+// site. Callers that need the store for a specific bead class route through
+// those accessors; on a single-store city every one collapses to the same
+// concrete store CityBeadStore() returns, so they are byte-identical today.
 type State interface {
 	// Config returns the current city config snapshot.
 	Config() *config.City
@@ -106,6 +106,34 @@ type State interface {
 	// CityBeadStore returns the city-level bead store for session beads.
 	// Returns nil if no store is available.
 	CityBeadStore() beads.Store
+
+	// NudgesBeadStore returns the store backing the nudge-queue shadow beads
+	// (gc:nudge). At the default backend this is the same store as
+	// CityBeadStore; when [beads.classes.nudges] is relocated it is the
+	// per-class store, so nudge-shadow ops (e.g. withdrawing wait nudges on
+	// session close/wake) reach the relocated beads instead of orphaning them
+	// on the work store. Returns nil if no store is available.
+	NudgesBeadStore() beads.Store
+
+	// SessionsBeadStore returns the store backing session-class beads — session
+	// lifecycle (type=session/gc:session) and durable session waits
+	// (type=gate/gc:wait). At the default backend this is the same store as
+	// CityBeadStore; when [beads.classes.sessions] is relocated it is the
+	// per-class store, so session/wait reads and writes reach the relocated
+	// beads instead of the work store. Session handlers source their store from
+	// here (not CityBeadStore); cross-class WORK-bead reads stay on
+	// CityBeadStore. Returns nil if no store is available.
+	SessionsBeadStore() beads.Store
+
+	// GraphBeadStore returns the store backing graph-class beads — the formula-v2
+	// execution topology and control lane (molecules, wisps, convoys, control
+	// steps). At the default backend this is the same store as CityBeadStore;
+	// when [beads.classes.graph] is relocated it is the dedicated graph store at
+	// the legacy <cityPath>/.gc/beads.sqlite (SQLite) or the gcg Postgres schema,
+	// so graph reads and writes reach the relocated beads instead of the work
+	// store. This is the class-aware graph leg; cross-class WORK-bead reads stay
+	// on CityBeadStore. Returns nil if no store is available.
+	GraphBeadStore() beads.Store
 
 	// Orders returns the current active set of scanned orders.
 	// Returns nil if orders are not configured.

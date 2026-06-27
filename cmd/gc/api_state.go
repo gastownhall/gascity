@@ -517,9 +517,9 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	// The just-closed bead is read from its owning store (store), but its
 	// molecule and wisp GRAPH parents live in the graph-class store, so the
 	// graph-root walks resolve through graphBeadStore() rather than assuming
-	// co-residence with the closed bead. On a single-store city graphBeadStore()
+	// co-residence with the closed bead. On a single-store city GraphBeadStore()
 	// returns the same store, so this is identity today.
-	graphStore := cs.graphBeadStore()
+	graphStore := cs.GraphBeadStore()
 	beadCloseAutocloseDispatch(func() {
 		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
 		doWispAutocloseWith(store, beadID, os.Stderr, graphStore)
@@ -1125,6 +1125,42 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.cityBeadStore
+}
+
+// NudgesBeadStore returns the store backing the nudge-queue shadow beads. At the
+// default backend resolveNudgesStore returns cityBeadStore, so this is byte-identical
+// to CityBeadStore; when [beads.classes.nudges] is relocated it returns the per-class
+// store. cs.eventProv is the recorder (an events.Recorder), matching how the city mail
+// store is wired (newCityMailProvider), so relocated writes through this store emit
+// bead.* exactly like the controller's own nudge writes.
+func (cs *controllerState) NudgesBeadStore() beads.Store {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return resolveNudgesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
+}
+
+// SessionsBeadStore returns the store backing session-class beads. At the default
+// backend resolveSessionStore returns cityBeadStore, so this is byte-identical to
+// CityBeadStore; when [beads.classes.sessions] is relocated it returns the per-class
+// store. cs.eventProv is the recorder, matching the nudges/mail wiring, so relocated
+// session writes emit bead.* exactly like the controller's own session writes.
+func (cs *controllerState) SessionsBeadStore() beads.Store {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return resolveSessionStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
+}
+
+// GraphBeadStore returns the store backing graph-class beads. At the default backend
+// resolveGraphStore returns cityBeadStore, so this is byte-identical to CityBeadStore;
+// when [beads.classes.graph] is relocated it returns the dedicated graph store at the
+// legacy .gc/beads.sqlite location (or the gcg Postgres schema). cs.eventProv is
+// passed for signature parity with the other accessors but is ignored by
+// resolveGraphStore: the graph store stays event-silent, matching the prior Router
+// graph leg.
+func (cs *controllerState) GraphBeadStore() beads.Store {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return resolveGraphStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
 }
 
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
