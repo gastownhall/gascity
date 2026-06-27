@@ -6,15 +6,14 @@ name: gc edge publish
 #   - beads CI runs bd-HEAD x this gc edge build (the reverse-direction radar).
 # The edge release is a moving pre-release pointed at the latest main commit. It
 # is NEVER used by the required contract gate (which pins released versions) and
-# is not for production. See engdocs/design/beads-gascity-contract-test-system.md.
+# is not for production.
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: gc-edge-publish
@@ -23,9 +22,14 @@ concurrency:
 jobs:
   publish-gc-edge:
     name: Publish gc edge build
-    # Forks have no edge release to publish to; only the canonical repo runs this.
-    if: ${{ github.repository == 'gastownhall/gascity' }}
+    # Forks have no edge release to publish to; only the canonical repo runs
+    # this. The ref guard also keeps a manual workflow_dispatch from a feature
+    # branch from publishing a non-main commit as edge, so "edge == a main
+    # commit" stays an invariant rather than a convention.
+    if: ${{ github.repository == 'gastownhall/gascity' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -58,11 +62,21 @@ jobs:
           cp "${arts[0]}" gascity_edge_linux_amd64.tar.gz
           sha256sum gascity_edge_linux_amd64.tar.gz | tee gascity_edge_checksums.txt
           notes="Rolling build of gascity main @ ${GITHUB_SHA}. Pre-release for cross-version contract radars; not for production."
-          if gh release view edge >/dev/null 2>&1; then
-            gh release edit edge --target "${GITHUB_SHA}" --notes "${notes}"
-          else
-            gh release create edge --target "${GITHUB_SHA}" \
+          # Move the rolling edge tag to this commit. gh release edit does NOT
+          # advance an existing tag (target_commitish is ignored once the tag
+          # exists), so without this the tag and GitHub's auto-generated source
+          # archives would stay frozen at the first run's commit while only the
+          # notes and binary assets refreshed.
+          git tag -f edge "${GITHUB_SHA}"
+          git push -f origin "refs/tags/edge"
+          if ! gh release view edge >/dev/null 2>&1; then
+            gh release create edge \
               --prerelease --title "gascity edge (rolling main)" --notes "${notes}"
           fi
+          # Upload assets before refreshing the notes so the advertised SHA only
+          # advances once the matching binary and checksum are in place. This
+          # narrows the cancel-in-progress window where notes and assets could
+          # momentarily disagree.
           gh release upload edge \
             gascity_edge_linux_amd64.tar.gz gascity_edge_checksums.txt --clobber
+          gh release edit edge --notes "${notes}"
