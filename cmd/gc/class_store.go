@@ -127,18 +127,3 @@ func (s *beadPolicyStore) createTarget(_ coordclass.Class) beads.Store {
 func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphApplyStore {
 	return s.applier
 }
-
-// resolveClassStoreOpen is the seam resolveClassStore opens through. Tests swap
-// it to avoid opening a real (native Dolt) store. It defaults to the CLI store
-// funnel, so production behavior is unchanged.
-var resolveClassStoreOpen = openStoreAtForCity
-
-// resolveClassStore opens the store that owns beads of the given coordination
-// class at the given scope, for the CLI funnel that opens a store on demand.
-// Identity today: it delegates to the store funnel for every class and ignores
-// the class entirely, so the returned store is the exact wrapped+cached value
-// the CLI already opens. The class is accepted so a future per-class backend
-// can route the open without a call-site change.
-func resolveClassStore(_ coordclass.Class, storePath, cityPath string) (beads.Store, error) {
-	return resolveClassStoreOpen(storePath, cityPath)
-}

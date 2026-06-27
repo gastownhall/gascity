@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // controllerClassAccessor names a controllerState per-class accessor for the
@@ -91,41 +90,6 @@ func TestCityRuntimeClassAccessorsAreIdentity(t *testing.T) {
 		if !sameStorePtr(work[name], store) {
 			t.Errorf("workBeadStores()[%q] = %p, want %p", name, work[name], store)
 		}
-	}
-}
-
-// TestResolveClassStoreIsClassAgnostic pins that resolveClassStore opens the
-// store funnel with the same (storePath, cityPath) scope for every coordination
-// class and returns the identical store the funnel produced — the class never
-// changes the routing today. It swaps the open seam so no real (Dolt) store is
-// opened.
-func TestResolveClassStoreIsClassAgnostic(t *testing.T) {
-	sentinel := beads.NewMemStore()
-	var sawStorePath, sawCityPath string
-	calls := 0
-	orig := resolveClassStoreOpen
-	t.Cleanup(func() { resolveClassStoreOpen = orig })
-	resolveClassStoreOpen = func(storePath, cityPath string) (beads.Store, error) {
-		calls++
-		sawStorePath, sawCityPath = storePath, cityPath
-		return sentinel, nil
-	}
-
-	classes := coordclass.Classes()
-	for _, class := range classes {
-		got, err := resolveClassStore(class, "/store", "/city")
-		if err != nil {
-			t.Fatalf("resolveClassStore(%s): %v", class, err)
-		}
-		if !sameStorePtr(got, sentinel) {
-			t.Errorf("resolveClassStore(%s) = %p, want funnel store %p", class, got, sentinel)
-		}
-		if sawStorePath != "/store" || sawCityPath != "/city" {
-			t.Errorf("resolveClassStore(%s) opened scope (%q, %q), want (/store, /city)", class, sawStorePath, sawCityPath)
-		}
-	}
-	if calls != len(classes) {
-		t.Errorf("open funnel called %d times, want %d (one per class)", calls, len(classes))
 	}
 }
 
