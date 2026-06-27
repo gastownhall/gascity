@@ -84,6 +84,81 @@ vulnerabilities:
       - "usr/local/bin/dolt"
     expired_at: 2026-07-07
     statement: Latest Dolt 1.88.0 still embeds github.com/apache/thrift v0.13.1; remove after a Dolt release includes thrift 0.23.0 or later.
+  - id: CVE-2026-25680
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML parsing issue; remove once upstream rebuilds against the fixed x/net release.
+  - id: CVE-2026-25681
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML rendering issue; remove once upstream rebuilds against the fixed x/net release.
+  - id: CVE-2026-27136
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML rendering issue; remove once upstream rebuilds against the fixed x/net release.
+  - id: CVE-2026-39821
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles a Go module set with this x/net idna issue; remove once upstream rebuilds against the fixed x/net release.
+  - id: CVE-2026-42502
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML rendering issue; remove once upstream rebuilds against the fixed x/net release.
+  - id: CVE-2026-42506
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML rendering issue; remove once upstream rebuilds against the fixed x/net release.
+  - id: CVE-2026-39827
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-39828
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-39829
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-39830
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-39832
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-39835
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-42508
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-46595
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-46597
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
   # HIGH severity, fixed upstream. Both CVEs below are present ONLY via the
   # deliberate steveyegge/beads v1.0.4 repin (v1.0.5 has data corruption) in the
   # bundled bd CLI binary. bd is a local CLI: the affected apache/thrift and
