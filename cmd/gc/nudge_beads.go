@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -39,7 +38,7 @@ type nudgeReference = nudgequeue.Reference
 // per-tick poll helpers close every store they open. Tests that replace this
 // package variable must stay serial; do not use t.Parallel in those tests.
 var openNudgeBeadStore = func(cityPath string) beads.Store {
-	store, err := resolveClassStore(coordclass.ClassNudges, cityPath, cityPath)
+	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		return nil
 	}

@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/spf13/cobra"
 )
@@ -120,7 +119,7 @@ func loadEventBeadPayload(beadID string) (json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolving current scope: %w", err)
 	}
-	store, err := resolveClassStore(coordclass.ClassWork, scopeRoot, cityPath)
+	store, err := openStoreAtForCity(scopeRoot, cityPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening bead store: %w", err)
 	}

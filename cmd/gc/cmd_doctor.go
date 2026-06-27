@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -632,6 +631,6 @@ func collectPackDirs(cfg *config.City) []string {
 // canonical city topology instead of guessing from the rig path.
 func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 	return func(dirPath string) (beads.Store, error) {
-		return resolveClassStore(coordclass.ClassWork, dirPath, cityPath)
+		return openStoreAtForCity(dirPath, cityPath)
 	}
 }
