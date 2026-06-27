@@ -28,8 +28,8 @@ type TaggedEvent struct {
 	RunID     string
 	SessionID string
 	StepID    string   // opaque acting-work-bead (run step) id; safeRef-gated at projection (EmitCorrelation)
-	Title     string   // FREE-FORM bead title; emitted only under Options.EmitContent
-	Formula   string   // FREE-FORM run formula name; emitted only under Options.EmitContent
+	Title     string   // FREE-FORM bead title; emitted only under the content opt-in (Options.emitContent)
+	Formula   string   // FREE-FORM run formula name; emitted only under the content opt-in (Options.emitContent)
 	_         struct{} // force keyed literals; blocks positional field transposition
 }
 
@@ -50,7 +50,6 @@ type Config struct {
 	Salt              []byte
 	ExportRef         bool
 	EmitCorrelation   bool // emit opaque run_id/session_id/step_id (default false)
-	EmitContent       bool // emit free-form title/formula (default false; REVERSES envelope-only — opt-in only)
 	Profile           Profile
 	BatchMax          int           // max events per POST (default 1000)
 	BatchInterval     time.Duration // max time between POSTs (default 5s)
@@ -180,15 +179,18 @@ func (e *Exporter) ingest(te TaggedEvent) {
 		return // already processed (resume overlap)
 	}
 	e.high[te.City] = te.Seq
-	// Correlation ids (run_id/session_id/step_id) and free-form content
-	// (title/formula) are emitted only when their respective Config toggles are set;
-	// both default false so the projection stays envelope-only unless opted in.
+	// Correlation ids (run_id/session_id/step_id) are emitted only when
+	// EmitCorrelation is set (default false), so the projection stays envelope-only
+	// unless opted in. The Exporter intentionally exposes no content (title/formula)
+	// opt-in: the producer path — a reachable Config knob plus the typed source
+	// fields — is staged behind ga-mt1e99, and the projection's content gate
+	// (Options.emitContent) is unexported, so free-form content cannot egress
+	// through the Exporter.
 	opt := Options{
 		Salt:            e.cfg.Salt,
 		ExportRef:       e.cfg.ExportRef,
 		Profile:         e.cfg.Profile,
 		EmitCorrelation: e.cfg.EmitCorrelation,
-		EmitContent:     e.cfg.EmitContent,
 	}
 	env, ok := ProjectEvent(te, opt)
 	if !ok {

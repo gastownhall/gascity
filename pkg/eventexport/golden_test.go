@@ -38,6 +38,16 @@ func TestGoldenWireBytes(t *testing.T) {
 			env:  Envelope{Seq: 2, Type: "bead.created", TS: "2026-06-21T10:03:27Z", ActorHash: "0123456789abcdef", Ref: "mc-2", RunID: "wf-root-abc", SessionID: "sess-9f2a", StepID: "mc-step-7"},
 			want: `{"seq":2,"type":"bead.created","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","ref":"mc-2","run_id":"wf-root-abc","session_id":"sess-9f2a","step_id":"mc-step-7"}`,
 		},
+		{
+			// The content opt-in path: free-form title/formula serialize verbatim
+			// after step_id. Pinning this anchors the off-by-default exemption — the
+			// empty-field cases above prove the DEFAULT wire is byte-identical to the
+			// pre-content shape, while this case fixes the opt-in wire shape so the
+			// receiver-ready contract cannot drift silently.
+			name: "content opt-in: title/formula appear after step_id",
+			env:  Envelope{Seq: 3, Type: "bead.closed", TS: "2026-06-21T10:03:27Z", ActorHash: "0123456789abcdef", Ref: "mc-3", Title: "ESCALATION: spike [HIGH]", Formula: "randy-triage-patrol"},
+			want: `{"seq":3,"type":"bead.closed","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","ref":"mc-3","title":"ESCALATION: spike [HIGH]","formula":"randy-triage-patrol"}`,
+		},
 	}
 	for _, tc := range cases {
 		out, err := json.Marshal(tc.env)

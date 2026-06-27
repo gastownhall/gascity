@@ -242,8 +242,9 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // TestExporter_EmitCorrelation proves the end-to-end exported batch carries
-// run_id/session_id only when Config.EmitCorrelation is true (the v1-compatible
-// opt-in; SchemaVersion stays 1 since the envelope already defines the fields).
+// run_id/session_id only when Config.EmitCorrelation is true (the version-neutral
+// opt-in; SchemaVersion is unchanged since the envelope already defines the fields
+// and they stay omitted by default).
 func TestExporter_EmitCorrelation(t *testing.T) {
 	run := func(emit bool) Batch {
 		cp := &capture{}
