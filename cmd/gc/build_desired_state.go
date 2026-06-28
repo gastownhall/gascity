@@ -536,7 +536,7 @@ func buildDesiredStateWithSessionBeads(
 		template := cfg.Agents[i].QualifiedName()
 		runningSessions := 0
 		for _, sb := range allOpenSessionBeads {
-			if isPoolManagedSessionBead(sb) {
+			if isPoolManagedSessionBead(sb) && poolSessionIsLive(sb) {
 				// Match the qualified template by identity equivalence.
 				// allOpenSessionBeads is aggregated across the city + every rig
 				// store, and pool session beads store the qualified name
