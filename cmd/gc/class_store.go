@@ -164,6 +164,9 @@ func (cr *CityRuntime) workBeadStores() map[string]beads.WorkStore {
 // beads.WorkStore, carrying the same underlying store value so the result is
 // byte-identical to the input map.
 func toWorkStores(stores map[string]beads.Store) map[string]beads.WorkStore {
+	if stores == nil {
+		return nil
+	}
 	out := make(map[string]beads.WorkStore, len(stores))
 	for name, store := range stores {
 		out[name] = beads.WorkStore{Store: store}
@@ -176,6 +179,9 @@ func toWorkStores(stores map[string]beads.Store) map[string]beads.WorkStore {
 // classes. Each value carries the same underlying store, so the result is
 // byte-identical.
 func unwrapWorkStores(stores map[string]beads.WorkStore) map[string]beads.Store {
+	if stores == nil {
+		return nil
+	}
 	out := make(map[string]beads.Store, len(stores))
 	for name, store := range stores {
 		out[name] = store.Store
