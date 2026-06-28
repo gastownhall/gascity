@@ -19,15 +19,41 @@ import (
 )
 
 type (
-	orderStoreResolver  func(orders.Order) (beads.Store, error)
-	orderStoresResolver func(orders.Order) ([]beads.Store, error)
+	orderStoreResolver  func(orders.Order) (beads.OrdersStore, error)
+	orderStoresResolver func(orders.Order) ([]beads.OrdersStore, error)
 )
+
+// unwrapOrdersStores returns the underlying beads.Store values of a typed
+// orders-store slice. The per-order resolution outputs are strongly typed as
+// beads.OrdersStore, but the cross-store gate/history reads
+// (orders.LastRunAcrossStores, orders.CursorAcrossStores, bdCursorAcrossStores,
+// store.List) are class-agnostic federated helpers shared with the dispatch and
+// by-id paths, so the typed slice is unwrapped to []beads.Store exactly at that
+// boundary. Each element carries the same underlying store, so the reads are
+// byte-identical.
+func unwrapOrdersStores(stores []beads.OrdersStore) []beads.Store {
+	out := make([]beads.Store, len(stores))
+	for i, s := range stores {
+		out[i] = s.Store
+	}
+	return out
+}
 
 type orderTrackingSweepTarget struct {
 	target execStoreTarget
 	label  string
 }
 
+// orderTrackingSweepScopedStore wraps one store in the multi-scope order-tracking
+// sweep (city + every rig) with its scope label and dedup key. The sweep is a
+// federated READ/close across heterogeneous scopes — the orders federated-read
+// exception (analogous to the by-id sweep) — so it carries a bare beads.Store
+// rather than a beads.OrdersStore: the sweep iterates a []beads.Store and
+// recovers each store's label/key via a structural type assertion
+// (orderTrackingSweepStoreKey / orderTrackingSweepStoreLabel), which would not
+// promote through the OrdersStore wrapper. Per-order resolution (openOrderStoreForOrder,
+// cachedOrderStoresResolver) IS strongly typed as beads.OrdersStore; only this
+// federated sweep enumeration stays beads.Store by design.
 type orderTrackingSweepScopedStore struct {
 	beads.Store
 	label string
@@ -42,34 +68,34 @@ func (s orderTrackingSweepScopedStore) orderTrackingSweepKey() string {
 	return s.key
 }
 
-func openCityOrderStore(stderr io.Writer, cmdName string) (beads.Store, int) {
+func openCityOrderStore(stderr io.Writer, cmdName string) (beads.OrdersStore, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return beads.OrdersStore{}, 1
 	}
 	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return beads.OrdersStore{}, 1
 	}
-	return store, 0
+	return beads.OrdersStore{Store: store}, 0
 }
 
-func openOrderStoreForOrder(cityPath string, cfg *config.City, a orders.Order, stderr io.Writer, cmdName string) (beads.Store, int) {
+func openOrderStoreForOrder(cityPath string, cfg *config.City, a orders.Order, stderr io.Writer, cmdName string) (beads.OrdersStore, int) {
 	target, err := resolveOrderStoreTarget(cityPath, cfg, a)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return beads.OrdersStore{}, 1
 	}
 	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return beads.OrdersStore{}, 1
 	}
-	return store, 0
+	return beads.OrdersStore{Store: store}, 0
 }
 
 func resolveOrderStoreTarget(cityPath string, cfg *config.City, a orders.Order) (execStoreTarget, error) {
@@ -490,7 +516,7 @@ func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresRes
 		stores[key] = store
 		return store, nil
 	}
-	return func(a orders.Order) ([]beads.Store, error) {
+	return func(a orders.Order) ([]beads.OrdersStore, error) {
 		target, err := resolveOrderStoreTarget(cityPath, cfg, a)
 		if err != nil {
 			return nil, err
@@ -499,13 +525,13 @@ func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresRes
 		if err != nil {
 			return nil, err
 		}
-		out := []beads.Store{primary}
+		out := []beads.OrdersStore{{Store: primary}}
 		if legacyOrderCityFallbackNeeded(cityPath, target) {
 			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, legacy)
+			out = append(out, beads.OrdersStore{Store: legacy})
 		}
 		return out, nil
 	}
@@ -590,7 +616,7 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 		stores[key] = store
 		return store, nil
 	}
-	return func(a orders.Order) ([]beads.Store, error) {
+	return func(a orders.Order) ([]beads.OrdersStore, error) {
 		target, err := resolveOrderStoreTarget(cityPath, cfg, a)
 		if err != nil {
 			return nil, err
@@ -599,14 +625,14 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 		if err != nil {
 			return nil, err
 		}
-		out := []beads.Store{primary}
+		out := []beads.OrdersStore{{Store: primary}}
 		if legacyOrderCityFallbackNeeded(cityPath, target) {
 			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order history: legacy city fallback unavailable for %s: %v\n", a.ScopedName(), err) //nolint:errcheck
 				return out, nil
 			}
-			out = append(out, legacy)
+			out = append(out, beads.OrdersStore{Store: legacy})
 		}
 		return out, nil
 	}

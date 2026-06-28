@@ -180,7 +180,7 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 		if err != nil {
 			return time.Time{}, err
 		}
-		return orders.LastRunAcrossStores(stores...)(order.ScopedName())
+		return orders.LastRunAcrossStores(unwrapOrdersStores(stores)...)(order.ScopedName())
 	}
 }
 

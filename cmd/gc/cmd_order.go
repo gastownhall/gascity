@@ -584,7 +584,7 @@ func cmdOrderRun(name, rig string, jsonOutput bool, stdout, stderr io.Writer) in
 			return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
 		}
 		store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
-		if store == nil {
+		if store.Store == nil {
 			return storeCode
 		}
 		// Only event-triggered orders need the event cursor; cooldown/cron
@@ -601,7 +601,7 @@ func cmdOrderRun(name, rig string, jsonOutput bool, stdout, stderr io.Writer) in
 		return doOrderRunExecTracked(a, cityPath, cfg, store, ep, stdout, stderr)
 	}
 	store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
-	if store == nil {
+	if store.Store == nil {
 		return storeCode
 	}
 
@@ -616,7 +616,7 @@ func cmdOrderRun(name, rig string, jsonOutput bool, stdout, stderr io.Writer) in
 // doOrderRun executes an order manually: instantiates a wisp from the
 // order's formula (or runs exec script directly) and routes it to the
 // configured target.
-func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store, ep events.Provider, stdout, stderr io.Writer) int {
+func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.OrdersStore, ep events.Provider, stdout, stderr io.Writer) int {
 	return doOrderRunWithJSON(aa, name, rig, cityPath, store, ep, false, stdout, stderr)
 }
 
@@ -632,7 +632,7 @@ type orderRunJSON struct {
 	EventCursor   uint64 `json:"event_cursor,omitempty"`
 }
 
-func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store beads.Store, ep events.Provider, jsonOutput bool, stdout, stderr io.Writer) int {
+func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store beads.OrdersStore, ep events.Provider, jsonOutput bool, stdout, stderr io.Writer) int {
 	a, ok := findOrder(aa, name, rig)
 	if !ok {
 		fmt.Fprintf(stderr, "gc order run: order %q not found\n", name) //nolint:errcheck // best-effort stderr
@@ -780,7 +780,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	return 0
 }
 
-func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, store beads.Store, ep events.Provider, stdout, stderr io.Writer) int {
+func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, store beads.OrdersStore, ep events.Provider, stdout, stderr io.Writer) int {
 	scoped := a.ScopedName()
 
 	// Event-triggered orders capture the event cursor before the side effect so
@@ -1047,11 +1047,12 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			stores, err := resolveStores(a)
+			typedStores, err := resolveStores(a)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
+			stores := unwrapOrdersStores(typedStores)
 			baseLastRunFn := orders.LastRunAcrossStores(stores...)
 			var lastRunErr error
 			lastRunFn := func(orderName string) (time.Time, error) {
@@ -1116,11 +1117,12 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		stores, err := resolveStores(a)
+		typedStores, err := resolveStores(a)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		stores := unwrapOrdersStores(typedStores)
 		baseLastRunFn := orders.LastRunAcrossStores(stores...)
 		var lastRunErr error
 		lastRunFn := func(orderName string) (time.Time, error) {
@@ -1336,19 +1338,19 @@ func renderOrderHistoryFromAPI(cr api.CachedRead[[]api.OrderHistoryView], name, 
 // doOrderHistory queries bead history for order runs and prints a table.
 // When name is empty, shows history for all orders. When name is given,
 // filters to that order only. When rig is non-empty, also filters by rig.
-func doOrderHistory(name, rig string, aa []orders.Order, store beads.Store, stdout io.Writer) int {
-	return doOrderHistoryWithStoreResolver(name, rig, aa, func(orders.Order) (beads.Store, error) {
+func doOrderHistory(name, rig string, aa []orders.Order, store beads.OrdersStore, stdout io.Writer) int {
+	return doOrderHistoryWithStoreResolver(name, rig, aa, func(orders.Order) (beads.OrdersStore, error) {
 		return store, nil
 	}, stdout, io.Discard)
 }
 
 func doOrderHistoryWithStoreResolver(name, rig string, aa []orders.Order, resolveStore orderStoreResolver, stdout, stderr io.Writer) int {
-	return doOrderHistoryWithStoresResolver(name, rig, aa, func(a orders.Order) ([]beads.Store, error) {
+	return doOrderHistoryWithStoresResolver(name, rig, aa, func(a orders.Order) ([]beads.OrdersStore, error) {
 		store, err := resolveStore(a)
 		if err != nil {
 			return nil, err
 		}
-		return []beads.Store{store}, nil
+		return []beads.OrdersStore{store}, nil
 	}, stdout, stderr)
 }
 
@@ -1389,7 +1391,7 @@ func doOrderHistoryWithStoresResolverJSON(name, rig string, aa []orders.Order, r
 		}
 		label := "order-run:" + a.ScopedName()
 		for i, store := range stores {
-			if store == nil {
+			if store.Store == nil {
 				continue
 			}
 			results, err := store.List(beads.ListQuery{

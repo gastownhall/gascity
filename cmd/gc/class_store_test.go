@@ -26,7 +26,9 @@ var controllerCityClassAccessors = []controllerClassAccessor{
 	// nudgesBeadStore returns the strongly-typed beads.NudgesStore; unwrap its
 	// embedded .Store so the identity check compares the underlying store pointer.
 	{"nudgesBeadStore", func(cs *controllerState) beads.Store { return cs.nudgesBeadStore().Store }},
-	{"ordersBeadStore", func(cs *controllerState) beads.Store { return cs.ordersBeadStore("") }},
+	// ordersBeadStore returns the strongly-typed beads.OrdersStore; unwrap its
+	// embedded .Store so the identity check compares the underlying store pointer.
+	{"ordersBeadStore", func(cs *controllerState) beads.Store { return cs.ordersBeadStore("").Store }},
 	{"cityWorkStore", func(cs *controllerState) beads.Store { return cs.cityWorkStore() }},
 }
 
@@ -93,7 +95,7 @@ func TestCityRuntimeClassAccessorsAreIdentity(t *testing.T) {
 			t.Errorf("CityRuntime.%s() = %p, want cityBeadStore %p", acc.name, got, city)
 		}
 	}
-	if got := cr.ordersBeadStore("myrig"); !sameStorePtr(got, city) {
+	if got := cr.ordersBeadStore("myrig").Store; !sameStorePtr(got, city) {
 		t.Errorf("CityRuntime.ordersBeadStore() = %p, want cityBeadStore %p", got, city)
 	}
 

@@ -59,11 +59,15 @@ func (cs *controllerState) nudgesBeadStore() beads.NudgesStore {
 // for the given scope (rig name, or "" for the city): the configured orders class
 // store when [beads.classes.orders] relocates orders, else the work store. The
 // scope is accepted so a future per-scope orders backend can route without a
-// call-site change. Identity to the work store at the default bd backend.
-func (cs *controllerState) ordersBeadStore(_ string) beads.Store {
+// call-site change. Identity to the work store at the default bd backend;
+// returned as the strongly-typed beads.OrdersStore so the orders class stays
+// statically visible. This is the city-scope simple case; per-order scope
+// (rig/pool-routed orders) resolves PER ORDER through resolveOrderStoreTarget
+// (the federated dispatch/sweep paths in order_store.go / order_dispatch.go).
+func (cs *controllerState) ordersBeadStore(_ string) beads.OrdersStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return resolveOrderStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
+	return beads.OrdersStore{Store: resolveOrderStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // cityWorkStore returns the city-level store for ordinary work beads that are
@@ -118,9 +122,13 @@ func (cr *CityRuntime) nudgesBeadStore() beads.NudgesStore {
 // ordersBeadStore returns the runtime's order-tracking bead store for the given
 // scope: the configured orders class store when [beads.classes.orders] relocates
 // orders, else the work store. The scope is accepted for forward compatibility.
-// Byte-identical to cityBeadStore() at the default bd backend.
-func (cr *CityRuntime) ordersBeadStore(_ string) beads.Store {
-	return resolveOrderStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
+// Byte-identical to cityBeadStore() at the default bd backend; returned as the
+// strongly-typed beads.OrdersStore so the orders class stays statically visible;
+// the wrapper carries the same underlying store value. This is the city-scope
+// simple case; per-order scope resolution flows through resolveOrderStoreTarget
+// in the federated dispatch/sweep paths.
+func (cr *CityRuntime) ordersBeadStore(_ string) beads.OrdersStore {
+	return beads.OrdersStore{Store: resolveOrderStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // cityWorkStore returns the runtime's city-level work bead store.
