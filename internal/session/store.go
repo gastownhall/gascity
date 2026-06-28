@@ -36,10 +36,12 @@ func (s *InfoStore) ApplyPatch(id string, patch MetadataPatch) error {
 	if len(patch) == 0 {
 		return nil
 	}
-	if err := s.store.SetMetadataBatch(id, map[string]string(patch)); err != nil {
-		return fmt.Errorf("applying session patch to %q: %w", id, err)
-	}
-	return nil
+	// Return the bare store error: this method confines the write codec, it does
+	// not re-message failures. Callers (the reconciler, setMetaBatch, the circuit
+	// breaker) log/wrap the error themselves, and several tests assert their exact
+	// diagnostic text — wrapping here would change that caller-visible text and
+	// break runtime fidelity.
+	return s.store.SetMetadataBatch(id, map[string]string(patch))
 }
 
 // SetState heals a session to the given lifecycle state with a state_reason.
@@ -99,10 +101,8 @@ func (s *InfoStore) SetWaitHold(id string, on bool, reason string) error {
 // this emits SetMetadata so the bead op is identical to the raw single-key write
 // it replaces.
 func (s *InfoStore) setMetadataValue(id, key, value string) error {
-	if err := s.store.SetMetadata(id, key, value); err != nil {
-		return fmt.Errorf("setting %s on session %q: %w", key, id, err)
-	}
-	return nil
+	// Bare store error — callers own their diagnostic text (see ApplyPatch).
+	return s.store.SetMetadata(id, key, value)
 }
 
 // SetMarker writes a single session-attribute marker key. It is the front door
@@ -128,10 +128,8 @@ func (s *InfoStore) RecordCurrentBead(id, beadID string) error {
 // then closes the bead. It emits a single Close op, byte-identical to the raw
 // write.
 func (s *InfoStore) CloseWithoutReason(id string) error {
-	if err := s.store.Close(id); err != nil {
-		return fmt.Errorf("closing session %q: %w", id, err)
-	}
-	return nil
+	// Bare store error — callers own their diagnostic text (see ApplyPatch).
+	return s.store.Close(id)
 }
 
 // GetState returns the persisted lifecycle state for id and whether the bead is
@@ -170,6 +168,33 @@ func (s *InfoStore) Close(id, stateCode string, now time.Time) (bool, error) {
 		return false, fmt.Errorf("closing session %q: %w", id, err)
 	}
 	return true, nil
+}
+
+// SetStatusOpen sets the session bead status to "open". It is the front door
+// for the raw store.Update(id, UpdateOpts{Status: &"open"}) writes in the
+// reopen and named-session retire-archive paths (session_beads.go), which open
+// the bead row after stamping archive/reopen metadata via setMetaBatch. It
+// emits a single Update op with only Status set, byte-identical to the raw
+// write.
+func (s *InfoStore) SetStatusOpen(id string) error {
+	open := "open"
+	if err := s.store.Update(id, beads.UpdateOpts{Status: &open}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RepairType sets the session bead Type to the canonical session bead type. It
+// is the front door for the empty-type repair write in session_beads.go, where
+// a session-labeled bead with an empty Type (left by a schema migration or a
+// partial write) is healed back to the session type. It emits a single Update
+// op with only Type set, byte-identical to the raw write.
+func (s *InfoStore) RepairType(id string) error {
+	t := BeadType
+	if err := s.store.Update(id, beads.UpdateOpts{Type: &t}); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Store returns the embedded strongly-typed session-class bead store. It is a

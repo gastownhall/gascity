@@ -232,6 +232,56 @@ func TestCloseWithoutReasonEmitsSingleClose(t *testing.T) {
 	}
 }
 
+// TestSetStatusOpenEmitsStatusOnlyUpdate proves SetStatusOpen emits exactly one
+// Update with only Status="open" set — byte-identical to the raw
+// store.Update(id, UpdateOpts{Status: &"open"}) reopen/retire-archive writes.
+func TestSetStatusOpenEmitsStatusOnlyUpdate(t *testing.T) {
+	b := sessionBeadFixture("s-1", "closed", map[string]string{"state": "archived"})
+	is, rec := recordingInfoStore(t, b)
+
+	if err := is.SetStatusOpen("s-1"); err != nil {
+		t.Fatalf("SetStatusOpen: %v", err)
+	}
+	gotOps := opsOf(rec.Calls())
+	if !reflect.DeepEqual(gotOps, []string{"Update"}) {
+		t.Fatalf("SetStatusOpen ops = %v, want [Update]", gotOps)
+	}
+	c := rec.CallsForOp("Update")[0]
+	if c.ID != "s-1" {
+		t.Errorf("Update target = %q, want s-1", c.ID)
+	}
+	if c.Opts.Status == nil || *c.Opts.Status != "open" {
+		t.Errorf("Update Status = %v, want open", c.Opts.Status)
+	}
+	if c.Opts.Type != nil || c.Opts.Metadata != nil || c.Opts.Labels != nil {
+		t.Errorf("Update set fields beyond Status: %#v", c.Opts)
+	}
+}
+
+// TestRepairTypeEmitsTypeOnlyUpdate proves RepairType emits exactly one Update
+// with only Type set to the canonical session bead type — byte-identical to the
+// raw store.Update(id, UpdateOpts{Type: &"session"}) empty-type repair write.
+func TestRepairTypeEmitsTypeOnlyUpdate(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", nil)
+	b.Type = ""
+	is, rec := recordingInfoStore(t, b)
+
+	if err := is.RepairType("s-1"); err != nil {
+		t.Fatalf("RepairType: %v", err)
+	}
+	gotOps := opsOf(rec.Calls())
+	if !reflect.DeepEqual(gotOps, []string{"Update"}) {
+		t.Fatalf("RepairType ops = %v, want [Update]", gotOps)
+	}
+	c := rec.CallsForOp("Update")[0]
+	if c.Opts.Type == nil || *c.Opts.Type != BeadType {
+		t.Errorf("Update Type = %v, want %q", c.Opts.Type, BeadType)
+	}
+	if c.Opts.Status != nil || c.Opts.Metadata != nil {
+		t.Errorf("Update set fields beyond Type: %#v", c.Opts)
+	}
+}
+
 func opsOf(calls []beadstest.RecordedCall) []string {
 	out := make([]string, 0, len(calls))
 	for _, c := range calls {
