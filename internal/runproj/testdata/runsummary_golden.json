@@ -1,0 +1,380 @@
+{
+  "totalActive": 2,
+  "totalHistorical": 1,
+  "runCounts": {
+    "total": 2,
+    "visible": 2,
+    "prReview": 1,
+    "designReview": 0,
+    "bugfix": 0,
+    "blocked": 1,
+    "other": 1
+  },
+  "lanes": [
+    {
+      "id": "dt-wisp1",
+      "title": "mol-do-work",
+      "formula": {
+        "status": "unavailable",
+        "error": "run formula unavailable"
+      },
+      "scope": {
+        "status": "unavailable",
+        "error": "run scope metadata unavailable"
+      },
+      "external": {
+        "status": "unavailable",
+        "error": "external reference unavailable"
+      },
+      "phase": "implementation",
+      "phaseLabel": "implementation",
+      "statusCounts": {
+        "open": 1,
+        "in_progress": 1
+      },
+      "activeAssignees": [
+        "ralph-3"
+      ],
+      "updatedAt": {
+        "status": "available",
+        "at": "2026-06-02T00:05:00Z"
+      },
+      "stages": [
+        {
+          "key": "intake",
+          "label": "Intake",
+          "status": "complete"
+        },
+        {
+          "key": "implementation",
+          "label": "Implementation",
+          "status": "active"
+        },
+        {
+          "key": "review",
+          "label": "Review",
+          "status": "pending"
+        },
+        {
+          "key": "approval",
+          "label": "Approval",
+          "status": "pending"
+        },
+        {
+          "key": "finalization",
+          "label": "Finalization",
+          "status": "pending"
+        }
+      ],
+      "progress": {
+        "status": "active_step",
+        "stepId": "do-work",
+        "stage": {
+          "status": "available",
+          "index": 1,
+          "key": "implementation",
+          "label": "Implementation"
+        },
+        "attempt": {
+          "status": "unavailable",
+          "error": "run step attempt unavailable"
+        }
+      },
+      "formulaStageResolved": false,
+      "health": {
+        "status": "unavailable",
+        "error": "run health has not been derived"
+      }
+    },
+    {
+      "id": "dt-adopt1",
+      "title": "PR #42: Add run-view Go projection",
+      "formula": {
+        "status": "known",
+        "name": "mol-adopt-pr-v2"
+      },
+      "scope": {
+        "status": "available",
+        "kind": "rig",
+        "ref": "gascity-packs",
+        "rootStoreRef": "rig:gascity-packs"
+      },
+      "external": {
+        "status": "available",
+        "label": "PR #42",
+        "url": "https://github.com/gastownhall/gascity/pull/42"
+      },
+      "phase": "review",
+      "phaseLabel": "Review loop",
+      "statusCounts": {
+        "open": 2,
+        "closed": 3,
+        "in_progress": 1
+      },
+      "activeAssignees": [
+        "polecat-1"
+      ],
+      "updatedAt": {
+        "status": "available",
+        "at": "2026-06-01T12:30:00Z"
+      },
+      "stages": [
+        {
+          "key": "preflight",
+          "label": "Preflight",
+          "status": "complete"
+        },
+        {
+          "key": "rebase",
+          "label": "Worktree / rebase",
+          "status": "complete"
+        },
+        {
+          "key": "review",
+          "label": "Review loop",
+          "status": "active"
+        },
+        {
+          "key": "ci",
+          "label": "Pre-approval CI",
+          "status": "pending"
+        },
+        {
+          "key": "approval",
+          "label": "Human approval",
+          "status": "pending"
+        },
+        {
+          "key": "finalize",
+          "label": "Merge-ready",
+          "status": "pending"
+        },
+        {
+          "key": "cleanup",
+          "label": "Cleanup",
+          "status": "pending"
+        }
+      ],
+      "progress": {
+        "status": "active_step",
+        "stepId": "review-loop",
+        "stage": {
+          "status": "available",
+          "index": 2,
+          "key": "review",
+          "label": "Review loop"
+        },
+        "attempt": {
+          "status": "available",
+          "value": 2
+        }
+      },
+      "formulaStageResolved": true,
+      "health": {
+        "status": "unavailable",
+        "error": "run health has not been derived"
+      }
+    }
+  ],
+  "historicalLanes": [
+    {
+      "id": "dt-bugdone",
+      "title": "Issue #17: mol-bug-report-implementation-v2",
+      "formula": {
+        "status": "known",
+        "name": "mol-bug-report-implementation-v2"
+      },
+      "scope": {
+        "status": "available",
+        "kind": "rig",
+        "ref": "demo-app",
+        "rootStoreRef": "rig:demo-app"
+      },
+      "external": {
+        "status": "available",
+        "label": "Issue #17",
+        "url": "https://github.com/gastownhall/gascity/issues/17"
+      },
+      "phase": "complete",
+      "phaseLabel": "complete",
+      "statusCounts": {
+        "closed": 3
+      },
+      "activeAssignees": [],
+      "updatedAt": {
+        "status": "available",
+        "at": "2026-05-20T15:45:00Z"
+      },
+      "stages": [
+        {
+          "key": "plan",
+          "label": "Plan approval",
+          "status": "complete"
+        },
+        {
+          "key": "design",
+          "label": "Design review",
+          "status": "complete"
+        },
+        {
+          "key": "implement",
+          "label": "Implement",
+          "status": "complete"
+        },
+        {
+          "key": "review",
+          "label": "Code review",
+          "status": "complete"
+        },
+        {
+          "key": "pr",
+          "label": "Open PR",
+          "status": "complete"
+        },
+        {
+          "key": "ci",
+          "label": "CI",
+          "status": "complete"
+        },
+        {
+          "key": "merge",
+          "label": "Merge",
+          "status": "complete"
+        }
+      ],
+      "progress": {
+        "status": "unavailable",
+        "error": "run progress unavailable"
+      },
+      "formulaStageResolved": false,
+      "health": {
+        "status": "unavailable",
+        "error": "run health has not been derived"
+      }
+    }
+  ],
+  "blockedLanes": [
+    {
+      "id": "dt-latch1",
+      "title": "mol-focus-review",
+      "formula": {
+        "status": "known",
+        "name": "mol-focus-review"
+      },
+      "scope": {
+        "status": "available",
+        "kind": "rig",
+        "ref": "gascity-dashboard",
+        "rootStoreRef": "rig:gascity-dashboard"
+      },
+      "external": {
+        "status": "unavailable",
+        "error": "external reference unavailable"
+      },
+      "phase": "blocked",
+      "phaseLabel": "blocked",
+      "statusCounts": {
+        "blocked": 1
+      },
+      "activeAssignees": [],
+      "updatedAt": {
+        "status": "available",
+        "at": "2026-04-01T00:00:00Z"
+      },
+      "stages": [
+        {
+          "key": "blocked",
+          "label": "Blocked",
+          "status": "blocked"
+        }
+      ],
+      "progress": {
+        "status": "unavailable",
+        "error": "run progress unavailable"
+      },
+      "formulaStageResolved": false,
+      "health": {
+        "status": "unavailable",
+        "error": "run health has not been derived"
+      }
+    }
+  ],
+  "recentChanges": [
+    {
+      "id": "dt-wisp1.1",
+      "title": "Implementation work",
+      "status": "in_progress",
+      "updatedAt": "2026-06-02T00:05:00Z"
+    },
+    {
+      "id": "dt-wisp1",
+      "title": "mol-do-work",
+      "status": "open",
+      "updatedAt": "2026-06-02T00:00:00Z"
+    },
+    {
+      "id": "dt-adopt1",
+      "title": "mol-adopt-pr-v2",
+      "status": "open",
+      "updatedAt": "2026-06-01T12:30:00Z"
+    },
+    {
+      "id": "dt-adopt1.3",
+      "title": "Review loop",
+      "status": "in_progress",
+      "updatedAt": "2026-06-01T12:30:00Z"
+    },
+    {
+      "id": "dt-adopt1.3a",
+      "title": "Claude review",
+      "status": "closed",
+      "updatedAt": "2026-06-01T11:00:00Z"
+    },
+    {
+      "id": "dt-adopt1.2",
+      "title": "Worktree rebase check",
+      "status": "closed",
+      "updatedAt": "2026-06-01T10:20:00Z"
+    },
+    {
+      "id": "dt-adopt1.1",
+      "title": "Preflight checks",
+      "status": "closed",
+      "updatedAt": "2026-06-01T10:05:00Z"
+    },
+    {
+      "id": "dt-adopt1.fin",
+      "title": "Merge and finalize",
+      "status": "open",
+      "updatedAt": "2026-06-01T10:00:30Z"
+    },
+    {
+      "id": "dt-bugdone",
+      "title": "mol-bug-report-implementation-v2",
+      "status": "closed",
+      "updatedAt": "2026-05-20T15:45:00Z"
+    },
+    {
+      "id": "dt-bugdone.2",
+      "title": "Merge and finalize",
+      "status": "closed",
+      "updatedAt": "2026-05-20T15:45:00Z"
+    },
+    {
+      "id": "dt-bugdone.1",
+      "title": "Implement change",
+      "status": "closed",
+      "updatedAt": "2026-05-20T11:00:00Z"
+    },
+    {
+      "id": "dt-latch1",
+      "title": "mol-focus-review",
+      "status": "blocked",
+      "updatedAt": "2026-04-01T00:00:00Z"
+    }
+  ],
+  "census": {
+    "status": "unavailable",
+    "error": "run health has not been derived"
+  }
+}
