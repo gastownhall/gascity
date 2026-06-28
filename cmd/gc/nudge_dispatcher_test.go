@@ -182,7 +182,7 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	// the per-session poller test, then enqueue a nudge for it.
 	store := openNudgeBeadStore(dir)
 	fake := runtime.NewFake()
-	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
 	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -196,12 +196,12 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	snapshot, err := loadSessionBeadSnapshot(store)
+	snapshot, err := loadSessionBeadSnapshot(store.Store)
 	if err != nil {
 		t.Fatalf("loadSessionBeadSnapshot: %v", err)
 	}
 
-	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store, fake, snapshot)
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store.Store, fake, snapshot)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestDispatchAllQueuedNudgesDeliversToIdleACPSession(t *testing.T) {
 
 	dir := t.TempDir()
 	store := openNudgeBeadStore(dir)
-	if store == nil {
+	if store.Store == nil {
 		t.Fatal("openNudgeBeadStore returned nil")
 	}
 

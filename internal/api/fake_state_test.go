@@ -106,11 +106,11 @@ func (f *fakeState) StartedAt() time.Time                  { return f.startedAt 
 func (f *fakeState) IsQuarantined(sessionName string) bool { return f.quarantined[sessionName] }
 func (f *fakeState) ClearCrashHistory(sessionName string)  { delete(f.quarantined, sessionName) }
 func (f *fakeState) CityBeadStore() beads.Store            { return f.cityBeadStore }
-func (f *fakeState) NudgesBeadStore() beads.Store {
+func (f *fakeState) NudgesBeadStore() beads.NudgesStore {
 	if f.nudgesBeadStore != nil {
-		return f.nudgesBeadStore
+		return beads.NudgesStore{Store: f.nudgesBeadStore}
 	}
-	return f.cityBeadStore
+	return beads.NudgesStore{Store: f.cityBeadStore}
 }
 
 func (f *fakeState) SessionsBeadStore() beads.SessionStore {

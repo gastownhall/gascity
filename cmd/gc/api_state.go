@@ -1132,11 +1132,13 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 // to CityBeadStore; when [beads.classes.nudges] is relocated it returns the per-class
 // store. cs.eventProv is the recorder (an events.Recorder), matching how the city mail
 // store is wired (newCityMailProvider), so relocated writes through this store emit
-// bead.* exactly like the controller's own nudge writes.
-func (cs *controllerState) NudgesBeadStore() beads.Store {
+// bead.* exactly like the controller's own nudge writes. The result is wrapped in the
+// strongly-typed beads.NudgesStore so the nudges class is statically visible to callers;
+// the wrapper carries the same underlying store value, so runtime behavior is unchanged.
+func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return resolveNudgesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
+	return beads.NudgesStore{Store: resolveNudgesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // SessionsBeadStore returns the store backing session-class beads. At the default

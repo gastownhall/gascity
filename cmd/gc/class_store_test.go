@@ -19,7 +19,9 @@ var controllerCityClassAccessors = []controllerClassAccessor{
 	// embedded .Store so the identity check compares the underlying store pointer.
 	{"sessionsBeadStore", func(cs *controllerState) beads.Store { return cs.sessionsBeadStore().Store }},
 	{"mailBeadStore", func(cs *controllerState) beads.Store { return cs.mailBeadStore() }},
-	{"nudgesBeadStore", func(cs *controllerState) beads.Store { return cs.nudgesBeadStore() }},
+	// nudgesBeadStore returns the strongly-typed beads.NudgesStore; unwrap its
+	// embedded .Store so the identity check compares the underlying store pointer.
+	{"nudgesBeadStore", func(cs *controllerState) beads.Store { return cs.nudgesBeadStore().Store }},
 	{"ordersBeadStore", func(cs *controllerState) beads.Store { return cs.ordersBeadStore("") }},
 	{"cityWorkStore", func(cs *controllerState) beads.Store { return cs.cityWorkStore() }},
 }
@@ -73,7 +75,9 @@ func TestCityRuntimeClassAccessorsAreIdentity(t *testing.T) {
 		// embedded .Store so the identity check compares the underlying store pointer.
 		{"sessionsBeadStore", func() beads.Store { return cr.sessionsBeadStore().Store }},
 		{"mailBeadStore", cr.mailBeadStore},
-		{"nudgesBeadStore", cr.nudgesBeadStore},
+		// nudgesBeadStore returns the strongly-typed beads.NudgesStore; unwrap its
+		// embedded .Store so the identity check compares the underlying store pointer.
+		{"nudgesBeadStore", func() beads.Store { return cr.nudgesBeadStore().Store }},
 		{"cityWorkStore", cr.cityWorkStore},
 	}
 	for _, acc := range accessors {

@@ -112,8 +112,10 @@ type State interface {
 	// CityBeadStore; when [beads.classes.nudges] is relocated it is the
 	// per-class store, so nudge-shadow ops (e.g. withdrawing wait nudges on
 	// session close/wake) reach the relocated beads instead of orphaning them
-	// on the work store. Returns nil if no store is available.
-	NudgesBeadStore() beads.Store
+	// on the work store. The strongly-typed beads.NudgesStore return makes the
+	// nudges class statically visible at the call site; its embedded .Store is
+	// nil when no store is available.
+	NudgesBeadStore() beads.NudgesStore
 
 	// SessionsBeadStore returns the store backing session-class beads — session
 	// lifecycle (type=session/gc:session) and durable session waits

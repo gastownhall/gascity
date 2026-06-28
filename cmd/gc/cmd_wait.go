@@ -1160,7 +1160,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, stor
 		if nudgeID == "" {
 			continue
 		}
-		_, ok, err := findQueuedNudgeBead(store, nudgeID)
+		_, ok, err := findQueuedNudgeBead(beads.NudgesStore{Store: store}, nudgeID)
 		if err != nil {
 			if beads.IsLookupLimitError(err) {
 				stampWaitLookupCapDiagnostic(store, sessionID, err, now, "ready-wait-nudge")
@@ -1182,7 +1182,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, stor
 			ContinuationEpoch: wait.Metadata["registered_epoch"],
 			Reference:         &nudgeReference{Kind: "bead", ID: wait.ID},
 		})
-		if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
+		if err := enqueueQueuedNudgeWithStore(cityPath, beads.NudgesStore{Store: store}, item); err != nil {
 			return err
 		}
 		if err := store.SetMetadata(wait.ID, "nudge_id", nudgeID); err != nil {
@@ -1227,7 +1227,7 @@ func finalizeReadyWaitFromNudge(store beads.Store, wait beads.Bead, now time.Tim
 	if nudgeID == "" {
 		return false, nil
 	}
-	nudge, ok, err := findAnyQueuedNudgeBead(store, nudgeID)
+	nudge, ok, err := findAnyQueuedNudgeBead(beads.NudgesStore{Store: store}, nudgeID)
 	if err != nil {
 		if beads.IsLookupLimitError(err) {
 			stampWaitLookupCapDiagnostic(store, wait.Metadata["session_id"], err, now, "ready-wait-finalize-nudge")
@@ -1420,7 +1420,7 @@ func nextWaitDeliveryAttempt(store beads.Store, wait beads.Bead) (string, error)
 	if nudgeID == "" || store == nil {
 		return strconv.Itoa(attempt + 1), nil
 	}
-	nudge, ok, err := findAnyQueuedNudgeBead(store, nudgeID)
+	nudge, ok, err := findAnyQueuedNudgeBead(beads.NudgesStore{Store: store}, nudgeID)
 	if err != nil {
 		return "", err
 	}
@@ -1440,7 +1440,7 @@ func isTerminalNudgeState(state string) bool {
 }
 
 func withdrawQueuedWaitNudges(cityPath string, nudgeIDs []string) error {
-	return nudgequeue.WithdrawWaitNudges(openNudgeBeadStore(cityPath), cityPath, nudgeIDs)
+	return nudgequeue.WithdrawWaitNudges(openNudgeBeadStore(cityPath).Store, cityPath, nudgeIDs)
 }
 
 func waitLifecycleEnabled() error {

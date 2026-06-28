@@ -1523,8 +1523,12 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	}
 	cr.nudgeMailSweepWatchdogLast = now
 
-	store := cr.cityBeadStore()
-	if store == nil {
+	// The nudge phase routes through the typed nudges accessor; the mail phase
+	// stays on the work store until the messaging class is strong-typed (C6).
+	// Both collapse to the city store today, so the sweep is byte-identical.
+	nudgeStore := cr.nudgesBeadStore()
+	mailStore := cr.cityBeadStore()
+	if nudgeStore.Store == nil || mailStore == nil {
 		return
 	}
 	// Load nudge state to protect live nudge IDs. A missing state file is not an
@@ -1540,7 +1544,7 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	}
 	statePtr := &nudgeState
 
-	result, sweepErr := sweepStaleNudgeMail(store, statePtr, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepWatchdogCloseBudget)
+	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepWatchdogCloseBudget)
 	if sweepErr != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
 	}
@@ -2780,14 +2784,14 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 	// them with is loaded via the sessions accessor inside loadSessionBeadSnapshot.
 	// Both collapse to the city store today.
 	store := cr.nudgesBeadStore()
-	if store == nil {
+	if store.Store == nil {
 		return
 	}
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	if sessionBeads == nil {
 		return
 	}
-	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store, cr.sp, sessionBeads); err != nil {
+	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sp, sessionBeads); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 }

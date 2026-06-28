@@ -113,7 +113,7 @@ func TestCmdNudgeDrainInjectClockAndNudgeSingleJSONDocument(t *testing.T) {
 			item := newQueuedNudgeWithOptions("worker", "check hook output", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{
 				SessionID: created.ID,
 			})
-			if err := enqueueQueuedNudgeWithStore(cityDir, store, item); err != nil {
+			if err := enqueueQueuedNudgeWithStore(cityDir, beads.NudgesStore{Store: store}, item); err != nil {
 				t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
 			}
 

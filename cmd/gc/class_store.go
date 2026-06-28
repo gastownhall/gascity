@@ -46,8 +46,9 @@ func (cs *controllerState) mailBeadStore() beads.Store {
 // nudgesBeadStore returns the store that owns nudge beads. It delegates to the
 // exported NudgesBeadStore() accessor so the api.State surface and the
 // controller's own callers share one resolver. Identity to the work store at the
-// default bd backend.
-func (cs *controllerState) nudgesBeadStore() beads.Store {
+// default bd backend; returned as the strongly-typed beads.NudgesStore so the
+// nudges class stays statically visible.
+func (cs *controllerState) nudgesBeadStore() beads.NudgesStore {
 	return cs.NudgesBeadStore()
 }
 
@@ -100,9 +101,11 @@ func (cr *CityRuntime) mailBeadStore() beads.Store {
 
 // nudgesBeadStore returns the runtime's nudge bead store: the configured nudges
 // class store when [beads.classes.nudges] relocates nudges, else the work store.
-// Byte-identical to cityBeadStore() at the default bd backend.
-func (cr *CityRuntime) nudgesBeadStore() beads.Store {
-	return resolveNudgesStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
+// Byte-identical to cityBeadStore() at the default bd backend. Returned as the
+// strongly-typed beads.NudgesStore so the nudges class stays statically visible;
+// the wrapper carries the same underlying store value.
+func (cr *CityRuntime) nudgesBeadStore() beads.NudgesStore {
+	return beads.NudgesStore{Store: resolveNudgesStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // ordersBeadStore returns the runtime's order-tracking bead store for the given

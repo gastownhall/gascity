@@ -2211,7 +2211,7 @@ func TestWithdrawQueuedWaitNudges_RemovesQueuedNudge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
-	nudge, ok, err := findAnyQueuedNudgeBead(store, item.ID)
+	nudge, ok, err := findAnyQueuedNudgeBead(beads.NudgesStore{Store: store}, item.ID)
 	if err != nil {
 		t.Fatalf("findAnyQueuedNudgeBead: %v", err)
 	}

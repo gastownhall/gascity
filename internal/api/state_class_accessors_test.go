@@ -11,12 +11,14 @@ import (
 // the work store, so the API path is byte-identical at the default backend.
 func TestFakeStateNudgesBeadStoreFallsBackToCityStore(t *testing.T) {
 	f := newFakeState(t)
-	if got := f.NudgesBeadStore(); got != f.CityBeadStore() {
+	// NudgesBeadStore returns the strongly-typed beads.NudgesStore; compare its
+	// embedded .Store to the work store for the default-backend identity check.
+	if got := f.NudgesBeadStore(); got.Store != f.CityBeadStore() {
 		t.Fatalf("default backend: NudgesBeadStore() must equal CityBeadStore(); got distinct stores")
 	}
 	relocated := beads.NewMemStore()
 	f.nudgesBeadStore = relocated
-	if got := f.NudgesBeadStore(); got != relocated {
+	if got := f.NudgesBeadStore(); got.Store != relocated {
 		t.Fatalf("relocated backend: NudgesBeadStore() must return the configured nudges store")
 	}
 }

@@ -34,27 +34,31 @@ const (
 type nudgeReference = nudgequeue.Reference
 
 // openNudgeBeadStore is a test seam (mirrors the injectable vars in
-// cmd_nudge.go) so tests can substitute a fake beads.Store and assert that
+// cmd_nudge.go) so tests can substitute a fake store and assert that
 // per-tick poll helpers close every store they open. Tests that replace this
 // package variable must stay serial; do not use t.Parallel in those tests.
-var openNudgeBeadStore = func(cityPath string) beads.Store {
+// It routes the opened work store through resolveNudgesStore and returns the
+// strongly-typed beads.NudgesStore so the nudges class is statically visible to
+// every leaf nudge-bead helper; the wrapper carries the same underlying store
+// value (identity to the work store until the nudges class relocates).
+var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
-		return nil
+		return beads.NudgesStore{}
 	}
-	return store
+	return beads.NudgesStore{Store: resolveNudgesStore(store, nil, cityPath, nil)}
 }
 
-func findQueuedNudgeBead(store beads.Store, nudgeID string) (beads.Bead, bool, error) {
+func findQueuedNudgeBead(store beads.NudgesStore, nudgeID string) (beads.Bead, bool, error) {
 	return findNudgeBead(store, nudgeID, false)
 }
 
-func findAnyQueuedNudgeBead(store beads.Store, nudgeID string) (beads.Bead, bool, error) {
+func findAnyQueuedNudgeBead(store beads.NudgesStore, nudgeID string) (beads.Bead, bool, error) {
 	return findNudgeBead(store, nudgeID, true)
 }
 
-func findNudgeBead(store beads.Store, nudgeID string, includeClosed bool) (beads.Bead, bool, error) {
-	if store == nil || nudgeID == "" {
+func findNudgeBead(store beads.NudgesStore, nudgeID string, includeClosed bool) (beads.Bead, bool, error) {
+	if store.Store == nil || nudgeID == "" {
 		return beads.Bead{}, false, nil
 	}
 	opts := []beads.QueryOpt(nil)
@@ -97,8 +101,8 @@ func findNudgeBead(store beads.Store, nudgeID string, includeClosed bool) (beads
 	return beads.Bead{}, false, nil
 }
 
-func ensureQueuedNudgeBead(store beads.Store, item queuedNudge) (string, bool, error) {
-	if store == nil {
+func ensureQueuedNudgeBead(store beads.NudgesStore, item queuedNudge) (string, bool, error) {
+	if store.Store == nil {
 		return "", false, nil
 	}
 	existing, ok, err := findQueuedNudgeBead(store, item.ID)
@@ -142,8 +146,8 @@ func ensureQueuedNudgeBead(store beads.Store, item queuedNudge) (string, bool, e
 	return created.ID, true, nil
 }
 
-func markQueuedNudgeTerminal(store beads.Store, item queuedNudge, state, reason, commitBoundary string, now time.Time) error {
-	if store == nil {
+func markQueuedNudgeTerminal(store beads.NudgesStore, item queuedNudge, state, reason, commitBoundary string, now time.Time) error {
+	if store.Store == nil {
 		return nil
 	}
 	update := map[string]string{
