@@ -518,7 +518,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if err != nil {
 			if m.gateFailClosed(ctx, a, scoped, err) {
 				if errors.Is(err, errGateTimeout) {
-					m.setGateBackoff(scoped, now.Add(orderGateTimeout))
+					// Anchor to actual wall clock after the gate consumed orderGateTimeout;
+					// using the tick-start 'now' would set a deadline that has already passed.
+					m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 				}
 				continue
 			}
@@ -614,7 +616,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if err != nil {
 			if m.gateFailClosed(ctx, a, scoped, err) {
 				if errors.Is(err, errGateTimeout) {
-					m.setGateBackoff(scoped, now.Add(orderGateTimeout))
+					// Anchor to actual wall clock after the gate consumed orderGateTimeout;
+					// using the tick-start 'now' would set a deadline that has already passed.
+					m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 				}
 				continue
 			}
@@ -1866,6 +1870,13 @@ func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, 
 // the rest of the sweep proceeds. Package-level var so it is tunable and
 // overridable in tests.
 var orderGateTimeout = 8 * time.Second
+
+// orderGateBackoffDuration is the suppression window set after a gate timeout,
+// anchored to the actual wall clock at the moment the timeout fires (not the
+// tick-start timestamp). It is intentionally larger than orderGateTimeout so
+// the expensive gate query is genuinely skipped for a bounded span; an equal
+// window would be consumed by the gate itself, yielding no real suppression.
+var orderGateBackoffDuration = 24 * time.Second
 
 // errGateTimeout marks an open-work gate error caused by the per-order
 // bound elapsing (the #2893 contention case), as opposed to ctx cancel or a

@@ -149,11 +149,14 @@ func TestOrderDispatchGateTimeoutBackoffPreventsRethrash(t *testing.T) {
 		t.Fatal("gate should have been called on tick 1 (to produce the timeout)")
 	}
 
-	// Tick 2 at same now (still within the backoff window): gateBackoffActive
-	// must return true and skip the order before either gate is reached.
-	// Without the fix the gate would be queried again, timing out and adding
-	// another 8s of Dolt load per tick.
-	ad.dispatch(context.Background(), cityPath, now)
+	// Tick 2: advance now by orderGateTimeout to mirror production reality — the
+	// previous tick blocked for the full gate duration before returning, so the
+	// next dispatchOrders call samples a fresh time.Now() ≥ tick1_start + gateTimeout.
+	// gateBackoffActive must still return true because the deadline is anchored to
+	// the actual wall clock at timeout (time.Now()+orderGateBackoffDuration), which
+	// extends well beyond the tick-start offset. Without the fix this assertion
+	// would fail: the deadline tick_start+gateTimeout is already in the past.
+	ad.dispatch(context.Background(), cityPath, now.Add(orderGateTimeout))
 	ad.drain(context.Background())
 
 	if extra := store.gateCallCount() - afterTick1; extra > 0 {
@@ -267,9 +270,13 @@ func TestOrderDispatchEventTriggeredBackoffOnTrackingGateTimeout(t *testing.T) {
 		t.Fatal("tick 1 did not reach the open order-tracking gate")
 	}
 
-	// Tick 2 (1ms later, still within backoff window): gateBackoffActive must
-	// return true and suppress the order before the gate is reached.
-	ad.dispatch(context.Background(), cityPath, now.Add(time.Millisecond))
+	// Tick 2: advance now by orderGateTimeout to mirror production reality — the
+	// previous tick blocked for the full gate duration, so the next tick's
+	// dispatchOrders samples now' ≥ tick1_start + orderGateTimeout. The deadline
+	// is anchored to actual wall clock + orderGateBackoffDuration, so the backoff
+	// is still active. Without the fix (deadline = tick_start + gateTimeout ≈ now),
+	// this assertion would fail.
+	ad.dispatch(context.Background(), cityPath, now.Add(orderGateTimeout))
 	ad.drain(context.Background())
 
 	if got := store.gateCount.Load(); got != countAfterTick1 {
@@ -317,9 +324,11 @@ func TestOrderDispatchNonIdempotentBackoffOnOpenTrackingTimeout(t *testing.T) {
 		t.Fatal("tick 1 did not reach the open order-tracking gate")
 	}
 
-	// Tick 2 (1ms later, still within backoff window): gateBackoffActive must
-	// return true and skip the order without re-entering the gate.
-	ad.dispatch(context.Background(), cityPath, now.Add(time.Millisecond))
+	// Tick 2: advance now by orderGateTimeout to mirror production reality — the
+	// previous tick blocked for the full gate duration. The deadline is anchored
+	// to actual wall clock + orderGateBackoffDuration, so the backoff is still
+	// active. Without the fix this assertion would fail.
+	ad.dispatch(context.Background(), cityPath, now.Add(orderGateTimeout))
 	ad.drain(context.Background())
 
 	if got := store.gateCount.Load(); got != countAfterTick1 {
