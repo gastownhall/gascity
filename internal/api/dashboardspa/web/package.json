@@ -13,7 +13,9 @@
     "build": "npm run build:shared && npm run build:frontend",
     "typecheck": "npm --workspace gas-city-dashboard-shared run typecheck && npm run build:shared && npm --workspace gas-city-dashboard-frontend run typecheck",
     "lint": "eslint . --max-warnings=0",
-    "format:check": "prettier --check . --ignore-path .gitignore --ignore-path .prettierignore"
+    "format:check": "prettier --check . --ignore-path .gitignore --ignore-path .prettierignore",
+    "gen:run-goldens": "tsx scripts/gen-run-goldens.mts",
+    "gen:run-goldens:check": "tsx scripts/gen-run-goldens.mts --check"
   },
   "engines": {
     "node": ">=22.13.0"
