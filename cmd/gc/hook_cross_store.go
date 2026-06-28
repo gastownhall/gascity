@@ -173,3 +173,26 @@ func firstStoreWithWork(command string, stores []hookStore, run func(command, di
 	}
 	return lastOut, hookStore{}, nil
 }
+
+// claimStoreWithFallback re-validates the discovery-selected store for
+// claim-time freshness, then falls back to federated re-selection across all
+// stores when that store has emptied since discovery. It exists because
+// gc hook --claim selects the first store with ready work, then must commit to
+// one store for the claim mutation. Re-running only the selected store would
+// drain as "no work" whenever its claimable row was taken between discovery and
+// claim — even though a later federated store still has ready routed work. The
+// returned output is the work-query result the claim should act on, paired with
+// the store it came from so the mutation runs against that store's bd context.
+// (The narrow window between this re-validation and the bd update --claim is
+// still handled by the claim itself skipping rows it cannot take.)
+func claimStoreWithFallback(command string, stores []hookStore, selected hookStore, run func(command, dir string, env []string) (string, error)) (string, hookStore, error) {
+	selectedOut, err := run(command, selected.dir, selected.env)
+	if err != nil {
+		return "", hookStore{}, err
+	}
+	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(selectedOut)), time.Now())
+	if workQueryHasReadyWork(ready) {
+		return selectedOut, selected, nil
+	}
+	return firstStoreWithWork(command, stores, run)
+}
