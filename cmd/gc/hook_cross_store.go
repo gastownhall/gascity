@@ -15,6 +15,11 @@ type hookStore struct {
 	env []string
 }
 
+// hookStoreRunner runs a work query against one federated store's dir and env.
+// Injectable so the cross-store selection and claim paths can be tested without
+// a real bd subprocess.
+type hookStoreRunner func(command, dir string, env []string) (string, error)
+
 // hookIdentityEnvKeys are the identity overrides that must stay constant across
 // every federated store attempt — the query always matches the agent's OWN
 // identity (gc.routed_to / assignee == this identity) regardless of which store
@@ -150,7 +155,7 @@ func rigScopedHookRig(cfg *config.City, agentIdentity string) string {
 // the reconciler, not be silently downgraded to "no work"). Errors from
 // federated rig stores are best-effort discovery (like appendRigHookStores)
 // and are not surfaced, so one flaky rig store can't wedge the hook.
-func firstStoreWithWork(command string, stores []hookStore, run func(command, dir string, env []string) (string, error)) (string, hookStore, error) {
+func firstStoreWithWork(command string, stores []hookStore, run hookStoreRunner) (string, hookStore, error) {
 	var lastOut string
 	var ownStoreOut string
 	var ownStoreErr error
@@ -185,7 +190,7 @@ func firstStoreWithWork(command string, stores []hookStore, run func(command, di
 // the store it came from so the mutation runs against that store's bd context.
 // (The narrow window between this re-validation and the bd update --claim is
 // still handled by the claim itself skipping rows it cannot take.)
-func claimStoreWithFallback(command string, stores []hookStore, selected hookStore, run func(command, dir string, env []string) (string, error)) (string, hookStore, error) {
+func claimStoreWithFallback(command string, stores []hookStore, selected hookStore, run hookStoreRunner) (string, hookStore, error) {
 	selectedOut, err := run(command, selected.dir, selected.env)
 	if err != nil {
 		return "", hookStore{}, err
@@ -195,4 +200,41 @@ func claimStoreWithFallback(command string, stores []hookStore, selected hookSto
 		return selectedOut, selected, nil
 	}
 	return firstStoreWithWork(command, stores, run)
+}
+
+// isZeroHookStore reports whether s is the zero hookStore that firstStoreWithWork
+// returns when no store has ready work (no dir and no env).
+func isZeroHookStore(s hookStore) bool {
+	return strings.TrimSpace(s.dir) == "" && len(s.env) == 0
+}
+
+// removeHookStore returns stores with the first entry equal to target removed.
+// The federated claim loop uses it to drop a store whose ready work was lost to
+// another claimant before reselecting across the remaining stores, which also
+// guarantees the loop makes progress (the working set strictly shrinks).
+func removeHookStore(stores []hookStore, target hookStore) []hookStore {
+	out := make([]hookStore, 0, len(stores))
+	removed := false
+	for _, s := range stores {
+		if !removed && sameHookStore(s, target) {
+			removed = true
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// sameHookStore reports whether two stores address the same dir and env, so the
+// federated claim loop can drop the exact store it just exhausted.
+func sameHookStore(a, b hookStore) bool {
+	if a.dir != b.dir || len(a.env) != len(b.env) {
+		return false
+	}
+	for i := range a.env {
+		if a.env[i] != b.env[i] {
+			return false
+		}
+	}
+	return true
 }

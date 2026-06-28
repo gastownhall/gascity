@@ -74,17 +74,44 @@ type hookClaimJSONResult struct {
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
 }
 
+// hookClaimResult is the outcome of attempting a claim against one store's
+// captured work-query output. A terminal result has already written its final
+// output — a claim, an existing assignment, or a hard error — and the caller
+// must return code as-is. A non-terminal result means the store yielded no
+// claimable work (it was empty/unready, or every claimable candidate was lost to
+// another claimant) and NO terminal output was written, so a federated caller
+// may try a later store before writing the single no-work drain.
+type hookClaimResult struct {
+	terminal bool
+	code     int
+}
+
 func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
+	res := tryHookClaim(workQuery, dir, &opts, &ops, stdout, stderr)
+	if res.terminal {
+		return res.code
+	}
+	return writeHookClaimNoWork(opts, ops, stdout, stderr)
+}
+
+// tryHookClaim runs the work query for one store (dir, via ops.Runner) and
+// attempts to claim a ready candidate. It returns a terminal result once a
+// claim, existing assignment, or hard error has been written, or a non-terminal
+// result — with NO output written — when the store yielded no claimable work, so
+// a federated caller can try a later store before draining. opts and ops are
+// normalized in place so a non-terminal caller can reuse the normalized ops
+// (defaults applied) for the shared drain.
+func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimOps, stdout, stderr io.Writer) hookClaimResult {
 	opts.Assignee = strings.TrimSpace(opts.Assignee)
 	opts.IdentityCandidates = hookClaimIdentityCandidates(append([]string{opts.Assignee}, opts.IdentityCandidates...)...)
 	opts.RouteTargets = hookClaimRouteTargets(opts.RouteTargets...)
 	if opts.Assignee == "" {
 		fmt.Fprintln(stderr, "gc hook --claim: assignee not specified (set $GC_SESSION_NAME or $GC_SESSION_ID)") //nolint:errcheck
-		return 1
+		return hookClaimResult{terminal: true, code: 1}
 	}
 	if ops.Runner == nil {
 		fmt.Fprintln(stderr, "gc hook --claim: missing work query runner") //nolint:errcheck
-		return 1
+		return hookClaimResult{terminal: true, code: 1}
 	}
 	ops.applyDefaults()
 	now := time.Now
@@ -95,28 +122,28 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 	output, err := ops.Runner(workQuery, dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck
-		return 1
+		return hookClaimResult{terminal: true, code: 1}
 	}
 
 	normalized := normalizeWorkQueryOutput(strings.TrimSpace(output))
 	normalized = filterUnreadyHookCandidates(normalized, now())
 	if !workQueryHasReadyWork(normalized) {
-		return writeHookClaimNoWork(opts, ops, stdout, stderr)
+		return hookClaimResult{}
 	}
 	candidates, err := decodeHookClaimBeads(normalized)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: requires JSON work_query output to identify claim candidates: %v\n", err) //nolint:errcheck
-		return 1
+		return hookClaimResult{terminal: true, code: 1}
 	}
 	if len(candidates) == 0 {
-		return writeHookClaimNoWork(opts, ops, stdout, stderr)
+		return hookClaimResult{}
 	}
 
-	if result, bead, ok := hookClaimExistingOrAssigned(candidates, opts); ok {
-		return writeHookClaimWorkResultForBead(result, bead, opts, ops, dir, stdout, stderr)
+	if result, bead, ok := hookClaimExistingOrAssigned(candidates, *opts); ok {
+		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, stdout, stderr)}
 	}
 
-	return claimFirstEligibleHookCandidate(candidates, opts, ops, dir, stdout, stderr)
+	return claimFirstEligibleHookCandidate(candidates, *opts, *ops, dir, stdout, stderr)
 }
 
 // applyDefaults fills any unset op seam with its production implementation, so
@@ -150,10 +177,13 @@ func (ops *hookClaimOps) applyDefaults() {
 }
 
 // claimFirstEligibleHookCandidate claims the first unassigned, route-matched
-// candidate and returns the exit code of the resulting work-result write, or the
-// terminal no-work result when none can be claimed. A claim lost to a different
-// live claimant is surfaced as a bead.claim_rejected event before moving on.
-func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
+// candidate and returns a terminal result carrying the exit code of the
+// work-result write. A claim lost to a different live claimant is surfaced as a
+// bead.claim_rejected event before moving on. When no candidate can be claimed —
+// none match this session, or every claimable one was lost to another claimant —
+// it returns a non-terminal result (no output written) so a federated caller can
+// try a later store before the shared no-work drain.
+func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	for _, candidate := range candidates {
@@ -163,7 +193,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc hook --claim: claiming %s: %v\n", candidate.ID, err) //nolint:errcheck
-			return 1
+			return hookClaimResult{terminal: true, code: 1}
 		}
 		if !ok {
 			reportHookClaimRejected(candidate, claimed, opts, ops)
@@ -188,10 +218,10 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if result.Assignee == "" {
 			result.Assignee = opts.Assignee
 		}
-		return writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, stdout, stderr)
+		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, stdout, stderr)}
 	}
 
-	return writeHookClaimNoWork(opts, ops, stdout, stderr)
+	return hookClaimResult{}
 }
 
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
