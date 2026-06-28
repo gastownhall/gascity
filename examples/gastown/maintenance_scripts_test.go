@@ -480,6 +480,145 @@ func TestOrphanSweepResetsBareShortFormWhenQualifiedAgentDead(t *testing.T) {
 	}
 }
 
+// orphanSweepOperatorAssigneeGCStub fakes a city with one configured agent
+// (gastown.deacon), no live sessions, and a single in-progress bead "ga-op"
+// assigned to the given assignee. Used to prove the human-operator guard:
+// assignee "human" must be preserved while a human-LIKE dead assignee
+// (e.g. "humanoid") must still reset.
+func orphanSweepOperatorAssigneeGCStub(t *testing.T, binDir, assignee string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "$1" = "--rig" ]; then
+  shift 2
+fi
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: gastown.deacon
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '%s\n' '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "show" ] && [ "$3" = "ga-op" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-op","status":"in_progress","assignee":"`+assignee+`"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-op","status":"in_progress","assignee":"`+assignee+`"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+}
+
+// TestOrphanSweepPreservesHumanOperatorAssignee verifies that a bead assigned
+// to the canonical human operator alias "human" is never treated as orphaned.
+// The operator is not a configured agent and has no session, but operator
+// action items are claims by a person, not by a dead agent — resetting them
+// silently wipes the operator's claim.
+func TestOrphanSweepPreservesHumanOperatorAssignee(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	orphanSweepOperatorAssigneeGCStub(t, binDir, "human")
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("human-operator assignee was swept:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if log := string(logData); strings.Contains(log, "bd release-if-current ga-op ") {
+		t.Fatalf("human-operator bead was reset:\n%s", log)
+	}
+}
+
+// TestOrphanSweepResetsHumanLikeDeadAssignee is the negative control for
+// TestOrphanSweepPreservesHumanOperatorAssignee: an assignee that merely
+// starts with "human" but matches no agent and no session is a genuine
+// orphan and must still be reset. This proves the operator guard is an
+// exact match and did not weaken the sweep.
+func TestOrphanSweepResetsHumanLikeDeadAssignee(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	orphanSweepOperatorAssigneeGCStub(t, binDir, "humanoid")
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
+		t.Fatalf("human-like dead assignee was not swept:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if log := string(logData); !strings.Contains(log, "bd release-if-current ga-op humanoid") {
+		t.Fatalf("orphan bead was not reset:\n%s", log)
+	}
+}
+
 func TestOrphanSweepConfigShowFallbackPreservesQualifiedAssignees(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()

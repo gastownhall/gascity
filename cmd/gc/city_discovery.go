@@ -145,5 +145,27 @@ func normalizeDiscoveryPath(path string) string {
 	if err == nil {
 		path = abs
 	}
-	return filepath.Clean(path)
+	// Resolve symlinks so ceiling comparisons match regardless of how the
+	// path was obtained: on macOS, t.Chdir/os.Getwd can yield /tmp/... while
+	// the same directory resolves to /private/tmp/..., and comparing the two
+	// raw forms silently defeats the ceiling. Both the walked directory and
+	// the configured ceilings flow through here, so resolution stays
+	// symmetric. For paths that do not (fully) exist, resolve the longest
+	// existing ancestor and re-append the remainder, so a configured-but-
+	// not-yet-created ceiling still normalizes consistently instead of
+	// silently dropping out of the comparison.
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(resolved)
+	}
+	dir, rest := path, ""
+	for dir != string(filepath.Separator) && dir != "." {
+		parent := filepath.Dir(dir)
+		rest = filepath.Join(filepath.Base(dir), rest)
+		dir = parent
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Clean(filepath.Join(resolved, rest))
+		}
+	}
+	return path
 }

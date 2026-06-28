@@ -1953,6 +1953,22 @@ func commitStartFailure(result startResult, store beads.Store, clk clock.Clock, 
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
+		if err := markProviderTerminalError(session, store, clk, reason); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, err) //nolint:errcheck
+		}
+		if trace != nil {
+			trace.recordOperation("reconciler.start.terminal_provider_error", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+				"error":  formatLifecycleError(result.err),
+				"reason": reason,
+			}, "")
+		}
+		if result.rollbackPending {
+			rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+		}
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+		return
+	}
 	if result.rateLimitScreen {
 		if err := recordRateLimitQuarantine(session, store, clk); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, err) //nolint:errcheck

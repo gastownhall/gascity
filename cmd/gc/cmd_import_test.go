@@ -2338,8 +2338,9 @@ scope = "city"
 // import-manifest rewrites). This pins zero false positives for the known pack
 // schema, so the guards fire only on genuinely unknown keys. The fixture must
 // include the sections where the reduced structs historically diverged from
-// config.PackConfig — the legacy [agents] alias and [[pricing]] — because those
-// are the keys the guards would otherwise flag as unrecognized.
+// config.PackConfig — the legacy [agents] alias, [[pricing]], and the
+// pack-level [upstreams] table — because those are the keys the guards would
+// otherwise flag as unrecognized.
 func TestGuardPackRewriteKeyLossAcceptsKnownPackSchema(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -2365,6 +2366,14 @@ source = "https://example/review.git"
 
 [providers.claude]
 base = "builtin:claude"
+
+[upstreams.bedrock]
+description = "AWS Bedrock Anthropic"
+base_url = "https://bedrock.example.com/anthropic"
+api_key = "$AWS_BEDROCK_KEY"
+
+[upstreams.bedrock.env]
+AWS_REGION = "us-west-2"
 
 [[pricing]]
 provider = "claude"
@@ -2442,6 +2451,48 @@ completion_usd_per_1m = 75.0
 	}
 	if strings.Contains(out, "[agents]") {
 		t.Fatalf("rewritten pack.toml still contains the legacy [agents] table:\n%s", out)
+	}
+}
+
+// An import-manifest rewrite must round-trip the pack-level [upstreams] table,
+// including its nested [upstreams.<name>.env] block, rather than refusing the
+// rewrite (false key-loss positive) or silently dropping the now-legitimate
+// schema surface. This pins cityPackManifest/cityPackManifestBody as a faithful
+// superset of the pack schema for the upstream axis.
+func TestWriteCityPackManifestPreservesUpstreams(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 1
+
+[upstreams.bedrock]
+description = "AWS Bedrock Anthropic"
+base_url = "https://bedrock.example.com/anthropic"
+api_key = "$AWS_BEDROCK_KEY"
+
+[upstreams.bedrock.env]
+AWS_REGION = "us-west-2"
+`)
+
+	manifest, err := loadCityPackManifestFS(fs, "/city")
+	if err != nil {
+		t.Fatalf("loadCityPackManifestFS: %v", err)
+	}
+	if err := writeCityPackManifest(fs, "/city", manifest); err != nil {
+		t.Fatalf("writeCityPackManifest: %v", err)
+	}
+
+	out := string(fs.Files["/city/pack.toml"])
+	for _, want := range []string{
+		"[upstreams.bedrock]",
+		`base_url = "https://bedrock.example.com/anthropic"`,
+		`api_key = "$AWS_BEDROCK_KEY"`,
+		"[upstreams.bedrock.env]",
+		`AWS_REGION = "us-west-2"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rewritten pack.toml dropped upstream field %q:\n%s", want, out)
+		}
 	}
 }
 

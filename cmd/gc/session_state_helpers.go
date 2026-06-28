@@ -45,6 +45,11 @@ func poolSessionIsLive(session beads.Bead) bool {
 // pool beads lets the supervisor spawn a fresh worker for ready queue work
 // instead of stranding it on a ghost slot.
 //
+// A session parked with sleep_reason=provider-terminal-error is also freeable:
+// markProviderTerminalError has classified it as a dead, non-retryable provider
+// failure, so its slot must be reaped — otherwise the dead bead and its worktree
+// leak indefinitely while still excluded from pool capacity.
+//
 // An explicit sleep_reason is required: deny-by-default for unknown or
 // missing reasons so writes that land in state=asleep without a known
 // reason (legacy beads, regressions, write races) cannot silently free
@@ -58,7 +63,8 @@ func isPoolSessionSlotFreeable(session beads.Bead) bool {
 	}
 	reason := strings.TrimSpace(session.Metadata["sleep_reason"])
 	switch reason {
-	case "idle", "idle-timeout", sleepReasonCityStop, "failed-create", sleepReasonRuntimeMissing:
+	case "idle", "idle-timeout", sleepReasonCityStop, "failed-create", sleepReasonRuntimeMissing,
+		sleepReasonProviderTerminalError:
 		return true
 	}
 	return false

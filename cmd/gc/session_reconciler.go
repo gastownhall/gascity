@@ -1505,6 +1505,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
 		if running && !alive {
 			if output, err := peek(rateLimitPeekLines); err == nil && output != "" {
+				if reason := runtime.ProviderTerminalErrorReason(output); reason != "" {
+					if markErr := markProviderTerminalError(session, store, clk, reason); markErr != nil {
+						fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, markErr) //nolint:errcheck
+					}
+					if trace != nil {
+						trace.recordDecision("reconciler.session.terminal_provider_error", tp.TemplateName, name, reason, "unhealthy", traceRecordPayload{
+							"session_bead_id": session.ID,
+						}, nil, "")
+					}
+				}
 				if !runtime.ContainsProviderRateLimitScreen(output) {
 					rec.Record(events.Event{
 						Type:    events.SessionCrashed,

@@ -126,6 +126,9 @@ func computePoolDesiredStates(
 		if sb.Status == "closed" {
 			continue
 		}
+		if sessionHasProviderTerminalError(sb) {
+			continue
+		}
 		template := strings.TrimSpace(normalizedSessionTemplate(sb, cfg))
 		if template != "" {
 			sessionBeadTemplate[sb.ID] = template
@@ -266,6 +269,7 @@ func computePoolDesiredStates(
 				continue
 			}
 			newCount := capNewDemandCount(limits, usage, agent, scaleCount)
+			recordNewDemandCapTrace(trace, template, agent, limits, usage, scaleCount, newCount)
 			inFlight := inFlightNewRequests[template]
 			inFlightCount := minInt(len(inFlight), newCount)
 			if scaleCount > 0 && len(inFlight) > 0 && trace != nil {
@@ -375,6 +379,9 @@ func poolInFlightNewRequests(cfg *config.City, sessionBeads []beads.Bead, resume
 		template := agent.QualifiedName()
 		for _, sb := range sortedSessionBeads {
 			if sb.ID == "" || sb.Status == "closed" {
+				continue
+			}
+			if sessionHasProviderTerminalError(sb) {
 				continue
 			}
 			if _, ok := resumeSessionBeadIDs[sb.ID]; ok {
@@ -515,6 +522,7 @@ type nestedCapUsage struct {
 	rigCount        map[string]int
 	workspaceCount  int
 	seenSessionBead map[string]bool
+	requests        []SessionRequest
 }
 
 func newNestedCapLimits(cfg *config.City) nestedCapLimits {
@@ -658,6 +666,86 @@ func (u *nestedCapUsage) accept(req SessionRequest, limits nestedCapLimits) {
 	if req.SessionBeadID != "" {
 		u.seenSessionBead[req.SessionBeadID] = true
 	}
+	u.requests = append(u.requests, req)
+}
+
+func recordNewDemandCapTrace(
+	trace *sessionReconcilerTraceCycle,
+	template string,
+	agent *config.Agent,
+	limits nestedCapLimits,
+	usage nestedCapUsage,
+	scaleCount int,
+	newCount int,
+) {
+	if trace == nil || scaleCount <= 0 || newCount >= scaleCount {
+		return
+	}
+	site, reason, capMax, current, blockers := newDemandBlockingScope(template, agent, limits, usage, newCount)
+	if site == "" {
+		return
+	}
+	blockingSessions := make([]string, 0, len(blockers))
+	blockingWork := make([]string, 0, len(blockers))
+	for _, req := range blockers {
+		if req.SessionBeadID != "" {
+			blockingSessions = append(blockingSessions, req.SessionBeadID)
+		}
+		if req.WorkBeadID != "" {
+			blockingWork = append(blockingWork, req.WorkBeadID)
+		}
+	}
+	trace.recordDecision(site, template, "", reason, "rejected", traceRecordPayload{
+		"scale_check":          scaleCount,
+		"accepted_new":         newCount,
+		"blocked_new":          scaleCount - newCount,
+		"current":              current,
+		"max":                  capMax,
+		"blocking_sessions":    blockingSessions,
+		"blocking_work_beads":  blockingWork,
+		"active_capacity_kind": reason,
+	}, nil, "")
+}
+
+func newDemandBlockingScope(
+	template string,
+	agent *config.Agent,
+	limits nestedCapLimits,
+	usage nestedCapUsage,
+	newCount int,
+) (string, string, int, int, []SessionRequest) {
+	if agentMax := limits.agentMax[template]; agentMax >= 0 && agentMax-usage.agentCount[template] <= newCount {
+		return string(TraceSitePoolNewDemandCap), string(TraceReasonAgentCap), agentMax, usage.agentCount[template], filterCapBlockers(usage.requests, func(req SessionRequest) bool {
+			return req.Template == template
+		})
+	}
+	if agent != nil {
+		if rig := limits.agentRig[template]; rig != "" {
+			rigMax, ok := limits.rigMax[rig]
+			if !ok {
+				rigMax = -1
+			}
+			if rigMax >= 0 && rigMax-usage.rigCount[rig] <= newCount {
+				return string(TraceSitePoolNewDemandCap), string(TraceReasonRigCap), rigMax, usage.rigCount[rig], filterCapBlockers(usage.requests, func(req SessionRequest) bool {
+					return limits.agentRig[req.Template] == rig
+				})
+			}
+		}
+	}
+	if limits.workspaceMax >= 0 && limits.workspaceMax-usage.workspaceCount <= newCount {
+		return string(TraceSitePoolNewDemandCap), string(TraceReasonWorkspaceCap), limits.workspaceMax, usage.workspaceCount, usage.requests
+	}
+	return "", "", 0, 0, nil
+}
+
+func filterCapBlockers(requests []SessionRequest, keep func(SessionRequest) bool) []SessionRequest {
+	out := make([]SessionRequest, 0, len(requests))
+	for _, req := range requests {
+		if keep(req) {
+			out = append(out, req)
+		}
+	}
+	return out
 }
 
 func minInt(a, b int) int {

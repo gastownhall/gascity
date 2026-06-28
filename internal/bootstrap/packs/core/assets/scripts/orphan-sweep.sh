@@ -284,6 +284,15 @@ reset_orphan_if_current() {
 # the template name from config.
 is_known_agent() {
     local name="$1"
+    # The human operator. "human" is the canonical operator alias across gc
+    # (mail alias `human`, `gc bd human <id>`), and beads assigned to the
+    # operator are action items for a person, not agent work. The operator
+    # is not a configured agent and never has a session — but is also never
+    # a dead agent. Without this guard the sweep resets any in_progress
+    # human-assigned bead to open/unassigned, silently wiping the operator's
+    # claim. Exact match only: agents that merely start with "human" still
+    # resolve through the normal paths below.
+    if [ "$name" = "human" ]; then return 0; fi
     # Direct match against a configured agent template name.
     if agent_exists "$name"; then return 0; fi
     # Pool instance: strip trailing -<digits> and check template name.

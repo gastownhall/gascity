@@ -325,3 +325,41 @@ name = "witness"
 		t.Errorf("existing base_url = %q, want https://city.example/anthropic (city entry preserved)", got)
 	}
 }
+
+// LoadPackForLint surfaces pack-declared [upstreams] the same way it surfaces
+// [providers], so lint-style tooling can inspect them instead of the loader
+// silently discarding the loaded map.
+func TestLoadPackForLint_SurfacesUpstreams(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/packs/local/pack.toml"] = []byte(`
+[pack]
+name = "local"
+schema = 2
+
+[upstreams.gasworks]
+description = "Gasworks managed gateway"
+base_url = "https://gasworks.example/anthropic"
+api_key  = "$GASWORKS_API_KEY"
+
+[upstreams.gasworks.env]
+GASWORKS_TRACE = "$GASWORKS_TRACE"
+`)
+
+	loaded, err := LoadPackForLint(fs, "/packs/local")
+	if err != nil {
+		t.Fatalf("LoadPackForLint: %v", err)
+	}
+	u, ok := loaded.Upstreams["gasworks"]
+	if !ok {
+		t.Fatalf("lint load missing pack upstream: %v", loaded.Upstreams)
+	}
+	if u.BaseURL != "https://gasworks.example/anthropic" {
+		t.Errorf("base_url = %q, want https://gasworks.example/anthropic", u.BaseURL)
+	}
+	if u.APIKey != "$GASWORKS_API_KEY" {
+		t.Errorf("api_key = %q, want $GASWORKS_API_KEY (env-ref)", u.APIKey)
+	}
+	if got := u.Env["GASWORKS_TRACE"]; got != "$GASWORKS_TRACE" {
+		t.Errorf("env GASWORKS_TRACE = %q, want $GASWORKS_TRACE", got)
+	}
+}

@@ -523,6 +523,20 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
+	// Recover ready work whose canonical pool route was lost or never written
+	// (gc.run_target set, gc.routed_to empty) before session reconciliation, so a
+	// post-restart rig re-enters pool demand without a manual `gc sling`
+	// (ga-n2d.4). Placed before the expensive reconcile for the same reason as
+	// startup-orders: routed demand should not wait behind cold-start drift work.
+	startupRouteRecoveryStart := time.Now()
+	cr.safeTick(func() {
+		cr.recoverUnroutedWorkRoutes()
+	}, "startup-route-recovery")
+	logPhaseElapsed("startup-route-recovery", startupRouteRecoveryStart)
+	if ctx.Err() != nil {
+		return
+	}
+
 	// Session bead sync BEFORE reconciliation: ensures beads exist for
 	// the reconciler to read/write hashes. Uses ListByLabel (indexed,
 	// fast even before CachingStore is primed).
@@ -1067,6 +1081,17 @@ func (cr *CityRuntime) tick(
 	phaseStart = time.Now()
 	cr.dispatchOrders(ctx, cityRoot)
 	recordPhase(TraceSiteOrderDispatch, "dispatch_orders", phaseStart, nil)
+	if ctx.Err() != nil {
+		return
+	}
+
+	// Re-route ready work whose canonical pool route was lost or never written
+	// (gc.run_target set, gc.routed_to empty), so the autoscaler — which keys on
+	// gc.routed_to — sees it as demand without a manual `gc sling` (ga-n2d.4).
+	// Runs in the cheap dispatch phase before the expensive session reconcile.
+	phaseStart = time.Now()
+	cr.recoverUnroutedWorkRoutes()
+	recordPhase(TraceSiteControllerTickPhase, "recover_unrouted_work_routes", phaseStart, nil)
 	if ctx.Err() != nil {
 		return
 	}

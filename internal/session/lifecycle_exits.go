@@ -132,6 +132,11 @@ func DecideSessionExit(f ExitFacts) ExitOutcome {
 // IsDeliberateSleepReason reports whether a sleep_reason records an
 // intentional stop rather than a crash, so the death must not accrue churn.
 // "city-stop" mirrors the CLI's stop sleep reason.
+// "provider-terminal-error" is a classified, non-retryable provider failure
+// (set by markProviderTerminalError); it is suppressed here so a session
+// already parked terminal cannot also accrue a spurious wake failure, making
+// the invariant explicit rather than relying on last_woke_at being cleared in
+// the same metadata batch.
 // The reason list deliberately diverges from shouldResetContinuation's
 // near-identical list (this one has "failed-create" and lacks
 // "runtime-missing"): that one decides continuation reset on wake, this one
@@ -139,7 +144,8 @@ func DecideSessionExit(f ExitFacts) ExitOutcome {
 func IsDeliberateSleepReason(reason string) bool {
 	switch strings.TrimSpace(reason) {
 	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained",
-		"city-stop", "user-hold", "wait-hold", "rate_limit", "failed-create":
+		"city-stop", "user-hold", "wait-hold", "rate_limit", "failed-create",
+		"provider-terminal-error":
 		return true
 	default:
 		return false

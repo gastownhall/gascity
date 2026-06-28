@@ -2261,6 +2261,20 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		fmt.Fprintf(stderr, "gc session kill: warning: session %s runtime was already inactive; cleared named-session circuit breaker\n", sessionID) //nolint:errcheck // best-effort stderr
 	}
 
+	// Sync the bead to asleep so a later `gc session wake` / reconcile starts
+	// a fresh runtime instead of short-circuiting on the stale live state the
+	// kill leaves behind (#3629). Written here at the CLI layer rather than in
+	// Manager.Kill so the drain-ack async-stop path (verifiedStop ->
+	// handle.Kill -> Manager.Kill) keeps owning its own lifecycle state.
+	if beadErr == nil {
+		now := time.Now().UTC()
+		patch := session.SleepPatch(now, "killed")
+		patch["synced_at"] = now.Format(time.RFC3339)
+		if err := store.SetMetadataBatch(sessionID, patch); err != nil {
+			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+
 	// Use the resolved session ID as the canonical Subject for event
 	// consumers. This ensures a stable key regardless of how the user
 	// specified the target (session ID or alias).
