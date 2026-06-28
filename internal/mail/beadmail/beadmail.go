@@ -1,6 +1,11 @@
 // Package beadmail implements [mail.Provider] backed by [beads.Store].
 // This is the built-in default mail backend — messages are stored as beads
 // with Type="message". No subprocess needed.
+//
+// beadmail is the confined bead/storage-row edge for mail: the mail.Message ⇄
+// message-bead translation lives only here (createMessageBead, beadToMessage).
+// Callers above this package speak mail.Message and never construct a message
+// bead directly — see [mail.Provider] for the domain seam.
 package beadmail
 
 import (
@@ -126,7 +131,43 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 		}
 	}
 
-	b, err := p.store.Create(beads.Bead{
+	b, err := p.createMessageBead(title, body, from, to, labels, metadata)
+	if err != nil {
+		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
+	}
+	return beadToMessage(b), nil
+}
+
+// SendHandoff creates a handoff message from a [mail.HandoffIntent]. It speaks
+// mail.Message at the boundary while confining the type=message bead, the
+// stable thread label, and the handoff-specific extra labels to this
+// implementation. Sender-route metadata is resolved exactly as [Provider.Send]
+// does, so handoff mail replies route correctly.
+func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, error) {
+	if intent.To == "" {
+		return mail.Message{}, fmt.Errorf("beadmail handoff: recipient is required")
+	}
+	from, metadata, err := p.resolveSenderRoute(intent.From)
+	if err != nil {
+		return mail.Message{}, fmt.Errorf("beadmail handoff: %w", err)
+	}
+	labels := make([]string, 0, 1+len(intent.ExtraLabels))
+	labels = append(labels, "thread:"+intent.ThreadID)
+	labels = append(labels, intent.ExtraLabels...)
+
+	b, err := p.createMessageBead(intent.Subject, intent.Body, from, intent.To, labels, metadata)
+	if err != nil {
+		return mail.Message{}, fmt.Errorf("beadmail handoff: %w", err)
+	}
+	return beadToMessage(b), nil
+}
+
+// createMessageBead is the single confined edge where a mail message becomes a
+// type=message bead. Every mail-creating method (Send, SendHandoff, Reply)
+// funnels its already-resolved fields through here so the bead shape stays in
+// one place.
+func (p *Provider) createMessageBead(title, body, from, to string, labels []string, metadata map[string]string) (beads.Bead, error) {
+	return p.store.Create(beads.Bead{
 		Title:       title,
 		Description: body,
 		Type:        "message",
@@ -136,10 +177,6 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 		Metadata:    metadata,
 		Ephemeral:   true,
 	})
-	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
-	}
-	return beadToMessage(b), nil
 }
 
 func (p *Provider) resolveSenderRoute(from string) (string, map[string]string, error) {

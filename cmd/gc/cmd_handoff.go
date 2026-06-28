@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -288,7 +289,12 @@ func doHandoffAuto(store beads.Store, rec events.Recorder, sessionAddress string
 	return 0
 }
 
-func createHandoffMail(store beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, stderr io.Writer) (beads.Bead, bool) {
+// createHandoffMail produces a handoff message through the mail.Provider domain
+// seam. The handoff command speaks mail.Message; the message-bead serialization
+// (Type="message", thread label, extra labels, sender-route metadata) is
+// confined inside beadmail.Provider.SendHandoff. The returned mail.Message
+// carries the assigned ID for the caller's confirmation output.
+func createHandoffMail(store beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, stderr io.Writer) (mail.Message, bool) {
 	subject := defaultSubject
 	if len(args) > 0 {
 		subject = args[0]
@@ -297,37 +303,28 @@ func createHandoffMail(store beads.Store, rec events.Recorder, senderAddress, re
 	if len(args) > 1 {
 		message = args[1]
 	}
-	metadata, err := mailSenderRouteMetadata(store, senderAddress)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: resolving sender route: %v\n", err) //nolint:errcheck // best-effort stderr
-		return beads.Bead{}, false
-	}
-	senderDisplay := mailSenderDisplayFromMetadata(senderAddress, metadata)
 
-	labels := []string{"thread:" + handoffThreadID()}
-	labels = append(labels, extraLabels...)
-	b, err := store.Create(beads.Bead{
-		Title:       subject,
-		Description: message,
-		Type:        "message",
-		Assignee:    recipientAddress,
-		From:        senderDisplay,
-		Labels:      labels,
-		Metadata:    metadata,
-		Ephemeral:   true,
+	provider := beadmail.New(store)
+	msg, err := provider.SendHandoff(mail.HandoffIntent{
+		From:        senderAddress,
+		To:          recipientAddress,
+		Subject:     subject,
+		Body:        message,
+		ThreadID:    handoffThreadID(),
+		ExtraLabels: extraLabels,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
-		return beads.Bead{}, false
+		return mail.Message{}, false
 	}
 	rec.Record(events.Event{
 		Type:    events.MailSent,
-		Actor:   senderDisplay,
-		Subject: b.ID,
+		Actor:   msg.From,
+		Subject: msg.ID,
 		Message: recipientAddress,
 		Payload: mailEventPayload(nil),
 	})
-	return b, true
+	return msg, true
 }
 
 func sessionRestartableByController(store beads.Store, sessionName string) (bool, error) {

@@ -54,6 +54,22 @@ type Message struct {
 	Rig       string    `json:"rig,omitempty"`
 }
 
+// HandoffIntent is the domain-shaped request for handoff mail. It lets the
+// gc handoff command express a message in mail terms — sender, recipient,
+// subject, body — plus the two handoff-specific routing details that ordinary
+// [Provider.Send] does not surface: an explicit thread ID (so a handoff thread
+// is stable and addressable) and extra labels (the auto-handoff / archive-after-
+// inject markers). The bead translation of these fields is confined to the
+// backend implementation; callers never construct a message bead themselves.
+type HandoffIntent struct {
+	From        string
+	To          string
+	Subject     string
+	Body        string
+	ThreadID    string
+	ExtraLabels []string
+}
+
 // ArchiveResult is one message's outcome in a batch [Provider.ArchiveMany] or
 // [Provider.DeleteMany] call. Err is nil for a newly-archived/deleted message,
 // [ErrAlreadyArchived] for an idempotent repeat, or a provider error.
@@ -62,9 +78,13 @@ type ArchiveResult struct {
 	Err error
 }
 
-// Provider is the internal interface for mail backends. Implementations
-// include beadmail (built-in default backed by beads.Store) and exec
-// (user-supplied script via fork/exec).
+// Provider is the internal interface for mail backends and the canonical
+// domain seam for mail: every mail caller speaks mail.Message (and
+// [HandoffIntent]) here, never a raw message bead. The translation between mail
+// and storage rows is confined to each backend — for the built-in default that
+// edge is beadmail.Provider, where a message becomes a Type="message" bead.
+// Implementations include beadmail (built-in default backed by beads.Store) and
+// exec (user-supplied script via fork/exec).
 type Provider interface {
 	// Send creates a message. Subject is the summary line, body is the
 	// full content. Returns the created message with assigned ID.

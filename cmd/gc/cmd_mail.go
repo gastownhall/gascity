@@ -1070,55 +1070,6 @@ type resolvedMailTarget struct {
 	recipients []string
 }
 
-func mailSenderRouteMetadata(store beads.Store, sender string) (map[string]string, error) {
-	sender = strings.TrimSpace(sender)
-	if store == nil || sender == "" || sender == "human" {
-		return nil, nil
-	}
-	sessionID, err := resolveSessionID(store, sender)
-	if err != nil {
-		if errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, session.ErrAmbiguous) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("resolving sender route %q: %w", sender, err)
-	}
-	b, err := store.Get(sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("loading sender session %q: %w", sessionID, err)
-	}
-	display := mailSenderDisplayAddress(b, sender)
-	return map[string]string{
-		mail.FromSessionIDMetadataKey: sessionID,
-		mail.FromDisplayMetadataKey:   display,
-	}, nil
-}
-
-func mailSenderDisplayAddress(b beads.Bead, fallback string) string {
-	if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" {
-		return alias
-	}
-	fallback = strings.TrimSpace(fallback)
-	if fallback != "" && fallback != b.ID {
-		return fallback
-	}
-	if name := strings.TrimSpace(b.Metadata["session_name"]); name != "" {
-		return name
-	}
-	if b.ID != "" {
-		return b.ID
-	}
-	return fallback
-}
-
-func mailSenderDisplayFromMetadata(fallback string, metadata map[string]string) string {
-	if metadata != nil {
-		if display := strings.TrimSpace(metadata[mail.FromDisplayMetadataKey]); display != "" {
-			return display
-		}
-	}
-	return strings.TrimSpace(fallback)
-}
-
 // mailIdentitySessionCache memoizes a single gc:session enumeration so that
 // repeated identity-resolution attempts (multi-candidate retry, sender +
 // recipient resolution in the same command, etc.) share the same broad scan.
