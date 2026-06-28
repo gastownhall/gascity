@@ -17,9 +17,8 @@ func TestBuiltinDefaultHomeFallbackAvoidsSharedTemp(t *testing.T) {
 	got := builtinDefaultHomeFallback()
 
 	if got == "" {
-		// Must never be empty: callers join the result into a path, so ""
-		// silently becomes a CWD-relative path and writes state to the wrong
-		// place.
+		// Must never be empty: callers join the result into a path, so "" silently
+		// becomes a CWD-relative path and writes state to the wrong place.
 		t.Fatal("builtinDefaultHomeFallback: got empty string")
 	}
 	if !filepath.IsAbs(got) {

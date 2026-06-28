@@ -15,9 +15,8 @@ func TestImplicitGCHomeFallbackAvoidsSharedTemp(t *testing.T) {
 	got := implicitGCHomeFallback()
 
 	if got == "" {
-		// Must never be empty: callers join the result into a path, so ""
-		// silently becomes a CWD-relative path and writes state to the wrong
-		// place.
+		// Must never be empty: callers join the result into a path, so "" silently
+		// becomes a CWD-relative path and writes state to the wrong place.
 		t.Fatal("implicitGCHomeFallback: got empty string")
 	}
 	if !filepath.IsAbs(got) {

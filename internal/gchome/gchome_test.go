@@ -50,7 +50,7 @@ func TestProcessUniqueFallbackNeverShared(t *testing.T) {
 		t.Fatal("ProcessUniqueFallback() returned an empty path; callers would write state to a CWD-relative path")
 	}
 	if !filepath.IsAbs(got) {
-		t.Errorf("ProcessUniqueFallback() = %q, want an absolute process-isolated path", got)
+		t.Fatalf("ProcessUniqueFallback() = %q, want an absolute process-isolated path", got)
 	}
 }
 

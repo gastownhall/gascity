@@ -73,6 +73,9 @@ func implicitImportPath() string {
 // Returns "" under `go test` to keep unit tests hermetic unless the
 // caller opts in by setting GC_HOME explicitly.
 
+// implicitGCHomeFallback is a copy of gchome.ProcessUniqueFallback kept
+// package-internal to avoid a new cross-package dependency (#3661).
+// Any changes here must be mirrored in the other three copies.
 func implicitGCHomeFallback() string {
 	// Home unresolved. Never fall back to a fixed os.TempDir()/.gc: that path
 	// is shared and world-writable, so concurrent processes clobber each
