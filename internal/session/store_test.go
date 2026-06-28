@@ -282,6 +282,56 @@ func TestRepairTypeEmitsTypeOnlyUpdate(t *testing.T) {
 	}
 }
 
+// TestCircuitResetGenerationReturnsPersistedValue proves the typed read returns
+// the persisted reset-generation metadata value verbatim — equivalent to the raw
+// store.Get(id) + read .Metadata[SessionCircuitResetGenerationMetadataKey] that
+// loadPersistedSessionCircuitResetGeneration performed.
+func TestCircuitResetGenerationReturnsPersistedValue(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{
+		SessionCircuitResetGenerationMetadataKey: "7",
+	})
+	is, rec := recordingInfoStore(t, b)
+
+	got, err := is.CircuitResetGeneration("s-1")
+	if err != nil {
+		t.Fatalf("CircuitResetGeneration: %v", err)
+	}
+	if want := b.Metadata[SessionCircuitResetGenerationMetadataKey]; got != want {
+		t.Errorf("CircuitResetGeneration = %q, want %q (the raw read value)", got, want)
+	}
+	// The read confines a single Get; it must not emit any mutating bead op.
+	if mutating := opsOf(rec.Calls()); len(mutating) != 0 {
+		t.Errorf("CircuitResetGeneration emitted mutating ops %v, want none", mutating)
+	}
+}
+
+// TestCircuitResetGenerationEmptyWhenUnset proves an unset key reads back as the
+// empty string (not an error) — matching the raw map read on a bead that never
+// stamped the generation.
+func TestCircuitResetGenerationEmptyWhenUnset(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	is, _ := recordingInfoStore(t, b)
+
+	got, err := is.CircuitResetGeneration("s-1")
+	if err != nil {
+		t.Fatalf("CircuitResetGeneration: %v", err)
+	}
+	if got != "" {
+		t.Errorf("CircuitResetGeneration on unset key = %q, want \"\"", got)
+	}
+}
+
+// TestCircuitResetGenerationSurfacesStoreError proves a missing bead surfaces the
+// bare store error (the caller owns its diagnostic wrapping), matching the raw
+// store.Get error path the front door replaces.
+func TestCircuitResetGenerationSurfacesStoreError(t *testing.T) {
+	store := seedSessionStore(t)
+	is := NewInfoStore(store)
+	if _, err := is.CircuitResetGeneration("missing"); err == nil {
+		t.Fatal("CircuitResetGeneration(missing): want store error, got nil")
+	}
+}
+
 func opsOf(calls []beadstest.RecordedCall) []string {
 	out := make([]string, 0, len(calls))
 	for _, c := range calls {

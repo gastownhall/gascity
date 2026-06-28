@@ -230,6 +230,11 @@ const (
 	SessionCircuitStateOpen = "CIRCUIT_OPEN"
 	// SessionCircuitStateClosed is the durable metadata value for a closed session circuit breaker.
 	SessionCircuitStateClosed = "CIRCUIT_CLOSED"
+	// SessionCircuitResetGenerationMetadataKey is the durable metadata key for
+	// the session circuit breaker reset generation. The controller persists a
+	// monotonically increasing generation here so a later reconciler metadata
+	// snapshot can be rejected as stale after an operator-driven reset.
+	SessionCircuitResetGenerationMetadataKey = "session_circuit_reset_generation"
 )
 
 // LifecycleDisplayReason returns the user-facing reason for a non-closed

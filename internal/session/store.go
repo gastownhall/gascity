@@ -132,6 +132,25 @@ func (s *InfoStore) CloseWithoutReason(id string) error {
 	return s.store.Close(id)
 }
 
+// CircuitResetGeneration returns the persisted session-circuit-breaker reset
+// generation metadata value for id, verbatim (the raw string; "" when unset).
+//
+// It is the front door for the raw store.Get(sessionID) + read
+// .Metadata[SessionCircuitResetGenerationMetadataKey] pattern in
+// loadPersistedSessionCircuitResetGeneration (cmd/gc/session_circuit_breaker.go).
+// The bead read and the metadata-key access are confined here; the caller still
+// owns parsing the value and observing it into the breaker, and owns its own
+// diagnostic wrapping (the error is returned bare — see ApplyPatch). It does NOT
+// validate the bead as a session bead: the raw read it replaces did not either,
+// so a non-session bead carrying the key reads back identically.
+func (s *InfoStore) CircuitResetGeneration(id string) (string, error) {
+	b, err := s.store.Get(id)
+	if err != nil {
+		return "", err
+	}
+	return b.Metadata[SessionCircuitResetGenerationMetadataKey], nil
+}
+
 // GetState returns the persisted lifecycle state for id and whether the bead is
 // closed. It replaces the Get(id) + read .Status/.Metadata["state"] pattern at
 // the reconciler / session_beads close-path sites. Returns ErrSessionNotFound

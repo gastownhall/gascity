@@ -54,7 +54,7 @@ const (
 	sessionCircuitProgressSignatureMetadata = "session_circuit_progress_signature"
 	sessionCircuitOpenedAtMetadata          = "session_circuit_opened_at"
 	sessionCircuitOpenRestartCountMetadata  = "session_circuit_open_restart_count"
-	sessionCircuitResetGenerationMetadata   = "session_circuit_reset_generation"
+	sessionCircuitResetGenerationMetadata   = session.SessionCircuitResetGenerationMetadataKey
 )
 
 var sessionCircuitMetadataKeys = []string{
@@ -509,7 +509,19 @@ func (b *sessionCircuitBreaker) observeResetGenerationFromMetadata(identity stri
 	if b == nil || identity == "" || len(meta) == 0 {
 		return nil
 	}
-	generation, err := parseCircuitResetGeneration(meta[sessionCircuitResetGenerationMetadata])
+	return b.observeResetGenerationValue(identity, meta[sessionCircuitResetGenerationMetadata])
+}
+
+// observeResetGenerationValue parses a single persisted reset-generation metadata
+// value and observes it into the breaker. It is the value-keyed half of
+// observeResetGenerationFromMetadata, used by callers (the circuit reset-generation
+// front-door read) that already hold the value rather than the whole bead metadata
+// map.
+func (b *sessionCircuitBreaker) observeResetGenerationValue(identity, value string) error {
+	if b == nil || identity == "" {
+		return nil
+	}
+	generation, err := parseCircuitResetGeneration(value)
 	if err != nil {
 		return err
 	}
@@ -724,11 +736,11 @@ func loadPersistedSessionCircuitResetGeneration(store beads.Store, sessionID, id
 	if store == nil || cb == nil || strings.TrimSpace(sessionID) == "" || strings.TrimSpace(identity) == "" {
 		return nil
 	}
-	session, err := store.Get(sessionID)
+	generationValue, err := sessionFrontDoor(store).CircuitResetGeneration(sessionID)
 	if err != nil {
 		return fmt.Errorf("loading session circuit breaker metadata for %s: %w", sessionID, err)
 	}
-	if err := cb.observeResetGenerationFromMetadata(identity, session.Metadata); err != nil {
+	if err := cb.observeResetGenerationValue(identity, generationValue); err != nil {
 		return fmt.Errorf("loading session circuit breaker reset generation for %s: %w", sessionID, err)
 	}
 	return nil
