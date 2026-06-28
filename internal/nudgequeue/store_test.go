@@ -2,11 +2,253 @@ package nudgequeue
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
+
+// newRecordingNudgeStore wires a RecordingStore over a fresh MemStore behind the
+// nudges class tag, returning both the front door and the recorder so a test can
+// assert byte-identical bead writes.
+func newRecordingNudgeStore(t *testing.T) (*Store, *beadstest.RecordingStore) {
+	t.Helper()
+	rec := beadstest.NewRecordingStore(beads.NewMemStore())
+	return NewStore(beads.NudgesStore{Store: rec}), rec
+}
+
+func sampleNudgeItem() Item {
+	return Item{
+		ID:                "nudge-xyz",
+		Agent:             "polecat-3",
+		SessionID:         "sess-1",
+		ContinuationEpoch: "epoch-7",
+		Source:            "controller",
+		Message:           "wake up",
+		Reference:         &Reference{Kind: "bead", ID: "gc-99"},
+		DeliverAfter:      time.Date(2026, 6, 2, 9, 0, 0, 0, time.UTC),
+		ExpiresAt:         time.Date(2026, 6, 2, 10, 0, 0, 0, time.UTC),
+	}
+}
+
+// TestSaveEmitsByteIdenticalCreate proves Save creates the shadow bead with the
+// exact metadata map, labels, title, and type the prior raw ensureQueuedNudgeBead
+// helper produced. The literal expected map IS the byte-identical contract.
+func TestSaveEmitsByteIdenticalCreate(t *testing.T) {
+	st, rec := newRecordingNudgeStore(t)
+	item := sampleNudgeItem()
+
+	beadID, created, err := st.Save(item)
+	if err != nil || !created || beadID == "" {
+		t.Fatalf("Save = (%q,%v,%v), want (non-empty,true,nil)", beadID, created, err)
+	}
+
+	creates := rec.CallsForOp("Create")
+	if len(creates) != 1 {
+		t.Fatalf("Create calls = %d, want 1", len(creates))
+	}
+	got := creates[0].Bead
+	wantMeta := map[string]string{
+		"nudge_id":           "nudge-xyz",
+		"agent":              "polecat-3",
+		"session_id":         "sess-1",
+		"continuation_epoch": "epoch-7",
+		"state":              "queued",
+		"source":             "controller",
+		"message":            "wake up",
+		"deliver_after":      "2026-06-02T09:00:00Z",
+		"expires_at":         "2026-06-02T10:00:00Z",
+		"reference_json":     `{"kind":"bead","id":"gc-99"}`,
+		"last_attempt_at":    "",
+		"last_error":         "",
+		"terminal_reason":    "",
+		"commit_boundary":    "",
+		"terminal_at":        "",
+	}
+	if !reflect.DeepEqual(got.Metadata, wantMeta) {
+		t.Errorf("metadata mismatch:\n got=%#v\nwant=%#v", got.Metadata, wantMeta)
+	}
+	wantLabels := []string{"gc:nudge", "agent:polecat-3", "nudge:nudge-xyz", "source:controller"}
+	if !reflect.DeepEqual(got.Labels, wantLabels) {
+		t.Errorf("labels = %#v, want %#v", got.Labels, wantLabels)
+	}
+	if got.Title != "nudge:nudge-xyz" || got.Type != "chore" {
+		t.Errorf("title/type = (%q,%q), want (nudge:nudge-xyz, chore)", got.Title, got.Type)
+	}
+}
+
+// TestSaveIdempotentNoSecondCreate proves Save does not re-create when a shadow
+// bead already exists for the nudge id (existence-gate parity with the raw op).
+func TestSaveIdempotentNoSecondCreate(t *testing.T) {
+	st, rec := newRecordingNudgeStore(t)
+	item := sampleNudgeItem()
+	first, created, err := st.Save(item)
+	if err != nil || !created {
+		t.Fatalf("first Save = (%q,%v,%v)", first, created, err)
+	}
+	second, created2, err := st.Save(item)
+	if err != nil {
+		t.Fatalf("second Save err = %v", err)
+	}
+	if created2 {
+		t.Errorf("second Save created a duplicate, want created=false")
+	}
+	if second != first {
+		t.Errorf("second Save id = %q, want existing %q", second, first)
+	}
+	if n := len(rec.CallsForOp("Create")); n != 1 {
+		t.Errorf("Create calls = %d, want 1 (no duplicate)", n)
+	}
+}
+
+// TestTerminalizeEmitsByteIdenticalWrites proves Terminalize stamps the exact
+// update map (including the canonical close_reason floor) and then closes the
+// bead — the byte-identical contract for the prior markQueuedNudgeTerminal.
+func TestTerminalizeEmitsByteIdenticalWrites(t *testing.T) {
+	st, rec := newRecordingNudgeStore(t)
+	item := sampleNudgeItem()
+	beadID, _, err := st.Save(item)
+	if err != nil {
+		t.Fatalf("Save err = %v", err)
+	}
+	item.BeadID = beadID
+	rec.Reset()
+
+	now := time.Date(2026, 6, 2, 9, 30, 0, 0, time.UTC)
+	if err := st.Terminalize(item, "failed", "boom", "post-commit", now); err != nil {
+		t.Fatalf("Terminalize err = %v", err)
+	}
+
+	batches := rec.CallsForOp("SetMetadataBatch")
+	if len(batches) != 1 {
+		t.Fatalf("SetMetadataBatch calls = %d, want 1", len(batches))
+	}
+	wantUpdate := map[string]string{
+		"state":           "failed",
+		"last_attempt_at": "",
+		"last_error":      "",
+		"terminal_reason": "boom",
+		"commit_boundary": "post-commit",
+		"terminal_at":     "2026-06-02T09:30:00Z",
+		"close_reason":    "nudge failed: queue terminalization rejected delivery",
+	}
+	if !reflect.DeepEqual(batches[0].Metadata, wantUpdate) {
+		t.Errorf("update map mismatch:\n got=%#v\nwant=%#v", batches[0].Metadata, wantUpdate)
+	}
+	if batches[0].ID != beadID {
+		t.Errorf("SetMetadataBatch id = %q, want %q", batches[0].ID, beadID)
+	}
+	closes := rec.CallsForOp("Close")
+	if len(closes) != 1 || closes[0].ID != beadID {
+		t.Errorf("Close calls = %+v, want one close of %q", closes, beadID)
+	}
+}
+
+// TestTerminalizeFindsBeadWhenBeadIDEmpty proves the BeadID-then-find fallback:
+// with no BeadID on the item, Terminalize resolves the shadow by label and
+// terminalizes it.
+func TestTerminalizeFindsBeadWhenBeadIDEmpty(t *testing.T) {
+	st, rec := newRecordingNudgeStore(t)
+	item := sampleNudgeItem()
+	beadID, _, err := st.Save(item)
+	if err != nil {
+		t.Fatalf("Save err = %v", err)
+	}
+	rec.Reset()
+
+	// item carries no BeadID — force the find fallback.
+	item.BeadID = ""
+	if err := st.Terminalize(item, "superseded", "superseded", "", time.Now().UTC()); err != nil {
+		t.Fatalf("Terminalize err = %v", err)
+	}
+	batches := rec.CallsForOp("SetMetadataBatch")
+	if len(batches) != 1 || batches[0].ID != beadID {
+		t.Fatalf("expected one SetMetadataBatch on %q, got %+v", beadID, batches)
+	}
+	if batches[0].Metadata["close_reason"] != "nudge superseded by newer queued entry" {
+		t.Errorf("close_reason = %q, want canonical superseded reason", batches[0].Metadata["close_reason"])
+	}
+}
+
+// TestTerminalizeMissingBeadIsNoOp proves terminalizing a nudge with no shadow
+// bead is a tolerated no-op (no writes), matching the raw op's missing-bead path.
+func TestTerminalizeMissingBeadIsNoOp(t *testing.T) {
+	st, rec := newRecordingNudgeStore(t)
+	item := Item{ID: "ghost", Agent: "a", Source: "s"}
+	if err := st.Terminalize(item, "failed", "x", "", time.Now().UTC()); err != nil {
+		t.Fatalf("Terminalize err = %v", err)
+	}
+	if n := len(rec.Calls()); n != 0 {
+		t.Errorf("recorded %d mutating calls, want 0 for a missing nudge", n)
+	}
+}
+
+// TestRollbackEnqueueEmitsByteIdenticalWrites proves RollbackEnqueue stamps the
+// canonical rollback close_reason then closes — the byte-identical contract for
+// the prior inline rollback in enqueueQueuedNudgeWithStore.
+func TestRollbackEnqueueEmitsByteIdenticalWrites(t *testing.T) {
+	st, rec := newRecordingNudgeStore(t)
+	item := sampleNudgeItem()
+	beadID, _, err := st.Save(item)
+	if err != nil {
+		t.Fatalf("Save err = %v", err)
+	}
+	rec.Reset()
+
+	if err := st.RollbackEnqueue(beadID); err != nil {
+		t.Fatalf("RollbackEnqueue err = %v", err)
+	}
+	sets := rec.CallsForOp("SetMetadata")
+	if len(sets) != 1 || sets[0].ID != beadID || sets[0].Key != "close_reason" ||
+		sets[0].Value != EnqueueRollbackCloseReason {
+		t.Errorf("SetMetadata = %+v, want close_reason=%q on %q", sets, EnqueueRollbackCloseReason, beadID)
+	}
+	closes := rec.CallsForOp("Close")
+	if len(closes) != 1 || closes[0].ID != beadID {
+		t.Errorf("Close = %+v, want one close of %q", closes, beadID)
+	}
+}
+
+// TestFindReturnsTypedShadow proves Find returns a decoded NudgeShadow (open
+// bead) and FindIncludingTerminal reads the controller-stamped terminal fields
+// off a closed bead.
+func TestFindReturnsTypedShadow(t *testing.T) {
+	st, _ := newRecordingNudgeStore(t)
+	item := sampleNudgeItem()
+	beadID, _, err := st.Save(item)
+	if err != nil {
+		t.Fatalf("Save err = %v", err)
+	}
+
+	open, ok, err := st.Find(item.ID)
+	if err != nil || !ok {
+		t.Fatalf("Find = (%+v,%v,%v)", open, ok, err)
+	}
+	if open.State != "queued" || open.BeadID != beadID || open.ID != item.ID {
+		t.Errorf("open shadow = %+v, want queued/%s/%s", open, beadID, item.ID)
+	}
+	if open.Reference == nil || open.Reference.ID != "gc-99" {
+		t.Errorf("reference not decoded: %+v", open.Reference)
+	}
+
+	// After terminalization, Find (open-only) must miss; FindIncludingTerminal hits.
+	item.BeadID = beadID
+	if err := st.Terminalize(item, "injected", "delivered", "cb", time.Now().UTC()); err != nil {
+		t.Fatalf("Terminalize err = %v", err)
+	}
+	if _, ok, err := st.Find(item.ID); err != nil || ok {
+		t.Errorf("Find after terminal = (%v,%v), want (false,nil)", ok, err)
+	}
+	term, ok, err := st.FindIncludingTerminal(item.ID)
+	if err != nil || !ok {
+		t.Fatalf("FindIncludingTerminal = (%+v,%v,%v)", term, ok, err)
+	}
+	if term.State != "injected" || term.TerminalReason != "delivered" || term.CommitBoundary != "cb" {
+		t.Errorf("terminal shadow = %+v, want injected/delivered/cb", term)
+	}
+}
 
 // nudgeShadowBeadFromItem builds a nudge shadow bead the way
 // cmd/gc/nudge_beads.go ensureQueuedNudgeBead does, so the decoder test asserts

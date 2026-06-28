@@ -1160,7 +1160,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, stor
 		if nudgeID == "" {
 			continue
 		}
-		_, ok, err := findQueuedNudgeBead(beads.NudgesStore{Store: store}, nudgeID)
+		_, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(nudgeID)
 		if err != nil {
 			if beads.IsLookupLimitError(err) {
 				stampWaitLookupCapDiagnostic(store, sessionID, err, now, "ready-wait-nudge")
@@ -1227,7 +1227,7 @@ func finalizeReadyWaitFromNudge(store beads.Store, wait beads.Bead, now time.Tim
 	if nudgeID == "" {
 		return false, nil
 	}
-	nudge, ok, err := findAnyQueuedNudgeBead(beads.NudgesStore{Store: store}, nudgeID)
+	nudge, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).FindIncludingTerminal(nudgeID)
 	if err != nil {
 		if beads.IsLookupLimitError(err) {
 			stampWaitLookupCapDiagnostic(store, wait.Metadata["session_id"], err, now, "ready-wait-finalize-nudge")
@@ -1238,21 +1238,21 @@ func finalizeReadyWaitFromNudge(store beads.Store, wait beads.Bead, now time.Tim
 	if !ok {
 		return false, err
 	}
-	switch nudge.Metadata["state"] {
+	switch nudge.State {
 	case "injected", "accepted_for_injection":
 		return true, setWaitTerminalState(store, wait.ID, map[string]string{
 			"state":           waitStateClosed,
 			"closed_at":       now.UTC().Format(time.RFC3339),
 			"nudge_id":        nudgeID,
-			"commit_boundary": nudge.Metadata["commit_boundary"],
+			"commit_boundary": nudge.CommitBoundary,
 		})
 	case "expired", "failed":
 		return true, setWaitTerminalState(store, wait.ID, map[string]string{
 			"state":           waitStateFailed,
 			"failed_at":       now.UTC().Format(time.RFC3339),
 			"nudge_id":        nudgeID,
-			"last_error":      nudge.Metadata["terminal_reason"],
-			"commit_boundary": nudge.Metadata["commit_boundary"],
+			"last_error":      nudge.TerminalReason,
+			"commit_boundary": nudge.CommitBoundary,
 		})
 	default:
 		return false, nil
@@ -1420,23 +1420,14 @@ func nextWaitDeliveryAttempt(store beads.Store, wait beads.Bead) (string, error)
 	if nudgeID == "" || store == nil {
 		return strconv.Itoa(attempt + 1), nil
 	}
-	nudge, ok, err := findAnyQueuedNudgeBead(beads.NudgesStore{Store: store}, nudgeID)
+	nudge, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).FindIncludingTerminal(nudgeID)
 	if err != nil {
 		return "", err
 	}
-	if !ok || isTerminalNudgeState(nudge.Metadata["state"]) {
+	if !ok || nudgequeue.IsTerminalState(nudge.State) {
 		return strconv.Itoa(attempt + 1), nil
 	}
 	return "", nil
-}
-
-func isTerminalNudgeState(state string) bool {
-	switch state {
-	case "accepted_for_injection", "injected", "expired", "failed", "superseded":
-		return true
-	default:
-		return false
-	}
 }
 
 func withdrawQueuedWaitNudges(cityPath string, nudgeIDs []string) error {

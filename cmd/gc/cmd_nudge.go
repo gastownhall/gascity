@@ -1856,15 +1856,13 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 		return nil
 	})
 	if err != nil && created && store.Store != nil && beadID != "" {
-		// Stamp metadata.close_reason before Close so BdStore.Close can forward
-		// it as `bd close --reason` and satisfy validation.on-close=error.
+		// Roll back the leaked shadow bead through the nudge front door, which
+		// stamps the canonical close_reason before Close so BdStore.Close can
+		// forward it as `bd close --reason` and satisfy validation.on-close=error.
 		// Preserve the original enqueue error, but return rollback failures too
 		// so leaked open nudge beads are diagnosable.
-		if setErr := store.SetMetadata(beadID, "close_reason", nudgeEnqueueRollbackCloseReason); setErr != nil {
-			err = errors.Join(err, fmt.Errorf("stamping rollback nudge bead %q close reason: %w", beadID, setErr))
-		}
-		if closeErr := store.Close(beadID); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("closing rollback nudge bead %q: %w", beadID, closeErr))
+		if rbErr := nudgeFrontDoor(store).RollbackEnqueue(beadID); rbErr != nil {
+			err = errors.Join(err, fmt.Errorf("rollback nudge bead %q: %w", beadID, rbErr))
 		}
 	}
 	if err == nil {
@@ -2154,14 +2152,14 @@ func pruneDeadQueuedNudges(state *nudgeQueueState, store beads.NudgesStore, now 
 				filtered = append(filtered, item)
 				continue
 			}
-			b, ok, err := findAnyQueuedNudgeBead(store, item.ID)
+			shadow, ok, err := nudgeFrontDoor(store).FindIncludingTerminal(item.ID)
 			if err != nil {
 				// Fail open: store lookup errors retain the item rather than
 				// blocking the entire queue operation. Pruning is best-effort.
 				filtered = append(filtered, item)
 				continue
 			}
-			if !ok || !isTerminalNudgeState(b.Metadata["state"]) {
+			if !ok || !nudgequeue.IsTerminalState(shadow.State) {
 				// Repair historical dead-letter entries whose queue state was
 				// durable but whose backing bead never received terminal state.
 				reason := strings.TrimSpace(item.LastError)
@@ -2176,8 +2174,8 @@ func pruneDeadQueuedNudges(state *nudgeQueueState, store beads.NudgesStore, now 
 					filtered = append(filtered, item)
 					continue
 				}
-				b, ok, err = findAnyQueuedNudgeBead(store, item.ID)
-				if err != nil || !ok || !isTerminalNudgeState(b.Metadata["state"]) {
+				shadow, ok, err = nudgeFrontDoor(store).FindIncludingTerminal(item.ID)
+				if err != nil || !ok || !nudgequeue.IsTerminalState(shadow.State) {
 					filtered = append(filtered, item)
 					continue
 				}
