@@ -2,6 +2,7 @@ package orders
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -207,6 +208,211 @@ func (s *Store) CloseRun(runID, reason string) error {
 		return fmt.Errorf("closing order run %q: %w", runID, err)
 	}
 	return nil
+}
+
+// orderTrackingHistoryIndexLimit caps the recent-history list the dispatcher's
+// tracking index reads. Mirrors cmd/gc/order_dispatch.go.
+const orderTrackingHistoryIndexLimit = 2048
+
+// CreateRunClosed creates a tracking bead, optionally stamps an event cursor and
+// outcome, then closes it — the cooldown-advance-only path used by manual
+// `gc order run`. The bead's CreatedAt advances the cooldown clock, and it is
+// closed immediately so a lingering open bead is not read as in-flight work
+// (ga-jra/ga-lo8c). It emits byte-identical bead writes to the prior raw
+// Create + (cursor Update) + (outcome Update) + (close_reason SetMetadata) +
+// Close sequence in cmd_order.go. The returned OrderRun is closed (Open=false).
+func (s *Store) CreateRunClosed(scoped string, outcome RunOutcome, cursor *EventCursor, closeReason string) (OrderRun, error) {
+	created, err := s.store.Create(beads.Bead{
+		Title:     trackingTitle(scoped),
+		Labels:    baseLabels(scoped, RunOutcomeNone),
+		NoHistory: true,
+	})
+	if err != nil {
+		return OrderRun{}, fmt.Errorf("creating closed order run for %q: %w", scoped, err)
+	}
+	run := OrderRun{ID: created.ID, Scoped: scoped, CreatedAt: created.CreatedAt}
+	if cursor != nil {
+		if err := s.SetCursor(created.ID, scoped, *cursor); err != nil {
+			return run, err
+		}
+		run.Cursor = *cursor
+	}
+	if outcome != RunOutcomeNone {
+		if err := s.SetOutcome(created.ID, outcome); err != nil {
+			return run, err
+		}
+		run.Outcome = outcome
+	}
+	if err := s.CloseRun(created.ID, closeReason); err != nil {
+		return run, err
+	}
+	return run, nil
+}
+
+// RecentRuns lists the tracking/order-run beads for scoped newest-first
+// (including closed), decoded into OrderRun values. It is the typed face of the
+// `gc order history` read: it confines the order-run-label List and the
+// bead->OrderRun decode. It reads through the raw store with TierMode TierBoth
+// (unioning wisp + issue tiers), byte-identical to the `gc order history` loop
+// and the LastRun/EventCursor runtime helpers — NOT through Live.List, which the
+// open-work gate (OpenTracking) uses instead.
+func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
+	if s.store.Store == nil {
+		return nil, nil
+	}
+	beadsList, err := s.store.List(beads.ListQuery{
+		Label:         labelOrderRunPrefix + scoped,
+		Limit:         limit,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		return decodeRuns(scoped, beadsList), err
+	}
+	return decodeRuns(scoped, beadsList), nil
+}
+
+// OpenTracking returns the OPEN tracking beads for scoped, decoded into
+// OrderRun values. An open tracking bead is the single-flight in-flight marker.
+// It is the typed face of listCanonicalOpenOrderTrackingBeads filtered to the
+// scoped order's order-run label.
+func (s *Store) OpenTracking(scoped string) ([]OrderRun, error) {
+	if s.store.Store == nil {
+		return nil, nil
+	}
+	beadsList, err := beads.HandlesFor(s.store.Store).Live.List(beads.ListQuery{
+		Label:    labelOrderRunPrefix + scoped,
+		Status:   "open",
+		Sort:     beads.SortCreatedDesc,
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]OrderRun, 0, len(beadsList))
+	for _, b := range beadsList {
+		if !beadLabelsContain(b.Labels, labelOrderTracking) {
+			continue
+		}
+		out = append(out, decodeRun(scoped, b))
+	}
+	return out, nil
+}
+
+// HasOpenWork reports whether any open tracking bead exists for scoped — the
+// single-flight gate that suppresses repeat dispatch while a run is in flight.
+// It only counts order-tracking beads (not wisp roots); the dispatcher's
+// wisp-aware open-work gate (hasOpenWorkStrict) layers descendant checks on top
+// and stays in cmd/gc.
+func (s *Store) HasOpenWork(scoped string) (bool, error) {
+	open, err := s.OpenTracking(scoped)
+	if err != nil {
+		return false, err
+	}
+	return len(open) > 0, nil
+}
+
+// decodeRun projects an order tracking/run bead onto an OrderRun. It is pure,
+// side-effect-free, and backend-invariant (reads only bead fields), matching the
+// projection-invariance invariant. The cooldown clock (CreatedAt), open flag,
+// outcome (from labels), and event cursor (max seq from labels) are decoded here.
+func decodeRun(scoped string, b beads.Bead) OrderRun {
+	return OrderRun{
+		ID:        b.ID,
+		Scoped:    scoped,
+		Outcome:   outcomeFromLabels(b.Labels),
+		CreatedAt: b.CreatedAt,
+		Open:      b.Status != "closed",
+		Cursor:    EventCursor(MaxSeqFromLabels([][]string{b.Labels})),
+	}
+}
+
+func decodeRuns(scoped string, list []beads.Bead) []OrderRun {
+	out := make([]OrderRun, 0, len(list))
+	for _, b := range list {
+		out = append(out, decodeRun(scoped, b))
+	}
+	return out
+}
+
+// outcomeFromLabels reverses RunOutcome.Labels, reporting the terminal outcome a
+// tracking bead's labels encode, or RunOutcomeNone for an in-flight run.
+func outcomeFromLabels(labels []string) RunOutcome {
+	wisp := beadLabelsContain(labels, labelWisp)
+	switch {
+	case beadLabelsContain(labels, labelWispCanceled):
+		return RunOutcomeWispCanceled
+	case beadLabelsContain(labels, labelWispFailed):
+		return RunOutcomeWispFailed
+	case wisp:
+		return RunOutcomeWisp
+	case beadLabelsContain(labels, labelExecEnvFailed):
+		return RunOutcomeExecEnvFailed
+	case beadLabelsContain(labels, labelExecFailed):
+		return RunOutcomeExecFailed
+	case beadLabelsContain(labels, labelExec):
+		return RunOutcomeExec
+	case beadLabelsContain(labels, labelTriggerEnvFail):
+		return RunOutcomeTriggerEnvFailed
+	default:
+		return RunOutcomeNone
+	}
+}
+
+func beadLabelsContain(labels []string, want string) bool {
+	for _, l := range labels {
+		if l == want {
+			return true
+		}
+	}
+	return false
+}
+
+// RecentRunsAcrossStores unions RecentRuns across a set of order stores,
+// returning the merged runs newest-first. It is the federated face of the
+// multi-scope `gc order history` read (city + per-rig). Each store is queried
+// independently; a partial failure returns the runs collected so far with the
+// error so the caller can degrade gracefully like the raw loop did.
+func RecentRunsAcrossStores(scoped string, limit int, stores ...beads.OrdersStore) ([]OrderRun, error) {
+	var all []OrderRun
+	for _, store := range stores {
+		if store.Store == nil {
+			continue
+		}
+		runs, err := NewStore(store).RecentRuns(scoped, limit)
+		all = append(all, runs...)
+		if err != nil {
+			return all, err
+		}
+	}
+	sortRunsCreatedDesc(all)
+	return all, nil
+}
+
+// EventCursorAcrossStores returns the max event-bus seq for scoped across a set
+// of order stores. It is the federated face of bdCursorAcrossStores.
+func EventCursorAcrossStores(scoped string, stores ...beads.OrdersStore) (EventCursor, error) {
+	var maxCur EventCursor
+	for _, store := range stores {
+		if store.Store == nil {
+			continue
+		}
+		cur, err := NewStore(store).EventCursor(scoped)
+		if err != nil {
+			return 0, err
+		}
+		if cur > maxCur {
+			maxCur = cur
+		}
+	}
+	return maxCur, nil
+}
+
+func sortRunsCreatedDesc(runs []OrderRun) {
+	sort.SliceStable(runs, func(i, j int) bool {
+		return runs[i].CreatedAt.After(runs[j].CreatedAt)
+	})
 }
 
 // LastRun returns the cooldown clock: the CreatedAt of the most recent

@@ -142,6 +142,188 @@ func TestCloseRunStampsReasonThenCloses(t *testing.T) {
 	}
 }
 
+// TestCreateRunClosedCooldownOnly proves CreateRunClosed creates an already
+// labeled tracking bead and then closes it (stamping close_reason) so the run
+// advances the cooldown clock without lingering as an in-flight marker — the
+// byte-identical replacement for cmd_order.go's Create + (Update outcome) +
+// Close manual-run path.
+func TestCreateRunClosedCooldownOnly(t *testing.T) {
+	st, rec := recordingOrdersStore()
+
+	run, err := st.CreateRunClosed("rig/agent", RunOutcomeExec, nil, "manual run complete enough chars")
+	if err != nil {
+		t.Fatalf("CreateRunClosed: %v", err)
+	}
+	if run.Open {
+		t.Errorf("run.Open = true, want false (cooldown-only)")
+	}
+
+	ops := make([]string, 0)
+	for _, c := range rec.Calls() {
+		ops = append(ops, c.Op)
+	}
+	want := []string{"Create", "Update", "SetMetadata", "Close"}
+	if !reflect.DeepEqual(ops, want) {
+		t.Fatalf("ops = %v, want %v", ops, want)
+	}
+	create := rec.CallsForOp("Create")[0].Bead
+	if create.Title != "order:rig/agent" || !create.NoHistory {
+		t.Errorf("create = %+v, want title order:rig/agent NoHistory true", create)
+	}
+	if got := rec.CallsForOp("Update")[0].Opts.Labels; !reflect.DeepEqual(got, []string{"exec"}) {
+		t.Errorf("outcome labels = %v, want [exec]", got)
+	}
+	mc := rec.CallsForOp("SetMetadata")[0]
+	if mc.Key != "close_reason" || mc.Value != "manual run complete enough chars" {
+		t.Errorf("close_reason = (%q,%q)", mc.Key, mc.Value)
+	}
+}
+
+// TestCreateRunClosedWithCursor proves the cursor label pair is stamped before
+// close when supplied (the event-exec manual path), matching the
+// (Create, Update cursor, Update outcome, Close) raw sequence.
+func TestCreateRunClosedWithCursor(t *testing.T) {
+	st, rec := recordingOrdersStore()
+	cur := EventCursor(9)
+
+	if _, err := st.CreateRunClosed("rig/agent", RunOutcomeExec, &cur, "manual run complete enough chars"); err != nil {
+		t.Fatalf("CreateRunClosed: %v", err)
+	}
+	updates := rec.CallsForOp("Update")
+	if len(updates) != 2 {
+		t.Fatalf("Update calls = %d, want 2 (cursor + outcome)", len(updates))
+	}
+	if got := updates[0].Opts.Labels; !reflect.DeepEqual(got, []string{"order:rig/agent", "seq:9"}) {
+		t.Errorf("cursor labels = %v, want [order:rig/agent seq:9]", got)
+	}
+	if got := updates[1].Opts.Labels; !reflect.DeepEqual(got, []string{"exec"}) {
+		t.Errorf("outcome labels = %v, want [exec]", got)
+	}
+}
+
+// TestRecentRunsReadsHistory proves RecentRuns lists tracking beads newest-first
+// (including closed) and decodes them into OrderRun values carrying the cooldown
+// clock and open flag.
+func TestRecentRunsReadsHistory(t *testing.T) {
+	st, _ := recordingOrdersStore()
+	first, err := st.CreateRun("rig/agent", RunOpts{})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if err := st.CloseRun(first.ID, "first run complete enough chars"); err != nil {
+		t.Fatalf("CloseRun: %v", err)
+	}
+	if _, err := st.CreateRun("rig/agent", RunOpts{}); err != nil {
+		t.Fatalf("CreateRun 2: %v", err)
+	}
+
+	runs, err := st.RecentRuns("rig/agent", 10)
+	if err != nil {
+		t.Fatalf("RecentRuns: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("RecentRuns = %d entries, want 2", len(runs))
+	}
+	for _, r := range runs {
+		if r.Scoped != "rig/agent" || r.CreatedAt.IsZero() {
+			t.Errorf("run = %+v, want scoped rig/agent with cooldown clock", r)
+		}
+	}
+}
+
+// TestHasOpenWorkSingleFlight proves an open tracking bead reads as in-flight
+// work and a closed one does not — the single-flight gate semantics.
+func TestHasOpenWorkSingleFlight(t *testing.T) {
+	st, _ := recordingOrdersStore()
+	run, err := st.CreateRun("rig/agent", RunOpts{})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	open, err := st.HasOpenWork("rig/agent")
+	if err != nil {
+		t.Fatalf("HasOpenWork: %v", err)
+	}
+	if !open {
+		t.Errorf("HasOpenWork = false, want true (open tracking bead is in-flight)")
+	}
+
+	if err := st.CloseRun(run.ID, "run complete enough characters here"); err != nil {
+		t.Fatalf("CloseRun: %v", err)
+	}
+	open, err = st.HasOpenWork("rig/agent")
+	if err != nil {
+		t.Fatalf("HasOpenWork after close: %v", err)
+	}
+	if open {
+		t.Errorf("HasOpenWork = true after close, want false")
+	}
+}
+
+// TestOpenTrackingReturnsOpenRuns proves OpenTracking returns only the open
+// tracking beads for the scoped order.
+func TestOpenTrackingReturnsOpenRuns(t *testing.T) {
+	st, _ := recordingOrdersStore()
+	if _, err := st.CreateRun("rig/agent", RunOpts{}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	runs, err := st.OpenTracking("rig/agent")
+	if err != nil {
+		t.Fatalf("OpenTracking: %v", err)
+	}
+	if len(runs) != 1 || !runs[0].Open {
+		t.Fatalf("OpenTracking = %+v, want 1 open run", runs)
+	}
+}
+
+// TestRecentRunsAcrossStoresMerges proves the federated history helper unions
+// runs from multiple stores newest-first.
+func TestRecentRunsAcrossStoresMerges(t *testing.T) {
+	a, _ := recordingOrdersStore()
+	b, _ := recordingOrdersStore()
+	if _, err := a.CreateRun("rig/agent", RunOpts{}); err != nil {
+		t.Fatalf("a.CreateRun: %v", err)
+	}
+	if _, err := b.CreateRun("rig/agent", RunOpts{}); err != nil {
+		t.Fatalf("b.CreateRun: %v", err)
+	}
+	runs, err := RecentRunsAcrossStores("rig/agent", 10, a.store, b.store)
+	if err != nil {
+		t.Fatalf("RecentRunsAcrossStores: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("RecentRunsAcrossStores = %d, want 2", len(runs))
+	}
+}
+
+// TestEventCursorAcrossStoresMax proves the federated cursor helper takes the
+// max seq across stores.
+func TestEventCursorAcrossStoresMax(t *testing.T) {
+	a, _ := recordingOrdersStore()
+	b, _ := recordingOrdersStore()
+	ra, err := a.CreateRun("rig/agent", RunOpts{})
+	if err != nil {
+		t.Fatalf("a.CreateRun: %v", err)
+	}
+	if err := a.SetCursor(ra.ID, "rig/agent", EventCursor(3)); err != nil {
+		t.Fatalf("a.SetCursor: %v", err)
+	}
+	rb, err := b.CreateRun("rig/agent", RunOpts{})
+	if err != nil {
+		t.Fatalf("b.CreateRun: %v", err)
+	}
+	if err := b.SetCursor(rb.ID, "rig/agent", EventCursor(8)); err != nil {
+		t.Fatalf("b.SetCursor: %v", err)
+	}
+	cur, err := EventCursorAcrossStores("rig/agent", a.store, b.store)
+	if err != nil {
+		t.Fatalf("EventCursorAcrossStores: %v", err)
+	}
+	if cur != EventCursor(8) {
+		t.Errorf("EventCursorAcrossStores = %d, want 8", cur)
+	}
+}
+
 // TestLastRunAndCursorReads prove the cooldown clock and cursor reads work over
 // a seeded store with order-run labels.
 func TestLastRunAndCursorReads(t *testing.T) {
