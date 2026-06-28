@@ -106,21 +106,15 @@ func (s *Server) extmsgSessionHandleForSelector(selector string) string {
 }
 
 func (s *Server) extmsgSessionHandleForResolvedID(resolvedID, fallback string) string {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return extmsgHandleLabel(fallback)
 	}
-	b, err := store.Get(resolvedID)
-	if err != nil {
+	source, ok := session.NewInfoStore(store).ExtmsgHandleSource(resolvedID)
+	if !ok || source == "" {
 		return extmsgHandleLabel(fallback)
 	}
-	if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" {
-		return extmsgHandleLabel(alias)
-	}
-	if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" {
-		return extmsgHandleLabel(sessionName)
-	}
-	return extmsgHandleLabel(fallback)
+	return extmsgHandleLabel(source)
 }
 
 // extmsgNotifyMembers sends a peer-publication reminder to transcript members
