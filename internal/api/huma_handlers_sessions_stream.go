@@ -16,22 +16,22 @@ import (
 // per-request streaming loop.
 
 func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamInput) (*sessionStreamState, error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
 
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	info, err := mgr.Get(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	handle, err := s.workerHandleForSession(store, id)
+	handle, err := s.workerHandleForSession(store.Store, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}

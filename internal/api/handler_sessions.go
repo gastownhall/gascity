@@ -628,7 +628,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		if abs, err := filepath.Abs(workDir); err == nil {
 			workDir = abs
 		}
-		factory, err := s.workerFactory(s.state.CityBeadStore())
+		factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
 		if err != nil {
 			return
 		}
