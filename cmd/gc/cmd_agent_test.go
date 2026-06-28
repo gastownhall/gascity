@@ -620,6 +620,55 @@ name = "mayor"
 	}
 }
 
+func TestDoAgentSuspendRootPackPreservesUpstreams(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	// Root pack.toml carries a pack-level [upstreams] table, which config load
+	// now accepts and importing cities inherit. Suspending a root-pack agent
+	// rewrites pack.toml through a reduced struct; the rewrite must preserve the
+	// upstream table and its nested [env] block rather than refusing the write
+	// (false key-loss positive) or silently dropping it.
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+
+[upstreams.bedrock]
+description = "AWS Bedrock Anthropic"
+base_url = "https://bedrock.example.com/anthropic"
+api_key = "$AWS_BEDROCK_KEY"
+
+[upstreams.bedrock.env]
+AWS_REGION = "us-west-2"
+
+[[agent]]
+name = "mayor"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentSuspend(fs, "/city", "mayor", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packToml := string(fs.Files["/city/pack.toml"])
+	if !strings.Contains(packToml, `suspended = true`) {
+		t.Fatalf("pack.toml missing suspended = true:\n%s", packToml)
+	}
+	for _, want := range []string{
+		"[upstreams.bedrock]",
+		`base_url = "https://bedrock.example.com/anthropic"`,
+		`api_key = "$AWS_BEDROCK_KEY"`,
+		"[upstreams.bedrock.env]",
+		`AWS_REGION = "us-west-2"`,
+	} {
+		if !strings.Contains(packToml, want) {
+			t.Fatalf("pack.toml dropped upstream field %q after suspend:\n%s", want, packToml)
+		}
+	}
+}
+
 func TestDoAgentSuspendRootPackCanonicalizesAgentsAlias(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`[workspace]

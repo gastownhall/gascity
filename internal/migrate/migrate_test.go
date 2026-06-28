@@ -507,6 +507,64 @@ provider = "local"
 	}
 }
 
+// TestMigratePreservesRootPackUpstreams guards the migrate packFile round-trip
+// for pack-level [upstreams]. The normal loader accepts [upstreams.<name>] in a
+// city's own pack.toml (a valid authoring surface, mirroring [providers]), so gc
+// migrate / gc doctor --fix must not fail it on the undecoded-key gate, and the
+// table — including its nested [upstreams.<name>.env] block — must survive the
+// pack.toml rewrite rather than being silently dropped.
+func TestMigratePreservesRootPackUpstreams(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+`)
+	// [agent_defaults] is migrated out to city.toml, forcing a pack.toml rewrite
+	// so the round-trip through marshalPackFile is exercised, not just the decode
+	// gate.
+	writeFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 2
+
+[agent_defaults]
+default_sling_formula = "mol-canonical"
+
+[upstreams.groq]
+description = "Groq OpenAI-compatible gateway"
+base_url = "https://api.groq.com/openai/v1"
+api_key = "$GROQ_API_KEY"
+
+[upstreams.groq.env]
+GROQ_EXTRA = "$GROQ_EXTRA"
+`)
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	for _, want := range []string{
+		"[upstreams.groq]",
+		`description = "Groq OpenAI-compatible gateway"`,
+		`base_url = "https://api.groq.com/openai/v1"`,
+		`api_key = "$GROQ_API_KEY"`,
+		"[upstreams.groq.env]",
+		`GROQ_EXTRA = "$GROQ_EXTRA"`,
+	} {
+		if !strings.Contains(packToml, want) {
+			t.Fatalf("rewritten pack.toml missing preserved upstream %q:\n%s", want, packToml)
+		}
+	}
+
+	// The migrated city must still compose cleanly with the preserved upstream.
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")); err != nil {
+		t.Fatalf("LoadWithIncludes after migration: %v", err)
+	}
+}
+
 func TestMigrateMovesPackAgentDefaultsProvider(t *testing.T) {
 	t.Parallel()
 

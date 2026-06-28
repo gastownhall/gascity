@@ -140,7 +140,7 @@ func rigScopedHookRig(cfg *config.City, agentIdentity string) string {
 }
 
 // firstStoreWithWork runs command against each store in order and returns the
-// output of the FIRST store that reports ready work (applying the same
+// output and store of the FIRST store that reports ready work (applying the same
 // normalize + unready-filter that doHook uses, so a store with only
 // deferred/blocked rows is not treated as a hit). run is injectable for tests.
 //
@@ -150,7 +150,7 @@ func rigScopedHookRig(cfg *config.City, agentIdentity string) string {
 // the reconciler, not be silently downgraded to "no work"). Errors from
 // federated rig stores are best-effort discovery (like appendRigHookStores)
 // and are not surfaced, so one flaky rig store can't wedge the hook.
-func firstStoreWithWork(command string, stores []hookStore, run func(command, dir string, env []string) (string, error)) (string, error) {
+func firstStoreWithWork(command string, stores []hookStore, run func(command, dir string, env []string) (string, error)) (string, hookStore, error) {
 	var lastOut string
 	var ownStoreOut string
 	var ownStoreErr error
@@ -159,7 +159,7 @@ func firstStoreWithWork(command string, stores []hookStore, run func(command, di
 		if err == nil {
 			ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(out)), time.Now())
 			if workQueryHasReadyWork(ready) {
-				return out, nil
+				return out, st, nil
 			}
 			lastOut = out
 			continue
@@ -169,7 +169,7 @@ func firstStoreWithWork(command string, stores []hookStore, run func(command, di
 		}
 	}
 	if ownStoreErr != nil {
-		return ownStoreOut, ownStoreErr
+		return ownStoreOut, hookStore{}, ownStoreErr
 	}
-	return lastOut, nil
+	return lastOut, hookStore{}, nil
 }

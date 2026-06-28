@@ -1152,6 +1152,7 @@ type LintPackLoad struct {
 	Agents        []Agent
 	NamedSessions []NamedSession
 	Providers     map[string]ProviderSpec
+	Upstreams     map[string]UpstreamSpec
 	PackDirs      []string
 	Warnings      []string
 }
@@ -1168,7 +1169,7 @@ func LoadPackForLint(fs fsys.FS, packDir string) (*LintPackLoad, error) {
 	}
 	topoPath := filepath.Join(absDir, packFile)
 	cache := &packLoadCache{results: make(map[string]*packLoadResult)}
-	agents, namedSessions, providers, _, _, topoDirs, _, _, err := loadPackWithCacheOptions(
+	agents, namedSessions, providers, upstreams, _, topoDirs, _, _, err := loadPackWithCacheOptions(
 		fs, topoPath, absDir, absDir, "", nil, cache, LoadOptions{})
 	if err != nil {
 		return nil, err
@@ -1187,6 +1188,7 @@ func LoadPackForLint(fs fsys.FS, packDir string) (*LintPackLoad, error) {
 		Agents:        agents,
 		NamedSessions: namedSessions,
 		Providers:     providers,
+		Upstreams:     upstreams,
 		PackDirs:      topoDirs,
 		Warnings:      cachedPackWarnings(cache, absDir),
 	}, nil

@@ -32,6 +32,7 @@ type packFile struct {
 	NamedSessions  []config.NamedSession          `toml:"named_session,omitempty"`
 	Services       []config.Service               `toml:"service,omitempty"`
 	Providers      map[string]config.ProviderSpec `toml:"providers,omitempty"`
+	Upstreams      map[string]config.UpstreamSpec `toml:"upstreams,omitempty"`
 	Formulas       config.FormulasConfig          `toml:"formulas,omitempty"`
 	Patches        config.Patches                 `toml:"patches,omitempty"`
 	Doctor         []config.PackDoctorEntry       `toml:"doctor,omitempty"`
