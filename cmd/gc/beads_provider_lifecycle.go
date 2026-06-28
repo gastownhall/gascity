@@ -599,6 +599,14 @@ var verifyManagedDoltDatabaseExistsAfterInit = func(cityPath, dir, dbName string
 	if !cityUsesBdStoreContract(cityPath) {
 		return nil
 	}
+	if isExternalDolt(cityPath) {
+		// External/hosted dolt endpoint (e.g. a per-tenant beads-gateway): the
+		// managed-local catalog is irrelevant, and the gateway denies the
+		// SHOW DATABASES catalog listing this guard relies on (it scopes each
+		// connection to its own provisioner-created project DB). Reachability of
+		// that DB is already proven by bd init's own connection.
+		return nil
+	}
 	port := currentResolvableManagedDoltPort(cityPath)
 	if port == "" {
 		return nil
