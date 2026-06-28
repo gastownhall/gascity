@@ -117,13 +117,12 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
-	info, err := mgr.Get(id)
+	info, pr, err := mgr.GetWithPersistedResponse(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	b, _ := store.Get(id)
 	wantPeek := input.Peek
-	resp := sessionResponseWithReason(info, session.PersistedResponseFromBead(b), cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
+	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, true, input.PeekLines)
 	return &IndexOutput[sessionResponse]{
 		Index:     s.latestIndex(),

@@ -326,14 +326,13 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, err)
 		return
 	}
-	info, err := catalog.Get(id)
+	info, pr, err := catalog.GetWithPersistedResponse(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
-	b, _ := store.Get(id)
 	wantPeek := r.URL.Query().Get("peek") == "true"
-	resp := sessionResponseWithReason(info, session.PersistedResponseFromBead(b), cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
+	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	handle, err := s.workerHandleForSession(store.Store, id)
 	if err == nil {
 		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true, 0)
@@ -554,13 +553,12 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	info, err := catalog.Get(id)
+	info, pr, err := catalog.GetWithPersistedResponse(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
-	updated, _ := store.Get(id)
-	rresp := sessionResponseWithReason(info, session.PersistedResponseFromBead(updated), s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
+	rresp := sessionResponseWithReason(info, pr, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	writeJSON(w, http.StatusOK, rresp)
 }
 
@@ -778,13 +776,12 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to get updated state.
-	info, err := catalog.Get(id)
+	info, pr, err := catalog.GetWithPersistedResponse(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
-	updated, _ := store.Get(id)
-	presp := sessionResponseWithReason(info, session.PersistedResponseFromBead(updated), s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
+	presp := sessionResponseWithReason(info, pr, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	writeJSON(w, http.StatusOK, presp)
 }
 

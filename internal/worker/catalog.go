@@ -18,6 +18,9 @@ type (
 	SessionPruneResult = sessionpkg.PruneResult
 	// SessionSubmissionCapabilities describes submit/nudge support for a session.
 	SessionSubmissionCapabilities = sessionpkg.SubmissionCapabilities
+	// SessionPersistedResponse carries the persisted half of a session's API
+	// response (status + metadata) projected from the session bead.
+	SessionPersistedResponse = sessionpkg.PersistedResponse
 )
 
 // SessionCatalog exposes worker-owned session discovery and maintenance
@@ -42,6 +45,14 @@ func (c *SessionCatalog) List(stateFilter, templateFilter string) ([]SessionInfo
 // Get loads one session by ID.
 func (c *SessionCatalog) Get(id string) (SessionInfo, error) {
 	return c.manager.Get(id)
+}
+
+// GetWithPersistedResponse loads one session by ID, returning the
+// runtime-enriched Info plus the persisted-response projection (status +
+// metadata) in a single fetch, so the API response path avoids a redundant raw
+// store.Get beside Get.
+func (c *SessionCatalog) GetWithPersistedResponse(id string) (SessionInfo, SessionPersistedResponse, error) {
+	return c.manager.GetWithPersistedResponse(id)
 }
 
 // ListFullFromBeads expands a bead set into full session listing results.

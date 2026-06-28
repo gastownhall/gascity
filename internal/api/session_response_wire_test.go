@@ -63,6 +63,54 @@ func sessionResponseFromBead(info session.Info, b *beads.Bead, cfg *config.City,
 	return r
 }
 
+// TestGetWithPersistedResponseWireByteIdentical is the keystone S3 invariant:
+// collapsing the redundant raw store.Get beside mgr.Get into the single-fetch
+// session.Manager.GetWithPersistedResponse must produce a byte-identical
+// session response. The golden builds the response the pre-S3 way (mgr.Get for
+// Info plus a separate store.Get projected through PersistedResponseFromBead);
+// the new path builds Info + PersistedResponse from the single domain call.
+func TestGetWithPersistedResponseWireByteIdentical(t *testing.T) {
+	cfg := &config.City{}
+	for _, b := range wireSessionBeadFixtures() {
+		b := b
+		t.Run(b.ID, func(t *testing.T) {
+			store := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+			mgr := session.NewManager(store, runtime.NewFake())
+
+			// Golden: the pre-S3 double-read. mgr.Get for the runtime-enriched
+			// Info, then a separate store.Get projected to PersistedResponse.
+			goldenInfo, err := mgr.Get(b.ID)
+			if err != nil {
+				t.Fatalf("mgr.Get: %v", err)
+			}
+			rawBead, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatalf("store.Get: %v", err)
+			}
+			golden := sessionResponseWithReason(goldenInfo, session.PersistedResponseFromBead(rawBead), cfg, nil, true)
+
+			// New: the single-fetch domain call.
+			gotInfo, pr, err := mgr.GetWithPersistedResponse(b.ID)
+			if err != nil {
+				t.Fatalf("GetWithPersistedResponse: %v", err)
+			}
+			got := sessionResponseWithReason(gotInfo, pr, cfg, nil, true)
+
+			goldenJSON, err := json.Marshal(golden)
+			if err != nil {
+				t.Fatalf("marshal golden: %v", err)
+			}
+			gotJSON, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal got: %v", err)
+			}
+			if string(goldenJSON) != string(gotJSON) {
+				t.Fatalf("wire mismatch for %s:\n golden = %s\n got    = %s", b.ID, goldenJSON, gotJSON)
+			}
+		})
+	}
+}
+
 // wireSessionBeadFixtures returns representative persisted session beads spanning
 // the states whose response JSON depends on bead status + metadata: creating,
 // active, and closed, with alias/title/agent_name/permission-mode overrides and
