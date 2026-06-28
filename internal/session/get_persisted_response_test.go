@@ -15,14 +15,14 @@ import (
 // confined inside the session package.
 func TestGetWithPersistedResponse(t *testing.T) {
 	b := sessionBeadFixture("s-pr-1", "open", map[string]string{
-		"__title":      "Persisted",
-		"template":     "polecat",
-		"state":        "asleep",
-		"alias":        "pc-1",
-		"agent_name":   "polecat-7",
-		"provider":     "claude",
-		"work_dir":     "/tmp/wd",
-		"session_name": "s-pr-1",
+		"__title":                   "Persisted",
+		"template":                  "polecat",
+		"state":                     "asleep",
+		"alias":                     "pc-1",
+		"agent_name":                "polecat-7",
+		"provider":                  "claude",
+		"work_dir":                  "/tmp/wd",
+		"session_name":              "s-pr-1",
 		"real_world_app_project_id": "proj-9",
 	})
 	store := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
