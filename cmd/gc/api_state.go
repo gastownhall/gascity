@@ -522,8 +522,8 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	graphStore := cs.GraphBeadStore()
 	beadCloseAutocloseDispatch(func() {
 		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
-		doWispAutocloseWith(store, beadID, os.Stderr, graphStore)
-		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore)
+		doWispAutocloseWith(store, beadID, os.Stderr, graphStore.Store)
+		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore.Store)
 	})
 }
 
@@ -1161,11 +1161,13 @@ func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 // legacy .gc/beads.sqlite location (or the gcg Postgres schema). cs.eventProv is
 // passed for signature parity with the other accessors but is ignored by
 // resolveGraphStore: the graph store stays event-silent, matching the prior Router
-// graph leg.
-func (cs *controllerState) GraphBeadStore() beads.Store {
+// graph leg. The result is wrapped in the strongly-typed beads.GraphStore so the
+// graph class is statically visible to callers; the wrapper carries the same
+// underlying store value, so runtime behavior is unchanged.
+func (cs *controllerState) GraphBeadStore() beads.GraphStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return resolveGraphStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
+	return beads.GraphStore{Store: resolveGraphStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.

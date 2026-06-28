@@ -103,8 +103,10 @@ type wispGC interface {
 	// runGC lists closed molecules, deletes those older than TTL, and returns
 	// the count of purged entries. Errors from individual deletes are
 	// best-effort and surfaced without stopping the purge; the returned error
-	// also covers list failures.
-	runGC(store beads.Store, now time.Time) (int, error)
+	// also covers list failures. The molecule/wisp/workflow purge arm operates on
+	// the graph-class store; the read-message retention arm on the messaging-class
+	// store. Both wrap the same underlying work store until either class relocates.
+	runGC(graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error)
 }
 
 // memoryWispGC is the production implementation of wispGC.
@@ -144,8 +146,12 @@ func (m *memoryWispGC) shouldRun(now time.Time) bool {
 	return now.Sub(m.lastRun) >= m.interval
 }
 
-func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
+func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error) {
 	m.lastRun = now
+	// The molecule/wisp/workflow purge arm operates on the graph-class store; the
+	// read-message retention arm on the messaging-class store. Pass the unwrapped
+	// .Store to the generic beads.Store-typed purge helpers.
+	store := graphStore.Store
 	if store == nil {
 		return 0, fmt.Errorf("listing closed molecules: bead store unavailable")
 	}
@@ -190,10 +196,10 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 		deleteErr = errors.Join(deleteErr, orphanErr)
 	}
 
-	if m.mailRetentionTTL > 0 {
-		mailEntries, mailErr := readMessageWispGCEntries(store)
+	if m.mailRetentionTTL > 0 && mailStore.Store != nil {
+		mailEntries, mailErr := readMessageWispGCEntries(mailStore.Store)
 		if mailErr == nil {
-			mailPurged, mailDeleteErr := purgeExpiredBeadRoots(store, mailEntries, now.Add(-m.mailRetentionTTL))
+			mailPurged, mailDeleteErr := purgeExpiredBeadRoots(mailStore.Store, mailEntries, now.Add(-m.mailRetentionTTL))
 			purged += mailPurged
 			deleteErr = errors.Join(deleteErr, mailDeleteErr)
 			if mailPurged > 0 {

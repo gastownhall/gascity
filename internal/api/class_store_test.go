@@ -53,7 +53,7 @@ func TestBeadStoresForIDClassAwareGraphArm(t *testing.T) {
 	s := New(st)
 
 	got := s.beadStoresForID(prefix + "-1")
-	if len(got) != 2 || got[0] != s.state.GraphBeadStore() || got[1] != s.state.CityBeadStore() {
+	if len(got) != 2 || got[0] != s.state.GraphBeadStore().Store || got[1] != s.state.CityBeadStore() {
 		t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want [graph, work]", prefix, got, len(got))
 	}
 }

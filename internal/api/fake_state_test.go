@@ -120,11 +120,11 @@ func (f *fakeState) SessionsBeadStore() beads.SessionStore {
 	return beads.SessionStore{Store: f.cityBeadStore}
 }
 
-func (f *fakeState) GraphBeadStore() beads.Store {
+func (f *fakeState) GraphBeadStore() beads.GraphStore {
 	if f.graphBeadStore != nil {
-		return f.graphBeadStore
+		return beads.GraphStore{Store: f.graphBeadStore}
 	}
-	return f.cityBeadStore
+	return beads.GraphStore{Store: f.cityBeadStore}
 }
 
 func (f *fakeState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {

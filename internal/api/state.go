@@ -136,8 +136,10 @@ type State interface {
 	// the legacy <cityPath>/.gc/beads.sqlite (SQLite) or the gcg Postgres schema,
 	// so graph reads and writes reach the relocated beads instead of the work
 	// store. This is the class-aware graph leg; cross-class WORK-bead reads stay
-	// on CityBeadStore. Returns nil if no store is available.
-	GraphBeadStore() beads.Store
+	// on CityBeadStore. The strongly-typed beads.GraphStore return makes the graph
+	// class statically visible at the call site; its embedded .Store is nil when no
+	// store is available.
+	GraphBeadStore() beads.GraphStore
 
 	// Orders returns the current active set of scanned orders.
 	// Returns nil if orders are not configured.

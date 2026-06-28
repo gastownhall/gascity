@@ -14,11 +14,15 @@ type controllerClassAccessor struct {
 }
 
 var controllerCityClassAccessors = []controllerClassAccessor{
-	{"graphBeadStore", func(cs *controllerState) beads.Store { return cs.graphBeadStore() }},
+	// graphBeadStore returns the strongly-typed beads.GraphStore; unwrap its
+	// embedded .Store so the identity check compares the underlying store pointer.
+	{"graphBeadStore", func(cs *controllerState) beads.Store { return cs.graphBeadStore().Store }},
 	// sessionsBeadStore returns the strongly-typed beads.SessionStore; unwrap its
 	// embedded .Store so the identity check compares the underlying store pointer.
 	{"sessionsBeadStore", func(cs *controllerState) beads.Store { return cs.sessionsBeadStore().Store }},
-	{"mailBeadStore", func(cs *controllerState) beads.Store { return cs.mailBeadStore() }},
+	// mailBeadStore returns the strongly-typed beads.MailStore; unwrap its
+	// embedded .Store so the identity check compares the underlying store pointer.
+	{"mailBeadStore", func(cs *controllerState) beads.Store { return cs.mailBeadStore().Store }},
 	// nudgesBeadStore returns the strongly-typed beads.NudgesStore; unwrap its
 	// embedded .Store so the identity check compares the underlying store pointer.
 	{"nudgesBeadStore", func(cs *controllerState) beads.Store { return cs.nudgesBeadStore().Store }},
@@ -70,11 +74,15 @@ func TestCityRuntimeClassAccessorsAreIdentity(t *testing.T) {
 		name string
 		got  func() beads.Store
 	}{
-		{"graphBeadStore", cr.graphBeadStore},
+		// graphBeadStore returns the strongly-typed beads.GraphStore; unwrap its
+		// embedded .Store so the identity check compares the underlying store pointer.
+		{"graphBeadStore", func() beads.Store { return cr.graphBeadStore().Store }},
 		// sessionsBeadStore returns the strongly-typed beads.SessionStore; unwrap its
 		// embedded .Store so the identity check compares the underlying store pointer.
 		{"sessionsBeadStore", func() beads.Store { return cr.sessionsBeadStore().Store }},
-		{"mailBeadStore", cr.mailBeadStore},
+		// mailBeadStore returns the strongly-typed beads.MailStore; unwrap its
+		// embedded .Store so the identity check compares the underlying store pointer.
+		{"mailBeadStore", func() beads.Store { return cr.mailBeadStore().Store }},
 		// nudgesBeadStore returns the strongly-typed beads.NudgesStore; unwrap its
 		// embedded .Store so the identity check compares the underlying store pointer.
 		{"nudgesBeadStore", func() beads.Store { return cr.nudgesBeadStore().Store }},

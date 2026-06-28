@@ -45,10 +45,10 @@ type nudgeMailSweepResult struct {
 // the caller can report them without treating the sweep as fatal.
 //
 // The nudge phase is sourced from the strongly-typed nudgeStore (the nudges
-// class); the mail phase stays on the class-agnostic mailStore until the
-// messaging class is strong-typed. Both wrap the same underlying work store
-// until either class relocates, so behavior is unchanged today.
-func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
+// class); the mail phase from the strongly-typed mailStore (the messaging class).
+// Both wrap the same underlying work store until either class relocates, so
+// behavior is unchanged today.
+func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
 	var result nudgeMailSweepResult
 	var beadErrs []error
 
@@ -145,8 +145,8 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.Store, nu
 // making any changes. Used by --dry-run to report candidate count without side
 // effects. The limit parameter caps the count the same way sweepStaleNudgeMail
 // caps closes; pass 0 for no cap. The nudge phase is counted from the typed
-// nudgeStore (nudges class); the mail phase from the class-agnostic mailStore.
-func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
+// nudgeStore (nudges class); the mail phase from the typed mailStore (messaging class).
+func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
 	var result nudgeMailSweepResult
 
 	liveIDs := liveNudgeIDSet(nudgeState)

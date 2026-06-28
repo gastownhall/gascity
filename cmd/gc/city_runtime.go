@@ -1249,10 +1249,13 @@ func (cr *CityRuntime) tick(
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
 	}
 
-	// Wisp GC: purge expired closed molecules.
-	if store := cr.cityBeadStore(); cr.wg != nil && store != nil && cr.wg.shouldRun(time.Now()) {
+	// Wisp GC: purge expired closed molecules. The molecule/wisp/workflow purge
+	// arm routes through the typed graph-class store; the read-message retention
+	// arm through the typed messaging-class store. Both collapse to the city store
+	// today, so the GC is byte-identical.
+	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
 		phaseStart = time.Now()
-		purged, gcErr := cr.wg.runGC(store, time.Now())
+		purged, gcErr := cr.wg.runGC(graphStore, cr.mailBeadStore(), time.Now())
 		recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
 		if gcErr != nil {
 			for _, line := range strings.Split(gcErr.Error(), "\n") {
@@ -1524,11 +1527,11 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	cr.nudgeMailSweepWatchdogLast = now
 
 	// The nudge phase routes through the typed nudges accessor; the mail phase
-	// stays on the work store until the messaging class is strong-typed (C6).
-	// Both collapse to the city store today, so the sweep is byte-identical.
+	// through the typed messaging accessor. Both collapse to the city store today,
+	// so the sweep is byte-identical.
 	nudgeStore := cr.nudgesBeadStore()
-	mailStore := cr.cityBeadStore()
-	if nudgeStore.Store == nil || mailStore == nil {
+	mailStore := cr.mailBeadStore()
+	if nudgeStore.Store == nil || mailStore.Store == nil {
 		return
 	}
 	// Load nudge state to protect live nudge IDs. A missing state file is not an

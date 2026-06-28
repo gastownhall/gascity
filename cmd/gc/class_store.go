@@ -20,8 +20,9 @@ import (
 // graphBeadStore returns the store that owns graph (workflow/v2) beads. It
 // delegates to the exported GraphBeadStore() accessor so the api.State surface
 // and the controller's own callers share one resolver. Identity to the work
-// store at the default bd backend.
-func (cs *controllerState) graphBeadStore() beads.Store {
+// store at the default bd backend; returned as the strongly-typed
+// beads.GraphStore so the graph class stays statically visible.
+func (cs *controllerState) graphBeadStore() beads.GraphStore {
 	return cs.GraphBeadStore()
 }
 
@@ -36,11 +37,13 @@ func (cs *controllerState) sessionsBeadStore() beads.SessionStore {
 
 // mailBeadStore returns the store that owns mail (message) beads: the configured
 // messaging class store when [beads.classes.messaging] relocates messaging, else
-// the work store. Identity to the work store at the default bd backend.
-func (cs *controllerState) mailBeadStore() beads.Store {
+// the work store. Identity to the work store at the default bd backend; returned
+// as the strongly-typed beads.MailStore so the messaging class stays statically
+// visible.
+func (cs *controllerState) mailBeadStore() beads.MailStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return resolveMailMessagesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
+	return beads.MailStore{Store: resolveMailMessagesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // nudgesBeadStore returns the store that owns nudge beads. It delegates to the
@@ -78,8 +81,10 @@ func (cs *controllerState) workBeadStores() map[string]beads.Store {
 // graphBeadStore returns the runtime's graph (workflow/v2) bead store: the
 // dedicated graph store when [beads.classes.graph] relocates graph, else the
 // work store. Byte-identical to cityBeadStore() at the default bd backend.
-func (cr *CityRuntime) graphBeadStore() beads.Store {
-	return resolveGraphStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
+// Returned as the strongly-typed beads.GraphStore so the graph class stays
+// statically visible; the wrapper carries the same underlying store value.
+func (cr *CityRuntime) graphBeadStore() beads.GraphStore {
+	return beads.GraphStore{Store: resolveGraphStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // sessionsBeadStore returns the runtime's session/session-wait bead store: the
@@ -95,8 +100,10 @@ func (cr *CityRuntime) sessionsBeadStore() beads.SessionStore {
 // mailBeadStore returns the runtime's mail (message) bead store: the configured
 // messaging class store when [beads.classes.messaging] relocates messaging, else
 // the work store. Byte-identical to cityBeadStore() at the default bd backend.
-func (cr *CityRuntime) mailBeadStore() beads.Store {
-	return resolveMailMessagesStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
+// Returned as the strongly-typed beads.MailStore so the messaging class stays
+// statically visible; the wrapper carries the same underlying store value.
+func (cr *CityRuntime) mailBeadStore() beads.MailStore {
+	return beads.MailStore{Store: resolveMailMessagesStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // nudgesBeadStore returns the runtime's nudge bead store: the configured nudges

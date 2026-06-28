@@ -611,6 +611,13 @@ func workflowSQLRouteCandidate(state State, prefix string) (workflowSQLStoreCand
 }
 
 func workflowStorePath(state State, info workflowStoreInfo) (string, bool) {
+	// The dedicated graph store lives at its own legacy .gc/ location (or a gcg
+	// Postgres schema), not at a rig/city path derivable here, so it has no
+	// rig-path-derived SQL fast-path candidate. Skip it; the slow store-scan in
+	// buildWorkflowSnapshot consults the graph store directly.
+	if strings.HasPrefix(strings.TrimSpace(info.ref), workflowGraphStoreRefPrefix+":") {
+		return "", false
+	}
 	switch strings.TrimSpace(info.scopeKind) {
 	case beadmeta.ScopeKindCity:
 		cityPath := strings.TrimSpace(state.CityPath())

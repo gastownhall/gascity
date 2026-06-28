@@ -138,7 +138,7 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 	// the first probe. Skipped for a default (non-relocated) city, where
 	// GraphBeadStore() == CityBeadStore(): the arm never fires and this path stays
 	// byte-identical.
-	if graph := s.state.GraphBeadStore(); graph != nil {
+	if graph := s.state.GraphBeadStore().Store; graph != nil {
 		if city := s.state.CityBeadStore(); graph != city {
 			if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && beadIDHasConfiguredPrefix(id, prefix) {
 				if city != nil {
