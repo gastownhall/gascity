@@ -149,6 +149,105 @@ func TestResolveRalphCheckMoleculePaths_UnsafeRootID(t *testing.T) {
 	}
 }
 
+// TestRunRalphCheckPackRelativeCheckPathWorkDirFallback covers
+// gastownhall/gascity#3008: a pack-relative gc.check_path
+// (e.g. assets/<pack>/scripts/check.sh) names a pack-shipped script that lives
+// under the store/city root, not the per-task gc.work_dir worktree. When the
+// control bead carries a work_dir pointing at a worktree that lacks the pack
+// tree, the relative join <work_dir>/assets/... does not exist and the check
+// was control-quarantined. The fallback resolves the relative path against the
+// store root instead, so the gate is evaluated.
+func TestRunRalphCheckPackRelativeCheckPathWorkDirFallback(t *testing.T) {
+	cityPath := t.TempDir()
+	// Pack-shipped check script lives under the city/store root.
+	checkRel := filepath.Join("assets", "demo-pack", "scripts", "check.sh")
+	storeScript := filepath.Join(cityPath, checkRel)
+	if err := os.MkdirAll(filepath.Dir(storeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storeScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Per-task worktree under the city root that does NOT contain the pack tree.
+	workDir := filepath.Join(cityPath, "worktrees", "task1")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{"gc.kind": "workflow"}})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.check_path":   filepath.ToSlash(checkRel),
+			"gc.work_dir":     workDir,
+			"gc.max_attempts": "3",
+		},
+	})
+	subject := mustCreate(t, store, beads.Bead{
+		Title:    "review loop iteration 1",
+		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
+	})
+
+	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v (the pack-relative check_path should fall back to the store root)", err)
+	}
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("Outcome = %q (stderr=%q), want pass via store-root fallback", result.Outcome, result.Stderr)
+	}
+}
+
+// TestRunRalphCheckWorkDirRelativeCheckPathKeepsPrecedence guards that the
+// #3008 fallback only fires when the work_dir join is missing: a check_path
+// that DOES exist under the worktree must still resolve against the worktree,
+// not the store root.
+func TestRunRalphCheckWorkDirRelativeCheckPathKeepsPrecedence(t *testing.T) {
+	cityPath := t.TempDir()
+	checkRel := "check.sh"
+	// Same relative name exists in both the store root and the worktree; the
+	// worktree copy must win. Distinguish them by exit code.
+	if err := os.WriteFile(filepath.Join(cityPath, checkRel), []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workDir := filepath.Join(cityPath, "worktrees", "task1")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, checkRel), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{"gc.kind": "workflow"}})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.check_path":   checkRel,
+			"gc.work_dir":     workDir,
+			"gc.max_attempts": "3",
+		},
+	})
+	subject := mustCreate(t, store, beads.Bead{
+		Title:    "review loop iteration 1",
+		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
+	})
+
+	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v", err)
+	}
+	// The worktree copy exits 0 (pass); the store copy exits 7 (fail). A pass
+	// proves the worktree script ran, i.e. the fallback did not shadow it.
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("Outcome = %q (stderr=%q), want pass from the worktree-relative script", result.Outcome, result.Stderr)
+	}
+}
+
 // TestRunRalphCheckEnvTracksSubject pins gastownhall/gascity#2558 review
 // feedback: GC_BEAD_ID and the molecule/artifact dirs must describe the SAME
 // bead. The per-attempt agent runs on the subject (attempt) bead and writes

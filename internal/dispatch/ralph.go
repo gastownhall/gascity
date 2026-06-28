@@ -2,7 +2,9 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -196,6 +198,20 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		return convergence.GateResult{}, fmt.Errorf("%s: absolute gc.check_path %q escapes trusted roots", bead.ID, checkPath)
 	}
 	scriptPath, err := convergence.ResolveConditionPath(cityPath, scriptBase, checkPath)
+	if err != nil && scriptBase != storePath && !filepath.IsAbs(checkPath) && errors.Is(err, fs.ErrNotExist) {
+		// Pack-shipped check scripts live in the pack/city tree, not the
+		// per-task gc.work_dir worktree, so a relative gc.check_path joined
+		// against a work_dir worktree that lacks the pack tree resolves to a
+		// nonexistent path (gastownhall/gascity#3008). Fall back to the
+		// store/city root — exactly the base used when work_dir is empty, so
+		// it introduces no new trusted root and stays subject to
+		// ResolveConditionPath's containment checks. Only on a not-exist miss,
+		// so a check that does exist under the worktree keeps precedence; the
+		// original work_dir error is preserved when the fallback also misses.
+		if fallbackPath, fallbackErr := convergence.ResolveConditionPath(cityPath, storePath, checkPath); fallbackErr == nil {
+			scriptPath, err = fallbackPath, nil
+		}
+	}
 	if err != nil {
 		return convergence.GateResult{}, fmt.Errorf("%s: resolving check path: %w", bead.ID, err)
 	}
