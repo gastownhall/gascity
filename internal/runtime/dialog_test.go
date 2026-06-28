@@ -1050,6 +1050,7 @@ func TestProviderTerminalErrorReason(t *testing.T) {
 	}{
 		{name: "codex model not found code", content: "model_not_found: gpt-5.3-codex-spark", want: "model_not_found"},
 		{name: "model not found text", content: "Error: model gpt-x was not found", want: "model_not_found"},
+		{name: "model and not-found on different lines is not terminal", content: "loading model weights\n... file path not found", want: ""},
 		{name: "quota exceeded", content: "Error: quota exceeded", want: "quota_exceeded"},
 		{name: "insufficient quota", content: "insufficient_quota: billing required", want: "quota_exceeded"},
 		{name: "disk quota is not provider quota", content: "disk quota exceeded while writing log", want: ""},
