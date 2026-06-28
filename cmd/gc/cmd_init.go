@@ -62,6 +62,7 @@ type initPackConfig struct {
 	NamedSessions  []config.NamedSession          `toml:"named_session,omitempty"`
 	Services       []config.Service               `toml:"service,omitempty"`
 	Providers      map[string]config.ProviderSpec `toml:"providers,omitempty"`
+	Upstreams      map[string]config.UpstreamSpec `toml:"upstreams,omitempty"`
 	Formulas       config.FormulasConfig          `toml:"formulas,omitempty"`
 	Patches        config.Patches                 `toml:"patches,omitempty"`
 	Doctor         []config.PackDoctorEntry       `toml:"doctor,omitempty"`
@@ -812,6 +813,7 @@ func marshalInitPackConfig(cfg initPackConfig) ([]byte, error) {
 		NamedSessions []config.NamedSession          `toml:"named_session,omitempty"`
 		Services      []config.Service               `toml:"service,omitempty"`
 		Providers     map[string]config.ProviderSpec `toml:"providers,omitempty"`
+		Upstreams     map[string]config.UpstreamSpec `toml:"upstreams,omitempty"`
 		Formulas      *config.FormulasConfig         `toml:"formulas,omitempty"`
 		Patches       *config.Patches                `toml:"patches,omitempty"`
 		Doctor        []config.PackDoctorEntry       `toml:"doctor,omitempty"`
@@ -835,6 +837,7 @@ func marshalInitPackConfig(cfg initPackConfig) ([]byte, error) {
 		NamedSessions: cfg.NamedSessions,
 		Services:      cfg.Services,
 		Providers:     cfg.Providers,
+		Upstreams:     cfg.Upstreams,
 		Doctor:        cfg.Doctor,
 		Commands:      cfg.Commands,
 		Pricing:       cfg.Pricing,

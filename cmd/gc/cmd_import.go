@@ -48,6 +48,7 @@ type cityPackManifest struct {
 	NamedSessions         []config.NamedSession          `toml:"named_session,omitempty"`
 	Services              []config.Service               `toml:"service,omitempty"`
 	Providers             map[string]config.ProviderSpec `toml:"providers,omitempty"`
+	Upstreams             map[string]config.UpstreamSpec `toml:"upstreams,omitempty"`
 	Formulas              config.FormulasConfig          `toml:"formulas,omitempty"`
 	Patches               config.Patches                 `toml:"patches,omitempty"`
 	Doctor                []config.PackDoctorEntry       `toml:"doctor,omitempty"`
@@ -72,6 +73,7 @@ type cityPackManifestBody struct {
 	NamedSessions []config.NamedSession          `toml:"named_session,omitempty"`
 	Services      []config.Service               `toml:"service,omitempty"`
 	Providers     map[string]config.ProviderSpec `toml:"providers,omitempty"`
+	Upstreams     map[string]config.UpstreamSpec `toml:"upstreams,omitempty"`
 	Formulas      config.FormulasConfig          `toml:"formulas,omitempty"`
 	Patches       config.Patches                 `toml:"patches,omitempty"`
 	Doctor        []config.PackDoctorEntry       `toml:"doctor,omitempty"`
@@ -1396,6 +1398,7 @@ func writeCityPackManifest(fs fsys.FS, cityPath string, manifest *cityPackManife
 		NamedSessions: manifest.NamedSessions,
 		Services:      manifest.Services,
 		Providers:     manifest.Providers,
+		Upstreams:     manifest.Upstreams,
 		Formulas:      manifest.Formulas,
 		Patches:       manifest.Patches,
 		Doctor:        manifest.Doctor,
