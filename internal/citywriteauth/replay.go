@@ -13,6 +13,13 @@ const defaultSweepThreshold = 4096
 // a single supervisor process given short grant TTLs; a restart forgets
 // consumed jtis, which is acceptable because expiry + request-binding bound the
 // replay window. Swap in a shared store if you need cross-process durability.
+//
+// sweepThreshold bounds how often expired entries are reclaimed, not the live
+// set size: a jti is retained until its acceptance deadline, so steady-state
+// memory is roughly mint_rate * (MaxTTL + Skew). Within the intended trust
+// model (only the trusted authority mints, short TTLs) that bound is small. An
+// operator who raises MaxTTL or shares the guard at a high mint rate should size
+// for it or add an independent size-capped eviction policy.
 type MemoryReplayGuard struct {
 	mu             sync.Mutex
 	seen           map[string]time.Time // jti -> exp

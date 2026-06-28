@@ -30,4 +30,15 @@
 // The req binding ties a grant to exactly one method+path+body, so a captured
 // grant cannot be repurposed for a different mutation even by a caller able to
 // read it.
+//
+// # Integration status
+//
+// This package is verify-only and is not yet wired into a request path. No
+// middleware currently buffers the request body, computes [ReqDigest], derives
+// the expected city from the {cityName} path segment, sources the verifying
+// keys, and calls [Verifier.Verify] to fail closed on a missing or invalid
+// X-GC-City-Write header. Until that integration lands, importing this package
+// grants no protection on its own. The supervisor/API integration and a
+// request-level integration test that drives a real request through [Expect]
+// and [Verifier.Verify] are tracked as follow-up work in ga-wojrnk.
 package citywriteauth

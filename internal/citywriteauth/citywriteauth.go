@@ -29,24 +29,31 @@ type Grant struct {
 // Sentinel errors. Callers distinguish failures with errors.Is; every one of
 // them is a rejection (fail-closed), never a pass-through.
 var (
-	ErrMalformed    = errors.New("citywriteauth: malformed token")
-	ErrUnknownKey   = errors.New("citywriteauth: unknown kid")
-	ErrBadSignature = errors.New("citywriteauth: signature verification failed")
-	ErrAudience     = errors.New("citywriteauth: audience mismatch")
-	ErrExpired      = errors.New("citywriteauth: grant expired")
-	ErrNotYetValid  = errors.New("citywriteauth: grant not yet valid")
-	ErrTTLTooLong   = errors.New("citywriteauth: grant ttl exceeds max")
-	ErrEpoch        = errors.New("citywriteauth: epoch below floor")
-	ErrCityMismatch = errors.New("citywriteauth: city mismatch")
-	ErrReqMismatch  = errors.New("citywriteauth: request binding mismatch")
-	ErrReplay       = errors.New("citywriteauth: replay detected")
+	ErrMalformed          = errors.New("citywriteauth: malformed token")
+	ErrUnknownKey         = errors.New("citywriteauth: unknown kid")
+	ErrBadSignature       = errors.New("citywriteauth: signature verification failed")
+	ErrAudience           = errors.New("citywriteauth: audience mismatch")
+	ErrExpired            = errors.New("citywriteauth: grant expired")
+	ErrNotYetValid        = errors.New("citywriteauth: grant not yet valid")
+	ErrBadWindow          = errors.New("citywriteauth: grant validity window is non-positive")
+	ErrTTLTooLong         = errors.New("citywriteauth: grant ttl exceeds max")
+	ErrEpoch              = errors.New("citywriteauth: epoch below floor")
+	ErrMissingClaim       = errors.New("citywriteauth: grant missing required claim")
+	ErrMissingExpectation = errors.New("citywriteauth: request expectation incomplete")
+	ErrCityMismatch       = errors.New("citywriteauth: city mismatch")
+	ErrReqMismatch        = errors.New("citywriteauth: request binding mismatch")
+	ErrReplay             = errors.New("citywriteauth: replay detected")
+	ErrReplayUnavailable  = errors.New("citywriteauth: replay guard unavailable")
 )
 
 // ReplayGuard records consumed token identifiers (jti) so a grant cannot be
 // verified twice. Implementations must be safe for concurrent use.
 type ReplayGuard interface {
 	// Use records jti as consumed until exp. It returns ErrReplay (or an error
-	// wrapping it) if jti was already consumed.
+	// wrapping it) if jti was already consumed. Any other error means the guard
+	// could not decide replay state — for example a shared or durable backend
+	// being unavailable — and MUST NOT wrap ErrReplay, so Verify can surface it
+	// as ErrReplayUnavailable instead of reporting a false duplicate.
 	Use(jti string, exp time.Time) error
 }
 
@@ -106,7 +113,11 @@ func New(opts Options) (*Verifier, error) {
 		if len(pub) != ed25519.PublicKeySize {
 			return nil, fmt.Errorf("citywriteauth: key %q has wrong size", kid)
 		}
-		keys[kid] = pub
+		// ed25519.PublicKey is a mutable []byte, so copying only the map would
+		// alias the caller's backing array and let a later mutation of
+		// opts.Keys change the verifier's trust root after construction. Clone
+		// each key so the verifier owns an immutable copy.
+		keys[kid] = append(ed25519.PublicKey(nil), pub...)
 	}
 	now := opts.Now
 	if now == nil {
@@ -152,13 +163,24 @@ func (v *Verifier) Verify(token string, expect Expect) (*Grant, error) {
 	}
 	// From here the claims are authentic.
 
+	// Reject empty required claims and request expectations before any equality
+	// or replay check. Without this, a grant with an empty city/req/jti would
+	// satisfy the equality checks whenever the integration accidentally supplies
+	// a zero-value Expect, defeating fail-closed request binding and single-use.
+	if err := requireBound(g, expect); err != nil {
+		return nil, err
+	}
+
 	if g.Aud != v.aud {
 		return nil, ErrAudience
 	}
 
 	iat := time.Unix(g.IAT, 0)
 	exp := time.Unix(g.Exp, 0)
-	if !exp.After(iat) || exp.Sub(iat) > v.maxTTL {
+	if !exp.After(iat) {
+		return nil, ErrBadWindow
+	}
+	if exp.Sub(iat) > v.maxTTL {
 		return nil, ErrTTLTooLong
 	}
 	now := v.now()
@@ -183,9 +205,31 @@ func (v *Verifier) Verify(token string, expect Expect) (*Grant, error) {
 	// exp: a guard that evicts at exp could drop the record while Verify still
 	// accepts the grant during the skew window, reopening single-use.
 	if err := v.replay.Use(g.JTI, exp.Add(v.skew)); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrReplay, err)
+		if errors.Is(err, ErrReplay) {
+			// A genuine duplicate jti: the grant was already consumed.
+			return nil, err
+		}
+		// A durable or shared guard can fail for storage or network reasons.
+		// That is not a replay, so surface it under a distinct sentinel: a
+		// caller using errors.Is then fails closed on guard unavailability
+		// without mistaking it for a duplicate token.
+		return nil, fmt.Errorf("%w: %w", ErrReplayUnavailable, err)
 	}
 	return &g, nil
+}
+
+// requireBound rejects a grant whose required single-use and request-binding
+// claims are empty, or a request expectation that is missing its binding
+// values. The equality and replay checks downstream rely on these fields, so an
+// empty value on either side would let them pass vacuously.
+func requireBound(g Grant, expect Expect) error {
+	switch {
+	case g.City == "", g.Req == "", g.JTI == "":
+		return ErrMissingClaim
+	case expect.City == "", expect.ReqDigest == "":
+		return ErrMissingExpectation
+	}
+	return nil
 }
 
 func splitToken(token string) (payload, sig []byte, err error) {
