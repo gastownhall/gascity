@@ -1353,6 +1353,12 @@ func runController(
 		// handler return 501 for create/unregister routes.
 		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", commit, time.Now())
 		apiMux.WithAnyHostAllowed()
+		// Gate city-config mutations on a signed write grant when configured.
+		// Fail closed at boot if write-auth is required but no key is set.
+		if err := api.InstallWriteAuth(apiMux, cfg.API.WriteAuthVerifyKey, cfg.API.WriteAuthRequired); err != nil {
+			fmt.Fprintf(stderr, "api: write-auth: %v\n", err) //nolint:errcheck
+			return 1
+		}
 		addr := net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 		apiLis, apiErr := net.Listen("tcp", addr)
 		if apiErr != nil {

@@ -2072,6 +2072,16 @@ type APIConfig struct {
 	// non-localhost. Set to true in containerized environments where the API
 	// must bind to 0.0.0.0 for health probes but mutations are still safe.
 	AllowMutations bool `toml:"allow_mutations,omitempty"`
+	// WriteAuthVerifyKey, when set, requires every city-config mutation to
+	// carry a signed write grant from a configured trusted authority. The
+	// value is one or more "kid:base64-ed25519-pubkey" entries, comma
+	// separated. The GC_CITY_WRITE_PUBKEY env var overrides this.
+	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
+	// WriteAuthRequired makes a missing or empty WriteAuthVerifyKey a startup
+	// error instead of silently disabling the gate, so a config that intends to
+	// gate writes fails closed if the key is ever dropped. The
+	// GC_CITY_WRITE_REQUIRED=1 env var has the same effect.
+	WriteAuthRequired bool `toml:"write_auth_required,omitempty"`
 }
 
 // BindOrDefault returns the bind address, defaulting to "127.0.0.1".

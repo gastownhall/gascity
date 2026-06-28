@@ -39,6 +39,10 @@ type Section struct {
 	AllowMutations bool     `toml:"allow_mutations,omitempty"`
 	AllowedOrigins []string `toml:"allowed_origins,omitempty"`
 	AllowedHosts   []string `toml:"allowed_hosts,omitempty"`
+	// WriteAuthVerifyKey / WriteAuthRequired gate city-config mutations on a
+	// signed write grant (see config.APIConfig for the format and semantics).
+	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
+	WriteAuthRequired  bool   `toml:"write_auth_required,omitempty"`
 }
 
 // PublicationConfig holds machine-wide publication policy for workspace
