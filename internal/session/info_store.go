@@ -62,10 +62,16 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 // *beads.Bead. Bead serialization is confined inside this type via the
 // InfoFromPersistedBead codec.
 //
-// InfoStore returns the persisted projection only — no live runtime overlay. It
-// is the read seam the API/response-building layer routes through for the
-// persisted view; callers that need live runtime enrichment (liveness,
-// attachment, detected transport) still go through session.Manager.
+// InfoStore returns the persisted projection only — no live runtime overlay.
+//
+// NOTE: this is the intended next-step read seam for the persisted view; it has
+// no production callers yet. The API/response-building layer currently routes
+// its persisted reads through Manager.GetWithPersistedResponse (which already
+// uses the same InfoFromPersistedBead codec internally), not through InfoStore.
+// Wiring the read path through InfoStore is a follow-up; until then this type is
+// the documented seam, not a live path. Callers that need live runtime
+// enrichment (liveness, attachment, detected transport) still go through
+// session.Manager.
 type InfoStore struct {
 	store beads.SessionStore
 }

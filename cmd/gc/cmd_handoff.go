@@ -304,6 +304,11 @@ func createHandoffMail(store beads.Store, rec events.Recorder, senderAddress, re
 		message = args[1]
 	}
 
+	// Handoff intentionally constructs the concrete bead-backed provider rather
+	// than resolving the configured mail provider (GC_MAIL / city.toml): handoff
+	// needs the thread label and handoff-specific extra-labels that SendHandoff
+	// expresses, which aren't part of the generic provider surface. This
+	// preserves the prior direct-store.Create behavior exactly (no regression).
 	provider := beadmail.New(store)
 	msg, err := provider.SendHandoff(mail.HandoffIntent{
 		From:        senderAddress,

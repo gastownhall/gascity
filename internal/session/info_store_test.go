@@ -128,11 +128,19 @@ func TestInfoStoreListFiltersLikeCatalog(t *testing.T) {
 	}
 }
 
-// TestInfoFromPersistedBeadProjectionInvariance asserts the persisted projection
-// is identical regardless of which backend stored the bead. The persisted
-// projection must not depend on runtime state, so a bead seeded into distinct
-// store backends round-trips to the same Info.
-func TestInfoFromPersistedBeadProjectionInvariance(t *testing.T) {
+// TestInfoFromPersistedBeadProjectionDeterminism asserts the persisted
+// projection is a deterministic, store-identity-independent function of the
+// bead's plain fields: the same bead seeded into two distinct store instances
+// round-trips to the same Info, and the direct codec agrees with the store
+// projection.
+//
+// NOTE: both stores here are in-memory (MemStore), so this proves codec
+// determinism, not true cross-backend (bd/sqlite/postgres) serialization
+// invariance. The stronger invariance claim holds only because
+// InfoFromPersistedBead reads exclusively backend-agnostic plain bead fields
+// (ID, Title, Status, CreatedAt, Metadata); a real cross-backend assertion
+// would need to seed those backends directly.
+func TestInfoFromPersistedBeadProjectionDeterminism(t *testing.T) {
 	meta := map[string]string{
 		"__title": "Inv", "template": "polecat", "state": "asleep",
 		"alias": "a", "agent_name": "n", "provider": "claude",
@@ -153,7 +161,7 @@ func TestInfoFromPersistedBeadProjectionInvariance(t *testing.T) {
 		t.Fatalf("Get B: %v", err)
 	}
 	if infoA != infoB {
-		t.Fatalf("projection not invariant across backends:\n A = %+v\n B = %+v", infoA, infoB)
+		t.Fatalf("projection not deterministic across store instances:\n A = %+v\n B = %+v", infoA, infoB)
 	}
 	// And the direct codec matches the stored projection.
 	if direct := InfoFromPersistedBead(b); direct != infoA {
