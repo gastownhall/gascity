@@ -18,6 +18,21 @@ func isDrainedSessionBead(session beads.Bead) bool {
 	return isDrainedSessionMetadata(session.Metadata)
 }
 
+// poolSessionIsLive reports whether a pool session bead represents an
+// actively running session for the runningSessions counter in
+// build_desired_state. An asleep or drained bead is not live — it holds
+// no active process and must not suppress the isCold cross-store wake
+// probe.
+func poolSessionIsLive(session beads.Bead) bool {
+	if strings.TrimSpace(session.Metadata["state"]) == "asleep" {
+		return false
+	}
+	if isDrainedSessionBead(session) {
+		return false
+	}
+	return true
+}
+
 // isPoolSessionSlotFreeable reports whether a session's bead is in a terminal
 // state where the pool slot it occupies can be freed — either explicitly
 // drained, or asleep from a normal idle transition. Sessions parked via
