@@ -35,7 +35,7 @@ gc [flags]
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
 | [gc costs](#gc-costs) | Show per-run usage and estimated cost for this city |
-| [gc dashboard](#gc-dashboard) | Print where the web dashboard is served |
+| [gc dashboard](#gc-dashboard) | Open the web dashboard in your browser |
 | [gc doctor](#gc-doctor) | Check workspace health |
 | [gc dolt-cleanup](#gc-dolt-cleanup) | Find and remove orphaned Dolt databases (Go-side core) |
 | [gc event](#gc-event) | Event operations |
@@ -1130,11 +1130,13 @@ gc costs
 
 ## gc dashboard
 
-Report the URL where the GC dashboard is served.
+Open the GC dashboard in your browser.
 
 The dashboard SPA is embedded in the gc binary and served same-origin by the
-supervisor; it is no longer a separate static server. This command resolves and
-prints the supervisor URL (or tells you how to start the supervisor).
+supervisor; it is no longer a separate static server. This command resolves the
+supervisor URL, opens it in your default browser, and prints it too (or tells
+you how to start the supervisor). Use --no-open to print the URL without
+launching a browser.
 
 ```
 gc dashboard [flags]
@@ -1143,6 +1145,7 @@ gc dashboard [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--api` | string |  | GC API server URL override (auto-discovered by default) |
+| `--no-open` | bool |  | print the dashboard URL instead of opening a browser |
 
 | Subcommand | Description |
 |------------|-------------|
@@ -1163,6 +1166,7 @@ gc dashboard serve [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--api` | string |  | GC API server URL override (auto-discovered by default) |
+| `--no-open` | bool |  | print the dashboard URL instead of opening a browser |
 
 ## gc doctor
 

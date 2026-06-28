@@ -31,7 +31,12 @@ func TestDashboard_PrintsSupervisorNotice(t *testing.T) {
 	c := newShortDashboardCity(t)
 	startCityUnderSupervisor(t, c)
 
-	out, err := c.GC("dashboard", "--city", c.Dir)
+	// --no-open keeps this out-of-process command from launching a real
+	// browser in CI; the served notice still names the supervisor as the
+	// dashboard host and carries its resolved URL. (The default browser-open
+	// path is covered in-process by cmd/gc/cmd_dashboard_test.go, which can
+	// stub the launch hook.)
+	out, err := c.GC("dashboard", "--no-open", "--city", c.Dir)
 	if err != nil {
 		t.Fatalf("gc dashboard failed: %v\n%s", err, out)
 	}
