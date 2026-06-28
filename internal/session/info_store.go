@@ -48,6 +48,9 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		ResumeStyle:   b.Metadata["resume_style"],
 		ResumeCommand: b.Metadata["resume_command"],
 		CreatedAt:     b.CreatedAt,
+
+		ContinuationEpoch: b.Metadata["continuation_epoch"],
+		SleepReason:       b.Metadata["sleep_reason"],
 	}
 	if raw := strings.TrimSpace(b.Metadata[MetadataLastNudgeDeliveredAt]); raw != "" {
 		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {

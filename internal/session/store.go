@@ -151,6 +151,42 @@ func (s *InfoStore) CircuitResetGeneration(id string) (string, error) {
 	return b.Metadata[SessionCircuitResetGenerationMetadataKey], nil
 }
 
+// PersistedMarkers is a narrow typed view of the persisted session-attribute
+// markers the wait paths read off a session bead: the bead Title (used to build
+// the wait bead title), the tmux session_name, the continuation_epoch (stamped
+// onto wait beads as registered_epoch), and the sleep_reason (consulted when
+// clearing a wait-hold). It carries the raw bead fields verbatim.
+type PersistedMarkers struct {
+	Title             string
+	SessionName       string
+	ContinuationEpoch string
+	SleepReason       string
+}
+
+// PersistedMarkers returns the persisted Title / session_name /
+// continuation_epoch / sleep_reason markers for id, verbatim (each "" when
+// unset).
+//
+// It is the front door for the raw store.Get(sessionID) + read .Title/.Metadata[...]
+// pattern in the wait registration (cmd_wait.go session-wait creation), the
+// closed-wait retry path, and the wait-hold clear path. The bead read and the
+// field access are confined here; the caller still owns observing the values and
+// its own diagnostic wrapping (the error is returned bare — see ApplyPatch).
+// Like CircuitResetGeneration, it does NOT validate the bead as a session bead:
+// the raw reads it replaces did not either.
+func (s *InfoStore) PersistedMarkers(id string) (PersistedMarkers, error) {
+	b, err := s.store.Get(id)
+	if err != nil {
+		return PersistedMarkers{}, err
+	}
+	return PersistedMarkers{
+		Title:             b.Title,
+		SessionName:       b.Metadata["session_name"],
+		ContinuationEpoch: b.Metadata["continuation_epoch"],
+		SleepReason:       b.Metadata["sleep_reason"],
+	}, nil
+}
+
 // GetState returns the persisted lifecycle state for id and whether the bead is
 // closed. It replaces the Get(id) + read .Status/.Metadata["state"] pattern at
 // the reconciler / session_beads close-path sites. Returns ErrSessionNotFound

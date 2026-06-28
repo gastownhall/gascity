@@ -332,6 +332,66 @@ func TestCircuitResetGenerationSurfacesStoreError(t *testing.T) {
 	}
 }
 
+// TestPersistedMarkersReturnsVerbatimValues proves the typed read returns the
+// persisted session_name / continuation_epoch / sleep_reason metadata values
+// verbatim — equivalent to the raw store.Get(id) + read .Metadata[...] the
+// cmd_wait registration and retry/clear paths performed. It performs no bead
+// validation (matching the raw reads) and emits no mutating op.
+func TestPersistedMarkersReturnsVerbatimValues(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{
+		"__title":            "My Session",
+		"session_name":       "polecat-1",
+		"continuation_epoch": "4",
+		"sleep_reason":       "wait-hold",
+	})
+	is, rec := recordingInfoStore(t, b)
+
+	got, err := is.PersistedMarkers("s-1")
+	if err != nil {
+		t.Fatalf("PersistedMarkers: %v", err)
+	}
+	want := PersistedMarkers{
+		Title:             "My Session",
+		SessionName:       "polecat-1",
+		ContinuationEpoch: "4",
+		SleepReason:       "wait-hold",
+	}
+	if got != want {
+		t.Errorf("PersistedMarkers = %#v, want %#v (the raw read values)", got, want)
+	}
+	// The read confines a single Get; it must not emit any mutating bead op.
+	if mutating := opsOf(rec.Calls()); len(mutating) != 0 {
+		t.Errorf("PersistedMarkers emitted mutating ops %v, want none", mutating)
+	}
+}
+
+// TestPersistedMarkersEmptyWhenUnset proves unset keys read back as empty
+// strings (not an error), matching the raw map read on a bead that never
+// stamped those markers.
+func TestPersistedMarkersEmptyWhenUnset(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	is, _ := recordingInfoStore(t, b)
+
+	got, err := is.PersistedMarkers("s-1")
+	if err != nil {
+		t.Fatalf("PersistedMarkers: %v", err)
+	}
+	if got != (PersistedMarkers{}) {
+		t.Errorf("PersistedMarkers on unset keys = %#v, want zero value", got)
+	}
+}
+
+// TestPersistedMarkersSurfacesStoreError proves a missing bead surfaces the bare
+// store error (the caller owns its diagnostic wrapping), matching the raw
+// store.Get error path the front door replaces.
+func TestPersistedMarkersSurfacesStoreError(t *testing.T) {
+	store := seedSessionStore(t)
+	is := NewInfoStore(store)
+	if _, err := is.PersistedMarkers("missing"); err == nil {
+		t.Fatal("PersistedMarkers(missing): want store error, got nil")
+	}
+}
+
 func opsOf(calls []beadstest.RecordedCall) []string {
 	out := make([]string, 0, len(calls))
 	for _, c := range calls {

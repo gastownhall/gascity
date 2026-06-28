@@ -225,7 +225,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	sb, err := store.Get(sessionID)
+	sb, err := sessionFrontDoor(store).PersistedMarkers(sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
 		return 1
@@ -240,12 +240,12 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	now := time.Now().UTC()
 	meta := map[string]string{
 		"session_id":         sessionID,
-		"session_name":       sb.Metadata["session_name"],
+		"session_name":       sb.SessionName,
 		"kind":               "deps",
 		"state":              state,
 		"dep_ids":            strings.Join(depIDs, ","),
 		"dep_mode":           "all",
-		"registered_epoch":   sb.Metadata["continuation_epoch"],
+		"registered_epoch":   sb.ContinuationEpoch,
 		"delivery_attempt":   "1",
 		"created_by_session": os.Getenv("GC_SESSION_ID"),
 		"created_at":         now.Format(time.RFC3339),
@@ -1286,7 +1286,7 @@ func clearSessionWaitHold(store beads.Store, sessionID string) error {
 		"sleep_intent": "",
 	}
 	if store != nil {
-		if sessionBead, err := store.Get(sessionID); err == nil && sessionBead.Metadata["sleep_reason"] == "wait-hold" {
+		if markers, err := sessionFrontDoor(store).PersistedMarkers(sessionID); err == nil && markers.SleepReason == "wait-hold" {
 			batch["sleep_reason"] = ""
 		}
 	}
@@ -1386,12 +1386,12 @@ func retryClosedWait(store beads.Store, wait beads.Bead, now string) (beads.Bead
 	meta["created_at"] = now
 	meta["retried_from_wait"] = wait.ID
 	if sessionID := wait.Metadata["session_id"]; sessionID != "" && store != nil {
-		if sessionBead, err := store.Get(sessionID); err == nil {
-			if epoch := sessionBead.Metadata["continuation_epoch"]; epoch != "" {
+		if markers, err := sessionFrontDoor(store).PersistedMarkers(sessionID); err == nil {
+			if epoch := markers.ContinuationEpoch; epoch != "" {
 				meta["registered_epoch"] = epoch
 			}
 			if meta["session_name"] == "" {
-				meta["session_name"] = sessionBead.Metadata["session_name"]
+				meta["session_name"] = markers.SessionName
 			}
 		}
 	}
