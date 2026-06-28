@@ -4895,6 +4895,45 @@ func TestCommitStartResult_SanitizesMultilineError(t *testing.T) {
 	}
 }
 
+func TestCommitStartResult_TerminalProviderErrorMarksUnhealthy(t *testing.T) {
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"template":     "worker",
+		"session_name": "worker",
+		"state":        "active",
+		"last_woke_at": "2026-05-27T12:00:00Z",
+	})
+	session.Type = sessionBeadType
+	session.Labels = []string{sessionBeadLabel}
+	session.Title = "worker"
+	candidate := startCandidate{
+		session: &session,
+		tp:      TemplateParams{TemplateName: "worker", InstanceName: "worker"},
+	}
+	result := startResult{
+		prepared: preparedStart{candidate: candidate},
+		err:      fmt.Errorf("model_not_found: gpt-5.3-codex-spark"),
+		outcome:  "provider_error",
+	}
+
+	if commitStartResult(result, store, &clock.Fake{Time: time.Unix(3, 0)}, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("commitStartResult returned true for terminal provider error")
+	}
+	got := store.metadata[session.ID]
+	if got[sessionHealthStateMetadataKey] != "unhealthy" {
+		t.Fatalf("session health = %q, want unhealthy", got[sessionHealthStateMetadataKey])
+	}
+	if got[sessionHealthReasonMetadataKey] != "model_not_found" {
+		t.Fatalf("health reason = %q, want model_not_found", got[sessionHealthReasonMetadataKey])
+	}
+	if got[sessionDrainableMetadataKey] != boolMetadata(true) {
+		t.Fatalf("drainable = %q, want true", got[sessionDrainableMetadataKey])
+	}
+	if got["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want cleared", got["last_woke_at"])
+	}
+}
+
 func TestInterruptTargetsBounded_LogsSuccessOutcome(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {

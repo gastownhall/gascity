@@ -248,6 +248,17 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 				}
 			}
 		}
+		// Merge pack.toml upstreams (pack is base, city wins).
+		if len(pc.Upstreams) > 0 {
+			if root.Upstreams == nil {
+				root.Upstreams = make(map[string]UpstreamSpec)
+			}
+			for name, spec := range pc.Upstreams {
+				if _, exists := root.Upstreams[name]; !exists {
+					root.Upstreams[name] = spec
+				}
+			}
+		}
 		// Merge pack.toml pricing (pack is base, city wins by (provider, model) key).
 		if len(pc.Pricing) > 0 {
 			root.PackPricing = mergePricingByKey(root.PackPricing, pc.Pricing)
@@ -1572,7 +1583,7 @@ func loadImportPackGraphDirsForDoctor(fs fsys.FS, imp Import, declDir, cityRoot 
 		return nil, err
 	}
 	topoPath := filepath.Join(impDir, packFile)
-	_, _, _, _, topoDirs, _, _, err := loadPackWithCacheOptions(
+	_, _, _, _, _, topoDirs, _, _, err := loadPackWithCacheOptions(
 		fs, topoPath, impDir, cityRoot, "", nil, cache, LoadOptions{allowLegacyOrderLayouts: true})
 	if err != nil {
 		return nil, err

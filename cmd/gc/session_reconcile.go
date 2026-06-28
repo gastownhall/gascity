@@ -41,6 +41,19 @@ type wakeEvaluation struct {
 
 const sleepReasonRuntimeMissing = "runtime-missing"
 
+// sleepReasonProviderTerminalError parks a session that hit a terminal
+// (non-retryable) provider error. markProviderTerminalError writes it; the
+// pool-slot freeable allowlist reads it to reap the dead bead + its worktree.
+const sleepReasonProviderTerminalError = "provider-terminal-error"
+
+const (
+	sessionHealthStateMetadataKey           = "session_health"
+	sessionHealthReasonMetadataKey          = "session_health_reason"
+	sessionDrainableMetadataKey             = "session_drainable"
+	sessionProviderTerminalErrorMetadataKey = "provider_terminal_error"
+	sessionProviderTerminalErrorAtKey       = "provider_terminal_error_at"
+)
+
 // Deprecated: evaluateWakeReasons and wakeReasons are legacy functions
 // superseded by ComputeAwakeSet (compute_awake_set.go). The production
 // reconciler at session_reconciler.go:438 uses ComputeAwakeSet →
@@ -610,11 +623,23 @@ func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drain
 	return true
 }
 
-// checkRateLimitStability runs the rate-limit lane of the exit-classification
-// decider: a dead crash candidate whose provider screen shows a rate-limit
-// message is quarantined without counting a crash. Returns handled=true when
-// the quarantine was recorded, or the write error when recording failed; the
-// caller skips further processing for the session in either case.
+// checkRateLimitStability runs the provider-screen lane of the
+// exit-classification decider for a dead crash candidate. It peeks the
+// session's provider screen and records, without counting an ordinary crash:
+//
+//   - a terminal (non-retryable) provider error → mark the session
+//     unhealthy + drainable so pool sizing excludes its slot. Terminal errors
+//     take precedence over the rate-limit screen: they are non-retryable.
+//   - otherwise a rate-limit screen → quarantine with a back-off and a
+//     distinct sleep_reason, so the session is retried rather than crashed.
+//
+// Returns handled=true when either was recorded, or the write error when
+// recording failed; the caller skips further processing for the session in
+// either case.
+//
+// This is the non-zombie counterpart to the reconciler's `running && !alive`
+// zombie screen capture: a session that died without satisfying that screen
+// but still exposes a terminal provider error via peek is classified here.
 func checkRateLimitStability(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, store beads.Store, clk clock.Clock, peek func(lines int) (string, error)) (bool, error) {
 	if session == nil {
 		return false, nil
@@ -624,8 +649,16 @@ func checkRateLimitStability(session *beads.Bead, cfg *config.City, alive bool, 
 	dec := sessionpkg.DecideSessionExit(facts)
 	for dec == sessionpkg.ExitGatherScreen {
 		facts.Screen = sessionpkg.ScreenOther
-		if content, err := peek(rateLimitPeekLines); err == nil && runtime.ContainsProviderRateLimitScreen(content) {
-			facts.Screen = sessionpkg.ScreenRateLimit
+		if content, err := peek(rateLimitPeekLines); err == nil {
+			if reason := runtime.ProviderTerminalErrorReason(content); reason != "" {
+				if markErr := markProviderTerminalError(session, store, clk, reason); markErr != nil {
+					return false, markErr
+				}
+				return true, nil
+			}
+			if runtime.ContainsProviderRateLimitScreen(content) {
+				facts.Screen = sessionpkg.ScreenRateLimit
+			}
 		}
 		dec = sessionpkg.DecideSessionExit(facts)
 	}
@@ -683,6 +716,51 @@ func recordRateLimitQuarantine(session *beads.Bead, store beads.Store, clk clock
 		session.Metadata[k] = v
 	}
 	return nil
+}
+
+func markProviderTerminalError(session *beads.Bead, store beads.Store, clk clock.Clock, reason string) error {
+	if session == nil || store == nil {
+		return nil
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return nil
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string)
+	}
+	now := time.Now().UTC()
+	if clk != nil {
+		now = clk.Now().UTC()
+	}
+	batch := map[string]string{
+		"state":                                 string(sessionpkg.StateAsleep),
+		"sleep_reason":                          sleepReasonProviderTerminalError,
+		"last_woke_at":                          "",
+		"pending_create_claim":                  "",
+		"pending_create_started_at":             "",
+		sessionHealthStateMetadataKey:           "unhealthy",
+		sessionHealthReasonMetadataKey:          reason,
+		sessionDrainableMetadataKey:             boolMetadata(true),
+		sessionProviderTerminalErrorMetadataKey: reason,
+		sessionProviderTerminalErrorAtKey:       now.Format(time.RFC3339),
+	}
+	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+		return err
+	}
+	for k, v := range batch {
+		session.Metadata[k] = v
+	}
+	return nil
+}
+
+func sessionHasProviderTerminalError(session beads.Bead) bool {
+	if strings.TrimSpace(session.Metadata[sessionProviderTerminalErrorMetadataKey]) != "" {
+		return true
+	}
+	return strings.TrimSpace(session.Metadata[sessionHealthStateMetadataKey]) == "unhealthy" &&
+		strings.TrimSpace(session.Metadata[sessionDrainableMetadataKey]) == boolMetadata(true) &&
+		strings.TrimSpace(session.Metadata[sessionHealthReasonMetadataKey]) != ""
 }
 
 // recordWakeFailure increments wake_attempts and quarantines if threshold exceeded.

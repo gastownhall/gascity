@@ -1021,6 +1021,49 @@ func ContainsProviderRateLimitScreen(content string) bool {
 		strings.Contains(content, "Stop")
 }
 
+// ProviderTerminalErrorReason classifies high-confidence provider errors that
+// require operator/config intervention rather than immediate retry.
+func ProviderTerminalErrorReason(content string) string {
+	lower := strings.ToLower(content)
+	switch {
+	case strings.Contains(lower, "model_not_found"):
+		return "model_not_found"
+	case lineContainsAll(lower, "model", "not found"):
+		// Require both tokens on the same line so the loose phrasing matches a
+		// real "model … not found" provider error, not "model" and "not found"
+		// landing on unrelated scrollback lines (which would permanently and
+		// wrongly mark the session terminal with no self-heal).
+		return "model_not_found"
+	case strings.Contains(lower, "insufficient_quota"):
+		return "quota_exceeded"
+	case strings.Contains(lower, "quota_exceeded"):
+		return "quota_exceeded"
+	case strings.Contains(lower, "quota exceeded") && !strings.Contains(lower, "disk quota"):
+		return "quota_exceeded"
+	default:
+		return ""
+	}
+}
+
+// lineContainsAll reports whether any single line of content contains every
+// substring in subs. It bounds loose multi-token matches to one line so the
+// tokens must co-occur in the same message rather than anywhere in scrollback.
+func lineContainsAll(content string, subs ...string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		all := true
+		for _, sub := range subs {
+			if !strings.Contains(line, sub) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
 // containsPromptIndicator checks whether any line in the content looks like a
 // common shell or agent prompt, indicating the session is ready and no dialog is
 // present. Full-screen agent UIs often render placeholder input after the prompt

@@ -1,0 +1,59 @@
+name: PR issue linkage
+
+# Enforce that every PR either links an issue with a GitHub closing keyword
+# (Closes/Fixes/Resolves #N — same-repo or owner/repo#N) OR is explicitly opted
+# out with the `no-issue` label. This is the gate that prevents the recurrence of
+# "fix merged, issue stayed open" (17 such issues in the 2026-06 hygiene triage).
+#
+# Deterministic + structural only (ZFC): it pattern-matches the body and reads
+# labels — no semantic judgement. The `no-issue` label is the maintainer opt-out
+# for PRs that genuinely close nothing (chores, docs, infra).
+#
+# pull_request_target is safe here: this job never checks out or runs PR code; it
+# only reads the PR body + labels and sets its own pass/fail conclusion. Re-runs on
+# edit/label changes so a contributor can fix the linkage and the check goes green.
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+
+permissions: {}
+
+jobs:
+  linkage:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Require a linked issue or the no-issue opt-out
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || "";
+            const labels = (pr.labels || []).map(l => l.name);
+
+            // Maintainer opt-out: PRs that legitimately close no issue.
+            if (labels.includes("no-issue")) {
+              core.info("no-issue label present — linkage requirement waived.");
+              return;
+            }
+
+            // Closing keyword + issue ref. Fully-qualified refs (owner/repo#N) only
+            // count when they point at THIS repo — a cross-repo ref closes nothing here.
+            const linkRe = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s+([\w.-]+\/[\w.-]+)?#\d+/gi;
+            const repoSlug = `${context.repo.owner}/${context.repo.repo}`.toLowerCase();
+            for (const m of body.matchAll(linkRe)) {
+              const qualified = m[1]; // "owner/repo" or undefined for a plain #N
+              if (!qualified || qualified.toLowerCase() === repoSlug) {
+                core.info("Linked issue via closing keyword found.");
+                return;
+              }
+            }
+
+            core.setFailed(
+              "No linked issue found. Add a closing keyword + issue number to the PR " +
+              "body (e.g. 'Closes #123'), or apply the 'no-issue' label if this PR " +
+              "intentionally closes no issue. See the PR template checklist." +
+              " Fully qualified refs must point at this repository."
+            );

@@ -85,6 +85,7 @@ const (
 	TraceSitePoolMinFill                    TraceSiteCode = "reconciler.pool.min_fill"
 	TraceSitePoolInFlightReuse              TraceSiteCode = "reconciler.pool.inflight_reuse"
 	TraceSitePoolWakeKnownIdentity          TraceSiteCode = "reconciler.pool.wake_known_identity"
+	TraceSitePoolNewDemandCap               TraceSiteCode = "reconciler.pool.new_demand_cap"
 	TraceSiteReconcilerUnknownState         TraceSiteCode = "reconciler.session.skip_unknown_state"
 	TraceSiteReconcilerOrphaned             TraceSiteCode = "reconciler.session.orphan_or_suspended"
 	TraceSiteReconcilerCloseOrphan          TraceSiteCode = "reconciler.session.close_orphan"
@@ -580,6 +581,7 @@ func normalizeTraceSiteCode(raw string) (TraceSiteCode, string) {
 		TraceSitePoolMinFill,
 		TraceSitePoolInFlightReuse,
 		TraceSitePoolWakeKnownIdentity,
+		TraceSitePoolNewDemandCap,
 		TraceSiteReconcilerUnknownState,
 		TraceSiteReconcilerOrphaned,
 		TraceSiteReconcilerCloseOrphan,

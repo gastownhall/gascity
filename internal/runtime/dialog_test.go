@@ -1041,6 +1041,30 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 	}
 }
 
+func TestProviderTerminalErrorReason(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "codex model not found code", content: "model_not_found: gpt-5.3-codex-spark", want: "model_not_found"},
+		{name: "model not found text", content: "Error: model gpt-x was not found", want: "model_not_found"},
+		{name: "model and not-found on different lines is not terminal", content: "loading model weights\n... file path not found", want: ""},
+		{name: "quota exceeded", content: "Error: quota exceeded", want: "quota_exceeded"},
+		{name: "insufficient quota", content: "insufficient_quota: billing required", want: "quota_exceeded"},
+		{name: "disk quota is not provider quota", content: "disk quota exceeded while writing log", want: ""},
+		{name: "generic rate limit remains transient", content: "Rate limit reached\n1. Keep trying\n2. Stop", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ProviderTerminalErrorReason(tt.content); got != tt.want {
+				t.Errorf("ProviderTerminalErrorReason(%q) = %q, want %q", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestContainsCustomAPIKeyDialog(t *testing.T) {
 	t.Parallel()
 

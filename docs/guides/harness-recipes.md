@@ -280,7 +280,9 @@ above.
 - **Other agent knobs** (prompt, model permission modes, transport, runtime,
   pools, lifecycle): [Configuring an Agent](/guides/configuring-an-agent).
 - **Ship a harness as a reusable preset** — a provider and its `upstream_env`
-  binding (named `[upstreams]` endpoint presets stay city-level):
+  binding (a pack may also declare named `[upstreams]` endpoint presets as a
+  base the importing city inherits; a city's or fragment's own `[upstreams]`
+  override the pack-provided ones):
   [Understanding Packs](/guides/understanding-packs) ·
   [Shareable Packs](/guides/shareable-packs).
 - **Exact fields and types:** [Config Reference](/reference/config).
