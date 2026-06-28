@@ -153,7 +153,7 @@ func reconcileDetachedAt(
 	}
 	if policy.Class == config.SessionSleepNonInteractive || !policy.enabled() || sp == nil || !alive || policy.Capability != runtime.SessionSleepCapabilityFull {
 		if session.Metadata["detached_at"] != "" {
-			if err := store.SetMetadata(session.ID, "detached_at", ""); err != nil {
+			if err := sessionFrontDoor(store).SetMarker(session.ID, "detached_at", ""); err != nil {
 				log.Printf("session sleep: clearing detached_at for %s: %v", session.ID, err)
 			} else {
 				session.Metadata["detached_at"] = ""
@@ -168,7 +168,7 @@ func reconcileDetachedAt(
 	attached, err := workerSessionTargetAttachedWithConfig("", store, sp, nil, session.ID)
 	if err == nil && attached {
 		if session.Metadata["detached_at"] != "" {
-			if err := store.SetMetadata(session.ID, "detached_at", ""); err != nil {
+			if err := sessionFrontDoor(store).SetMarker(session.ID, "detached_at", ""); err != nil {
 				log.Printf("session sleep: clearing detached_at for %s: %v", session.ID, err)
 			} else {
 				session.Metadata["detached_at"] = ""
@@ -178,7 +178,7 @@ func reconcileDetachedAt(
 	}
 	if session.Metadata["detached_at"] == "" {
 		ts := clk.Now().UTC().Format(time.RFC3339)
-		if err := store.SetMetadata(session.ID, "detached_at", ts); err != nil {
+		if err := sessionFrontDoor(store).SetMarker(session.ID, "detached_at", ts); err != nil {
 			log.Printf("session sleep: setting detached_at for %s: %v", session.ID, err)
 		} else {
 			session.Metadata["detached_at"] = ts
@@ -292,7 +292,7 @@ func persistSleepPolicyMetadata(
 	if len(changed) == 0 {
 		return
 	}
-	if err := store.SetMetadataBatch(session.ID, changed); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, changed); err != nil {
 		return
 	}
 	if session.Metadata == nil {
@@ -307,7 +307,7 @@ func markIdleSleepPending(session *beads.Bead, store beads.Store) {
 	if session == nil || store == nil || session.Metadata["sleep_intent"] == "idle-stop-pending" {
 		return
 	}
-	if err := store.SetMetadata(session.ID, "sleep_intent", "idle-stop-pending"); err != nil {
+	if err := sessionFrontDoor(store).SetMarker(session.ID, "sleep_intent", "idle-stop-pending"); err != nil {
 		return
 	}
 	if session.Metadata == nil {
@@ -329,7 +329,7 @@ func recoverPendingIdleSleep(
 	if fingerprint := session.Metadata["sleep_policy_fingerprint"]; fingerprint != "" {
 		batch["sleep_policy_fingerprint"] = fingerprint
 	}
-	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err != nil {
 		return false
 	}
 	if session.Metadata == nil {

@@ -902,7 +902,7 @@ func buildPreparedStartWithWorkDirResolver(
 			return nil, fmt.Errorf("generating session key: %w", err)
 		}
 		if store != nil && session.ID != "" {
-			if err := store.SetMetadata(session.ID, "session_key", sessionKey); err != nil {
+			if err := sessionFrontDoor(store).SetMarker(session.ID, "session_key", sessionKey); err != nil {
 				return nil, fmt.Errorf("storing session key: %w", err)
 			}
 		}
@@ -995,7 +995,7 @@ func buildPreparedStartWithWorkDirResolver(
 	instanceToken := session.Metadata["instance_token"]
 	if instanceToken == "" {
 		instanceToken = sessionpkg.NewInstanceToken()
-		if err := store.SetMetadata(session.ID, "instance_token", instanceToken); err != nil {
+		if err := sessionFrontDoor(store).SetMarker(session.ID, "instance_token", instanceToken); err != nil {
 			return nil, err
 		}
 		session.Metadata["instance_token"] = instanceToken
@@ -1820,7 +1820,7 @@ func clearStaleResumeKeyMetadata(session *beads.Bead, store beads.Store) {
 		"continuation_reset_pending": "true",
 	}
 	if store != nil && strings.TrimSpace(session.ID) != "" {
-		_ = store.SetMetadataBatch(session.ID, patch)
+		_ = sessionFrontDoor(store).ApplyPatch(session.ID, patch)
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(patch))
@@ -1932,7 +1932,7 @@ func commitStartResultTraced(
 			metadata[sessionpkg.MCPIdentityMetadataKey] = storedMCPIdentity
 		}
 	}
-	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, metadata); err != nil {
 		clearPendingStartInFlightLease(session, store, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
 		if trace != nil {
@@ -2044,7 +2044,7 @@ func commitStartFailure(result startResult, store beads.Store, clk clock.Clock, 
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 		return
 	}
-	if err := store.SetMetadata(session.ID, "last_woke_at", ""); err != nil {
+	if err := sessionFrontDoor(store).SetMarker(session.ID, "last_woke_at", ""); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
 	} else {
 		session.Metadata["last_woke_at"] = ""
@@ -2114,7 +2114,7 @@ func recoverRunningPendingCreate(
 		StartsAwakeInterval: confirmPendingStart(session.Metadata["state"]),
 		Now:                 now,
 	})
-	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, metadata); err != nil {
 		if trace != nil {
 			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_commit_failed", "failed", traceRecordPayload{
 				"error": err.Error(),
@@ -2914,8 +2914,7 @@ func markCityStopSessionAsAsleep(store beads.Store, sessionID string, stderr io.
 	if store == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
-	batch := sessionpkg.SleepPatch(time.Now().UTC(), sleepReasonCityStop)
-	if err := store.SetMetadataBatch(sessionID, batch); err != nil && stderr != nil {
+	if err := sessionFrontDoor(store).Sleep(sessionID, sleepReasonCityStop, time.Now().UTC()); err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "gc stop: marking session %s asleep: %v\n", sessionID, err) //nolint:errcheck
 	}
 }

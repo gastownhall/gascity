@@ -228,15 +228,15 @@ func createPoolSessionBeadWithAlias(
 	}
 	sessionName, err = derivePoolSessionName(store, cfg, template, bead.ID, resolvedTmuxAlias, sessionBeads)
 	if err != nil {
-		_ = store.Close(bead.ID)
+		_ = sessionFrontDoor(store).CloseWithoutReason(bead.ID)
 		return beads.Bead{}, err
 	}
 	if bead.Metadata == nil {
 		bead.Metadata = map[string]string{}
 	}
 	if bead.Metadata["session_name"] != sessionName {
-		if err := store.SetMetadata(bead.ID, "session_name", sessionName); err != nil {
-			_ = store.Close(bead.ID)
+		if err := sessionFrontDoor(store).SetMarker(bead.ID, "session_name", sessionName); err != nil {
+			_ = sessionFrontDoor(store).CloseWithoutReason(bead.ID)
 			return beads.Bead{}, err
 		}
 		bead.Metadata["session_name"] = sessionName
