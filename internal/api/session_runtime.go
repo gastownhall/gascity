@@ -215,8 +215,8 @@ func (s *Server) sessionMCPServers(template, providerName, identity, workDir, tr
 }
 
 func (s *Server) sessionMetadata(sessionID string) map[string]string {
-	store := s.state.CityBeadStore()
-	if store == nil || strings.TrimSpace(sessionID) == "" {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
 	bead, err := store.Get(sessionID)

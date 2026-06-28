@@ -34,8 +34,8 @@ type sessionCreateRequest struct {
 }
 
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
@@ -185,7 +185,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	handle, err := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
+	handle, err := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -198,15 +198,15 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		reservationIDs = append(reservationIDs, createCtx.Identity)
 	}
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
+		if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); err != nil {
 			return err
 		}
 		if reserveConcreteIdentity && createCtx.Identity != alias {
-			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), createCtx.Identity, ""); err != nil {
+			if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), createCtx.Identity, ""); err != nil {
 				return err
 			}
 		}
-		if err := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), createCtx.ExplicitName, ""); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfig(store.Store, s.state.Config(), createCtx.ExplicitName, ""); err != nil {
 			return err
 		}
 		var createErr error
@@ -229,18 +229,18 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
 	titleProvider := s.resolveTitleProvider()
-	MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+	MaybeGenerateTitleAsync(store.Store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
 	})
 
 	resp := sessionToResponse(info, s.state.Config())
 	resp.Kind = "agent"
-	if catalog, catErr := s.workerSessionCatalog(store); catErr == nil {
+	if catalog, catErr := s.workerSessionCatalog(store.Store); catErr == nil {
 		if caps, capErr := catalog.SubmissionCapabilities(info.ID); capErr == nil {
 			resp.SubmissionCapabilities = caps
 		}
 	}
-	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
+	if handle, handleErr := s.workerHandleForSession(store.Store, info.ID); handleErr == nil {
 		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false, true, true, 0)
 	}
 	statusCode := http.StatusAccepted // always async for agent sessions
@@ -250,7 +250,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 // createProviderSession handles the "provider" kind session creation.
 // Resolves a bare provider (not an agent template) and creates a session.
-func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, store beads.Store, body sessionCreateRequest, providerName, idemKey, bodyHash string) {
+func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, store beads.SessionStore, body sessionCreateRequest, providerName, idemKey, bodyHash string) {
 	cfg := s.state.Config()
 	if cfg == nil {
 		s.idem.unreserve(idemKey)
@@ -372,7 +372,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		writeSessionManagerError(w, err)
 		return
 	}
-	handle, err := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
+	handle, err := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -380,7 +380,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 	var info session.Info
 	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
+		if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); err != nil {
 			return err
 		}
 		var createErr error
@@ -401,13 +401,13 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
 	titleProvider := s.resolveTitleProvider()
-	MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+	MaybeGenerateTitleAsync(store.Store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
 	})
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
-		if _, sendErr := s.submitMessageToSession(r.Context(), store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
+		if _, sendErr := s.submitMessageToSession(r.Context(), store.Store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
 			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
 			rollbackErr := s.rollbackCreatedSession(store, info.ID)
 			s.idem.unreserve(idemKey)
@@ -424,12 +424,12 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	resp := sessionToResponse(info, s.state.Config())
 	resp.Kind = "provider"
-	if catalog, catErr := s.workerSessionCatalog(store); catErr == nil {
+	if catalog, catErr := s.workerSessionCatalog(store.Store); catErr == nil {
 		if caps, capErr := catalog.SubmissionCapabilities(info.ID); capErr == nil {
 			resp.SubmissionCapabilities = caps
 		}
 	}
-	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
+	if handle, handleErr := s.workerHandleForSession(store.Store, info.ID); handleErr == nil {
 		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false, true, true, 0)
 	}
 	statusCode := http.StatusCreated
@@ -455,11 +455,11 @@ func sessionTemplateOverridesMetadata(options map[string]string, message string)
 	return map[string]string{"template_overrides": string(overridesJSON)}
 }
 
-func (s *Server) rollbackCreatedSession(store beads.Store, sessionID string) error {
-	if store == nil || strings.TrimSpace(sessionID) == "" {
+func (s *Server) rollbackCreatedSession(store beads.SessionStore, sessionID string) error {
+	if store.Store == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
-	if err := s.sessionManager(store).Close(sessionID); err != nil {
+	if err := s.sessionManager(store.Store).Close(sessionID); err != nil {
 		return fmt.Errorf("close created session: %w", err)
 	}
 	if err := store.Delete(sessionID); err != nil {
@@ -469,7 +469,7 @@ func (s *Server) rollbackCreatedSession(store beads.Store, sessionID string) err
 }
 
 // persistSessionMeta writes option metadata and project_id to the session bead.
-func (s *Server) persistSessionMeta(store beads.Store, sessionID, projectID string, optMeta map[string]string) {
+func (s *Server) persistSessionMeta(store beads.SessionStore, sessionID, projectID string, optMeta map[string]string) {
 	batch := make(map[string]string)
 	for k, v := range optMeta {
 		batch[k] = v

@@ -27,19 +27,19 @@ type sessionRawTranscriptResponse struct {
 }
 
 func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
 
-	catalog, err := s.workerSessionCatalog(store)
+	catalog, err := s.workerSessionCatalog(store.Store)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -49,7 +49,7 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		writeSessionManagerError(w, err)
 		return
 	}
-	handle, err := s.workerHandleForSession(store, id)
+	handle, err := s.workerHandleForSession(store.Store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return

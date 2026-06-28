@@ -35,8 +35,8 @@ type sessionCommandableWaiter interface {
 }
 
 func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
@@ -158,7 +158,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return
 		}
-		handle, handleErr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
+		handle, handleErr := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
 		if handleErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", handleErr.Error())
 			return
@@ -175,15 +175,15 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			reservationIDs = append(reservationIDs, workDirQualifiedName)
 		}
 		createErr := session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
-			if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); aliasErr != nil {
+			if aliasErr := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); aliasErr != nil {
 				return aliasErr
 			}
 			if reserveConcreteIdentity && workDirQualifiedName != alias {
-				if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), workDirQualifiedName, ""); aliasErr != nil {
+				if aliasErr := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), workDirQualifiedName, ""); aliasErr != nil {
 					return aliasErr
 				}
 			}
-			if nameErr := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), explicitName, ""); nameErr != nil {
+			if nameErr := session.EnsureSessionNameAvailableWithConfig(store.Store, s.state.Config(), explicitName, ""); nameErr != nil {
 				return nameErr
 			}
 			var err error
@@ -214,7 +214,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		}
 
 		titleProvider := s.resolveTitleProvider()
-		MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+		MaybeGenerateTitleAsync(store.Store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
 		})
 	}()
@@ -228,7 +228,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 
 // humaCreateProviderSession handles the "provider" kind session creation.
 
-func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store, body sessionCreateBody, providerName string) (*SessionCreateOutput, error) {
+func (s *Server) humaCreateProviderSession(_ context.Context, store beads.SessionStore, body sessionCreateBody, providerName string) (*SessionCreateOutput, error) {
 	cfg := s.state.Config()
 	if cfg == nil {
 		return nil, huma.Error503ServiceUnavailable("city config not loaded yet")
@@ -327,14 +327,14 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return
 		}
-		handle, handleErr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
+		handle, handleErr := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
 		if handleErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", handleErr.Error())
 			return
 		}
 		var info session.Info
 		createErr := session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
-			if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); aliasErr != nil {
+			if aliasErr := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); aliasErr != nil {
 				return aliasErr
 			}
 			var err error
@@ -346,7 +346,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 			return
 		}
 		if msg := strings.TrimSpace(body.Message); msg != "" {
-			if _, sendErr := s.submitMessageToSession(context.Background(), store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
+			if _, sendErr := s.submitMessageToSession(context.Background(), store.Store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
 				if rollbackErr := s.rollbackCreatedSession(store, info.ID); rollbackErr != nil {
 					s.emitSessionCreateFailed(reqID, "message_delivery_failed",
 						fmt.Sprintf("initial message delivery failed: %v (rollback failed: %v)", sendErr, rollbackErr))
@@ -361,7 +361,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 		s.emitSessionCreateSucceeded(reqID, resp)
 		s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 		titleProvider := s.resolveTitleProvider()
-		MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+		MaybeGenerateTitleAsync(store.Store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
 		})
 	}()
@@ -394,12 +394,12 @@ type sessionTranscriptGetResponse struct {
 // humaHandleSessionTranscript is the Huma-typed handler for GET /v0/session/{id}/transcript.
 
 func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchInput) (*IndexOutput[sessionResponse], error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -423,9 +423,9 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 	if !session.IsSessionBeadOrRepairable(b) {
 		return nil, huma.Error400BadRequest(id + " is not a session")
 	}
-	session.RepairEmptyType(store, &b)
+	session.RepairEmptyType(store.Store, &b)
 
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	updateFn := func() error {
 		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
 	}
@@ -434,7 +434,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 			return nil, huma.Error403Forbidden("forbidden: alias is controller-managed for this session")
 		}
 		if lockErr := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
-			if avErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); avErr != nil {
+			if avErr := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), *aliasPtr, id); avErr != nil {
 				return avErr
 			}
 			return updateFn()
@@ -464,12 +464,12 @@ func (s *Server) humaHandleSessionPermissionMode(_ context.Context, input *Sessi
 }
 
 func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissionModeBody) (*IndexOutput[sessionResponse], error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, idRef)
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, idRef)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -480,9 +480,9 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	if !session.IsSessionBeadOrRepairable(b) {
 		return nil, huma.Error400BadRequest(id + " is not a session")
 	}
-	session.RepairEmptyType(store, &b)
+	session.RepairEmptyType(store.Store, &b)
 
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	info, err := mgr.Get(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -554,8 +554,8 @@ func providerHasOption(schema []config.ProviderOption, key string) bool {
 // humaHandleSessionSubmit is the Huma-typed handler for POST /v0/session/{id}/submit.
 
 func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmitInput) (*SessionSubmitOutput, error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
@@ -576,12 +576,12 @@ func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmit
 	sessionTarget := input.ID
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionSubmit)
-		id, err := s.resolveSessionIDMaterializingNamedWithContext(context.Background(), store, sessionTarget)
+		id, err := s.resolveSessionIDMaterializingNamedWithContext(context.Background(), store.Store, sessionTarget)
 		if err != nil {
 			s.emitSessionSubmitFailed(reqID, "resolve_failed", err.Error())
 			return
 		}
-		outcome, submitErr := s.submitMessageToSession(context.Background(), store, id, message, intent)
+		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent)
 		if submitErr != nil {
 			s.emitSessionSubmitFailed(reqID, "submit_failed", submitErr.Error())
 		} else {
@@ -601,8 +601,8 @@ func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmit
 // humaHandleSessionMessage is the Huma-typed handler for POST /v0/session/{id}/messages.
 
 func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessageInput) (*SessionMessageOutput, error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
@@ -646,12 +646,12 @@ func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessa
 					sendResult(messageResult{errorCode: "internal_error", err: fmt.Errorf("panic: %v", r)})
 				}
 			}()
-			id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, sessionTarget)
+			id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, sessionTarget)
 			if err != nil {
 				sendResult(messageResult{errorCode: "resolve_failed", err: err})
 				return
 			}
-			if err := s.sendUserMessageToSession(ctx, store, id, message); err != nil {
+			if err := s.sendUserMessageToSession(ctx, store.Store, id, message); err != nil {
 				code := "message_failed"
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 					code = "timeout"
@@ -702,17 +702,17 @@ func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessa
 // humaHandleSessionStop is the Huma-typed handler for POST /v0/session/{id}/stop.
 
 func (s *Server) humaHandleSessionStop(_ context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
 
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	if err := mgr.StopTurn(id); err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -727,17 +727,17 @@ func (s *Server) humaHandleSessionStop(_ context.Context, input *SessionIDInput)
 // humaHandleSessionKill is the Huma-typed handler for POST /v0/session/{id}/kill.
 
 func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
 
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	if err := mgr.Kill(id); err != nil {
 		if errors.Is(err, session.ErrSessionClosed) {
 			out := &OKWithIDResponse{}
@@ -758,18 +758,18 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 // humaHandleSessionRespond is the Huma-typed handler for POST /v0/session/{id}/respond.
 
 func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespondInput) (*SessionRespondOutput, error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
 
 	// Huma validates Body.Action (minLength:1); no handler guard needed.
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	if err := mgr.Respond(id, runtime.InteractionResponse{
 		RequestID: input.Body.RequestID,
 		Action:    input.Body.Action,
@@ -790,13 +790,13 @@ func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespo
 // humaHandleSessionSuspend is the Huma-typed handler for POST /v0/session/{id}/suspend.
 
 func (s *Server) humaHandleSessionSuspend(ctx context.Context, input *SessionIDInput) (*OKResponse, error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, input.ID)
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -813,12 +813,12 @@ func (s *Server) humaHandleSessionSuspend(ctx context.Context, input *SessionIDI
 // humaHandleSessionClose is the Huma-typed handler for POST /v0/session/{id}/close.
 
 func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionCloseInput) (*OKResponse, error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -829,7 +829,7 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 		strings.Contains(strings.TrimSpace(b.Metadata[apiNamedSessionIdentityKey]), "/") {
 		return nil, huma.Error409Conflict("configured always-on named sessions cannot be closed while config-managed")
 	}
-	handle, err := s.workerHandleForSession(store, id)
+	handle, err := s.workerHandleForSession(store.Store, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -837,13 +837,15 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), closeResult.WaitNudgeIDs); err != nil {
+	// Nudge withdrawal reads the nudges class; until that class relocates it
+	// stays sourced from the city store rather than the typed session store.
+	if err := withdrawQueuedWaitNudges(s.state.CityBeadStore(), s.state.CityPath(), closeResult.WaitNudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
 	}
 
 	// Optional: permanently delete the bead after closing.
 	if input.Delete {
-		if err := deleteSessionBeadAfterClose(store, id); err != nil {
+		if err := deleteSessionBeadAfterClose(store.Store, id); err != nil {
 			log.Printf("gc api: deleting bead after close %s: %v", id, err)
 			return nil, huma.Error500InternalServerError("closed but delete failed: " + err.Error())
 		}
@@ -859,12 +861,12 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 // humaHandleSessionWake is the Huma-typed handler for POST /v0/session/{id}/wake.
 
 func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, input.ID)
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -876,23 +878,25 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	if !session.IsSessionBeadOrRepairable(b) {
 		return nil, huma.Error400BadRequest(id + " is not a session")
 	}
-	session.RepairEmptyType(store, &b)
+	session.RepairEmptyType(store.Store, &b)
 	if b.Status == "closed" {
 		return nil, huma.Error409Conflict("session " + id + " is closed")
 	}
 
-	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
+	nudgeIDs, err := session.WakeSession(store.Store, b, time.Now().UTC())
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
+	// Nudge withdrawal reads the nudges class; until that class relocates it
+	// stays sourced from the city store rather than the typed session store.
+	if err := withdrawQueuedWaitNudges(s.state.CityBeadStore(), s.state.CityPath(), nudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
 	}
 	sessionName := b.Metadata["session_name"]
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
 	}
-	handle, err := s.workerHandleForSession(store, id)
+	handle, err := s.workerHandleForSession(store.Store, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -913,12 +917,12 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 // humaHandleSessionRename is the Huma-typed handler for POST /v0/session/{id}/rename.
 
 func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRenameInput) (*IndexOutput[sessionResponse], error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -931,9 +935,9 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 	if !session.IsSessionBeadOrRepairable(b) {
 		return nil, huma.Error400BadRequest(id + " is not a session")
 	}
-	session.RepairEmptyType(store, &b)
+	session.RepairEmptyType(store.Store, &b)
 
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	if err := mgr.Rename(id, input.Body.Title); err != nil {
 		return nil, humaSessionManagerError(err)
 	}

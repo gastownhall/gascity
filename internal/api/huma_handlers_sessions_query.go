@@ -21,14 +21,14 @@ import (
 // logic from mutations and streaming.
 
 func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
 
-	all, partialErrors, err := sessionReadModelRows(store)
+	all, partialErrors, err := sessionReadModelRows(store.Store)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
@@ -73,7 +73,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		}
 		return &ListOutput[sessionResponse]{
 			Index:     s.latestIndex(),
-			CacheAgeS: cacheAgeSeconds(store),
+			CacheAgeS: cacheAgeSeconds(store.Store),
 			Body: ListBody[sessionResponse]{
 				Items:         items,
 				Total:         total,
@@ -89,7 +89,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	}
 	return &ListOutput[sessionResponse]{
 		Index:     s.latestIndex(),
-		CacheAgeS: cacheAgeSeconds(store),
+		CacheAgeS: cacheAgeSeconds(store.Store),
 		Body: ListBody[sessionResponse]{
 			Items:         page,
 			Total:         total,
@@ -105,15 +105,15 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 // humaHandleSessionGet is the Huma-typed handler for GET /v0/session/{id}.
 
 func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput) (*IndexOutput[sessionResponse], error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -127,7 +127,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, true, input.PeekLines)
 	return &IndexOutput[sessionResponse]{
 		Index:     s.latestIndex(),
-		CacheAgeS: cacheAgeSeconds(store),
+		CacheAgeS: cacheAgeSeconds(store.Store),
 		Body:      resp,
 	}, nil
 }
@@ -137,17 +137,17 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 // humaHandleSessionCreate is the Huma-typed handler for POST /v0/sessions.
 
 func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
 
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	info, err := mgr.Get(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -284,12 +284,12 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 // humaHandleSessionPending is the Huma-typed handler for GET /v0/session/{id}/pending.
 
 func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInput) (*IndexOutput[sessionPendingResponse], error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -301,7 +301,7 @@ func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInp
 		}, nil
 	}
 
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	pending, supported, err := mgr.Pending(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -344,13 +344,13 @@ type cityPendingProbe struct {
 // runtime predating the state-metadata field can still hold a pending
 // decision and must not be dropped from the aggregate.
 func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (*ListOutput[cityPendingEntry], error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 
-	all, partialErrors, err := sessionReadModelRows(store)
+	all, partialErrors, err := sessionReadModelRows(store.Store)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
@@ -411,7 +411,7 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 
 	return &ListOutput[cityPendingEntry]{
 		Index:     s.latestIndex(),
-		CacheAgeS: cacheAgeSeconds(store),
+		CacheAgeS: cacheAgeSeconds(store.Store),
 		Body: ListBody[cityPendingEntry]{
 			Items:         entries,
 			Total:         len(entries),
@@ -426,17 +426,17 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 // humaHandleSessionPatch is the Huma-typed handler for PATCH /v0/session/{id}.
 
 func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDInput) (*IndexOutput[sessionAgentListResponse], error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
 
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	logPath, err := mgr.TranscriptPath(id, s.sessionLogPaths())
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -467,12 +467,12 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 // humaHandleSessionAgentGet is the Huma-typed handler for GET /v0/session/{id}/agents/{agentId}.
 
 func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgentGetInput) (*IndexOutput[sessionAgentGetResponse], error) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -484,7 +484,7 @@ func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgen
 		return nil, huma.Error400BadRequest(err.Error())
 	}
 
-	mgr := s.sessionManager(store)
+	mgr := s.sessionManager(store.Store)
 	logPath, err := mgr.TranscriptPath(id, s.sessionLogPaths())
 	if err != nil {
 		return nil, humaSessionManagerError(err)

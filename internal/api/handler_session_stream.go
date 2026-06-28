@@ -65,19 +65,19 @@ func runtimePendingInteraction(pending *worker.PendingInteraction) runtime.Pendi
 }
 
 func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
 
-	catalog, err := s.workerSessionCatalog(store)
+	catalog, err := s.workerSessionCatalog(store.Store)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -88,7 +88,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	format := r.URL.Query().Get("format")
-	handle, err := s.workerHandleForSession(store, id)
+	handle, err := s.workerHandleForSession(store.Store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -935,7 +935,7 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
 
-	handle, err := s.workerHandleForSession(s.state.CityBeadStore(), info.ID)
+	handle, err := s.workerHandleForSession(s.state.SessionsBeadStore().Store, info.ID)
 	if err != nil {
 		return
 	}
@@ -1016,7 +1016,7 @@ func (s *Server) streamSessionPeekHuma(ctx context.Context, send sse.Sender, inf
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
 
-	handle, err := s.workerHandleForSession(s.state.CityBeadStore(), info.ID)
+	handle, err := s.workerHandleForSession(s.state.SessionsBeadStore().Store, info.ID)
 	if err != nil {
 		return
 	}
