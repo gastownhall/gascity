@@ -8424,6 +8424,7 @@
             "request.result.session.submit": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit",
             "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
+            "session.dialog_dismissed": "#/components/schemas/TypedEventStreamEnvelopeSessionDialogDismissed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
@@ -8607,6 +8608,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDialogDismissed"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
@@ -9541,6 +9545,7 @@
                 "session.stranded",
                 "session.unknown_state",
                 "session.reset_stalled",
+                "session.dialog_dismissed",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
                 "bead.created",
@@ -11506,6 +11511,57 @@
         "title": "TypedEventStreamEnvelope session.crashed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionDialogDismissed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.dialog_dismissed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.dialog_dismissed",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork": {
         "additionalProperties": false,
         "properties": {
@@ -12634,6 +12690,7 @@
             "request.result.session.submit": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit",
             "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
+            "session.dialog_dismissed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDialogDismissed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
@@ -12817,6 +12874,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDialogDismissed"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
@@ -13818,6 +13878,7 @@
                 "session.stranded",
                 "session.unknown_state",
                 "session.reset_stalled",
+                "session.dialog_dismissed",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
                 "bead.created",
@@ -15930,6 +15991,61 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.crashed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionDialogDismissed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.dialog_dismissed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.dialog_dismissed",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork": {

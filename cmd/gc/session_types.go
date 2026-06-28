@@ -301,6 +301,20 @@ const (
 	// reads, not the timeout.
 	stalledSessionDialogDismissTimeout = 8 * time.Second
 
+	// stalledSessionDialogDismissMaxAttempts bounds how many consecutive
+	// reconcile ticks may dismiss a blocking dialog on a progress-stalled
+	// session before the recycle is allowed to proceed. A genuine dismissal
+	// sends keystrokes whose tmux echo advances the session's activity, so
+	// the happy path leaves the stall window within a tick or two; only an
+	// ineffective/no-op dismissal climbs to the cap, at which point a wedged
+	// session must not be parked forever (gastownhall/gascity#3426 review F1).
+	stalledSessionDialogDismissMaxAttempts = 3
+
+	// dialogDismissAttemptsMetadataKey persists the consecutive dialog-dismiss
+	// attempt count on a session bead so the bounded fallthrough above
+	// survives the stateless per-tick reconciler.
+	dialogDismissAttemptsMetadataKey = "dialog_dismiss_attempts"
+
 	// churnProductivityThreshold is how long a session must run to be
 	// considered productive. Sessions that survive past stabilityThreshold
 	// but die before this threshold are "churning" — alive long enough to

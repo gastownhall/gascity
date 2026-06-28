@@ -1067,6 +1067,30 @@ func TestProviderTerminalErrorReason(t *testing.T) {
 	}
 }
 
+func TestContainsProviderRateLimitChooser(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "slash command entry point", content: "You've hit your limit, Pro plan\n\n/rate-limit-options", want: true},
+		{name: "session chooser menu", content: "You've hit your session limit · resets 8:40am\n❯ 1. Stop and wait for limit to reset\n  2. Upgrade", want: true},
+		{name: "gemini chooser menu", content: "Usage limit reached for gemini-3-flash-preview.\n❯ Keep trying\n  Stop", want: true},
+		{name: "bare session-limit phrase, live prompt", content: "You've hit your session limit · resets 8:40am\n❯ ", want: false},
+		{name: "bare usage-limit phrase, no menu", content: "Usage limit reached for gemini-3-flash-preview.", want: false},
+		{name: "scrollback mentioning rate limit", content: "respect the API rate limit\n❯ ", want: false},
+		{name: "empty", content: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containsProviderRateLimitChooser(tt.content); got != tt.want {
+				t.Errorf("containsProviderRateLimitChooser(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestContainsDismissableMidSessionDialog(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1105,6 +1129,14 @@ func TestContainsDismissableMidSessionDialog(t *testing.T) {
 			// that merely talks about rate limits.
 			name:    "scrollback discussing rate limits",
 			content: "Next I'll add retry logic so we respect the API rate limit.\n❯ ",
+			want:    false,
+		},
+		{
+			// F3: a session-limit phrase left in 120 lines of scrollback
+			// above a LIVE prompt has no chooser anchor; treating it as a
+			// dialog would inject Down/Enter into the working prompt.
+			name:    "session-limit phrase in scrollback above live prompt",
+			content: "You've hit your session limit · resets 8:40am\nresumed; continuing the task\n❯ ",
 			want:    false,
 		},
 		{

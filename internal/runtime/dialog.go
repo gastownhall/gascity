@@ -1021,13 +1021,22 @@ func ContainsModelSwitchModal(content string) bool {
 		strings.Contains(content, "Switch to ")
 }
 
-// ContainsProviderRateLimitScreen reports whether pane content has
-// high-confidence provider rate-limit screen evidence.
-func ContainsProviderRateLimitScreen(content string) bool {
-	if strings.Contains(content, "Usage limit reached") ||
+// containsRateLimitPhrase reports whether content carries one of the
+// distinctive provider rate-limit / usage-limit phrases. A phrase alone is
+// high-confidence evidence on a dead post-crash pane, but is NOT sufficient to
+// send keystrokes into a possibly-live session — see
+// containsProviderRateLimitChooser.
+func containsRateLimitPhrase(content string) bool {
+	return strings.Contains(content, "Usage limit reached") ||
 		strings.Contains(content, "You've hit your limit") ||
-		strings.Contains(content, "hit your session limit") ||
-		strings.Contains(content, "/rate-limit-options") {
+		strings.Contains(content, "hit your session limit")
+}
+
+// ContainsProviderRateLimitScreen reports whether pane content has
+// high-confidence provider rate-limit screen evidence. It is used to classify
+// a dead/exited pane (quarantine routing), where a bare phrase is sufficient.
+func ContainsProviderRateLimitScreen(content string) bool {
+	if containsRateLimitPhrase(content) || strings.Contains(content, "/rate-limit-options") {
 		return true
 	}
 	return strings.Contains(strings.ToLower(content), "rate limit") &&
@@ -1078,19 +1087,41 @@ func lineContainsAll(content string, subs ...string) bool {
 	return false
 }
 
+// containsProviderRateLimitChooser reports whether content shows an
+// *interactive* provider rate-limit chooser: a rate-limit phrase co-resident
+// with a menu/selector anchor, or the slash-command entry point that is itself
+// screen-shaped. Unlike ContainsProviderRateLimitScreen (which classifies a
+// dead pane), this gates whether the reconciler may send Down/Enter into a
+// possibly-live session, so a bare phrase buried in scrollback above a working
+// prompt must NOT qualify — otherwise the dismissal chain could inject keys
+// into the live prompt (gastownhall/gascity#3426 review F3).
+func containsProviderRateLimitChooser(content string) bool {
+	if strings.Contains(content, "/rate-limit-options") {
+		return true
+	}
+	if !containsRateLimitPhrase(content) {
+		return false
+	}
+	return strings.Contains(content, "Keep trying") ||
+		strings.Contains(content, "Stop and wait")
+}
+
 // ContainsDismissableMidSessionDialog reports whether pane content shows a
 // blocking dialog that is safe to auto-dismiss on an arbitrary mid-session
-// screen. It deliberately composes only the high-confidence matchers: the
-// permissive startup forms (ContainsRateLimitDialog's bare "rate limit",
-// the single-phrase workspace-trust and API-key anchors) would read
-// ordinary scrollback that merely talks about those things as a dialog.
-// Callers use it as a cheap pre-check before running the full dismissal
-// chain, which re-verifies per dialog before sending any keys.
+// screen. It deliberately composes only the high-confidence, screen-shaped
+// matchers: the permissive startup forms (ContainsRateLimitDialog's bare
+// "rate limit", the single-phrase workspace-trust and API-key anchors) would
+// read ordinary scrollback that merely talks about those things as a dialog.
+// The rate-limit case uses containsProviderRateLimitChooser (not the broader
+// ContainsProviderRateLimitScreen) so a bare phrase in scrollback above a live
+// prompt cannot trigger keystrokes. Callers use it as a cheap pre-check before
+// running the full dismissal chain, which re-verifies per dialog before
+// sending any keys.
 func ContainsDismissableMidSessionDialog(content string) bool {
 	return containsClaudeResumeDialog(content) ||
 		containsCodexUpdateDialog(content) ||
 		containsCodexHookReviewDialog(content) ||
-		ContainsProviderRateLimitScreen(content)
+		containsProviderRateLimitChooser(content)
 }
 
 // containsPromptIndicator checks whether any line in the content looks like a

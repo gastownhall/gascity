@@ -4306,6 +4306,21 @@ type TypedEventStreamEnvelopeSessionCrashed struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionDialogDismissed defines model for TypedEventStreamEnvelopeSessionDialogDismissed.
+type TypedEventStreamEnvelopeSessionDialogDismissed struct {
+	Actor     string                   `json:"actor"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   SessionLifecyclePayload  `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork defines model for TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.
 type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork struct {
 	Actor     string                                   `json:"actor"`
@@ -5476,6 +5491,22 @@ type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout struct {
 
 // TypedTaggedEventStreamEnvelopeSessionCrashed defines model for TypedTaggedEventStreamEnvelopeSessionCrashed.
 type TypedTaggedEventStreamEnvelopeSessionCrashed struct {
+	Actor     string                   `json:"actor"`
+	City      string                   `json:"city"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   SessionLifecyclePayload  `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionDialogDismissed defines model for TypedTaggedEventStreamEnvelopeSessionDialogDismissed.
+type TypedTaggedEventStreamEnvelopeSessionDialogDismissed struct {
 	Actor     string                   `json:"actor"`
 	City      string                   `json:"city"`
 	Message   *string                  `json:"message,omitempty"`
@@ -9922,6 +9953,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionCrashed(v
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionDialogDismissed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDialogDismissed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDialogDismissed() (TypedEventStreamEnvelopeSessionDialogDismissed, error) {
+	var body TypedEventStreamEnvelopeSessionDialogDismissed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionDialogDismissed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionDialogDismissed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionDialogDismissed(v TypedEventStreamEnvelopeSessionDialogDismissed) error {
+	v.Type = "session.dialog_dismissed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionDialogDismissed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionDialogDismissed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDialogDismissed(v TypedEventStreamEnvelopeSessionDialogDismissed) error {
+	v.Type = "session.dialog_dismissed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork() (TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork, error) {
 	var body TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
@@ -10660,6 +10719,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
 		return t.AsTypedEventStreamEnvelopeSessionCrashed()
+	case "session.dialog_dismissed":
+		return t.AsTypedEventStreamEnvelopeSessionDialogDismissed()
 	case "session.drain_acked_with_assigned_work":
 		return t.AsTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork()
 	case "session.draining":
@@ -12201,6 +12262,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionDialogDismissed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDialogDismissed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDialogDismissed() (TypedTaggedEventStreamEnvelopeSessionDialogDismissed, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionDialogDismissed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionDialogDismissed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionDialogDismissed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionDialogDismissed(v TypedTaggedEventStreamEnvelopeSessionDialogDismissed) error {
+	v.Type = "session.dialog_dismissed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionDialogDismissed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionDialogDismissed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionDialogDismissed(v TypedTaggedEventStreamEnvelopeSessionDialogDismissed) error {
+	v.Type = "session.dialog_dismissed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork() (TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
@@ -12939,6 +13028,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionCrashed()
+	case "session.dialog_dismissed":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionDialogDismissed()
 	case "session.drain_acked_with_assigned_work":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork()
 	case "session.draining":
