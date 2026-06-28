@@ -269,7 +269,7 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 	cityName := loadedCityName(cfg, cityPath)
 
 	store, _ := openCityStoreAt(cityPath)
-	markCityStopSessionSleepReason(store, stderr)
+	markCityStopSessionSleepReason(beads.SessionStore{Store: store}, stderr)
 
 	// If a controller is running, ask it to shut down (it stops agents).
 	if tryStopControllerWithForce(cityPath, stdout, force) {
@@ -344,8 +344,8 @@ func teardownServerForStop(sp runtime.Provider, stderr io.Writer) {
 	}
 }
 
-func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
-	if store == nil {
+func markCityStopSessionSleepReason(store beads.SessionStore, stderr io.Writer) {
+	if store.Store == nil {
 		return
 	}
 	sessions, err := store.ListByLabel("gc:session", 0)
@@ -461,7 +461,7 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 		}
 		orphans = append(orphans, name)
 	}
-	gracefulStopAll(orphans, sp, timeout, rec, cfg, store, stdout, stderr)
+	gracefulStopAll(orphans, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr)
 }
 
 // tryStopController connects to the controller socket and sends "stop".
@@ -557,7 +557,7 @@ func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store 
 			running = append(running, sn)
 		}
 	}
-	gracefulStopAll(running, sp, timeout, rec, cfg, store, stdout, stderr)
+	gracefulStopAll(running, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr)
 	fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 	return 0
 }

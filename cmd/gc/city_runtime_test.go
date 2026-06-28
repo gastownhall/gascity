@@ -73,7 +73,7 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -154,7 +154,7 @@ func TestSweepUndesiredPoolSessionBeads_UsesProcessNameFallback(t *testing.T) {
 	}
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -211,7 +211,7 @@ func TestSweepUndesiredPoolSessionBeads_RunningProbeAvoidsFullObservation(t *tes
 	sp.SetActivity("worker-bd-running", time.Now())
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -252,7 +252,7 @@ func TestSweepUndesiredPoolSessionBeads_UsesRuntimeLivenessObservation(t *testin
 	}
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		newSessionBeadSnapshot([]beads.Bead{bead}),
 		nil,
@@ -306,7 +306,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsProtectedCreateBeforeRuntimeProbe(t
 	sp := runtime.NewFake()
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2103,7 +2103,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsCreatingState(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2156,7 +2156,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecentlyCreated(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2204,7 +2204,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsStaleCreatingState(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2245,7 +2245,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsLongStuckActiveWithoutWake(t *test
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2284,7 +2284,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecentCreationCompleteAfterWakeReco
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2325,7 +2325,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsActiveWithoutCreationCompleteAt(t 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2372,7 +2372,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsAwakeStateInPreWakeWindow(t *testin
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2421,7 +2421,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecoveredActiveBead(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2472,7 +2472,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsFreshRestartAfterPriorCrash(t *test
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2518,7 +2518,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsCrashedActiveBead(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2554,7 +2554,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsPendingCreateClaim(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2604,7 +2604,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsExpiredPendingCreateClaimLease(t *
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2643,7 +2643,7 @@ func TestSweepUndesiredPoolSessionBeads_UsesPendingCreateStartedAtForCreatingSta
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2694,7 +2694,7 @@ func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2752,7 +2752,7 @@ func TestSweepUndesiredPoolSessionBeads_ClosesMissingOrStaleSessionName(t *testi
 			}
 
 			closed := sweepUndesiredPoolSessionBeads(
-				store,
+				beads.SessionStore{Store: store},
 				nil,
 				newSessionBeadSnapshot([]beads.Bead{bead}),
 				nil,
@@ -2798,7 +2798,7 @@ func TestSweepUndesiredPoolSessionBeads_KeepsAssignedSessionsOpen(t *testing.T) 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,
@@ -2841,7 +2841,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsPartialAssignedSnapshot(t *testing.
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		sessionBeads,
 		nil,

@@ -58,15 +58,21 @@ func controlDispatcherSessionRuntimeMissing(cityPath, qualifiedName string) bool
 	if err != nil || store == nil {
 		return false
 	}
-	return sessionRuntimeMissingInStore(store, qualifiedName)
+	// Session beads are session-class; thread the city store into the consumer
+	// as a typed beads.SessionStore so the class stays statically visible. The
+	// lazy open above is retained deliberately: it is the load-bearing guard that
+	// avoids spinning up a managed Dolt backend on a bare working dir, and there
+	// is no controllerState here to source a pre-opened session store from.
+	return sessionRuntimeMissingInStore(beads.SessionStore{Store: store}, qualifiedName)
 }
 
 // sessionRuntimeMissingInStore reports whether any open session bead for the
 // agent (selected by its agent:<qualified> label) projects the runtime-missing
-// lifecycle reason in the given store. The projection lives in internal/session
-// so the API sling path can share it without importing package main.
-func sessionRuntimeMissingInStore(store beads.Store, qualifiedName string) bool {
-	return sessionpkg.RuntimeMissingInStore(store, qualifiedName)
+// lifecycle reason in the given session store. The projection lives in
+// internal/session so the API sling path can share it without importing package
+// main; it takes the unwrapped beads.Store.
+func sessionRuntimeMissingInStore(store beads.SessionStore, qualifiedName string) bool {
+	return sessionpkg.RuntimeMissingInStore(store.Store, qualifiedName)
 }
 
 // applyGraphRouting delegates to graphroute.ApplyGraphRouting with CLI

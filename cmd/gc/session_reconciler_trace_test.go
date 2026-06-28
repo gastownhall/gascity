@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -573,7 +574,7 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 		nil,
 		&config.City{},
 		nil,
-		nil,
+		beads.SessionStore{},
 		nil,
 		nil,
 		nil,

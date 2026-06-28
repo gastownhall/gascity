@@ -56,7 +56,7 @@ func TestSessionRuntimeMissingInStore(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := beads.NewMemStoreFrom(1, []beads.Bead{tt.bead}, nil)
-			if got := sessionRuntimeMissingInStore(store, tt.qualified); got != tt.want {
+			if got := sessionRuntimeMissingInStore(beads.SessionStore{Store: store}, tt.qualified); got != tt.want {
 				t.Fatalf("sessionRuntimeMissingInStore = %v, want %v", got, tt.want)
 			}
 		})
@@ -64,11 +64,11 @@ func TestSessionRuntimeMissingInStore(t *testing.T) {
 }
 
 func TestSessionRuntimeMissingInStore_NilAndEmpty(t *testing.T) {
-	if sessionRuntimeMissingInStore(nil, "gc-contrib/control-dispatcher") {
+	if sessionRuntimeMissingInStore(beads.SessionStore{}, "gc-contrib/control-dispatcher") {
 		t.Fatal("nil store should report not-missing")
 	}
 	store := beads.NewMemStoreFrom(1, nil, nil)
-	if sessionRuntimeMissingInStore(store, "") {
+	if sessionRuntimeMissingInStore(beads.SessionStore{Store: store}, "") {
 		t.Fatal("empty qualified name should report not-missing")
 	}
 }

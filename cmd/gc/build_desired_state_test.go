@@ -4641,7 +4641,7 @@ func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T)
 	var firstSyncStderr bytes.Buffer
 	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
 		cityPath,
-		store,
+		beads.SessionStore{Store: store},
 		nil,
 		firstTick.State,
 		sp,

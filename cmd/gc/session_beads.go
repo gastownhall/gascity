@@ -844,7 +844,7 @@ func syncSessionBeads(
 	skipClose bool,
 ) map[string]string {
 	openIndex, _ := syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, store, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, nil,
+		cityPath, beads.SessionStore{Store: store}, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, nil,
 	)
 	return openIndex
 }
@@ -862,13 +862,13 @@ func syncSessionBeadsWithSnapshot(
 	sessionBeads *sessionBeadSnapshot,
 ) (map[string]string, *sessionBeadSnapshot) {
 	return syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, store, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, sessionBeads,
+		cityPath, beads.SessionStore{Store: store}, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, sessionBeads,
 	)
 }
 
 func syncSessionBeadsWithSnapshotAndRigStores(
 	cityPath string,
-	store beads.Store,
+	sessStore beads.SessionStore,
 	rigStores map[string]beads.Store,
 	desiredState map[string]TemplateParams,
 	sp runtime.Provider,
@@ -879,6 +879,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	skipClose bool,
 	sessionBeads *sessionBeadSnapshot,
 ) (map[string]string, *sessionBeadSnapshot) {
+	// Session class typed at the boundary; the snapshot/repair/close helpers
+	// below take the unwrapped beads.Store. Same underlying store value, behavior
+	// unchanged.
+	store := sessStore.Store
 	if store == nil {
 		return nil, nil
 	}

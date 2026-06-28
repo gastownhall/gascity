@@ -4489,7 +4489,7 @@ func TestGracefulStopAll_UsesLogicalSubjectForGracefulExit(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)}}}
 	var stdout, stderr bytes.Buffer
 
-	gracefulStopAll([]string{"custom-worker"}, sp, 50*time.Millisecond, rec, cfg, store, &stdout, &stderr)
+	gracefulStopAll([]string{"custom-worker"}, sp, 50*time.Millisecond, rec, cfg, beads.SessionStore{Store: store}, &stdout, &stderr)
 
 	if len(rec.Events) != 1 {
 		t.Fatalf("got %d events, want 1", len(rec.Events))
@@ -4521,7 +4521,7 @@ func TestGracefulStopAll_ReconstructsPoolSubjectFromLegacyBead(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}}}
 	var stdout, stderr bytes.Buffer
 
-	gracefulStopAll([]string{"custom-worker-2"}, sp, 50*time.Millisecond, rec, cfg, store, &stdout, &stderr)
+	gracefulStopAll([]string{"custom-worker-2"}, sp, 50*time.Millisecond, rec, cfg, beads.SessionStore{Store: store}, &stdout, &stderr)
 
 	if len(rec.Events) != 1 {
 		t.Fatalf("got %d events, want 1", len(rec.Events))
@@ -4553,7 +4553,7 @@ func TestGracefulStopAll_UsesLegacyAgentLabelForPoolSubject(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)}}}
 	var stdout, stderr bytes.Buffer
 
-	gracefulStopAll([]string{"custom-worker-4"}, sp, 50*time.Millisecond, rec, cfg, store, &stdout, &stderr)
+	gracefulStopAll([]string{"custom-worker-4"}, sp, 50*time.Millisecond, rec, cfg, beads.SessionStore{Store: store}, &stdout, &stderr)
 
 	if len(rec.Events) != 1 {
 		t.Fatalf("got %d events, want 1", len(rec.Events))
@@ -4572,7 +4572,7 @@ func TestGracefulStopAll_UsesListRunningToStopLingeringSessions(t *testing.T) {
 	rec := events.NewFake()
 	var stdout, stderr bytes.Buffer
 
-	gracefulStopAll([]string{"custom-worker"}, sp, 20*time.Millisecond, rec, nil, nil, &stdout, &stderr)
+	gracefulStopAll([]string{"custom-worker"}, sp, 20*time.Millisecond, rec, nil, beads.SessionStore{}, &stdout, &stderr)
 
 	var stopCalls int
 	for _, call := range sp.Calls {
@@ -4597,7 +4597,7 @@ func TestGracefulStopAll_CleansExitedRuntimeArtifact(t *testing.T) {
 	rec := events.NewFake()
 	var stdout, stderr bytes.Buffer
 
-	gracefulStopAll([]string{"custom-worker"}, sp, 20*time.Millisecond, rec, nil, nil, &stdout, &stderr)
+	gracefulStopAll([]string{"custom-worker"}, sp, 20*time.Millisecond, rec, nil, beads.SessionStore{}, &stdout, &stderr)
 
 	if sp.stopCalls["custom-worker"] == 0 {
 		t.Fatalf("expected gracefulStopAll to cleanup exited runtime artifact, calls=%+v", sp.Calls)
@@ -4619,7 +4619,7 @@ func TestGracefulStopAll_CleansExitedRuntimeArtifactAlongsideLiveSurvivor(t *tes
 	rec := events.NewFake()
 	var stdout, stderr bytes.Buffer
 
-	gracefulStopAll([]string{"corpse-worker", "live-worker"}, sp, 20*time.Millisecond, rec, nil, nil, &stdout, &stderr)
+	gracefulStopAll([]string{"corpse-worker", "live-worker"}, sp, 20*time.Millisecond, rec, nil, beads.SessionStore{}, &stdout, &stderr)
 
 	if sp.stopCalls["corpse-worker"] == 0 {
 		t.Fatalf("expected cleanup Stop for exited runtime artifact, calls=%+v", sp.Calls)

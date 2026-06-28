@@ -21,14 +21,14 @@ import (
 // It runs after session beads have been synced for the tick so a respawned
 // session's replacement bead is already visible. Errors are logged and
 // swallowed so a binding-store hiccup never stalls the reconciler loop.
-func reapStaleExtmsgBindings(ctx context.Context, store beads.Store, now time.Time, stderr io.Writer) {
-	if store == nil {
+func reapStaleExtmsgBindings(ctx context.Context, store beads.SessionStore, now time.Time, stderr io.Writer) {
+	if store.Store == nil {
 		return
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	stats, err := extmsg.ReapStaleBindings(ctx, store, now)
+	stats, err := extmsg.ReapStaleBindings(ctx, store.Store, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: reaping stale extmsg bindings: %v\n", err) //nolint:errcheck
 		return
@@ -48,14 +48,14 @@ func reapStaleExtmsgBindings(ctx context.Context, store beads.Store, now time.Ti
 // stranded on the retired session bead. It runs on the same tick and after
 // session beads have been synced. Errors are logged and swallowed so a
 // participant-store hiccup never stalls the reconciler loop.
-func reapStaleExtmsgParticipants(ctx context.Context, store beads.Store, stderr io.Writer) {
-	if store == nil {
+func reapStaleExtmsgParticipants(ctx context.Context, store beads.SessionStore, stderr io.Writer) {
+	if store.Store == nil {
 		return
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	stats, err := extmsg.ReapStaleParticipants(ctx, store)
+	stats, err := extmsg.ReapStaleParticipants(ctx, store.Store)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: reaping stale extmsg participants: %v\n", err) //nolint:errcheck
 		return

@@ -981,18 +981,18 @@ func prepareWaitWakeState(store beads.Store, now time.Time) (map[string]bool, er
 }
 
 func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Time) (map[string]bool, error) {
-	return prepareWaitWakeStateForCityWithSnapshot(cityPath, store, now, nil)
+	return prepareWaitWakeStateForCityWithSnapshot(cityPath, beads.SessionStore{Store: store}, now, nil)
 }
 
-func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
+func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store beads.SessionStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
 	if sessionBeads == nil {
 		var err error
-		sessionBeads, err = loadSessionBeadSnapshot(store)
+		sessionBeads, err = loadSessionBeadSnapshot(store.Store)
 		if err != nil {
 			return nil, err
 		}
 	}
-	waits, err := loadWaitBeadsForWakeState(store, sessionBeads)
+	waits, err := loadWaitBeadsForWakeState(store.Store, sessionBeads)
 	if err != nil {
 		return nil, err
 	}
@@ -1010,7 +1010,7 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store beads.Store,
 		if !ok {
 			if wait.Metadata["registered_epoch"] != "" {
 				var found bool
-				sessionBead, found, err = lookupSessionBeadByID(store, sessionID)
+				sessionBead, found, err = lookupSessionBeadByID(store.Store, sessionID)
 				if err != nil {
 					return nil, err
 				}
@@ -1022,7 +1022,7 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store beads.Store,
 			}
 		}
 		if epoch := wait.Metadata["registered_epoch"]; epoch != "" && sessionBead.Metadata["continuation_epoch"] != "" && epoch != sessionBead.Metadata["continuation_epoch"] {
-			if err := setWaitTerminalState(store, wait.ID, map[string]string{
+			if err := setWaitTerminalState(store.Store, wait.ID, map[string]string{
 				"state":       waitStateCanceled,
 				"canceled_at": now.UTC().Format(time.RFC3339),
 				"last_error":  "continuation-stale",

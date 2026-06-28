@@ -130,7 +130,7 @@ func TestGracefulStopAll_HangingProviderDoesNotWedge(t *testing.T) {
 			cfg.Daemon.ShutdownTimeoutDuration(),
 			events.Discard,
 			cfg,
-			nil,
+			beads.SessionStore{},
 			&stdout,
 			&stderr,
 		)

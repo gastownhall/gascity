@@ -8048,7 +8048,7 @@ func TestSyncSessionBeadsWithSnapshotAndRigStoresLeavesOrphanedSessionBeadOpenWh
 	var stderr bytes.Buffer
 	syncSessionBeadsWithSnapshotAndRigStores(
 		"",
-		store,
+		beads.SessionStore{Store: store},
 		map[string]beads.Store{"frontend": rigStore},
 		nil,
 		sp,

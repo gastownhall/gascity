@@ -80,7 +80,7 @@ func formatSoftReloadFailedSessions(names []string) string {
 // Returns accepted-session, failed-session, stale-drain-cancelation, and
 // empty-desired-state diagnostics for the controller reply.
 func acceptConfigDriftAcrossSessions(
-	store beads.Store,
+	store beads.SessionStore,
 	desired map[string]TemplateParams,
 	sessionBeads *sessionBeadSnapshot,
 	sp runtime.Provider,
@@ -88,12 +88,12 @@ func acceptConfigDriftAcrossSessions(
 	stderr io.Writer,
 ) softReloadAcceptanceResult {
 	result := softReloadAcceptanceResult{DesiredEmpty: len(desired) == 0}
-	if store == nil {
+	if store.Store == nil {
 		return result
 	}
 	if sessionBeads == nil {
 		var err error
-		sessionBeads, err = loadSessionBeadSnapshot(store)
+		sessionBeads, err = loadSessionBeadSnapshot(store.Store)
 		if err != nil {
 			fmt.Fprintf(stderr, "soft reload: listing session beads: %v\n", err) //nolint:errcheck // best-effort stderr
 			return result

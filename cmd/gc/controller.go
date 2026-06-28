@@ -972,7 +972,7 @@ func gracefulStopAll(
 	timeout time.Duration,
 	rec events.Recorder,
 	cfg *config.City,
-	store beads.Store,
+	store beads.SessionStore,
 	stdout, stderr io.Writer,
 ) {
 	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
@@ -984,16 +984,16 @@ func gracefulStopAllWithForceSignal(
 	timeout time.Duration,
 	rec events.Recorder,
 	cfg *config.City,
-	store beads.Store,
+	store beads.SessionStore,
 	stdout, stderr io.Writer,
 	forceStopRequested func() bool,
 ) {
 	if timeout <= 0 || len(names) == 0 || stopForceRequested(forceStopRequested) {
 		// Immediate kill (no grace period).
-		stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, rec, "gc", stdout, stderr)
+		stopTargetsBounded(stopTargetsForNames(names, cfg, store.Store, stderr), cfg, store.Store, sp, rec, "gc", stdout, stderr)
 		return
 	}
-	targets := stopTargetsForNames(names, cfg, store, stderr)
+	targets := stopTargetsForNames(names, cfg, store.Store, stderr)
 	targetByName := make(map[string]stopTarget, len(targets))
 	for _, target := range targets {
 		targetByName[target.name] = target
@@ -1005,7 +1005,7 @@ func gracefulStopAllWithForceSignal(
 	// The configured timeout is the post-dispatch grace window; dispatch
 	// latency is intentionally outside that budget so every interrupted
 	// session still gets the full graceful-exit wait once nudged.
-	sent := interruptTargetsBoundedWithForceSignal(targets, cfg, store, sp, stderr, forceStopRequested)
+	sent := interruptTargetsBoundedWithForceSignal(targets, cfg, store.Store, sp, stderr, forceStopRequested)
 	fmt.Fprintf(stdout, "Sent interrupt to %d/%d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
 		sent, len(names), timeout)
 
@@ -1077,8 +1077,8 @@ func gracefulStopAllWithForceSignal(
 				}
 				template = target.template
 				agentIdentity = target.agentName
-				if cityStopSessionMarked(store, target.sessionID) {
-					markCityStopSessionAsAsleep(store, target.sessionID, stderr)
+				if cityStopSessionMarked(store.Store, target.sessionID) {
+					markCityStopSessionAsAsleep(store.Store, target.sessionID, stderr)
 				}
 			}
 			rec.Record(events.Event{
@@ -1090,7 +1090,7 @@ func gracefulStopAllWithForceSignal(
 		}
 		survivors = append(survivors, name)
 	}
-	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, store, sp, rec, "gc", stdout, stderr)
+	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, store.Store, sp, rec, "gc", stdout, stderr)
 }
 
 func stopForceRequested(forceStopRequested func() bool) bool {

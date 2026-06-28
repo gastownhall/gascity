@@ -1153,7 +1153,7 @@ func (cr *CityRuntime) tick(
 			cr.cityPath,
 			cr.cfg,
 			cr.sp,
-			cr.cityBeadStore(),
+			cr.sessionsBeadStore(),
 			cr.rigBeadStores(),
 			sessionBeads.Open(),
 			cr.dops,
@@ -1210,14 +1210,14 @@ func (cr *CityRuntime) tick(
 	// Re-point external-message bindings at respawned sessions (and clear
 	// bindings whose session is gone) now that replacement beads are visible.
 	phaseStart = time.Now()
-	reapStaleExtmsgBindings(ctx, cr.cityBeadStore(), time.Now(), cr.stderr)
+	reapStaleExtmsgBindings(ctx, cr.sessionsBeadStore(), time.Now(), cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_bindings", phaseStart, nil)
 	// Re-point group participants at respawned sessions and carry their
 	// group-owned transcript membership; the participant side has no read-time
 	// membership overlay, so this backstop is what converges binding-less
 	// participants the binding reaper never sees.
 	phaseStart = time.Now()
-	reapStaleExtmsgParticipants(ctx, cr.cityBeadStore(), cr.stderr)
+	reapStaleExtmsgParticipants(ctx, cr.sessionsBeadStore(), cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_participants", phaseStart, nil)
 	phaseStart = time.Now()
 	result = refreshDesiredStateWithSessionBeads(
@@ -1909,7 +1909,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		if len(running) > 0 {
 			fmt.Fprintf(cr.stdout, "Provider changed (%s), stopping %d agent(s)...\n", //nolint:errcheck
 				providerSwapSummary, len(running))
-			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.cityBeadStore(), cr.stdout, cr.stderr)
+			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.sessionsBeadStore(), cr.stdout, cr.stderr)
 		}
 		cr.rec.Record(events.Event{
 			Type:    events.ProviderSwapped,
@@ -2043,7 +2043,7 @@ func (cr *CityRuntime) applySoftReloadAcceptance(
 	if reply == nil {
 		return
 	}
-	result := acceptConfigDriftAcrossSessions(cr.cityBeadStore(), desired, sessionBeads, cr.sp, cr.sessionDrains, cr.stderr)
+	result := acceptConfigDriftAcrossSessions(cr.sessionsBeadStore(), desired, sessionBeads, cr.sp, cr.sessionDrains, cr.stderr)
 	accepted := result.Updated
 	reply.AcceptedDriftCount = &accepted
 	for _, warning := range result.warnings() {
@@ -2116,6 +2116,10 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if store == nil {
 		return
 	}
+	// Session-class ops (pool-session sweep, wait-wake state, reconcile) route
+	// through the typed session store; it wraps the same underlying store value
+	// as the work store today, so behavior is unchanged.
+	sessStore := cr.sessionsBeadStore()
 	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
 		if trace != nil {
 			trace.RecordControllerOperation(site, TraceReasonRetained, TraceOutcomeComplete, name, time.Since(start), fields)
@@ -2197,7 +2201,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 	phaseStart = time.Now()
 	if sweepUndesiredPoolSessionBeads(
-		store,
+		sessStore,
 		rigStores,
 		sessionBeads,
 		desiredState,
@@ -2218,7 +2222,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	readyWaitSet, err := prepareWaitWakeStateForCityWithSnapshot(cr.cityPath, store, time.Now(), sessionBeads)
+	readyWaitSet, err := prepareWaitWakeStateForCityWithSnapshot(cr.cityPath, sessStore, time.Now(), sessionBeads)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil
@@ -2243,7 +2247,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	})
 	phaseStart = time.Now()
 	reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, store,
+		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,
 		cr.dops,
 		awakeAssignedWorkBeads, rigStores, readyWaitSet, cr.sessionDrains, cr.providerHealthGate,
 		poolDesired,
@@ -2598,7 +2602,7 @@ func poolSweepWouldDrain(sessionBeads *sessionBeadSnapshot, desiredState map[str
 }
 
 func sweepUndesiredPoolSessionBeads(
-	store beads.Store,
+	store beads.SessionStore,
 	rigStores map[string]beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	desiredState map[string]TemplateParams,
@@ -2606,7 +2610,7 @@ func sweepUndesiredPoolSessionBeads(
 	sp runtime.Provider,
 	storeQueryPartial bool,
 ) int {
-	if store == nil || sessionBeads == nil || cfg == nil || storeQueryPartial {
+	if store.Store == nil || sessionBeads == nil || cfg == nil || storeQueryPartial {
 		return 0
 	}
 	startupTimeout := cfg.Session.StartupTimeoutDuration()
@@ -2703,7 +2707,7 @@ func sweepUndesiredPoolSessionBeads(
 		}
 		candidates = append(candidates, bead)
 	}
-	return len(GCSweepSessionBeads(store, rigStores, candidates))
+	return len(GCSweepSessionBeads(store.Store, rigStores, candidates))
 }
 
 func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, processNames []string) (bool, error) {
@@ -2926,7 +2930,7 @@ func ensureManagedDoltPublishedForRuntime(
 
 // syncBeadsAndUpdateIndex runs syncSessionBeads.
 func (cr *CityRuntime) syncBeadsAndUpdateIndex(desiredState map[string]TemplateParams, sessionBeads *sessionBeadSnapshot) *sessionBeadSnapshot {
-	store := cr.cityBeadStore()
+	store := cr.sessionsBeadStore()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cr.cityName, sessionBeads)
 	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
 		cr.cityPath, store, cr.rigBeadStores(), desiredState, cr.sp, cfgNames, cr.cfg, clock.Real{}, cr.stderr, cr.sessionDrains != nil, sessionBeads,
@@ -3315,7 +3319,7 @@ func (cr *CityRuntime) shutdown() {
 				fmt.Fprintf(cr.stderr, "%s: shutdown session listing failed: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
 			}
 		}
-		store := cr.cityBeadStore()
+		store := cr.sessionsBeadStore()
 		markCityStopSessionSleepReason(store, cr.stderr)
 		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
 		if !asyncStartsDrained && cr.forceStopRequested() {

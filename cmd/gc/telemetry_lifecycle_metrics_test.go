@@ -386,7 +386,7 @@ func TestGracefulStopAll_RecordsGracefulExitStopMetric(t *testing.T) {
 
 	rec := events.NewFake()
 	var stdout, stderr bytes.Buffer
-	gracefulStopAll([]string{sessionName}, sp, 20*time.Millisecond, rec, nil, store, &stdout, &stderr)
+	gracefulStopAll([]string{sessionName}, sp, 20*time.Millisecond, rec, nil, beads.SessionStore{Store: store}, &stdout, &stderr)
 
 	if !strings.Contains(stdout.String(), "Agent 'custom-worker' exited gracefully") {
 		t.Fatalf("stdout = %q, want graceful exit message (fixture must reach pass 2)", stdout.String())

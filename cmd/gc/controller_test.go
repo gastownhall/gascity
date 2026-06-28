@@ -116,7 +116,7 @@ func TestGracefulStopAllFallsBackWhenPartialListOmitsExplicitTarget(t *testing.T
 	_ = sp.Start(context.Background(), "alpha", runtime.Config{})
 
 	var stdout, stderr bytes.Buffer
-	gracefulStopAll([]string{"alpha"}, sp, 20*time.Millisecond, events.Discard, nil, nil, &stdout, &stderr)
+	gracefulStopAll([]string{"alpha"}, sp, 20*time.Millisecond, events.Discard, nil, beads.SessionStore{}, &stdout, &stderr)
 	if sp.IsRunning("alpha") {
 		t.Fatal("gracefulStopAll should stop explicit targets even when partial listing omits them")
 	}

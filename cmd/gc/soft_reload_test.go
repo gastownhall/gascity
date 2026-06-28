@@ -91,7 +91,7 @@ func TestAcceptConfigDriftAcrossSessions_UpdatesStaleHash(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(beads.SessionStore{Store: store}, desired, nil, nil, nil, &stderr)
 	if got.Updated != 1 {
 		t.Fatalf("updated = %d, want 1 (stderr=%s)", got.Updated, stderr.String())
 	}
@@ -139,7 +139,7 @@ func TestAcceptConfigDriftAcrossSessions_SkipsUnstartedSessions(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(beads.SessionStore{Store: store}, desired, nil, nil, nil, &stderr)
 	if got.Updated != 0 {
 		t.Fatalf("updated = %d, want 0 for unstarted session (stderr=%s)", got.Updated, stderr.String())
 	}
@@ -182,7 +182,7 @@ func TestAcceptConfigDriftAcrossSessions_SkipsOrphanedSessions(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(beads.SessionStore{Store: store}, desired, nil, nil, nil, &stderr)
 	if got.Updated != 0 {
 		t.Fatalf("updated = %d, want 0 for orphaned session (stderr=%s)", got.Updated, stderr.String())
 	}
@@ -222,7 +222,7 @@ func TestAcceptConfigDriftAcrossSessions_LeavesNonDriftingSessionsAlone(t *testi
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(beads.SessionStore{Store: store}, desired, nil, nil, nil, &stderr)
 	if got.Updated != 0 {
 		t.Fatalf("updated = %d, want 0 (no drift) — stderr=%s", got.Updated, stderr.String())
 	}
@@ -265,7 +265,7 @@ func TestAcceptConfigDriftAcrossSessions_CancelsExistingConfigDriftDrain(t *test
 		"worker": {Command: "new-cmd", SessionName: "worker", TemplateName: "worker"},
 	}
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, sp, dt, &stderr)
+	got := acceptConfigDriftAcrossSessions(beads.SessionStore{Store: store}, desired, nil, sp, dt, &stderr)
 	if got.Updated != 1 {
 		t.Fatalf("updated = %d, want 1 (stderr=%s)", got.Updated, stderr.String())
 	}
@@ -306,7 +306,7 @@ func TestAcceptConfigDriftAcrossSessions_FailsAckedDrainWithoutProviderBeforeMet
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, dt, &stderr)
+	got := acceptConfigDriftAcrossSessions(beads.SessionStore{Store: store}, desired, nil, nil, dt, &stderr)
 	if got.Updated != 0 || got.Failed != 1 {
 		t.Fatalf("result = %+v, want updated=0 failed=1 (stderr=%s)", got, stderr.String())
 	}
@@ -362,7 +362,7 @@ func TestAcceptConfigDriftAcrossSessions_FailsWhenAckMetadataClearFails(t *testi
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, sp, dt, &stderr)
+	got := acceptConfigDriftAcrossSessions(beads.SessionStore{Store: store}, desired, nil, sp, dt, &stderr)
 	if got.Updated != 0 || got.Failed != 1 || got.CanceledDrains != 0 {
 		t.Fatalf("result = %+v, want updated=0 failed=1 canceled=0 (stderr=%s)", got, stderr.String())
 	}
@@ -424,7 +424,7 @@ func TestAcceptConfigDriftAcrossSessions_AppliesTemplateOverridesToHash(t *testi
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(beads.SessionStore{Store: store}, desired, nil, nil, nil, &stderr)
 	if got.Updated != 1 {
 		t.Fatalf("updated = %d, want 1 (stderr=%s)", got.Updated, stderr.String())
 	}
@@ -474,7 +474,7 @@ func TestAcceptConfigDriftAcrossSessions_MetadataFailureReportsAndContinues(t *t
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(beads.SessionStore{Store: store}, desired, nil, nil, nil, &stderr)
 	if got.Updated != 1 || got.Failed != 1 {
 		t.Fatalf("result = %+v, want updated=1 failed=1 (stderr=%s)", got, stderr.String())
 	}
@@ -512,7 +512,7 @@ func TestAcceptConfigDriftAcrossSessions_EmptyDesiredReportsOpenSessions(t *test
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, map[string]TemplateParams{}, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(beads.SessionStore{Store: store}, map[string]TemplateParams{}, nil, nil, nil, &stderr)
 	if !got.DesiredEmpty || got.OpenSessions != 1 {
 		t.Fatalf("result = %+v, want DesiredEmpty with one open session", got)
 	}

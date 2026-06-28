@@ -893,7 +893,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	ds := dsResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, oneShotStore, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
+		cityPath, beads.SessionStore{Store: oneShotStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
 	)
 
 	open := sessionBeads.Open()
@@ -908,7 +908,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		ds = dsResult.State
 		cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 		_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
-			cityPath, oneShotStore, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
+			cityPath, beads.SessionStore{Store: oneShotStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
 		)
 		open = sessionBeads.Open()
 	}
@@ -947,7 +947,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	ds = dsResult.State
 	cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, oneShotStore, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads,
+		cityPath, beads.SessionStore{Store: oneShotStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads,
 	)
 
 	fmt.Fprintln(stdout, "City started.") //nolint:errcheck // best-effort stdout

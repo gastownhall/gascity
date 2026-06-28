@@ -435,7 +435,7 @@ func finalizeDrainAckStopPendingSessions(
 	cityPath string,
 	cfg *config.City,
 	sp runtime.Provider,
-	store beads.Store,
+	sessStore beads.SessionStore,
 	rigStores map[string]beads.Store,
 	sessions []beads.Bead,
 	dops drainOps,
@@ -445,6 +445,9 @@ func finalizeDrainAckStopPendingSessions(
 	rec events.Recorder,
 	stderr io.Writer,
 ) int {
+	// Session class typed at the boundary; the drain-ack helpers below take the
+	// unwrapped beads.Store. Same underlying store value, behavior unchanged.
+	store := sessStore.Store
 	if store == nil || sp == nil || len(sessions) == 0 {
 		return 0
 	}
@@ -890,7 +893,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	stdout, stderr io.Writer,
 ) int {
 	return reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
 		poolDesired, namedSessionDemand, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
 	)
 }
@@ -924,7 +927,7 @@ func reconcileSessionBeadsTraced(
 	startOptions ...startExecutionOption,
 ) int {
 	return reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
 		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, trace,
 		startOptions...,
 	)
@@ -938,7 +941,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	configuredNames map[string]bool,
 	cfg *config.City,
 	sp runtime.Provider,
-	store beads.Store,
+	sessStore beads.SessionStore,
 	dops drainOps,
 	assignedWorkBeads []beads.Bead,
 	rigStores map[string]beads.Store,
@@ -959,6 +962,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	trace *sessionReconcilerTraceCycle,
 	startOptions ...startExecutionOption,
 ) int {
+	// The session class enters typed at the boundary; the generic beads.Store
+	// helpers this function fans out to (heal, persist, drain-ack, worker probes)
+	// take the unwrapped store. It is the same underlying store value, so
+	// behavior is unchanged.
+	store := sessStore.Store
 	// Every tick counts as a cycle, including ticks aborted by context
 	// cancellation after real work (e.g. starts) already executed — the
 	// counter means "cycles", not "cycles that ran to completion". started

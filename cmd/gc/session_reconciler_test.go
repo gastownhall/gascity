@@ -1311,7 +1311,7 @@ func TestFinalizeDrainAckStopPendingSessionsClosesStoppedPoolBeforeAllocation(t 
 	session.Metadata = patch.Apply(session.Metadata)
 
 	finalized := finalizeDrainAckStopPendingSessions(
-		"", env.cfg, env.sp, env.store, nil, []beads.Bead{session},
+		"", env.cfg, env.sp, beads.SessionStore{Store: env.store}, nil, []beads.Bead{session},
 		newFakeDrainOps(), env.dt, nil, env.clk, env.rec, &env.stderr,
 	)
 	if finalized != 1 {
