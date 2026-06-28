@@ -832,6 +832,12 @@
           },
           "type": "object"
         },
+        "upstreams": {
+          "additionalProperties": {
+            "$ref": "#/$defs/UpstreamSpec"
+          },
+          "type": "object"
+        },
         "runtimes": {
           "additionalProperties": {
             "$ref": "#/$defs/PackRuntimeEntry"
@@ -1399,6 +1405,48 @@
       "additionalProperties": false,
       "type": "object",
       "description": "UpstreamEnvBinding is a harness's serving-env contract: the env-var NAMES this CLI reads for the model-serving endpoint and credential."
+    },
+    "UpstreamSpec": {
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Description is a human-readable summary shown in tooling."
+        },
+        "base_url": {
+          "type": "string",
+          "description": "BaseURL is the abstract serving endpoint, rendered onto the harness's\nbase_url env var name (UpstreamEnvBinding.BaseURL)."
+        },
+        "api_key": {
+          "type": "string",
+          "description": "APIKey is the abstract credential, rendered onto the harness's api_key env\nvar name. May be a $VAR ref so the secret stays out of config."
+        },
+        "auth_token": {
+          "type": "string",
+          "description": "AuthToken is an abstract bearer-token credential (an alternative to APIKey\nfor harnesses/upstreams that use a token), rendered onto the harness's\nauth_token env var name."
+        },
+        "base_url_env": {
+          "type": "string",
+          "description": "BaseURLEnv/APIKeyEnv/AuthTokenEnv override the HARNESS binding's env-var\nname for the corresponding abstract field. Needed for GATEWAY harnesses —\none CLI (e.g. opencode) fronting many upstreams where the credential env\nvar is upstream-dependent (GROQ_API_KEY, CEREBRAS_API_KEY, …), so the\nHARNESS has no single binding and the UPSTREAM names its own target.\nPrecedence per field: this override \u003e the harness binding \u003e error."
+        },
+        "api_key_env": {
+          "type": "string",
+          "description": "APIKeyEnv overrides the harness binding's api_key env-var name for this\nupstream (see BaseURLEnv for when this is needed)."
+        },
+        "auth_token_env": {
+          "type": "string",
+          "description": "AuthTokenEnv overrides the harness binding's auth_token env-var name for this\nupstream (see BaseURLEnv)."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env is a harness-specific escape hatch: raw env keys merged AFTER the\nabstract fields render. Values may use $VAR refs."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "UpstreamSpec is a named model-serving endpoint preset (Phase C — the Upstream axis: WHO serves+resolves the model)."
     }
   },
   "title": "Gas City Pack Manifest",

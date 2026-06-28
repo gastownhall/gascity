@@ -2468,7 +2468,7 @@ includes = ["../maintenance"]
 name = "mayor"
 `)
 
-	agents, _, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/gastown/pack.toml"),
 		filepath.Join(dir, "packs/gastown"),
@@ -2515,7 +2515,7 @@ name = "mayor"
 scope = "city"
 `)
 
-	agents, _, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/gastown/pack.toml"),
 		filepath.Join(dir, "packs/gastown"),
@@ -2663,7 +2663,7 @@ name = "mayor"
 `)
 	writeFile(t, dir, "packs/gastown/formulas/.keep", "")
 
-	_, _, _, _, topoDirs, _, _, err := loadPack(
+	_, _, _, _, _, topoDirs, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/gastown/pack.toml"),
 		filepath.Join(dir, "packs/gastown"),
@@ -2707,7 +2707,7 @@ includes = ["../a"]
 name = "beta"
 `)
 
-	_, _, _, _, _, _, _, err := loadPack(
+	_, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/a/pack.toml"),
 		filepath.Join(dir, "packs/a"),
@@ -2733,7 +2733,7 @@ includes = ["../nonexistent"]
 name = "alpha"
 `)
 
-	_, _, _, _, _, _, _, err := loadPack(
+	_, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/main/pack.toml"),
 		filepath.Join(dir, "packs/main"),
@@ -2776,7 +2776,7 @@ command = "main-claude"
 name = "boss"
 `)
 
-	_, _, providers, _, _, _, _, err := loadPack(
+	_, _, providers, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/main/pack.toml"),
 		filepath.Join(dir, "packs/main"),
@@ -2919,7 +2919,7 @@ name = "polecat"
 scope = "rig"
 `)
 
-	agents, _, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{}, filepath.Join(dir, "packs/test/pack.toml"),
 		filepath.Join(dir, "packs/test"), dir, "myrig", nil)
 	if err != nil {
