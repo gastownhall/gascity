@@ -101,6 +101,42 @@ reclaiming. Unlike the full `dolt gc --archive-level=1` procedure above,
 the city — though quiescing writers still makes the GC faster and more
 thorough.
 
+## Compacting a city whose Dolt remote is uncredentialed
+
+Before flattening (and again before pushing) the compactor runs
+`CALL DOLT_FETCH('<remote>')` to reconcile against the remote. Against an
+**uncredentialed git+https remote**, that call does not merely return an error —
+it **crashes the managed Dolt sql-server process**. The shell tolerates a
+non-zero return code ("proceeding from local source of truth") but cannot catch
+a server-process death across the process boundary: the supervisor restarts the
+server seconds later, but by then every remaining database's probe hits
+`connection refused`, so one misconfigured remote takes down compaction for the
+whole city.
+
+If a city's remote is not (yet) credentialed, opt out of the fetch so
+compaction runs entirely from the local source of truth. The post-compaction
+remote push is deferred via a pending-push marker and resumes automatically on a
+later run once the fetch path is healthy:
+
+```bash
+# Skip the fetch for every database this run.
+gc dolt compact --skip-fetch
+
+# Equivalent environment opt-out (e.g. set in a wrapper or on the city).
+GC_DOLT_COMPACT_SKIP_FETCH=1 gc dolt compact
+
+# Skip the fetch only for specific, known-uncredentialed databases (CSV);
+# credentialed databases in the same city still fetch and push normally.
+GC_DOLT_COMPACT_SKIP_FETCH_DBS=<database>[,<database>...] gc dolt compact
+```
+
+Prefer the per-database `GC_DOLT_COMPACT_SKIP_FETCH_DBS` form over the global
+opt-out when only some databases are uncredentialed — the global form disables
+remote sync for every database, including ones whose push would otherwise
+succeed. Do **not** set the global opt-out in the shared `mol-dog-compactor`
+order for the same reason; set the per-database env on the affected city
+instead.
+
 ## Expected Outcome
 
 DoltHub's archive format typically delivers ~30% compression on top of

@@ -130,6 +130,11 @@ set -eu
 #   --only-db <name>   restrict to the named database (repeatable; augments
 #                      GC_DOLT_COMPACT_ONLY_DBS).
 #   --dry-run          print intended actions without mutating Dolt.
+#   --skip-fetch       bypass CALL DOLT_FETCH for every database (sets
+#                      GC_DOLT_COMPACT_SKIP_FETCH=1) — opt-out for cities whose
+#                      remote is uncredentialed, where the fetch would crash the
+#                      managed dolt server. Compaction proceeds from the local
+#                      source of truth and any remote push is deferred.
 gc_only=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -166,12 +171,16 @@ while [ "$#" -gt 0 ]; do
       GC_DOLT_COMPACT_DRY_RUN=1
       shift
       ;;
+    --skip-fetch)
+      GC_DOLT_COMPACT_SKIP_FETCH=1
+      shift
+      ;;
     --)
       shift
       break
       ;;
     -*)
-      printf 'compact: unknown flag %s (supported: --gc-only, --only-db <name>, --dry-run)\n' "$1" >&2
+      printf 'compact: unknown flag %s (supported: --gc-only, --only-db <name>, --dry-run, --skip-fetch)\n' "$1" >&2
       exit 2
       ;;
     *)
@@ -287,6 +296,8 @@ compact_remote="${GC_DOLT_COMPACT_REMOTE:-}"
 dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
 bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
+skip_fetch_input="${GC_DOLT_COMPACT_SKIP_FETCH:-}"
+skip_fetch_dbs="${GC_DOLT_COMPACT_SKIP_FETCH_DBS:-}"
 compact_alert_to="${GC_DOLT_COMPACT_ALERT_TO:-mayor}"
 case "$bare_gc_input" in
   ''|0|false|FALSE|no|NO)
@@ -298,6 +309,20 @@ case "$bare_gc_input" in
   *)
     printf 'compact: invalid GC_DOLT_COMPACT_BARE_GC=%s (must be 1/true/yes or 0/false/no)\n' \
       "$bare_gc_input" >&2
+    exit 2
+    ;;
+esac
+
+case "$skip_fetch_input" in
+  ''|0|false|FALSE|no|NO)
+    skip_fetch=0
+    ;;
+  1|true|TRUE|yes|YES)
+    skip_fetch=1
+    ;;
+  *)
+    printf 'compact: invalid GC_DOLT_COMPACT_SKIP_FETCH=%s (must be 1/true/yes or 0/false/no)\n' \
+      "$skip_fetch_input" >&2
     exit 2
     ;;
 esac
@@ -830,6 +855,26 @@ fetch_remote() {
   db="$1"
   remote="$2"
   dolt_query "$db" "CALL DOLT_FETCH('$remote')"
+}
+
+# skip_fetch_for_db reports whether CALL DOLT_FETCH must be bypassed for the
+# given database. True when the global GC_DOLT_COMPACT_SKIP_FETCH opt-out is set
+# or when <db> appears in the GC_DOLT_COMPACT_SKIP_FETCH_DBS allowlist. The
+# fetch crashes the managed dolt server for uncredentialed remotes (issue
+# #2361), so this opt-out keeps one misconfigured remote from cascading.
+skip_fetch_for_db() {
+  db="$1"
+  if [ "$skip_fetch" = "1" ]; then
+    return 0
+  fi
+  if [ -n "$skip_fetch_dbs" ]; then
+    case ",$skip_fetch_dbs," in
+      *,"$db",*)
+        return 0
+        ;;
+    esac
+  fi
+  return 1
 }
 
 remote_branch_head() {
@@ -1513,6 +1558,18 @@ push_remote_after_compaction() {
     return 1
   }
 
+  if skip_fetch_for_db "$db"; then
+    # skip-fetch opt-out (#2361): the pre-push fetch carries the same managed-
+    # server crash risk as the pre-flatten one (B23 sibling). Skip both the fetch
+    # and the force-push; local compaction already succeeded, so record a pending-
+    # push marker and defer remote sync until credentials are wired.
+    printf 'compact: db=%s remote=%s — skip-fetch set, deferring remote push after local compaction\n' \
+      "$db" "$remote"
+    write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
+      "flatten and full GC succeeded but remote push deferred by skip-fetch" "$local_branch" "$remote_branch" || return 1
+    return 0
+  fi
+
   fetch_rc=0
   fetch_err_tmp=$(mktemp)
   fetch_remote "$db" "$remote" >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
@@ -1977,49 +2034,58 @@ flatten_database() {
     local_branch=$(printf '%s\n' "$refspec_pair" | sed -n '1p')
     remote_branch=$(printf '%s\n' "$refspec_pair" | sed -n '2p')
 
-    printf 'compact: db=%s remote=%s — fetching before flatten...\n' "$db" "$remote"
-    fetch_rc=0
-    fetch_err_tmp=$(mktemp)
-    fetch_remote "$db" "$remote" >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
-    if [ "$fetch_rc" -ne 0 ]; then
-      printf 'compact: db=%s remote=%s fetch failed rc=%s — proceeding from local source of truth\n' \
-        "$db" "$remote" "$fetch_rc" >&2
-      emit_error_file "$db" "$fetch_err_tmp"
+    if skip_fetch_for_db "$db"; then
+      # skip-fetch opt-out (#2361): the fetch crashes the managed dolt server for
+      # uncredentialed remotes. Bypass it and take the same downstream path the
+      # fetch-failure branch takes — remote stays set, expected_remote_head="" and
+      # expected_remote_head_verified=0 (their initialized values), so the push
+      # after local compaction is deferred via a pending-push marker.
+      printf 'compact: db=%s remote=%s — skip-fetch set, proceeding from local source of truth\n' "$db" "$remote"
     else
-      if ! remote_head=$(remote_branch_head "$db" "$remote" "$remote_branch"); then
-        rm -f "$fetch_err_tmp"
-        return 1
-      fi
-      expected_remote_head="$remote_head"
-      if [ -n "$remote_head" ] && [ "$remote_head" != "$head" ]; then
-        case "$remote_head" in
-          *[!A-Za-z0-9]*)
-            printf 'compact: db=%s remote=%s returned invalid HEAD=%s — fail\n' \
-              "$db" "$remote" "$remote_head" >&2
-            rm -f "$fetch_err_tmp"
-            return 1
-            ;;
-        esac
-        if ! in_local=$(commit_exists_in_local_log "$db" "$remote_head"); then
+      printf 'compact: db=%s remote=%s — fetching before flatten...\n' "$db" "$remote"
+      fetch_rc=0
+      fetch_err_tmp=$(mktemp)
+      fetch_remote "$db" "$remote" >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
+      if [ "$fetch_rc" -ne 0 ]; then
+        printf 'compact: db=%s remote=%s fetch failed rc=%s — proceeding from local source of truth\n' \
+          "$db" "$remote" "$fetch_rc" >&2
+        emit_error_file "$db" "$fetch_err_tmp"
+      else
+        if ! remote_head=$(remote_branch_head "$db" "$remote" "$remote_branch"); then
           rm -f "$fetch_err_tmp"
           return 1
         fi
-        if [ "$in_local" != "1" ]; then
-          printf 'compact: db=%s remote=%s remote HEAD=%s is not in local history — proceeding from local source of truth; remote push will remain pending\n' \
-            "$db" "$remote" "$remote_head" >&2
-        else
+        expected_remote_head="$remote_head"
+        if [ -n "$remote_head" ] && [ "$remote_head" != "$head" ]; then
+          case "$remote_head" in
+            *[!A-Za-z0-9]*)
+              printf 'compact: db=%s remote=%s returned invalid HEAD=%s — fail\n' \
+                "$db" "$remote" "$remote_head" >&2
+              rm -f "$fetch_err_tmp"
+              return 1
+              ;;
+          esac
+          if ! in_local=$(commit_exists_in_local_log "$db" "$remote_head"); then
+            rm -f "$fetch_err_tmp"
+            return 1
+          fi
+          if [ "$in_local" != "1" ]; then
+            printf 'compact: db=%s remote=%s remote HEAD=%s is not in local history — proceeding from local source of truth; remote push will remain pending\n' \
+              "$db" "$remote" "$remote_head" >&2
+          else
+            expected_remote_head_verified=1
+            printf 'compact: db=%s remote=%s fetch ok\n' "$db" "$remote"
+          fi
+        elif [ "$remote_head" = "$head" ]; then
           expected_remote_head_verified=1
           printf 'compact: db=%s remote=%s fetch ok\n' "$db" "$remote"
+        else
+          expected_remote_head_verified=0
+          printf 'compact: db=%s remote=%s fetch ok; remote HEAD empty — push will verify after local compaction\n' "$db" "$remote"
         fi
-      elif [ "$remote_head" = "$head" ]; then
-        expected_remote_head_verified=1
-        printf 'compact: db=%s remote=%s fetch ok\n' "$db" "$remote"
-      else
-        expected_remote_head_verified=0
-        printf 'compact: db=%s remote=%s fetch ok; remote HEAD empty — push will verify after local compaction\n' "$db" "$remote"
       fi
+      rm -f "$fetch_err_tmp"
     fi
-    rm -f "$fetch_err_tmp"
   fi
 
   ensure_repair_marker_paths_writable "$db" "$remote" || return 1

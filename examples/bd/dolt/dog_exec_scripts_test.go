@@ -4913,3 +4913,138 @@ func TestCompactScriptStillQuarantinesRowDecreaseWithStableHead(t *testing.T) {
 		t.Fatalf("stable-HEAD row-decrease must block full GC:\n%s", string(data))
 	}
 }
+
+// --skip-fetch opt-out (issue #2361): CALL DOLT_FETCH against an
+// uncredentialed git+https remote crashes the managed dolt sql-server, which
+// the shell cannot catch across the process boundary and which cascades to
+// every remaining database. The only robust prevention is a declarative
+// opt-out that bypasses the fetch entirely for known-uncredentialed databases.
+// These tests assert the ABSENCE of the fetch (not just a green run), exercise
+// both the flag and env forms, the per-db allowlist, the deferred-push
+// contract, and invalid-value validation.
+
+func TestCompactScriptSkipFetchFlagBypassesFetch(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		extraEnv []string
+	}{
+		{name: "flag", args: []string{"--skip-fetch"}},
+		{name: "env", extraEnv: []string{"GC_DOLT_COMPACT_SKIP_FETCH=1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			env := append([]string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"}, tc.extraEnv...)
+			out, err := fixture.runWithArgs(t, "remote_success", tc.args, env...)
+			if err != nil {
+				t.Fatalf("skip-fetch compact should succeed from local source of truth: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "skip-fetch set") {
+				t.Fatalf("output should announce skip-fetch:\n%s", out)
+			}
+			data, err := os.ReadFile(fixture.doltLog)
+			if err != nil {
+				t.Fatalf("read dolt log: %v", err)
+			}
+			log := string(data)
+			if strings.Contains(log, "DOLT_FETCH") {
+				t.Fatalf("skip-fetch must bypass the fetch at every call site:\n%s", log)
+			}
+			for _, want := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
+				if !strings.Contains(log, want) {
+					t.Fatalf("skip-fetch must not block local compaction; missing %s:\n%s", want, log)
+				}
+			}
+		})
+	}
+}
+
+func TestCompactScriptSkipFetchPerDBList(t *testing.T) {
+	// db "beads" is the sole database compacted in remote_success mode, so a
+	// list naming it skips the fetch while a list that omits it does not. This
+	// discriminates listed vs non-listed, not merely "green when listed".
+	t.Run("listed_db_skips_fetch", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		out, err := fixture.run(t, "remote_success",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_SKIP_FETCH_DBS=beads")
+		if err != nil {
+			t.Fatalf("listed-db skip-fetch compact should succeed: %v\n%s", err, out)
+		}
+		data, err := os.ReadFile(fixture.doltLog)
+		if err != nil {
+			t.Fatalf("read dolt log: %v", err)
+		}
+		if strings.Contains(string(data), "DOLT_FETCH") {
+			t.Fatalf("db in skip-fetch list must bypass the fetch:\n%s", data)
+		}
+	})
+	t.Run("unlisted_db_fetches", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		out, err := fixture.run(t, "remote_success",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_SKIP_FETCH_DBS=otherdb")
+		if err != nil {
+			t.Fatalf("unlisted-db compact should succeed: %v\n%s", err, out)
+		}
+		data, err := os.ReadFile(fixture.doltLog)
+		if err != nil {
+			t.Fatalf("read dolt log: %v", err)
+		}
+		if !strings.Contains(string(data), "CALL DOLT_FETCH('origin')") {
+			t.Fatalf("db absent from skip-fetch list must still fetch:\n%s", data)
+		}
+	})
+}
+
+func TestCompactScriptSkipFetchDefersPush(t *testing.T) {
+	// Skipping the fetch means we cannot verify the remote contract, so the
+	// post-compaction push is deferred via a pending-push marker rather than
+	// force-pushed blind — remote sync resumes once credentials are wired.
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "remote_success", []string{"--skip-fetch"},
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("skip-fetch compact should succeed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	if strings.Contains(log, "DOLT_FETCH") {
+		t.Fatalf("skip-fetch must bypass fetch at the pre-push site too:\n%s", log)
+	}
+	if strings.Contains(log, "DOLT_PUSH") {
+		t.Fatalf("skip-fetch must defer the push, not force-push blind:\n%s", log)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	markerData, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("skip-fetch should write a pending-push marker instead of pushing: %v", err)
+	}
+	if !strings.Contains(string(markerData), "remote=origin") {
+		t.Fatalf("pending-push marker should record the deferred remote:\n%s", markerData)
+	}
+}
+
+func TestCompactScriptSkipFetchRejectsInvalidValue(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_SKIP_FETCH=bogus")
+	if err == nil {
+		t.Fatalf("skip-fetch must reject invalid value:\n%s", out)
+	}
+	if !strings.Contains(out, "invalid GC_DOLT_COMPACT_SKIP_FETCH=bogus") {
+		t.Fatalf("skip-fetch output missing invalid-value diagnostic:\n%s", out)
+	}
+	// Invalid env exits during validation, before any dolt query, so the fake
+	// dolt log may not exist. Tolerate that and assert only on presence.
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("invalid skip-fetch value must exit before any DOLT_GC call:\n%s", logData)
+		}
+	}
+}

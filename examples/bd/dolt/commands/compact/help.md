@@ -25,6 +25,14 @@ row preservation, and runs `CALL DOLT_GC('--full')`.
 - `--dry-run` — Print the intended actions without issuing any
   `DOLT_RESET` / `DOLT_COMMIT` / `DOLT_GC`.
 
+- `--skip-fetch` — Bypass `CALL DOLT_FETCH` for every database (sets
+  `GC_DOLT_COMPACT_SKIP_FETCH=1`). Against an uncredentialed git+https remote
+  the fetch crashes the managed Dolt sql-server and cascades to every remaining
+  database, so this opt-out lets compaction proceed from the local source of
+  truth; the post-compaction remote push is deferred via a pending-push marker.
+  To skip only specific known-uncredentialed databases while others fetch and
+  push normally, set `GC_DOLT_COMPACT_SKIP_FETCH_DBS=<db>[,<db>...]` instead.
+
 ## Examples
 
 ```bash
