@@ -269,6 +269,12 @@ type SessionHandle struct {
 	historyRaw     historyGeneration
 	pricing        *pricing.Registry
 	invTelemetryMu sync.Mutex
+	// sidecarDoneID is the session id whose transcript-session sidecar has been
+	// confirmed written, guarded by sidecarMu. The keyed transcript path is stable
+	// once the session key exists, so a matching id lets repeated turn/poll calls
+	// skip both the keyed-path resolve and the write once the sidecar is current.
+	sidecarMu     sync.Mutex
+	sidecarDoneID string
 }
 
 var (

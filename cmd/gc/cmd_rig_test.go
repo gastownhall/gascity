@@ -2867,11 +2867,14 @@ func TestDoRigAdd_AdoptWithBdContractInvokesInitAndHook(t *testing.T) {
 	// init path was invoked with the adopted rig dir.
 	origEnsure := initDirIfReadyEnsureBeadsProvider
 	origInit := initDirIfReadyInitAndHookDir
+	origWait := initDirIfReadyWaitForManagedDolt
 	t.Cleanup(func() {
 		initDirIfReadyEnsureBeadsProvider = origEnsure
 		initDirIfReadyInitAndHookDir = origInit
+		initDirIfReadyWaitForManagedDolt = origWait
 	})
 	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
+	initDirIfReadyWaitForManagedDolt = func(_ string, _ time.Duration) error { return nil }
 
 	var initCalls []string
 	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {
@@ -2927,11 +2930,14 @@ func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *test
 
 	origEnsure := initDirIfReadyEnsureBeadsProvider
 	origInit := initDirIfReadyInitAndHookDir
+	origWait := initDirIfReadyWaitForManagedDolt
 	t.Cleanup(func() {
 		initDirIfReadyEnsureBeadsProvider = origEnsure
 		initDirIfReadyInitAndHookDir = origInit
+		initDirIfReadyWaitForManagedDolt = origWait
 	})
 	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
+	initDirIfReadyWaitForManagedDolt = func(_ string, _ time.Duration) error { return nil }
 
 	var initCalls []string
 	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {

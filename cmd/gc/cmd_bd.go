@@ -79,6 +79,11 @@ rig directory to find the correct .beads database. This command resolves
 the rig automatically from the --rig flag or by detecting the bead prefix
 in the arguments.
 
+Use --rig <name> to pin a specific rig store, or --city <path> to pin the
+city (HQ) store. An explicit --city is a true scope override: it forces the
+city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
+deliberate city-scoped query is never silently downgraded to a rig store.
+
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat <issue-id>" subcommand, which rewrites to
 "update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC now>"
@@ -93,6 +98,7 @@ auto-export behavior, invoke bd directly.`,
   gc bd --rig my-project create "New task"
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
+  gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
   gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
   gc bd release-if-current my-project-abc worker-1`,
 		DisableFlagParsing: true,
@@ -212,7 +218,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs)
+	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "")
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -653,8 +659,8 @@ func extractRigFlag(args []string) (string, []string) {
 }
 
 // resolveBdScopeTarget determines the canonical scope root for a bd command.
-// Priority: explicit rig name > bead prefix auto-detection > GC_RIG env > enclosing rig > city root.
-func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string) (execStoreTarget, error) {
+// Priority: explicit rig name > explicit city > bead prefix auto-detection > GC_RIG env > enclosing rig > city root.
+func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string, cityExplicit bool) (execStoreTarget, error) {
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if rigName != "" {
 		rig, ok := rigByName(cfg, rigName)
@@ -668,6 +674,16 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	}
 
 	cityTarget := bdCityScopeTarget(cityPath, cfg)
+
+	// An explicit --city pins the city store, symmetric with explicit --rig:
+	// a deliberate city scope must never be silently downgraded to a rig store
+	// by bead-prefix / GC_RIG-env / cwd auto-detection below. Without this,
+	// `gc bd --city <path> list` returned cwd/rig-scoped results, mis-scoping
+	// scripts that trusted the flag. (gastownhall/gascity#3410)
+	if cityExplicit {
+		return cityTarget, nil
+	}
+
 	cityPrefix := config.EffectiveHQPrefix(cfg)
 	if cityPrefix != "" {
 		for _, arg := range args {

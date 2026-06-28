@@ -156,6 +156,37 @@ func TestLintEmitsLoaderWarnings(t *testing.T) {
 	}
 }
 
+func TestLintRejectsNamedSessionBackedByPoolControlledAgent(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "bad-pool-named"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+min_active_sessions = 0
+max_active_sessions = 3
+
+[[named_session]]
+template = "worker"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc lint succeeded, want named-session pool conflict\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, `named_session "worker" targets pool-controlled agent "worker"`) {
+		t.Fatalf("stderr missing named-session pool conflict:\n%s", errText)
+	}
+}
+
 func TestLintPromptDiscoverySkipsIgnoredDirs(t *testing.T) {
 	packDir := t.TempDir()
 	writeLintPack(t, packDir, "skip-dirs", "worker", "prompts/worker.template.md")

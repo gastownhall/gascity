@@ -261,7 +261,7 @@ func isWorkflowPolicyMetadata(metadata map[string]string) bool {
 		return false
 	}
 	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow ||
-		metadata[beadmeta.FormulaContractMetadataKey] == "graph.v2" ||
+		metadata[beadmeta.FormulaContractMetadataKey] == beadmeta.FormulaContractGraphV2 ||
 		strings.TrimSpace(metadata[beadmeta.RootBeadIDMetadataKey]) != ""
 }
 

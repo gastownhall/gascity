@@ -48,6 +48,26 @@ type managedDoltStartedProcess struct {
 	StartIdentity string
 }
 
+// defaultManagedDoltBindHost is the listener host a managed dolt sql-server
+// binds when no explicit host is configured. Loopback by default: the work
+// ledger must not listen on a wildcard (LAN-reachable) interface unless the
+// operator explicitly opts in with GC_DOLT_HOST=0.0.0.0. Distinct from
+// defaultManagedDoltHost (bd_env.go), which is the client-side connect
+// default.
+const defaultManagedDoltBindHost = "127.0.0.1"
+
+// normalizeManagedDoltBindHost resolves the listener host for a managed dolt
+// sql-server. Blank means "no explicit choice" and resolves to the loopback
+// default; any explicit value — including the 0.0.0.0 wildcard opt-out for
+// multi-host deployments — is preserved.
+func normalizeManagedDoltBindHost(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return defaultManagedDoltBindHost
+	}
+	return host
+}
+
 const (
 	managedDoltTestModeEnv      = "GC_MANAGED_DOLT_TEST_MODE"
 	managedDoltTestParentPIDEnv = "GC_MANAGED_DOLT_TEST_PARENT_PID"
@@ -130,9 +150,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	if err != nil || portNum <= 0 {
 		return managedDoltStartReport{}, fmt.Errorf("invalid port %q", port)
 	}
-	if strings.TrimSpace(host) == "" {
-		host = "0.0.0.0"
-	}
+	host = normalizeManagedDoltBindHost(host)
 	if strings.TrimSpace(user) == "" {
 		user = "root"
 	}
@@ -322,8 +340,9 @@ func resolveManagedDoltStartAddressInUseRetryWindow(cityPath string) time.Durati
 // became free within the window. A non-positive retryWindow returns false
 // immediately (no wait).
 //
-// The host argument matches the host dolt will bind to (typically "0.0.0.0"
-// in production); using the same host for the probe and the bind avoids
+// The host argument matches the host dolt will bind to (typically
+// "127.0.0.1" in production); using the same host for the probe and the
+// bind avoids
 // false-positive availability reports caused by interface-specific bind
 // states. The poll interval is shrunk to the retry window when the window is
 // shorter than the default 2s, so a sub-2s window still gets one check
@@ -374,13 +393,15 @@ var managedDoltPortAvailableFn = managedDoltPortAvailableForHost
 // bound by a Go net.Listen call. Mirrors managedDoltPortAvailable's check but
 // uses the configured host instead of forcing 127.0.0.1, so the probe is
 // faithful to what dolt's bind will attempt (interface-specific TIME_WAIT
-// state on a wildcard bind is not seen by a localhost probe). A blank or "*"
-// host is normalized to "0.0.0.0".
+// state on a wildcard bind is not seen by a localhost probe). A "*" host is
+// an explicit wildcard spelling and normalizes to "0.0.0.0"; a blank host
+// normalizes to the loopback bind default, matching
+// startManagedDoltProcessWithOptions.
 func managedDoltPortAvailableForHost(host string, port int) bool {
-	host = strings.TrimSpace(host)
-	if host == "" || host == "*" {
+	if strings.TrimSpace(host) == "*" {
 		host = "0.0.0.0"
 	}
+	host = normalizeManagedDoltBindHost(host)
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		return false

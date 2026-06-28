@@ -322,6 +322,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// reclaimed and dolt-backup.json registrations pointing at deleted
 	// paths (ga-yfbs28).
 	register(doctor.NewBdBackupStateCheckForConfig(cityPath, cfg, cfgErr))
+	// Backup freshness: a configured bd backup that silently stopped syncing
+	// looks healthy to every other backup check while its recovery point ages
+	// out — the only surviving backup can be weeks stale before anyone notices.
+	register(doctor.NewBdBackupFreshnessCheckForConfig(cityPath, cfg, cfgErr))
 	// Worktree checks deliberately run even when cfgErr != nil — they
 	// only need the city path, and a broken city.toml is exactly when
 	// silent disk-fill is most likely. The zero-value DoctorConfig

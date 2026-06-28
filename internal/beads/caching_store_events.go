@@ -7,6 +7,8 @@ import (
 	"maps"
 	"slices"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // ApplyEvent updates the cache from a bd hook event. Call this when the
@@ -660,7 +662,19 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 		c.recordProblem(fmt.Sprintf("marshal %s notification", eventType), err)
 		return
 	}
-	c.onChange(eventType, b.ID, payload)
+	// Resolve the opaque run/session correlation ids from the bead's metadata at
+	// the record site and pass ONLY those two ids to onChange — never the
+	// free-form metadata map. The run-chain (workflow_id || molecule_id ||
+	// gc.root_bead_id || bead.ID) always resolves to a non-empty id since b.ID is
+	// non-empty; session id is a direct, optional metadata read. Both are
+	// safeRef-gated again at the export boundary.
+	runID := beadmeta.ResolveRunID(b.Metadata, b.ID, "")
+	sessionID := b.Metadata[beadmeta.SessionIDMetadataKey]
+	// step_id is the acting work bead the lifecycle event is about: a work/dispatch
+	// bead carries its own gc.step_id, so a bead.created/closed on one stamps that
+	// step. Non-work beads (sessions, mail, …) carry none → empty, omitted at export.
+	stepID := b.Metadata[beadmeta.StepIDMetadataKey]
+	c.onChange(eventType, b.ID, runID, sessionID, stepID, payload)
 }
 
 type cacheNotification struct {

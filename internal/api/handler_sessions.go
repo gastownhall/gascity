@@ -30,6 +30,7 @@ type sessionResponse struct {
 	Provider    string `json:"provider"`
 	DisplayName string `json:"display_name,omitempty"`
 	SessionName string `json:"session_name"`
+	WorkDir     string `json:"work_dir,omitempty"`
 	CreatedAt   string `json:"created_at"`
 	LastActive  string `json:"last_active,omitempty"`
 	// LastNudgeDeliveredAt is the most recent successful nudge delivery
@@ -102,6 +103,7 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		Provider:    provider,
 		DisplayName: displayName,
 		SessionName: info.SessionName,
+		WorkDir:     info.WorkDir,
 		CreatedAt:   info.CreatedAt.Format(time.RFC3339),
 		Attached:    info.Attached,
 		Rig:         rig,

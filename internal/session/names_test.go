@@ -308,6 +308,64 @@ func TestEnsureSessionNameAvailable_RejectsClosedAdHocSession(t *testing.T) {
 	}
 }
 
+// TestEnsureSessionNameAvailable_AllowsClosedNamedSessionByIdentity reproduces
+// ga-841: a closed configured named session bead that carries the
+// configured_named_identity but is MISSING the boolean configured_named_session
+// flag must not permanently reserve its runtime session name. Such stale beads
+// (closed by a path that only retained the identity, or predating the flag)
+// otherwise block on-demand respawn with ErrSessionNameExists ("already belongs
+// to <closed-id>"), which is exactly the refinery no-respawn class in ga-n2d.
+func TestEnsureSessionNameAvailable_AllowsClosedNamedSessionByIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "gascity--gastown__refinery",
+			"configured_named_identity": "gastown.refinery",
+			// configured_named_session flag intentionally absent.
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// A closed configured named session — recognized by its identity even
+	// without the boolean flag — releases its runtime name so the reconciler
+	// can materialize a fresh canonical bead.
+	if err := ensureSessionNameAvailable(store, "gascity--gastown__refinery"); err != nil {
+		t.Fatalf("ensureSessionNameAvailable(closed named-by-identity) = %v, want nil", err)
+	}
+}
+
+// TestEnsureSessionNameAvailable_RejectsLiveNamedSessionByIdentity guards the
+// no-regression requirement of ga-841: the release only applies to CLOSED
+// beads. A live (open) configured named session must still own its runtime
+// name so two live sessions cannot collide.
+func TestEnsureSessionNameAvailable_RejectsLiveNamedSessionByIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+
+	if _, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "gascity--gastown__refinery",
+			"configured_named_identity": "gastown.refinery",
+			"configured_named_session":  "true",
+		},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := ensureSessionNameAvailable(store, "gascity--gastown__refinery"); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailable(live named) = %v, want %v", err, ErrSessionNameExists)
+	}
+}
+
 func TestEnsureAliasAvailableWithConfig_AllowsLiveAliasHistoryReuse(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := store.Create(beads.Bead{

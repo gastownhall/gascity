@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -83,6 +84,30 @@ type panicMetadataBatchStore struct {
 
 func (s *panicMetadataBatchStore) SetMetadataBatch(string, map[string]string) error {
 	panic("metadata batch panic")
+}
+
+func TestSessionTriggerBeadEnv(t *testing.T) {
+	session := &beads.Bead{
+		ID: "sess-1",
+		Metadata: map[string]string{
+			beadmeta.TriggerBeadIDMetadataKey:       "gp-59q",
+			beadmeta.TriggerBeadStoreRefMetadataKey: "rig:gascity-packs",
+		},
+	}
+
+	env := sessionTriggerBeadEnv(session)
+	if got := env["GC_TRIGGER_BEAD_ID"]; got != "gp-59q" {
+		t.Fatalf("GC_TRIGGER_BEAD_ID = %q, want gp-59q", got)
+	}
+	if got := env["GC_TRIGGER_WORK_BEAD_ID"]; got != "gp-59q" {
+		t.Fatalf("GC_TRIGGER_WORK_BEAD_ID = %q, want gp-59q", got)
+	}
+	if got := env["GC_TRIGGER_BEAD_STORE_REF"]; got != "rig:gascity-packs" {
+		t.Fatalf("GC_TRIGGER_BEAD_STORE_REF = %q, want rig:gascity-packs", got)
+	}
+	if got := env["GC_TRIGGER_WORK_STORE_REF"]; got != "rig:gascity-packs" {
+		t.Fatalf("GC_TRIGGER_WORK_STORE_REF = %q, want rig:gascity-packs", got)
+	}
 }
 
 type getErrorStore struct {

@@ -43,12 +43,14 @@ const (
 	AttemptMetadataKey                   = "gc.attempt"
 	BondMetadataKey                      = "gc.bond"
 	BondVarsMetadataKey                  = "gc.bond_vars"
+	BrainParentSIDMetadataKey            = "gc.brain_parent_sid"
 	CheckModeMetadataKey                 = "gc.check_mode"
 	CheckPathMetadataKey                 = "gc.check_path"
 	CheckTimeoutMetadataKey              = "gc.check_timeout"
 	CityPathMetadataKey                  = "gc.city_path"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
+	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
 	ControlEpochMetadataKey              = "gc.control_epoch"
 	ControlForMetadataKey                = "gc.control_for"
 	ControlQuarantineReasonMetadataKey   = "gc.control_quarantine_reason"
@@ -57,6 +59,13 @@ const (
 	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
+	CurrentRunIDMetadataKey              = "gc.current_run_id"
+	// ActiveWorkBeadMetadataKey is the session bead's current-pointer to the STEP it
+	// is executing — the work bead's bare gc.step_id (NOT its namespaced bead id),
+	// stamped at the claim hook and read at the usage record site to populate
+	// usage.Fact.StepID. Empty when the current work has no formula step (ad-hoc /
+	// manual), matching the events plane. See engdocs/design/active-work-bead-v0.md.
+	ActiveWorkBeadMetadataKey            = "gc.active_work_bead"
 	DeferredAssigneeMetadataKey          = "gc.deferred_assignee"
 	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
@@ -119,13 +128,13 @@ const (
 	OutcomeMetadataKey                   = "gc.outcome"
 	OutputJSONMetadataKey                = "gc.output_json"
 	OutputJSONRequiredMetadataKey        = "gc.output_json_required"
-	PRURLMetadataKey                     = "gc.pr_url"
 	ParentConvoyIDMetadataKey            = "gc.parent_convoy_id"
 	PartialFragmentMetadataKey           = "gc.partial_fragment"
 	PartialRetryMetadataKey              = "gc.partial_retry"
+	PackMetadataKey                      = "gc.pack"
+	PackRootMetadataKey                  = "gc.pack_root"
+	PackWorkspaceMetadataKey             = "gc.pack_workspace"
 	PerDispatchModelMetadataKey          = "gc.per_dispatch_model"
-	PhaseHistoryMetadataKey              = "gc.phase_history"
-	PhaseMetadataKey                     = "gc.phase"
 	RalphStepIDMetadataKey               = "gc.ralph_step_id"
 	ReasoningMetadataKey                 = "gc.reasoning"
 	RequiredArtifactMetadataKey          = "gc.required_artifact"
@@ -159,12 +168,11 @@ const (
 	StepTimeoutMetadataKey               = "gc.step_timeout"
 	SyntheticKindMetadataKey             = "gc.synthetic_kind"
 	SyntheticMetadataKey                 = "gc.synthetic"
-	TallyModeMetadataKey                 = "gc.tally_mode"
-	TallyResultMetadataKey               = "gc.tally_result"
 	TemplateMetadataKey                  = "gc.template"
 	TerminalMetadataKey                  = "gc.terminal"
+	TriggerBeadIDMetadataKey             = "gc.trigger_bead_id"
+	TriggerBeadStoreRefMetadataKey       = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey                 = "gc.truncated"
-	VoteFieldMetadataKey                 = "gc.vote_field"
 	WorkBranchMetadataKey                = "gc.work_branch"
 	WorkCommitMetadataKey                = "gc.work_commit"
 	WorkDirMetadataKey                   = "gc.work_dir"
@@ -221,6 +229,15 @@ const (
 	LegacyWorkDirMetadataKey = "work_dir"
 )
 
+// OptionMetadataPrefix is the dynamic non-"gc."-prefixed key prefix under
+// which provider option choices are stored as opt_<OptionsSchema key> (e.g.
+// opt_model, opt_effort) on session and work beads. The suffix is open-world
+// (a pack-authored OptionsSchema key), so it is declared as a prefix, not
+// enumerated — the non-gc sibling of FormulaVarPrefix. Like the directory
+// keys above, it is not in KnownMetadataPrefixes because the drift guard's
+// key-shape rule only covers the gc. namespace.
+const OptionMetadataPrefix = "opt_"
+
 // KnownMetadataKeys lists every engine-owned bead-metadata key this package
 // declares. The guard test asserts every gc.* metadata literal used in non-test
 // Go resolves to a member of this slice (or a KnownMetadataPrefixes entry).
@@ -229,6 +246,7 @@ var KnownMetadataKeys = []string{
 	AttemptMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,
+	BrainParentSIDMetadataKey,
 	CheckModeMetadataKey,
 	CheckPathMetadataKey,
 	CheckTimeoutMetadataKey,
@@ -243,6 +261,8 @@ var KnownMetadataKeys = []string{
 	ControllerErrorClassMetadataKey,
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
+	CurrentRunIDMetadataKey,
+	ActiveWorkBeadMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
@@ -305,13 +325,13 @@ var KnownMetadataKeys = []string{
 	OutcomeMetadataKey,
 	OutputJSONMetadataKey,
 	OutputJSONRequiredMetadataKey,
-	PRURLMetadataKey,
 	ParentConvoyIDMetadataKey,
 	PartialFragmentMetadataKey,
 	PartialRetryMetadataKey,
+	PackMetadataKey,
+	PackRootMetadataKey,
+	PackWorkspaceMetadataKey,
 	PerDispatchModelMetadataKey,
-	PhaseHistoryMetadataKey,
-	PhaseMetadataKey,
 	RalphStepIDMetadataKey,
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
@@ -345,12 +365,11 @@ var KnownMetadataKeys = []string{
 	StepTimeoutMetadataKey,
 	SyntheticKindMetadataKey,
 	SyntheticMetadataKey,
-	TallyModeMetadataKey,
-	TallyResultMetadataKey,
 	TemplateMetadataKey,
 	TerminalMetadataKey,
+	TriggerBeadIDMetadataKey,
+	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
-	VoteFieldMetadataKey,
 	WorkBranchMetadataKey,
 	WorkCommitMetadataKey,
 	WorkDirMetadataKey,

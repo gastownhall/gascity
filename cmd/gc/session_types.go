@@ -72,18 +72,20 @@ type idleProbeState struct {
 
 // drainTracker manages in-memory drain states for all sessions.
 type drainTracker struct {
-	mu              sync.Mutex
-	drains          map[string]*drainState     // session bead ID -> drain state
-	idleProbes      map[string]*idleProbeState // session bead ID -> async idle probe
-	resetStalls     map[string]bool            // session bead ID -> reset stall event emitted
-	idleProbeCursor int
+	mu               sync.Mutex
+	drains           map[string]*drainState     // session bead ID -> drain state
+	idleProbes       map[string]*idleProbeState // session bead ID -> async idle probe
+	resetStalls      map[string]bool            // session bead ID -> reset stall event emitted
+	suspendDeferrals map[string]int             // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
+	idleProbeCursor  int
 }
 
 func newDrainTracker() *drainTracker {
 	return &drainTracker{
-		drains:      make(map[string]*drainState),
-		idleProbes:  make(map[string]*idleProbeState),
-		resetStalls: make(map[string]bool),
+		drains:           make(map[string]*drainState),
+		idleProbes:       make(map[string]*idleProbeState),
+		resetStalls:      make(map[string]bool),
+		suspendDeferrals: make(map[string]int),
 	}
 }
 
@@ -103,6 +105,38 @@ func (dt *drainTracker) remove(beadID string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 	delete(dt.drains, beadID)
+	delete(dt.suspendDeferrals, beadID)
+}
+
+// bumpSuspendDeferral increments and returns the consecutive-tick count for a
+// named session that is suspend-drain-eligible because its configured spec is
+// absent this tick. The reconciler requires namedSuspendConfirmTicks confirming
+// ticks before actually draining, so a transient namedSessionSpecs enumeration
+// collapse during boot (the spec vanishes for one tick and reappears) does not
+// spuriously drain a named session and lose its in-session context (#3630).
+func (dt *drainTracker) bumpSuspendDeferral(beadID string) int {
+	if dt == nil {
+		return 0
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.suspendDeferrals == nil {
+		dt.suspendDeferrals = make(map[string]int)
+	}
+	dt.suspendDeferrals[beadID]++
+	return dt.suspendDeferrals[beadID]
+}
+
+// clearSuspendDeferral resets the deferral counter once a named session's spec
+// is present again (preserved or desired), so a later genuine removal starts a
+// fresh confirmation window rather than draining on its first absent tick.
+func (dt *drainTracker) clearSuspendDeferral(beadID string) {
+	if dt == nil {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	delete(dt.suspendDeferrals, beadID)
 }
 
 func (dt *drainTracker) all() map[string]*drainState {
@@ -226,6 +260,15 @@ const (
 	// survives before being killed. Prevents killing sessions that are
 	// slow to register their beads.
 	orphanGraceTicks = 3
+
+	// namedSuspendConfirmTicks is how many consecutive reconciler ticks a
+	// named session must be observed as suspend-drain-eligible (its configured
+	// spec absent from the desired set) before it is actually drained. A
+	// namedSessionSpecs enumeration collapse during boot can drop a spec for a
+	// single tick and restore it on the next; suspend-class drains are
+	// revertible, so a 1-tick confirmation buffer is safe and cheap and
+	// prevents spurious context-losing respawns (#3630).
+	namedSuspendConfirmTicks = 2
 
 	// defaultDrainTimeout is the default time allowed for graceful drain
 	// before force-stopping a session.

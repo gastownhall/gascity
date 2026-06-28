@@ -79,6 +79,24 @@ var (
 	supervisorSystemctlUserAvailable = func() bool {
 		return supervisorSystemctlRun("--user", "show-environment") == nil
 	}
+	// supervisorLoginctlRun enables systemd user lingering via loginctl.
+	// Exposed as a package var so tests stub it instead of spawning
+	// loginctl. Enabling linger for one's own account is permitted without
+	// root on default polkit configurations.
+	supervisorLoginctlRun = func(args ...string) error {
+		return exec.Command("loginctl", args...).Run()
+	}
+	// supervisorLingerEnabled reports whether systemd lingering is already
+	// enabled for the given user, so a reinstall does not re-run
+	// enable-linger or warn spuriously. Returns false when loginctl is
+	// unavailable or the user manager cannot be queried.
+	supervisorLingerEnabled = func(user string) bool {
+		out, err := exec.Command("loginctl", "show-user", user, "--property=Linger", "--value").Output()
+		if err != nil {
+			return false
+		}
+		return strings.TrimSpace(string(out)) == "yes"
+	}
 	supervisorRunningPreserveSignalReady                = runningSupervisorPreserveSignalReady
 	supervisorProcRoot                                  = "/proc"
 	supervisorProcReadDir                               = os.ReadDir
@@ -2016,8 +2034,36 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 		_ = supervisorSystemctlRun("--user", "daemon-reload")
 	}
 
+	ensureSupervisorLinger(stdout, stderr)
+
 	fmt.Fprintf(stdout, "Installed systemd service: %s\n", path) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// ensureSupervisorLinger enables systemd user lingering for the current
+// account so the installed --user supervisor unit (WantedBy=default.target)
+// survives logout and starts at boot without an interactive login. Without
+// linger, systemd-logind tears down the user manager on the last logout and
+// stops the supervisor, freezing all claimed work until the next login
+// (gascity#3683). Linger is an enhancement layered on an already-successful
+// install: when it cannot be enabled (e.g. restrictive polkit, unresolved
+// user) this loudly warns with the sudo remediation rather than failing the
+// install.
+func ensureSupervisorLinger(stdout, stderr io.Writer) {
+	u, err := currentUserForSystemdHint()
+	if err != nil || strings.TrimSpace(u.Username) == "" {
+		fmt.Fprintf(stderr, "gc supervisor install: warning: could not resolve the current user to enable systemd lingering; the supervisor will stop on logout and freeze claimed work until next login. Enable it manually: 'sudo loginctl enable-linger <your-user>'.\n") //nolint:errcheck // best-effort stderr
+		return
+	}
+	user := u.Username
+	if supervisorLingerEnabled(user) {
+		return
+	}
+	if err := supervisorLoginctlRun("enable-linger", user); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: warning: could not enable systemd lingering for %s (%v); the supervisor will stop on logout and freeze claimed work until next login. Enable it manually: 'sudo loginctl enable-linger %s'.\n", user, err, user) //nolint:errcheck // best-effort stderr
+		return
+	}
+	fmt.Fprintf(stdout, "Enabled systemd lingering for %s so the supervisor survives logout.\n", user) //nolint:errcheck // best-effort stdout
 }
 
 // currentUsernameForSystemdHint returns the current username for use in the

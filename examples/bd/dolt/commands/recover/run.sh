@@ -15,10 +15,12 @@ PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 
 beads_bd="$GC_BEADS_BD_SCRIPT"
 
-# Reject remote servers — can't manage remote dolt processes.
+# Reject remote servers — can't manage remote dolt processes. Local hosts
+# include 0.0.0.0, the explicit wildcard opt-out for the managed server's
+# bind (the default bind is 127.0.0.1).
 if [ -n "$GC_DOLT_HOST" ]; then
   case "$GC_DOLT_HOST" in
-    127.0.0.1|localhost|"::1"|"[::1]") ;; # local is fine
+    127.0.0.1|0.0.0.0|localhost|"::1"|"[::1]") ;; # local is fine
     *) echo "gc dolt recover: not supported for remote dolt servers" >&2; exit 1 ;;
   esac
 fi

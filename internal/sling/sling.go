@@ -134,17 +134,26 @@ type SlingDeps struct {
 	// DirectSessionResolver optionally materializes direct graph assignee
 	// targets to concrete session bead IDs.
 	DirectSessionResolver func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error)
+	// ControlDispatcherRuntimeMissing reports whether the named control-
+	// dispatcher agent's session is asleep with reason runtime-missing. It
+	// gates the rig→city control-dispatcher fallback on the sling graph-
+	// routing path (#3454); nil disables the fallback. Forwarded verbatim
+	// into graphroute.Deps so a freshly slung graph.v2 molecule binds its
+	// auto-injected workflow-finalize sink to the city dispatcher when the
+	// rig-local one has decayed, instead of a dead session.
+	ControlDispatcherRuntimeMissing func(qualifiedName string) bool
 }
 
 // graphrouteDeps projects the graph-routing subset of SlingDeps into
 // graphroute.Deps. Store, city name, and config travel as explicit
-// parameters on every graphroute entry point, so only these three
-// fields cross the boundary.
+// parameters on every graphroute entry point, so only these fields cross
+// the boundary.
 func (deps SlingDeps) graphrouteDeps() graphroute.Deps {
 	return graphroute.Deps{
-		CityPath:              deps.CityPath,
-		Resolver:              deps.Resolver,
-		DirectSessionResolver: deps.DirectSessionResolver,
+		CityPath:                        deps.CityPath,
+		Resolver:                        deps.Resolver,
+		DirectSessionResolver:           deps.DirectSessionResolver,
+		ControlDispatcherRuntimeMissing: deps.ControlDispatcherRuntimeMissing,
 	}
 }
 
@@ -1224,7 +1233,7 @@ func IsGraphWorkflowAttachment(store beads.Store, rootID string) bool {
 	if err != nil {
 		return false
 	}
-	return b.Metadata[beadmeta.KindMetadataKey] == "workflow" && b.Metadata[beadmeta.FormulaContractMetadataKey] == "graph.v2"
+	return b.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow && b.Metadata[beadmeta.FormulaContractMetadataKey] == beadmeta.FormulaContractGraphV2
 }
 
 // InstantiateSlingFormula compiles and instantiates a formula, applying
@@ -1448,7 +1457,7 @@ func stampGraphV2RootMetadata(recipe *formula.Recipe, formulaName string, vars m
 	}
 	root.Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
 	for i := range recipe.Steps {
-		if recipe.Steps[i].Metadata[beadmeta.KindMetadataKey] != "drain" {
+		if recipe.Steps[i].Metadata[beadmeta.KindMetadataKey] != beadmeta.KindDrain {
 			continue
 		}
 		if recipe.Steps[i].Metadata == nil {
@@ -1488,7 +1497,7 @@ func privatizeAttachedRootOnlyWisp(recipe *formula.Recipe, sourceBeadID string) 
 		return
 	}
 	root := &recipe.Steps[0]
-	if root.Metadata[beadmeta.KindMetadataKey] != "wisp" {
+	if root.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWisp {
 		return
 	}
 	root.Type = "molecule"

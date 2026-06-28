@@ -189,6 +189,7 @@
               "guides/registry-showcase",
               "guides/gastown-config-recipes",
               "guides/using-json-from-gc",
+              "guides/connected-clients",
               "guides/multi-agent-engineering-environment"
             ]
           }

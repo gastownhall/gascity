@@ -953,6 +953,97 @@ func TestNativeDoltStoreTxAppliesCallbackWrites(t *testing.T) {
 	}
 }
 
+// commitCountingMemStorage counts how many RunInTransaction (i.e. DOLT_COMMIT)
+// boundaries a sequence of store writes crosses.
+type commitCountingMemStorage struct {
+	*nativeDoltMemStorage
+	commits int
+}
+
+func (s *commitCountingMemStorage) RunInTransaction(ctx context.Context, msg string, fn func(beadslib.Transaction) error) error {
+	s.commits++
+	return s.nativeDoltMemStorage.RunInTransaction(ctx, msg, fn)
+}
+
+func TestNativeDoltStoreTxCoalescesWritesIntoSingleCommit(t *testing.T) {
+	counting := &commitCountingMemStorage{nativeDoltMemStorage: newNativeDoltMemStorage()}
+	store := newNativeDoltStoreForTest(counting)
+
+	seed, err := store.Create(Bead{Title: "seed", Metadata: map[string]string{"k": "v"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	commitsBeforeTx := counting.commits
+	var membershipID string
+	if err := store.Tx("coalesced bind", func(tx Tx) error {
+		created, err := tx.Create(Bead{Title: "membership", Metadata: map[string]string{"role": "member"}})
+		if err != nil {
+			return err
+		}
+		membershipID = created.ID
+		if err := tx.SetMetadataBatch(seed.ID, map[string]string{"touched": "yes"}); err != nil {
+			return err
+		}
+		if err := tx.Update(seed.ID, UpdateOpts{Metadata: map[string]string{"phase": "bound"}}); err != nil {
+			return err
+		}
+		return tx.Close(membershipID)
+	}); err != nil {
+		t.Fatalf("Tx: %v", err)
+	}
+
+	if got := counting.commits - commitsBeforeTx; got != 1 {
+		t.Fatalf("Tx with 4 writes issued %d commits, want exactly 1", got)
+	}
+
+	gotSeed, err := store.Get(seed.ID)
+	if err != nil {
+		t.Fatalf("Get seed: %v", err)
+	}
+	if gotSeed.Metadata["touched"] != "yes" || gotSeed.Metadata["phase"] != "bound" || gotSeed.Metadata["k"] != "v" {
+		t.Fatalf("seed metadata = %#v, want merged tx writes", gotSeed.Metadata)
+	}
+	gotMembership, err := store.Get(membershipID)
+	if err != nil {
+		t.Fatalf("Get membership: %v", err)
+	}
+	if gotMembership.Status != "closed" {
+		t.Fatalf("membership status = %q, want closed", gotMembership.Status)
+	}
+	if gotMembership.Metadata["role"] != "member" {
+		t.Fatalf("membership metadata = %#v, want created-in-tx fields", gotMembership.Metadata)
+	}
+}
+
+// TestNativeDoltStoreTxRollsBackOnError verifies the coalesced transaction is
+// atomic: a failure mid-callback leaves none of the writes committed.
+func TestNativeDoltStoreTxRollsBackOnError(t *testing.T) {
+	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+	seed, err := store.Create(Bead{Title: "seed", Metadata: map[string]string{"phase": "initial"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	sentinel := errors.New("boom")
+	if err := store.Tx("rollback", func(tx Tx) error {
+		if err := tx.SetMetadataBatch(seed.ID, map[string]string{"phase": "mutated"}); err != nil {
+			return err
+		}
+		return sentinel
+	}); !errors.Is(err, sentinel) {
+		t.Fatalf("Tx error = %v, want sentinel", err)
+	}
+
+	got, err := store.Get(seed.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["phase"] != "initial" {
+		t.Fatalf("phase = %q, want initial (rolled back)", got.Metadata["phase"])
+	}
+}
+
 func TestNativeDoltStoreDependencyRoundTrip(t *testing.T) {
 	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
 	parent, err := store.Create(Bead{Title: "dependency parent"})
@@ -1583,9 +1674,11 @@ func assertNativeDependency(t *testing.T, deps []Dep, issueID, dependsOnID, depT
 }
 
 type nativeDoltTransactionTestStorage interface {
+	CreateIssue(context.Context, *beadslib.Issue, string) error
 	CreateIssues(context.Context, []*beadslib.Issue, string) error
 	GetIssue(context.Context, string) (*beadslib.Issue, error)
 	UpdateIssue(context.Context, string, map[string]interface{}, string) error
+	CloseIssue(context.Context, string, string, string, string) error
 	AddLabel(context.Context, string, string, string) error
 	RemoveLabel(context.Context, string, string, string) error
 	AddDependency(context.Context, *beadslib.Dependency, string) error
@@ -1598,8 +1691,16 @@ type nativeDoltTransactionForTest struct {
 	storage nativeDoltTransactionTestStorage
 }
 
+func (tx nativeDoltTransactionForTest) CreateIssue(ctx context.Context, issue *beadslib.Issue, actor string) error {
+	return tx.storage.CreateIssue(ctx, issue, actor)
+}
+
 func (tx nativeDoltTransactionForTest) CreateIssues(ctx context.Context, issues []*beadslib.Issue, actor string) error {
 	return tx.storage.CreateIssues(ctx, issues, actor)
+}
+
+func (tx nativeDoltTransactionForTest) CloseIssue(ctx context.Context, id, reason, actor, session string) error {
+	return tx.storage.CloseIssue(ctx, id, reason, actor, session)
 }
 
 func (tx nativeDoltTransactionForTest) GetIssue(ctx context.Context, id string) (*beadslib.Issue, error) {

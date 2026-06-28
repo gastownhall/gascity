@@ -5,6 +5,13 @@ import (
 	"time"
 )
 
+// CurrentBeadIDKey records the work bead a session is currently processing.
+// The reconciler writes it whenever a session is brought up for a specific
+// work bead. ComputeAwakeSet uses it to detect when an alive session has been
+// reassigned to a different bead — the trigger for a fresh-wake conversation
+// cycle under wake_mode=fresh.
+const CurrentBeadIDKey = "currently_processing_bead_id"
+
 var freshWakeConversationResetKeys = []string{
 	"session_key",
 	"started_config_hash",

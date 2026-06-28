@@ -566,7 +566,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if opts.Title != "" {
 				b.Title = formula.Substitute(opts.Title, vars)
 			}
-			if opts.ParentID != "" && step.Metadata[beadmeta.KindMetadataKey] != "workflow" {
+			if opts.ParentID != "" && step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflow {
 				b.ParentID = opts.ParentID
 			}
 			if b.Metadata == nil {
@@ -1007,7 +1007,7 @@ func preservesGraphActionTypes(recipe *formula.Recipe) bool {
 		return false
 	}
 	root := recipe.Steps[0]
-	if root.Metadata[beadmeta.KindMetadataKey] == "workflow" {
+	if root.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
 		return true
 	}
 	return root.Metadata[beadmeta.AttemptMetadataKey] != "" && root.Metadata[beadmeta.StepRefMetadataKey] != ""

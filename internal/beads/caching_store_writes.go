@@ -490,6 +490,15 @@ func newCachingStoreTx() *cachingStoreTx {
 	}
 }
 
+func (tx *cachingStoreTx) Create(b Bead) (Bead, error) {
+	created, err := tx.backing.Create(b)
+	if err != nil {
+		return Bead{}, err
+	}
+	tx.touch(created.ID)
+	return created, nil
+}
+
 func (tx *cachingStoreTx) Update(id string, opts UpdateOpts) error {
 	if err := tx.backing.Update(id, opts); err != nil {
 		return err

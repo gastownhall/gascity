@@ -1867,6 +1867,98 @@ func TestEnsureCanonicalMetadataScrubsDoltKeysOnPostgresCanonicalise(t *testing.
 	}
 }
 
+// TestEnsureCanonicalConfigWritesDoltModeOnAbsentConfig verifies that
+// EnsureCanonicalConfig writes dolt.mode: server to a new config when
+// ConfigState.DoltMode is "server".
+func TestEnsureCanonicalConfigWritesDoltModeOnAbsentConfig(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: "server"})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() changed = false, want true for new file with DoltMode")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "dolt.mode: server") {
+		t.Fatalf("config missing dolt.mode: server:\n%s", data)
+	}
+}
+
+// TestEnsureCanonicalConfigDoltModeIdempotent verifies that a second call with
+// the same DoltMode:"server" on an already-canonical config returns changed=false.
+func TestEnsureCanonicalConfigDoltModeIdempotent(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	state := ConfigState{DoltMode: "server"}
+	if _, err := EnsureCanonicalConfig(fs, path, state); err != nil {
+		t.Fatalf("first EnsureCanonicalConfig() error = %v", err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, state)
+	if err != nil {
+		t.Fatalf("second EnsureCanonicalConfig() error = %v", err)
+	}
+	if changed {
+		data, _ := fs.ReadFile(path)
+		t.Fatalf("second EnsureCanonicalConfig() changed = true, want false (idempotent):\n%s", data)
+	}
+}
+
+// TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt verifies
+// that a pre-existing dolt.mode: server in config is not removed or changed
+// when ConfigState.DoltMode is empty ("caller doesn't know the mode").
+func TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	// Pre-write a config that already has dolt.mode: server.
+	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: "server"}); err != nil {
+		t.Fatalf("setup EnsureCanonicalConfig() error = %v", err)
+	}
+
+	// Now call with DoltMode:"" — existing dolt.mode must be preserved unchanged.
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: ""})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig(DoltMode empty) error = %v", err)
+	}
+	if changed {
+		data, _ := fs.ReadFile(path)
+		t.Fatalf("EnsureCanonicalConfig(DoltMode empty) changed = true, want false:\n%s", data)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "dolt.mode: server") {
+		t.Fatalf("config should preserve existing dolt.mode: server when DoltMode is empty:\n%s", data)
+	}
+}
+
+// TestCrossBackendKeysToScrubDoesNotIncludeConfigDotModeKey guards that the
+// config key "dolt.mode" (dot-separated, used in config.yaml) is never added
+// to the metadata scrub list for the dolt backend. The metadata key "dolt_mode"
+// (underscore) is expected and correct; only the config key would be wrong.
+func TestCrossBackendKeysToScrubDoesNotIncludeConfigDotModeKey(t *testing.T) {
+	scrub := crossBackendKeysToScrub("dolt")
+	for _, k := range scrub {
+		if k == "dolt.mode" {
+			t.Fatalf("crossBackendKeysToScrub(dolt) must not include config key %q (only metadata key %q is expected)", "dolt.mode", "dolt_mode")
+		}
+	}
+}
+
 func TestEnsureCanonicalMetadataPreservesAllKeysOnEmptyBackend(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()

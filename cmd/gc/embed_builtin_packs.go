@@ -179,7 +179,11 @@ func builtinImportsForNames(names []string) (map[string]config.Import, []string)
 	imports := make(map[string]config.Import, len(names))
 	ordered := make([]string, 0, len(names))
 	for _, name := range names {
-		source, ok := builtinpacks.Source(name)
+		// CanonicalImportSource authors the dereferenceable tree-URL form
+		// that gc init and the builtin-pack-imports doctor fix write into
+		// pack.toml; the version pin still derives from the normalized
+		// source, which both spellings share.
+		source, ok := builtinpacks.CanonicalImportSource(name)
 		if !ok {
 			continue
 		}

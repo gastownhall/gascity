@@ -186,6 +186,7 @@ func lintPack(packDir string) lintPackReport {
 	for _, warning := range loaded.Warnings {
 		out.Diagnostics = append(out.Diagnostics, diagnosticFromWarning(filepath.Join(packDir, "pack.toml"), warning))
 	}
+	out.Diagnostics = append(out.Diagnostics, lintNamedSessionPoolConflicts(filepath.Join(packDir, "pack.toml"), loaded)...)
 	out.Diagnostics = append(out.Diagnostics, lintFormulaFiles(packDir)...)
 	targets, diagnostics := collectLintPromptTargets(packDir, loaded)
 	out.Diagnostics = append(out.Diagnostics, diagnostics...)
@@ -195,6 +196,35 @@ func lintPack(packDir string) lintPackReport {
 	out.Diagnostics = append(out.Diagnostics, lintClaudeOverlayHookShape(packDir)...)
 	out.OK = lintErrorCount(out.Diagnostics) == 0
 	return out
+}
+
+func lintNamedSessionPoolConflicts(packPath string, loaded *config.LintPackLoad) []lintDiagnostic {
+	if loaded == nil || len(loaded.NamedSessions) == 0 || len(loaded.Agents) == 0 {
+		return nil
+	}
+	agentsByName := make(map[string]config.Agent, len(loaded.Agents))
+	for _, agentCfg := range loaded.Agents {
+		agentsByName[agentCfg.QualifiedName()] = agentCfg
+	}
+	var diagnostics []lintDiagnostic
+	for _, named := range loaded.NamedSessions {
+		agentCfg, ok := agentsByName[named.TemplateQualifiedName()]
+		if !ok || !agentHasPoolControls(agentCfg) {
+			continue
+		}
+		diagnostics = append(diagnostics, newLintDiagnostic(packPath, 0,
+			fmt.Sprintf("named_session %q targets pool-controlled agent %q; remove pool settings from named-session templates or remove [[named_session]] for pool agents",
+				named.QualifiedName(), agentCfg.QualifiedName())))
+	}
+	return diagnostics
+}
+
+func agentHasPoolControls(agentCfg config.Agent) bool {
+	return agentCfg.MinActiveSessions != nil ||
+		agentCfg.MaxActiveSessions != nil ||
+		strings.TrimSpace(agentCfg.ScaleCheck) != "" ||
+		strings.TrimSpace(agentCfg.Namepool) != "" ||
+		len(agentCfg.NamepoolNames) > 0
 }
 
 func collectLintPromptTargets(packDir string, loaded *config.LintPackLoad) ([]lintPromptTarget, []lintDiagnostic) {

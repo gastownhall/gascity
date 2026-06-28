@@ -17,6 +17,7 @@ EXPECTED_SHARED_PATHS = {
     "go.sum",
     "Makefile",
     ".github/workflows/**",
+    ".github/actions/setup-gascity-ubuntu/**",
     "internal/beads/**",
     "internal/events/**",
     "internal/config/**",

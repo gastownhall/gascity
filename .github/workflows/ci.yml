@@ -60,7 +60,7 @@ jobs:
       mail: ${{ steps.filter.outputs.mail == 'true' || steps.filter.outputs.shared == 'true' }}
       docker: ${{ steps.filter.outputs.docker == 'true' || steps.filter.outputs.shared == 'true' }}
       k8s: ${{ steps.filter.outputs.k8s == 'true' || steps.filter.outputs.shared == 'true' }}
-      beads: ${{ steps.filter.outputs.beads }}
+      beads: ${{ steps.filter.outputs.beads == 'true' || steps.filter.outputs.shared == 'true' }}
       packs: ${{ steps.filter.outputs.packs == 'true' || steps.filter.outputs.shared == 'true' }}
       worker: ${{ steps.filter.outputs.worker == 'true' || steps.filter.outputs.shared == 'true' }}
       worker_phase2: ${{ steps.filter.outputs.worker_phase2 == 'true' || steps.filter.outputs.shared == 'true' }}
@@ -91,6 +91,9 @@ jobs:
             beads:
               - 'go.mod'
               - 'internal/beads/**'
+              - 'deps.env'
+              - '.github/scripts/install-bd-archive.sh'
+              - 'cmd/gc/init_provider_readiness.go'
             packs:
               - 'examples/gastown/**'
               - 'internal/config/pack.go'
@@ -144,12 +147,15 @@ jobs:
             # gated output above, forcing a full union run. Beads is the
             # universal persistence substrate, events the universal observation
             # substrate, config the universal activation mechanism; build,
-            # dependency, and CI-config files affect every job.
+            # dependency, and CI workflow/composite-action files affect every
+            # job. The setup-gascity-ubuntu composite action is shared by nearly
+            # every job, so a change to it must re-run all path-gated suites.
             shared:
               - 'go.mod'
               - 'go.sum'
               - 'Makefile'
               - '.github/workflows/**'
+              - '.github/actions/setup-gascity-ubuntu/**'
               - 'internal/beads/**'
               - 'internal/events/**'
               - 'internal/config/**'
@@ -179,6 +185,8 @@ jobs:
         run: make check-gomod-replace
       - name: Native dependency surface guard
         run: make check-native-dependency-surface
+      - name: Event-export isolation guard
+        run: make check-eventexport-isolation
       - name: Native DoltLite beads tests
         run: make test-native-doltlite-beads
       - name: Get golangci-lint version for cache key
@@ -289,6 +297,91 @@ jobs:
       - name: Acceptance tests (Tier A)
         run: make test-acceptance
 
+  # Cross-version contract gate: the "current" cell of the bd matrix. The
+  # "prev" cell is preflight-acceptance above (bd v1.0.4, the min-supported
+  # release). This cell builds bd from gastownhall/beads source at
+  # BD_CURRENT_REF (deps.env) — the bleeding-edge rc has no release tarball —
+  # and runs the same live acceptance suite, so a bd change that breaks gc's
+  # decoder/classifier surface against the newer bd is caught before merge.
+  # Path-gated on the beads filter; tolerated as a skip by the Check gate.
+  contract-acceptance-current:
+    name: Contract / acceptance A (bd current)
+    needs:
+      - runner-policy
+      - changes
+    if: ${{ needs.changes.outputs.beads == 'true' }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    env:
+      DOLT_VERSION: "2.1.7"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: "" # build bd from source below instead of installing a release
+          install-claude-cli: "true"
+      - name: Resolve bd current pin
+        id: bd
+        run: |
+          set -euo pipefail
+          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
+          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
+          if [ -z "$ref" ] || [ -z "$ver" ]; then
+            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+      - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/beads-src"
+          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
+          git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
+          mkdir -p "${HOME}/.local/bin"
+          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      - name: Verify bd on PATH
+        run: bd version
+      - name: Acceptance tests (Tier A, bd current)
+        run: make test-acceptance
+
+  # NON-REQUIRED HEADxHEAD radar: builds bd from beads MAIN HEAD (live, not the
+  # pinned BD_CURRENT_REF) and runs gc-HEAD's real bd calls (the acceptance
+  # suite) against it — early warning when bd's bleeding edge diverges from what
+  # gc expects, before the next deliberate pin bump. Deliberately NOT wired into
+  # ci-required: a bd-main break must never block a gascity merge (that is the
+  # cross-HEAD deadlock the pinned cells avoid). A red here is an advisory signal
+  # to stage a coordinated change, not a gate. Path-gated on the beads filter.
+  contract-radar-bd-head:
+    name: Contract radar (gc HEAD x bd main HEAD)
+    needs:
+      - runner-policy
+      - changes
+    if: ${{ needs.changes.outputs.beads == 'true' }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    env:
+      DOLT_VERSION: "2.1.7"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: "" # build bd from source below
+          install-claude-cli: "true"
+      - name: Build bd from beads main HEAD
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/beads-src"
+          git clone --depth 1 --filter=blob:none https://github.com/gastownhall/beads "$src"
+          mkdir -p "${HOME}/.local/bin"
+          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      - name: Verify bd on PATH
+        run: bd version
+      - name: Acceptance tests (Tier A, bd main HEAD)
+        run: make test-acceptance
+
   preflight-generated:
     name: Preflight / generated artifacts
     needs:
@@ -311,15 +404,24 @@ jobs:
       - name: OpenAPI spec + client drift check
         run: make spec-ci
 
-  # Historical fan-in name. During the Blacksmith proof, branch protection can
-  # move to `CI / required`; this job keeps the old name meaningful.
+  # Historical fan-in name and the branch-protection-enforced required status.
+  # Branch protection requires `Check`, so the cross-version contract matrix
+  # must gate here: the `prev` cell is preflight-acceptance above, and the
+  # path-gated `current` cell (contract-acceptance-current) is folded in below.
+  # During the Blacksmith proof, branch protection can move to `CI / required`;
+  # this job keeps the old name meaningful either way.
   check:
     name: Check
     needs:
       - runner-policy
+      # `changes` is a hard dependency (kept out of allow_skipped) so a
+      # filter-job flake fails Check directly instead of silently skipping
+      # the path-gated contract-acceptance-current cell. Mirrors ci-required.
+      - changes
       - preflight-static
       - preflight-acceptance
       - preflight-generated
+      - contract-acceptance-current
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -332,12 +434,19 @@ jobs:
           import os
           import sys
 
+          # contract-acceptance-current is path-gated on the beads filter: it
+          # skips on PRs that touch no beads/contract path, which is the
+          # expected pass case. Every other dependency runs unconditionally.
+          allow_skipped = {"contract-acceptance-current"}
           needs = json.loads(os.environ["NEEDS_JSON"])
-          failures = {
-              job: meta.get("result", "unknown")
-              for job, meta in sorted(needs.items())
-              if meta.get("result") != "success"
-          }
+          failures = {}
+          for job, meta in sorted(needs.items()):
+              result = meta.get("result", "unknown")
+              if result == "success":
+                  continue
+              if result == "skipped" and job in allow_skipped:
+                  continue
+              failures[job] = result
           summary_path = os.environ["GITHUB_STEP_SUMMARY"]
           with open(summary_path, "a", encoding="utf-8") as handle:
               handle.write("## CI Preflight\n\n")

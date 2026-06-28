@@ -109,6 +109,7 @@ type ConditionalAssignmentReleaser interface {
 // Keep this interface limited to methods needed by current transactional
 // write pairs; do not add Store methods speculatively.
 type Tx interface {
+	Create(b Bead) (Bead, error)
 	Update(id string, opts UpdateOpts) error
 	SetMetadataBatch(id string, kvs map[string]string) error
 	Close(id string) error
@@ -179,6 +180,7 @@ var readyExcludeTypes = map[string]bool{
 	"gate":          true, // async wait conditions
 	"molecule":      true, // workflow containers
 	"step":          true, // non-root formula steps; parent molecule is the actionable unit (#1039)
+	"convoy":        true, // sling-minted container; groups child beads, never actionable Ready work (#3591)
 	"message":       true, // mail/communication items
 	"session":       true, // runtime/session continuity beads, never actionable work
 	"agent":         true, // identity/state tracking beads
@@ -235,9 +237,16 @@ func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 // IsReadyExcludedBead reports whether a bead is infrastructure rather than
 // actionable Ready work.
 func IsReadyExcludedBead(b Bead) bool {
-	if IsReadyExcludedType(b.Type) {
-		return true
-	}
+	return IsReadyExcludedType(b.Type) || HasReadyExcludedLabel(b)
+}
+
+// HasReadyExcludedLabel reports whether a bead carries a label that marks it
+// as infrastructure bookkeeping (session continuity, order tracking) rather
+// than actionable Ready work. Distinct from IsReadyExcludedType: a bead may be
+// label-excluded regardless of its type. Callers that have already constrained
+// the bead's type (e.g. iterating known-convoy beads) use this to test only
+// the label dimension.
+func HasReadyExcludedLabel(b Bead) bool {
 	for _, label := range b.Labels {
 		switch label {
 		case "gc:session", "gc:order-tracking", "order-tracking":

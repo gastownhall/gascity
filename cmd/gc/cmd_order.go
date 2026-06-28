@@ -576,19 +576,29 @@ func cmdOrderRun(name, rig string, jsonOutput bool, stdout, stderr io.Writer) in
 			fmt.Fprintln(stderr, "gc order run: --json is not supported for exec orders because the exec body may write arbitrary stdout") //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		// Manual/condition triggers have no cooldown clock to advance, so they run
+		// directly without opening a store. Event/cooldown/cron orders record a
+		// scoped tracking bead so `gc order check` sees the run and the order does
+		// not re-fire every tick (#3570).
+		if a.Trigger != "event" && !orderTriggerUsesLastRun(a) {
+			return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
+		}
+		store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
+		if store == nil {
+			return storeCode
+		}
+		// Only event-triggered orders need the event cursor; cooldown/cron
+		// orders just need the run recorded.
+		var ep events.Provider
 		if a.Trigger == "event" {
-			store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
-			if store == nil {
-				return storeCode
-			}
-			ep, epCode := openCityEventsProvider(stderr, "gc order run")
+			var epCode int
+			ep, epCode = openCityEventsProvider(stderr, "gc order run")
 			if ep == nil {
 				return epCode
 			}
 			defer ep.Close() //nolint:errcheck // best-effort
-			return doOrderRunExecTracked(a, cityPath, cfg, store, ep, stdout, stderr)
 		}
-		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
+		return doOrderRunExecTracked(a, cityPath, cfg, store, ep, stdout, stderr)
 	}
 	store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
 	if store == nil {
@@ -771,16 +781,27 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 }
 
 func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, store beads.Store, ep events.Provider, stdout, stderr io.Writer) int {
-	if a.Trigger != "event" || ep == nil {
-		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
+	scoped := a.ScopedName()
+
+	// Event-triggered orders capture the event cursor before the side effect so
+	// the controller cursor isn't left stale; cooldown/cron orders only need the
+	// run record. Reading the cursor up front keeps a cursor failure from leaving
+	// an orphaned tracking bead.
+	var cursorLabels []string
+	if a.Trigger == "event" && ep != nil {
+		headSeq, err := ep.LatestSeq()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order run: reading event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		cursorLabels = eventCursorLabels(scoped, headSeq)
 	}
 
-	scoped := a.ScopedName()
-	headSeq, err := ep.LatestSeq()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: reading event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	// Record the run with a scoped tracking bead so `gc order check` advances the
+	// cooldown clock, matching dispatcher-driven runs (order_dispatch.go) and the
+	// formula path. Without this, a manual `gc order run --rig` is invisible to
+	// the labelOrderTracking history index and the order re-fires every tick
+	// (#3570).
 	tracking, err := store.Create(beads.Bead{
 		Title:     "order:" + scoped,
 		Labels:    []string{"order-run:" + scoped, labelOrderTracking},
@@ -792,11 +813,11 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, st
 	}
 	defer store.Close(tracking.ID) //nolint:errcheck // best-effort close
 
-	// Persist the event cursor before running the command so manual event execs
-	// do not leave the controller cursor stale after the side effect.
-	if err := store.Update(tracking.ID, beads.UpdateOpts{Labels: eventCursorLabels(scoped, headSeq)}); err != nil {
-		fmt.Fprintf(stderr, "gc order run: labeling exec event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
-		return 1
+	if len(cursorLabels) > 0 {
+		if err := store.Update(tracking.ID, beads.UpdateOpts{Labels: cursorLabels}); err != nil {
+			fmt.Fprintf(stderr, "gc order run: labeling exec event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	result := doOrderRunExecResult(a, cityPath, cfg, stdout, stderr)

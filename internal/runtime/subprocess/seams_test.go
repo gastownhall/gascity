@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // TestSeamsLifecycle drives the subprocess provider through the de-conflated
@@ -119,7 +120,13 @@ func TestSeamsInterrupt(t *testing.T) {
 		t.Fatalf("Interrupt: %v", err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	// The deadline races a real subprocess death (SIGINT delivery to the process
+	// group, the kernel reaping `sleep`, and cmd.Wait closing sc.done). Under CI
+	// CPU saturation a sub-second/few-second constant flakes — see TESTING.md
+	// "Test deadline rule." This timer is not the subject under test (we prove
+	// Interrupt delegates, not that it lands within N seconds), so use the shared
+	// exec-race floor.
+	deadline := time.Now().Add(testutil.ExecRaceTimeout)
 	for {
 		alive, _ := place.IsRunning(ctx)
 		if !alive {

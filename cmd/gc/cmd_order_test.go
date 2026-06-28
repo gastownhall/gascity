@@ -2681,6 +2681,59 @@ dolt.auto-start: false
 	}
 }
 
+func TestOrderRunExecTrackedRecordsCooldownForNonEventRigOrder(t *testing.T) {
+	// Regression for #3570: a manual `gc order run <name> --rig <rig>` of a
+	// cooldown-triggered exec order must record a rig-scoped cooldown tracking
+	// bead. Without it, `gc order check --rig` always reports "never run" and
+	// the order re-fires every tick (process exhaustion).
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`)
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	a := orders.Order{
+		Name:     "poll",
+		Rig:      "frontend",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "true",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExecTracked(a, cityDir, cfg, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExecTracked = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	all := trackingBeads(t, store, "order-run:poll:rig:frontend")
+	if len(all) != 1 {
+		t.Fatalf("rig-scoped tracking bead count = %d, want 1 (labels must be scoped so gc order check finds the run)", len(all))
+	}
+	if all[0].Title != "order:poll:rig:frontend" {
+		t.Fatalf("tracking bead title = %q, want order:poll:rig:frontend", all[0].Title)
+	}
+	if !slicesContain(all[0].Labels, "exec") {
+		t.Fatalf("tracking bead labels = %v, want exec", all[0].Labels)
+	}
+}
+
 func TestOrderRunExecEnvBuildFailureRedactsProcessSecrets(t *testing.T) {
 	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")

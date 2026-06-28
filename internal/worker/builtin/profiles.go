@@ -52,13 +52,18 @@ type BuiltinProviderSpec struct {
 	ResumeStyle            string
 	ResumeCommand          string
 	SessionIDFlag          string
-	PermissionModes        map[string]string
-	OptionDefaults         map[string]string
-	OptionsSchema          []BuiltinProviderOption
-	PrintArgs              []string
-	TitleModel             string
-	ACPCommand             string
-	ACPArgs                []string
+	// ForkFlag is the CLI flag that forks a resumed conversation into a new
+	// branch. Combined with ResumeFlag + SessionIDFlag it yields the fork-launch
+	// form (resume a parent brain, fork off it, bind gc's own session id). Empty
+	// for providers with no fork verb (currently every provider except claude).
+	ForkFlag        string
+	PermissionModes map[string]string
+	OptionDefaults  map[string]string
+	OptionsSchema   []BuiltinProviderOption
+	PrintArgs       []string
+	TitleModel      string
+	ACPCommand      string
+	ACPArgs         []string
 	// Upstream serving-env binding (Phase C — the Upstream axis): the env-var
 	// NAMES this harness reads for the model-serving base URL and credential, so
 	// an abstract [upstreams.<name>] renders onto the right names for this CLI.
@@ -117,6 +122,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile:       "CLAUDE.md",
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",
+		ForkFlag:               "--fork-session",
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
 		PermissionModes: map[string]string{
@@ -181,7 +187,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u203a ",
 		ReadyDelayMs:      3000,
-		ProcessNames:      []string{"codex"},
+		ProcessNames:      []string{"codex", "codex-raw"},
 		SupportsHooks:     true,
 		InstructionsFile:  "AGENTS.md",
 		ResumeFlag:        "resume",
@@ -212,7 +218,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
 					{Value: "gpt-5.5", Label: "GPT-5.5", FlagArgs: []string{"--model", "gpt-5.5"}, FlagAliases: [][]string{{"-m", "gpt-5.5"}}},
-					{Value: "gpt-5.3-codex-spark", Label: "GPT-5.3 Codex Spark", FlagArgs: []string{"--model", "gpt-5.3-codex-spark"}, FlagAliases: [][]string{{"-m", "gpt-5.3-codex-spark"}}},
+					{Value: "gpt-5.3-codex", Label: "GPT-5.3 Codex", FlagArgs: []string{"--model", "gpt-5.3-codex"}, FlagAliases: [][]string{{"-m", "gpt-5.3-codex"}}},
 					{Value: "o3", Label: "o3", FlagArgs: []string{"--model", "o3"}, FlagAliases: [][]string{{"-m", "o3"}}},
 					{Value: "o4-mini", Label: "o4-mini", FlagArgs: []string{"--model", "o4-mini"}, FlagAliases: [][]string{{"-m", "o4-mini"}}},
 				},

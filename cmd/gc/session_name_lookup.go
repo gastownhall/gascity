@@ -24,6 +24,7 @@ type poolSessionCreateIdentity struct {
 	AgentName string
 	Alias     string
 	Slot      int
+	Metadata  map[string]string
 }
 
 func isPoolManagedSessionBead(bead beads.Bead) bool {
@@ -207,6 +208,13 @@ func createPoolSessionBeadWithAlias(
 	}
 	if identity.Slot > 0 {
 		meta["pool_slot"] = strconv.Itoa(identity.Slot)
+	}
+	for key, value := range identity.Metadata {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		meta[key] = strings.TrimSpace(value)
 	}
 	bead, err := store.Create(beads.Bead{
 		ID:       explicitID,

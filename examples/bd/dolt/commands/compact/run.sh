@@ -117,6 +117,70 @@
 set -eu
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
+
+# CLI flags. The discovered-command bridge forwards `gc dolt compact` argv here
+# with flag-parsing disabled, so this script owns its option parsing. Flags map
+# onto the GC_DOLT_COMPACT_* environment defaults (and the gc_only mode) read
+# below, giving operators a discoverable, sanctioned reclaim path without
+# exporting environment variables. --help is intercepted by the bridge.
+#   --gc-only          reclaim orphaned chunks via CALL DOLT_GC('--full') on
+#                      each database, bypassing the commit-count threshold and
+#                      the flatten path — recovery for a database stranded below
+#                      the threshold with orphaned oldgen archives.
+#   --only-db <name>   restrict to the named database (repeatable; augments
+#                      GC_DOLT_COMPACT_ONLY_DBS).
+#   --dry-run          print intended actions without mutating Dolt.
+gc_only=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --gc-only)
+      gc_only=1
+      shift
+      ;;
+    --only-db)
+      if [ "$#" -lt 2 ]; then
+        printf 'compact: --only-db requires a database name\n' >&2
+        exit 2
+      fi
+      if [ -n "${GC_DOLT_COMPACT_ONLY_DBS:-}" ]; then
+        GC_DOLT_COMPACT_ONLY_DBS="${GC_DOLT_COMPACT_ONLY_DBS},$2"
+      else
+        GC_DOLT_COMPACT_ONLY_DBS="$2"
+      fi
+      shift 2
+      ;;
+    --only-db=*)
+      only_db_flag_value="${1#--only-db=}"
+      if [ -z "$only_db_flag_value" ]; then
+        printf 'compact: --only-db requires a database name\n' >&2
+        exit 2
+      fi
+      if [ -n "${GC_DOLT_COMPACT_ONLY_DBS:-}" ]; then
+        GC_DOLT_COMPACT_ONLY_DBS="${GC_DOLT_COMPACT_ONLY_DBS},${only_db_flag_value}"
+      else
+        GC_DOLT_COMPACT_ONLY_DBS="${only_db_flag_value}"
+      fi
+      shift
+      ;;
+    --dry-run)
+      GC_DOLT_COMPACT_DRY_RUN=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      printf 'compact: unknown flag %s (supported: --gc-only, --only-db <name>, --dry-run)\n' "$1" >&2
+      exit 2
+      ;;
+    *)
+      printf 'compact: unexpected argument %s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+done
+
 : "${GC_DOLT_PORT:=}"
 gc_dolt_port_input="$GC_DOLT_PORT"
 gc_dolt_host_input="${GC_DOLT_HOST:-}"
@@ -237,6 +301,11 @@ case "$bare_gc_input" in
     exit 2
     ;;
 esac
+
+if [ "$gc_only" = "1" ] && [ "$bare_gc" = "1" ]; then
+  printf 'compact: --gc-only cannot be combined with bare GC (GC_DOLT_COMPACT_BARE_GC) — choose one reclaim mode\n' >&2
+  exit 2
+fi
 
 case "$threshold_commits" in
   ''|*[!0-9]*)
@@ -1855,7 +1924,7 @@ flatten_database() {
 
   if [ "$count" -lt "$threshold_commits" ]; then
     if oldgen_has_files "$db"; then
-      printf 'compact: db=%s commits=%s below_threshold=%s oldgen_archives=present pending_gc=absent — skip\n' \
+      printf 'compact: db=%s commits=%s below_threshold=%s oldgen_archives=present pending_gc=absent — skip (run "gc dolt compact --gc-only" to reclaim if these archives are orphaned)\n' \
         "$db" "$count" "$threshold_commits"
       return 0
     fi
@@ -2397,6 +2466,49 @@ bare_gc_database() {
   return 0
 }
 
+# gc_only_database — reclaim orphaned chunks on one database via a full
+# CALL DOLT_GC('--full'), with no flatten and no commit-count threshold. This is
+# the operator-invoked reclaim path (--gc-only) for a database stranded below
+# the flatten threshold with orphaned oldgen archives: a prior flatten dropped
+# its commit count below the threshold but the post-flatten full GC was
+# deferred, quarantined-then-cleared, or otherwise never ran, so the scheduled
+# threshold-gated compactor skips it forever and never reclaims the orphaned
+# chunks. Unlike bare-GC (working-set CALL DOLT_GC()), --full rewrites oldgen so
+# the orphaned history is actually reclaimed (see
+# docs/troubleshooting/dolt-bloat-recovery.md). Honors GC_DOLT_COMPACT_ONLY_DBS,
+# GC_DOLT_COMPACT_DRY_RUN, and the per-db quarantine marker; does NOT write
+# pending-GC / pending-push markers (those are flatten-remediation state).
+gc_only_database() {
+  db="$1"
+
+  if [ -n "$only_dbs" ]; then
+    case ",$only_dbs," in
+      *,"$db",*) ;;
+      *)
+        printf 'compact: db=%s not in GC_DOLT_COMPACT_ONLY_DBS — skip\n' "$db"
+        return 0
+        ;;
+    esac
+  fi
+
+  if has_compact_marker "$quarantine_dir" "$db"; then
+    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
+    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
+    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
+    printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
+      "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+    return 1
+  fi
+
+  if [ -n "$dry_run" ]; then
+    printf 'compact: db=%s — dry-run (would reclaim via DOLT_GC --full)\n' "$db"
+    return 0
+  fi
+
+  start=$(date +%s)
+  run_full_gc "$db" "gc-only reclaim" "gc-only reclaim" "$start"
+}
+
 # shellcheck disable=SC2317
 cleanup() {
   if [ "$flock_acquired" = "1" ]; then
@@ -2566,6 +2678,21 @@ main() {
   done < "$_db_tmp"
 
   failed_count=0
+  if [ "$gc_only" = "1" ]; then
+    while IFS= read -r db; do
+      [ -n "$db" ] || continue
+      if ! gc_only_database "$db"; then
+        failed_count=$((failed_count + 1))
+      fi
+    done < "$_unique_db_tmp"
+
+    if [ "$failed_count" -gt 0 ]; then
+      printf 'compact: %s database(s) failed gc-only reclaim\n' "$failed_count" >&2
+      exit 1
+    fi
+    exit 0
+  fi
+
   if [ "$bare_gc" = "1" ]; then
     while IFS= read -r db; do
       [ -n "$db" ] || continue

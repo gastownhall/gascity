@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -958,7 +959,11 @@ func (m *Manager) clearWakeAndHoldOverrides(id string) error {
 }
 
 func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bead) error {
-	if strings.TrimSpace(b.Metadata["configured_named_session"]) != "true" {
+	// Recognize configured named sessions by flag OR identity so a
+	// partially-tagged bead (identity recorded, boolean flag absent) still
+	// releases its reserved runtime name on close instead of stranding the
+	// name and blocking respawn (ga-841).
+	if !wasConfiguredNamedSession(b) {
 		return nil
 	}
 	update := beads.UpdateOpts{
@@ -1220,7 +1225,7 @@ func (m *Manager) UpdateTemplateOverrides(id string, updates map[string]string) 
 			if key == "initial_message" {
 				continue
 			}
-			metadata["opt_"+key] = value
+			metadata[beadmeta.OptionMetadataPrefix+key] = value
 		}
 		if err := m.store.SetMetadataBatch(id, metadata); err != nil {
 			return err

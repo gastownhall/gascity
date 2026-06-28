@@ -58,15 +58,15 @@ formula (TOML)
     → workflow root bead          (type "task", gc.kind = "workflow")
     + step beads                  (independently routable work, blocking deps only)
     + control beads               (orchestrator-owned: check, retry, fanout,
-                                   tally, drain, scope-check, workflow-finalize)
+                                   drain, scope-check, workflow-finalize)
 ```
 
 Execution responsibility is split by bead kind:
 
 - **The orchestrator executes every control bead.** The control dispatcher in
   `internal/dispatch` evaluates check and retry budgets, expands fan-outs,
-  tallies votes, scatters drains, enforces scope failure policy, and
-  finalizes the workflow. No agent participates in control execution.
+  scatters drains, enforces scope failure policy, and finalizes the
+  workflow. No agent participates in control execution.
 - **Agents execute only plain work beads.** Step beads are
   independently Ready-visible and routable, so different steps of one
   workflow may be worked by different agents, pools, or providers.
@@ -76,7 +76,7 @@ The execution model is the structural difference from v1:
 | | v1 | Formulas v2 |
 |---|---|---|
 | Compiled shape | Parent-child molecule tree under a `molecule` container root | Flat graph: `task` root plus step beads linked only by blocking dependency edges |
-| Runtime engine | None. Conditions and loops resolve at cook time; afterwards the molecule is inert data | The orchestrator's control dispatcher executes every control bead — check and retry evaluation, fan-out, tally, drain, scope checks, workflow-finalize |
+| Runtime engine | None. Conditions and loops resolve at cook time; afterwards the molecule is inert data | The orchestrator's control dispatcher executes every control bead — check and retry evaluation, fan-out, drain, scope checks, workflow-finalize |
 | Who advances work | Agents working hooked beads, inside their own sessions | The orchestrator drives orchestration outside any agent session; agents only run plain work beads |
 | Agent fan-out | The molecule is typically worked by the one agent it is slung to; spreading steps across agents is manual routing | Step beads are independently routable; per-step routing intent resolves at dispatch, and `drain` / `on_complete` fan out across agents or pools at runtime |
 | Root visibility | The container root is the molecule's handle | The root blocks on `workflow-finalize` and only becomes Ready when the workflow completes (section 2) |
@@ -123,7 +123,7 @@ needs = ["cook"]
 
 This section specifies the full authoring surface. Every construct here is
 accepted under the v2 contract. Constructs marked **graph-only** (`check`,
-`retry`, `drain`, `on_complete`, `tally`, `timeout`, and reserved `gc.*`
+`retry`, `drain`, `on_complete`, `timeout`, and reserved `gc.*`
 step metadata) additionally require the explicit contract declaration of
 section 5 — they are rejected without it.
 
@@ -226,7 +226,7 @@ formula that uses them without it must fail to compile.
 | `retry` | table | graph-only | Transient retry loop (section 3.2) |
 | `drain` | table | graph-only | Scatter the input convoy into unit convoys (section 3.3) |
 | `on_complete` | table | graph-only | Runtime fan-out over step output (section 3.4) |
-| `tally` | table | graph-only | Aggregate fan-out voter outputs; requires `on_complete` (section 3.4) |
+| `tally` | table | graph-only | Removed from the SDK; authored formulas must not use it (section 3.4) |
 | `timeout` | duration string | graph-only | Max duration for this step's `check` script; requires `check`; `check.check.timeout` takes precedence |
 
 <Note>
@@ -489,8 +489,8 @@ validation error:
 - `on_complete`: `for_each` and `bond` must be set together; `for_each`
   must start with `output.`; `parallel` and `sequential` are mutually
   exclusive.
-- `tally` requires `on_complete`; `mode` must be `majority`, `unanimous`,
-  or `any-pass`.
+- `tally` is removed; formulas that still declare `[steps.tally]` fail with
+  `steps.tally was removed from the SDK`.
 - `check`: `max_attempts` ≥ 1; the inner `check` table is required with
   `mode = "exec"` (the only supported checker) and a non-empty `path`.
   Unexpected keys fail:
@@ -563,7 +563,7 @@ of the `gc.kind` step-metadata key (all hyphenated):
 
 | Group | Values | Author may set |
 |---|---|---|
-| Control kinds (dispatched by the orchestrator) | `retry`, `ralph`, `check`, `retry-eval`, `fanout`, `tally`, `drain`, `scope-check`, `workflow-finalize` | No — compiler/orchestrator-owned; authored values are not validated and produce unspecified dispatcher behavior |
+| Control kinds (dispatched by the orchestrator) | `retry`, `ralph`, `check`, `retry-eval`, `fanout`, `drain`, `scope-check`, `workflow-finalize` | No — compiler/orchestrator-owned; authored values are not validated and produce unspecified dispatcher behavior |
 | Structural kinds (compiled into graphs, never dispatched) | `scope`, `cleanup`, `run`, `retry-run` | `scope` and `cleanup` only (section 3.5) |
 | Root kinds | `workflow`, `wisp` | No — stamped by the compiler |
 | Sidecar | `spec` | No — generated step-spec sidecars |
@@ -643,7 +643,7 @@ reserved-variable rules of section 1.4 are enforced at this point.
 
 **Control dispatch.** The orchestrator's control dispatcher processes every
 open control bead by `gc.kind`: `retry`, `ralph`, `check`, `retry-eval`,
-`fanout`, `tally`, `drain`, `scope-check`, and `workflow-finalize`. An
+`fanout`, `drain`, `scope-check`, and `workflow-finalize`. An
 unknown control kind is a hard dispatcher error. Structural kinds
 (`scope`, `cleanup`, `run`, `retry-run`) are never dispatched. Control
 execution requires only the orchestrator; no user-configured agent role
@@ -819,45 +819,10 @@ each element of a collection in its output. The compiler marks such steps
 | `vars` | Variable bindings per iteration; `{item}`, `{item.field}`, and `{index}` placeholders |
 | `parallel` / `sequential` | Run bonded work concurrently (default) or one at a time; mutually exclusive |
 
-`[steps.tally]` aggregates the voters spawned by an `on_complete` fan-out
-into a single pass/fail outcome. The compiler injects a `<step>-tally`
-control (kind `tally`) after the fanout and rewrites downstream references
-to wait on the tally result.
-
-| Key | Purpose |
-|---|---|
-| `vote_field` | Dot-separated JSON path within each voter's `gc.output_json` to read as the vote; empty means use each voter's raw `gc.outcome` |
-| `mode` | `majority` (default), `unanimous`, or `any-pass` |
-
-Tally semantics: `majority` passes when the most common vote holds a
-strict majority (more than half of all votes), failing as `no-majority`
-otherwise; `unanimous` passes only when every vote is identical; `any-pass`
-is defined over voter `gc.outcome` independent of `vote_field` and passes
-when any voter passed. Zero voters tally as pass (`no-voters`).
-
-```toml
-formula = "vote"
-description = "Fan out voters and tally their verdicts"
-
-[requires]
-formula_compiler = ">=2.0.0"
-
-[[steps]]
-id = "survey"
-title = "Survey reviewers"
-
-[steps.on_complete]
-for_each = "output.reviewers"
-bond = "mol-do-work"
-parallel = true
-
-[steps.on_complete.vars]
-reviewer = "{item.name}"
-
-[steps.tally]
-vote_field = "verdict"
-mode = "majority"
-```
+`[steps.tally]` was removed from the SDK. Use pack-level workflow logic to
+aggregate fan-out results if you need a synthetic pass/fail decision. Any
+formula that still declares `[steps.tally]` fails fast with
+`steps.tally was removed from the SDK`.
 
 <Note>
 `drain` is the graph-native canonical fan-out. Fan-out via authored
@@ -976,8 +941,8 @@ supported requirements: formula_compiler`.
 
 ### Explicit declaration rule
 
-Graph-only constructs — `check`, `retry`, `drain`, `on_complete` (and
-`tally`, which requires it), and reserved `gc.*` step metadata (the
+Graph-only constructs — `check`, `retry`, `drain`, `on_complete`, and
+reserved `gc.*` step metadata (the
 section 2 kind values, `gc.scope_name`, `gc.scope_role`, `gc.scope_ref`,
 `gc.continuation_group`, `gc.on_fail`) — require an explicit declaration.
 Compiling without one must fail with:

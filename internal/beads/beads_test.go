@@ -60,13 +60,13 @@ func TestIsReadyExcludedType(t *testing.T) {
 		{"gate", true},
 		{"molecule", true},
 		{"step", true},
+		{"convoy", true}, // container type; never actionable Ready work (#3591)
 		{"message", true},
 		{"session", true},
 		{"agent", true},
 		{"role", true},
 		{"rig", true},
 		{"task", false},
-		{"convoy", false},
 		{"wisp", false},
 		{"", false},
 		{"MOLECULE", false}, // case-sensitive

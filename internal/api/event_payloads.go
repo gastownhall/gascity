@@ -296,6 +296,36 @@ func SessionLifecyclePayloadJSON(sessionID, template, reason string) json.RawMes
 	return b
 }
 
+// MoleculeResolvedPayload is the typed payload for molecule.resolved events.
+// It records a molecule root's state transition at its auto-close site and
+// joins it to the resolving session resolved from the root's stamped
+// metadata. This is the attribution backbone the honesty-gate A/B program
+// consumes to correlate a resolved molecule with the session, model, and
+// cost that produced it. Session fields are empty when the root was closed
+// before any reconcile stamped its identity (graceful degradation, not an
+// error).
+type MoleculeResolvedPayload struct {
+	IssueID     string    `json:"issue_id" doc:"Molecule root bead ID that resolved."`
+	FromStatus  string    `json:"from_status" doc:"Root status captured before the close mutated it."`
+	ToStatus    string    `json:"to_status" doc:"Terminal status after resolution. Always \"closed\"."`
+	Actor       string    `json:"actor" doc:"Identity that triggered the close (eventActor)."`
+	SessionName string    `json:"session_name,omitempty" doc:"Resolving session name from gc.session_name. Empty if unstamped."`
+	SessionID   string    `json:"session_id,omitempty" doc:"Resolving session ID from gc.session_id. Empty if unstamped."`
+	WorkDir     string    `json:"work_dir,omitempty" doc:"Resolving session work dir from gc.work_dir. Empty if unstamped."`
+	CloseReason string    `json:"close_reason,omitempty" doc:"close_reason stamped on the root."`
+	Ts          time.Time `json:"ts" doc:"Resolution timestamp (UTC)."`
+}
+
+// IsEventPayload marks MoleculeResolvedPayload as an events.Payload variant.
+func (MoleculeResolvedPayload) IsEventPayload() {}
+
+// MoleculeResolvedPayloadJSON builds the JSON wire form of a
+// MoleculeResolvedPayload for attachment to an events.Event.Payload field.
+func MoleculeResolvedPayloadJSON(p MoleculeResolvedPayload) json.RawMessage {
+	b, _ := json.Marshal(p)
+	return b
+}
+
 // WorkerOperationEventPayload is the typed payload projected for
 // worker.operation events on the supervisor event stream.
 //
@@ -556,6 +586,7 @@ func init() {
 	events.RegisterPayload(events.ProviderSwapped, events.NoPayload{})
 	events.RegisterPayload(events.WorkerOperation, WorkerOperationEventPayload{})
 	events.RegisterPayload(events.ProjectIdentityStamped, ProjectIdentityStampedPayload{})
+	events.RegisterPayload(events.MoleculeResolved, MoleculeResolvedPayload{})
 
 	// gc.store.maintenance.* — supervisor StoreMaintenanceLoop outcomes.
 	events.RegisterPayload(events.StoreMaintenanceDone, events.StoreMaintenanceDonePayload{})

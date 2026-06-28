@@ -168,6 +168,20 @@ func NamedSessionIdentity(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[NamedSessionIdentityMetadata])
 }
 
+// wasConfiguredNamedSession reports whether a bead was created for a configured
+// named session, recognized by either the configured-named-session boolean flag
+// or a recorded configured-named identity.
+//
+// The identity fallback is load-bearing on close/respawn (ga-841): a bead whose
+// boolean flag was never set or was later cleared — legacy beads predating the
+// flag, or beads closed by a path that only retained the identity — must still
+// be treated as a configured named session. Otherwise its reserved runtime
+// session name is never released and permanently blocks the on-demand respawn
+// of a same-named session (the refinery no-respawn class in ga-n2d).
+func wasConfiguredNamedSession(b beads.Bead) bool {
+	return IsNamedSessionBead(b) || NamedSessionIdentity(b) != ""
+}
+
 // NamedSessionMode returns the configured named session mode stored on a bead.
 func NamedSessionMode(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[NamedSessionModeMetadata])

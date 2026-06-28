@@ -171,7 +171,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if opts.Title != "" {
 				node.Title = formula.Substitute(opts.Title, vars)
 			}
-			if opts.ParentID != "" && step.Metadata[beadmeta.KindMetadataKey] != "workflow" {
+			if opts.ParentID != "" && step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflow {
 				node.ParentID = opts.ParentID
 			}
 			if opts.IdempotencyKey != "" {
@@ -189,6 +189,18 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 						node.Metadata[formulaVarMetadataPrefix+k] = v
 					}
 				}
+			}
+			if recipe.ContentHash != "" {
+				if node.Metadata == nil {
+					node.Metadata = make(map[string]string, 2)
+				}
+				node.Metadata[beadmeta.FormulaHashMetadataKey] = recipe.ContentHash
+			}
+			if recipe.FormulaSource != "" {
+				if node.Metadata == nil {
+					node.Metadata = make(map[string]string, 1)
+				}
+				node.Metadata[beadmeta.FormulaSourceMetadataKey] = recipe.FormulaSource
 			}
 		} else {
 			// graph.v2 workflows and their retry/Ralph attempt sub-recipes

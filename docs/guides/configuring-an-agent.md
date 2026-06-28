@@ -275,8 +275,13 @@ $ gc doctor                          # validates your city / agent config
 - **Packs:** ship harness presets — a provider and its `upstream_env`
   serving-env binding — as reusable, shareable bundles —
   [Understanding Packs](/guides/understanding-packs),
-  [Shareable Packs](/guides/shareable-packs). (Named `[upstreams.<name>]`
-  endpoint presets stay city-level: declare them in `city.toml` or a city
-  fragment, not in a pack.)
+  [Shareable Packs](/guides/shareable-packs). (A pack may also declare named
+  `[upstreams.<name>]` endpoint presets as a base that the importing city
+  inherits — import the pack, get the upstream for free. A city's own
+  `[upstreams.<name>]` in `city.toml` or a city fragment overrides a
+  pack-provided one of the same name. A pack-carried `[upstreams.<name>]`
+  (its `base_url`, credential env-refs, and raw `[env]` block) is TRUSTED
+  configuration — the same trust level as a pack's `provider.command` — so
+  only import packs you trust.)
 - **Tutorial:** the guided walkthrough that introduces agents —
   [Tutorial 02 — Agents](/tutorials/02-agents).

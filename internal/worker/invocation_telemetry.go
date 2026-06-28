@@ -96,6 +96,15 @@ func defaultPricingRegistry() *pricing.Registry {
 // have no transcript adapter, no session bead for the cursor, and no agent
 // identity, and will not gain bead-backed identity just for telemetry.
 func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
+	// Record the transcript-session correlation sidecar on the same
+	// post-successful-turn beat as the usage telemetry below. Deferred at the top
+	// so it runs on every return path — this function has several early returns
+	// (suppressed events, no transcript, no new usage) that are unrelated to
+	// whether the sidecar should be written, and the Message/Nudge callers expect
+	// the write on every successful turn. Best-effort and a no-op unless
+	// correlation is armed; it uses its own guard, not invTelemetryMu.
+	defer h.writeTranscriptSessionMeta()
+
 	if operationEventsSuppressed(ctx) {
 		return
 	}
@@ -185,7 +194,11 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // run id is resolved from the session bead through the shared
 // beadmeta.ResolveRunID — the same resolver the compute-fact emitter uses — so a
 // run's model and compute facts carry the same RunID and group together in
-// gc costs. The dedup identity is the invocation's provider message id (or the
+// gc costs. The session bead id is carried verbatim as SessionID (the join key to
+// the manifold spend plane's EIA session_id and to recall transcripts), distinct
+// from the resolved RunID and from Worker (the session name). StepID carries the
+// session's gc.active_work_bead when present, and is empty only for ad-hoc,
+// manual, or idle sessions. The dedup identity is the invocation's provider message id (or the
 // transcript entry uuid when none), so the best-effort cursor races noted on
 // recordInvocationTelemetry collapse a re-recorded invocation to one fact at the
 // sink via IdempotencyKey. Unpriced is true exactly when the pricing registry
@@ -193,12 +206,19 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // read as "not measured", never as a free invocation.
 func modelUsageFact(u sessionlog.TailUsage, bead beads.Bead, sessionID, worker, providerFamily string, cost float64, priced bool, now time.Time) usage.Fact {
 	runID := beadmeta.ResolveRunID(bead.Metadata, bead.ID, sessionID)
+	// The run STEP: the session's current work bead's gc.step_id, stamped at the claim
+	// hook (gc.active_work_bead). Read from the SAME session-bead snapshot as runID so
+	// StepID always names a step under this RunID. Empty when the session isn't on a
+	// formula work bead (ad-hoc/manual/idle) — run-level attribution, matching events.
+	stepID := strings.TrimSpace(bead.Metadata[beadmeta.ActiveWorkBeadMetadataKey])
 	reqID := usageIdentity(u)
 	if !priced {
 		cost = 0
 	}
 	return usage.Fact{
 		RunID:               runID,
+		SessionID:           strings.TrimSpace(sessionID),
+		StepID:              stepID,
 		Worker:              strings.TrimSpace(worker),
 		Kind:                usage.KindModel,
 		Model:               strings.TrimSpace(u.Model),

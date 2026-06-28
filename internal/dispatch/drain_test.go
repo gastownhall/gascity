@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -8,8 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -1321,6 +1324,100 @@ func TestProcessDrainExclusiveFailsClosedForInvalidItemFormula(t *testing.T) {
 	}
 }
 
+func TestIsSharedDrainExecutableStepExcludesControlAndTopologyKinds(t *testing.T) {
+	t.Parallel()
+	excluded := append(append([]string{}, beadmeta.ControlKinds...), beadmeta.WorkflowTopologyKinds...)
+	for _, kind := range excluded {
+		step := &formula.RecipeStep{Metadata: map[string]string{beadmeta.KindMetadataKey: kind}}
+		if isSharedDrainExecutableStep(step) {
+			t.Errorf("isSharedDrainExecutableStep(kind=%q) = true, want false", kind)
+		}
+		padded := &formula.RecipeStep{Metadata: map[string]string{beadmeta.KindMetadataKey: " " + kind + " "}}
+		if isSharedDrainExecutableStep(padded) {
+			t.Errorf("isSharedDrainExecutableStep(kind=%q padded) = true, want false", kind)
+		}
+	}
+	if isSharedDrainExecutableStep(nil) {
+		t.Error("isSharedDrainExecutableStep(nil) = true, want false")
+	}
+	for _, step := range []*formula.RecipeStep{
+		{},
+		{Metadata: map[string]string{}},
+		{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindTask}},
+	} {
+		if !isSharedDrainExecutableStep(step) {
+			t.Errorf("isSharedDrainExecutableStep(%+v) = false, want true", step)
+		}
+	}
+}
+
+func TestStampDrainItemRecipeSharedSkipsControlStep(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	content := `
+formula = "drain-item"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Work {{convoy_id}}"
+
+[steps.on_complete]
+for_each = "output.voters"
+bond = "mol-voter"
+`
+	if err := os.WriteFile(filepath.Join(dir, "drain-item.formula.toml"), []byte(strings.TrimSpace(content)+"\n"), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), "drain-item", []string{dir}, map[string]string{graphv2.ConvoyIDVar: "unit-1"})
+	if err != nil {
+		t.Fatalf("CompileWithoutRuntimeVarValidation: %v", err)
+	}
+	control := beads.Bead{ID: "drain-1", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:         beadmeta.KindDrain,
+		beadmeta.DrainContextMetadataKey: beadmeta.DrainContextShared,
+	}}
+	unit := beads.Bead{ID: "unit-1"}
+	member := beads.Bead{ID: "member-1"}
+	row := &drainManifestRow{Index: 0, ItemRootKey: "item-key-1"}
+	stampDrainItemRecipe(recipe, control, unit, member, 1, row, "drain-item", nil)
+
+	stepsByKind := make(map[string]*formula.RecipeStep)
+	var workStep *formula.RecipeStep
+	for i := range recipe.Steps {
+		step := &recipe.Steps[i]
+		if kind := step.Metadata[beadmeta.KindMetadataKey]; kind != "" {
+			stepsByKind[kind] = step
+		}
+		if strings.HasSuffix(step.ID, ".work") || step.ID == "work" {
+			workStep = step
+		}
+	}
+	for _, kind := range []string{beadmeta.KindFanout} {
+		step, ok := stepsByKind[kind]
+		if !ok {
+			t.Fatalf("compiled recipe has no %s step; steps=%+v", kind, recipe.Steps)
+		}
+		if got := step.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != "" {
+			t.Errorf("%s step gc.continuation_group = %q, want unset", kind, got)
+		}
+		if got := step.Metadata[beadmeta.SessionAffinityMetadataKey]; got != "" {
+			t.Errorf("%s step gc.session_affinity = %q, want unset", kind, got)
+		}
+	}
+	if workStep == nil {
+		t.Fatalf("compiled recipe has no work step; steps=%+v", recipe.Steps)
+	}
+	if got, want := workStep.Metadata[beadmeta.ContinuationGroupMetadataKey], "drain:drain-1"; got != want {
+		t.Errorf("work step gc.continuation_group = %q, want %q", got, want)
+	}
+	if got, want := workStep.Metadata[beadmeta.SessionAffinityMetadataKey], "require"; got != want {
+		t.Errorf("work step gc.session_affinity = %q, want %q", got, want)
+	}
+}
+
 func seedDrainWorkflow(t *testing.T) (*beads.MemStore, beads.Bead) {
 	t.Helper()
 	store := beads.NewMemStore()
@@ -1518,6 +1615,131 @@ func assertFormulaStepMetadata(t *testing.T, store beads.Store, rootID, key, wan
 		}
 	}
 	t.Fatalf("no child of %s has metadata %s=%q; beads=%+v", rootID, key, want, all)
+}
+
+// TestProcessDrainTerminalCloseReconcilesEnclosingScope pins the
+// fanout/retry/ralph parity fix: when a scoped drain control reaches a
+// terminal close and it was the scope's last open member, the drain must
+// reconcile its enclosing scope (closing the body) instead of relying on
+// another control's close-time backstop.
+func TestProcessDrainTerminalCloseReconcilesEnclosingScope(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "empty parent", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.input_convoy_id":  parent.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := store.Create(beads.Bead{
+		Title: "scope body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.iter",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain, err := store.Create(beads.Bead{
+		Title: "drain",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "drain",
+			"gc.root_bead_id":        root.ID,
+			"gc.scope_ref":           "demo.iter",
+			"gc.scope_role":          "control",
+			"gc.drain_context":       "separate",
+			"gc.drain_formula":       "drain-item",
+			"gc.drain_member_access": "read",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(scoped empty drain): %v", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	if drain.Status != "closed" || drain.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("drain = status %q outcome %q, want closed/pass", drain.Status, drain.Metadata["gc.outcome"])
+	}
+	body = mustGetBead(t, store, body.ID)
+	if body.Status != "closed" {
+		t.Fatalf("scope body status = %q, want closed (drain terminal close must reconcile the scope)", body.Status)
+	}
+	if got := body.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("scope body gc.outcome = %q, want pass", got)
+	}
+}
+
+// TestProcessDrainFailureCloseAbortsEnclosingScope pins the fail half of the
+// scope-reconcile parity: a scoped drain that fail-closes (limit exceeded)
+// must abort its enclosing scope like any failed scope member — body closed
+// with outcome fail — rather than leaving the scope to a backstop.
+func TestProcessDrainFailureCloseAbortsEnclosingScope(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	rootID := drain.Metadata["gc.root_bead_id"]
+	body, err := store.Create(beads.Bead{
+		Title: "scope body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": rootID,
+			"gc.step_ref":     "demo.iter",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{
+		"gc.scope_ref":       "demo.iter",
+		"gc.scope_role":      "control",
+		"gc.drain_max_units": "1",
+	} {
+		if err := store.SetMetadata(drain.ID, k, v); err != nil {
+			t.Fatalf("SetMetadata(%s): %v", k, err)
+		}
+	}
+
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(scoped limit exceeded): %v", err)
+	}
+	if result.Action != "drain-limit-exceeded" {
+		t.Fatalf("Action = %q, want drain-limit-exceeded", result.Action)
+	}
+	body = mustGetBead(t, store, body.ID)
+	if body.Status != "closed" {
+		t.Fatalf("scope body status = %q, want closed (failed scoped drain must abort the scope)", body.Status)
+	}
+	if got := body.Metadata["gc.outcome"]; got != "fail" {
+		t.Fatalf("scope body gc.outcome = %q, want fail", got)
+	}
 }
 
 func mustFindDrainItemWorkStep(t *testing.T, store beads.Store, rootID string) beads.Bead {

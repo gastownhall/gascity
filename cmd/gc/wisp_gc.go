@@ -231,9 +231,9 @@ type wispGCRootSelector struct {
 func wispGCRootSelectors() []wispGCRootSelector {
 	return []wispGCRootSelector{
 		{"molecule", beads.ListQuery{Type: "molecule", TierMode: beads.TierBoth}},
-		{"wisp", beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: "wisp"}, TierMode: beads.TierBoth}},
-		{"graph.v2", beads.ListQuery{Metadata: map[string]string{beadmeta.FormulaContractMetadataKey: "graph.v2"}, TierMode: beads.TierBoth}},
-		{"workflow", beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: "workflow"}, TierMode: beads.TierBoth}},
+		{"wisp", beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}, TierMode: beads.TierBoth}},
+		{"graph.v2", beads.ListQuery{Metadata: map[string]string{beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2}, TierMode: beads.TierBoth}},
+		{"workflow", beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}, TierMode: beads.TierBoth}},
 	}
 }
 

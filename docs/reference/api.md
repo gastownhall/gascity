@@ -36,6 +36,14 @@ The spec is the full reference. A brief summary of the surfaces:
   query + hook operations, dependencies, labels.
 - **Sessions.** CRUD under `/v0/city/{cityName}/sessions`, submit,
   prompt, resume, interaction response, transcript, SSE stream.
+- **Connected-client external messaging.** `POST /v0/extmsg/clients`
+  registers an external LLM client and returns a bearer token.
+  `POST /v0/extmsg/inbound` (with `provider: "llm-client"`) delivers an
+  inbound turn from the registered client to a city session.
+  `GET /v0/extmsg/{provider}/{account_id}/{conversation_id}/subscribe`
+  opens a long-lived SSE reply stream for that conversation.
+  See [Connect an external LLM client](/guides/connected-clients) for
+  the full integration guide including the SSE error catalog.
 - **Mail, convoys, orders, formulas, participants,
   transcripts, adapters.** External messaging and orchestration
   surfaces; see the spec for per-operation shapes.

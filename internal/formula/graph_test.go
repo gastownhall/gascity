@@ -1,6 +1,10 @@
 package formula
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+)
 
 func TestApplyGraphControlsRecursesIntoNestedChildren(t *testing.T) {
 	t.Parallel()
@@ -208,127 +212,54 @@ func TestApplyGraphControlsSimpleRalphInsideScopeDoesNotCreateRunScopeCheck(t *t
 	}
 }
 
-func TestApplyGraphControls_TallyInjected(t *testing.T) {
+// TestNeedsScopeCheckTracksBeadmetaExemptKinds keeps the compile-path
+// scope-check predicate in lockstep with beadmeta.ScopeCheckExemptKinds: every
+// exempt kind is skipped, every non-exempt kind with a scope_ref still gets a
+// paired scope-check, and the teardown-role guard is kind-independent.
+func TestNeedsScopeCheckTracksBeadmetaExemptKinds(t *testing.T) {
 	t.Parallel()
 
-	f := &Formula{
-		Steps: []*Step{
-			{
-				ID:    "ask",
-				Title: "Ask voters",
-				OnComplete: &OnCompleteSpec{
-					ForEach: "output.voters",
-					Bond:    "mol-voter",
-				},
-				Tally: &TallySpec{
-					VoteField: "answer",
-					Mode:      "majority",
-				},
+	for _, kind := range beadmeta.ScopeCheckExemptKinds {
+		step := &Step{
+			ID: "subject",
+			Metadata: map[string]string{
+				beadmeta.ScopeRefMetadataKey: "body",
+				beadmeta.KindMetadataKey:     kind,
 			},
-			{
-				ID:    "summarize",
-				Title: "Summarize",
-				Needs: []string{"ask"},
+		}
+		if needsScopeCheck(step) {
+			t.Errorf("needsScopeCheck(kind=%q) = true, want false (exempt kind)", kind)
+		}
+	}
+
+	for _, kind := range []string{"", beadmeta.KindTask, beadmeta.KindRetry, beadmeta.KindRalph, beadmeta.KindCleanup} {
+		step := &Step{
+			ID: "subject",
+			Metadata: map[string]string{
+				beadmeta.ScopeRefMetadataKey: "body",
+				beadmeta.KindMetadataKey:     kind,
 			},
+		}
+		if !needsScopeCheck(step) {
+			t.Errorf("needsScopeCheck(kind=%q) = false, want true (non-exempt kind)", kind)
+		}
+	}
+
+	teardown := &Step{
+		ID: "subject",
+		Metadata: map[string]string{
+			beadmeta.ScopeRefMetadataKey:  "body",
+			beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleTeardown,
 		},
 	}
-
-	ApplyGraphControls(f)
-
-	steps := collectGraphSteps(f.Steps)
-
-	fanout := findGraphStepByID(steps, "ask-fanout")
-	if fanout == nil {
-		t.Fatal("missing ask-fanout control")
+	if needsScopeCheck(teardown) {
+		t.Error("needsScopeCheck(teardown role) = true, want false")
 	}
-	if got := fanout.Metadata["gc.kind"]; got != "fanout" {
-		t.Errorf("ask-fanout gc.kind = %q, want fanout", got)
+	if needsScopeCheck(nil) {
+		t.Error("needsScopeCheck(nil) = true, want false")
 	}
-
-	tally := findGraphStepByID(steps, "ask-tally")
-	if tally == nil {
-		t.Fatal("missing ask-tally control step")
-	}
-	if got := tally.Metadata["gc.kind"]; got != "tally" {
-		t.Errorf("ask-tally gc.kind = %q, want tally", got)
-	}
-	if got := tally.Metadata["gc.control_for"]; got != "ask" {
-		t.Errorf("ask-tally gc.control_for = %q, want ask", got)
-	}
-	if got := tally.Metadata["gc.tally_mode"]; got != "majority" {
-		t.Errorf("ask-tally gc.tally_mode = %q, want majority", got)
-	}
-	if got := tally.Metadata["gc.vote_field"]; got != "answer" {
-		t.Errorf("ask-tally gc.vote_field = %q, want answer", got)
-	}
-	if !containsString(tally.Needs, "ask-fanout") {
-		t.Errorf("ask-tally.Needs = %v, want ask-fanout", tally.Needs)
-	}
-
-	// Downstream step should be rewritten to wait for ask-tally, not ask.
-	summarize := findGraphStepByID(steps, "summarize")
-	if summarize == nil {
-		t.Fatal("missing summarize step")
-	}
-	if containsString(summarize.Needs, "ask") {
-		t.Error("summarize.Needs still contains ask — should have been rewritten to ask-tally")
-	}
-	if !containsString(summarize.Needs, "ask-tally") {
-		t.Errorf("summarize.Needs = %v, want ask-tally", summarize.Needs)
-	}
-}
-
-func TestApplyGraphControls_TallyDefaultMode(t *testing.T) {
-	t.Parallel()
-
-	f := &Formula{
-		Steps: []*Step{
-			{
-				ID:    "vote",
-				Title: "Vote",
-				OnComplete: &OnCompleteSpec{
-					ForEach: "output.items",
-					Bond:    "mol-voter",
-				},
-				Tally: &TallySpec{},
-			},
-		},
-	}
-
-	ApplyGraphControls(f)
-
-	steps := collectGraphSteps(f.Steps)
-	tally := findGraphStepByID(steps, "vote-tally")
-	if tally == nil {
-		t.Fatal("missing vote-tally")
-	}
-	if got := tally.Metadata["gc.tally_mode"]; got != "majority" {
-		t.Errorf("gc.tally_mode = %q, want majority (default)", got)
-	}
-}
-
-func TestApplyGraphControls_NoTallyWhenFieldAbsent(t *testing.T) {
-	t.Parallel()
-
-	f := &Formula{
-		Steps: []*Step{
-			{
-				ID:    "ask",
-				Title: "Ask",
-				OnComplete: &OnCompleteSpec{
-					ForEach: "output.items",
-					Bond:    "mol-voter",
-				},
-				// No Tally field.
-			},
-		},
-	}
-
-	ApplyGraphControls(f)
-
-	steps := collectGraphSteps(f.Steps)
-	if tally := findGraphStepByID(steps, "ask-tally"); tally != nil {
-		t.Errorf("unexpected ask-tally control when Tally is nil: %+v", tally)
+	if needsScopeCheck(&Step{ID: "no-scope"}) {
+		t.Error("needsScopeCheck(no scope_ref) = true, want false")
 	}
 }
 
@@ -348,4 +279,42 @@ func containsString(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestApplyGraphControls_FanoutControlScopeRoleIsControl pins that a minted
+// fanout control for a scope member is classified as scope-role control, not
+// member: control infrastructure must not inherit the host step's member role,
+// or its metadata/output participates in scope finalization as if it were work
+// (mirrors the explicit ScopeRoleControl stamp on minted scope-checks).
+func TestApplyGraphControls_FanoutControlScopeRoleIsControl(t *testing.T) {
+	f := &Formula{
+		Steps: []*Step{{
+			ID:    "work",
+			Title: "Work",
+			OnComplete: &OnCompleteSpec{
+				ForEach: "output.members",
+				Bond:    "review-member",
+			},
+			Metadata: map[string]string{
+				beadmeta.ScopeRefMetadataKey:  "scope-1",
+				beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
+			},
+		}},
+	}
+	applyGraphControls(f, false)
+	var control *Step
+	for _, s := range f.Steps {
+		if s.ID == "work-fanout" {
+			control = s
+		}
+	}
+	if control == nil {
+		t.Fatal("missing minted fanout control work-fanout")
+	}
+	if got := control.Metadata[beadmeta.ScopeRefMetadataKey]; got != "scope-1" {
+		t.Fatalf("fanout control gc.scope_ref = %q, want scope-1", got)
+	}
+	if got := control.Metadata[beadmeta.ScopeRoleMetadataKey]; got != beadmeta.ScopeRoleControl {
+		t.Fatalf("fanout control gc.scope_role = %q, want %q", got, beadmeta.ScopeRoleControl)
+	}
 }

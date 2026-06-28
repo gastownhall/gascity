@@ -128,6 +128,17 @@ const (
 	ProjectIdentityStamped          = "project.identity.stamped"
 	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
 
+	// MoleculeResolved fires once at the molecule-autoclose Go close site
+	// when a molecule root transitions to closed. It carries the
+	// state-transition record (issue, from/to status, close reason) joined
+	// to the resolving session, resolved from the root's stamped metadata
+	// (gc.session_name / gc.session_id / gc.work_dir). It is additive: the
+	// existing bead.closed emission is unchanged. A manual non-molecule
+	// `bd close` produces bead.closed but NOT molecule.resolved, so this
+	// event attributes molecule-resolution closes only — a root hand-closed
+	// directly has no resolving session and degrades to empty session fields.
+	MoleculeResolved = "molecule.resolved"
+
 	// External messaging events.
 	ExtMsgBound          = "extmsg.bound"
 	ExtMsgUnbound        = "extmsg.unbound"
@@ -211,6 +222,7 @@ var KnownEventTypes = []string{
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
+	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
@@ -229,14 +241,24 @@ var KnownEventTypes = []string{
 }
 
 // Event is a single recorded occurrence in the system.
+//
+// RunID/SessionID are opaque correlation ids stamped at the record site (run
+// root via the bead metadata run-chain; session bead id), used by downstream
+// consumers to join an event to its run/session. They are additive and
+// omitempty: old records lack them and unmarshal as "". They are NOT derived
+// from Payload — the redacted export forwards them as typed primitives, never by
+// decoding the free-form payload.
 type Event struct {
-	Seq     uint64          `json:"seq"`
-	Type    string          `json:"type"`
-	Ts      time.Time       `json:"ts"`
-	Actor   string          `json:"actor"`
-	Subject string          `json:"subject,omitempty"`
-	Message string          `json:"message,omitempty"`
-	Payload json.RawMessage `json:"payload,omitempty"`
+	Seq       uint64          `json:"seq"`
+	Type      string          `json:"type"`
+	Ts        time.Time       `json:"ts"`
+	Actor     string          `json:"actor"`
+	Subject   string          `json:"subject,omitempty"`
+	Message   string          `json:"message,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	RunID     string          `json:"run_id,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
+	StepID    string          `json:"step_id,omitempty"`
 }
 
 // Recorder records events. Safe for concurrent use. Best-effort.

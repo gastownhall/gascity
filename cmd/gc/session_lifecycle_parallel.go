@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -455,6 +456,11 @@ type stopTarget struct {
 // metadata.session_name. Returning the empty string here would violate
 // the SessionLifecyclePayload.SessionID "always present" contract — see
 // internal/api/event_payloads.go's docstring.
+// NOTE: when used as an event's SessionID (session.stopped), the t.name
+// fallback can be a non-opaque session NAME (uppercase allowed). That is
+// intentional and safe: the export's safeRef gate DROPS a non-opaque value
+// rather than emit it — do not "fix" the gate assuming this is always an
+// opaque id.
 func (t stopTarget) lifecycleCorrelationID() string {
 	if t.sessionID != "" {
 		return t.sessionID
@@ -873,13 +879,41 @@ func buildPreparedStartWithWorkDirResolver(
 		}
 		session.Metadata["session_key"] = sessionKey
 	}
-	if sk := session.Metadata["session_key"]; sk != "" && tp.ResolvedProvider != nil && !tp.IsACP {
-		firstStart := session.Metadata["started_config_hash"] == ""
-		forceFresh := session.Metadata["wake_mode"] == "fresh"
-		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, tp.ResolvedProvider, firstStart, forceFresh)
-	}
 	firstStart := session.Metadata["started_config_hash"] == ""
 	forceFresh := session.Metadata["wake_mode"] == "fresh"
+	// Fork-launch validation (fail loud, never silent fresh). A session carrying
+	// gc.brain_parent_sid is a warm arm that must fork off a pre-built brain;
+	// degrading it to a fresh start would mislabel it cold and invert the
+	// experiment's headline metric.
+	//
+	// This deliberately runs AFTER the stale-resume guard and key-mint above, so
+	// it validates against the same firstStart that resolveSessionCommand will see
+	// below. The guard's clearStaleResumeKeyMetadata wipes started_config_hash when
+	// a forked child's own keyed transcript has gone stale on a later wake, which
+	// flips firstStart back to true. Validating earlier (against the pre-recovery
+	// firstStart) would let that recovered launch reach the fork branch unchecked:
+	// it would re-fork off the brain — or, on an unsupported provider, silently
+	// fall through to a fresh (cold-equivalent) session — without re-running the
+	// provider, parent-staleness, and wake_mode gates. A later-wake + own-key-stale
+	// recovery therefore re-forks off the brain when the parent is present, and
+	// fails loud (parent gone / unsupported provider / wake_mode=fresh) rather than
+	// ever mislabeling a cold run as warm.
+	parentSID := strings.TrimSpace(session.Metadata[beadmeta.BrainParentSIDMetadataKey])
+	if parentSID != "" {
+		parentStale := false
+		if firstStart && !forceFresh && tp.ResolvedProvider != nil && agentCfg.WorkDir != "" {
+			provider := sessionTranscriptProvider(tp.ResolvedProvider, session.Metadata)
+			if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, parentSID); probeable && !present {
+				parentStale = true
+			}
+		}
+		if err := validateForkLaunch(parentSID, tp.ResolvedProvider, firstStart, forceFresh, parentStale); err != nil {
+			return nil, err
+		}
+	}
+	if sk := session.Metadata["session_key"]; sk != "" && tp.ResolvedProvider != nil && !tp.IsACP {
+		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, parentSID, tp.ResolvedProvider, firstStart, forceFresh)
+	}
 	hasResumeKey := strings.TrimSpace(session.Metadata["session_key"]) != ""
 	if !firstStart && !forceFresh && hasResumeKey {
 		agentCfg.PromptSuffix = ""
@@ -895,32 +929,26 @@ func buildPreparedStartWithWorkDirResolver(
 			agentCfg.Env[startupPromptDeliveredEnv] = "1"
 		}
 	}
-	// Initial message: append to prompt on first start only.
+	// Initial message: append to prompt on first start only, reusing the
+	// overrides parsed once by parseSessionTemplateOverridesForLaunch above.
 	// Schema overrides were already applied in the block above (before coreHash).
 	// resolveSessionCommand only adds --resume/--session-id which are not schema
 	// flags, so the overrides don't need to be re-applied.
-	if raw := session.Metadata["template_overrides"]; raw != "" {
-		var overrides map[string]string
-		if err := json.Unmarshal([]byte(raw), &overrides); err == nil {
-			firstStart := session.Metadata["started_config_hash"] == ""
-			forceFresh := session.Metadata["wake_mode"] == "fresh"
-			if msg, ok := overrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
-				if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
-					agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
-				} else {
-					existing := ""
-					if agentCfg.PromptSuffix != "" {
-						parts := shellquote.Split(agentCfg.PromptSuffix)
-						if len(parts) > 0 {
-							existing = parts[0]
-						}
-					}
-					if existing != "" {
-						agentCfg.PromptSuffix = shellquote.Quote(existing + "\n\n---\n\nUser message:\n" + msg)
-					} else {
-						agentCfg.PromptSuffix = shellquote.Quote(msg)
-					}
+	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
+		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+			agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
+		} else {
+			existing := ""
+			if agentCfg.PromptSuffix != "" {
+				parts := shellquote.Split(agentCfg.PromptSuffix)
+				if len(parts) > 0 {
+					existing = parts[0]
 				}
+			}
+			if existing != "" {
+				agentCfg.PromptSuffix = shellquote.Quote(existing + "\n\n---\n\nUser message:\n" + msg)
+			} else {
+				agentCfg.PromptSuffix = shellquote.Quote(msg)
 			}
 		}
 	}
@@ -955,6 +983,9 @@ func buildPreparedStartWithWorkDirResolver(
 	if gcProvider := sessionProviderFamily(*session); gcProvider != "" {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
+	if triggerEnv := sessionTriggerBeadEnv(session); len(triggerEnv) > 0 {
+		agentCfg.Env = mergeEnv(agentCfg.Env, triggerEnv)
+	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
 		candidate:     candidate,
@@ -967,16 +998,31 @@ func buildPreparedStartWithWorkDirResolver(
 	}, nil
 }
 
+func sessionTriggerBeadEnv(session *beads.Bead) map[string]string {
+	if session == nil {
+		return nil
+	}
+	triggerBeadID := strings.TrimSpace(session.Metadata[beadmeta.TriggerBeadIDMetadataKey])
+	if triggerBeadID == "" {
+		return nil
+	}
+	env := map[string]string{
+		"GC_TRIGGER_BEAD_ID":      triggerBeadID,
+		"GC_TRIGGER_WORK_BEAD_ID": triggerBeadID,
+	}
+	if storeRef := strings.TrimSpace(session.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]); storeRef != "" {
+		env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
+		env["GC_TRIGGER_WORK_STORE_REF"] = storeRef
+	}
+	return env
+}
+
 func parseSessionTemplateOverridesForLaunch(session *beads.Bead) map[string]string {
 	if session == nil {
 		return nil
 	}
-	rawOverrides := strings.TrimSpace(session.Metadata["template_overrides"])
-	if rawOverrides == "" {
-		return nil
-	}
-	var overrides map[string]string
-	if err := json.Unmarshal([]byte(rawOverrides), &overrides); err != nil {
+	overrides, err := sessionpkg.ParseTemplateOverrides(session.Metadata)
+	if err != nil {
 		log.Printf("session %s: invalid template_overrides JSON: %v", session.ID, err)
 		return nil
 	}
@@ -1639,6 +1685,57 @@ var staleResumeKeyProbe = func(provider, workDir, sessionKey string) (present, p
 	return workertranscript.HasKeyedTranscript(worker.DefaultSearchPaths(), provider, workDir, sessionKey)
 }
 
+// validateForkLaunch enforces fork-launch invariants before command resolution.
+// It fails loud rather than ever silently degrading a brain-forked (warm) arm to
+// a fresh (cold-equivalent) session — the single worst outcome for the warm/cold
+// experiment, since it mislabels a cold run as warm. parentSID is
+// gc.brain_parent_sid on the session bead; an empty parentSID is not a fork
+// launch and is a no-op. parentStale reports that the parent brain's transcript
+// is provably absent on disk (probeable && !present).
+func validateForkLaunch(parentSID string, rp *config.ResolvedProvider, firstStart, forceFresh, parentStale bool) error {
+	if parentSID == "" {
+		return nil
+	}
+	providerName := ""
+	if rp != nil {
+		providerName = rp.Name
+	}
+	// Q2 hard guard: a brain_parent_sid-carrying session must never wake fresh. A
+	// fresh bounce mints a new key and uses SessionIDFlag, discarding the fork and
+	// turning a warm arm cold while it is still labeled warm. Fail at the earliest
+	// launch rather than waiting for a mid-task bounce to downgrade it silently.
+	if forceFresh {
+		return fmt.Errorf("fork-launch: session carries %s=%q but wake_mode=fresh would discard the fork (warm->cold mislabel); set wake_mode=resume", beadmeta.BrainParentSIDMetadataKey, parentSID)
+	}
+	// The fork form is only emitted on the initial launch; later wakes resume the
+	// forked child via its own key, so provider/staleness gating is firstStart-only.
+	if !firstStart {
+		return nil
+	}
+	if rp == nil || rp.ForkFlag == "" || rp.SessionIDFlag == "" {
+		forkFlag, sessionIDFlag := "", ""
+		if rp != nil {
+			forkFlag, sessionIDFlag = rp.ForkFlag, rp.SessionIDFlag
+		}
+		return fmt.Errorf("fork-launch requested (parent_sid=%q) but provider %q lacks fork support (fork_flag=%q session_id_flag=%q)", parentSID, providerName, forkFlag, sessionIDFlag)
+	}
+	// The fork form (resolveSessionCommand) builds "<cmd> --resume <parent_sid>
+	// --fork-session --session-id <gc_sid>" — flag-style --resume hardcoded. It
+	// does NOT route through resolveResumeCommand, so a provider that resumes via a
+	// custom resume_command (bypassed entirely by the fork form) or a non-flag
+	// resume_style (wrong token placement) would build a malformed fork CLI. Reject
+	// such a provider here rather than emit a broken command; claude — the only
+	// fork-capable provider today — is flag-style, so this never trips in practice
+	// and exists to keep a future ForkFlag provider from silently misfiring.
+	if rp.ResumeFlag == "" || rp.ResumeCommand != "" || (rp.ResumeStyle != "" && rp.ResumeStyle != "flag") {
+		return fmt.Errorf("fork-launch requested (parent_sid=%q) but provider %q has no fork-safe resume form: the fork command requires flag-style --resume (resume_flag=%q resume_style=%q resume_command=%q)", parentSID, providerName, rp.ResumeFlag, rp.ResumeStyle, rp.ResumeCommand)
+	}
+	if parentStale {
+		return fmt.Errorf("fork-launch: parent brain session %q (provider %q) is missing on disk; gc-core does not regenerate brains - regen is owned by brains/mem", parentSID, providerName)
+	}
+	return nil
+}
+
 // sessionTranscriptProvider resolves the provider-family identifier consumed by
 // the transcript discovery layer, preferring the resolved provider's builtin
 // ancestor and falling back to its start command and then the session's
@@ -1831,9 +1928,10 @@ func commitStartResultTraced(
 	// failure paths above report the start as failed and retry (ga-kmoj9c).
 	fmt.Fprintf(stdout, "Woke session '%s'\n", tp.DisplayName()) //nolint:errcheck
 	rec.Record(events.Event{
-		Type:    events.SessionWoke,
-		Actor:   "gc",
-		Subject: tp.DisplayName(),
+		Type:      events.SessionWoke,
+		Actor:     "gc",
+		Subject:   tp.DisplayName(),
+		SessionID: session.ID,
 	})
 	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), nil)
 	if trace != nil {
@@ -2883,7 +2981,8 @@ func stopTargetsBounded(
 					stopped++
 					rec.Record(events.Event{
 						Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
-						Payload: api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
+						SessionID: result.target.lifecycleCorrelationID(),
+						Payload:   api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 					})
 					telemetry.RecordAgentStop(context.Background(), result.target.name, firstNonEmptyGCString(result.target.agentName, result.target.template), "stopped", nil)
 				}
@@ -2927,7 +3026,8 @@ func stopTargetsBounded(
 			stopped++
 			rec.Record(events.Event{
 				Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
-				Payload: api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
+				SessionID: result.target.lifecycleCorrelationID(),
+				Payload:   api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 			})
 			telemetry.RecordAgentStop(context.Background(), result.target.name, firstNonEmptyGCString(result.target.agentName, result.target.template), "stopped", nil)
 		}

@@ -6143,6 +6143,152 @@ func TestCurrentUsernameForSystemdHintFallback(t *testing.T) {
 	})
 }
 
+// ensureSupervisorLinger: regression coverage for gascity#3683. Installing
+// the --user supervisor unit must enable systemd lingering so the supervisor
+// survives logout, with a loud warning (not a failed install) when linger
+// cannot be enabled.
+func TestEnsureSupervisorLinger(t *testing.T) {
+	oldUser := currentUserForSystemdHint
+	oldRun := supervisorLoginctlRun
+	oldEnabled := supervisorLingerEnabled
+	t.Cleanup(func() {
+		currentUserForSystemdHint = oldUser
+		supervisorLoginctlRun = oldRun
+		supervisorLingerEnabled = oldEnabled
+	})
+
+	t.Run("enables_when_disabled", func(t *testing.T) {
+		currentUserForSystemdHint = func() (*user.User, error) {
+			return &user.User{Username: "alice"}, nil
+		}
+		supervisorLingerEnabled = func(string) bool { return false }
+		var got []string
+		supervisorLoginctlRun = func(args ...string) error {
+			got = args
+			return nil
+		}
+		var stdout, stderr bytes.Buffer
+		ensureSupervisorLinger(&stdout, &stderr)
+		if want := []string{"enable-linger", "alice"}; !slices.Equal(got, want) {
+			t.Fatalf("loginctl args = %v, want %v", got, want)
+		}
+		if !strings.Contains(stdout.String(), "Enabled systemd lingering for alice") {
+			t.Fatalf("stdout = %q, want linger-enabled confirmation", stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q, want empty on success", stderr.String())
+		}
+	})
+
+	t.Run("skips_when_already_enabled", func(t *testing.T) {
+		currentUserForSystemdHint = func() (*user.User, error) {
+			return &user.User{Username: "alice"}, nil
+		}
+		supervisorLingerEnabled = func(string) bool { return true }
+		called := false
+		supervisorLoginctlRun = func(...string) error {
+			called = true
+			return nil
+		}
+		var stdout, stderr bytes.Buffer
+		ensureSupervisorLinger(&stdout, &stderr)
+		if called {
+			t.Fatalf("loginctl enable-linger must not run when linger is already enabled")
+		}
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Fatalf("expected no output when already enabled; stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	})
+
+	t.Run("warns_when_enable_fails", func(t *testing.T) {
+		currentUserForSystemdHint = func() (*user.User, error) {
+			return &user.User{Username: "alice"}, nil
+		}
+		supervisorLingerEnabled = func(string) bool { return false }
+		supervisorLoginctlRun = func(...string) error { return errors.New("polkit denied") }
+		var stdout, stderr bytes.Buffer
+		ensureSupervisorLinger(&stdout, &stderr)
+		msg := stderr.String()
+		if !strings.Contains(msg, "could not enable systemd lingering for alice") ||
+			!strings.Contains(msg, "polkit denied") ||
+			!strings.Contains(msg, "sudo loginctl enable-linger alice") {
+			t.Fatalf("stderr = %q, want loud warning with cause and sudo remediation", msg)
+		}
+	})
+
+	t.Run("warns_when_user_unresolved", func(t *testing.T) {
+		currentUserForSystemdHint = func() (*user.User, error) {
+			return nil, errors.New("no current user")
+		}
+		supervisorLingerEnabled = func(string) bool {
+			t.Fatalf("must not query linger when the user is unresolved")
+			return false
+		}
+		supervisorLoginctlRun = func(...string) error {
+			t.Fatalf("must not run loginctl when the user is unresolved")
+			return nil
+		}
+		var stdout, stderr bytes.Buffer
+		ensureSupervisorLinger(&stdout, &stderr)
+		if !strings.Contains(stderr.String(), "could not resolve the current user") ||
+			!strings.Contains(stderr.String(), "sudo loginctl enable-linger <your-user>") {
+			t.Fatalf("stderr = %q, want unresolved-user warning with placeholder remediation", stderr.String())
+		}
+	})
+}
+
+// TestInstallSupervisorSystemdEnablesLinger pins that the normal install
+// path (not just the no-user-manager error path) enables lingering, the
+// regression in gascity#3683.
+func TestInstallSupervisorSystemdEnablesLinger(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-new",
+		LogPath:       "/tmp/gc-home/supervisor.log",
+		GCHome:        "/tmp/gc-home",
+		XDGRuntimeDir: "/tmp/gc-run",
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+
+	oldRun := supervisorSystemctlRun
+	oldActive := supervisorSystemctlActive
+	oldUser := currentUserForSystemdHint
+	oldEnabled := supervisorLingerEnabled
+	oldLoginctl := supervisorLoginctlRun
+	supervisorSystemctlRun = func(...string) error { return nil }
+	supervisorSystemctlActive = func(string) bool { return false }
+	currentUserForSystemdHint = func() (*user.User, error) {
+		return &user.User{Username: "alice"}, nil
+	}
+	supervisorLingerEnabled = func(string) bool { return false }
+	var lingerArgs []string
+	supervisorLoginctlRun = func(args ...string) error {
+		lingerArgs = args
+		return nil
+	}
+	t.Cleanup(func() {
+		supervisorSystemctlRun = oldRun
+		supervisorSystemctlActive = oldActive
+		currentUserForSystemdHint = oldUser
+		supervisorLingerEnabled = oldEnabled
+		supervisorLoginctlRun = oldLoginctl
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if want := []string{"enable-linger", "alice"}; !slices.Equal(lingerArgs, want) {
+		t.Fatalf("loginctl args = %v, want %v (install must enable linger on the normal path)", lingerArgs, want)
+	}
+}
+
 // TestRunSupervisorEnsuresHomeDirAndWritesLog confirms the fix for the
 // "Supervisor logs: log file not found" symptom seen on first start under
 // systemd/launchd/container — where the original `gc supervisor start`

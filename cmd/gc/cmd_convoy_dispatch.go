@@ -187,6 +187,12 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
 	opts.Tracef = workflowTracef
 	loadCfg := false
+	// This is a per-kind capability switch (does this control kind need city
+	// config loaded to resolve store-refs/formulas/sessions?), not a
+	// control-kind membership predicate, so it intentionally lists literals
+	// rather than deriving from the beadmeta taxonomy. "scope-check" is
+	// deliberately absent because it needs no config resolution; a future
+	// control kind that needs cfg must be added here explicitly.
 	switch bead.Metadata[beadmeta.KindMetadataKey] {
 	case "check", "drain", "fanout", "retry-eval", "retry", "ralph":
 		loadCfg = true
@@ -203,7 +209,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			return fmt.Errorf("loading city config for %s: unavailable after warning-only load", cityPath)
 		}
 		opts.ResolveStoreRef = makeStoreRefResolver(cityPath, cfg)
-		if bead.Metadata[beadmeta.KindMetadataKey] == "workflow-finalize" {
+		if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 			sourceWorkflowCtx, cancelSourceWorkflowCtx := sourceWorkflowCommandContext()
 			defer cancelSourceWorkflowCtx()
 			opts.SourceWorkflowLock = makeSourceWorkflowLocker(sourceWorkflowCtx, cityPath, cfg, storePath)
@@ -278,13 +284,13 @@ func quarantineControlFailureBead(store beads.Store, beadID string, cause error)
 		Status: &status,
 		Labels: []string{"gc:control-quarantined"},
 		Metadata: map[string]string{
-			beadmeta.OutcomeMetadataKey:                 "fail",
-			beadmeta.FailureClassMetadataKey:            "hard",
+			beadmeta.OutcomeMetadataKey:                 beadmeta.OutcomeFail,
+			beadmeta.FailureClassMetadataKey:            beadmeta.FailureClassHard,
 			beadmeta.FailureReasonMetadataKey:           failureReason,
 			beadmeta.ControllerErrorMetadataKey:         reason,
-			beadmeta.ControllerErrorClassMetadataKey:    "hard",
+			beadmeta.ControllerErrorClassMetadataKey:    beadmeta.FailureClassHard,
 			beadmeta.ControllerRetryableMetadataKey:     "",
-			beadmeta.FinalDispositionMetadataKey:        "control_quarantined",
+			beadmeta.FinalDispositionMetadataKey:        beadmeta.DispositionControlQuarantine,
 			beadmeta.ControlQuarantinedMetadataKey:      "true",
 			beadmeta.ControlQuarantineReasonMetadataKey: reason,
 			beadmeta.ControlQuarantinedAtMetadataKey:    workflowTraceNow().UTC().Format(time.RFC3339),
@@ -564,7 +570,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		if binding, ok := controlRoutes[rigContext]; ok {
 			return binding, nil
 		}
-		binding, err := controlDispatcherBinding(store, cityName, cfg, rigContext)
+		binding, err := graphroute.ControlDispatcherBinding(store, cityName, cfg, rigContext, cliGraphrouteDeps(cityPath))
 		if err != nil {
 			return graphRouteBinding{}, err
 		}
@@ -641,7 +647,7 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 	}
 	routedTo := graphroute.WorkflowExecutionRoute(source)
 	if strings.TrimSpace(routedTo) == "" {
-		if strings.TrimSpace(source.Metadata[beadmeta.KindMetadataKey]) == "drain" {
+		if strings.TrimSpace(source.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindDrain {
 			vars, err := drainItemRecipeVars(recipe)
 			if err != nil {
 				return err
@@ -765,14 +771,14 @@ func propagateDynamicScopeMetadata(step *formula.RecipeStep, source beads.Bead) 
 	if step.Metadata[beadmeta.ScopeRefMetadataKey] == "" || step.Metadata[beadmeta.ScopeRoleMetadataKey] != "" {
 		return
 	}
-	switch step.Metadata[beadmeta.KindMetadataKey] {
-	case "scope":
+	kind := step.Metadata[beadmeta.KindMetadataKey]
+	switch {
+	case kind == beadmeta.KindScope:
 		return
-	case "scope-check", "workflow-finalize", "fanout", "check", "retry-eval", "retry", "ralph":
-		step.Metadata[beadmeta.ScopeRoleMetadataKey] = "control"
-		return
+	case beadmeta.IsControlKind(kind):
+		step.Metadata[beadmeta.ScopeRoleMetadataKey] = beadmeta.ScopeRoleControl
 	default:
-		step.Metadata[beadmeta.ScopeRoleMetadataKey] = "member"
+		step.Metadata[beadmeta.ScopeRoleMetadataKey] = beadmeta.ScopeRoleMember
 	}
 }
 
@@ -948,7 +954,7 @@ func closeWorkflowMatches(matches []workflowStoreMatch) int {
 	for _, m := range matches {
 		ids := workflowBeadIDs(m.beads)
 		n, _ := m.store.CloseAll(ids, map[string]string{
-			beadmeta.OutcomeMetadataKey: "skipped",
+			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 		})
 		closed += n
@@ -1102,7 +1108,7 @@ func openSourceWorkflowStoreRef(cfg *config.City, cityPath, storeRef string) (co
 func applySourceWorkflowMatchCleanup(match sourceWorkflowStoreMatch, deleteBeads bool, stderr io.Writer) (closed, deleted int, incomplete bool) {
 	ids := workflowBeadIDs(match.beads)
 	n, closeErr := match.store.CloseAll(ids, map[string]string{
-		beadmeta.OutcomeMetadataKey: "skipped",
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 	})
 	closed += n

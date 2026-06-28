@@ -418,3 +418,56 @@ func TestRetainScaleCheckPartialPoolDesiredNormalizesLegacyBoundTemplate(t *test
 		t.Fatalf("retained[%s] = %d with nil cfg, want 0 (legacy template only matches after normalization)", canonical, raw[canonical])
 	}
 }
+
+// TestRetainScaleCheckPartialPoolDesired_InFlightCreatingBeadRetained confirms that
+// scaleCheckPartialSessionRetainable retains creating beads that hold an active
+// pending_create_claim lease, while stale creates (lease cleared/expired) are dropped.
+// This is acceptance criterion #4 from ga-4qbgqf.1: after the retainable narrowing
+// that removes "start-pending" and "creating" from the explicit case list,
+// in-flight creates with an active lease still count as retained capacity.
+func TestRetainScaleCheckPartialPoolDesired_InFlightCreatingBeadRetained(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "echo",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+	const template = "worker"
+	partial := map[string]bool{template: true}
+
+	// In-flight create: pending_create_claim=true (active lease) → must be retained.
+	inFlightBead := beads.Bead{
+		ID: "creating-inflight", Type: sessionBeadType, Status: "open",
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "worker-1",
+			"state":                "creating",
+			"pending_create_claim": boolMetadata(true),
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{inFlightBead})
+	got := retainScaleCheckPartialPoolDesired(cfg, nil, snapshot, partial)
+	if got[template] < 1 {
+		t.Fatalf("in-flight creating bead not retained: retained[worker]=%d, want >= 1", got[template])
+	}
+
+	// Stale create: no pending_create_claim (lease expired/cleared) → must not be retained.
+	staleBead := beads.Bead{
+		ID: "creating-stale", Type: sessionBeadType, Status: "open",
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "worker-2",
+			"state":                "creating",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}
+	staleSnapshot := newSessionBeadSnapshot([]beads.Bead{staleBead})
+	staleGot := retainScaleCheckPartialPoolDesired(cfg, nil, staleSnapshot, partial)
+	if staleGot[template] != 0 {
+		t.Fatalf("stale creating bead incorrectly retained: retained[worker]=%d, want 0", staleGot[template])
+	}
+}

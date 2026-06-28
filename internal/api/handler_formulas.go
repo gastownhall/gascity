@@ -422,6 +422,12 @@ func includeFormulaPreviewStep(step formula.RecipeStep, rootID string) bool {
 	if step.ID == rootID {
 		return false
 	}
+	// This is a preview-projection filter, not a control-kind membership
+	// predicate, so it intentionally lists literals instead of deriving from
+	// the beadmeta control-kind taxonomy. The hidden set is the structural
+	// bookkeeping steps that should not surface in a formula preview; it
+	// includes "spec" (not a control kind) and omits control kinds that are
+	// meant to remain previewable, so no existing beadmeta set matches it.
 	switch strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) {
 	case "scope-check", "workflow-finalize", "spec":
 		return false

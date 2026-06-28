@@ -87,7 +87,24 @@ type defaultScaleCheckTarget struct {
 	err      error
 }
 
-var errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
+type scaleCheckDemand struct {
+	Count       int
+	WorkBeadIDs []string
+	Titles      map[string]string
+	Packs       map[string]string
+	Workspaces  map[string]string
+	StoreRefs   map[string]string
+	// ParentSIDs maps work-bead id → gc.brain_parent_sid, carrying the fork
+	// parent through to the new pool session bead so the launch path can fork
+	// the warm arm off its pre-built brain.
+	ParentSIDs map[string]string
+}
+
+var (
+	errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
+	errPoolSessionCreatePartial         = errors.New("pool session create skipped: demand read partial")
+	errPoolSessionCreateProviderRed     = errors.New("pool session create skipped: provider red")
+)
 
 // poolSessionCreateFairShareCounter rotates scarce create tokens across
 // contending pools so stable template sort order does not always win.
@@ -470,6 +487,11 @@ func buildDesiredStateWithSessionBeads(
 	// below so the probe wakes a cold pool from zero without overriding the
 	// pool's custom scale_check count.
 	coldWakeTemplates := map[string]bool{}
+	// namedOnDemandTemplates marks templates where namedSessionMode != "always"
+	// and a defaultScaleTargets entry was appended (on_demand named-backing).
+	// Their pool demand is clamped to 1 at the merge so one pool slot wakes the
+	// session without over-spawning {name}-N phantoms when N routed beads arrive.
+	namedOnDemandTemplates := map[string]bool{}
 	// activeStores is the set of stores a cold custom-scale_check pool is probed
 	// against (city + every non-suspended rig store), so routed demand a sleeping
 	// rig pool can't see locally — e.g. work queued in the city store — still
@@ -492,13 +514,14 @@ func buildDesiredStateWithSessionBeads(
 		if cfg.Agents[i].Suspended {
 			continue
 		}
-		backsNamedSession := false
+		namedSessionMode := ""
 		for j := range cfg.NamedSessions {
 			if cfg.NamedSessions[j].TemplateQualifiedName() == cfg.Agents[i].QualifiedName() {
-				backsNamedSession = true
+				namedSessionMode = cfg.NamedSessions[j].ModeOrDefault()
 				break
 			}
 		}
+		backsNamedSession := namedSessionMode != ""
 
 		sp := scaleParamsForBeads(&cfg.Agents[i], cfg.Beads)
 		// Expand {{.Rig}}/{{.AgentBase}} before the scale_check enters the
@@ -513,7 +536,7 @@ func buildDesiredStateWithSessionBeads(
 		template := cfg.Agents[i].QualifiedName()
 		runningSessions := 0
 		for _, sb := range allOpenSessionBeads {
-			if isPoolManagedSessionBead(sb) {
+			if isPoolManagedSessionBead(sb) && poolSessionIsLive(sb) {
 				// Match the qualified template by identity equivalence.
 				// allOpenSessionBeads is aggregated across the city + every rig
 				// store, and pool session beads store the qualified name
@@ -555,7 +578,16 @@ func buildDesiredStateWithSessionBeads(
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if store != nil && !hasCustomScaleCheck {
 				ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
-				defaultScaleTargets = append(defaultScaleTargets, ownTarget)
+				// mode='always': named session is unconditionally desired by the named
+				// pass; pool demand is redundant and creates {name}-N phantoms when N
+				// routed beads arrive. mode='on_demand': pool demand wakes the sleeping
+				// singleton (namedWorkReady covers only direct Assignee beads, not
+				// gc.routed_to). Leave defaultNamedScaleTargets unchanged for both modes
+				// (partial-query retention).
+				if namedSessionMode != "always" {
+					defaultScaleTargets = append(defaultScaleTargets, ownTarget)
+					namedOnDemandTemplates[template] = true
+				}
 				defaultNamedScaleTargets = append(defaultNamedScaleTargets, ownTarget)
 				// Cross-store cold-wake for named-backing pools (vp-cl4): mirror the
 				// generic-pool guard (vp-s37 / #3078 line ~598). A cold rig pool that
@@ -566,7 +598,9 @@ func buildDesiredStateWithSessionBeads(
 				// mirrors these probes only for partial-query retention bookkeeping.
 				if isCold && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
-					defaultScaleTargets = append(defaultScaleTargets, cityTarget)
+					if namedSessionMode != "always" {
+						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
+					}
 					defaultNamedScaleTargets = append(defaultNamedScaleTargets, cityTarget)
 				}
 				continue
@@ -643,6 +677,7 @@ func buildDesiredStateWithSessionBeads(
 	var assignedWorkStoreRefs []string
 	var storePartial bool
 	var scaleCheckCounts map[string]int
+	var scaleCheckDemandByTemplate map[string]scaleCheckDemand
 	var poolScaleCheckPartialTemplates map[string]bool
 	var namedScaleCheckPartialTemplates map[string]bool
 	var scaleCheckPartialTemplates map[string]bool
@@ -685,7 +720,7 @@ func buildDesiredStateWithSessionBeads(
 		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, unassignedRoutedBeads)
 		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
 		if len(defaultScaleTargets) > 0 {
-			defaultCounts, partialTemplates, errs := defaultScaleCheckCounts(defaultScaleTargets)
+			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(defaultScaleTargets)
 			for _, err := range errs {
 				// defaultScaleCheckCounts wraps Ready() failures with
 				// enough context to keep this generic outer log honest
@@ -697,6 +732,9 @@ func buildDesiredStateWithSessionBeads(
 			if scaleCheckCounts == nil {
 				scaleCheckCounts = make(map[string]int)
 			}
+			if scaleCheckDemandByTemplate == nil {
+				scaleCheckDemandByTemplate = make(map[string]scaleCheckDemand)
+			}
 			for template, count := range defaultCounts {
 				// A cold-pool wake probe only wakes the pool from zero; clamp its
 				// contribution to 1 so it never overrides a custom scale_check's
@@ -704,9 +742,16 @@ func buildDesiredStateWithSessionBeads(
 				if coldWakeTemplates[template] && count > 1 {
 					count = 1
 				}
+				// An on_demand named-session backing template is a singleton: one pool
+				// slot is enough to drain N queued routed tasks sequentially. Clamp to
+				// 1 so N unassigned gc.routed_to beads do not spawn {name}-N phantoms.
+				if namedOnDemandTemplates[template] && count > 1 {
+					count = 1
+				}
 				if count > scaleCheckCounts[template] {
 					scaleCheckCounts[template] = count
 				}
+				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], defaultDemand[template], count)
 			}
 		}
 		if len(controlDispatcherOpenDemand) > 0 {
@@ -735,7 +780,9 @@ func buildDesiredStateWithSessionBeads(
 		}
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.Open(), assignedWorkBeads, assignedWorkStoreRefs)
 		bp.assignedWorkBeads = poolWorkBeads
-		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, poolWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
+		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
+		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
+		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, sessionBeads.Open(), scaleCheckCounts, scaleCheckDemandByTemplate, trace)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -751,6 +798,7 @@ func buildDesiredStateWithSessionBeads(
 	} else {
 		// No store — use scale_check counts directly.
 		scaleCheckCounts, _ = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
+		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
 		for _, pw := range pendingPools {
 			cfgAgent := &cfg.Agents[pw.agentIdx]
 			desiredCount := scaleCheckCounts[cfgAgent.QualifiedName()]
@@ -1295,13 +1343,20 @@ func defaultScaleCheckTargetForAgent(
 // generic pool demand. Assigned beads are handled by assigned-work collection
 // and named-session demand so they are intentionally excluded here.
 func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int, map[string]bool, []error) {
+	counts, _, partialTemplates, errs := defaultScaleCheckCountsAndDemand(targets)
+	return counts, partialTemplates, errs
+}
+
+func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
 	counts := make(map[string]int, len(targets))
+	demand := make(map[string]scaleCheckDemand, len(targets))
 	if len(targets) == 0 {
-		return counts, nil, nil
+		return counts, demand, nil, nil
 	}
 
 	type scaleStoreGroup struct {
 		store     beads.Store
+		storeKey  string
 		templates map[string]struct{}
 	}
 	groups := make(map[string]*scaleStoreGroup)
@@ -1330,7 +1385,7 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		}
 		group := groups[key]
 		if group == nil {
-			group = &scaleStoreGroup{store: target.store, templates: make(map[string]struct{})}
+			group = &scaleStoreGroup{store: target.store, storeKey: key, templates: make(map[string]struct{})}
 			groups[key] = group
 		}
 		group.templates[template] = struct{}{}
@@ -1359,9 +1414,92 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 				continue
 			}
 			counts[template]++
+			entry := demand[template]
+			entry.Count++
+			entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
+			if entry.Titles == nil {
+				entry.Titles = make(map[string]string)
+			}
+			entry.Titles[b.ID] = b.Title
+			if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
+				if entry.Packs == nil {
+					entry.Packs = make(map[string]string)
+				}
+				entry.Packs[b.ID] = pack
+			}
+			if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
+				if entry.Workspaces == nil {
+					entry.Workspaces = make(map[string]string)
+				}
+				entry.Workspaces[b.ID] = workspace
+			}
+			if entry.StoreRefs == nil {
+				entry.StoreRefs = make(map[string]string)
+			}
+			entry.StoreRefs[b.ID] = group.storeKey
+			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
+				if entry.ParentSIDs == nil {
+					entry.ParentSIDs = make(map[string]string)
+				}
+				entry.ParentSIDs[b.ID] = parentSID
+			}
+			demand[template] = entry
 		}
 	}
-	return counts, partialTemplates, errs
+	return counts, demand, partialTemplates, errs
+}
+
+func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scaleCheckDemand {
+	if count <= 0 || len(incoming.WorkBeadIDs) == 0 {
+		return existing
+	}
+	limit := count
+	if limit > len(incoming.WorkBeadIDs) {
+		limit = len(incoming.WorkBeadIDs)
+	}
+	if existing.StoreRefs == nil && len(incoming.StoreRefs) > 0 {
+		existing.StoreRefs = make(map[string]string, len(incoming.StoreRefs))
+	}
+	if existing.Titles == nil && len(incoming.Titles) > 0 {
+		existing.Titles = make(map[string]string, len(incoming.Titles))
+	}
+	if existing.Packs == nil && len(incoming.Packs) > 0 {
+		existing.Packs = make(map[string]string, len(incoming.Packs))
+	}
+	if existing.Workspaces == nil && len(incoming.Workspaces) > 0 {
+		existing.Workspaces = make(map[string]string, len(incoming.Workspaces))
+	}
+	if existing.ParentSIDs == nil && len(incoming.ParentSIDs) > 0 {
+		existing.ParentSIDs = make(map[string]string, len(incoming.ParentSIDs))
+	}
+	for _, id := range incoming.WorkBeadIDs[:limit] {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		existing.WorkBeadIDs = append(existing.WorkBeadIDs, id)
+		if incoming.Titles != nil {
+			existing.Titles[id] = incoming.Titles[id]
+		}
+		if incoming.Packs != nil {
+			existing.Packs[id] = incoming.Packs[id]
+		}
+		if incoming.Workspaces != nil {
+			existing.Workspaces[id] = incoming.Workspaces[id]
+		}
+		if incoming.StoreRefs != nil {
+			existing.StoreRefs[id] = incoming.StoreRefs[id]
+		}
+		if incoming.ParentSIDs != nil {
+			if sid := incoming.ParentSIDs[id]; sid != "" {
+				existing.ParentSIDs[id] = sid
+			}
+		}
+	}
+	existing.Count = len(existing.WorkBeadIDs)
+	if existing.Count < count {
+		existing.Count = count
+	}
+	return existing
 }
 
 func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City, _ string) (map[string]bool, map[string]bool, []error) {
@@ -1549,10 +1687,12 @@ func retainScaleCheckPartialPoolDesired(cfg *config.City, counts map[string]int,
 }
 
 // Preserve dormant affected-template beads during transient scale_check
-// failures, but do not count them as awake demand.
+// failures, but do not count them as awake demand. Sessions that are already
+// mid-drain or past-drain (draining/drained/archived) are not preserved so a
+// partial read cannot interrupt an in-progress drain lifecycle.
 func scaleCheckPartialSessionPreservable(b beads.Bead) bool {
 	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "", "active", "awake", "start-pending", "creating", "asleep", "stopped", "suspended", "quarantined", "draining", "drained", "archived":
+	case "", "active", "awake", "start-pending", "creating", "asleep", "stopped", "suspended", "quarantined":
 		return true
 	default:
 		return isPendingPoolCreate(b)
@@ -1561,9 +1701,12 @@ func scaleCheckPartialSessionPreservable(b beads.Bead) bool {
 
 func scaleCheckPartialSessionRetainable(b beads.Bead) bool {
 	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "active", "awake", "start-pending", "creating":
+	case "active", "awake":
 		return true
 	default:
+		// A fresh in-flight create that still holds an active pending_create_claim
+		// lease counts as retained capacity. Stale creates (lease expired/cleared)
+		// return false so they stop inflating the desired count.
 		return isPendingPoolCreate(b)
 	}
 }
@@ -1893,8 +2036,15 @@ func discoverSessionBeadsWithRoots(
 				desiredHasCanonicalNonExpandingPoolSession(desired, template, cfgAgent) {
 				continue
 			}
+			// Use a narrower partial-alive guard than scaleCheckPartial here: for
+			// creating/start-pending beads, only protect in-flight creates with an
+			// active pending_create_claim lease; stale creates (lease cleared/expired)
+			// roll back even during a partial tick. For all other states (active, awake,
+			// asleep, stopped, …) the broad preservable rule applies unchanged.
+			poolPartialAlive := (poolScaleCheckPartial || namedScaleCheckPartial) &&
+				(isPendingPoolCreate(b) || (!creating && scaleCheckPartialSessionPreservable(b)))
 			if controllerManagedPool && !manualSession && !isNamedSessionBead(b) &&
-				!sessionAlreadyDesired && !templateDesired && !scaleCheckPartial {
+				!sessionAlreadyDesired && !templateDesired && !poolPartialAlive {
 				continue
 			}
 			if !manualSession && (!creating || isStaleCreating(b)) && !templateDesired && !pendingCreate && !scaleCheckPartial {
@@ -2182,11 +2332,17 @@ func realizePoolDesiredSessions(
 					prefer = &bead
 				}
 			}
-			sessionBead, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, used, usedSlots)
+			sessionBead, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, used, usedSlots)
 			if err != nil {
-				if errors.Is(err, errPoolSessionCreateBudgetExhausted) {
+				switch {
+				case errors.Is(err, errPoolSessionCreateBudgetExhausted):
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (fresh create deferred)\n", qualifiedName, err) //nolint:errcheck
-				} else {
+				case errors.Is(err, errPoolSessionCreatePartial):
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (partial demand read, fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
+				case errors.Is(err, errPoolSessionCreateProviderRed):
+					// debug-level: fires every tick during a red episode; not operator noise
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (provider red, fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
+				default:
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 				}
 				item.skip = true
@@ -2276,6 +2432,12 @@ func realizePoolDesiredSessions(
 			used[item.sessionBead.ID] = true
 		}
 		sessionBead := item.sessionBead
+		if bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedName, sessionBead, item.request); err != nil {
+			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sessionBead.ID, item.request.WorkBeadID, err) //nolint:errcheck
+		} else {
+			sessionBead = bound
+			item.sessionBead = bound
+		}
 		slot := item.slot
 		manualSession := isManualSessionBeadForAgent(sessionBead, cfgAgent)
 		var (
@@ -2317,6 +2479,185 @@ func realizePoolDesiredSessions(
 		installAgentSideEffects(bp, resolveAgent, tp, stderr)
 		desired[tp.SessionName] = tp
 	}
+}
+
+func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, sessionBead beads.Bead, request SessionRequest) (beads.Bead, error) {
+	workBeadID := strings.TrimSpace(request.WorkBeadID)
+	if sessionBead.ID == "" {
+		return sessionBead, nil
+	}
+	metadata := map[string]string{}
+	if workBeadID == "" {
+		if strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadIDMetadataKey]) != "" {
+			metadata[beadmeta.TriggerBeadIDMetadataKey] = ""
+		}
+		if strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]) != "" {
+			metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = ""
+		}
+		// Q1: a re-pointed session is a new work item; it must not silently
+		// inherit the prior fork's "warm" provenance. Clear the parent sid so the
+		// selection layer must re-stamp it deterministically to stay warm.
+		if strings.TrimSpace(sessionBead.Metadata[beadmeta.BrainParentSIDMetadataKey]) != "" {
+			metadata[beadmeta.BrainParentSIDMetadataKey] = ""
+		}
+		if len(metadata) == 0 {
+			return sessionBead, nil
+		}
+		if bp != nil && bp.beadStore != nil {
+			if err := bp.beadStore.Update(sessionBead.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
+				return sessionBead, err
+			}
+		}
+		sessionBead.Metadata = cloneStringMap(sessionBead.Metadata)
+		for key, value := range metadata {
+			sessionBead.Metadata[key] = value
+		}
+		return sessionBead, nil
+	}
+	oldWorkBeadID := strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadIDMetadataKey])
+	if oldWorkBeadID != workBeadID {
+		metadata[beadmeta.TriggerBeadIDMetadataKey] = workBeadID
+		// Q1: on a genuine reassign to a different work bead, reconcile the fork
+		// parent to the new work's value (set when the new bead carries one,
+		// clear otherwise) so a re-pointed session never inherits the old fork.
+		newParentSID := strings.TrimSpace(request.BrainParentSID)
+		if strings.TrimSpace(sessionBead.Metadata[beadmeta.BrainParentSIDMetadataKey]) != newParentSID {
+			metadata[beadmeta.BrainParentSIDMetadataKey] = newParentSID
+		}
+	}
+	workStoreRef := strings.TrimSpace(request.WorkStoreRef)
+	if workStoreRef != "" && strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]) != workStoreRef {
+		metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = workStoreRef
+	} else if workStoreRef == "" && oldWorkBeadID != workBeadID && strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]) != "" {
+		metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = ""
+	}
+	if pack := strings.TrimSpace(request.WorkPack); strings.TrimSpace(sessionBead.Metadata[beadmeta.PackMetadataKey]) != pack {
+		metadata[beadmeta.PackMetadataKey] = pack
+	}
+	if workspace := packWorkspaceSlug(request); strings.TrimSpace(sessionBead.Metadata[beadmeta.PackWorkspaceMetadataKey]) != workspace {
+		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
+	}
+	if workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); workDir != "" {
+		if strings.TrimSpace(sessionBead.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
+			metadata[beadmeta.WorkDirMetadataKey] = workDir
+		}
+		if strings.TrimSpace(sessionBead.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != workDir {
+			metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+		}
+	}
+	if len(metadata) == 0 {
+		return sessionBead, nil
+	}
+	if bp != nil && bp.beadStore != nil {
+		if err := bp.beadStore.Update(sessionBead.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
+			return sessionBead, err
+		}
+	}
+	sessionBead.Metadata = cloneStringMap(sessionBead.Metadata)
+	if sessionBead.Metadata == nil {
+		sessionBead.Metadata = map[string]string{}
+	}
+	for key, value := range metadata {
+		sessionBead.Metadata[key] = value
+	}
+	return sessionBead, nil
+}
+
+func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {
+	if bp == nil || cfgAgent == nil || strings.TrimSpace(request.WorkBeadID) == "" {
+		return ""
+	}
+	base, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	if err != nil || strings.TrimSpace(base) == "" {
+		return ""
+	}
+	if pack := strings.TrimSpace(request.WorkPack); pack != "" {
+		packDir := filepath.Join(filepath.Dir(base), pack)
+		if workspace := packWorkspaceSlug(request); workspace != "" {
+			return filepath.Join(packDir, workspace)
+		}
+		return packDir
+	}
+	if workspace := packWorkspaceSlug(request); workspace != "" {
+		return filepath.Join(base, workspace)
+	}
+	if slug := triggerBeadPathSlug(request.WorkBeadID, request.WorkBeadTitle); slug != "" {
+		return filepath.Join(base, slug)
+	}
+	return ""
+}
+
+func packWorkspaceSlug(request SessionRequest) string {
+	if explicit := safeWorkspaceName(request.WorkWorkspace, 96); explicit != "" {
+		return explicit
+	}
+	return ""
+}
+
+func triggerBeadPathSlug(beadID, title string) string {
+	id := safePathSlug(beadID, 32)
+	titleSlug := safePathSlug(title, 72)
+	switch {
+	case id != "" && titleSlug != "":
+		return id + "-" + titleSlug
+	case id != "":
+		return id
+	default:
+		return titleSlug
+	}
+}
+
+func safeWorkspaceName(value string, maxLen int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "." || value == ".." || strings.ContainsAny(value, `/\`) {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			return ""
+		}
+		if maxLen > 0 && b.Len() >= maxLen {
+			break
+		}
+	}
+	return strings.Trim(b.String(), ".-_")
+}
+
+func safePathSlug(value string, maxLen int) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		var out rune
+		switch {
+		case r >= 'a' && r <= 'z':
+			out = r
+		case r >= '0' && r <= '9':
+			out = r
+		default:
+			out = '-'
+		}
+		if out == '-' {
+			if b.Len() == 0 || lastDash {
+				continue
+			}
+			lastDash = true
+		} else {
+			lastDash = false
+		}
+		b.WriteRune(out)
+		if maxLen > 0 && b.Len() >= maxLen {
+			break
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func poolDesiredRequestIdentity(cfgAgent *config.Agent, slot int) (*config.Agent, string, int) {
@@ -2538,7 +2879,25 @@ func resolveTemplateForSessionBead(
 ) (TemplateParams, error) {
 	local := *bp
 	local.beadNames = map[string]string{qualifiedName: sessionBead.Metadata["session_name"]}
-	return resolveTemplatePrepared(&local, cfgAgent, qualifiedName, fpExtra)
+	tp, err := resolveTemplatePrepared(&local, cfgAgent, qualifiedName, fpExtra)
+	if err != nil {
+		return tp, err
+	}
+	if triggerID := strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadIDMetadataKey]); triggerID != "" {
+		if tp.Env == nil {
+			tp.Env = make(map[string]string)
+		}
+		tp.Env["GC_TRIGGER_BEAD_ID"] = triggerID
+		tp.Env["GC_TRIGGER_WORK_BEAD_ID"] = triggerID
+		if storeRef := strings.TrimSpace(sessionBead.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]); storeRef != "" {
+			tp.Env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
+			tp.Env["GC_TRIGGER_WORK_STORE_REF"] = storeRef
+		}
+		if pack := strings.TrimSpace(sessionBead.Metadata[beadmeta.PackMetadataKey]); pack != "" {
+			tp.Env["GC_PACKER_PACK"] = pack
+		}
+	}
+	return tp, nil
 }
 
 // canonicalSessionIdentity returns the agent and qualified name to use when
@@ -2856,6 +3215,7 @@ type poolSessionCreatePlan struct {
 	qualifiedInstance string
 	slot              int
 	poolSlot          int
+	metadata          map[string]string
 }
 
 func selectOrCreatePoolSessionBead(
@@ -2866,7 +3226,7 @@ func selectOrCreatePoolSessionBead(
 	used map[string]bool,
 	usedSlots map[int]bool,
 ) (beads.Bead, int, error) {
-	bead, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, template, preferred, used, usedSlots)
+	bead, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, template, preferred, SessionRequest{}, used, usedSlots)
 	if err != nil {
 		return beads.Bead{}, 0, err
 	}
@@ -2899,6 +3259,7 @@ func selectOrPlanPoolSessionBead(
 	cfgAgent *config.Agent,
 	template string,
 	preferred *beads.Bead,
+	request SessionRequest,
 	used map[string]bool,
 	usedSlots map[int]bool,
 ) (beads.Bead, int, *poolSessionCreatePlan, error) {
@@ -2940,6 +3301,29 @@ func selectOrPlanPoolSessionBead(
 	}
 	slot := claimDesiredPoolSlot(bp.city, cfgAgent, beads.Bead{}, usedSlots)
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, slot)
+	metadata := poolTriggerMetadata(bp, cfgAgent, qualifiedInstance, request)
+
+	if bp.poolScaleCheckPartialTemplates[template] {
+		delete(usedSlots, slot)
+		return beads.Bead{}, 0, nil, errPoolSessionCreatePartial
+	}
+
+	// Provider-health gate: refuse new creates when the registry reports this
+	// agent's provider as red. Reuse paths above are unaffected (they return
+	// before reaching this point). loadProviderHealthSnapshot always returns a
+	// non-nil snapshot; check() fails-open when the registry is absent or stale.
+	// Symmetric with the respawn gate in session_reconciler.go:2424.
+	provName := strings.TrimSpace(cfgAgent.Provider)
+	if provName == "" {
+		provName = strings.TrimSpace(cfgAgent.InheritedProvider)
+	}
+	if provName == "" && bp.workspace != nil {
+		provName = strings.TrimSpace(bp.workspace.Provider)
+	}
+	if healthy, present := bp.providerHealthSnapshot.check(provName); present && !healthy {
+		delete(usedSlots, slot)
+		return beads.Bead{}, 0, nil, errPoolSessionCreateProviderRed
+	}
 
 	if !bp.tryClaimPoolSessionCreate(template) {
 		delete(usedSlots, slot)
@@ -2950,8 +3334,36 @@ func selectOrPlanPoolSessionBead(
 		qualifiedInstance: qualifiedInstance,
 		slot:              slot,
 		poolSlot:          poolSlot,
+		metadata:          metadata,
 	}
 	return beads.Bead{}, 0, plan, nil
+}
+
+func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) map[string]string {
+	workID := strings.TrimSpace(request.WorkBeadID)
+	if workID == "" {
+		return nil
+	}
+	metadata := map[string]string{
+		beadmeta.TriggerBeadIDMetadataKey: workID,
+	}
+	if storeRef := strings.TrimSpace(request.WorkStoreRef); storeRef != "" {
+		metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = storeRef
+	}
+	if parentSID := strings.TrimSpace(request.BrainParentSID); parentSID != "" {
+		metadata[beadmeta.BrainParentSIDMetadataKey] = parentSID
+	}
+	if pack := strings.TrimSpace(request.WorkPack); pack != "" {
+		metadata[beadmeta.PackMetadataKey] = pack
+	}
+	if workspace := packWorkspaceSlug(request); workspace != "" {
+		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
+	}
+	if workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); workDir != "" {
+		metadata[beadmeta.WorkDirMetadataKey] = workDir
+		metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+	}
+	return metadata
 }
 
 // executePlannedPoolSessionBeadCreate materializes a pool session bead from a
@@ -2965,7 +3377,7 @@ func executePlannedPoolSessionBeadCreate(
 	template string,
 	plan poolSessionCreatePlan,
 ) (beads.Bead, error) {
-	bead, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, plan.qualifiedInstance, plan.slot)
+	bead, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, plan.qualifiedInstance, plan.slot, plan.metadata)
 	if err != nil {
 		bp.releasePoolSessionCreate()
 	}
@@ -3138,6 +3550,7 @@ func createPoolSessionBeadWithGuardedAlias(
 	template string,
 	qualifiedInstance string,
 	slot int,
+	metadata map[string]string,
 ) (beads.Bead, error) {
 	if bp == nil {
 		return beads.Bead{}, fmt.Errorf("creating pool session for %q: build params unavailable", template)
@@ -3156,6 +3569,7 @@ func createPoolSessionBeadWithGuardedAlias(
 	identity := poolSessionCreateIdentity{
 		AgentName: qualifiedInstance,
 		Slot:      slot,
+		Metadata:  metadata,
 	}
 	alias := strings.TrimSpace(qualifiedInstance)
 	if bp.beadStore == nil {
@@ -3590,7 +4004,7 @@ func selectOrCreateDependencyPoolSessionBead(
 	// Dependency floors are bounded prerequisites for already-realized roots,
 	// so they bypass the ordinary fresh pool create budget. The wake budget
 	// still caps when those floor sessions can actually start.
-	return createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, qualifiedInstance, poolSlot)
+	return createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, qualifiedInstance, poolSlot, nil)
 }
 
 func reusableDependencyPoolSessionBeads(bp *agentBuildParams, template string) []beads.Bead {
@@ -3723,17 +4137,21 @@ func materializeProviderOverlaysBeforeFingerprint(
 		stderr = io.Discard
 	}
 	installHooks := config.ResolveInstallHooks(cfgAgent, bp.workspace)
-	overlayProviders := runtime.OverlayProviderNamesFromParts(
-		resolvedProviderLaunchFamily(resolved),
-		strings.TrimSpace(resolved.Name),
-		installHooks,
-	)
-	for _, overlayDir := range effectiveOverlayDirs(bp.packOverlayDirs, bp.rigOverlayDirs, rigName) {
-		if err := runtime.StageProviderOverlayDir(overlayDir, workDir, overlayProviders, stderr); err != nil {
-			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
+	packDirs := effectiveOverlayDirs(bp.packOverlayDirs, bp.rigOverlayDirs, rigName)
+	overlayDir := resolveOverlayDir(cfgAgent.OverlayDir, bp.cityPath)
+	overlayProviders := runtime.EffectiveOverlayProviderNames(runtime.Config{
+		ProviderName:        resolvedProviderLaunchFamily(resolved),
+		ProviderOverlayName: strings.TrimSpace(resolved.Name),
+		InstallAgentHooks:   installHooks,
+		PackOverlayDirs:     packDirs,
+		OverlayDir:          overlayDir,
+	})
+	for _, od := range packDirs {
+		if err := runtime.StageProviderOverlayDir(od, workDir, overlayProviders, stderr); err != nil {
+			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
-	if overlayDir := resolveOverlayDir(cfgAgent.OverlayDir, bp.cityPath); overlayDir != "" {
+	if overlayDir != "" {
 		if err := runtime.StageProviderOverlayDir(overlayDir, workDir, overlayProviders, stderr); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}

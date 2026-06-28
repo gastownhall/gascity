@@ -37,6 +37,12 @@ const (
 	// ordinary git checkouts that point at the same repository and commit.
 	SyntheticCacheNamespace = "bundled-synthetic-v1"
 
+	// canonicalBrowseRef is the branch ref embedded in the dereferenceable
+	// GitHub tree URLs CanonicalImportSource authors. It is the browse ref
+	// only — the exact pinned commit travels in the import's version field —
+	// and matches the ref the public gascity-packs tree sources use.
+	canonicalBrowseRef = "main"
+
 	syntheticMarkerFile = ".gc-bundled-pack-cache.toml"
 )
 
@@ -87,12 +93,39 @@ func Source(name string) (string, bool) {
 }
 
 // CanonicalImportSource returns the source spelling gc writes for NEW
-// imports of a bundled pack: the public registry source when the pack is
-// published there (matching what gc init templates and the wave-1 doctor
-// migration write), else the gascity.git source.
+// imports of a bundled pack: a dereferenceable GitHub tree URL pinned to the
+// canonical browse ref, matching the authored form documented for
+// Import.Source and the form "gc import add" expects. Packs published in the
+// public gascity-packs repository resolve to its tree URL (identical to the
+// config.PublicGastownPackSource / config.PublicGascityPackSource
+// constants); the remaining bundled packs resolve to the gascity.git tree
+// URL. The //subpath spelling returned by Source stays the internal
+// recognition/cache form; only the authored text changes.
+//
+// Resolution treats both spellings identically (remotesource.Parse and
+// IsSource normalize tree URLs and //subpath forms to the same clone URL +
+// subpath), so this only affects how the source reads in pack.toml. The
+// FormatGitHubTreeSource fallback to Source keeps a non-GitHub bundled
+// repository (should one ever be added) authorable.
 func CanonicalImportSource(name string) (string, bool) {
-	if publicSubpath, ok := publicSubpathForPack(name); ok {
+	// Resolve registry identity first: generation must stay tied to an
+	// actually-bundled pack, so an unregistered name returns ok=false even
+	// if it happens to match publicSubpathForPack (which keys off the name
+	// string, not the registry).
+	pack, ok := ByName(name)
+	if !ok {
+		return "", false
+	}
+	if publicSubpath, ok := publicSubpathForPack(pack.Name); ok {
+		if tree, ok := remotesource.FormatGitHubTreeSource(PublicRepository, canonicalBrowseRef, publicSubpath); ok {
+			return tree, true
+		}
 		return PublicRepository + "//" + publicSubpath, true
+	}
+	if pack.Subpath != "" {
+		if tree, ok := remotesource.FormatGitHubTreeSource(Repository, canonicalBrowseRef, pack.Subpath); ok {
+			return tree, true
+		}
 	}
 	return Source(name)
 }

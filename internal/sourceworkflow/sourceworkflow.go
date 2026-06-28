@@ -71,8 +71,8 @@ const WorkflowSkippedCloseReason = "workflow cleanup: subtree bead force-closed 
 // Queries that only match one label miss graph.v2-only roots and allow
 // --force to spawn duplicates.
 func IsWorkflowRoot(b beads.Bead) bool {
-	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), "workflow") ||
-		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), "graph.v2")
+	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindWorkflow) ||
+		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)
 }
 
 func (e *ConflictError) Error() string {
@@ -459,7 +459,7 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 		return 0, err
 	}
 	return store.CloseAll(ordered, map[string]string{
-		beadmeta.OutcomeMetadataKey: "skipped",
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              WorkflowSubtreeClosedReason,
 	})
 }
@@ -505,7 +505,7 @@ func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, er
 		return 0, fmt.Errorf("ordering workflow spec sidecars for %s: %w", rootID, err)
 	}
 	return store.CloseAll(ordered, map[string]string{
-		beadmeta.OutcomeMetadataKey: "pass",
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass,
 		"close_reason":              reason,
 	})
 }
@@ -600,7 +600,7 @@ func generatedSpecSidecarCandidates(store beads.Store) ([]beads.Bead, error) {
 // IsGeneratedSpecSidecar reports whether a bead is a generated workflow spec
 // sidecar rather than executable work.
 func IsGeneratedSpecSidecar(bead beads.Bead) bool {
-	return strings.EqualFold(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]), "spec") ||
+	return strings.EqualFold(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindSpec) ||
 		strings.EqualFold(strings.TrimSpace(bead.Type), "spec")
 }
 

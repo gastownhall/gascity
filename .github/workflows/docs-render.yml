@@ -1,0 +1,33 @@
+name: Docs render check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-render-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  broken-links:
+    name: Mintlify broken-links (baseline-aware)
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@cdca7365b2dadb8aad0a33bc7601856ffabcc48e # v4
+        with:
+          node-version: '20'
+
+      - name: Run baseline-aware broken-link check
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: .github/scripts/docs-render-check.sh "$BASE_REF"

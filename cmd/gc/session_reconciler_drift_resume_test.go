@@ -111,7 +111,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 	// to catch future drift between the prep path and the resolve helper.
 	firstStart := got.Metadata["started_config_hash"] == ""
 	rp := &config.ResolvedProvider{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}
-	cmd := resolveSessionCommand("claude --dangerously-skip-permissions", got.Metadata["session_key"], rp, firstStart, false)
+	cmd := resolveSessionCommand("claude --dangerously-skip-permissions", got.Metadata["session_key"], "", rp, firstStart, false)
 	if !strings.Contains(cmd, wantArg) {
 		t.Fatalf("resolveSessionCommand = %q, want substring %q", cmd, wantArg)
 	}

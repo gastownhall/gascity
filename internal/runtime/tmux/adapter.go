@@ -100,7 +100,7 @@ func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
 	// V2 per-provider overlay support: StageProviderOverlayDir copies universal
 	// files then flattened per-provider/<provider>/ slots for ProviderOverlayName
 	// with ProviderName fallback, plus any InstallAgentHooks entries.
-	overlayProviders := runtime.OverlayProviderNames(cfg)
+	overlayProviders := runtime.EffectiveOverlayProviderNames(cfg)
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {
 			if err := runtime.StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {

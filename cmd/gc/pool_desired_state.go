@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -19,6 +20,13 @@ type SessionRequest struct {
 	Tier          string
 	SessionBeadID string // concrete session to preserve for resume or in-flight new demand
 	WorkBeadID    string // the work bead driving this request
+	WorkBeadTitle string // title of the work bead driving this request, when known
+	WorkPack      string // pack route key from the work bead, when known
+	WorkWorkspace string // explicit pack workspace route key from the work bead, when known
+	WorkStoreRef  string // city or rig:<name> store reference for WorkBeadID when known
+	// BrainParentSID is gc.brain_parent_sid from the driving work bead, when
+	// set: the parent session to fork this launch off of (warm-arm fork-launch).
+	BrainParentSID string
 	// FloorGuarantee marks a "new" request created to satisfy an agent's
 	// min_active_sessions floor (as opposed to elastic scale-check demand).
 	// The per-tick create-budget allocator reserves a token for each
@@ -73,7 +81,7 @@ func ComputePoolDesiredStates(
 	sessionBeads []beads.Bead,
 	scaleCheckCounts map[string]int,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads, scaleCheckCounts, nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads, scaleCheckCounts, nil, nil)
 }
 
 func ComputePoolDesiredStatesTraced(
@@ -83,7 +91,18 @@ func ComputePoolDesiredStatesTraced(
 	scaleCheckCounts map[string]int,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads, scaleCheckCounts, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads, scaleCheckCounts, nil, trace)
+}
+
+func ComputePoolDesiredStatesWithDemandTraced(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionBeads []beads.Bead,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads, scaleCheckCounts, scaleCheckDemand, trace)
 }
 
 func computePoolDesiredStates(
@@ -91,6 +110,7 @@ func computePoolDesiredStates(
 	assignedWorkBeads []beads.Bead,
 	sessionBeads []beads.Bead,
 	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
 	// Build reverse lookup: any identifier → session bead ID.
@@ -117,6 +137,8 @@ func computePoolDesiredStates(
 			namedSessionBeadIDs[sb.ID] = true
 		}
 	}
+
+	aliasHeldTemplates := canonicalSingletonAliasHeldTemplates(cfg, sessionBeads)
 
 	var resumeRequests []SessionRequest
 	wakeRequestedTemplates := make(map[string]struct{})
@@ -170,11 +192,14 @@ func computePoolDesiredStates(
 					continue
 				}
 				resumeRequests = append(resumeRequests, SessionRequest{
-					Template:      template,
-					BeadPriority:  beadPriority(wb),
-					Tier:          "resume",
-					SessionBeadID: sessionBeadID,
-					WorkBeadID:    wb.ID,
+					Template:       template,
+					BeadPriority:   beadPriority(wb),
+					Tier:           "resume",
+					SessionBeadID:  sessionBeadID,
+					WorkBeadID:     wb.ID,
+					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+					BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
 				})
 				continue
 			}
@@ -192,10 +217,13 @@ func computePoolDesiredStates(
 			}
 			wakeRequestedTemplates[template] = struct{}{}
 			resumeRequests = append(resumeRequests, SessionRequest{
-				Template:     template,
-				BeadPriority: beadPriority(wb),
-				Tier:         "wake-known-identity",
-				WorkBeadID:   wb.ID,
+				Template:       template,
+				BeadPriority:   beadPriority(wb),
+				Tier:           "wake-known-identity",
+				WorkBeadID:     wb.ID,
+				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+				WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+				BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
 			})
 			if trace != nil {
 				trace.recordDecision(string(TraceSitePoolWakeKnownIdentity), template, "", "assigned_work", "scheduled", traceRecordPayload{
@@ -234,6 +262,9 @@ func computePoolDesiredStates(
 			if !ok {
 				continue
 			}
+			if _, ok := aliasHeldTemplates[template]; ok {
+				continue
+			}
 			newCount := capNewDemandCount(limits, usage, agent, scaleCount)
 			inFlight := inFlightNewRequests[template]
 			inFlightCount := minInt(len(inFlight), newCount)
@@ -251,9 +282,39 @@ func computePoolDesiredStates(
 				usage.accept(req, limits)
 			}
 			for j := inFlightCount; j < newCount; j++ {
+				workBeadID := ""
+				workBeadTitle := ""
+				workPack := ""
+				workWorkspace := ""
+				workStoreRef := ""
+				workParentSID := ""
+				if demand := scaleCheckDemand[template]; len(demand.WorkBeadIDs) > j {
+					workBeadID = strings.TrimSpace(demand.WorkBeadIDs[j])
+					if demand.Titles != nil {
+						workBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
+					}
+					if demand.Packs != nil {
+						workPack = strings.TrimSpace(demand.Packs[workBeadID])
+					}
+					if demand.Workspaces != nil {
+						workWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
+					}
+					if demand.StoreRefs != nil {
+						workStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
+					}
+					if demand.ParentSIDs != nil {
+						workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
+					}
+				}
 				req := SessionRequest{
-					Template: template,
-					Tier:     "new",
+					Template:       template,
+					Tier:           "new",
+					WorkBeadID:     workBeadID,
+					WorkBeadTitle:  workBeadTitle,
+					WorkPack:       workPack,
+					WorkWorkspace:  workWorkspace,
+					WorkStoreRef:   workStoreRef,
+					BrainParentSID: workParentSID,
 				}
 				allRequests = append(allRequests, req)
 				usage.accept(req, limits)
@@ -261,7 +322,40 @@ func computePoolDesiredStates(
 		}
 	}
 
-	return applyNestedCaps(cfg, allRequests, trace)
+	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+}
+
+func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionBeads []beads.Bead) map[string]struct{} {
+	held := make(map[string]struct{})
+	if cfg == nil {
+		return held
+	}
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || !agent.UsesCanonicalSingletonPoolIdentity() {
+			continue
+		}
+		template := agent.QualifiedName()
+		for _, sb := range sessionBeads {
+			// None of these own the canonical alias: a closed or drained named
+			// session released it at close via the retire path, a pool-managed bead
+			// never held it, and a failed-create bead released it via
+			// failedCreateIdentityReleased (names.go). Counting any as a live holder
+			// would suppress demand while the alias is actually free, hanging routed
+			// work.
+			if sb.Status == "closed" || isPoolManagedSessionBead(sb) || isDrainedSessionBead(sb) || isFailedCreateSessionBead(sb) {
+				continue
+			}
+			if strings.TrimSpace(sb.Metadata["state"]) == "asleep" {
+				continue
+			}
+			if strings.TrimSpace(sb.Metadata["alias"]) == template {
+				held[template] = struct{}{}
+				break
+			}
+		}
+	}
+	return held
 }
 
 func poolInFlightNewRequests(cfg *config.City, sessionBeads []beads.Bead, resumeSessionBeadIDs map[string]struct{}) map[string][]SessionRequest {
@@ -296,9 +390,12 @@ func poolInFlightNewRequests(cfg *config.City, sessionBeads []beads.Bead, resume
 				continue
 			}
 			requests[template] = append(requests[template], SessionRequest{
-				Template:      template,
-				Tier:          "new",
-				SessionBeadID: sb.ID,
+				Template:       template,
+				Tier:           "new",
+				SessionBeadID:  sb.ID,
+				WorkBeadID:     strings.TrimSpace(sb.Metadata[beadmeta.TriggerBeadIDMetadataKey]),
+				WorkStoreRef:   strings.TrimSpace(sb.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]),
+				BrainParentSID: strings.TrimSpace(sb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
 			})
 		}
 	}
@@ -318,7 +415,7 @@ func poolSessionConsumesNewDemand(session beads.Bead) bool {
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
 // Accepts requests in priority order, rejecting any that would exceed a cap.
-func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
+func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
 	// Sort by priority DESC, resume tier first within same priority.
 	sort.SliceStable(requests, func(i, j int) bool {
 		if requests[i].BeadPriority != requests[j].BeadPriority {
@@ -367,6 +464,9 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 		}
 		template := agent.QualifiedName()
 		minSess := agent.EffectiveMinActiveSessions()
+		if _, ok := aliasHeldTemplates[template]; ok {
+			continue
+		}
 		for usage.agentCount[template] < minSess {
 			req := SessionRequest{
 				Template:       template,

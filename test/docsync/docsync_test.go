@@ -482,6 +482,23 @@ func TestSchemaFreshness(t *testing.T) {
 	}
 }
 
+// hasMdSuffix reports whether the path portion of a link target (before any
+// anchor or query) has a .md or .mdx extension. Used to catch "GitHub-friendly"
+// edits that add .md suffixes to Mintlify page links — the deployed site serves
+// extensionless routes, so the suffix breaks navigation even though the file
+// exists on disk.
+func hasMdSuffix(target string) bool {
+	path := target
+	if idx := strings.Index(path, "#"); idx >= 0 {
+		path = path[:idx]
+	}
+	if idx := strings.Index(path, "?"); idx >= 0 {
+		path = path[:idx]
+	}
+	ext := filepath.Ext(path)
+	return ext == ".md" || ext == ".mdx"
+}
+
 // isMintlifySource returns true if path belongs to a doc tree that has a
 // Mintlify config (docs.json). In Mintlify trees, extensionless root-relative
 // links like /tutorials/01-beads are the expected convention. Other trees are
@@ -509,6 +526,10 @@ func TestLocalMarkdownLinks(t *testing.T) {
 			t.Fatalf("reading %s: %v", path, err)
 		}
 		mintlify := isMintlifySource(root, path)
+		docsRoot := filepath.Join(root, "docs")
+		relToDocsRoot, _ := filepath.Rel(docsRoot, path)
+		relToDocsRoot = filepath.ToSlash(relToDocsRoot)
+		publishedMintlifyPage := mintlify && !docsPublishExemptions[relToDocsRoot]
 		for _, target := range extractMarkdownLinks(string(data)) {
 			if isExternalLink(target) {
 				continue
@@ -518,9 +539,16 @@ func TestLocalMarkdownLinks(t *testing.T) {
 				continue
 			}
 			if mintlify {
-				// Mintlify docs: extensionless links are OK (deployed
-				// site uses route-based URLs without .md).
-				if !localLinkExists(resolved) {
+				// Mintlify docs: extensionless links are the correct convention
+				// (deployed site uses route-based URLs without extensions).
+				// A .md/.mdx suffix on an internal page link breaks Mintlify
+				// navigation even though the file exists on disk.
+				// Only enforce for published pages — workspace meta files
+				// (docsPublishExemptions) may legitimately reference raw filenames.
+				if publishedMintlifyPage && hasMdSuffix(target) {
+					relPath, _ := filepath.Rel(root, path)
+					broken = append(broken, relPath+" -> "+target)
+				} else if !localLinkExists(resolved) {
 					relPath, _ := filepath.Rel(root, path)
 					broken = append(broken, relPath+" -> "+target)
 				}
@@ -543,7 +571,18 @@ func TestLocalMarkdownLinks(t *testing.T) {
 		}
 	}
 	if len(unexpected) > 0 {
-		t.Errorf("broken local markdown links:")
+		t.Errorf(`broken local markdown links (%d):
+
+docs/ is authored for the Mintlify site (https://docs.gascityhall.com), NOT for
+direct GitHub viewing. Internal page links in docs/ are extensionless by
+convention — use /tutorials/01-beads, not /tutorials/01-beads.md. A .md/.mdx
+suffix breaks Mintlify navigation even though the file exists on disk, so please
+don't reformat docs/ links to be "GitHub-friendly". (engdocs/ and root .md files
+ARE GitHub-only and DO require explicit .md paths.) See CONTRIBUTING.md ->
+"Docs link conventions". If a link is genuinely broken on the live site, say so
+in the PR and we'll fix it Mintlify-side rather than changing the path here.
+
+Offending links:`, len(unexpected))
 		for _, item := range unexpected {
 			t.Errorf("  %s", item)
 		}

@@ -203,6 +203,17 @@ out raw key literals; `TestNoUndeclaredMetadataKeys` in
 `internal/beadmeta/guard_test.go` enforces this by scanning source for
 whole `gc.*`-key-shaped string literals.
 
+Value vocabularies live alongside the keys: `values.go` declares the
+closed value domains (kind, outcome, failure class, scope role, drain /
+retry / fanout state machines, dispositions, modes, scope kind), and
+`kindsets.go` declares the named subsets of the kind vocabulary with
+their relationships — `ControlKinds` (authoritative; the ProcessControl
+switch in `internal/dispatch/runtime.go` is its behavior owner),
+`StructuralGraphKinds`, `WorkflowTopologyKinds`, and
+`GraphContractMetadataKinds`. Every routing predicate is exactly equal
+to `ControlKinds`; `TestKindSetRelationships` and the dispatch lockstep
+tests pin the compositions and the equalities.
+
 The namespace is deliberately open-world at the edges:
 
 - **Dynamic keys.** Formula input vars are stamped as `gc.var.<name>`
@@ -221,11 +232,11 @@ The namespace is deliberately open-world at the edges:
   their read/write helper behavior remaining in
   `internal/beads/contract/metadata.go`.
 
-Keys embedded inside larger strings -- jq `--metadata-field` filters in
-`internal/config/config.go` and SQL JSON paths in
-`internal/api/convoy_sql.go` -- are outside the guard's key-shape rule and
-are tracked as a follow-up (generate those path fragments from the
-constants).
+Keys embedded inside larger strings are outside the guard's key-shape
+rule, but the two such surfaces are constructed from the constants rather
+than spelled raw: the jq/bd shell builders in `internal/config/config.go`
+(via the local `jqMeta` helper and direct constant concatenation) and the
+SQL JSON paths in `internal/api/convoy_sql.go` (via `beadmeta.JSONPath`).
 
 ## Interactions
 

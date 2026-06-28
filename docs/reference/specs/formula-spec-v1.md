@@ -80,7 +80,7 @@ The execution model is the structural difference from v2:
 | | v1 | Formulas v2 |
 |---|---|---|
 | Compiled shape | Parent-child molecule tree under a `molecule` container root | Flat graph: `task` root plus step beads linked only by blocking dependency edges |
-| Runtime engine | None. Conditions and loops resolve at cook time; afterwards the molecule is inert data | The orchestrator's control dispatcher executes every control bead — check and retry evaluation, fan-out, tally, drain, scope checks, workflow-finalize |
+| Runtime engine | None. Conditions and loops resolve at cook time; afterwards the molecule is inert data | The orchestrator's control dispatcher executes every control bead — check and retry evaluation, fan-out, drain, scope checks, workflow-finalize |
 | Who advances work | Agents working hooked beads, inside their own sessions | The orchestrator drives orchestration outside any agent session; agents only run plain work beads |
 | Agent fan-out | The molecule is typically worked by the one agent it is slung to; spreading steps across agents is manual routing | Step beads are independently routable; per-step routing intent resolves at dispatch, and `drain` / `on_complete` fan out across agents or pools at runtime |
 | Root visibility | The container root is the molecule's handle; default-typed steps are stamped type `step` and excluded from `Ready()` (section 2) | Step beads are independently Ready-visible and routable; the root surfaces only when the workflow completes |
@@ -126,7 +126,7 @@ needs = ["cook"]
 This section specifies the full authoring surface. The file format is
 shared with formulas v2; every construct below parses under both
 contracts. Constructs marked **v2-only** (`check`, `retry`, `drain`,
-`on_complete`, `tally`, `timeout`, and reserved `gc.*` step metadata)
+`on_complete`, `timeout`, and reserved `gc.*` step metadata)
 require the explicit v2 declaration — using them in a v1 formula must fail
 compilation (section 5).
 
@@ -231,7 +231,7 @@ Their semantics are specified in the
 | `retry` | table | v2-only | Transient retry loop |
 | `drain` | table | v2-only | Scatter the input convoy into unit convoys |
 | `on_complete` | table | v2-only | Runtime fan-out over step output |
-| `tally` | table | v2-only | Aggregate fan-out voter outputs; requires `on_complete` |
+| `tally` | table | v2-only | Removed from the SDK; authored formulas must not use it |
 | `timeout` | duration string | v2-only | Max duration for a `check` script; requires `check` |
 
 Compiling a v1 formula that uses any v2-only construct must fail with:
@@ -515,7 +515,8 @@ with the section 1.3 compile error.
   exactly one of `count` / `until` / `range`; `max` required with `until`.
 
 The v2-only constructs carry their own shape rules (`check` / `retry` /
-`drain` / `on_complete` / `tally` field constraints); those are specified
+`drain` / `on_complete` field constraints); `tally` was removed and now
+fails fast if authored. The remaining construct constraints are specified
 with the constructs in the
 [v2 specification](/reference/specs/formula-spec-v2#19-validation).
 
@@ -723,8 +724,8 @@ under either setting.
 
 ### v2-only constructs are rejected
 
-A v1 formula that uses `check`, `retry`, `drain`, `on_complete` (or
-`tally`, which requires it), or reserved `gc.*` step metadata (the control
+A v1 formula that uses `check`, `retry`, `drain`, `on_complete`, or
+reserved `gc.*` step metadata (the control
 and structural `gc.kind` values, `gc.scope_name`, `gc.scope_role`,
 `gc.scope_ref`, `gc.continuation_group`, `gc.on_fail`) must fail to
 compile with:

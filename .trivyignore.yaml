@@ -84,6 +84,81 @@ vulnerabilities:
       - "usr/local/bin/dolt"
     expired_at: 2026-07-07
     statement: Latest Dolt 1.88.0 still embeds github.com/apache/thrift v0.13.1; remove after a Dolt release includes thrift 0.23.0 or later.
+  - id: CVE-2026-25680
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML parsing issue; remove once upstream rebuilds against the fixed x/net release.
+  - id: CVE-2026-25681
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML rendering issue; remove once upstream rebuilds against the fixed x/net release.
+  - id: CVE-2026-27136
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML rendering issue; remove once upstream rebuilds against the fixed x/net release.
+  - id: CVE-2026-39821
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles a Go module set with this x/net idna issue; remove once upstream rebuilds against the fixed x/net release.
+  - id: CVE-2026-42502
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML rendering issue; remove once upstream rebuilds against the fixed x/net release.
+  - id: CVE-2026-42506
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML rendering issue; remove once upstream rebuilds against the fixed x/net release.
+  - id: CVE-2026-39827
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-39828
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-39829
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-39830
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-39832
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-39835
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-42508
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-46595
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-46597
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
   # HIGH severity, fixed upstream. Both CVEs below are present ONLY via the
   # deliberate steveyegge/beads v1.0.4 repin (v1.0.5 has data corruption) in the
   # bundled bd CLI binary. bd is a local CLI: the affected apache/thrift and
@@ -100,3 +175,117 @@ vulnerabilities:
       - "usr/local/bin/bd"
     expired_at: 2026-07-07
     statement: "HIGH, fixed upstream (go-jose/go-jose/v4). Present only via the deliberate steveyegge/beads v1.0.4 repin (v1.0.5 has data corruption), in the bundled bd CLI binary on non-network JWE paths. Remove when gascity moves off bd 1.0.4 (tracking: move gascity off bd v1.0.4)."
+  # The golang.org/x/net (HTML/idna/http2) and golang.org/x/crypto/ssh CVEs in
+  # the same series the dolt entries above waive are also reported against the
+  # bd CLI binary (steveyegge/beads v1.0.4 repin, external), the gc binary
+  # (indirect golang.org/x/net v0.52.0 / golang.org/x/crypto v0.49.0), and the
+  # external kubectl binary (golang.org/x/net v0.49.0; the gc-controller image
+  # adds kubectl on top of the agent image). With set -e the Container Scan
+  # halts at the first failing image, so kubectl's x/net findings stayed masked
+  # until the bd/gc findings were waived. These are base-pre-existing: the
+  # Container Scan is already red on main (scheduled run 2026-06-24) and this PR
+  # does not change go.mod, so gc's transitive module versions are identical to
+  # base. Remove the bd/kubectl paths once those binaries rebuild upstream;
+  # remove the gc paths once gc's go.mod bumps golang.org/x/net >= 0.55.0
+  # (>= 0.53.0 for CVE-2026-33814) and golang.org/x/crypto >= 0.52.0.
+  - id: CVE-2026-25680
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-07-07
+    statement: golang.org/x/net HTML parsing DoS; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin), gc (indirect x/net v0.52.0), and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream and gc bumps golang.org/x/net >= 0.55.0.
+  - id: CVE-2026-25681
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-07-07
+    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin), gc (indirect x/net v0.52.0), and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream and gc bumps golang.org/x/net >= 0.55.0.
+  - id: CVE-2026-27136
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-07-07
+    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin), gc (indirect x/net v0.52.0), and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream and gc bumps golang.org/x/net >= 0.55.0.
+  - id: CVE-2026-39821
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-07-07
+    statement: golang.org/x/net/idna issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin), gc (indirect x/net v0.52.0), and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream and gc bumps golang.org/x/net >= 0.55.0.
+  - id: CVE-2026-42502
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-07-07
+    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin), gc (indirect x/net v0.52.0), and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream and gc bumps golang.org/x/net >= 0.55.0.
+  - id: CVE-2026-42506
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-07-07
+    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin), gc (indirect x/net v0.52.0), and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream and gc bumps golang.org/x/net >= 0.55.0.
+  - id: CVE-2026-33814
+    paths:
+      - "usr/local/bin/gc"
+    expired_at: 2026-07-07
+    statement: golang.org/x/net http2 issue; base-pre-existing (also red on main 2026-06-24). gc only (indirect x/net v0.52.0); bd/br/dolt/kubectl already covered by the stdlib waiver above. Remove once gc bumps golang.org/x/net >= 0.53.0.
+  - id: CVE-2026-39827
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-07-07
+    statement: golang.org/x/crypto/ssh CVE; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin) and gc (indirect x/crypto v0.49.0). Remove once bd rebuilds and gc bumps golang.org/x/crypto >= 0.52.0.
+  - id: CVE-2026-39828
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-07-07
+    statement: golang.org/x/crypto/ssh CVE; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin) and gc (indirect x/crypto v0.49.0). Remove once bd rebuilds and gc bumps golang.org/x/crypto >= 0.52.0.
+  - id: CVE-2026-39829
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-07-07
+    statement: golang.org/x/crypto/ssh CVE; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin) and gc (indirect x/crypto v0.49.0). Remove once bd rebuilds and gc bumps golang.org/x/crypto >= 0.52.0.
+  - id: CVE-2026-39830
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-07-07
+    statement: golang.org/x/crypto/ssh CVE; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin) and gc (indirect x/crypto v0.49.0). Remove once bd rebuilds and gc bumps golang.org/x/crypto >= 0.52.0.
+  - id: CVE-2026-39832
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-07-07
+    statement: golang.org/x/crypto/ssh/agent CVE; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin) and gc (indirect x/crypto v0.49.0). Remove once bd rebuilds and gc bumps golang.org/x/crypto >= 0.52.0.
+  - id: CVE-2026-39835
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-07-07
+    statement: golang.org/x/crypto/ssh CVE; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin) and gc (indirect x/crypto v0.49.0). Remove once bd rebuilds and gc bumps golang.org/x/crypto >= 0.52.0.
+  - id: CVE-2026-42508
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-07-07
+    statement: golang.org/x/crypto/ssh/knownhosts CVE; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin) and gc (indirect x/crypto v0.49.0). Remove once bd rebuilds and gc bumps golang.org/x/crypto >= 0.52.0.
+  - id: CVE-2026-46595
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-07-07
+    statement: golang.org/x/crypto/ssh CVE; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin) and gc (indirect x/crypto v0.49.0). Remove once bd rebuilds and gc bumps golang.org/x/crypto >= 0.52.0.
+  - id: CVE-2026-46597
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-07-07
+    statement: golang.org/x/crypto/ssh CVE; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.0.4 repin) and gc (indirect x/crypto v0.49.0). Remove once bd rebuilds and gc bumps golang.org/x/crypto >= 0.52.0.

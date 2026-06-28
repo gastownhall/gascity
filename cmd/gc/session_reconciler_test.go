@@ -887,6 +887,200 @@ func TestReconcileSessionBeads_DrainAckMarksStopPendingAndStopsAsync(t *testing.
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckedOrphanStopDeferredWhenStoreQueryPartial is
+// the gc-hz0nu regression guard. During a transient store outage the desired /
+// assigned-work view is incomplete, so a live session can be misjudged as
+// orphaned and a drain ack minted from that degraded view. The drain-acked stop
+// path must NOT kill the session in that window — it has to defer, exactly like
+// the plain orphan-drain path already does when storeQueryPartial is set.
+// Without the guard this session gets marked stop-pending and async-stopped,
+// which is what killed king/dalinar/omp-crew/boot on 2026-06-09.
+func TestReconcileSessionBeads_DrainAckedOrphanStopDeferredWhenStoreQueryPartial(t *testing.T) {
+	env := newReconcilerTestEnv()
+	// "worker" is neither desired nor configured-named -> falls to the orphan
+	// (default) branch; provider is alive so the branch would async-stop it.
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,  // empty: not desired
+		map[string]bool{}, // not configured-named: not preserveNamed
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		true, // storeQueryPartial: store is degraded, ack can't be trusted
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state_reason"] == sessionpkg.DrainAckStopPendingReason {
+		t.Fatalf("drain-acked orphan marked stop-pending under storeQueryPartial; must defer until the store is healthy (gc-hz0nu)")
+	}
+	if got.Metadata["state"] == string(sessionpkg.StateDraining) {
+		t.Fatalf("state = draining under storeQueryPartial; live session must be preserved (gc-hz0nu)")
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed under storeQueryPartial; live session must be preserved (gc-hz0nu)")
+	}
+}
+
+// TestReconcileSessionBeads_PreserveNamedReconcilerAckStopDeferredWhenStoreQueryPartial
+// is the gc-kkgak regression guard for the second (preserveNamed/named-session)
+// drain-ack block. A RECONCILER-owned drain ack is minted from the
+// desired-state/assigned-work view; under a partial store query that view is
+// unreliable, so the reconciler-owned stop must defer until the store is
+// healthy — the same reasoning as gc-hz0nu's orphan branch. Without the guard
+// the named session is async-stopped on degraded data.
+func TestReconcileSessionBeads_PreserveNamedReconcilerAckStopDeferredWhenStoreQueryPartial(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	// Reconciler-owned ack (source=reconciler), generation matches the bead's "1".
+	if err := setReconcilerDrainAckMetadata(env.sp, "worker", &drainState{reason: "orphaned", generation: 1}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		true, // storeQueryPartial
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state_reason"] == sessionpkg.DrainAckStopPendingReason {
+		t.Fatalf("reconciler-owned drain-ack marked stop-pending under storeQueryPartial; must defer (gc-kkgak)")
+	}
+	if got.Metadata["state"] == string(sessionpkg.StateDraining) {
+		t.Fatalf("state = draining under storeQueryPartial; reconciler-owned stop must defer (gc-kkgak)")
+	}
+}
+
+// TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial locks
+// the other half of gc-kkgak: an agent-sourced drain ack (NOT reconciler-owned —
+// an explicit `gc runtime drain-ack` handoff) must still stop promptly even
+// under storeQueryPartial. The agent's intent is explicit, not derived from the
+// degraded store, so the partial-store guard must not swallow it.
+func TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	// Plain agent ack: GC_DRAIN_ACK set, but no reconciler source metadata.
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		true, // storeQueryPartial — must NOT defer an agent-sourced ack
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state_reason"] != sessionpkg.DrainAckStopPendingReason {
+		t.Fatalf("agent-sourced drain-ack was deferred under storeQueryPartial (state_reason=%q); handoff acks must stop unconditionally (gc-kkgak)", got.Metadata["state_reason"])
+	}
+}
+
 func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := newBlockingStopProvider()
@@ -9433,10 +9627,10 @@ func TestResolveResumeCommand(t *testing.T) {
 			Args: []string{
 				"run", "codex", "--",
 				"--dangerously-bypass-approvals-and-sandbox",
-				"-m", "gpt-5.3-codex-spark",
+				"-m", "gpt-5.3-codex",
 				"-c", "model_reasoning_effort=\"medium\"",
 			},
-			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume {{.SessionKey}}",
 		},
 	}, func(name string) (string, error) { return "/usr/bin/" + name, nil })
 	if err != nil {
@@ -9498,10 +9692,10 @@ func TestResolveResumeCommand(t *testing.T) {
 		},
 		{
 			name:       "explicit wrapped codex resume command includes inferred defaults",
-			command:    "aimux run codex -- --dangerously-bypass-approvals-and-sandbox --model gpt-5.3-codex-spark -c model_reasoning_effort=medium",
+			command:    "aimux run codex -- --dangerously-bypass-approvals-and-sandbox --model gpt-5.3-codex -c model_reasoning_effort=medium",
 			sessionKey: "def-456",
 			provider:   codexMini,
-			want:       "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume -c model_reasoning_effort=medium def-456",
+			want:       "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume -c model_reasoning_effort=medium def-456",
 		},
 	}
 	for _, tt := range tests {
@@ -9521,7 +9715,7 @@ func TestResolveSessionCommand(t *testing.T) {
 	}
 
 	t.Run("first start uses --session-id", func(t *testing.T) {
-		got := resolveSessionCommand("claude --dangerously-skip-permissions", "abc-123", claude, true, false)
+		got := resolveSessionCommand("claude --dangerously-skip-permissions", "abc-123", "", claude, true, false)
 		want := "claude --dangerously-skip-permissions --session-id abc-123"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -9529,7 +9723,7 @@ func TestResolveSessionCommand(t *testing.T) {
 	})
 
 	t.Run("resume uses --resume", func(t *testing.T) {
-		got := resolveSessionCommand("claude --dangerously-skip-permissions", "abc-123", claude, false, false)
+		got := resolveSessionCommand("claude --dangerously-skip-permissions", "abc-123", "", claude, false, false)
 		want := "claude --dangerously-skip-permissions --resume abc-123"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -9537,7 +9731,7 @@ func TestResolveSessionCommand(t *testing.T) {
 	})
 
 	t.Run("fresh wake uses --session-id", func(t *testing.T) {
-		got := resolveSessionCommand("claude --dangerously-skip-permissions", "abc-123", claude, false, true)
+		got := resolveSessionCommand("claude --dangerously-skip-permissions", "abc-123", "", claude, false, true)
 		want := "claude --dangerously-skip-permissions --session-id abc-123"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -9546,7 +9740,7 @@ func TestResolveSessionCommand(t *testing.T) {
 
 	t.Run("first start without SessionIDFlag falls back to resume", func(t *testing.T) {
 		noSessionID := &config.ResolvedProvider{ResumeFlag: "--resume"}
-		got := resolveSessionCommand("agent run", "key-1", noSessionID, true, false)
+		got := resolveSessionCommand("agent run", "key-1", "", noSessionID, true, false)
 		want := "agent run --resume key-1"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)

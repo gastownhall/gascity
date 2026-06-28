@@ -94,3 +94,38 @@ func TestBuiltinProvidersReturnClonedData(t *testing.T) {
 		t.Fatal("BuiltinProviders() should clone nested slices")
 	}
 }
+
+func TestBuiltinCodexModelChoicesUseAvailable53CodexAlias(t *testing.T) {
+	unavailable53CodexAlias := "gpt-5.3-" + "codex-spark"
+	codex, ok := BuiltinProviders()["codex"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing codex")
+	}
+
+	var modelOption BuiltinProviderOption
+	for _, option := range codex.OptionsSchema {
+		if option.Key == "model" {
+			modelOption = option
+			break
+		}
+	}
+	if modelOption.Key == "" {
+		t.Fatal("codex provider missing model option")
+	}
+
+	var found53 bool
+	for _, choice := range modelOption.Choices {
+		if choice.Value == unavailable53CodexAlias {
+			t.Fatalf("codex model choices include unavailable alias %q", choice.Value)
+		}
+		if choice.Value == "gpt-5.3-codex" {
+			found53 = true
+			if got, want := choice.Label, "GPT-5.3 Codex"; got != want {
+				t.Fatalf("gpt-5.3-codex label = %q, want %q", got, want)
+			}
+		}
+	}
+	if !found53 {
+		t.Fatal("codex model choices missing gpt-5.3-codex")
+	}
+}

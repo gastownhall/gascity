@@ -42,6 +42,7 @@ City is the top-level configuration for a Gas City instance.
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
+| `extmsg` | ExtMsgConfig |  |  | ExtMsg configures the external-messaging fabric (default routes for inbound conversations with no binding). |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides root city defaults for agents that don't override them (canonical TOML key: agent_defaults). Pack-local defaults use the same table shape in pack.toml. The runtime currently applies provider, default_sling_formula, and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
 | `pricing` | []ModelPricing |  |  | Pricing holds per-model cost rate overrides keyed by (provider, model). City-level entries override pack-level entries which override the defaults shipped with the pricing package. See internal/pricing for the estimation seam introduced by issue #1255 (1d). |
 
@@ -385,6 +386,24 @@ EventsRotationConfig holds file-backed events rotation settings.
 | `check_interval_seconds` | integer |  | `60` | CheckIntervalSeconds is the time backstop between size checks. Defaults to DefaultEventsRotationCheckIntervalSeconds. |
 | `archive_retain_age` | string |  |  | ArchiveRetainAge is an optional Go duration. Empty keeps all archives. |
 
+## ExtMsgConfig
+
+ExtMsgConfig configures the external-messaging fabric.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `default_route` | []ExtMsgDefaultRoute |  |  | DefaultRoutes map inbound conversations that have no binding and no group route to a configured agent, keyed by provider and optionally narrowed to one adapter account. The first matching inbound message binds the conversation to the agent (an agent-name binding), so the route is sticky until rebound or unbound. |
+
+## ExtMsgDefaultRoute
+
+ExtMsgDefaultRoute routes unbound inbound conversations from one external messaging provider (and optionally a single adapter account) to a configured agent.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `provider` | string | **yes** |  | Provider is the external messaging provider name as registered by the adapter (e.g. "telegram"). Required. |
+| `account_id` | string |  |  | AccountID narrows the route to one adapter account. Empty matches every account of the provider that has no account-specific route. |
+| `agent` | string | **yes** |  | Agent is the configured agent identity to route to. It must resolve to a configured named session so the delivery layer can cold-wake a session for it. |
+
 ## FormulasConfig
 
 FormulasConfig is the legacy [formulas] table with no supported fields: authored [formulas].dir is rejected at config load (use the well-known formulas/ directory instead), and gc doctor flags any declaration as a fixable v2-formulas-dir error.
@@ -667,6 +686,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `resume_style` | string |  |  | ResumeStyle controls how ResumeFlag is applied:   "flag"       → command --resume &lt;key&gt;              (default)   "subcommand" → command resume &lt;key&gt; |
 | `resume_command` | string |  |  | ResumeCommand is the full shell command to run when resuming a session. Supports only the &#123;&#123;.SessionKey&#125;&#125; template variable. When set, takes precedence over ResumeFlag/ResumeStyle. When schema-managed defaults are inserted, the resolver tokenizes and re-emits the command; for subcommand-style resume it inserts after the ResumeFlag token that precedes &#123;&#123;.SessionKey&#125;&#125;. Example:   "claude --resume &#123;&#123;.SessionKey&#125;&#125; --dangerously-skip-permissions" Schema-managed defaults missing from a subcommand-style resume command are inserted before &#123;&#123;.SessionKey&#125;&#125; during provider resolution. |
 | `session_id_flag` | string |  |  | SessionIDFlag is the CLI flag for providers that support creating a fresh session with a caller-supplied ID. Empty means fresh starts cannot receive a preselected provider session ID; resume metadata must come from the provider after startup. |
+| `fork_flag` | string |  |  | ForkFlag is the CLI flag that forks a resumed conversation into a new branch (claude's "--fork-session"). With ResumeFlag + SessionIDFlag it forms the fork-launch command (resume a parent brain session, fork off it, bind gc's own session id). Empty means the provider has no fork verb, in which case a launch carrying a parent sid fails loud rather than silently degrading to a fresh session. |
 | `permission_modes` | map[string]string |  |  | PermissionModes maps permission mode names to CLI flags. Example: &#123;"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"&#125; This is a config-only lookup table consumed by external clients (e.g., real-world app) to populate permission mode dropdowns. Launch-time flag substitution is planned for a follow-up PR — currently no runtime code reads this field. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults overrides the Default value in OptionsSchema entries without redefining the schema itself. Keys are option keys (e.g., "permission_mode"), values are choice values (e.g., "unrestricted"). city.toml users set this to customize provider behavior without touching Args or OptionsSchema. |
 | `options_schema` | []ProviderOption |  |  | OptionsSchema declares the configurable options this provider supports. Each option maps to CLI args via its Choices[].FlagArgs field. Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side. |

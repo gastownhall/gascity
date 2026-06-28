@@ -424,6 +424,44 @@ func TestNamedOnDemand_NamedSessionDemandWakesSingletonTemplateResolvedIdentity(
 	assertReason(t, result, "primary", "named-demand")
 }
 
+// TestNamedOnDemand_NamedSessionDemandWakesIdleAsleepSession is the #3413
+// regression: an asleep on_demand named session (sleep_reason=idle) with
+// routed/assigned demand must wake even when it has been idle past its
+// timeout. Before the fix, the idle-sleep suppression below only exempted
+// "assigned-work"/"min-active"/"reset-pending", so a session woken by
+// "named-demand" that was idle got re-slept every tick — leaving the work
+// wedged forever (reconciler emits reason_code=retained indefinitely).
+// Being idle while routed work is pending is the stuck state, not a drain
+// trigger.
+func TestNamedOnDemand_NamedSessionDemandWakesIdleAsleepSession(t *testing.T) {
+	idleSince := now.Add(-(defaultOnDemandIdleTimeout + time.Minute))
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:             []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions:      []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:       []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", SleepReason: "idle", NamedIdentity: "hello-world/refinery", IdleSince: idleSince}},
+		NamedSessionDemand: map[string]bool{"hello-world/refinery": true},
+		Now:                now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "named-demand")
+}
+
+// TestNamedOnDemand_WorkQueryWakesIdleAsleepSession is the work-query variant
+// of #3413: a named session whose backing template's work-query found pending
+// work (NamedSessionWorkQ) must also wake despite being idle past timeout.
+func TestNamedOnDemand_WorkQueryWakesIdleAsleepSession(t *testing.T) {
+	idleSince := now.Add(-(defaultOnDemandIdleTimeout + time.Minute))
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:            []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions:     []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:      []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", SleepReason: "idle", NamedIdentity: "hello-world/refinery", IdleSince: idleSince}},
+		NamedSessionWorkQ: map[string]bool{"hello-world/refinery": true},
+		Now:               now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "work-query")
+}
+
 func TestNamedOnDemand_PendingCreateWakesWithoutDemand(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
@@ -2150,4 +2188,129 @@ func TestScaledPool_NotAffectedByRunningOverride(t *testing.T) {
 		Now:              now,
 	})
 	assertAsleep(t, result, "polecat-mc-1")
+}
+
+// ---------------------------------------------------------------------------
+// currently_processing_bead_id divergence (#1893)
+// ---------------------------------------------------------------------------
+
+func TestAssignedWork_RecordsAnchorBeadID(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery",
+			State: "active", NamedIdentity: "hello-world/refinery",
+		}},
+		WorkBeads:       []AwakeWorkBead{{ID: "wb-77", Assignee: "hello-world/refinery", Status: "in_progress"}},
+		RunningSessions: map[string]bool{"hello-world--refinery": true},
+		Now:             now,
+	})
+	d := result["hello-world--refinery"]
+	if d.AssignedWorkBeadID != "wb-77" {
+		t.Fatalf("AssignedWorkBeadID = %q, want %q", d.AssignedWorkBeadID, "wb-77")
+	}
+	if d.RequiresFreshCycle {
+		t.Fatalf("RequiresFreshCycle = true, want false (no recorded current bead)")
+	}
+}
+
+func TestAssignedWork_SameAsCurrentBead_NoFreshCycle(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery",
+			State: "active", NamedIdentity: "hello-world/refinery",
+			CurrentlyProcessingBeadID: "wb-77",
+		}},
+		WorkBeads:       []AwakeWorkBead{{ID: "wb-77", Assignee: "hello-world/refinery", Status: "in_progress"}},
+		RunningSessions: map[string]bool{"hello-world--refinery": true},
+		Now:             now,
+	})
+	d := result["hello-world--refinery"]
+	if d.AssignedWorkBeadID != "wb-77" {
+		t.Fatalf("AssignedWorkBeadID = %q, want %q", d.AssignedWorkBeadID, "wb-77")
+	}
+	if d.RequiresFreshCycle {
+		t.Fatalf("RequiresFreshCycle = true, want false — recorded bead still anchors")
+	}
+}
+
+func TestAssignedWork_DifferentBead_EmitsFreshCycle(t *testing.T) {
+	// Patrol formula reassigned the witness from wb-1 to wb-2. Only wb-2 is
+	// visible to the reconciler (wb-1 was burned/closed). The recorded
+	// current bead no longer appears among the assigned work, so the new
+	// bead becomes the anchor and the divergence fires fresh-cycle.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "gascity/witness"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "gascity/witness", Template: "gascity/witness", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "gascity--witness", Template: "gascity/witness",
+			State: "active", NamedIdentity: "gascity/witness",
+			CurrentlyProcessingBeadID: "wb-1",
+		}},
+		WorkBeads:       []AwakeWorkBead{{ID: "wb-2", Assignee: "gascity/witness", Status: "in_progress"}},
+		RunningSessions: map[string]bool{"gascity--witness": true},
+		Now:             now,
+	})
+	d := result["gascity--witness"]
+	if d.AssignedWorkBeadID != "wb-2" {
+		t.Fatalf("AssignedWorkBeadID = %q, want %q", d.AssignedWorkBeadID, "wb-2")
+	}
+	if !d.RequiresFreshCycle {
+		t.Fatal("RequiresFreshCycle = false, want true — assigned bead differs from recorded current")
+	}
+}
+
+func TestAssignedWork_PrefersRecordedCurrentBeadOverOthers(t *testing.T) {
+	// Crash recovery: two work beads are assigned to the same session, and
+	// the bead recorded as the current one is among them. ComputeAwakeSet
+	// must pick the recorded bead as the anchor — otherwise the agent
+	// would restart on whichever bead happened to be listed first and
+	// abandon the work it was last actively processing.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "gascity/witness"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "gascity/witness", Template: "gascity/witness", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "gascity--witness", Template: "gascity/witness",
+			State: "asleep", NamedIdentity: "gascity/witness",
+			CurrentlyProcessingBeadID: "wb-current",
+		}},
+		WorkBeads: []AwakeWorkBead{
+			{ID: "wb-other", Assignee: "gascity/witness", Status: "open", Ready: true},
+			{ID: "wb-current", Assignee: "gascity/witness", Status: "open", Ready: true},
+		},
+		Now: now,
+	})
+	d := result["gascity--witness"]
+	if d.AssignedWorkBeadID != "wb-current" {
+		t.Fatalf("AssignedWorkBeadID = %q, want wb-current — recorded current bead must win the anchor selection", d.AssignedWorkBeadID)
+	}
+	if d.RequiresFreshCycle {
+		t.Fatal("RequiresFreshCycle = true, want false — recorded bead still in assigned set")
+	}
+}
+
+func TestAssignedWork_NoRecordedCurrent_FirstMatchAnchors(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "gascity/witness"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "gascity/witness", Template: "gascity/witness", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "gascity--witness", Template: "gascity/witness",
+			State: "asleep", NamedIdentity: "gascity/witness",
+		}},
+		WorkBeads: []AwakeWorkBead{
+			{ID: "wb-a", Assignee: "gascity/witness", Status: "in_progress"},
+			{ID: "wb-b", Assignee: "gascity/witness", Status: "in_progress"},
+		},
+		Now: now,
+	})
+	d := result["gascity--witness"]
+	if d.AssignedWorkBeadID != "wb-a" {
+		t.Fatalf("AssignedWorkBeadID = %q, want wb-a (first match when no current bead recorded)", d.AssignedWorkBeadID)
+	}
+	if d.RequiresFreshCycle {
+		t.Fatal("RequiresFreshCycle = true, want false — no recorded current means no divergence")
+	}
 }

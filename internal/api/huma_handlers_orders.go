@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -372,7 +373,7 @@ func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, 
 		if rigStore := state.BeadStore(a.Rig); rigStore != nil {
 			infos = append(infos, workflowStoreInfo{
 				ref:       "rig:" + a.Rig,
-				scopeKind: "rig",
+				scopeKind: beadmeta.ScopeKindRig,
 				scopeRef:  a.Rig,
 				store:     rigStore,
 			})
@@ -382,7 +383,7 @@ func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, 
 	if cityStore := state.CityBeadStore(); cityStore != nil {
 		infos = append(infos, workflowStoreInfo{
 			ref:       "city:" + cityName,
-			scopeKind: "city",
+			scopeKind: beadmeta.ScopeKindCity,
 			scopeRef:  cityName,
 			store:     cityStore,
 		})

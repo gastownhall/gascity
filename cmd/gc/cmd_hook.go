@@ -437,11 +437,18 @@ func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) (map[strin
 // dir sets the command's working directory.
 type WorkQueryRunner func(command, dir string) (string, error)
 
-// hookWorkQueryTimeout caps the work-query subprocess. Default matches
-// the pre-bounded behavior (30s) so existing tests that legitimately
-// take >15s don't regress; the package-level var lets us lower it in
-// follow-up work after slow paths are identified and optimized.
-var hookWorkQueryTimeout = 30 * time.Second
+// hookWorkQueryTimeout caps the work-query subprocess that `gc hook` and the
+// workflow serve loop run via shellWorkQueryWithEnv. The default work-probe
+// issues ~6 sequential bd/store round-trips before the pool-demand tier that
+// finds routed work; on a multi-rig dolt city under concurrent load the probe
+// intermittently exceeded the prior 30s cap, so shellWorkQueryWithEnv killed it
+// and pool operators were starved of routed work. Raised to 60s to cover the
+// realistic loaded cost. This is independent of defaultHookRunTimeout, which
+// bounds the `gc hook run` managed-hook wrapper (around nudge drain / mail
+// check) and does not enclose this work query. The package-level var lets us
+// lower it again once the probe's round-trip count is reduced and the slow
+// per-rig `bd ready`/`gc ready` paths are optimized.
+var hookWorkQueryTimeout = 60 * time.Second
 
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment

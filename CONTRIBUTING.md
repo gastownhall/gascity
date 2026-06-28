@@ -111,6 +111,37 @@ When updating docs:
 - Updating `GastownCity()`'s `Imports` or `DefaultRigImports` map requires
   updating the auto-import table in `engdocs/design/packv2/migration.mdx`
 
+### Docs link conventions
+
+`docs/` is published to **[docs.gascityhall.com](https://docs.gascityhall.com)**
+via Mintlify — it is **not** meant to be read directly on GitHub. The published
+site serves **route-based, extensionless URLs**, so internal page links must be
+written that way:
+
+| Context | Correct | Wrong |
+|---|---|---|
+| `docs/` page link (Mintlify) | `/tutorials/01-beads` | `/tutorials/01-beads.md` |
+| `engdocs/` and root `.md` (GitHub-only) | `engdocs/architecture/index.md` | `engdocs/architecture/index` |
+
+**Why this matters — and why you usually do _not_ want to "fix" a docs path:**
+a `.md`/`.mdx` suffix on a `docs/` page link breaks Mintlify navigation on the
+live site **even though the file exists on disk**. A link that looks "broken" on
+GitHub is very often correct for the deployed site, so reformatting `docs/` links
+to be GitHub-friendly is the most common way to *silently break the published
+docs*.
+
+Two checks enforce this, both failing **only on net-new** breakage your change
+introduces (pre-existing issues won't block you):
+
+- `make check-docs` (`test/docsync`) — on-disk check that `docs/` page links are
+  extensionless and that `engdocs/`/root links resolve.
+- The **Docs render check** CI Action (`.github/workflows/docs-render.yml`) —
+  runs Mintlify's own `broken-links` against your branch vs `main`.
+
+If a `docs/` link is **genuinely** broken on the live site, note it in your PR
+and a maintainer will fix it Mintlify-side — don't change the on-disk path to
+work around GitHub rendering.
+
 ## Make Targets
 
 Run `make help` for the full list. The most useful targets are:
@@ -121,7 +152,7 @@ Run `make help` for the full list. The most useful targets are:
 | `make build` | Build `gc` with version metadata |
 | `make install` | Install `gc` into `$(go env GOPATH)/bin` |
 | `make check` | Fast Go quality gates |
-| `make check-docs` | Docs sync tests plus Mintlify broken-link checks |
+| `make check-docs` | Docs sync tests (on-disk link checker; does not run `mint broken-links`) |
 | `make check-all` | Extended quality gates including integration tests |
 | `make test` | Unit and repo-level Go tests |
 | `make test-integration` | Integration tests |

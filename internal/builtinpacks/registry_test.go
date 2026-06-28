@@ -46,6 +46,61 @@ func TestAllAndSourceAreDeterministic(t *testing.T) {
 	}
 }
 
+// TestCanonicalImportSourceAuthorsResolvableTreeURLs locks in the rule from
+// issue #3644: the source spelling gc generates into pack.toml must be a
+// dereferenceable GitHub tree URL (the form imports.gascity already uses),
+// never the legacy .git//subpath form that does not resolve in a browser.
+// Recognition still accepts both spellings (TestSourceRecognitionVariants);
+// only generation is constrained here.
+func TestCanonicalImportSourceAuthorsResolvableTreeURLs(t *testing.T) {
+	for _, pack := range All() {
+		source, ok := CanonicalImportSource(pack.Name)
+		if !ok {
+			t.Fatalf("CanonicalImportSource(%q) ok = false, want true", pack.Name)
+		}
+		if !strings.Contains(source, "/tree/") {
+			t.Errorf("CanonicalImportSource(%q) = %q, want a dereferenceable GitHub tree URL", pack.Name, source)
+		}
+		if strings.Contains(source, ".git//") || strings.Contains(source, ".git/tree/") {
+			t.Errorf("CanonicalImportSource(%q) = %q, must not author the legacy non-resolvable .git//subpath form", pack.Name, source)
+		}
+		// The generated spelling must round-trip through recognition so
+		// resolution, cache keying, and the doctor checks still see it as a
+		// bundled source.
+		if !IsSource(source) {
+			t.Errorf("IsSource(%q) = false, generated source must be recognized as bundled", source)
+		}
+	}
+}
+
+// TestGascityBundledSubpathsExistInWorkingTree guards the browse ref choice
+// for issue #3644: CanonicalImportSource authors gascity.git tree URLs at the
+// "main" browse ref while the real pin lives in the version field. That URL is
+// only dereferenceable if the pack subpath still exists at main. This test
+// fails fast if a gascity.git-hosted bundled pack is moved or renamed without
+// updating All(), which would otherwise ship a 404 browse URL into pack.toml.
+// (Public packs live in gascity-packs, not this repo, so they are excluded.)
+func TestGascityBundledSubpathsExistInWorkingTree(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed; cannot locate repo root")
+	}
+	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	for _, pack := range All() {
+		if pack.Subpath == "" {
+			continue
+		}
+		if _, public := publicSubpathForPack(pack.Name); public {
+			continue
+		}
+		packToml := filepath.Join(repoRoot, filepath.FromSlash(pack.Subpath), "pack.toml")
+		if _, err := os.Stat(packToml); err != nil {
+			t.Errorf("bundled pack %q subpath %q has no pack.toml at %s (%v); the generated /tree/main/%s URL would 404 — update builtinpacks.All() or move the pack back",
+				pack.Name, pack.Subpath, packToml, err, pack.Subpath)
+		}
+	}
+}
+
 func TestSourceRecognitionVariants(t *testing.T) {
 	coreSource := MustSource("core")
 	cases := []struct {

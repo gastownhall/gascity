@@ -620,8 +620,8 @@ func TestAdoptionBarrier_UsesProviderlessDetectedProcessNames(t *testing.T) {
 		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
 	}
 	got := sp.processNameCalls["test-city-worker"]
-	if strings.Join(got, ",") != "codex" {
-		t.Fatalf("process names = %v, want [codex]", got)
+	if strings.Join(got, ",") != "codex,codex-raw" {
+		t.Fatalf("process names = %v, want [codex codex-raw]", got)
 	}
 }
 
@@ -834,8 +834,8 @@ func TestProcessHintsUsesResolvedProviderProcessNames(t *testing.T) {
 		},
 	}
 
-	if got := processHints(cfg, &config.Agent{Name: "worker"}); strings.Join(got, ",") != "codex" {
-		t.Fatalf("processHints() = %v, want [codex]", got)
+	if got := processHints(cfg, &config.Agent{Name: "worker"}); strings.Join(got, ",") != "codex,codex-raw" {
+		t.Fatalf("processHints() = %v, want [codex codex-raw]", got)
 	}
 }
 

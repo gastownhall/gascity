@@ -55,26 +55,27 @@ type AwakeNamedSession struct {
 
 // AwakeSessionBead represents an open session bead from the store.
 type AwakeSessionBead struct {
-	ID                       string
-	SessionName              string
-	Template                 string
-	State                    string // "creating", "active", "asleep", "drained", "closed"
-	SleepReason              string
-	ManualSession            bool
-	PendingCreate            bool      // controller claimed this bead for initial start
-	ExplicitWake             bool      // explicit durable wake request is pending
-	DependencyOnly           bool      // only wakeable via dependency gate
-	NamedIdentity            string    // non-empty for named session beads
-	ConfiguredNamedSession   bool      // configured_named_session metadata is true
-	Pinned                   bool      // pin_awake durable wake reason
-	Drained                  bool      // state=="drained" or sleep_reason=="drained"
-	WaitHold                 bool      // user-issued gc wait in progress
-	HeldUntil                time.Time // zero = not held
-	QuarantinedUntil         time.Time // zero = not quarantined
-	IdleSince                time.Time // zero = unknown/not idle
-	CreatedAt                time.Time // bead creation time (for grace period checks)
-	RestartRequested         bool      // restart_requested metadata is still active
-	ContinuationResetPending bool      // continuation_reset_pending metadata is set
+	ID                        string
+	SessionName               string
+	Template                  string
+	State                     string // "creating", "active", "asleep", "drained", "closed"
+	SleepReason               string
+	ManualSession             bool
+	PendingCreate             bool      // controller claimed this bead for initial start
+	ExplicitWake              bool      // explicit durable wake request is pending
+	DependencyOnly            bool      // only wakeable via dependency gate
+	NamedIdentity             string    // non-empty for named session beads
+	ConfiguredNamedSession    bool      // configured_named_session metadata is true
+	Pinned                    bool      // pin_awake durable wake reason
+	Drained                   bool      // state=="drained" or sleep_reason=="drained"
+	WaitHold                  bool      // user-issued gc wait in progress
+	HeldUntil                 time.Time // zero = not held
+	QuarantinedUntil          time.Time // zero = not quarantined
+	IdleSince                 time.Time // zero = unknown/not idle
+	CreatedAt                 time.Time // bead creation time (for grace period checks)
+	RestartRequested          bool      // restart_requested metadata is still active
+	ContinuationResetPending  bool      // continuation_reset_pending metadata is set
+	CurrentlyProcessingBeadID string    // work bead the session is currently processing
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -90,6 +91,17 @@ type AwakeDecision struct {
 	ShouldWake      bool
 	Reason          string // human-readable reason for debugging
 	HasAssignedWork bool   // underlying assigned-work demand before wake reason overrides
+	// AssignedWorkBeadID identifies the work bead that anchored the
+	// assigned-work decision for this session, when one applies. Callers
+	// use it to persist currently_processing_bead_id and to detect when an
+	// alive session has been reassigned to a different bead.
+	AssignedWorkBeadID string
+	// RequiresFreshCycle is true when an alive session's recorded
+	// currently_processing_bead_id differs from AssignedWorkBeadID. The
+	// reconciler combines this with wake_mode=fresh to trigger a
+	// restart-style cycle so the next wake starts a fresh conversation on
+	// the newly assigned bead.
+	RequiresFreshCycle bool
 }
 
 // ComputeAwakeSet determines which sessions should be awake.
@@ -268,7 +280,15 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	// ready open work assigned to it must stay awake. Open work must carry
 	// Ready=true so a blocked routed assignment cannot become wake demand if
 	// a future caller accidentally broadens the collection query.
-	assignedWorkDemand := make(map[string]bool)
+	//
+	// When the session bead records currently_processing_bead_id, prefer the
+	// matching work bead as the anchor so crash recovery brings a session
+	// back to the bead it last owned even when other beads share the
+	// assignee. If no candidate matches the recorded current bead, fall back
+	// to the first matching work bead and flag the divergence — the
+	// reconciler reads this to decide whether to cycle the conversation for
+	// wake_mode=fresh.
+	assignedAnchor := make(map[string]string) // sessionName → matched work bead ID
 	for _, bead := range input.SessionBeads {
 		if bead.State == "closed" {
 			continue
@@ -276,17 +296,39 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if agent, ok := lookupAgent(bead.Template); ok && agent.Suspended {
 			continue
 		}
+		var (
+			fallback   string
+			haveExact  bool
+			anchorBead string
+			recorded   = bead.CurrentlyProcessingBeadID
+			matchedAny = false
+		)
 		for _, wb := range input.WorkBeads {
 			assignee := strings.TrimSpace(wb.Assignee)
 			if assignee == "" || !workBeadHasAwakeDemand(wb) {
 				continue
 			}
-			if sessionAssigneeMatches(input.NamedSessions, bead, assignee) {
-				assignedWorkDemand[bead.SessionName] = true
-				desired[bead.SessionName] = "assigned-work"
+			if !sessionAssigneeMatches(input.NamedSessions, bead, assignee) {
+				continue
+			}
+			matchedAny = true
+			if recorded != "" && wb.ID == recorded {
+				anchorBead = wb.ID
+				haveExact = true
 				break
 			}
+			if fallback == "" {
+				fallback = wb.ID
+			}
 		}
+		if !matchedAny {
+			continue
+		}
+		if !haveExact {
+			anchorBead = fallback
+		}
+		desired[bead.SessionName] = "assigned-work"
+		assignedAnchor[bead.SessionName] = anchorBead
 	}
 
 	// Min-active-sessions wake: keep min_active_sessions pool sessions warm
@@ -340,8 +382,15 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 
 	for _, bead := range input.SessionBeads {
 		name := bead.SessionName
+		anchor, hasAssignedWork := assignedAnchor[name]
 		decision := AwakeDecision{
-			HasAssignedWork: assignedWorkDemand[name],
+			HasAssignedWork: hasAssignedWork,
+		}
+		if hasAssignedWork {
+			decision.AssignedWorkBeadID = anchor
+			if bead.CurrentlyProcessingBeadID != "" && anchor != bead.CurrentlyProcessingBeadID {
+				decision.RequiresFreshCycle = true
+			}
 		}
 
 		// Desired set (demand-driven wake). wait_hold suppresses normal
@@ -404,10 +453,22 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// in_progress ownership or open work with Ready=true; blocked open
 		// assignments do not prevent idle sleep. Manual sessions within their
 		// grace period are also exempt.
+		//
+		// On_demand named sessions woken by routed/named demand
+		// ("named-demand", "work-query") are also exempt: that demand means
+		// there is pending work for this specific session, so an idle window
+		// must not put it back to sleep. Without this, an asleep on_demand
+		// named session (e.g. a refinery) with routed work that already exists
+		// (open_count==desired_count==1) is re-slept every tick and the work
+		// is wedged forever — the reconciler reports reason_code=retained
+		// indefinitely. A fresh cold-create wakes only because it has no
+		// idle reference. The "work done, no demand" drain still fires via the
+		// "on-demand:running" reason, which is NOT exempt. See #3413.
 		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !bead.IdleSince.IsZero() &&
 			!isAlwaysNamedSession(input.NamedSessions, bead) &&
 			desired[name] != "assigned-work" && desired[name] != "min-active" &&
 			desired[name] != "reset-pending" &&
+			desired[name] != "named-demand" && desired[name] != "work-query" &&
 			!inManualGracePeriod(bead, input.ManualGracePeriod, input.Now) {
 			agent, hasAgent := lookupAgent(bead.Template)
 			var idleTimeout time.Duration

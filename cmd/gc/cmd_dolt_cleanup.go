@@ -948,6 +948,12 @@ func rigProtections(rigs []resolverRig, fs fsys.FS) ([]CleanupRigProtection, []r
 	var errs []rigProtectionError
 	for _, r := range orderRigsHQFirst(rigs) {
 		resolution := resolveRigDoltDatabase(r, fs)
+		if resolution.skip {
+			// Non-dolt-backed rig (e.g. mysql): not a dolt-cleanup target, so
+			// omit it from rig protections. It is then neither counted as a
+			// force_blocker nor selected for forced drop/purge (az-374).
+			continue
+		}
 		out = append(out, CleanupRigProtection{Rig: r.Name, DB: resolution.name})
 		if resolution.err != nil {
 			errs = append(errs, rigProtectionError{rig: r.Name, err: resolution.err})
@@ -1006,6 +1012,11 @@ func rigDoltDatabaseName(r resolverRig, fs fsys.FS) string {
 type rigDoltDatabaseResolution struct {
 	name string
 	err  error
+	// skip is set when the rig declares a non-dolt backend (e.g. mysql) and
+	// therefore has no dolt database for dolt-cleanup to verify, drop, or
+	// purge. Such rigs are excluded from rig protections rather than being
+	// treated as a force_blocker for a missing dolt_database (az-374).
+	skip bool
 }
 
 func resolveRigDoltDatabase(r resolverRig, fs fsys.FS) rigDoltDatabaseResolution {
@@ -1034,6 +1045,14 @@ func resolveRigDoltDatabase(r resolverRig, fs fsys.FS) rigDoltDatabaseResolution
 		return rigDoltDatabaseResolution{
 			name: r.Name,
 			err:  fmt.Errorf("parse rig metadata %s: %w", metadataPath, err),
+		}
+	}
+	// A rig that declares a non-dolt backend (e.g. mysql) has no dolt database
+	// for dolt-cleanup to act on. Skip it instead of reporting the absent
+	// dolt_database as a rig-protection force_blocker (az-374).
+	if backend, ok := meta["backend"].(string); ok {
+		if b := strings.TrimSpace(strings.ToLower(backend)); b != "" && b != "dolt" {
+			return rigDoltDatabaseResolution{name: r.Name, skip: true}
 		}
 	}
 	if db, ok := meta["dolt_database"]; ok {

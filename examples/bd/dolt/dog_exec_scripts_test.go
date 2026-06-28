@@ -156,7 +156,13 @@ func newCompactScriptFixture(t *testing.T) compactScriptFixture {
 
 func (f compactScriptFixture) run(t *testing.T, mode string, extraEnv ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command("sh", filepath.Join(f.root, "commands", "compact", "run.sh"))
+	return f.runWithArgs(t, mode, nil, extraEnv...)
+}
+
+func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []string, extraEnv ...string) (string, error) {
+	t.Helper()
+	scriptArgs := append([]string{filepath.Join(f.root, "commands", "compact", "run.sh")}, args...)
+	cmd := exec.Command("sh", scriptArgs...)
 	cmd.Env = append(filteredEnv(
 		"PATH",
 		"GC_CITY_PATH",
@@ -3706,6 +3712,170 @@ func TestCompactScriptBareGCDisabledWhenEnvFalsy(t *testing.T) {
 	}
 	if strings.Contains(string(logData), "DOLT_GC") {
 		t.Fatalf("falsy bare-gc + below threshold must not call DOLT_GC:\n%s", logData)
+	}
+}
+
+// --gc-only reclaim flag (ga-zrs): an operator-invoked CALL DOLT_GC('--full')
+// per database that bypasses the commit-count threshold and the flatten path.
+// This is the sanctioned reclaim path for a database stranded below the flatten
+// threshold with orphaned oldgen archives — the catch-22 where a prior flatten
+// dropped commits below threshold so scheduled compaction skips it forever and
+// never reclaims the orphaned chunks. Unlike bare-GC (working-set DOLT_GC()),
+// --full rewrites oldgen so the orphaned history is actually reclaimed.
+
+func TestCompactScriptGCOnlyFlagReclaimsBelowThresholdWithFullGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("gc-only reclaim failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "db=beads gc-only reclaim duration=") || !strings.Contains(out, "— ok") {
+		t.Fatalf("gc-only output missing reclaim success line:\n%s", out)
+	}
+	if strings.Contains(out, "below_threshold=") {
+		t.Fatalf("gc-only must bypass the threshold gate:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	for _, forbidden := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_PUSH", "DOLT_FETCH"} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("gc-only must not issue %s:\n%s", forbidden, log)
+		}
+	}
+	if !strings.Contains(log, "CALL DOLT_GC('--full')") {
+		t.Fatalf("gc-only must issue full CALL DOLT_GC('--full'):\n%s", log)
+	}
+}
+
+func TestCompactScriptGCOnlyFlagHonorsOnlyDBFlag(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "cache", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir cache db: %v", err)
+	}
+	out, err := fixture.runWithArgs(t, "success", []string{"--gc-only", "--only-db", "beads"},
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("gc-only allowlist reclaim failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "db=cache not in GC_DOLT_COMPACT_ONLY_DBS") {
+		t.Fatalf("gc-only output missing allowlist skip:\n%s", out)
+	}
+	if !strings.Contains(out, "db=beads gc-only reclaim duration=") {
+		t.Fatalf("gc-only output missing reclaim success for allowlisted db:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "db=cache query=") {
+		t.Fatalf("non-allowlisted database should not receive dolt queries:\n%s", log)
+	}
+	if !strings.Contains(log, "db=beads query=CALL DOLT_GC('--full')") {
+		t.Fatalf("allowlisted database was not reclaimed with full GC:\n%s", log)
+	}
+}
+
+func TestCompactScriptGCOnlyFlagDryRunSkipsMutations(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "success", []string{"--gc-only", "--dry-run"},
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("gc-only dry-run failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "dry-run (would reclaim via DOLT_GC --full)") {
+		t.Fatalf("gc-only dry-run output missing explanation:\n%s", out)
+	}
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("gc-only dry-run must not issue DOLT_GC:\n%s", logData)
+		}
+	}
+}
+
+func TestCompactScriptGCOnlyFlagRefusesQuarantinedDatabase(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	quarantineMarker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if err := os.MkdirAll(filepath.Dir(quarantineMarker), 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+	if err := os.WriteFile(quarantineMarker, []byte("db=beads\nreason=test\ncreated_at=2026-05-01T00:00:00Z\n"), 0o600); err != nil {
+		t.Fatalf("write quarantine marker: %v", err)
+	}
+	out, err := fixture.runWithArgs(t, "success", []string{"--gc-only"},
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("gc-only must fail when quarantine marker exists:\n%s", out)
+	}
+	if !strings.Contains(out, "integrity quarantine marker exists") {
+		t.Fatalf("gc-only output missing quarantine explanation:\n%s", out)
+	}
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("quarantined database must not be reclaimed:\n%s", logData)
+		}
+	}
+}
+
+func TestCompactScriptGCOnlyFlagSurfacesDoltGCFailure(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "gc_failure", []string{"--gc-only"},
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("gc-only must fail when DOLT_GC fails:\n%s", out)
+	}
+	if !strings.Contains(out, "gc exploded") {
+		t.Fatalf("gc-only output missing Dolt GC stderr:\n%s", out)
+	}
+	if !strings.Contains(out, "1 database(s) failed gc-only reclaim") {
+		t.Fatalf("gc-only output missing per-run failure tally:\n%s", out)
+	}
+	// gc-only reclaim must NOT write flatten-bookkeeping markers — those
+	// describe flatten remediation state that the reclaim path never enters.
+	for _, dir := range []string{"compact-pending-gc", "compact-pending-push", "compact-quarantine"} {
+		marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", dir, "beads")
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("gc-only failure must not write %s marker, stat err=%v", dir, err)
+		}
+	}
+}
+
+func TestCompactScriptGCOnlyFlagRejectsBareGCEnvCombination(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "success", []string{"--gc-only"},
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_BARE_GC=1")
+	if err == nil {
+		t.Fatalf("compact must reject --gc-only combined with bare GC:\n%s", out)
+	}
+	if !strings.Contains(out, "--gc-only cannot be combined with bare GC") {
+		t.Fatalf("output missing mutual-exclusion diagnostic:\n%s", out)
+	}
+}
+
+func TestCompactScriptRejectsUnknownFlag(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "success", []string{"--bogus"})
+	if err == nil {
+		t.Fatalf("compact must reject an unknown flag:\n%s", out)
+	}
+	if !strings.Contains(out, "unknown flag --bogus") {
+		t.Fatalf("output missing unknown-flag diagnostic:\n%s", out)
+	}
+}
+
+func TestCompactScriptOnlyDBFlagRequiresValue(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "success", []string{"--gc-only", "--only-db"})
+	if err == nil {
+		t.Fatalf("compact must reject --only-db without a value:\n%s", out)
+	}
+	if !strings.Contains(out, "--only-db requires a database name") {
+		t.Fatalf("output missing --only-db value diagnostic:\n%s", out)
 	}
 }
 
