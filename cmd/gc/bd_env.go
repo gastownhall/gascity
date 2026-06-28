@@ -1508,6 +1508,7 @@ func overlayEnvEntries(environ []string, overrides map[string]string) []string {
 		out = removeEnvKey(out, key)
 		out = append(out, key+"="+overrides[key])
 	}
+	out = preserveHostedBeadsCredentialEnv(out, environ, overrides)
 	return out
 }
 
@@ -1570,6 +1571,45 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 	sort.Strings(overrideKeys)
 	for _, key := range overrideKeys {
 		out = append(out, key+"="+overrides[key])
+	}
+	out = preserveHostedBeadsCredentialEnv(out, environ, overrides)
+	return out
+}
+
+// hostedBeadsCredentialPassthroughKeys are env vars the bd provider needs to
+// authenticate to a hosted beads-gateway: the credential command and the inputs
+// its helper (e.g. eia-helper) reads. Several contain execenv.IsSensitiveKey
+// markers (CREDENTIAL / TOKEN) and would otherwise be stripped by
+// FilterInherited, but they carry command/URL/path references — not secret
+// values (the orchestrator key itself stays in a file mount) — so they are
+// preserved explicitly for gc-spawned bd subprocesses.
+var hostedBeadsCredentialPassthroughKeys = []string{
+	"BEADS_DOLT_CREDENTIAL_COMMAND",
+	"BEADS_DOLT_SERVER_TLS",
+	"ORCHESTRATOR_KEY_FILE",
+	"EIA_AUDIENCE",
+	"EIA_SCOPES",
+	"STS_MACHINE_URL",
+	"STS_TOKEN_URL",
+}
+
+// preserveHostedBeadsCredentialEnv re-adds the hosted-gateway credential env
+// from the original (pre-filter) environ, unless an override already set the
+// key. Without this, FilterInherited drops the credential command (and the
+// STS token URL) and gc-spawned bd cannot reach a hosted beads-gateway.
+func preserveHostedBeadsCredentialEnv(out, environ []string, overrides map[string]string) []string {
+	for _, key := range hostedBeadsCredentialPassthroughKeys {
+		if _, ok := overrides[key]; ok {
+			continue
+		}
+		prefix := key + "="
+		for _, entry := range environ {
+			if strings.HasPrefix(entry, prefix) {
+				out = removeEnvKey(out, key)
+				out = append(out, entry)
+				break
+			}
+		}
 	}
 	return out
 }
