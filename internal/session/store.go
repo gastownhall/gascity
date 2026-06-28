@@ -93,10 +93,45 @@ func (s *InfoStore) SetWaitHold(id string, on bool, reason string) error {
 	})
 }
 
+// setMetadataValue is the single-key write chokepoint. It is the byte-identical
+// replacement for the raw store.SetMetadata(id, key, value) sites that write a
+// single session-attribute key. Unlike ApplyPatch (which emits SetMetadataBatch),
+// this emits SetMetadata so the bead op is identical to the raw single-key write
+// it replaces.
+func (s *InfoStore) setMetadataValue(id, key, value string) error {
+	if err := s.store.SetMetadata(id, key, value); err != nil {
+		return fmt.Errorf("setting %s on session %q: %w", key, id, err)
+	}
+	return nil
+}
+
+// SetMarker writes a single session-attribute marker key. It is the front door
+// for the raw store.SetMetadata(session.ID, key, value) sites: the stranded
+// throttle marker (session_reconciler.go), the sleep_intent clear, and the
+// city-stop sleep_reason (cmd_stop.go). It emits a single SetMetadata op,
+// byte-identical to the raw write. An empty value clears the key per the
+// empty-string-clear contract.
+func (s *InfoStore) SetMarker(id, key, value string) error {
+	return s.setMetadataValue(id, key, value)
+}
+
 // RecordCurrentBead stamps the work bead a session is currently processing.
-// Replaces recordCurrentBeadIDOnWake (session_bead_cycle.go).
+// Replaces recordCurrentBeadIDOnWake (session_bead_cycle.go), which uses a
+// single-key SetMetadata write — so this emits SetMetadata, not a batch.
 func (s *InfoStore) RecordCurrentBead(id, beadID string) error {
-	return s.ApplyPatch(id, MetadataPatch{CurrentBeadIDKey: beadID})
+	return s.setMetadataValue(id, CurrentBeadIDKey, beadID)
+}
+
+// CloseWithoutReason closes the session bead identified by id without stamping
+// terminal close metadata. It is the front door for the raw store.Close(id)
+// call in closeBead, which stamps ClosePatch via setMetaBatch separately and
+// then closes the bead. It emits a single Close op, byte-identical to the raw
+// write.
+func (s *InfoStore) CloseWithoutReason(id string) error {
+	if err := s.store.Close(id); err != nil {
+		return fmt.Errorf("closing session %q: %w", id, err)
+	}
+	return nil
 }
 
 // GetState returns the persisted lifecycle state for id and whether the bead is

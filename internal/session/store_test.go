@@ -157,6 +157,81 @@ func TestGetStateProjectsState(t *testing.T) {
 	}
 }
 
+// TestSetMarkerEmitsSingleKeySetMetadata proves SetMarker emits exactly one
+// single-key SetMetadata op — byte-identical to the raw store.SetMetadata
+// single-key write it replaces (stranded marker, sleep_intent clear, cmd_stop
+// sleep_reason), NOT a SetMetadataBatch.
+func TestSetMarkerEmitsSingleKeySetMetadata(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	is, rec := recordingInfoStore(t, b)
+
+	if err := is.SetMarker("s-1", "sleep_reason", "city-stop"); err != nil {
+		t.Fatalf("SetMarker: %v", err)
+	}
+	gotOps := opsOf(rec.Calls())
+	if !reflect.DeepEqual(gotOps, []string{"SetMetadata"}) {
+		t.Fatalf("SetMarker ops = %v, want [SetMetadata]", gotOps)
+	}
+	c := rec.CallsForOp("SetMetadata")[0]
+	if c.ID != "s-1" || c.Key != "sleep_reason" || c.Value != "city-stop" {
+		t.Errorf("SetMarker call = (%q,%q,%q), want (s-1,sleep_reason,city-stop)", c.ID, c.Key, c.Value)
+	}
+}
+
+// TestSetMarkerEmptyValueClears proves SetMarker writes an empty string verbatim
+// (the empty-string-clear contract) via a single SetMetadata op.
+func TestSetMarkerEmptyValueClears(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"sleep_intent": "idle-stop-pending"})
+	is, rec := recordingInfoStore(t, b)
+
+	if err := is.SetMarker("s-1", "sleep_intent", ""); err != nil {
+		t.Fatalf("SetMarker: %v", err)
+	}
+	c := rec.CallsForOp("SetMetadata")
+	if len(c) != 1 || c[0].Key != "sleep_intent" || c[0].Value != "" {
+		t.Fatalf("SetMarker clear = %#v, want one SetMetadata(sleep_intent,\"\")", c)
+	}
+}
+
+// TestRecordCurrentBeadEmitsSingleKeySetMetadata proves RecordCurrentBead emits
+// a single-key SetMetadata of CurrentBeadIDKey — byte-identical to
+// recordCurrentBeadIDOnWake's raw store.SetMetadata write (NOT a batch).
+func TestRecordCurrentBeadEmitsSingleKeySetMetadata(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", nil)
+	is, rec := recordingInfoStore(t, b)
+
+	if err := is.RecordCurrentBead("s-1", "gcg-42"); err != nil {
+		t.Fatalf("RecordCurrentBead: %v", err)
+	}
+	gotOps := opsOf(rec.Calls())
+	if !reflect.DeepEqual(gotOps, []string{"SetMetadata"}) {
+		t.Fatalf("RecordCurrentBead ops = %v, want [SetMetadata]", gotOps)
+	}
+	c := rec.CallsForOp("SetMetadata")[0]
+	if c.ID != "s-1" || c.Key != CurrentBeadIDKey || c.Value != "gcg-42" {
+		t.Errorf("RecordCurrentBead call = (%q,%q,%q), want (s-1,%q,gcg-42)", c.ID, c.Key, c.Value, CurrentBeadIDKey)
+	}
+}
+
+// TestCloseWithoutReasonEmitsSingleClose proves CloseWithoutReason emits exactly
+// one Close op and no metadata write — byte-identical to closeBead's raw
+// store.Close(id) after it stamps ClosePatch separately.
+func TestCloseWithoutReasonEmitsSingleClose(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	is, rec := recordingInfoStore(t, b)
+
+	if err := is.CloseWithoutReason("s-1"); err != nil {
+		t.Fatalf("CloseWithoutReason: %v", err)
+	}
+	gotOps := opsOf(rec.Calls())
+	if !reflect.DeepEqual(gotOps, []string{"Close"}) {
+		t.Fatalf("CloseWithoutReason ops = %v, want [Close]", gotOps)
+	}
+	if rec.CallsForOp("Close")[0].ID != "s-1" {
+		t.Errorf("Close target = %q, want s-1", rec.CallsForOp("Close")[0].ID)
+	}
+}
+
 func opsOf(calls []beadstest.RecordedCall) []string {
 	out := make([]string, 0, len(calls))
 	for _, c := range calls {
