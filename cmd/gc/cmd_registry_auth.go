@@ -328,7 +328,7 @@ func registryBrowserLogin(ctx context.Context, baseURL, label string, stdout io.
 		"label":        {label},
 	}.Encode()
 	if openBrowser {
-		if err := openRegistryURL(authURL); err != nil {
+		if err := openURL(authURL); err != nil {
 			fmt.Fprintf(stdout, "Open this URL to finish registry login:\n%s\n", authURL) //nolint:errcheck
 		} else {
 			fmt.Fprintf(stdout, "Opened browser for registry login.\n%s\n", authURL) //nolint:errcheck
@@ -638,7 +638,10 @@ func registryMintGitHubActionsPublishToken(ctx context.Context, client *http.Cli
 	return payload.AccessToken, nil
 }
 
-func openRegistryURL(rawURL string) error {
+// openURL opens rawURL in the user's default browser using the
+// platform-appropriate launcher. It is shared by every command that opens a
+// browser (registry login, dashboard).
+func openURL(rawURL string) error {
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("open", rawURL).Start()

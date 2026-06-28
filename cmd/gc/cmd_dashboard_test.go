@@ -9,9 +9,25 @@ import (
 	"testing"
 )
 
+// stubDashboardOpen replaces the browser-open hook with a recorder for the
+// duration of the test and returns a pointer to the opened URL ("" if never
+// called).
+func stubDashboardOpen(t *testing.T) *string {
+	t.Helper()
+	var opened string
+	old := openDashboardURLHook
+	openDashboardURLHook = func(rawURL string) error {
+		opened = rawURL
+		return nil
+	}
+	t.Cleanup(func() { openDashboardURLHook = old })
+	return &opened
+}
+
 func TestRunDashboardNoticePrintsSupervisorURL(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Chdir(t.TempDir())
+	stubDashboardOpen(t)
 
 	oldAlive := supervisorAliveHook
 	oldCityFlag := cityFlag
@@ -27,7 +43,7 @@ func TestRunDashboardNoticePrintsSupervisorURL(t *testing.T) {
 	rigFlag = ""
 
 	var stdout bytes.Buffer
-	if err := runDashboardNotice("", &stdout, io.Discard); err != nil {
+	if err := runDashboardNotice("", true, &stdout, io.Discard); err != nil {
 		t.Fatalf("runDashboardNotice() error: %v", err)
 	}
 
@@ -38,6 +54,111 @@ func TestRunDashboardNoticePrintsSupervisorURL(t *testing.T) {
 	wantURL = strings.TrimRight(wantURL, "/")
 	if !strings.Contains(stdout.String(), wantURL) {
 		t.Fatalf("notice = %q, want it to include supervisor URL %q", stdout.String(), wantURL)
+	}
+}
+
+// TestRunDashboardNoticeOpensBrowserWhenServed pins that, when the URL resolves
+// and --no-open is not set, the command opens the resolved URL in the browser
+// and still prints it.
+func TestRunDashboardNoticeOpensBrowserWhenServed(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Chdir(t.TempDir())
+	opened := stubDashboardOpen(t)
+
+	oldAlive := supervisorAliveHook
+	oldCityFlag := cityFlag
+	oldRigFlag := rigFlag
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		cityFlag = oldCityFlag
+		rigFlag = oldRigFlag
+	})
+
+	supervisorAliveHook = func() int { return 4242 }
+	cityFlag = ""
+	rigFlag = ""
+
+	var stdout bytes.Buffer
+	if err := runDashboardNotice("", false, &stdout, io.Discard); err != nil {
+		t.Fatalf("runDashboardNotice() error: %v", err)
+	}
+
+	wantURL, err := supervisorAPIBaseURL()
+	if err != nil {
+		t.Fatalf("supervisorAPIBaseURL(): %v", err)
+	}
+	wantURL = strings.TrimRight(wantURL, "/")
+	if *opened != wantURL {
+		t.Fatalf("opened URL = %q, want %q", *opened, wantURL)
+	}
+	if !strings.Contains(stdout.String(), wantURL) {
+		t.Fatalf("notice = %q, want it to still print the URL %q", stdout.String(), wantURL)
+	}
+}
+
+// TestRunDashboardNoticeNoOpenSkipsBrowser pins that --no-open (noOpen=true)
+// prints the URL without launching a browser.
+func TestRunDashboardNoticeNoOpenSkipsBrowser(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Chdir(t.TempDir())
+	opened := stubDashboardOpen(t)
+
+	oldAlive := supervisorAliveHook
+	oldCityFlag := cityFlag
+	oldRigFlag := rigFlag
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		cityFlag = oldCityFlag
+		rigFlag = oldRigFlag
+	})
+
+	supervisorAliveHook = func() int { return 4242 }
+	cityFlag = ""
+	rigFlag = ""
+
+	var stdout bytes.Buffer
+	if err := runDashboardNotice("", true, &stdout, io.Discard); err != nil {
+		t.Fatalf("runDashboardNotice() error: %v", err)
+	}
+	if *opened != "" {
+		t.Fatalf("opened URL = %q, want no browser launch under --no-open", *opened)
+	}
+}
+
+// TestRunDashboardNoticeOpenFailureFallsBackToPrint pins that a browser-launch
+// failure does not error the command — it falls back to printing the URL.
+func TestRunDashboardNoticeOpenFailureFallsBackToPrint(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Chdir(t.TempDir())
+
+	old := openDashboardURLHook
+	openDashboardURLHook = func(string) error { return io.ErrClosedPipe }
+	t.Cleanup(func() { openDashboardURLHook = old })
+
+	oldAlive := supervisorAliveHook
+	oldCityFlag := cityFlag
+	oldRigFlag := rigFlag
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		cityFlag = oldCityFlag
+		rigFlag = oldRigFlag
+	})
+
+	supervisorAliveHook = func() int { return 4242 }
+	cityFlag = ""
+	rigFlag = ""
+
+	var stdout bytes.Buffer
+	if err := runDashboardNotice("", false, &stdout, io.Discard); err != nil {
+		t.Fatalf("runDashboardNotice() error = %v, want nil (open failure must not error)", err)
+	}
+
+	wantURL, err := supervisorAPIBaseURL()
+	if err != nil {
+		t.Fatalf("supervisorAPIBaseURL(): %v", err)
+	}
+	if !strings.Contains(stdout.String(), strings.TrimRight(wantURL, "/")) {
+		t.Fatalf("notice = %q, want it to fall back to printing the URL", stdout.String())
 	}
 }
 
@@ -59,7 +180,7 @@ func TestRunDashboardNoticeUsesAPIOverride(t *testing.T) {
 	rigFlag = ""
 
 	var stdout bytes.Buffer
-	if err := runDashboardNotice("http://127.0.0.1:9999/", &stdout, io.Discard); err != nil {
+	if err := runDashboardNotice("http://127.0.0.1:9999/", true, &stdout, io.Discard); err != nil {
 		t.Fatalf("runDashboardNotice() error: %v", err)
 	}
 	if !strings.Contains(stdout.String(), "http://127.0.0.1:9999") {
@@ -91,7 +212,7 @@ func TestRunDashboardNoticeHintsStartWhenUnresolvable(t *testing.T) {
 	rigFlag = ""
 
 	var stdout bytes.Buffer
-	if err := runDashboardNotice("", &stdout, io.Discard); err != nil {
+	if err := runDashboardNotice("", true, &stdout, io.Discard); err != nil {
 		t.Fatalf("runDashboardNotice() error = %v, want nil (informational command exits 0)", err)
 	}
 	if !strings.Contains(stdout.String(), "gc supervisor start") {
@@ -128,7 +249,7 @@ func TestRunDashboardNoticeResilientToBadCityConfig(t *testing.T) {
 	rigFlag = ""
 
 	var stdout bytes.Buffer
-	if err := runDashboardNotice("", &stdout, io.Discard); err != nil {
+	if err := runDashboardNotice("", true, &stdout, io.Discard); err != nil {
 		t.Fatalf("runDashboardNotice() error = %v, want nil (must degrade past a bad city config)", err)
 	}
 	wantURL, err := supervisorAPIBaseURL()
@@ -180,7 +301,7 @@ port = 9123
 	rigFlag = ""
 
 	var stdout bytes.Buffer
-	if err := runDashboardNotice("", &stdout, io.Discard); err != nil {
+	if err := runDashboardNotice("", true, &stdout, io.Discard); err != nil {
 		t.Fatalf("runDashboardNotice() error = %v, want nil (standalone-controller API is supported)", err)
 	}
 	if !strings.Contains(stdout.String(), ":9123") {

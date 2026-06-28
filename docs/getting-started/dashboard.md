@@ -17,16 +17,27 @@ gc supervisor start
 # Dashboard:  http://127.0.0.1:8372/
 ```
 
-If the supervisor is already running, `gc dashboard` prints where it is served:
+If the supervisor is already running, `gc dashboard` opens it in your browser
+and prints the URL too:
 
 ```bash
 gc dashboard
+# Opened the dashboard in your browser: http://127.0.0.1:8372
+```
+
+Pass `--no-open` to print the URL without launching a browser (useful over SSH
+or in scripts):
+
+```bash
+gc dashboard --no-open
 # The dashboard is served by the gc supervisor at http://127.0.0.1:8372
 ```
 
-`gc dashboard` is informational only: it does not start a server. The supervisor
-is the host, and one supervisor serves every registered city. Pick the city you
-want from the switcher in the dashboard header.
+`gc dashboard` does not start a server — it points your browser at the running
+supervisor. The supervisor is the host, and one supervisor serves every
+registered city. Pick the city you want from the switcher in the dashboard
+header. If the supervisor is not running, `gc dashboard` prints how to start it
+instead of opening a (dead) URL.
 
 ## What it shows
 
