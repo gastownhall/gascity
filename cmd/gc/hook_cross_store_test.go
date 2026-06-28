@@ -77,7 +77,7 @@ func TestFirstStoreWithWorkReturnsFirstStoreThatHasWork(t *testing.T) {
 		}
 		return `[]`, nil
 	}
-	out, gotStore, err := firstStoreWithWork("q", stores, run)
+	out, gotStore, err := firstStoreWithWork("q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestFirstStoreWithWorkReturnsFirstStoreThatHasWork(t *testing.T) {
 func TestFirstStoreWithWorkReturnsLastWhenNoneHasWork(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	run := func(_, _ string, _ []string) (string, error) { return `[]`, nil }
-	out, gotStore, err := firstStoreWithWork("q", stores, run)
+	out, gotStore, err := firstStoreWithWork("q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestFirstStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
 		}
 		return `[]`, nil
 	}
-	if _, _, err := firstStoreWithWork("q", stores, run); !errors.Is(err, errTestStoreTimeout) {
+	if _, _, err := firstStoreWithWork("q", stores, stores[0], run); !errors.Is(err, errTestStoreTimeout) {
 		t.Fatalf("own-store error must be surfaced when no store has work; got %v", err)
 	}
 }
@@ -134,7 +134,7 @@ func TestFirstStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.
 		}
 		return "", errTestStoreTimeout
 	}
-	out, gotStore, err := firstStoreWithWork("q", stores, run)
+	out, gotStore, err := firstStoreWithWork("q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("rig-store error must not surface when own store is healthy; got %v", err)
 	}
@@ -155,7 +155,7 @@ func TestFirstStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
 		}
 		return `[{"id":"va-2"}]`, nil
 	}
-	out, gotStore, err := firstStoreWithWork("q", stores, run)
+	out, gotStore, err := firstStoreWithWork("q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestClaimStoreWithFallbackFallsBackWhenSelectedStoreRerunsEmpty(t *testing.
 		}
 	}
 
-	out, gotStore, err := claimStoreWithFallback("q", stores, selected, run)
+	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
 		return `[{"id":"va-1"}]`, nil
 	}
 
-	out, gotStore, err := claimStoreWithFallback("q", stores, selected, run)
+	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}

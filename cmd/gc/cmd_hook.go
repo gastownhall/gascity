@@ -356,7 +356,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
 	runner := func(command, _ string) (string, error) {
-		out, _, err := firstStoreWithWork(command, stores, shellWorkQueryWithEnv)
+		out, _, err := firstStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
 		emitQueryFailure(command, err)
 		return out, err
 	}
@@ -407,9 +407,18 @@ func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookSt
 // the event bus when eligible.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
+	// primary is the agent's own store (the first entry). It is captured once
+	// here, before the loop shrinks remaining: only the primary may surface a
+	// work-query error as a fatal claim failure. Once the primary loses its
+	// claim race and is dropped, a later federated store must never inherit that
+	// emit-on-timeout semantics, so it is matched by identity, not slice index.
+	var primary hookStore
+	if len(stores) > 0 {
+		primary = stores[0]
+	}
 	remaining := stores
 	for len(remaining) > 0 {
-		_, selected, err := firstStoreWithWork(workQuery, remaining, run)
+		_, selected, err := firstStoreWithWork(workQuery, remaining, primary, run)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -418,7 +427,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
 		}
-		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, run)
+		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, run)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
