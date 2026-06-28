@@ -113,11 +113,11 @@ func (f *fakeState) NudgesBeadStore() beads.Store {
 	return f.cityBeadStore
 }
 
-func (f *fakeState) SessionsBeadStore() beads.Store {
+func (f *fakeState) SessionsBeadStore() beads.SessionStore {
 	if f.sessionsBeadStore != nil {
-		return f.sessionsBeadStore
+		return beads.SessionStore{Store: f.sessionsBeadStore}
 	}
-	return f.cityBeadStore
+	return beads.SessionStore{Store: f.cityBeadStore}
 }
 
 func (f *fakeState) GraphBeadStore() beads.Store {

@@ -1143,11 +1143,14 @@ func (cs *controllerState) NudgesBeadStore() beads.Store {
 // backend resolveSessionStore returns cityBeadStore, so this is byte-identical to
 // CityBeadStore; when [beads.classes.sessions] is relocated it returns the per-class
 // store. cs.eventProv is the recorder, matching the nudges/mail wiring, so relocated
-// session writes emit bead.* exactly like the controller's own session writes.
-func (cs *controllerState) SessionsBeadStore() beads.Store {
+// session writes emit bead.* exactly like the controller's own session writes. The
+// result is wrapped in the strongly-typed beads.SessionStore so the session class is
+// statically visible to callers; the wrapper carries the same underlying store value,
+// so runtime behavior is unchanged.
+func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return resolveSessionStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
+	return beads.SessionStore{Store: resolveSessionStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // GraphBeadStore returns the store backing graph-class beads. At the default backend

@@ -15,7 +15,9 @@ type controllerClassAccessor struct {
 
 var controllerCityClassAccessors = []controllerClassAccessor{
 	{"graphBeadStore", func(cs *controllerState) beads.Store { return cs.graphBeadStore() }},
-	{"sessionsBeadStore", func(cs *controllerState) beads.Store { return cs.sessionsBeadStore() }},
+	// sessionsBeadStore returns the strongly-typed beads.SessionStore; unwrap its
+	// embedded .Store so the identity check compares the underlying store pointer.
+	{"sessionsBeadStore", func(cs *controllerState) beads.Store { return cs.sessionsBeadStore().Store }},
 	{"mailBeadStore", func(cs *controllerState) beads.Store { return cs.mailBeadStore() }},
 	{"nudgesBeadStore", func(cs *controllerState) beads.Store { return cs.nudgesBeadStore() }},
 	{"ordersBeadStore", func(cs *controllerState) beads.Store { return cs.ordersBeadStore("") }},
@@ -67,7 +69,9 @@ func TestCityRuntimeClassAccessorsAreIdentity(t *testing.T) {
 		got  func() beads.Store
 	}{
 		{"graphBeadStore", cr.graphBeadStore},
-		{"sessionsBeadStore", cr.sessionsBeadStore},
+		// sessionsBeadStore returns the strongly-typed beads.SessionStore; unwrap its
+		// embedded .Store so the identity check compares the underlying store pointer.
+		{"sessionsBeadStore", func() beads.Store { return cr.sessionsBeadStore().Store }},
 		{"mailBeadStore", cr.mailBeadStore},
 		{"nudgesBeadStore", cr.nudgesBeadStore},
 		{"cityWorkStore", cr.cityWorkStore},

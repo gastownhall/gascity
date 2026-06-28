@@ -122,8 +122,10 @@ type State interface {
 	// per-class store, so session/wait reads and writes reach the relocated
 	// beads instead of the work store. Session handlers source their store from
 	// here (not CityBeadStore); cross-class WORK-bead reads stay on
-	// CityBeadStore. Returns nil if no store is available.
-	SessionsBeadStore() beads.Store
+	// CityBeadStore. The strongly-typed beads.SessionStore return makes the
+	// session class statically visible at the call site; its embedded .Store is
+	// nil when no store is available.
+	SessionsBeadStore() beads.SessionStore
 
 	// GraphBeadStore returns the store backing graph-class beads — the formula-v2
 	// execution topology and control lane (molecules, wisps, convoys, control

@@ -2798,7 +2798,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	// per-class backend routes each role independently; both collapse to the same
 	// store today, so the tick is byte-identical.
 	sessionsStore := cr.sessionsBeadStore()
-	if sessionsStore == nil || cr.sessionDrains == nil {
+	if sessionsStore.Store == nil || cr.sessionDrains == nil {
 		return
 	}
 
@@ -2980,7 +2980,7 @@ func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapsho
 	// The session-bead snapshot is a sessions-class read, so route it through the
 	// sessions accessor (identity to the city store today).
 	store := cr.sessionsBeadStore()
-	if store == nil {
+	if store.Store == nil {
 		return nil, false
 	}
 	sessionBeads, err := loadSessionBeadSnapshot(store)

@@ -28,8 +28,9 @@ func (cs *controllerState) graphBeadStore() beads.Store {
 // sessionsBeadStore returns the store that owns session and session-wait beads.
 // It delegates to the exported SessionsBeadStore() accessor so the api.State
 // surface and the controller's own callers share one resolver. Identity to the
-// work store at the default bd backend.
-func (cs *controllerState) sessionsBeadStore() beads.Store {
+// work store at the default bd backend; returned as the strongly-typed
+// beads.SessionStore so the session class stays statically visible.
+func (cs *controllerState) sessionsBeadStore() beads.SessionStore {
 	return cs.SessionsBeadStore()
 }
 
@@ -84,8 +85,10 @@ func (cr *CityRuntime) graphBeadStore() beads.Store {
 // configured session class store (with the controller recorder so relocated
 // session writes emit bead.*) when [beads.classes.sessions] relocates sessions,
 // else the work store. Byte-identical to cityBeadStore() at the default bd backend.
-func (cr *CityRuntime) sessionsBeadStore() beads.Store {
-	return resolveSessionStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
+// Returned as the strongly-typed beads.SessionStore so the session class stays
+// statically visible; the wrapper carries the same underlying store value.
+func (cr *CityRuntime) sessionsBeadStore() beads.SessionStore {
+	return beads.SessionStore{Store: resolveSessionStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // mailBeadStore returns the runtime's mail (message) bead store: the configured

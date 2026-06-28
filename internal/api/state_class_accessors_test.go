@@ -27,12 +27,14 @@ func TestFakeStateNudgesBeadStoreFallsBackToCityStore(t *testing.T) {
 // the default backend.
 func TestFakeStateSessionsBeadStoreFallsBackToCityStore(t *testing.T) {
 	f := newFakeState(t)
-	if got := f.SessionsBeadStore(); got != f.CityBeadStore() {
+	// SessionsBeadStore returns the strongly-typed beads.SessionStore; compare its
+	// embedded .Store to the work store for the default-backend identity check.
+	if got := f.SessionsBeadStore(); got.Store != f.CityBeadStore() {
 		t.Fatalf("default backend: SessionsBeadStore() must equal CityBeadStore(); got distinct stores")
 	}
 	relocated := beads.NewMemStore()
 	f.sessionsBeadStore = relocated
-	if got := f.SessionsBeadStore(); got != relocated {
+	if got := f.SessionsBeadStore(); got.Store != relocated {
 		t.Fatalf("relocated backend: SessionsBeadStore() must return the configured sessions store")
 	}
 }
