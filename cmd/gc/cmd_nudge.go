@@ -1080,7 +1080,7 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 	if store.Store != nil {
 		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store.Store, identifier)
 		if err == nil {
-			b, getErr := store.Store.Get(sessionID)
+			b, getErr := store.Get(sessionID)
 			if getErr != nil {
 				return nudgeTarget{}, getErr
 			}
