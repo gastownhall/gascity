@@ -188,13 +188,19 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 		clearCityDoltConfig(cityPath)
 	}
 	skipLocalDolt := false
-	if cityUsesManagedDoltBeadsLifecycle(cityPath) {
+	switch {
+	case isExternalDolt(cityPath):
+		// An externally-pinned dolt endpoint (city_canonical / explicit, e.g. a
+		// hosted beads-gateway) is not a gc-managed local lifecycle: connect to
+		// the external server, never spawn or adopt a local managed Dolt for it.
+		skipLocalDolt = true
+	case cityUsesManagedDoltBeadsLifecycle(cityPath):
 		owned, err := managedDoltLifecycleOwned(cityPath)
 		if err != nil {
 			return err
 		}
 		skipLocalDolt = !owned
-	} else if cityUsesDoltliteBeadsBackend(cityPath) {
+	case cityUsesDoltliteBeadsBackend(cityPath):
 		skipLocalDolt = true
 	}
 	if !skipLocalDolt {
