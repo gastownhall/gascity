@@ -147,12 +147,15 @@ jobs:
             # gated output above, forcing a full union run. Beads is the
             # universal persistence substrate, events the universal observation
             # substrate, config the universal activation mechanism; build,
-            # dependency, and CI-config files affect every job.
+            # dependency, and CI workflow/composite-action files affect every
+            # job. The setup-gascity-ubuntu composite action is shared by nearly
+            # every job, so a change to it must re-run all path-gated suites.
             shared:
               - 'go.mod'
               - 'go.sum'
               - 'Makefile'
               - '.github/workflows/**'
+              - '.github/actions/setup-gascity-ubuntu/**'
               - 'internal/beads/**'
               - 'internal/events/**'
               - 'internal/config/**'
