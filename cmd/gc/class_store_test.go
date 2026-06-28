@@ -29,7 +29,9 @@ var controllerCityClassAccessors = []controllerClassAccessor{
 	// ordersBeadStore returns the strongly-typed beads.OrdersStore; unwrap its
 	// embedded .Store so the identity check compares the underlying store pointer.
 	{"ordersBeadStore", func(cs *controllerState) beads.Store { return cs.ordersBeadStore("").Store }},
-	{"cityWorkStore", func(cs *controllerState) beads.Store { return cs.cityWorkStore() }},
+	// cityWorkStore returns the strongly-typed beads.WorkStore; unwrap its embedded
+	// .Store so the identity check compares the underlying store pointer.
+	{"cityWorkStore", func(cs *controllerState) beads.Store { return cs.cityWorkStore().Store }},
 }
 
 // TestControllerStateClassAccessorsAreIdentity pins that every controllerState
@@ -56,8 +58,10 @@ func TestControllerStateClassAccessorsAreIdentity(t *testing.T) {
 		t.Fatalf("workBeadStores() len = %d, want %d", len(work), len(want))
 	}
 	for name, store := range want {
-		if !sameStorePtr(work[name], store) {
-			t.Errorf("workBeadStores()[%q] = %p, want %p", name, work[name], store)
+		// work[name] is a strongly-typed beads.WorkStore; unwrap its embedded .Store
+		// so the identity check compares the underlying store pointer.
+		if !sameStorePtr(work[name].Store, store) {
+			t.Errorf("workBeadStores()[%q] = %p, want %p", name, work[name].Store, store)
 		}
 	}
 }
@@ -88,7 +92,9 @@ func TestCityRuntimeClassAccessorsAreIdentity(t *testing.T) {
 		// nudgesBeadStore returns the strongly-typed beads.NudgesStore; unwrap its
 		// embedded .Store so the identity check compares the underlying store pointer.
 		{"nudgesBeadStore", func() beads.Store { return cr.nudgesBeadStore().Store }},
-		{"cityWorkStore", cr.cityWorkStore},
+		// cityWorkStore returns the strongly-typed beads.WorkStore; unwrap its embedded
+		// .Store so the identity check compares the underlying store pointer.
+		{"cityWorkStore", func() beads.Store { return cr.cityWorkStore().Store }},
 	}
 	for _, acc := range accessors {
 		if got := acc.got(); !sameStorePtr(got, city) {
@@ -105,8 +111,10 @@ func TestCityRuntimeClassAccessorsAreIdentity(t *testing.T) {
 		t.Fatalf("workBeadStores() len = %d, want %d", len(work), len(want))
 	}
 	for name, store := range want {
-		if !sameStorePtr(work[name], store) {
-			t.Errorf("workBeadStores()[%q] = %p, want %p", name, work[name], store)
+		// work[name] is a strongly-typed beads.WorkStore; unwrap its embedded .Store
+		// so the identity check compares the underlying store pointer.
+		if !sameStorePtr(work[name].Store, store) {
+			t.Errorf("workBeadStores()[%q] = %p, want %p", name, work[name].Store, store)
 		}
 	}
 }

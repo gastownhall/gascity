@@ -70,16 +70,26 @@ func (cs *controllerState) ordersBeadStore(_ string) beads.OrdersStore {
 	return beads.OrdersStore{Store: resolveOrderStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
-// cityWorkStore returns the city-level store for ordinary work beads that are
-// not scoped to a named rig. Identity: the city-level bead store today.
-func (cs *controllerState) cityWorkStore() beads.Store {
-	return cs.CityBeadStore()
+// cityWorkStore returns the city-level store for ordinary WORK-class beads that
+// are not scoped to a named rig. Work is the default/residual coordination class
+// (everything Classify does not route elsewhere), so this is the typed accessor
+// for the work class — distinct from CityBeadStore(), which stays beads.Store as
+// the federation/by-id/default root. Returned as the strongly-typed
+// beads.WorkStore so the work class stays statically visible; the wrapper carries
+// the exact same underlying store value CityBeadStore() returns today, so it is
+// byte-identical. Pass the embedded .Store field to any generic beads.Store
+// helper shared across classes.
+func (cs *controllerState) cityWorkStore() beads.WorkStore {
+	return beads.WorkStore{Store: cs.CityBeadStore()}
 }
 
-// workBeadStores returns all rig work stores keyed by rig name, including the
-// HQ city store. Identity: the same map BeadStores() returns today.
-func (cs *controllerState) workBeadStores() map[string]beads.Store {
-	return cs.BeadStores()
+// workBeadStores returns all rig WORK-class stores keyed by rig name, including
+// the HQ city store, as strongly-typed beads.WorkStore values. Each wrapper
+// carries the exact same underlying store value BeadStores() returns today, so it
+// is byte-identical; pass the embedded .Store field to any generic beads.Store
+// helper shared across classes.
+func (cs *controllerState) workBeadStores() map[string]beads.WorkStore {
+	return toWorkStores(cs.BeadStores())
 }
 
 // graphBeadStore returns the runtime's graph (workflow/v2) bead store: the
@@ -131,16 +141,46 @@ func (cr *CityRuntime) ordersBeadStore(_ string) beads.OrdersStore {
 	return beads.OrdersStore{Store: resolveOrderStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
-// cityWorkStore returns the runtime's city-level work bead store.
-// Identity: the city-level bead store today.
-func (cr *CityRuntime) cityWorkStore() beads.Store {
-	return cr.cityBeadStore()
+// cityWorkStore returns the runtime's city-level WORK-class bead store. Work is
+// the default/residual coordination class; this is its typed accessor, distinct
+// from the federation/by-id/default cityBeadStore() root. Returned as the
+// strongly-typed beads.WorkStore carrying the same underlying store value
+// cityBeadStore() returns today, so it is byte-identical; pass the embedded
+// .Store field to any generic beads.Store helper shared across classes.
+func (cr *CityRuntime) cityWorkStore() beads.WorkStore {
+	return beads.WorkStore{Store: cr.cityBeadStore()}
 }
 
-// workBeadStores returns the runtime's per-rig work stores keyed by rig name.
-// Identity: the same map rigBeadStores() returns today.
-func (cr *CityRuntime) workBeadStores() map[string]beads.Store {
-	return cr.rigBeadStores()
+// workBeadStores returns the runtime's per-rig WORK-class stores keyed by rig
+// name as strongly-typed beads.WorkStore values. Each wrapper carries the exact
+// same underlying store value rigBeadStores() returns today, so it is
+// byte-identical; pass the embedded .Store field to any generic beads.Store
+// helper shared across classes.
+func (cr *CityRuntime) workBeadStores() map[string]beads.WorkStore {
+	return toWorkStores(cr.rigBeadStores())
+}
+
+// toWorkStores wraps each store in a rig→store map as a strongly-typed
+// beads.WorkStore, carrying the same underlying store value so the result is
+// byte-identical to the input map.
+func toWorkStores(stores map[string]beads.Store) map[string]beads.WorkStore {
+	out := make(map[string]beads.WorkStore, len(stores))
+	for name, store := range stores {
+		out[name] = beads.WorkStore{Store: store}
+	}
+	return out
+}
+
+// unwrapWorkStores unwraps a rig→work-store map back to a generic
+// rig→beads.Store map for passing into helpers shared across coordination
+// classes. Each value carries the same underlying store, so the result is
+// byte-identical.
+func unwrapWorkStores(stores map[string]beads.WorkStore) map[string]beads.Store {
+	out := make(map[string]beads.Store, len(stores))
+	for name, store := range stores {
+		out[name] = store.Store
+	}
+	return out
 }
 
 // createTarget returns the inner store that owns creates of the given

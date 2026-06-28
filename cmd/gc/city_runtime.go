@@ -2828,7 +2828,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		filteredCfg,
 		cr.sp,
 		sessionsStore,
-		cr.workBeadStores(),
+		unwrapWorkStores(cr.workBeadStores()),
 		sessionBeads,
 		nil,
 		cr.stderr,
@@ -2838,7 +2838,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
 		cr.cityPath,
 		cr.sessionsBeadStore(),
-		cr.workBeadStores(),
+		unwrapWorkStores(cr.workBeadStores()),
 		desiredState,
 		cr.sp,
 		cfgNames,
@@ -2872,7 +2872,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.sessionsBeadStore(),
 		cr.dops,
 		nil,
-		cr.workBeadStores(),
+		unwrapWorkStores(cr.workBeadStores()),
 		nil, // control-dispatcher ticks only need ownership continuity, not main-tick assigned/ready snapshots
 		cr.sessionDrains,
 		cr.providerHealthGate,
@@ -3024,7 +3024,7 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	// routes each role independently; both collapse to the same store today.
 	sessionsStore := cr.sessionsBeadStore()
 	if cr.buildFnWithSessionBeads != nil {
-		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore, cr.workBeadStores(), sessionBeads, trace)
+		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)
 	}
 	return cr.buildFn(cr.cfg, cr.sp, sessionsStore)
 }
