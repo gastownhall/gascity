@@ -25,7 +25,7 @@ func TestDoHookClaimUsesSelectedStoreContextForMutationAndContinuation(t *testin
 	candidates := []beads.Bead{{
 		ID:       "bead-1",
 		Status:   "open",
-		Metadata: map[string]string{"gc.run_target": "route-1", "gc.root_bead_id": "root-1", "gc.continuation_group": "group-a"},
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.run_target": "route-1", "gc.root_bead_id": "root-1", "gc.continuation_group": "group-a"},
 	}}
 	output, err := json.Marshal(candidates)
 	if err != nil {

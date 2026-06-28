@@ -38,9 +38,12 @@ func TestCrossStorePipeline_ReadThenClaim(t *testing.T) {
 		return `[]`, nil
 	}
 
-	out, err := firstStoreWithWork("fake-query", stores, run)
+	out, gotStore, err := firstStoreWithWork("fake-query", stores, run)
 	if err != nil {
 		t.Fatalf("firstStoreWithWork: %v", err)
+	}
+	if filepath.Clean(gotStore.dir) != filepath.Clean(rigPath) {
+		t.Fatalf("selected store = %q, want %q (rig store)", gotStore.dir, rigPath)
 	}
 
 	// Parse the bead ID from the output (same parse the agent/host would do).
