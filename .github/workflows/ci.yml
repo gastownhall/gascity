@@ -158,6 +158,7 @@ jobs:
               - '.github/workflows/**'
               - '.github/actions/setup-gascity-ubuntu/**'
               - '.github/scripts/install-dolt-archive.sh'
+              - '.github/scripts/install-bd-archive.sh'
               - '.github/scripts/install-claude-native.sh'
               - 'internal/beads/**'
               - 'internal/events/**'
