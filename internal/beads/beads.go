@@ -105,6 +105,26 @@ type ConditionalAssignmentReleaser interface {
 	ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
 }
 
+// AtomicTxStore is implemented by stores whose Tx commits the whole callback
+// atomically: when the callback returns an error, none of its writes persist.
+// Stores that do not implement it (or whose AtomicTx returns false) may leave
+// partial writes after a failed Tx — see the Store.Tx contract — so callers that
+// need an all-or-nothing multi-write swap must either require such a store or
+// sequence their writes so a partial failure stays recoverable on non-atomic
+// backends.
+type AtomicTxStore interface {
+	// AtomicTx reports whether Store.Tx rolls the whole callback back on error.
+	AtomicTx() bool
+}
+
+// StoreSupportsAtomicTx reports whether store's Tx provides atomic rollback. It
+// returns false for any store that does not implement AtomicTxStore, matching
+// the conservative Store.Tx contract for backends without native transactions.
+func StoreSupportsAtomicTx(store Store) bool {
+	a, ok := store.(AtomicTxStore)
+	return ok && a.AtomicTx()
+}
+
 // Tx is the write surface available inside a Store.Tx callback.
 // Keep this interface limited to methods needed by current transactional
 // write pairs; do not add Store methods speculatively.

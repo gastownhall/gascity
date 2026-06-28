@@ -1509,6 +1509,7 @@ func extmsgBindingRecordFromWire(record genclient.SessionBindingRecord) extmsg.S
 			Kind:                 extmsg.ConversationKind(record.Conversation.Kind),
 		},
 		SessionID:         record.SessionID,
+		SessionName:       record.SessionName,
 		AgentName:         record.AgentName,
 		Status:            extmsg.BindingStatus(record.Status),
 		BoundAt:           record.BoundAt,

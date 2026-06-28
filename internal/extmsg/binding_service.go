@@ -80,6 +80,17 @@ func newBindingService(store beads.Store, delivery bindingCleaner, transcript bi
 	return svc
 }
 
+// bindTarget is the resolved endpoint a Bind call creates a binding for:
+// exactly one of sessionID/agentName is set, and sessionName is the stable
+// session identity captured for session bindings (empty for agent bindings or
+// when no live session bead resolved). It bundles the three values the bind
+// helpers thread together so the create/rebind/handoff paths share one shape.
+type bindTarget struct {
+	sessionID   string
+	agentName   string
+	sessionName string
+}
+
 func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInput) (SessionBindingRecord, error) {
 	if err := checkContext(ctx); err != nil {
 		return SessionBindingRecord{}, err
@@ -101,7 +112,11 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 	}
 	// Capture the target's stable session name so the binding survives respawn.
 	// Best-effort: empty when the selector resolves to no session bead.
-	sessionName := sessionNameForSelector(s.store, sessionID)
+	target := bindTarget{
+		sessionID:   sessionID,
+		agentName:   agentName,
+		sessionName: sessionNameForSelector(s.store, sessionID),
+	}
 	now := zeroNow(input.Now)
 
 	var out SessionBindingRecord
@@ -117,129 +132,235 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 		if err != nil {
 			return err
 		}
-		if active != nil && (active.SessionID != sessionID || active.AgentName != agentName) {
+		switch {
+		case active != nil && (active.SessionID != sessionID || active.AgentName != agentName):
 			if !input.Replace {
 				return fmt.Errorf("%w: conversation already bound to %s", ErrBindingConflict, bindingTarget(*active))
 			}
-			// Handoff: end the active binding and fall through to create
-			// the new one under the same conversation lock.
-			if err := s.endActiveBindingLocked(ctx, caller, *active, now); err != nil {
-				return err
-			}
-			if s.delivery != nil && active.SessionID != "" {
-				if err := s.delivery.ClearForConversation(ctx, active.SessionID, active.Conversation); err != nil {
-					return err
-				}
-			}
-			active = nil
+			out, err = s.handoffActiveBindingLocked(ctx, caller, *active, ref, target, input, history, now)
+			return err
+		case active != nil:
+			out, err = s.rebindActiveLocked(caller, ref, *active, target, input, now)
+			return err
+		default:
+			out, err = s.createBindingLocked(caller, ref, target, input, history, now, "")
+			return err
 		}
-		if active != nil {
-			// Coalesce the rebind's writes — optional session-name backfill,
-			// binding metadata, and transcript membership — into one commit so a
-			// rebind costs a single DOLT_COMMIT instead of 2-4 (gastownhall/gascity#3735).
-			if err := s.store.Tx("gc: extmsg rebind "+conversationLockKey(ref), func(tx beads.Tx) error {
-				if active.SessionName == "" && sessionName != "" {
-					if err := tx.Update(active.ID, beads.UpdateOpts{
-						Labels:   []string{bindingSessionNameLabel(sessionName)},
-						Metadata: map[string]string{"session_name": sessionName},
-					}); err != nil {
-						return fmt.Errorf("backfill session name on binding %s: %w", active.ID, err)
-					}
-				}
-				if err := s.updateBindingMetadata(tx, *active, input.Metadata, input.ExpiresAt, now); err != nil {
-					return err
-				}
-				if s.transcript != nil {
-					if _, err := s.transcript.ensureMembershipLockedWriter(tx, EnsureMembershipInput{
-						Caller:         caller,
-						Conversation:   ref,
-						SessionID:      bindingMembershipKey(*active),
-						BackfillPolicy: MembershipBackfillSinceJoin,
-						Owner:          MembershipOwnerBinding,
-						Now:            now,
-					}); err != nil {
-						return wrapTranscriptSyncError("ensure transcript membership after bind", err)
-					}
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
-			updated, err := s.getBinding(active.ID)
-			if err != nil {
-				return err
-			}
-			out = updated
-			return nil
-		}
-		nextGeneration := nextBindingGeneration(history)
-		// A binding targets either a configured agent (delivery-time resolution)
-		// or a concrete session. Agent bindings get only the agent label; session
-		// bindings get the volatile session-id label plus the stable session-name
-		// label (which survives respawn) when a name is known.
-		labels := []string{"gc:extmsg-binding", labelBindingBase, bindingConversationLabel(ref)}
-		if agentName != "" {
-			labels = append(labels, bindingAgentLabel(agentName))
-		} else {
-			labels = append(labels, bindingSessionLabel(sessionID))
-			if sessionName != "" {
-				labels = append(labels, bindingSessionNameLabel(sessionName))
-			}
-		}
-		// Coalesce the new binding's create and its transcript membership (plus
-		// any first-touch transcript-state create) into one commit so a fresh
-		// bind costs a single DOLT_COMMIT (gastownhall/gascity#3735).
-		return s.store.Tx("gc: extmsg bind "+conversationLockKey(ref), func(tx beads.Tx) error {
-			b, err := tx.Create(beads.Bead{
-				Title:  conversationTitle(ref),
-				Type:   "task",
-				Labels: labels,
-				Metadata: encodeMetadataFields(input.Metadata, map[string]string{
-					"schema_version":         strconv.Itoa(schemaVersion),
-					"scope_id":               ref.ScopeID,
-					"provider":               ref.Provider,
-					"account_id":             ref.AccountID,
-					"conversation_id":        ref.ConversationID,
-					"parent_conversation_id": ref.ParentConversationID,
-					"conversation_kind":      string(ref.Kind),
-					"session_id":             sessionID,
-					"session_name":           sessionName,
-					"agent_name":             agentName,
-					"binding_generation":     strconv.FormatInt(nextGeneration, 10),
-					"bound_at":               formatTime(now),
-					"expires_at":             formatTimePtr(input.ExpiresAt),
-					"last_touched_at":        formatTime(now),
-					"created_by_kind":        string(normalizeCaller(caller).Kind),
-					"created_by_id":          normalizeCaller(caller).ID,
-				}),
-			})
-			if err != nil {
-				return fmt.Errorf("create external binding: %w", err)
-			}
-			decoded, err := decodeBindingBead(b)
-			if err != nil {
-				return err
-			}
-			out = decoded
-			if s.transcript != nil {
-				if _, err := s.transcript.ensureMembershipLockedWriter(tx, EnsureMembershipInput{
-					Caller:         caller,
-					Conversation:   ref,
-					SessionID:      bindingMembershipKey(decoded),
-					BackfillPolicy: MembershipBackfillSinceJoin,
-					Owner:          MembershipOwnerBinding,
-					Now:            now,
-				}); err != nil {
-					return wrapTranscriptSyncError("ensure transcript membership after bind", err)
-				}
-			}
-			return nil
-		})
 	})
 	if err != nil {
 		return SessionBindingRecord{}, err
 	}
 	return out, nil
+}
+
+// createBindingLocked creates a fresh binding for ref under the conversation
+// lock. It coalesces the binding bead, its transcript membership, and an
+// optional displaced-binding close into a single commit so a bind costs one
+// DOLT_COMMIT (gastownhall/gascity#3735). When displaceID is non-empty the
+// displaced binding is closed in the SAME transaction; on a store with atomic
+// transactions (the only caller that passes displaceID, see
+// handoffActiveBindingLocked) a failure creating the replacement or its
+// membership rolls the whole swap back and leaves the displaced binding active,
+// so the conversation is never left unbound. history supplies the next
+// generation.
+func (s *bindingService) createBindingLocked(caller Caller, ref ConversationRef, target bindTarget, input BindInput, history []SessionBindingRecord, now time.Time, displaceID string) (SessionBindingRecord, error) {
+	nextGeneration := nextBindingGeneration(history)
+	// A binding targets either a configured agent (delivery-time resolution)
+	// or a concrete session. Agent bindings get only the agent label; session
+	// bindings get the volatile session-id label plus the stable session-name
+	// label (which survives respawn) when a name is known.
+	labels := []string{"gc:extmsg-binding", labelBindingBase, bindingConversationLabel(ref)}
+	if target.agentName != "" {
+		labels = append(labels, bindingAgentLabel(target.agentName))
+	} else {
+		labels = append(labels, bindingSessionLabel(target.sessionID))
+		if target.sessionName != "" {
+			labels = append(labels, bindingSessionNameLabel(target.sessionName))
+		}
+	}
+	var out SessionBindingRecord
+	if err := s.store.Tx("gc: extmsg bind "+conversationLockKey(ref), func(tx beads.Tx) error {
+		if displaceID != "" {
+			if err := tx.Close(displaceID); err != nil {
+				return fmt.Errorf("close displaced binding %s: %w", displaceID, err)
+			}
+		}
+		b, err := tx.Create(beads.Bead{
+			Title:  conversationTitle(ref),
+			Type:   "task",
+			Labels: labels,
+			Metadata: encodeMetadataFields(input.Metadata, map[string]string{
+				"schema_version":         strconv.Itoa(schemaVersion),
+				"scope_id":               ref.ScopeID,
+				"provider":               ref.Provider,
+				"account_id":             ref.AccountID,
+				"conversation_id":        ref.ConversationID,
+				"parent_conversation_id": ref.ParentConversationID,
+				"conversation_kind":      string(ref.Kind),
+				"session_id":             target.sessionID,
+				"session_name":           target.sessionName,
+				"agent_name":             target.agentName,
+				"binding_generation":     strconv.FormatInt(nextGeneration, 10),
+				"bound_at":               formatTime(now),
+				"expires_at":             formatTimePtr(input.ExpiresAt),
+				"last_touched_at":        formatTime(now),
+				"created_by_kind":        string(normalizeCaller(caller).Kind),
+				"created_by_id":          normalizeCaller(caller).ID,
+			}),
+		})
+		if err != nil {
+			return fmt.Errorf("create external binding: %w", err)
+		}
+		decoded, err := decodeBindingBead(b)
+		if err != nil {
+			return err
+		}
+		out = decoded
+		if s.transcript != nil {
+			if _, err := s.transcript.ensureMembershipLockedWriter(tx, EnsureMembershipInput{
+				Caller:         caller,
+				Conversation:   ref,
+				SessionID:      bindingMembershipKey(decoded),
+				BackfillPolicy: MembershipBackfillSinceJoin,
+				Owner:          MembershipOwnerBinding,
+				Now:            now,
+			}); err != nil {
+				return wrapTranscriptSyncError("ensure transcript membership after bind", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return SessionBindingRecord{}, err
+	}
+	return out, nil
+}
+
+// rebindActiveLocked refreshes the already-active binding when Bind targets the
+// same endpoint: it backfills a now-known session name, updates binding
+// metadata, and re-ensures transcript membership, coalescing all writes into a
+// single commit (gastownhall/gascity#3735).
+func (s *bindingService) rebindActiveLocked(caller Caller, ref ConversationRef, active SessionBindingRecord, target bindTarget, input BindInput, now time.Time) (SessionBindingRecord, error) {
+	if err := s.store.Tx("gc: extmsg rebind "+conversationLockKey(ref), func(tx beads.Tx) error {
+		if active.SessionName == "" && target.sessionName != "" {
+			if err := tx.Update(active.ID, beads.UpdateOpts{
+				Labels:   []string{bindingSessionNameLabel(target.sessionName)},
+				Metadata: map[string]string{"session_name": target.sessionName},
+			}); err != nil {
+				return fmt.Errorf("backfill session name on binding %s: %w", active.ID, err)
+			}
+		}
+		if err := s.updateBindingMetadata(tx, active, input.Metadata, input.ExpiresAt, now); err != nil {
+			return err
+		}
+		if s.transcript != nil {
+			if _, err := s.transcript.ensureMembershipLockedWriter(tx, EnsureMembershipInput{
+				Caller:         caller,
+				Conversation:   ref,
+				SessionID:      bindingMembershipKey(active),
+				BackfillPolicy: MembershipBackfillSinceJoin,
+				Owner:          MembershipOwnerBinding,
+				Now:            now,
+			}); err != nil {
+				return wrapTranscriptSyncError("ensure transcript membership after bind", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return SessionBindingRecord{}, err
+	}
+	return s.getBinding(active.ID)
+}
+
+// handoffActiveBindingLocked swaps the conversation's active binding from
+// displaced to the caller's new target, all under the conversation's binding
+// lock. Delivery contexts for the displaced session are cleared first, so a
+// clear failure leaves the displaced binding fully intact and the whole handoff
+// retryable (the same end-then-clear ordering the expiry path uses). The
+// displaced binding's transcript membership is dropped before the swap and
+// re-ensured if the swap fails while the displaced binding is still active.
+//
+// How the close-of-displaced and create-of-replacement are sequenced depends on
+// the store's transaction guarantee, because a handoff is the first write pair
+// whose atomicity is a correctness requirement rather than a commit-count
+// optimization:
+//
+//   - On a store with atomic transactions, both happen in one store.Tx that
+//     commits or rolls back as a unit (see createBindingLocked). A failure
+//     leaves the displaced binding active and creates no replacement.
+//   - On a non-atomic store, a single Tx cannot do both atomically and partial
+//     writes persist on failure, so the displaced binding is closed first as its
+//     own write and the replacement is created after. A mid-swap failure can then
+//     only leave the conversation unbound (recoverable by a fresh bind) or bound
+//     to the new target without transcript membership (recovered by the next
+//     same-target rebind) — never two active bindings at once, which
+//     selectActiveBinding rejects as an unrecoverable invariant violation.
+func (s *bindingService) handoffActiveBindingLocked(ctx context.Context, caller Caller, displaced SessionBindingRecord, ref ConversationRef, target bindTarget, input BindInput, history []SessionBindingRecord, now time.Time) (SessionBindingRecord, error) {
+	if s.delivery != nil && displaced.SessionID != "" {
+		if err := s.delivery.ClearForConversation(ctx, displaced.SessionID, displaced.Conversation); err != nil {
+			return SessionBindingRecord{}, err
+		}
+	}
+	if err := s.store.SetMetadata(displaced.ID, "last_touched_at", formatTime(now)); err != nil {
+		return SessionBindingRecord{}, fmt.Errorf("update binding %s metadata: %w", displaced.ID, err)
+	}
+	if s.transcript != nil {
+		if err := s.transcript.removeMembershipLocked(RemoveMembershipInput{
+			Caller:       caller,
+			Conversation: displaced.Conversation,
+			SessionID:    bindingMembershipKey(displaced),
+			Owner:        MembershipOwnerBinding,
+			Now:          now,
+		}); err != nil {
+			return SessionBindingRecord{}, wrapTranscriptSyncError("remove transcript membership after unbind", err)
+		}
+	}
+
+	if beads.StoreSupportsAtomicTx(s.store) {
+		out, err := s.createBindingLocked(caller, ref, target, input, history, now, displaced.ID)
+		if err != nil {
+			// The swap rolled back, so the displaced binding is still active —
+			// restore its membership to match.
+			return SessionBindingRecord{}, s.restoreDisplacedMembershipLocked(caller, displaced, now, err)
+		}
+		return out, nil
+	}
+
+	if err := s.store.Close(displaced.ID); err != nil {
+		// The displaced binding is still active because the close did not land —
+		// restore its membership to match.
+		return SessionBindingRecord{}, s.restoreDisplacedMembershipLocked(caller, displaced, now,
+			fmt.Errorf("close displaced binding %s: %w", displaced.ID, err))
+	}
+	out, err := s.createBindingLocked(caller, ref, target, input, history, now, "")
+	if err != nil {
+		// The displaced binding is already closed, so the conversation is unbound
+		// or bound to a replacement still missing its membership; both states are
+		// recoverable on retry. Do not re-open the displaced binding.
+		return SessionBindingRecord{}, err
+	}
+	return out, nil
+}
+
+// restoreDisplacedMembershipLocked re-ensures the displaced binding's transcript
+// membership after a failed swap that left the displaced binding active, and
+// returns cause. If the restore itself fails, it joins that failure onto cause
+// so a transcript that could not be put back is surfaced rather than silently
+// dropped.
+func (s *bindingService) restoreDisplacedMembershipLocked(caller Caller, displaced SessionBindingRecord, now time.Time, cause error) error {
+	if s.transcript == nil {
+		return cause
+	}
+	if _, err := s.transcript.ensureMembershipLocked(EnsureMembershipInput{
+		Caller:         caller,
+		Conversation:   displaced.Conversation,
+		SessionID:      bindingMembershipKey(displaced),
+		BackfillPolicy: MembershipBackfillSinceJoin,
+		Owner:          MembershipOwnerBinding,
+		Now:            now,
+	}); err != nil {
+		return errors.Join(cause, wrapTranscriptSyncError("restore displaced transcript membership after failed handoff", err))
+	}
+	return cause
 }
 
 func (s *bindingService) ResolveByConversation(ctx context.Context, ref ConversationRef) (*SessionBindingRecord, error) {

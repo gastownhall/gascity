@@ -259,6 +259,15 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 	if subject == "" {
 		subject = agentName
 	}
+	// A handoff (Replace=true) ends the displaced binding and creates the
+	// replacement atomically, but emits only ExtMsgBound — not a paired
+	// ExtMsgUnbound for the displaced binding. ExtMsgBound with an incremented
+	// binding generation is the canonical handoff lifecycle signal; the bound
+	// payload identifies the new target, and the displaced binding's end is
+	// implied by the conversation now resolving to that new binding (whose
+	// generation is greater than 1). Consumers tracking binding lifecycle should
+	// reconcile against the active binding rather than wait for an ExtMsgUnbound
+	// that handoff intentionally does not emit.
 	s.extmsgEmitEvent()(events.ExtMsgBound, subject, extmsg.BoundEventPayload{
 		Provider:       input.Body.Conversation.Provider,
 		ConversationID: input.Body.Conversation.ConversationID,
