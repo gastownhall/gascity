@@ -66,13 +66,6 @@ func implicitImportPath() string {
 	return filepath.Join(home, "implicit-import.toml")
 }
 
-// ImplicitGCHome returns the user-global GC_HOME directory used to
-// resolve implicit-import bookkeeping and bootstrap pack caches.
-//
-// Resolution order: GC_HOME env var → user home/.gc → tmp fallback.
-// Returns "" under `go test` to keep unit tests hermetic unless the
-// caller opts in by setting GC_HOME explicitly.
-
 // implicitGCHomeFallback is a copy of gchome.ProcessUniqueFallback kept
 // package-internal to avoid a new cross-package dependency (#3661).
 // Any changes here must be mirrored in the other three copies.
@@ -92,6 +85,12 @@ func implicitGCHomeFallback() string {
 	return filepath.Join(os.TempDir(), fmt.Sprintf("gc-home-%d", os.Getpid()))
 }
 
+// ImplicitGCHome returns the user-global GC_HOME directory used to
+// resolve implicit-import bookkeeping and bootstrap pack caches.
+//
+// Resolution order: GC_HOME env var → user home/.gc → tmp fallback.
+// Returns "" under `go test` to keep unit tests hermetic unless the
+// caller opts in by setting GC_HOME explicitly.
 func ImplicitGCHome() string {
 	if v := strings.TrimSpace(os.Getenv("GC_HOME")); v != "" {
 		return v
