@@ -36,11 +36,11 @@ func TestMetadataEmptyStringClearContract(t *testing.T) {
 	}{
 		{
 			name:     "MemStore",
-			newStore: func(t *testing.T) beads.Store { return beads.NewMemStore() },
+			newStore: func(_ *testing.T) beads.Store { return beads.NewMemStore() },
 		},
 		{
 			name:     "NativeDoltStore",
-			newStore: func(t *testing.T) beads.Store { return beads.NewNativeDoltStoreForConformance() },
+			newStore: func(_ *testing.T) beads.Store { return beads.NewNativeDoltStoreForConformance() },
 		},
 		{
 			name: "Postgres",
@@ -113,7 +113,7 @@ func TestMetadataEmptyStringClearContract(t *testing.T) {
 
 // assertEmptyClears creates a bead with state="active", applies clear via the
 // supplied write, and asserts the read-back state is empty.
-func assertEmptyClears(t *testing.T, s beads.Store, clear func(s beads.Store, id string) error) {
+func assertEmptyClears(t *testing.T, s beads.Store, clearFn func(s beads.Store, id string) error) {
 	t.Helper()
 	created, err := s.Create(beads.Bead{
 		Title:    "clear me",
@@ -129,7 +129,7 @@ func assertEmptyClears(t *testing.T, s beads.Store, clear func(s beads.Store, id
 	if pre.Metadata["state"] != "active" {
 		t.Fatalf("precondition: state should be %q, got %q", "active", pre.Metadata["state"])
 	}
-	if err := clear(s, created.ID); err != nil {
+	if err := clearFn(s, created.ID); err != nil {
 		t.Fatalf("clear write: %v", err)
 	}
 	post, err := s.Get(created.ID)

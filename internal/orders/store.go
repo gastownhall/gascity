@@ -210,10 +210,6 @@ func (s *Store) CloseRun(runID, reason string) error {
 	return nil
 }
 
-// orderTrackingHistoryIndexLimit caps the recent-history list the dispatcher's
-// tracking index reads. Mirrors cmd/gc/order_dispatch.go.
-const orderTrackingHistoryIndexLimit = 2048
-
 // CreateRunClosed creates a tracking bead, optionally stamps an event cursor and
 // outcome, then closes it — the cooldown-advance-only path used by manual
 // `gc order run`. The bead's CreatedAt advances the cooldown clock, and it is

@@ -128,7 +128,7 @@ func (s *InfoStore) Close(id, stateCode string, now time.Time) (bool, error) {
 	if info.Closed {
 		return false, nil
 	}
-	if err := s.ApplyPatch(id, MetadataPatch(ClosePatch(now, stateCode))); err != nil {
+	if err := s.ApplyPatch(id, ClosePatch(now, stateCode)); err != nil {
 		return false, err
 	}
 	if err := s.store.Close(id); err != nil {
