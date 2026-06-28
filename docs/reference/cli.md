@@ -1644,7 +1644,7 @@ gc hook run -- <gc args...> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--timeout` | duration | `30s` | hard timeout for the managed hook command |
+| `--timeout` | duration | `15s` | hard timeout for the managed hook command |
 | `--timeout-exit-code` | int | `124` | exit code to return when the managed hook command times out |
 
 ## gc import

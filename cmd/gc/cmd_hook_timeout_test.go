@@ -10,22 +10,24 @@ import (
 // issues ~6 sequential bd/store round-trips — three session identifiers across
 // the in-progress and ready assigned tiers — before the pool-demand tier that
 // finds routed work. On a multi-rig dolt city under concurrent load each
-// round-trip costs several seconds, so at the prior 15s (gc hook run) / 30s
-// (work-query subprocess) budgets the probe was killed before reaching
-// pool-demand and pool operators (gc.run-operator) were starved of work they
-// had already been routed. Keep both budgets generous enough to clear the
-// realistic loaded cost, and keep the subprocess cap at least as large as the
-// managed-hook wrapper so the wrapper never preempts the inner work query.
+// round-trip costs several seconds, so at the prior 30s work-query subprocess
+// budget the probe was killed before reaching pool-demand and pool operators
+// (gc.run-operator) were starved of work they had already been routed. Keep the
+// subprocess budget generous enough to clear the realistic loaded cost.
+//
+// This guards hookWorkQueryTimeout, the cap that actually bounds the work query
+// (shellWorkQueryWithEnv in `gc hook` and the workflow serve loop). It does not
+// constrain defaultHookRunTimeout: that budget bounds the separate `gc hook run`
+// managed-hook wrapper (nudge drain / mail check) and does not enclose the work
+// query, so the two are intentionally independent and not asserted against each
+// other here.
 func TestWorkQueryTimeoutsAccommodateMultiRoundTripProbe(t *testing.T) {
-	const minProbeBudget = 30 * time.Second
+	// minProbeBudget is the remediation target, not merely the old cap: keeping it
+	// at 60s means a regression of hookWorkQueryTimeout back to the known-bad 30s
+	// budget (which starved pool operators) fails this guard rather than passing it.
+	const minProbeBudget = 60 * time.Second
 
-	if defaultHookRunTimeout < minProbeBudget {
-		t.Errorf("defaultHookRunTimeout = %s, want >= %s (multi-round-trip probe budget)", defaultHookRunTimeout, minProbeBudget)
-	}
 	if hookWorkQueryTimeout < minProbeBudget {
 		t.Errorf("hookWorkQueryTimeout = %s, want >= %s (multi-round-trip probe budget)", hookWorkQueryTimeout, minProbeBudget)
-	}
-	if hookWorkQueryTimeout < defaultHookRunTimeout {
-		t.Errorf("hookWorkQueryTimeout (%s) must be >= defaultHookRunTimeout (%s) so the managed-hook wrapper does not preempt the inner work-query subprocess", hookWorkQueryTimeout, defaultHookRunTimeout)
 	}
 }
