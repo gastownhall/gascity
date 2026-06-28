@@ -450,7 +450,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return nil, humaSessionManagerError(err)
 	}
 	updated, _ := store.Get(id)
-	presp := sessionResponseWithReason(info, &updated, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
+	presp := sessionResponseWithReason(info, session.PersistedResponseFromBead(updated), s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	return &IndexOutput[sessionResponse]{
 		Index: s.latestIndex(),
 		Body:  presp,
@@ -533,7 +533,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	if err != nil {
 		return nil, humaStoreError(err)
 	}
-	resp := sessionResponseWithReason(info, &updated, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
+	resp := sessionResponseWithReason(info, session.PersistedResponseFromBead(updated), s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	return &IndexOutput[sessionResponse]{
 		Index: s.latestIndex(),
 		Body:  resp,
@@ -947,7 +947,7 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 		return nil, humaSessionManagerError(err)
 	}
 	updated, _ := store.Get(id)
-	rresp := sessionResponseWithReason(info, &updated, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
+	rresp := sessionResponseWithReason(info, session.PersistedResponseFromBead(updated), s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	return &IndexOutput[sessionResponse]{
 		Index: s.latestIndex(),
 		Body:  rresp,
