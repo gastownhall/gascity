@@ -291,7 +291,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 		return 0
 	}
 	if sleep {
-		if err := store.SetMetadataBatch(sessionID, map[string]string{
+		if err := sessionFrontDoor(store).ApplyPatch(sessionID, map[string]string{
 			"wait_hold":    "true",
 			"sleep_intent": "wait-hold",
 		}); err != nil {
@@ -754,7 +754,7 @@ func stampWaitLookupCapDiagnostic(store beads.Store, sessionID string, err error
 	}
 	batch := map[string]string{}
 	sessionpkg.StampWaitLookupCapMetadata(batch, label, limitErr.Limit, now, source)
-	if err := store.SetMetadataBatch(sessionID, batch); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(sessionID, batch); err != nil {
 		log.Printf("gc wait: recording lookup cap diagnostic for session %s failed: %v", sessionID, err)
 	}
 }
@@ -1290,7 +1290,7 @@ func clearSessionWaitHold(store beads.Store, sessionID string) error {
 			batch["sleep_reason"] = ""
 		}
 	}
-	return store.SetMetadataBatch(sessionID, batch)
+	return sessionFrontDoor(store).ApplyPatch(sessionID, batch)
 }
 
 func clearSessionWaitHoldIfIdle(store beads.Store, sessionID string) error {

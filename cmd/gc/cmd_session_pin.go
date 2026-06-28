@@ -122,7 +122,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 		value = "true"
 	}
 	if !materializedForPin {
-		if err := store.SetMetadata(id, "pin_awake", value); err != nil {
+		if err := sessionFrontDoor(store).SetMarker(id, "pin_awake", value); err != nil {
 			fmt.Fprintf(stderr, "gc session %s: updating metadata: %v\n", action, err) //nolint:errcheck
 			return 1
 		}

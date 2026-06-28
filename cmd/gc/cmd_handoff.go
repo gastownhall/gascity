@@ -374,7 +374,7 @@ func clearRestartRequest(store beads.Store, dops drainOps, sessionName string) e
 		errs = append(errs, fmt.Errorf("resolving session %q: %w", sessionName, err))
 		return errors.Join(errs...)
 	}
-	if err := store.SetMetadataBatch(id, map[string]string{
+	if err := sessionFrontDoor(store).ApplyPatch(id, map[string]string{
 		"restart_requested":          "",
 		"continuation_reset_pending": "",
 	}); err != nil {
