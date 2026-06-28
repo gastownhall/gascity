@@ -238,7 +238,7 @@ func TestCmdSessionKill_SyncsBeadToAsleep(t *testing.T) {
 
 	fakeProvider := runtime.NewFake()
 	oldBuild := buildSessionProviderByName
-	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
 		return fakeProvider, nil
 	}
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
