@@ -63,7 +63,7 @@ func markDrainAckStopPending(session *beads.Bead, store beads.Store, clk clock.C
 		stderr = io.Discard
 	}
 	batch := sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC())
-	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err != nil {
 		name := strings.TrimSpace(session.Metadata["session_name"])
 		if name == "" {
 			name = session.ID
@@ -375,7 +375,7 @@ func finalizeDrainAckStoppedSession(
 	if session.Metadata["restart_requested"] == "true" {
 		batch["restart_requested"] = ""
 	}
-	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: finalizing drain-ack stopped %s: %v\n", name, err) //nolint:errcheck
 		return
 	}
@@ -1831,7 +1831,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if hasCapability && newSessionKey == "" {
 					batch["session_key"] = ""
 				}
-				if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+				if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: recording restart handoff for %s: %v\n", name, err) //nolint:errcheck
 					continue
 				}
@@ -2149,7 +2149,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						case storedLive == "" && len(agentCfg.SessionLive) == 0:
 							// No stored hash and no live config — silently
 							// backfill the hash without running anything.
-							_ = store.SetMetadataBatch(session.ID, map[string]string{
+							_ = sessionFrontDoor(store).ApplyPatch(session.ID, map[string]string{
 								"live_hash":         currentLive,
 								"started_live_hash": currentLive,
 							})
@@ -2175,7 +2175,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if err := sp.RunLive(name, agentCfg); err != nil {
 								fmt.Fprintf(stderr, "session reconciler: RunLive %s: %v\n", name, err) //nolint:errcheck
 							} else {
-								_ = store.SetMetadataBatch(session.ID, map[string]string{
+								_ = sessionFrontDoor(store).ApplyPatch(session.ID, map[string]string{
 									"live_hash":         currentLive,
 									"started_live_hash": currentLive,
 								})
@@ -2306,7 +2306,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					})
 					telemetry.RecordAgentMaxAgeKill(context.Background(), tp.DisplayName())
 					batch := sessionpkg.SleepPatch(clk.Now(), dec.SleepReason)
-					_ = store.SetMetadataBatch(session.ID, batch)
+					_ = sessionFrontDoor(store).ApplyPatch(session.ID, batch)
 					if session.Metadata == nil {
 						session.Metadata = make(map[string]string, len(batch))
 					}
@@ -2380,7 +2380,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// last_woke_at and setting state to asleep. The wake logic
 					// below will pick it up.
 					batch := sessionpkg.SleepPatch(clk.Now(), dec.SleepReason)
-					_ = store.SetMetadataBatch(session.ID, batch)
+					_ = sessionFrontDoor(store).ApplyPatch(session.ID, batch)
 					if session.Metadata == nil {
 						session.Metadata = make(map[string]string, len(batch))
 					}
@@ -2581,7 +2581,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			cancelSessionDrain(*target.session, sp, dt)
 			clearCompletedIdleProbe(target.session.ID, dt)
 			if target.session.Metadata["sleep_intent"] == "idle-stop-pending" {
-				_ = store.SetMetadata(target.session.ID, "sleep_intent", "")
+				_ = sessionFrontDoor(store).SetMarker(target.session.ID, "sleep_intent", "")
 				target.session.Metadata["sleep_intent"] = ""
 			}
 		}
@@ -3029,7 +3029,7 @@ func emitSessionStrandedDiagnostic(
 	// can't cause the next tick (still seeing this same *Bead value or
 	// a re-fetch with the durable write missing) to emit again.
 	session.Metadata[strandedEventEmittedKey] = now.Format(time.RFC3339)
-	if err := store.SetMetadata(session.ID, strandedEventEmittedKey, now.Format(time.RFC3339)); err != nil {
+	if err := sessionFrontDoor(store).SetMarker(session.ID, strandedEventEmittedKey, now.Format(time.RFC3339)); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: stamping stranded throttle marker on %s: %v\n", session.ID, err) //nolint:errcheck
 	}
 }
@@ -3401,7 +3401,7 @@ func recordNamedSessionConfigDriftDeferredAt(session beads.Bead, store beads.Sto
 	if store == nil || session.ID == "" {
 		return nil
 	}
-	return store.SetMetadataBatch(session.ID, map[string]string{
+	return sessionFrontDoor(store).ApplyPatch(session.ID, map[string]string{
 		namedSessionConfigDriftDeferredAtMetadata:  t.UTC().Format(time.RFC3339),
 		namedSessionConfigDriftDeferredKeyMetadata: driftKey,
 	})
@@ -3417,7 +3417,7 @@ func clearSessionConfigDriftDeferral(session beads.Bead, store beads.Store) erro
 		session.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] == "" {
 		return nil
 	}
-	return store.SetMetadataBatch(session.ID, map[string]string{
+	return sessionFrontDoor(store).ApplyPatch(session.ID, map[string]string{
 		namedSessionConfigDriftDeferredAtMetadata:     "",
 		namedSessionConfigDriftDeferredKeyMetadata:    "",
 		sessionAttachedConfigDriftDeferredAtMetadata:  "",
@@ -3449,7 +3449,7 @@ func recordSessionAttachedConfigDriftDeferral(session beads.Bead, store beads.St
 			}
 		}
 	}
-	return store.SetMetadataBatch(session.ID, map[string]string{
+	return sessionFrontDoor(store).ApplyPatch(session.ID, map[string]string{
 		sessionAttachedConfigDriftDeferredAtMetadata:  now.Format(time.RFC3339),
 		sessionAttachedConfigDriftDeferredKeyMetadata: driftKey,
 	})
@@ -3687,7 +3687,7 @@ func resetConfiguredNamedSessionForConfigDrift(
 	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredKeyMetadata] = ""
-	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
 		return
 	}
@@ -4062,7 +4062,7 @@ func silentRebaselineSessionHashes(session *beads.Bead, store beads.Store, agent
 	if err != nil {
 		return err
 	}
-	if err := store.SetMetadataBatch(session.ID, patch); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, patch); err != nil {
 		return fmt.Errorf("rebaselining hashes: %w", err)
 	}
 	if session.Metadata == nil {
@@ -4170,7 +4170,7 @@ func rebaselineLaunchDriftHashes(session *beads.Bead, store beads.Store, agentCf
 		"started_launch_hash":    runtime.LaunchFingerprint(agentCfg),
 		"core_hash_breakdown":    string(breakdownJSON),
 	}
-	if err := store.SetMetadataBatch(session.ID, patch); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, patch); err != nil {
 		return fmt.Errorf("rebaselining launch-drift hashes: %w", err)
 	}
 	if session.Metadata == nil {

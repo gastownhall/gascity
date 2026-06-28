@@ -343,8 +343,7 @@ func reopenClosedConfiguredNamedSessionBead(
 			fmt.Fprintf(stderr, "session beads: session_name %q for %s unavailable during reopen: %v\n", sessionName, identity, err) //nolint:errcheck
 			return nil
 		}
-		open := "open"
-		if err := store.Update(bead.ID, beads.UpdateOpts{Status: &open}); err != nil {
+		if err := sessionFrontDoor(store).SetStatusOpen(bead.ID); err != nil {
 			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, err) //nolint:errcheck
 			return nil
 		}
@@ -455,8 +454,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 			if setMetaBatch(store, b.ID, batch, stderr) != nil {
 				continue
 			}
-			status := "open"
-			if err := store.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+			if err := sessionFrontDoor(store).SetStatusOpen(b.ID); err != nil {
 				fmt.Fprintf(stderr, "session beads: archiving duplicate named session %s: %v\n", b.ID, err) //nolint:errcheck
 				continue
 			}
@@ -468,7 +466,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 			for k, v := range batch {
 				b.Metadata[k] = v
 			}
-			b.Status = status
+			b.Status = "open"
 			openBeads[idx] = b
 			if oldSessionName != "" {
 				delete(bySessionName, oldSessionName)
@@ -525,8 +523,7 @@ func retireRemovedConfiguredNamedSessionBead(
 	if setMetaBatch(store, b.ID, batch, stderr) != nil {
 		return false
 	}
-	status := "open"
-	if err := store.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+	if err := sessionFrontDoor(store).SetStatusOpen(b.ID); err != nil {
 		fmt.Fprintf(stderr, "session beads: archiving removed named session %s: %v\n", b.ID, err) //nolint:errcheck
 		return false
 	}
@@ -904,8 +901,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if b.Type != "" || b.Status == "closed" {
 			continue
 		}
-		t := sessionBeadType
-		if err := store.Update(b.ID, beads.UpdateOpts{Type: &t}); err != nil {
+		if err := sessionFrontDoor(store).RepairType(b.ID); err != nil {
 			fmt.Fprintf(stderr, "session beads: repairing type for %s: %v\n", b.ID, err) //nolint:errcheck
 		} else {
 			existing[i].Type = sessionBeadType
@@ -1200,7 +1196,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				createdSessionName = strings.TrimSpace(newBead.Metadata["session_name"])
 				if isPoolInstance {
 					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
-					if err := store.SetMetadata(newBead.ID, "session_name", createdSessionName); err != nil {
+					if err := sessionFrontDoor(store).SetMarker(newBead.ID, "session_name", createdSessionName); err != nil {
 						finalizeErr = err
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
 						closeFailedCreateBead(store, newBead.ID, now, stderr)
@@ -1811,18 +1807,29 @@ func configuredSessionNamesWithSnapshot(cfg *config.City, cityName string, sessi
 // setMeta wraps store.SetMetadata with error logging. Returns the error
 // so callers can abort dependent writes (e.g., skip config_hash on failure).
 func setMeta(store beads.Store, id, key, value string, stderr io.Writer) error {
-	if err := store.SetMetadata(id, key, value); err != nil {
+	if err := sessionFrontDoor(store).SetMarker(id, key, value); err != nil {
 		fmt.Fprintf(stderr, "session beads: setting %s on %s: %v\n", key, id, err) //nolint:errcheck
 		return err
 	}
 	return nil
 }
 
+// sessionFrontDoor wraps a raw session-class bead store as the typed session
+// write front door. It is the single place cmd/gc constructs the front door
+// from a raw beads.Store; the write codec (MetadataPatch builders, empty-string
+// clears) is confined inside internal/session. Callers must pass the
+// session-class store (or the single-store default that backs it); the wrapper
+// holds beads.SessionStore by value and never traps a typed nil (it carries the
+// raw store directly).
+func sessionFrontDoor(store beads.Store) *session.InfoStore {
+	return session.NewInfoStore(beads.SessionStore{Store: store})
+}
+
 func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr io.Writer) error {
 	if len(batch) == 0 {
 		return nil
 	}
-	if err := store.SetMetadataBatch(id, batch); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(id, batch); err != nil {
 		fmt.Fprintf(stderr, "session beads: setting metadata on %s: %v\n", id, err) //nolint:errcheck
 		return err
 	}
@@ -1837,7 +1844,7 @@ func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr i
 	if setMetaBatch(store, id, patch, stderr) != nil {
 		return false
 	}
-	if err := store.Close(id); err != nil {
+	if err := sessionFrontDoor(store).CloseWithoutReason(id); err != nil {
 		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}
@@ -2354,7 +2361,7 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	if setMetaBatch(store, id, session.ClosePatch(now, reason), stderr) != nil {
 		return false
 	}
-	if err := store.Close(id); err != nil {
+	if err := sessionFrontDoor(store).CloseWithoutReason(id); err != nil {
 		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}

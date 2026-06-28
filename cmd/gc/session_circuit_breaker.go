@@ -613,7 +613,7 @@ func persistSessionCircuitBreakerMetadata(
 	if sessionCircuitMetadataEqual(session.Metadata, metadata) {
 		return nil
 	}
-	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, metadata); err != nil {
 		return fmt.Errorf("persisting session circuit breaker metadata for %s: %w", session.ID, err)
 	}
 	if session.Metadata == nil {
@@ -655,7 +655,7 @@ func recordSessionCircuitBreakerRestart(
 	if sessionCircuitMetadataEqual(session.Metadata, metadata) {
 		return state, nil
 	}
-	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, metadata); err != nil {
 		cb.restoreEntryLocked(identity, previous, hadPrevious)
 		return state, fmt.Errorf("persisting session circuit breaker metadata for %s: %w", session.ID, err)
 	}
@@ -745,7 +745,7 @@ func clearPersistedSessionCircuitBreakerMetadata(store beads.Store, sessionID st
 	if resetGeneration > 0 {
 		metadata[sessionCircuitResetGenerationMetadata] = strconv.FormatUint(resetGeneration, 10)
 	}
-	if err := store.SetMetadataBatch(sessionID, metadata); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(sessionID, metadata); err != nil {
 		return fmt.Errorf("clearing session circuit breaker metadata for %s: %w", sessionID, err)
 	}
 	return nil

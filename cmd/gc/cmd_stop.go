@@ -361,7 +361,7 @@ func markCityStopSessionSleepReason(store beads.SessionStore, stderr io.Writer) 
 		if strings.TrimSpace(session.Metadata["sleep_reason"]) != "" {
 			continue
 		}
-		if err := store.SetMetadata(session.ID, "sleep_reason", sleepReasonCityStop); err != nil {
+		if err := sessionFrontDoor(store).SetMarker(session.ID, "sleep_reason", sleepReasonCityStop); err != nil {
 			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", session.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}

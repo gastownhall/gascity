@@ -29,7 +29,7 @@ func recordCurrentBeadIDOnWake(session *beads.Bead, store beads.Store, beadID st
 	if session.Metadata[sessionpkg.CurrentBeadIDKey] == beadID {
 		return
 	}
-	if err := store.SetMetadata(session.ID, sessionpkg.CurrentBeadIDKey, beadID); err != nil {
+	if err := sessionFrontDoor(store).RecordCurrentBead(session.ID, beadID); err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording %s for %s: %v\n", sessionpkg.CurrentBeadIDKey, session.Metadata["session_name"], err) //nolint:errcheck
 		}
@@ -97,7 +97,7 @@ func cycleAliveSessionForFreshReassign(
 		batch["session_key"] = ""
 	}
 	batch[sessionpkg.CurrentBeadIDKey] = newBeadID
-	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording fresh-cycle handoff for %s: %v\n", name, err) //nolint:errcheck
 		}

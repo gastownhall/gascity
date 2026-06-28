@@ -143,7 +143,7 @@ func acceptConfigDriftAcrossSessions(
 			fmt.Fprintf(stderr, "soft reload: preparing config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+		if err := sessionFrontDoor(store).ApplyPatch(session.ID, metadata); err != nil {
 			result.Failed++
 			result.FailedSessions = append(result.FailedSessions, name)
 			fmt.Fprintf(stderr, "soft reload: updating config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr

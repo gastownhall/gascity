@@ -580,7 +580,7 @@ func healExpiredTimers(session *beads.Bead, store beads.Store, clk clock.Clock) 
 	if h := session.Metadata["held_until"]; h != "" {
 		if t, _ := time.Parse(time.RFC3339, h); !t.IsZero() && clk.Now().After(t) {
 			batch := sessionpkg.ClearExpiredHoldPatch(session.Metadata["sleep_reason"])
-			if err := store.SetMetadataBatch(session.ID, batch); err == nil {
+			if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err == nil {
 				for k, v := range batch {
 					session.Metadata[k] = v
 				}
@@ -590,7 +590,7 @@ func healExpiredTimers(session *beads.Bead, store beads.Store, clk clock.Clock) 
 	if q := session.Metadata["quarantined_until"]; q != "" {
 		if t, _ := time.Parse(time.RFC3339, q); !t.IsZero() && clk.Now().After(t) {
 			batch := sessionpkg.ClearExpiredQuarantinePatch(session.Metadata["sleep_reason"])
-			if err := store.SetMetadataBatch(session.ID, batch); err == nil {
+			if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err == nil {
 				for k, v := range batch {
 					session.Metadata[k] = v
 				}
@@ -696,7 +696,7 @@ func sessionExitFacts(session *beads.Bead, cfg *config.City, alive bool, dt *dra
 }
 
 func clearLastWokeAt(session *beads.Bead, store beads.Store) {
-	_ = store.SetMetadata(session.ID, "last_woke_at", "")
+	_ = sessionFrontDoor(store).SetMarker(session.ID, "last_woke_at", "")
 	session.Metadata["last_woke_at"] = ""
 }
 
@@ -708,7 +708,7 @@ func recordRateLimitQuarantine(session *beads.Bead, store beads.Store, clk clock
 		session.Metadata = make(map[string]string)
 	}
 	batch := sessionpkg.RateLimitQuarantinePatch(clk.Now().Add(defaultRateLimitQuarantineDuration))
-	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err != nil {
 		fmt.Fprintf(os.Stderr, "recordRateLimitQuarantine: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
 		return err
 	}
@@ -786,14 +786,14 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock, 
 	// left behind by older builds.
 	if session.Metadata["session_key"] != "" || session.Metadata["started_config_hash"] != "" {
 		reset := sessionpkg.ConversationResetPatch(true)
-		_ = store.SetMetadataBatch(session.ID, reset)
+		_ = sessionFrontDoor(store).ApplyPatch(session.ID, reset)
 		for k, v := range reset {
 			session.Metadata[k] = v
 		}
 	}
 	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
-		if err := store.SetMetadataBatch(session.ID, accrual.Patch); err == nil {
+		if err := sessionFrontDoor(store).ApplyPatch(session.ID, accrual.Patch); err == nil {
 			for k, v := range accrual.Patch {
 				session.Metadata[k] = v
 			}
@@ -801,7 +801,7 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock, 
 		}
 	} else {
 		next := accrual.Patch["wake_attempts"]
-		_ = store.SetMetadata(session.ID, "wake_attempts", next)
+		_ = sessionFrontDoor(store).SetMarker(session.ID, "wake_attempts", next)
 		session.Metadata["wake_attempts"] = next
 	}
 }
@@ -818,7 +818,7 @@ func clearWakeFailures(session *beads.Bead, store beads.Store) {
 	if len(batch) == 0 {
 		return
 	}
-	if err := store.SetMetadataBatch(session.ID, batch); err == nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err == nil {
 		if session.Metadata == nil {
 			session.Metadata = make(map[string]string)
 		}
@@ -841,7 +841,7 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 		recordChurn(session, store, clk, sessionAgentMetricIdentity(*session, cfg))
 		// Clear last_woke_at so this death is not re-counted next tick
 		// (edge-triggered, same pattern as checkStability).
-		_ = store.SetMetadata(session.ID, "last_woke_at", "")
+		_ = sessionFrontDoor(store).SetMarker(session.ID, "last_woke_at", "")
 		session.Metadata["last_woke_at"] = ""
 		return true
 	case sessionpkg.ExitProductiveDeath:
@@ -876,7 +876,7 @@ func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock, agentI
 	// re-hitting the same wall.
 	if session.Metadata["session_key"] != "" {
 		reset := sessionpkg.ConversationResetPatch(false)
-		_ = store.SetMetadataBatch(session.ID, reset)
+		_ = sessionFrontDoor(store).ApplyPatch(session.ID, reset)
 		for k, v := range reset {
 			session.Metadata[k] = v
 		}
@@ -884,7 +884,7 @@ func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock, agentI
 
 	accrual := sessionpkg.ChurnAccrualPatch(count, defaultMaxChurnCycles, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
-		if err := store.SetMetadataBatch(session.ID, accrual.Patch); err == nil {
+		if err := sessionFrontDoor(store).ApplyPatch(session.ID, accrual.Patch); err == nil {
 			for k, v := range accrual.Patch {
 				session.Metadata[k] = v
 			}
@@ -894,7 +894,7 @@ func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock, agentI
 	}
 
 	next := accrual.Patch["churn_count"]
-	_ = store.SetMetadata(session.ID, "churn_count", next)
+	_ = sessionFrontDoor(store).SetMarker(session.ID, "churn_count", next)
 	session.Metadata["churn_count"] = next
 }
 
@@ -903,7 +903,7 @@ func clearChurn(session *beads.Bead, store beads.Store) {
 	if session.Metadata["churn_count"] == "" || session.Metadata["churn_count"] == "0" {
 		return
 	}
-	_ = store.SetMetadata(session.ID, "churn_count", "0")
+	_ = sessionFrontDoor(store).SetMarker(session.ID, "churn_count", "0")
 	session.Metadata["churn_count"] = "0"
 }
 
@@ -997,7 +997,7 @@ func healStateWithRollback(session *beads.Bead, alive bool, store beads.Store, c
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(batch))
 	}
-	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+	if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err != nil {
 		fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
 	}
 	for k, v := range batch {
