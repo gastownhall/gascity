@@ -1,5 +1,11 @@
 # Next-session kickoff prompt
 
+> ⚠️ **OBSOLETE — P4 IS COMPLETE** (P4a `30dbb7214` + `ceaeac078`, P4b `c2aa9ac53`).
+> The SPA cutover and the dead-fold deletion both landed and pushed on
+> `feat/runs-event-projection`. The block below kicks off P4 and must NOT be
+> re-run. The only remaining phase is **P5 (`runspec` codegen)** — deferrable;
+> the system rests stably at single-home-in-Go. See `runs-view-HANDOFF.md`.
+
 Paste the block below into a fresh session to continue this work at **P4**.
 
 ---
