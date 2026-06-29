@@ -70,8 +70,13 @@ type ListQuery struct {
 	Assignee string
 	// Assignees matches beads assigned to any listed assignee.
 	// It is mutually exclusive with Assignee; call Validate to enforce that contract.
-	Assignees     []string
-	ParentID      string
+	Assignees []string
+	ParentID  string
+	// ParentIDs matches beads whose parent_id is any of the listed ids — a
+	// batched form of ParentID for graph/subtree walks. Backends that do not
+	// recognize it should ignore it (returning a superset); callers that need
+	// exact results must filter the returned beads by parent in memory.
+	ParentIDs     []string
 	Metadata      map[string]string
 	CreatedBefore time.Time
 	// UpdatedBefore matches beads whose UpdatedAt is before this timestamp.
