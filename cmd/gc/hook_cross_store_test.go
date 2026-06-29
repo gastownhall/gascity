@@ -77,7 +77,7 @@ func TestFirstStoreWithWorkReturnsFirstStoreThatHasWork(t *testing.T) {
 		}
 		return `[]`, nil
 	}
-	out, gotStore, err := firstStoreWithWork("q", stores, run)
+	out, gotStore, err := firstStoreWithWork("q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestFirstStoreWithWorkReturnsFirstStoreThatHasWork(t *testing.T) {
 func TestFirstStoreWithWorkReturnsLastWhenNoneHasWork(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	run := func(_, _ string, _ []string) (string, error) { return `[]`, nil }
-	out, gotStore, err := firstStoreWithWork("q", stores, run)
+	out, gotStore, err := firstStoreWithWork("q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestFirstStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
 		}
 		return `[]`, nil
 	}
-	if _, _, err := firstStoreWithWork("q", stores, run); !errors.Is(err, errTestStoreTimeout) {
+	if _, _, err := firstStoreWithWork("q", stores, stores[0], run); !errors.Is(err, errTestStoreTimeout) {
 		t.Fatalf("own-store error must be surfaced when no store has work; got %v", err)
 	}
 }
@@ -134,7 +134,7 @@ func TestFirstStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.
 		}
 		return "", errTestStoreTimeout
 	}
-	out, gotStore, err := firstStoreWithWork("q", stores, run)
+	out, gotStore, err := firstStoreWithWork("q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("rig-store error must not surface when own store is healthy; got %v", err)
 	}
@@ -155,7 +155,7 @@ func TestFirstStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
 		}
 		return `[{"id":"va-2"}]`, nil
 	}
-	out, gotStore, err := firstStoreWithWork("q", stores, run)
+	out, gotStore, err := firstStoreWithWork("q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -164,5 +164,71 @@ func TestFirstStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
 	}
 	if gotStore.dir != "riga" {
 		t.Fatalf("store.dir = %q, want riga", gotStore.dir)
+	}
+}
+
+// TestClaimStoreWithFallbackFallsBackWhenSelectedStoreRerunsEmpty pins the
+// post-merge fix for the bundled gc hook --claim change: when the
+// discovery-selected store loses its claimable row before the claim, the claim
+// must re-select across the federated stores instead of draining as "no work"
+// while a later store still has ready routed work.
+func TestClaimStoreWithFallbackFallsBackWhenSelectedStoreRerunsEmpty(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	selected := stores[0]
+	var calls []string
+	run := func(_, dir string, _ []string) (string, error) {
+		calls = append(calls, dir)
+		switch len(calls) {
+		case 1: // claim-time re-validation of the selected store: now empty.
+			return `[]`, nil
+		case 2: // federated re-selection: own store still empty.
+			return `[]`, nil
+		case 3: // later store still has ready routed work.
+			return `[{"id":"va-3"}]`, nil
+		default:
+			t.Fatalf("unexpected call %d to %q", len(calls), dir)
+			return "", nil
+		}
+	}
+
+	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if out != `[{"id":"va-3"}]` {
+		t.Fatalf("out = %q, want later-store work", out)
+	}
+	if gotStore.dir != "riga" {
+		t.Fatalf("store.dir = %q, want riga", gotStore.dir)
+	}
+	if len(calls) != 3 || calls[0] != "city" || calls[1] != "city" || calls[2] != "riga" {
+		t.Fatalf("calls = %v, want [city city riga]", calls)
+	}
+}
+
+// TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady covers the common
+// path: when the selected store still reports ready work at claim time, the
+// claim acts on that store's fresh output without a redundant federated rescan.
+func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	selected := stores[0]
+	var calls []string
+	run := func(_, dir string, _ []string) (string, error) {
+		calls = append(calls, dir)
+		return `[{"id":"va-1"}]`, nil
+	}
+
+	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if out != `[{"id":"va-1"}]` {
+		t.Fatalf("out = %q, want selected-store work", out)
+	}
+	if gotStore.dir != "city" {
+		t.Fatalf("store.dir = %q, want city", gotStore.dir)
+	}
+	if len(calls) != 1 || calls[0] != "city" {
+		t.Fatalf("calls = %v, want a single [city] re-validation", calls)
 	}
 }

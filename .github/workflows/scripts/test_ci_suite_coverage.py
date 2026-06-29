@@ -18,6 +18,9 @@ EXPECTED_SHARED_PATHS = {
     "Makefile",
     ".github/workflows/**",
     ".github/actions/setup-gascity-ubuntu/**",
+    ".github/scripts/install-dolt-archive.sh",
+    ".github/scripts/install-bd-archive.sh",
+    ".github/scripts/install-claude-native.sh",
     "internal/beads/**",
     "internal/events/**",
     "internal/config/**",
@@ -29,6 +32,7 @@ GATED_OUTPUTS = {
     "mail",
     "docker",
     "k8s",
+    "beads",
     "packs",
     "worker",
     "worker_phase2",
@@ -206,6 +210,40 @@ class AcceptanceScenarioTests(unittest.TestCase):
         # if the integration filter had not matched on its own.
         integration_expr = _load_changes_job()["outputs"]["integration"]
         self.assertIn("shared", integration_expr)
+
+    def test_setup_action_or_helper_change_runs_full_suite(self) -> None:
+        """A change confined to the setup-gascity-ubuntu composite action — or a
+        helper script it shells out to — must run the full suite, because nearly
+        every job depends on that shared setup path.
+
+        This pins the major release-safety invariant: a helper-only edit to the
+        setup path (e.g. install-dolt-archive.sh) must not silently skip the
+        bd-current contract jobs that exercise it.
+        """
+        filters = _filter_globs()
+        setup_paths = [
+            ".github/actions/setup-gascity-ubuntu/action.yml",
+            ".github/scripts/install-dolt-archive.sh",
+            ".github/scripts/install-bd-archive.sh",
+            ".github/scripts/install-claude-native.sh",
+        ]
+        for changed in setup_paths:
+            with self.subTest(changed=changed):
+                shared_fires = cov.paths_match([changed], filters["shared"])
+                self.assertTrue(
+                    shared_fires,
+                    f"a setup-path change ({changed}) must trigger the shared filter",
+                )
+                self.assertEqual(
+                    cov.classify_mode(shared_fires),
+                    cov.FULL,
+                    "a setup-path change must classify as a full-suite run",
+                )
+        # The beads output folds shared in, so the bd-current contract jobs
+        # (gated on needs.changes.outputs.beads) run for any setup-path change
+        # even when the beads filter would not match on its own.
+        beads_expr = _load_changes_job()["outputs"]["beads"]
+        self.assertIn("shared", beads_expr)
 
 
 class SQLiteCoordinationStoreCoverageTests(unittest.TestCase):

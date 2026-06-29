@@ -945,6 +945,10 @@ export type ExtMsgBindInputBody = {
         [key: string]: string;
     };
     /**
+     * Rebind (handoff) a conversation whose active binding targets someone else instead of returning a conflict.
+     */
+    replace?: boolean;
+    /**
      * Session ID to bind (mutually exclusive with agent_name).
      */
     session_id?: string;

@@ -344,17 +344,20 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		stores = appendCityHookStore(stores, cityPath, cfg, &a, overrides)
 	}
 
-	runner := func(command, _ string) (string, error) {
-		out, _, err := firstStoreWithWork(command, stores, shellWorkQueryWithEnv)
-		if err != nil && emitFailureEvent {
-			// A killed/timed-out work query strands the session with no
-			// output and no cause on the event bus; emit one so the
-			// reconciler can escalate instead of skipping it forever
-			// (issues #1496/#1497). Ordinary command errors are ignored
-			// by emitWorkQueryFailure and stay on the stderr path below.
-			emitCityWorkQueryFailure(cityPath, stderr,
-				os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
+	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
+	// so the reconciler can escalate instead of silently treating the strand as
+	// "no work" (issues #1496/#1497). Ordinary command errors are ignored by
+	// emitCityWorkQueryFailure and stay on the caller's stderr path.
+	emitQueryFailure := func(command string, err error) {
+		if err == nil || !emitFailureEvent {
+			return
 		}
+		emitCityWorkQueryFailure(cityPath, stderr,
+			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
+	}
+	runner := func(command, _ string) (string, error) {
+		out, _, err := firstStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		emitQueryFailure(command, err)
 		return out, err
 	}
 	if opts.Claim {
@@ -362,7 +365,6 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		sessionName := strings.TrimSpace(sessionForQuery)
 		alias := strings.TrimSpace(overrides["GC_ALIAS"])
 		assignee := firstNonEmptyHookValue(sessionName, sessionID, alias, agentForQuery, resolvedAgentName)
-		routeTarget := hookClaimPrimaryRouteTarget(&a)
 		claimOpts := hookClaimOptions{
 			Assignee: assignee,
 			IdentityCandidates: hookClaimIdentityCandidates(
@@ -373,35 +375,89 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 				agentForQuery,
 				resolvedAgentName,
 			),
-			RouteTargets: hookClaimRouteTargets(routeTarget, resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"])),
+			RouteTargets: hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"])),
 			Env:          queryEnv,
 			DrainAck:     opts.DrainAck,
 			JSON:         opts.JSON,
 		}
-		_, selectedStore, err := firstStoreWithWork(workQuery, stores, shellWorkQueryWithEnv)
+		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+	}
+	return doHook(workQuery, workDir, false, runner, stdout, stderr)
+}
+
+// claimHookWork claims routed work for gc hook --claim from the federated store
+// set, binding the production shell work-query runner and real claim ops. See
+// claimHookWorkWithRunner for the federation and lost-claim-race semantics.
+func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, hookClaimOps{}, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
+}
+
+// claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
+// ops injected for tests. It selects the first store reporting ready work,
+// re-validates it for claim-time freshness and falls back to a later store if it
+// emptied since discovery (claimStoreWithFallback), then attempts the claim
+// against that store's captured rows, against that store's dir/env.
+//
+// When a selected store still reports ready work but every claimable row is lost
+// to another claimant before the mutation, the single-store claim drains as
+// "no work". That would strand routed work waiting in a LATER federated store
+// behind the lost race, so this loop drops the exhausted store and reselects
+// across the remaining stores. It writes the no-work drain exactly once, after
+// every store has been exhausted. emitFailure surfaces a work-query timeout on
+// the event bus when eligible.
+func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	ops.applyDefaults()
+	// primary is the agent's own store (the first entry). It is captured once
+	// here, before the loop shrinks remaining: only the primary may surface a
+	// work-query error as a fatal claim failure. Once the primary loses its
+	// claim race and is dropped, a later federated store must never inherit that
+	// emit-on-timeout semantics, so it is matched by identity, not slice index.
+	var primary hookStore
+	if len(stores) > 0 {
+		primary = stores[0]
+	}
+	remaining := stores
+	for len(remaining) > 0 {
+		_, selected, err := firstStoreWithWork(workQuery, remaining, primary, run)
 		if err != nil {
-			if emitFailureEvent {
-				emitCityWorkQueryFailure(cityPath, stderr,
-					os.Getenv("GC_SESSION_ID"), failureTemplate, workQuery, err)
-			}
+			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		if isZeroHookStore(selected) {
+			break // no remaining store has ready work
+		}
+		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, run)
+		if err != nil {
+			emitFailure(workQuery, err)
+			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if isZeroHookStore(claimStore) {
+			break // selected store emptied and no later store has ready work
+		}
+		storeOpts := claimOpts
+		storeOpts.Env = queryEnv
+		if len(claimStore.env) > 0 {
+			storeOpts.Env = claimStore.env
+		}
 		storeDir := workDir
-		storeEnv := queryEnv
-		if strings.TrimSpace(selectedStore.dir) != "" {
-			storeDir = selectedStore.dir
+		if dir := strings.TrimSpace(claimStore.dir); dir != "" {
+			storeDir = dir
 		}
-		if len(selectedStore.env) > 0 {
-			storeEnv = selectedStore.env
+		storeOps := ops
+		storeOps.Runner = func(string, string) (string, error) { return claimOutput, nil }
+		res := tryHookClaim(workQuery, storeDir, &storeOpts, &storeOps, stdout, stderr)
+		if res.terminal {
+			return res.code
 		}
-		claimOpts.Env = storeEnv
-		claimRunner := func(command, _ string) (string, error) {
-			return shellWorkQueryWithEnv(command, storeDir, storeEnv)
-		}
-		return doHookClaim(workQuery, storeDir, claimOpts, hookClaimOps{Runner: claimRunner}, stdout, stderr)
+		// This store reported ready work but the claim acquired nothing (every
+		// claimable row was lost to another claimant, or none matched this
+		// session). Drop it and reselect from the remaining stores so routed work
+		// in a later federated store is not stranded behind it.
+		remaining = removeHookStore(remaining, claimStore)
 	}
-	return doHook(workQuery, workDir, false, runner, stdout, stderr)
+	return writeHookClaimNoWork(claimOpts, ops, stdout, stderr)
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {

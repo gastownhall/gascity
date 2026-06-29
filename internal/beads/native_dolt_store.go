@@ -166,6 +166,7 @@ type NativeDoltStore struct {
 var (
 	_ Store                         = (*NativeDoltStore)(nil)
 	_ ConditionalAssignmentReleaser = (*NativeDoltStore)(nil)
+	_ AtomicTxStore                 = (*NativeDoltStore)(nil)
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
 	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)
@@ -971,6 +972,10 @@ func (s *NativeDoltStore) Tx(commitMsg string, fn func(Tx) error) error {
 		return fn(&nativeDoltTx{store: s, ctx: ctx, tx: tx})
 	})
 }
+
+// AtomicTx reports that Tx is backed by a native Dolt transaction that rolls
+// back every write when the callback returns an error.
+func (s *NativeDoltStore) AtomicTx() bool { return true }
 
 // nativeDoltTx adapts the Store.Tx write surface onto an open beadslib
 // transaction. Every method routes through the store's applyXInTx helpers so

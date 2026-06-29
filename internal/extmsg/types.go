@@ -413,11 +413,15 @@ type GroupOutboundDecision struct {
 
 // BindInput is the input for creating a session binding. Exactly one of
 // SessionID (bind to a concrete session) or AgentName (bind to a configured
-// agent identity whose live session is resolved at delivery time) must be set.
+// agent identity whose live session is resolved at delivery time) must be
+// set. Replace rebinds a conversation whose active binding targets someone
+// else (a handoff): the active binding is ended and the new one created
+// under the same conversation lock. Without Replace such a bind conflicts.
 type BindInput struct {
 	Conversation ConversationRef
 	SessionID    string
 	AgentName    string
+	Replace      bool
 	ExpiresAt    *time.Time
 	Metadata     map[string]string
 	Now          time.Time

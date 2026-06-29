@@ -66,6 +66,7 @@ type ExtMsgBindInput struct {
 		Conversation extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to bind."`
 		SessionID    string                 `json:"session_id,omitempty" doc:"Session ID to bind (mutually exclusive with agent_name)."`
 		AgentName    string                 `json:"agent_name,omitempty" doc:"Configured agent identity to bind; its live session is resolved at delivery time, cold-waking one when none is live (mutually exclusive with session_id)."`
+		Replace      bool                   `json:"replace,omitempty" doc:"Rebind (handoff) a conversation whose active binding targets someone else instead of returning a conflict."`
 		Metadata     map[string]string      `json:"metadata,omitempty" doc:"Optional binding metadata."`
 	}
 }

@@ -2768,6 +2768,8 @@ export interface components {
             metadata?: {
                 [key: string]: string;
             };
+            /** @description Rebind (handoff) a conversation whose active binding targets someone else instead of returning a conflict. */
+            replace?: boolean;
             /** @description Session ID to bind (mutually exclusive with agent_name). */
             session_id?: string;
         };

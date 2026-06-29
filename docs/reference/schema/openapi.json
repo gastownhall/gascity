@@ -2532,6 +2532,10 @@
             "description": "Optional binding metadata.",
             "type": "object"
           },
+          "replace": {
+            "description": "Rebind (handoff) a conversation whose active binding targets someone else instead of returning a conflict.",
+            "type": "boolean"
+          },
           "session_id": {
             "description": "Session ID to bind (mutually exclusive with agent_name).",
             "type": "string"

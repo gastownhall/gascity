@@ -691,6 +691,193 @@ func TestDoHookClaimDrainAckOnNoWork(t *testing.T) {
 	}
 }
 
+// TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace is the
+// post-merge regression for the federated claim race: when the discovery-
+// selected store still reports ready work at claim-time re-validation but every
+// claimable row is lost to another claimant before the mutation, the claim must
+// drop that store and reselect across the remaining federated stores instead of
+// draining as "no work" while a later store still has claimable routed work.
+func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testing.T) {
+	stores := []hookStore{
+		{dir: "city", env: []string{"GC_STORE=city"}},
+		{dir: "riga", env: []string{"GC_STORE=riga"}},
+	}
+	// Both stores report ready routed work on every query, so the selected
+	// store's claim-time re-validation succeeds; the only reason the city claim
+	// fails is the lost race below, not an emptied store.
+	run := func(_, dir string, _ []string) (string, error) {
+		switch dir {
+		case "city":
+			return `[{"id":"hw-city","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+		case "riga":
+			return `[{"id":"hw-riga","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+		default:
+			t.Fatalf("unexpected store dir %q", dir)
+			return "", nil
+		}
+	}
+	var claimDir string
+	ops := hookClaimOps{
+		Claim: func(_ context.Context, dir string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			if beadID == "hw-city" {
+				// Lost the race: a different worker already owns the city row.
+				return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2", Metadata: map[string]string{"gc.routed_to": "worker"}}, false, nil
+			}
+			claimDir = dir
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		EmitClaimRejected: func(string, string, string) {},   // suppress event side effect
+		ResolveWorkBranch: func(string) string { return "" }, // suppress stamp noise
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.BeadID != "hw-riga" || result.Reason != "claimed" {
+		t.Fatalf("claim result = %+v, want hw-riga claimed (later store after lost city race)", result)
+	}
+	if claimDir != "riga" {
+		t.Fatalf("winning claim ran against dir %q, want riga", claimDir)
+	}
+}
+
+// TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors is the
+// post-merge regression for the primary-store error contract: once the agent's
+// own (primary) store loses its claim race and is dropped from the working set,
+// a later federated store that errors must stay a best-effort skip. The claim
+// must drain as "no work" rather than surface that federated store's error as a
+// fatal claim failure (the bug: firstStoreWithWork keyed "own store" on slice
+// position, so the federated store became index 0 after the primary was removed
+// and wedged the hook).
+func TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors(t *testing.T) {
+	stores := []hookStore{
+		{dir: "city", env: []string{"GC_STORE=city"}}, // primary (own) store
+		{dir: "riga", env: []string{"GC_STORE=riga"}}, // best-effort federated store
+	}
+	// The primary store always reports ready work, so discovery and claim-time
+	// re-validation both select it; the federated store errors whenever queried.
+	run := func(_, dir string, _ []string) (string, error) {
+		switch dir {
+		case "city":
+			return `[{"id":"hw-city","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+		case "riga":
+			return "", errTestStoreTimeout
+		default:
+			t.Fatalf("unexpected store dir %q", dir)
+			return "", nil
+		}
+	}
+	ops := hookClaimOps{
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			// Lost the race: a different worker already owns the only city row.
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2", Metadata: map[string]string{"gc.routed_to": "worker"}}, false, nil
+		},
+		EmitClaimRejected: func(string, string, string) {},
+		ResolveWorkBranch: func(string) string { return "" },
+		DrainAck:          func(io.Writer) error { return nil },
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}
+
+	emitted := false
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) { emitted = true }, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0 (clean drain); stderr=%s", code, stderr.String())
+	}
+	if emitted {
+		t.Fatal("a federated-store error after the primary lost its race must not emit a work-query failure")
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != "no_work" {
+		t.Fatalf("claim result = %+v, want drain/no_work", result)
+	}
+}
+
+// TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput covers the load-bearing
+// fallback-store handoff directly at the claim entrypoint: when the discovery-
+// selected store has emptied by claim-time re-validation, the claim mutation
+// must run against the LATER federated store's dir, env, and captured rows — not
+// the original selected store's coordinates.
+func TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput(t *testing.T) {
+	stores := []hookStore{
+		{dir: "city", env: []string{"GC_STORE=city"}},
+		{dir: "riga", env: []string{"GC_STORE=riga"}},
+	}
+	cityCalls := 0
+	run := func(_, dir string, _ []string) (string, error) {
+		switch dir {
+		case "city":
+			cityCalls++
+			if cityCalls == 1 {
+				// Discovery sees ready work in the city store...
+				return `[{"id":"hw-city","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+			}
+			// ...but it has emptied by claim-time re-validation (and stays empty).
+			return `[]`, nil
+		case "riga":
+			return `[{"id":"hw-riga","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+		default:
+			t.Fatalf("unexpected store dir %q", dir)
+			return "", nil
+		}
+	}
+	var claimDir string
+	var claimEnv []string
+	ops := hookClaimOps{
+		Claim: func(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimDir, claimEnv = dir, env
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		ResolveWorkBranch: func(string) string { return "" },
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.BeadID != "hw-riga" {
+		t.Fatalf("claim result = %+v, want hw-riga (fallback store's captured row)", result)
+	}
+	if claimDir != "riga" {
+		t.Fatalf("claim ran against dir %q, want riga (fallback store dir)", claimDir)
+	}
+	if len(claimEnv) != 1 || claimEnv[0] != "GC_STORE=riga" {
+		t.Fatalf("claim ran with env %v, want [GC_STORE=riga] (fallback store env)", claimEnv)
+	}
+}
+
 func TestDoHookClaimPreassignsContinuationGroupSiblings(t *testing.T) {
 	var assigned []string
 	runner := func(string, string) (string, error) {

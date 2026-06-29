@@ -11,7 +11,7 @@
 
 ## Checklist
 
-- [ ] Linked an issue with a closing keyword (e.g. `Closes #123`), or applied the `no-issue` label if this PR closes none — enforced by the **PR issue linkage** check
+- [ ] Linked an issue, or explained why one is not needed
 - [ ] Added or updated tests for behavior changes
 - [ ] Updated docs for user-facing changes
 - [ ] Called out breaking changes or migration notes

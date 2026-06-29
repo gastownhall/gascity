@@ -104,8 +104,18 @@ func TestSeamsInterrupt(t *testing.T) {
 	rt, tp := NewProviderWithDir(t.TempDir()).Seams()
 	ctx := context.Background()
 
+	// Launch with `exec` so the shell replaces itself with `sleep` in place. A
+	// bare `sh -c "sleep 3600"` lets dash FORK `sleep` as a child under load and,
+	// while waiting on that foreground child, set SIGINT to SIG_IGN. Our single
+	// best-effort SIGINT to the group then lands in the window after dash starts
+	// ignoring it but before the `sleep` child exists, so the signal hits only
+	// dash (which drops it) and is lost — `sleep` then runs unmolested for the
+	// full deadline. `exec` removes the intermediate shell parent: the box IS
+	// `sleep` with default SIGINT disposition, so one signal deterministically
+	// lands. (Interrupt is single-shot with no retry/escalation, unlike Stop's
+	// SIGTERM→SIGKILL, which is why only this verb was exposed to the race.)
 	place, err := rt.Provision(ctx, "intr", runtime.ProvisionRequest{
-		Config: runtime.Config{Command: "sleep 3600"},
+		Config: runtime.Config{Command: "exec sleep 3600"},
 	})
 	if err != nil {
 		t.Fatalf("provision: %v", err)
@@ -120,12 +130,10 @@ func TestSeamsInterrupt(t *testing.T) {
 		t.Fatalf("Interrupt: %v", err)
 	}
 
-	// The deadline races a real subprocess death (SIGINT delivery to the process
-	// group, the kernel reaping `sleep`, and cmd.Wait closing sc.done). Under CI
-	// CPU saturation a sub-second/few-second constant flakes — see TESTING.md
-	// "Test deadline rule." This timer is not the subject under test (we prove
-	// Interrupt delegates, not that it lands within N seconds), so use the shared
-	// exec-race floor.
+	// Death is now deterministic, but reaping (SIGINT delivery + cmd.Wait closing
+	// sc.done) still races the scheduler, so poll up to the shared exec-race floor
+	// rather than asserting a constant. The ceiling is a safety margin, not the
+	// subject under test: we prove Interrupt delegates, not that it lands within N.
 	deadline := time.Now().Add(testutil.ExecRaceTimeout)
 	for {
 		alive, _ := place.IsRunning(ctx)

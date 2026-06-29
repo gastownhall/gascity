@@ -148,14 +148,18 @@ jobs:
             # universal persistence substrate, events the universal observation
             # substrate, config the universal activation mechanism; build,
             # dependency, and CI workflow/composite-action files affect every
-            # job. The setup-gascity-ubuntu composite action is shared by nearly
-            # every job, so a change to it must re-run all path-gated suites.
+            # job. The setup-gascity-ubuntu composite action and the installer
+            # scripts it invokes are shared by nearly every job, so a change to
+            # them must re-run all path-gated suites.
             shared:
               - 'go.mod'
               - 'go.sum'
               - 'Makefile'
               - '.github/workflows/**'
               - '.github/actions/setup-gascity-ubuntu/**'
+              - '.github/scripts/install-dolt-archive.sh'
+              - '.github/scripts/install-bd-archive.sh'
+              - '.github/scripts/install-claude-native.sh'
               - 'internal/beads/**'
               - 'internal/events/**'
               - 'internal/config/**'

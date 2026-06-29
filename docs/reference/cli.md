@@ -40,6 +40,7 @@ gc [flags]
 | [gc dolt-cleanup](#gc-dolt-cleanup) | Find and remove orphaned Dolt databases (Go-side core) |
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show events from the GC API |
+| [gc extmsg](#gc-extmsg) | Manage external-conversation bindings |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc github](#gc-github) | GitHub integration commands |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
@@ -1357,6 +1358,97 @@ gc --city /path/to/city events rotate --api http://127.0.0.1:8080
 |------|------|---------|-------------|
 | `--api` | string |  | GC API server URL override (auto-discovered by default) |
 | `--wait` | bool |  | Wait for archive compression to complete before returning |
+
+## gc extmsg
+
+Manage bindings between external conversations (telegram, discord, ...)
+and gc sessions or configured agents.
+
+A conversation bound to an agent name survives session restarts: inbound
+messages resolve a live session for the agent at delivery time, cold-waking
+one when none is live. "handoff" rebinds a conversation to another agent —
+the front-desk pattern: a default-routed agent inspects the conversation
+and hands it to the right specialist.
+
+These commands require the city API server; they have no local fallback.
+
+```
+gc extmsg
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc extmsg bind](#gc-extmsg-bind) | Bind a conversation to a session or configured agent |
+| [gc extmsg handoff](#gc-extmsg-handoff) | Rebind a conversation to another configured agent |
+| [gc extmsg unbind](#gc-extmsg-unbind) | Remove active conversation bindings |
+
+## gc extmsg bind
+
+Bind an external conversation to a concrete session (--session) or to a
+configured agent (--agent). Agent bindings survive session restarts:
+delivery resolves a live session for the agent each time, cold-waking one
+when none is live. Binding an actively-bound conversation conflicts; use
+"gc extmsg handoff" to rebind.
+
+```
+gc extmsg bind [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--account-id` | string | `default` | Adapter account ID |
+| `--agent` | string |  | Configured agent identity to bind (mutually exclusive with --session) |
+| `--conversation-id` | string |  | Provider conversation ID (required) |
+| `--json` | bool |  | Output the binding record as JSON |
+| `--kind` | string | `dm` | Conversation kind: dm, room, or thread |
+| `--parent-conversation-id` | string |  | Parent conversation ID for thread conversations |
+| `--provider` | string |  | External messaging provider (required) |
+| `--scope-id` | string |  | Conversation scope (default: the city name) |
+| `--session` | string |  | Session ID to bind (mutually exclusive with --agent) |
+
+## gc extmsg handoff
+
+Rebind an external conversation to another configured agent, replacing
+the active binding. Run from inside an agent session to hand a
+conversation to the right specialist — the routing judgment lives in the
+agent's prompt, this verb is pure transport.
+
+```
+gc extmsg handoff [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--account-id` | string | `default` | Adapter account ID |
+| `--conversation-id` | string |  | Provider conversation ID (required) |
+| `--json` | bool |  | Output the binding record as JSON |
+| `--kind` | string | `dm` | Conversation kind: dm, room, or thread |
+| `--parent-conversation-id` | string |  | Parent conversation ID for thread conversations |
+| `--provider` | string |  | External messaging provider (required) |
+| `--scope-id` | string |  | Conversation scope (default: the city name) |
+| `--to` | string |  | Configured agent identity to hand the conversation to (required) |
+
+## gc extmsg unbind
+
+Remove active external-conversation bindings. Filter by conversation
+(--provider/--conversation-id), by --agent, by --session, or a
+combination. At least one filter is required.
+
+```
+gc extmsg unbind [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--account-id` | string | `default` | Adapter account ID |
+| `--agent` | string |  | Unbind conversations bound to this configured agent |
+| `--conversation-id` | string |  | Provider conversation ID (required) |
+| `--json` | bool |  | Output the removed binding records as JSON |
+| `--kind` | string | `dm` | Conversation kind: dm, room, or thread |
+| `--parent-conversation-id` | string |  | Parent conversation ID for thread conversations |
+| `--provider` | string |  | External messaging provider (required) |
+| `--scope-id` | string |  | Conversation scope (default: the city name) |
+| `--session` | string |  | Unbind conversations bound to this session ID |
 
 ## gc formula
 

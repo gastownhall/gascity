@@ -476,6 +476,12 @@ func (c *CachingStore) Tx(commitMsg string, fn func(Tx) error) error {
 	return nil
 }
 
+// AtomicTx reports whether Tx is atomic, which for the caching store is exactly
+// whether its backing store provides an atomic transaction: CachingStore.Tx is a
+// transparent pass-through to backing.Tx, so it inherits the backing's
+// all-or-nothing (or partial-write) failure semantics.
+func (c *CachingStore) AtomicTx() bool { return StoreSupportsAtomicTx(c.backing) }
+
 type cachingStoreTx struct {
 	backing Tx
 	seen    map[string]struct{}

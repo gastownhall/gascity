@@ -200,3 +200,42 @@ func TestHandleExtMsgOutboundAgentBoundAuthorizesResolvedAgentSession(t *testing
 		t.Fatalf("status(agent) = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
+
+func TestHandleExtMsgBindReplaceHandsOffActiveBinding(t *testing.T) {
+	fs, srv, services, ref := newExtMsgAgentBindingFixture(t)
+
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+		Conversation: ref,
+		SessionID:    "sess-frontdesk",
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Bind(session): %v", err)
+	}
+
+	// Without replace the rebind conflicts.
+	rec := postExtMsg(t, fs, srv, "/extmsg/bind", map[string]any{
+		"agent_name":   "myrig/worker",
+		"conversation": conversationBody(ref),
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status(no replace) = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+
+	rec = postExtMsg(t, fs, srv, "/extmsg/bind", map[string]any{
+		"agent_name":   "myrig/worker",
+		"replace":      true,
+		"conversation": conversationBody(ref),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status(replace) = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	binding, err := services.Bindings.ResolveByConversation(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("ResolveByConversation: %v", err)
+	}
+	if binding == nil || binding.AgentName != "myrig/worker" || binding.SessionID != "" {
+		t.Fatalf("binding = %#v, want handed off to myrig/worker", binding)
+	}
+}
