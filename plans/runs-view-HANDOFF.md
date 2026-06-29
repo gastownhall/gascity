@@ -53,10 +53,21 @@ Landed as P2a (`006c5c32d`) + P2b (`62a599efa`). Notes for later phases:
 - `EnrichRunSummary(s, sessions, sessionsAvailable, nowMs, marks)` — marks are tailer-owned (`AdvanceProgressMarks`), passed in read-only. Sessions are unmarshaled straight from the `/v0` list `items` into `[]DashboardSession` (equivalent to `normalizeSessions`).
 - `enrich.ts` in the original P2 note was a red herring — it's the *detail* enrich (`enrichFormulaRun`), which is P3.
 
-### P3 — detail interpreter + `/runs/{id}/detail`
-- Port the detail pipeline: `shared/src/runs/{groups,edges,node-shape,execution-instances,formula-run,formula-order,session-link,display-state}.ts` into `internal/runproj` (`BuildRunDetail`). It must call the SAME `mapRunPhase`/`stageProgress` as the summary so stage ladders are identical by construction.
-- Regenerate `rundetail_golden.json` on the clean base (NOTE: `session-link.ts` differs in the `new-dashboard` dirty tree; the committed detail golden was generated on the clean base and is valid). Add a Go golden test + a summary/detail consistency test (same run → same phase/stage through both endpoints).
-- `GET /api/city/{cityName}/runs/{runId}/detail` returning the unchanged `FormulaRunDetail` DTO.
+### P3 — detail interpreter + `/runs/{id}/detail`  ← NEXT
+Port the detail pipeline: `shared/src/runs/{enrich(enrichFormulaRun),formula-run,groups,edges,node-shape,execution-instances,formula-order,session-link,display-state}.ts` into `internal/runproj` (`BuildRunDetail`). Sizes: `groups.ts` 359, `formula-run.ts` 289, `execution-instances.ts` 264, `node-shape.ts` 190, others smaller. The graph-layout (groups semantic-id disambiguation, alias maps, loop instancing; node-shape) is the hard, correctness-sensitive core — port as Go code, single-homed (the ADR says it's genuinely not data).
+
+**Design facts (verified this session — read before porting):**
+- **The golden path is BEAD-DERIVED ONLY.** The generator builds `rundetail_golden.json` via `snapshotForRun(beads, "dt-adopt1")` → `enrichFormulaRun(snapshot, {})` — **no sessions, no formulaDetail** (`gen-run-goldens.mts:buildDetailGolden`). So the golden-gated Go port is the bead-derived detail; session/compiled-formula enrichment is OUT of golden scope.
+- **Input shape:** `enrichFormulaRun` consumes a `RunSnapshot` of `RunSnapshotBead` (`shared/src/run-snapshot.ts`: id, title, status, **kind**, step_ref, scope_ref, logical_bead_id, metadata), NOT `beads.Bead`. The Go port must reproduce the generator's projection from the fold:
+  - `snapshotForRun(beads, rootId)` member selection: `id==rootId || parent==rootId || metadata['gc.root_bead_id']==rootId || id.startsWith(rootId+'.')`.
+  - `toRunSnapshotBead`: `kind = metadata['gc.original_kind'] ?? issue_type`; `step_ref = ref`; `scope_ref = metadata['gc.scope_ref']`; `logical_bead_id = metadata['gc.logical_bead_id']`.
+  - `depsForMembers`: each non-root member → `{from: rootId, to: member.id, kind:'parent'}`.
+  - snapshot identity from root metadata; **`snapshot_version=1`, `snapshot_event_seq=100`** (generator constants — they appear verbatim in the golden's `snapshotVersion`/`snapshotEventSeq`). Parameterize these (e.g. `BuildRunDetail(beadList, runID, version, eventSeq)`): golden test passes 1/100; the live endpoint passes a real version + the tailer's `LastSeq()`.
+- **Shared classifier (ADR invariant):** `formula-run.ts` calls the SAME `mapRunPhase`/`stageProgress`/`stagesForFormula` already ported in P1 `phasemapping.go`. Reuse them so detail stages == summary stages by construction. Add a summary↔detail consistency test (same fixture run → same phase/stage through both).
+- **session-link caveat:** `session-link.ts` (lane→session links in the detail view) only fires when `opts.sessions` is passed, which the golden path does NOT — so its effect is ABSENT from the golden. Port it for the live endpoint's request-time session enrich (mirror P2's summary enrich), but it is not golden-gated. `session-link.test.ts` exists — port it as a unit test. (`session-link.ts` differs in the `new-dashboard` dirty tree; the committed golden was generated on the clean `runs-proj` base and is valid — don't regenerate against the dirty tree.)
+- **Detail golden shape (19 keys):** runId, rootBeadId, rootStoreRef, resolvedRootStore, scopeKind, scopeRef, title, formula, formulaDetail, executionPath, snapshotVersion, snapshotEventSeq, completeness, progress, phase, stages, nodes, edges, lanes. Fixture `dt-adopt1` run → 5 nodes, 4 edges, 7 stages, 1 lane. Same union-marshaling discipline as P1/P2a (per-arm keys in TS object-literal order).
+
+**Endpoint:** `GET /api/city/{cityName}/runs/{runId}/detail` on the BFF plane (non-Huma) returning the unchanged `FormulaRunDetail` DTO. The tailer already holds the warm `Projector`; the handler gets `Projector.Beads()` (all) + the `runId`, calls `BuildRunDetail` (which does member selection), then optionally request-time session enrich. Mirror `registerRunSummary`/`cityRunTailer` in `runtailer.go`.
 
 ### P4 — SPA cutover + delete TS run logic
 - Repoint `frontend/src/supervisor/runSummary.ts` + `runDetail.ts` (and `runs/runSummarySubscription.tsx`, the detail route) to the BFF endpoints behind a flag; keep the existing SSE `useGcEvents` nudge + debounce (now guarding a cheap warm read). Shadow-compare both paths for a soak window.
@@ -69,13 +80,17 @@ Landed as P2a (`006c5c32d`) + P2b (`62a599efa`). Notes for later phases:
 
 - **Pre-commit hook is broken** (stale `docs/schema/` path on the machine's shared `core.hooksPath`). Run its checks manually (gofmt, `make lint-changed LINT_CHANGED_SCOPE=staged`, `go vet`) then `git commit --no-verify`; `git push --no-verify`. Note it in PR bodies.
 - **Golden discriminated unions:** Go maps reorder keys; `marshal.go` emits per-arm keys in TS object-literal order. `statusCounts` uses JS insertion order (not alphabetical). Use `sort.SliceStable` (JS sort is stable).
-- **Timestamps:** `beads.Bead.UpdatedAt` zero → fall back to `CreatedAt`; re-render RFC3339 UTC (`…Z`) to match the fixture.
+- **Timestamps:** `beads.Bead.UpdatedAt` zero → fall back to `CreatedAt`; re-render RFC3339 UTC (`…Z`) to match the fixture. The TS `Number.isFinite(Date.parse(x))` guard → a parse failure means "not stale"; the Go port mirrors this via `millisFromTimestamp` returning `ok=false` (`enrich.go`).
+- **Live-view determinism (P2b):** never feed the live tailer a plain `Fold` map — Go map iteration is random and `BuildRunSummary` groups by first-seen order, so the view would flicker between requests. Use `runproj.Projector` (order-preserving). P3's detail endpoint must do the same.
+- **Race-free tail resume (P2b):** the tailer captures its byte offset BEFORE the cold replay and dedupes events past the projector cursor (`eventsAfter`). Do NOT "optimize" this to compute the offset after `close(readyCh)` — the race detector caught that ordering dropping events that race the replay.
+- **No `transientCityEventProvider`:** the ADR/old-prompt named it but it doesn't exist. P2b uses a self-contained read-only `events.ReadFrom` byte-offset loop (`runtailer.go`) — fork-owned, no supervisor-core wiring, no second writer. Keep P3's detail tailing on the same warm Projector.
+- **Sessions read:** `/v0/city/{name}/sessions` returns `ListBody[sessionResponse]`; unmarshal `items` straight into `[]runproj.DashboardSession` (extra wire fields are ignored — equivalent to the frontend `normalizeSessions`).
 - **Rebase** `feat/runs-event-projection` onto `origin/feat/dashboard-supervisor-hosting` whenever the dashboard branch advances (it has moved several times).
-- The full `cmd/gc` test package times out as one monolith — use the sharded targets / targeted `-run` (see `TESTING.md`).
+- The full `cmd/gc` test package times out as one monolith — use the sharded targets / targeted `-run` (see `TESTING.md`). Run the tailer/endpoint tests under `-race` (`go test -race ./internal/api/dashboardbff/`).
 
 ## Pointers
 
 - Architecture: `plans/runs-view-architecture-adr.md` · Design + evidence: `plans/runs-view-event-sourcing.md`
-- Code: `internal/runproj/` · Goldens + fixture: `internal/runproj/testdata/` · Generator: `internal/api/dashboardspa/web/scripts/gen-run-goldens.mts`
-- BFF plane + sampler pattern to mirror: `internal/api/dashboardbff/{plane.go,samplers.go}` · wiring: `cmd/gc/supervisor_dashboard.go`
-- TS sources to port: `internal/api/dashboardspa/web/shared/src/runs/*` + `frontend/src/supervisor/{runSummary,runDetail,sessionReads}.ts`
+- Code (object-model): `internal/runproj/` — P0 `fold.go`; P1 `{summary,types,marshal,phasemapping,scope,strip,formulaname}.go`; P2a `{enrich,session}.go` (+ available-arm marshalers); P2b `projector.go`. Goldens + fixtures: `internal/runproj/testdata/{beads_fixture,sessions_fixture,runsummary_golden,runsummary_enriched_golden,rundetail_golden}.json`. Generator: `internal/api/dashboardspa/web/scripts/gen-run-goldens.mts`.
+- BFF plane: `internal/api/dashboardbff/{plane.go,samplers.go(citySampler pattern),runtailer.go(P2b tailer+endpoint to mirror for P3)}` · plane Start/Stop is called from `cmd/gc/supervisor_dashboard.go` (no edit needed — tailers enable inside `plane.Start`).
+- TS sources to port for P3: `internal/api/dashboardspa/web/shared/src/runs/{enrich,formula-run,groups,edges,node-shape,execution-instances,formula-order,session-link,display-state}.ts` + types `shared/src/{run-detail,run-snapshot}.ts`. Frontend detail enrich (P4): `frontend/src/supervisor/runDetail.ts`.
