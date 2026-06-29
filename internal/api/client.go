@@ -266,12 +266,12 @@ type Client struct {
 const sessionMessageTimeout = 4 * time.Minute
 
 // defaultClientTimeout is the overall HTTP timeout for control-plane client
-// calls. The read paths (EphemeralBeads, ReadyBeads, ClaimBead, ...) pass
-// context.Background() and rely solely on this ceiling, and several of them
-// federate the city store plus every rig store — a dolt-backed rig store can
-// take many seconds, so a 10s ceiling timed out gc hook --claim and stalled
-// the worker claim path. Most calls return in milliseconds; this only bounds
-// the slow federated reads and genuinely hung requests.
+// calls. The read paths (ListBeads, GetBead, GetStatus, ListMailInbox,
+// ListConvoys, ...) pass context.Background() and rely solely on this ceiling,
+// and several of them federate the city store plus every rig store — a
+// dolt-backed rig store can take many seconds, so a 10s ceiling false-timed-out
+// healthy-but-slow federated reads. Most calls return in milliseconds; this
+// only bounds the slow federated reads and genuinely hung requests.
 const defaultClientTimeout = 60 * time.Second
 
 // SessionSubmitResponse is the domain-facing shape of a session submit result.
