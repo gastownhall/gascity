@@ -155,18 +155,93 @@ type RunLaneStepAttempt struct {
 	Error  string
 }
 
-// RunLaneHealthState is the pre-enrich lane-health union. TS Avail<{data}>.
-// The builder always emits the unavailable arm (Phase 2 enrichment replaces it).
+// RunLaneHealthState is the lane-health union. TS Avail<{data}>. BuildRunSummary
+// emits the unavailable arm; EnrichRunSummary replaces it with the available arm
+// carrying the derived RunLaneHealth.
 type RunLaneHealthState struct {
 	Status string // "available" | "unavailable"
+	Data   RunLaneHealth
 	Error  string
 }
 
-// RunCensusState is the city-census union. TS Avail<{data}>. The builder always
-// emits the unavailable arm pre-enrich.
+// RunLaneHealth is the engine-derived per-lane health. Port of TS RunLaneHealth.
+// Field order matches the object literal built in deriveRunHealth (health.ts).
+type RunLaneHealth struct {
+	PhaseConfidence   string // "known" | "inferred"
+	NeedsOperator     bool
+	StuckNode         RunLaneStuckNode
+	ThrashingDetected bool
+	Session           RunLaneSessionState
+}
+
+// RunLaneStuckNode is the stuck-node union. TS Avail<{id}>.
+type RunLaneStuckNode struct {
+	Status string // "available" | "unavailable"
+	ID     string
+	Error  string
+}
+
+// RunLaneSessionState is the resolved-session union. TS RunLaneSessionState:
+// {status:'resolved', lastActive, running, activity} | {status:'unresolved', error}.
+type RunLaneSessionState struct {
+	Status     string // "resolved" | "unresolved"
+	LastActive RunLaneSessionLastActive
+	Running    RunLaneSessionRunning
+	Activity   RunLaneSessionActivity
+	Error      string
+}
+
+// RunLaneSessionLastActive is the last-active union. TS Avail<{at}>.
+type RunLaneSessionLastActive struct {
+	Status string // "available" | "unavailable"
+	At     string
+	Error  string
+}
+
+// RunLaneSessionRunning is the running-flag union. TS Avail<{value}>.
+type RunLaneSessionRunning struct {
+	Status string // "available" | "unavailable"
+	Value  bool
+	Error  string
+}
+
+// RunLaneSessionActivity is the activity-hint union. TS Avail<{value}>.
+type RunLaneSessionActivity struct {
+	Status string // "available" | "unavailable"
+	Value  string
+	Error  string
+}
+
+// RunCensusState is the city-census union. TS Avail<{data}>. BuildRunSummary
+// emits the unavailable arm; EnrichRunSummary replaces it with the available arm
+// carrying the derived RunCensus.
 type RunCensusState struct {
 	Status string // "available" | "unavailable"
+	Data   RunCensus
 	Error  string
+}
+
+// RunCensus is the threshold-independent city census. Port of TS RunCensus.
+// Field order matches the object literal built in buildCensus (health.ts).
+type RunCensus struct {
+	ByPhase          RunCensusByPhase
+	TotalInFlight    int
+	Unverifiable     int
+	KnownDenominator int
+	Thrashing        int
+}
+
+// RunCensusByPhase is the per-phase lane tally. Port of TS Record<RunPhase,number>.
+// Key order matches zeroByPhase() in health.ts (NOT alphabetical).
+type RunCensusByPhase struct {
+	Intake         int
+	Implementation int
+	Review         int
+	Approval       int
+	Finalization   int
+	Blocked        int
+	Complete       int
+	Active         int
 }
 
 // RunChange is one recent-change row. Port of TS RunChange.
