@@ -149,11 +149,22 @@ func normalizeE2EPath(t *testing.T, path string) string {
 	return resolved
 }
 
+// e2eDaemonSection sets a fast patrol interval for E2E cities. The default is
+// 30s (config.go), so every test that waits on a reconcile-driven state change
+// — drain/undrain, nudge, restart, config-drift restart — otherwise pays up to
+// a full 30s patrol cadence per wait. CI gains nothing from the production
+// cadence; reconcile logic is identical at 1s, so this trims wall-clock without
+// changing what is exercised. (Deferral floors such as the named-session
+// config-drift recent-activity window still apply — this only removes the extra
+// patrol-cadence latency on top of them.)
+const e2eDaemonSection = "\n[daemon]\npatrol_interval = \"1s\"\n"
+
 // renderE2EToml generates a full single-file template for gc init --file.
 func renderE2EToml(city e2eCity) string {
 	var b strings.Builder
 	writeE2EWorkspaceSection(&b, city.Workspace)
 	b.WriteString("\n[beads]\nprovider = \"file\"\n")
+	b.WriteString(e2eDaemonSection)
 	writeE2EProviderSections(&b, city.Providers)
 	writeE2EAgentSections(&b, city.Agents)
 	writeE2ENamedSessionSections(&b, city.Agents)
@@ -164,6 +175,7 @@ func renderE2ECityRuntimeToml(city e2eCity) string {
 	var b strings.Builder
 	writeE2EWorkspaceSection(&b, city.Workspace)
 	b.WriteString("\n[beads]\nprovider = \"file\"\n")
+	b.WriteString(e2eDaemonSection)
 	return b.String()
 }
 
