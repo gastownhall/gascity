@@ -228,6 +228,7 @@ type Tmux struct {
 	configureOnce        sync.Once
 	hiddenAttachMu       sync.Mutex
 	hiddenAttachClients  map[string]*hiddenAttachClient
+	hiddenAttachSeq      atomic.Uint64
 
 	// pokeMu guards pokes, which tracks gc's own send-keys per session so
 	// GetSessionActivity can discount activity that is only our poke's echo
@@ -259,9 +260,13 @@ const (
 )
 
 type hiddenAttachClient struct {
-	cancel  context.CancelFunc
-	done    chan error
-	stdin   io.WriteCloser
+	cancel context.CancelFunc
+	done   chan error
+	stdin  io.WriteCloser
+	// channel is the per-attach tmux wait-for channel signaled by this
+	// client's client-attached hook. Empty when the hook could not be armed,
+	// in which case readiness falls back to polling.
+	channel string
 	writeMu sync.Mutex
 }
 
@@ -1338,10 +1343,22 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 		t.hiddenAttachMu.Unlock()
 		return err
 	}
+	// Arm a per-attach wait-for channel so waitForHiddenAttachReady wakes on a
+	// server-pushed client-attached event instead of polling display-message in
+	// a loop, whose per-tick subprocesses otherwise contend with the attach
+	// itself under CI CPU starvation. set-hook here happens-before that wait's
+	// fast-path IsSessionAttached check, so an attach that races ahead of the
+	// hook is still caught; an empty channel (set-hook failed) falls back to the
+	// legacy poll.
+	channel := fmt.Sprintf("gc-hidden-attach-%d", t.hiddenAttachSeq.Add(1))
+	if _, err := t.run("set-hook", "-t", target, "client-attached", "wait-for -S "+channel); err != nil {
+		channel = ""
+	}
 	client := &hiddenAttachClient{
-		cancel: cancel,
-		done:   make(chan error, 1),
-		stdin:  stdin,
+		cancel:  cancel,
+		done:    make(chan error, 1),
+		stdin:   stdin,
+		channel: channel,
 	}
 	if t.hiddenAttachClients == nil {
 		t.hiddenAttachClients = make(map[string]*hiddenAttachClient)
@@ -1379,6 +1396,50 @@ func (t *Tmux) hiddenAttachClient(target string) *hiddenAttachClient {
 }
 
 func (t *Tmux) waitForHiddenAttachReady(target string, client *hiddenAttachClient) error {
+	// Fast path: already attached. Covers a re-resolved live client and an
+	// attach that completed before the hook was armed.
+	if t.IsSessionAttached(target) {
+		return nil
+	}
+	if client.channel == "" {
+		return t.pollForHiddenAttachReady(target, client)
+	}
+
+	// Block on the client-attached hook's wait-for signal: the tmux server wakes
+	// us the instant a client attaches, with no per-tick polling subprocess to
+	// contend with the attach. tmux remembers a signal that precedes the wait, so
+	// there is no signal-before-wait race. The wait-for is bounded by
+	// hiddenAttachReadyTimeout (not extended — it is the same ceiling the poll
+	// used), and IsSessionAttached is the authoritative confirmation on timeout.
+	waitErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), hiddenAttachReadyTimeout)
+		defer cancel()
+		_, err := t.runCtx(ctx, "wait-for", client.channel)
+		waitErr <- err
+	}()
+
+	select {
+	case err := <-waitErr:
+		if err == nil || t.IsSessionAttached(target) {
+			return nil
+		}
+		return fmt.Errorf("timed out waiting for hidden tmux client to attach: %w", err)
+	case err, ok := <-client.done:
+		if t.IsSessionAttached(target) {
+			return nil
+		}
+		if ok && err != nil {
+			return fmt.Errorf("hidden tmux client exited before attaching: %w", err)
+		}
+		return fmt.Errorf("hidden tmux client exited before attaching")
+	}
+}
+
+// pollForHiddenAttachReady is the fallback used when the client-attached hook
+// could not be armed: poll IsSessionAttached until the client attaches, the
+// client exits, or the deadline elapses.
+func (t *Tmux) pollForHiddenAttachReady(target string, client *hiddenAttachClient) error {
 	deadline := time.Now().Add(hiddenAttachReadyTimeout)
 	for time.Now().Before(deadline) {
 		if t.IsSessionAttached(target) {
@@ -1386,10 +1447,7 @@ func (t *Tmux) waitForHiddenAttachReady(target string, client *hiddenAttachClien
 		}
 		select {
 		case err, ok := <-client.done:
-			if !ok {
-				return fmt.Errorf("hidden tmux client exited before attaching")
-			}
-			if err != nil {
+			if ok && err != nil {
 				return fmt.Errorf("hidden tmux client exited before attaching: %w", err)
 			}
 			return fmt.Errorf("hidden tmux client exited before attaching")
@@ -1418,6 +1476,11 @@ func (t *Tmux) CloseHiddenAttachClient(target string) {
 
 	if client == nil {
 		return
+	}
+	if client.channel != "" {
+		// Remove the client-attached hook armed for this client. Best-effort: a
+		// killed session drops its hooks with it.
+		_, _ = t.run("set-hook", "-u", "-t", target, "client-attached")
 	}
 	client.cancel()
 	_ = client.stdin.Close()
