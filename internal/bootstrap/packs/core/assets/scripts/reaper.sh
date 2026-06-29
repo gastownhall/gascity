@@ -520,10 +520,17 @@ has_dependency_target_column() {
         return 0
     fi
 
-    printf '%s\n' "$fields" | grep -qx 'issue_id' || return 1
-    printf '%s\n' "$fields" | grep -qx 'depends_on_issue_id' || return 1
-    printf '%s\n' "$fields" | grep -qx 'depends_on_wisp_id' || return 1
-    printf '%s\n' "$fields" | grep -qx 'depends_on_external' || return 1
+    # Check membership with a here-string, never `printf ... | grep -q`. `grep -q`
+    # closes its stdin the instant it matches, so the upstream `printf` races into
+    # a SIGPIPE; under `set -o pipefail` that SIGPIPE becomes the pipeline's exit
+    # status and `|| return 1` fires spuriously, making the reaper skip the whole
+    # database's workflow-root cleanup. A here-string is a simple command
+    # (pipefail does not apply) with no upstream writer to kill.
+    local field
+    for field in issue_id depends_on_issue_id depends_on_wisp_id depends_on_external; do
+        grep -qx "$field" <<<"$fields" || return 1
+    done
+    return 0
 }
 
 workflow_root_candidates_cte() {
