@@ -676,7 +676,7 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 	switch state {
 	case waitStateReady:
 		batch["ready_at"] = now
-		nextAttempt, err := nextWaitDeliveryAttempt(store, b)
+		nextAttempt, err := nextWaitDeliveryAttempt(nudgeFrontDoor(beads.NudgesStore{Store: store}), b)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
 			return result, 1
@@ -1362,7 +1362,7 @@ func setWaitTerminalState(store beads.Store, waitID string, batch map[string]str
 }
 
 func retryClosedWait(store beads.Store, wait beads.Bead, now string) (beads.Bead, error) {
-	nextAttempt, err := nextWaitDeliveryAttempt(store, wait)
+	nextAttempt, err := nextWaitDeliveryAttempt(nudgeFrontDoor(beads.NudgesStore{Store: store}), wait)
 	if err != nil {
 		return beads.Bead{}, err
 	}
@@ -1404,7 +1404,7 @@ func retryClosedWait(store beads.Store, wait beads.Bead, now string) (beads.Bead
 	})
 }
 
-func nextWaitDeliveryAttempt(store beads.Store, wait beads.Bead) (string, error) {
+func nextWaitDeliveryAttempt(front *nudgequeue.Store, wait beads.Bead) (string, error) {
 	state := wait.Metadata["state"]
 	if state == waitStatePending || state == waitStateReady {
 		return "", nil
@@ -1417,10 +1417,10 @@ func nextWaitDeliveryAttempt(store beads.Store, wait beads.Bead) (string, error)
 	if nudgeID == "" {
 		nudgeID = waitNudgeID(wait)
 	}
-	if nudgeID == "" || store == nil {
+	if nudgeID == "" || front == nil {
 		return strconv.Itoa(attempt + 1), nil
 	}
-	nudge, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).FindIncludingTerminal(nudgeID)
+	nudge, ok, err := front.FindIncludingTerminal(nudgeID)
 	if err != nil {
 		return "", err
 	}
