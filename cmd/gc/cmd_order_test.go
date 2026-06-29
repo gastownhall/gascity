@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -933,6 +935,63 @@ func TestOrderRun(t *testing.T) {
 	}
 	if got := results[0].Metadata["gc.routed_to"]; got != "dog" {
 		t.Fatalf("gc.routed_to = %q, want dog", got)
+	}
+}
+
+// orderRunGraphApplySpy is a graph-apply-capable store that records whether
+// ApplyGraphPlan was invoked. Unlike graphApplySpyStore it creates real beads
+// in the embedded MemStore so the manual order-run path can label the wisp root
+// and record its tracking bead after instantiation. It implements
+// beads.GraphApplyStore.
+type orderRunGraphApplySpy struct {
+	*beads.MemStore
+	applied bool
+}
+
+func (s *orderRunGraphApplySpy) ApplyGraphPlan(_ context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	s.applied = true
+	ids := make(map[string]string, len(plan.Nodes))
+	for _, node := range plan.Nodes {
+		created, err := s.Create(beads.Bead{
+			Title:    node.Title,
+			Type:     node.Type,
+			Labels:   node.Labels,
+			Metadata: node.Metadata,
+		})
+		if err != nil {
+			return nil, err
+		}
+		ids[node.Key] = created.ID
+	}
+	return &beads.GraphApplyResult{IDs: ids}, nil
+}
+
+// TestOrderRunUsesGraphApplyThroughOrdersStore pins the fix for the manual
+// `gc order run` graph-apply regression: openOrderStoreForOrder hands
+// doOrderRunWithJSON a beads.OrdersStore wrapper, and typed wrappers do not
+// promote optional capabilities, so passing the wrapper straight into
+// molecule.Instantiate hides the underlying GraphApplyStore and silently falls
+// back to sequential creation. The path must unwrap to store.Store at the
+// generic molecule/graph-routing boundary so graph apply is used when enabled,
+// matching the controller dispatch path.
+func TestOrderRunUsesGraphApplyThroughOrdersStore(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(true)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+
+	spy := &orderRunGraphApplySpy{MemStore: beads.NewMemStore()}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", "/city", beads.OrdersStore{Store: spy}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !spy.applied {
+		t.Fatal("ApplyGraphPlan was not invoked — graph apply capability lost through the beads.OrdersStore wrapper")
 	}
 }
 

@@ -6,11 +6,12 @@
 // today and is retired in the final phase of the infra/beads split, so this
 // package carries the same routing forward over an explicit []beads.Store the
 // caller assembles, with no central Router. Bead ids are prefix-disjoint across
-// stores (enforced by the class-prefix disjointness guard and
-// config.ValidateReservedPrefixesIn), so the owning store is the sole residence.
+// stores (reserved class prefixes are kept off HQ/rig work-store prefixes by
+// config.ValidateRigs), so the owning store is the sole residence.
 package storeref
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -44,19 +45,30 @@ func PrefixOwner(id string, stores []beads.Store) beads.Store {
 
 // Resolve federates a point read: a bead lives in exactly one store, so it tries
 // the prefix owner first (the cheap, fork-free path) and falls back to probing
-// every store in turn, returning the first hit. It returns beads.ErrNotFound when
-// no store has the bead and every probe was a clean not-found. Mirrors
-// coordrouter.Router.Get's multi-backend body, so it is a drop-in for the
-// Router's by-id read once the Router is deleted.
+// every store in turn, returning the first hit. It preserves the first hard
+// (non-ErrNotFound) read failure seen across the owner probe and the fallback
+// scan, returning beads.ErrNotFound only when every probe was a clean not-found.
+// A hard failure means an authoritative store was unavailable, which must never
+// be flattened into a clean miss — otherwise an unreachable owner store looks
+// identical to a deleted bead. Mirrors coordrouter.Router.Get's multi-backend
+// body, so it is a drop-in for the Router's by-id read once the Router is deleted.
 func Resolve(id string, stores []beads.Store) (beads.Bead, error) {
+	var firstErr error
+	recordErr := func(err error) {
+		if firstErr == nil && err != nil && !errors.Is(err, beads.ErrNotFound) {
+			firstErr = err
+		}
+	}
 	if owner := PrefixOwner(id, stores); owner != nil {
-		if got, err := owner.Get(id); err == nil {
+		got, err := owner.Get(id)
+		if err == nil {
 			return got, nil
 		}
-		// Owner miss (unknown prefix / partial migration): fall through to the
-		// full probe below so correctness is never reduced.
+		// Owner miss (unknown prefix / partial migration) or hard failure: keep
+		// the first hard error and fall through to the full probe below so
+		// correctness is never reduced.
+		recordErr(err)
 	}
-	var lastErr error
 	for _, s := range stores {
 		if s == nil {
 			continue
@@ -65,10 +77,10 @@ func Resolve(id string, stores []beads.Store) (beads.Bead, error) {
 		if err == nil {
 			return got, nil
 		}
-		lastErr = err
+		recordErr(err)
 	}
-	if lastErr != nil {
-		return beads.Bead{}, lastErr
+	if firstErr != nil {
+		return beads.Bead{}, firstErr
 	}
 	return beads.Bead{}, beads.ErrNotFound
 }

@@ -694,6 +694,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Reserved coordination-class prefixes are a non-fatal advisory until
+	// per-class stores activate; warn but do not block startup.
+	for _, w := range config.ReservedPrefixWarnings(cfg.Rigs, config.EffectiveHQPrefix(cfg)) {
+		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

@@ -113,6 +113,31 @@ func TestClassifyGraphPlan(t *testing.T) {
 			t.Errorf("got %s, want graph (embedded bug step must not split the plan)", got)
 		}
 	})
+	// graph.v2 step nodes carry their only gc.root_bead_id marker in
+	// MetadataRefs (molecule/graph_apply.go writes it there, guarded by an
+	// empty Metadata marker), not in Metadata. ClassifyGraphPlan must consult
+	// MetadataRefs the same way the storage-tier policyNameForGraphPlan does,
+	// otherwise such nodes are invisible to routing and the whole-plan result
+	// depends on an unstated root-Metadata-marker invariant.
+	t.Run("step node workflow marker in MetadataRefs routes the plan to graph", func(t *testing.T) {
+		plan := &beads.GraphApplyPlan{Nodes: []beads.GraphApplyNode{
+			{Key: "root", Type: "molecule"},
+			{Key: "s1", Type: "step", ParentKey: "root", MetadataRefs: map[string]string{beadmeta.RootBeadIDMetadataKey: "root"}},
+		}}
+		if got := ClassifyGraphPlan(plan); got != ClassGraph {
+			t.Errorf("got %s, want graph (gc.root_bead_id in MetadataRefs must route to graph)", got)
+		}
+	})
+	t.Run("realistic graph.v2 pour: workflow root in Metadata, steps refs-only", func(t *testing.T) {
+		plan := &beads.GraphApplyPlan{Nodes: []beads.GraphApplyNode{
+			{Key: "root", Type: "molecule", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
+			{Key: "s1", Type: "step", ParentKey: "root", MetadataRefs: map[string]string{beadmeta.RootBeadIDMetadataKey: "root"}},
+			{Key: "s2", Type: "step", ParentKey: "root", MetadataRefs: map[string]string{beadmeta.RootBeadIDMetadataKey: "root"}},
+		}}
+		if got := ClassifyGraphPlan(plan); got != ClassGraph {
+			t.Errorf("got %s, want graph", got)
+		}
+	})
 }
 
 func TestClassStringStable(t *testing.T) {

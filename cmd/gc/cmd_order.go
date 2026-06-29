@@ -684,7 +684,13 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	recipe, err := prepareOrderWispRecipe(context.Background(), store, a, searchPaths)
+	// Pass the unwrapped store to the generic molecule/graph-routing boundaries:
+	// the beads.OrdersStore wrapper does not promote optional capabilities, so
+	// handing it to molecule.Instantiate would hide the underlying
+	// GraphApplyStore and silently fall back to sequential creation. store stays
+	// the typed wrapper for the order-tracking bead operations below.
+	genericStore := store.Store
+	recipe, err := prepareOrderWispRecipe(context.Background(), genericStore, a, searchPaths)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -707,12 +713,12 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	}
 
 	if a.Pool != "" && cfg != nil {
-		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", store, cityName, cityPath, cfg); err != nil {
+		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", genericStore, cityName, cityPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}
 
-	cookResult, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{})
+	cookResult, err := molecule.Instantiate(context.Background(), genericStore, recipe, molecule.Options{})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

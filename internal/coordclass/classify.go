@@ -75,7 +75,7 @@ const (
 // exactly as policyNameForBead does, so a tracker or session bead is never
 // misrouted to ClassGraph.
 func Classify(b beads.Bead) Class {
-	return classifyFields(b.Type, b.Labels, b.Metadata)
+	return classifyFields(b.Type, b.Labels, b.Metadata, nil)
 }
 
 // ClassifyGraphPlan returns the [Class] for an entire graph-apply plan. A
@@ -90,7 +90,7 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 		return ClassWork
 	}
 	for _, node := range plan.Nodes {
-		if classifyFields(node.Type, node.Labels, node.Metadata) == ClassGraph {
+		if classifyFields(node.Type, node.Labels, node.Metadata, node.MetadataRefs) == ClassGraph {
 			return ClassGraph
 		}
 	}
@@ -101,13 +101,18 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 			break
 		}
 	}
-	return classifyFields(root.Type, root.Labels, root.Metadata)
+	return classifyFields(root.Type, root.Labels, root.Metadata, root.MetadataRefs)
 }
 
 // classifyFields is the shared decision used by both Classify and
 // ClassifyGraphPlan, operating on the raw bead/node fields so it works for a
-// beads.Bead and a beads.GraphApplyNode alike.
-func classifyFields(beadType string, labels []string, metadata map[string]string) Class {
+// beads.Bead and a beads.GraphApplyNode alike. metadataRefs holds a node's
+// deferred metadata references (beads.GraphApplyNode.MetadataRefs) and is nil
+// for a beads.Bead, whose metadata is already merged into a single map; the
+// workflow arm consults both maps so a graph step node whose only
+// gc.root_bead_id marker lives in MetadataRefs routes to ClassGraph, matching
+// the storage-tier policyNameForGraphPlan classifier.
+func classifyFields(beadType string, labels []string, metadata, metadataRefs map[string]string) Class {
 	switch {
 	case isWispMetadata(metadata) || beadType == beadmeta.KindWisp || hasLabel(labels, "gc:wisp") || hasLabel(labels, "wisp"):
 		return ClassGraph
@@ -121,7 +126,7 @@ func classifyFields(beadType string, labels []string, metadata map[string]string
 		return ClassSessions
 	case hasLabel(labels, labelNudge):
 		return ClassNudges
-	case isWorkflowMetadata(metadata):
+	case isWorkflowMetadata(metadata) || isWorkflowMetadata(metadataRefs):
 		return ClassGraph
 	case beadType == typeConvoy && isSyntheticConvoy(metadata):
 		return ClassGraph

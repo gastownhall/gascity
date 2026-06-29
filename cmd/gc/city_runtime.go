@@ -1841,6 +1841,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if err := config.ValidateRigs(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); err != nil {
 		appendWarning(fmt.Sprintf("config reload: %v", err))
 	}
+	for _, w := range config.ReservedPrefixWarnings(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)) {
+		appendWarning(fmt.Sprintf("config reload: %s", w))
+	}
 	resolveRigPaths(cityRoot, nextCfg.Rigs)
 	var lifecycleErr error
 	for attempt := 1; attempt <= cityRuntimeReloadLifecycleRetryLimit; attempt++ {

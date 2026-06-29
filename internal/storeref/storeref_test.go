@@ -24,6 +24,18 @@ func newPrefixed(prefix string) prefixedStore {
 	return prefixedStore{Store: beads.NewMemStore(), prefix: prefix}
 }
 
+// hardErrStore reports an IDPrefix but fails every Get with a non-ErrNotFound
+// error, standing in for an unavailable backend (I/O or connection failure) as
+// opposed to a clean miss.
+type hardErrStore struct {
+	beads.Store
+	prefix string
+	err    error
+}
+
+func (h hardErrStore) IDPrefix() string               { return h.prefix }
+func (h hardErrStore) Get(string) (beads.Bead, error) { return beads.Bead{}, h.err }
+
 func TestPrefixOwner(t *testing.T) {
 	graph := newPrefixed("gcg")
 	orders := newPrefixed("gco")
@@ -79,6 +91,36 @@ func TestResolve_FederationFallback(t *testing.T) {
 	if _, err := Resolve("gcg-does-not-exist", stores); !errors.Is(err, beads.ErrNotFound) {
 		t.Fatalf("Resolve(absent) err = %v, want ErrNotFound", err)
 	}
+}
+
+// TestResolvePreservesHardError pins the federation error semantics: a hard
+// read failure from any probed store must surface to the caller rather than
+// being masked as a clean ErrNotFound by a later store's miss.
+func TestResolvePreservesHardError(t *testing.T) {
+	boom := errors.New("owner store unavailable")
+
+	t.Run("owner hard error wins over a fallback not-found", func(t *testing.T) {
+		owner := hardErrStore{Store: beads.NewMemStore(), prefix: "gcg", err: boom}
+		fallback := beads.NewMemStore() // clean miss on every id
+		_, err := Resolve("gcg-1", []beads.Store{owner, fallback})
+		if !errors.Is(err, boom) {
+			t.Fatalf("Resolve err = %v, want owner hard error %v", err, boom)
+		}
+		if errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Resolve err = %v, must not be masked as ErrNotFound", err)
+		}
+	})
+
+	t.Run("first hard error survives a preceding not-found in the probe scan", func(t *testing.T) {
+		// No prefix owner for this id, so resolution probes the full list in
+		// order: a clean-miss store first, then an unavailable store.
+		missing := beads.NewMemStore()
+		broken := hardErrStore{Store: beads.NewMemStore(), prefix: "", err: boom}
+		_, err := Resolve("orphan-1", []beads.Store{missing, broken})
+		if !errors.Is(err, boom) {
+			t.Fatalf("Resolve err = %v, want hard error %v", err, boom)
+		}
+	})
 }
 
 func TestResolveSkipsNilStores(t *testing.T) {

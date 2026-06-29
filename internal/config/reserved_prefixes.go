@@ -1,6 +1,7 @@
 package config
 
 import (
+	"sort"
 	"strings"
 )
 
@@ -50,4 +51,15 @@ func IsReservedClassPrefix(p string) bool {
 		}
 	}
 	return false
+}
+
+// reservedClassPrefixListText returns the reserved class id-prefixes as a
+// sorted, comma-separated string for use in validation error messages.
+func reservedClassPrefixListText() string {
+	prefixes := make([]string, 0, len(reservedClassPrefixes))
+	for _, p := range reservedClassPrefixes {
+		prefixes = append(prefixes, p)
+	}
+	sort.Strings(prefixes)
+	return strings.Join(prefixes, ", ")
 }
