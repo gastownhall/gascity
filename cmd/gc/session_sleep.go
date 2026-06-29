@@ -256,11 +256,11 @@ func sessionKeepWarmEligible(
 
 func persistSleepPolicyMetadata(
 	session *beads.Bead,
-	store beads.Store,
+	sessFront *sessionpkg.InfoStore,
 	policy resolvedSessionSleepPolicy,
 	configSuppressed bool,
 ) {
-	if session == nil || store == nil {
+	if session == nil || sessFront == nil {
 		return
 	}
 	fingerprint := policy.Fingerprint
@@ -292,7 +292,7 @@ func persistSleepPolicyMetadata(
 	if len(changed) == 0 {
 		return
 	}
-	if err := sessionFrontDoor(store).ApplyPatch(session.ID, changed); err != nil {
+	if err := sessFront.ApplyPatch(session.ID, changed); err != nil {
 		return
 	}
 	if session.Metadata == nil {
@@ -303,11 +303,11 @@ func persistSleepPolicyMetadata(
 	}
 }
 
-func markIdleSleepPending(session *beads.Bead, store beads.Store) {
-	if session == nil || store == nil || session.Metadata["sleep_intent"] == "idle-stop-pending" {
+func markIdleSleepPending(session *beads.Bead, sessFront *sessionpkg.InfoStore) {
+	if session == nil || sessFront == nil || session.Metadata["sleep_intent"] == "idle-stop-pending" {
 		return
 	}
-	if err := sessionFrontDoor(store).SetMarker(session.ID, "sleep_intent", "idle-stop-pending"); err != nil {
+	if err := sessFront.SetMarker(session.ID, "sleep_intent", "idle-stop-pending"); err != nil {
 		return
 	}
 	if session.Metadata == nil {
@@ -318,18 +318,18 @@ func markIdleSleepPending(session *beads.Bead, store beads.Store) {
 
 func recoverPendingIdleSleep(
 	session *beads.Bead,
-	store beads.Store,
+	sessFront *sessionpkg.InfoStore,
 	running bool,
 	clk clock.Clock,
 ) bool {
-	if session == nil || store == nil || running || session.Metadata["sleep_intent"] != "idle-stop-pending" {
+	if session == nil || sessFront == nil || running || session.Metadata["sleep_intent"] != "idle-stop-pending" {
 		return false
 	}
 	batch := sessionpkg.SleepPatch(clk.Now(), "idle")
 	if fingerprint := session.Metadata["sleep_policy_fingerprint"]; fingerprint != "" {
 		batch["sleep_policy_fingerprint"] = fingerprint
 	}
-	if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err != nil {
+	if err := sessFront.ApplyPatch(session.ID, batch); err != nil {
 		return false
 	}
 	if session.Metadata == nil {

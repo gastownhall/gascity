@@ -436,7 +436,7 @@ func TestReconcileSessionBeads_RestartRequestClearsCircuitBreakerForNextWake(t *
 		"session_key":                "original-key",
 		"started_config_hash":        "hash-before-restart",
 	})
-	if err := persistSessionCircuitBreakerMetadata(env.store, &session, cb, identity, base); err != nil {
+	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(env.store), &session, cb, identity, base); err != nil {
 		t.Fatalf("persist circuit metadata: %v", err)
 	}
 	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {

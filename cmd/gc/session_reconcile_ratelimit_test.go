@@ -135,7 +135,7 @@ func TestCheckRateLimitStability_BeforeHealPreservesResumeMetadata(t *testing.T)
 		return "You've hit your limit, Pro plan\n\n/rate-limit-options", nil
 	}
 
-	handled, err := checkRateLimitStability(&session, nil, false, dt, store, clk, peek)
+	handled, err := checkRateLimitStability(&session, nil, false, dt, sessionFrontDoor(store), clk, peek)
 	if err != nil {
 		t.Fatalf("recording rate-limit rapid exit: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestCheckRateLimitStability_BatchFailureDoesNotClearLastWokeAt(t *testing.T
 		return "You've hit your limit, Pro plan\n\n/rate-limit-options", nil
 	}
 
-	handled, err := checkRateLimitStability(&session, nil, false, dt, store, clk, peek)
+	handled, err := checkRateLimitStability(&session, nil, false, dt, sessionFrontDoor(store), clk, peek)
 	if err == nil {
 		t.Fatal("rate-limit batch failure should be returned")
 	}
@@ -204,7 +204,7 @@ func TestCheckRateLimitStability_BatchFailureDoesNotClearLastWokeAt(t *testing.T
 	}
 
 	store.metadataBatchErr = nil
-	handled, err = checkRateLimitStability(&session, nil, false, dt, store, clk, peek)
+	handled, err = checkRateLimitStability(&session, nil, false, dt, sessionFrontDoor(store), clk, peek)
 	if err != nil {
 		t.Fatalf("retrying rate-limit detection: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestCheckRateLimitStability_BatchFailureRetriesAfterStabilityThreshold(t *t
 		return "You've hit your limit, Pro plan\n\n/rate-limit-options", nil
 	}
 
-	handled, err := checkRateLimitStability(&session, nil, false, dt, store, clk, peek)
+	handled, err := checkRateLimitStability(&session, nil, false, dt, sessionFrontDoor(store), clk, peek)
 	if err == nil {
 		t.Fatal("initial failed batch should be returned")
 	}
@@ -255,7 +255,7 @@ func TestCheckRateLimitStability_BatchFailureRetriesAfterStabilityThreshold(t *t
 
 	clk.Time = now.Add(stabilityThreshold + time.Second)
 	store.metadataBatchErr = nil
-	handled, err = checkRateLimitStability(&session, nil, false, dt, store, clk, peek)
+	handled, err = checkRateLimitStability(&session, nil, false, dt, sessionFrontDoor(store), clk, peek)
 	if err != nil {
 		t.Fatalf("retrying after stability threshold: %v", err)
 	}

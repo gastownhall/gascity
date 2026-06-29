@@ -378,7 +378,7 @@ func reopenClosedConfiguredNamedSessionBead(
 		for k, v := range extraMeta {
 			batch[k] = v
 		}
-		if setMetaBatch(store, bead.ID, batch, stderr) == nil {
+		if setMetaBatch(sessionFrontDoor(store), bead.ID, batch, stderr) == nil {
 			if bead.Metadata == nil {
 				bead.Metadata = make(map[string]string, len(batch))
 			}
@@ -450,7 +450,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 				continue
 			}
 			batch := session.RetireNamedSessionPatch(now, "duplicate-repair", identity)
-			if setMetaBatch(store, b.ID, batch, stderr) != nil {
+			if setMetaBatch(sessionFrontDoor(store), b.ID, batch, stderr) != nil {
 				continue
 			}
 			if err := sessionFrontDoor(store).SetStatusOpen(b.ID); err != nil {
@@ -519,7 +519,7 @@ func retireRemovedConfiguredNamedSessionBead(
 		return false
 	}
 	batch := session.RetireNamedSessionPatch(now, "removed-configured-named-session", namedSessionIdentity(b))
-	if setMetaBatch(store, b.ID, batch, stderr) != nil {
+	if setMetaBatch(sessionFrontDoor(store), b.ID, batch, stderr) != nil {
 		return false
 	}
 	if err := sessionFrontDoor(store).SetStatusOpen(b.ID); err != nil {
@@ -869,6 +869,12 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	if store == nil {
 		return nil, nil
 	}
+	// The typed session front door is constructed once at this composition root
+	// and threaded to the session-only leaves (setMeta/setMetaBatch/
+	// closeFailedCreateBead/syncDesiredPoolSlots); the raw store stays for the
+	// snapshot/Get and work-release/close residual. Same underlying store, so
+	// every session bead write is byte-identical.
+	sessFront := session.NewInfoStore(sessStore)
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -906,7 +912,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if b.Status == "closed" || !isNamedSessionBead(b) || !isFailedCreateSessionBead(b) {
 			continue
 		}
-		if closeFailedCreateBead(store, b.ID, now, stderr) {
+		if closeFailedCreateBead(sessFront, b.ID, now, stderr) {
 			openBeads[i].Status = "closed"
 		}
 	}
@@ -1185,10 +1191,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				createdSessionName = strings.TrimSpace(newBead.Metadata["session_name"])
 				if isPoolInstance {
 					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
-					if err := sessionFrontDoor(store).SetMarker(newBead.ID, "session_name", createdSessionName); err != nil {
+					if err := sessFront.SetMarker(newBead.ID, "session_name", createdSessionName); err != nil {
 						finalizeErr = err
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
-						closeFailedCreateBead(store, newBead.ID, now, stderr)
+						closeFailedCreateBead(sessFront, newBead.ID, now, stderr)
 						return
 					}
 					if newBead.Metadata == nil {
@@ -1439,7 +1445,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		applyBatch := func() {
 			if len(batch) > 0 {
 				batch["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
-				if setMetaBatch(store, b.ID, batch, stderr) == nil {
+				if setMetaBatch(sessFront, b.ID, batch, stderr) == nil {
 					if b.Metadata == nil {
 						b.Metadata = make(map[string]string, len(batch))
 					}
@@ -1460,7 +1466,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if changed {
 				// Defensive fallback; current callers should always have queued at
 				// least one metadata write when changed=true.
-				setMeta(store, b.ID, "synced_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
+				setMeta(sessFront, b.ID, "synced_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
 			}
 		}
 		clearAliasConflict := func() {
@@ -1560,7 +1566,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		applyBatch()
 	}
-	openBeads = syncDesiredPoolSlots(store, desiredState, openBeads, indexBySessionName, cfg, now, stderr)
+	openBeads = syncDesiredPoolSlots(sessFront, desiredState, openBeads, indexBySessionName, cfg, now, stderr)
 
 	// Classify and close beads with no matching desired entry.
 	if !skipClose {
@@ -1649,7 +1655,7 @@ func queueAliasChangeDriftRebaseline(b beads.Bead, tp TemplateParams, queueMeta 
 }
 
 func syncDesiredPoolSlots(
-	store beads.Store,
+	sessFront *session.InfoStore,
 	desiredState map[string]TemplateParams,
 	openBeads []beads.Bead,
 	indexBySessionName map[string]int,
@@ -1657,7 +1663,7 @@ func syncDesiredPoolSlots(
 	now time.Time,
 	stderr io.Writer,
 ) []beads.Bead {
-	if store == nil || cfg == nil {
+	if sessFront == nil || cfg == nil {
 		return openBeads
 	}
 
@@ -1733,7 +1739,7 @@ func syncDesiredPoolSlots(
 				continue
 			}
 			batch["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
-			if setMetaBatch(store, bead.ID, batch, stderr) != nil {
+			if setMetaBatch(sessFront, bead.ID, batch, stderr) != nil {
 				continue
 			}
 			if bead.Metadata == nil {
@@ -1795,8 +1801,8 @@ func configuredSessionNamesWithSnapshot(cfg *config.City, cityName string, sessi
 
 // setMeta wraps store.SetMetadata with error logging. Returns the error
 // so callers can abort dependent writes (e.g., skip config_hash on failure).
-func setMeta(store beads.Store, id, key, value string, stderr io.Writer) error {
-	if err := sessionFrontDoor(store).SetMarker(id, key, value); err != nil {
+func setMeta(sessFront *session.InfoStore, id, key, value string, stderr io.Writer) error {
+	if err := sessFront.SetMarker(id, key, value); err != nil {
 		fmt.Fprintf(stderr, "session beads: setting %s on %s: %v\n", key, id, err) //nolint:errcheck
 		return err
 	}
@@ -1814,33 +1820,33 @@ func sessionFrontDoor(store beads.Store) *session.InfoStore {
 	return session.NewInfoStore(beads.SessionStore{Store: store})
 }
 
-func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr io.Writer) error {
+func setMetaBatch(sessFront *session.InfoStore, id string, batch map[string]string, stderr io.Writer) error {
 	if len(batch) == 0 {
 		return nil
 	}
-	if err := sessionFrontDoor(store).ApplyPatch(id, batch); err != nil {
+	if err := sessFront.ApplyPatch(id, batch); err != nil {
 		fmt.Fprintf(stderr, "session beads: setting metadata on %s: %v\n", id, err) //nolint:errcheck
 		return err
 	}
 	return nil
 }
 
-func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr io.Writer) bool {
+func closeFailedCreateBead(sessFront *session.InfoStore, id string, now time.Time, stderr io.Writer) bool {
 	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
 	patch["sleep_intent"] = ""
-	if setMetaBatch(store, id, patch, stderr) != nil {
+	if setMetaBatch(sessFront, id, patch, stderr) != nil {
 		return false
 	}
-	if err := sessionFrontDoor(store).CloseWithoutReason(id); err != nil {
+	if err := sessFront.CloseWithoutReason(id); err != nil {
 		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}
 	// Defense in depth: a startup race between bead creation and an early
 	// bind could leave participant records behind. Cleanup helpers no-op
 	// when the session has no labeled state.
-	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
+	cancelStateAssignedToRetiredSessionBead(sessFront.Store().Store, id, now, stderr)
 	return true
 }
 
@@ -2256,7 +2262,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(b) {
-		return closeFailedCreateBead(store, b.ID, now, stderr)
+		return closeFailedCreateBead(sessionFrontDoor(store), b.ID, now, stderr)
 	}
 	return closeBead(store, b.ID, closeReason, now, stderr)
 }
@@ -2345,9 +2351,9 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 		return false
 	}
 	if reason == string(session.StateFailedCreate) {
-		return closeFailedCreateBead(store, id, now, stderr)
+		return closeFailedCreateBead(sessionFrontDoor(store), id, now, stderr)
 	}
-	if setMetaBatch(store, id, session.ClosePatch(now, reason), stderr) != nil {
+	if setMetaBatch(sessionFrontDoor(store), id, session.ClosePatch(now, reason), stderr) != nil {
 		return false
 	}
 	if err := sessionFrontDoor(store).CloseWithoutReason(id); err != nil {

@@ -1464,7 +1464,7 @@ func TestResetSessionCircuitBreakerStateClearsRacingOpenPersist(t *testing.T) {
 
 	persistErr := make(chan error, 1)
 	go func() {
-		persistErr <- persistSessionCircuitBreakerMetadata(store, &session, cb, identity, t0.Add(6*time.Minute))
+		persistErr <- persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), &session, cb, identity, t0.Add(6*time.Minute))
 	}()
 
 	select {

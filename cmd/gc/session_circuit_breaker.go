@@ -607,13 +607,13 @@ func formatCircuitTime(tm time.Time) string {
 }
 
 func persistSessionCircuitBreakerMetadata(
-	store beads.Store,
+	sessFront *session.InfoStore,
 	session *beads.Bead,
 	cb *sessionCircuitBreaker,
 	identity string,
 	now time.Time,
 ) error {
-	if store == nil || session == nil || cb == nil {
+	if sessFront == nil || session == nil || cb == nil {
 		return nil
 	}
 	cb.mu.Lock()
@@ -625,7 +625,7 @@ func persistSessionCircuitBreakerMetadata(
 	if sessionCircuitMetadataEqual(session.Metadata, metadata) {
 		return nil
 	}
-	if err := sessionFrontDoor(store).ApplyPatch(session.ID, metadata); err != nil {
+	if err := sessFront.ApplyPatch(session.ID, metadata); err != nil {
 		return fmt.Errorf("persisting session circuit breaker metadata for %s: %w", session.ID, err)
 	}
 	if session.Metadata == nil {
@@ -638,13 +638,13 @@ func persistSessionCircuitBreakerMetadata(
 }
 
 func recordSessionCircuitBreakerRestart(
-	store beads.Store,
+	sessFront *session.InfoStore,
 	session *beads.Bead,
 	cb *sessionCircuitBreaker,
 	identity string,
 	now time.Time,
 ) (circuitBreakerStateKind, error) {
-	if store == nil || session == nil {
+	if sessFront == nil || session == nil {
 		return circuitClosed, nil
 	}
 	identity = strings.TrimSpace(identity)
@@ -667,7 +667,7 @@ func recordSessionCircuitBreakerRestart(
 	if sessionCircuitMetadataEqual(session.Metadata, metadata) {
 		return state, nil
 	}
-	if err := sessionFrontDoor(store).ApplyPatch(session.ID, metadata); err != nil {
+	if err := sessFront.ApplyPatch(session.ID, metadata); err != nil {
 		cb.restoreEntryLocked(identity, previous, hadPrevious)
 		return state, fmt.Errorf("persisting session circuit breaker metadata for %s: %w", session.ID, err)
 	}
@@ -732,11 +732,11 @@ func sessionCircuitMetadataEqual(existing map[string]string, next map[string]str
 	return true
 }
 
-func loadPersistedSessionCircuitResetGeneration(store beads.Store, sessionID, identity string, cb *sessionCircuitBreaker) error {
-	if store == nil || cb == nil || strings.TrimSpace(sessionID) == "" || strings.TrimSpace(identity) == "" {
+func loadPersistedSessionCircuitResetGeneration(sessFront *session.InfoStore, sessionID, identity string, cb *sessionCircuitBreaker) error {
+	if sessFront == nil || cb == nil || strings.TrimSpace(sessionID) == "" || strings.TrimSpace(identity) == "" {
 		return nil
 	}
-	generationValue, err := sessionFrontDoor(store).CircuitResetGeneration(sessionID)
+	generationValue, err := sessFront.CircuitResetGeneration(sessionID)
 	if err != nil {
 		return fmt.Errorf("loading session circuit breaker metadata for %s: %w", sessionID, err)
 	}
@@ -746,8 +746,8 @@ func loadPersistedSessionCircuitResetGeneration(store beads.Store, sessionID, id
 	return nil
 }
 
-func clearPersistedSessionCircuitBreakerMetadata(store beads.Store, sessionID string, resetGeneration uint64) error {
-	if store == nil || strings.TrimSpace(sessionID) == "" {
+func clearPersistedSessionCircuitBreakerMetadata(sessFront *session.InfoStore, sessionID string, resetGeneration uint64) error {
+	if sessFront == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
 	metadata := make(map[string]string, len(sessionCircuitMetadataKeys))
@@ -757,7 +757,7 @@ func clearPersistedSessionCircuitBreakerMetadata(store beads.Store, sessionID st
 	if resetGeneration > 0 {
 		metadata[sessionCircuitResetGenerationMetadata] = strconv.FormatUint(resetGeneration, 10)
 	}
-	if err := sessionFrontDoor(store).ApplyPatch(sessionID, metadata); err != nil {
+	if err := sessFront.ApplyPatch(sessionID, metadata); err != nil {
 		return fmt.Errorf("clearing session circuit breaker metadata for %s: %w", sessionID, err)
 	}
 	return nil
