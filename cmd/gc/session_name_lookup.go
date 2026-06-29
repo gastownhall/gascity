@@ -216,13 +216,16 @@ func createPoolSessionBeadWithAlias(
 		}
 		meta[key] = strings.TrimSpace(value)
 	}
-	bead, err := store.Create(beads.Bead{
-		ID:       explicitID,
-		Title:    title,
-		Type:     sessionBeadType,
-		Labels:   []string{sessionBeadLabel, "agent:" + agentName},
-		Metadata: meta,
+	beadID, err := sessionFrontDoor(store).CreateSession(sessionpkg.CreateSpec{
+		ID:        explicitID,
+		Title:     title,
+		AgentName: agentName,
+		Metadata:  meta,
 	})
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	bead, err := store.Get(beadID)
 	if err != nil {
 		return beads.Bead{}, err
 	}

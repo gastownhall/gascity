@@ -1177,12 +1177,15 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				}
 			}
 			createBead := func() (beads.Bead, error) {
-				return store.Create(beads.Bead{
-					Title:    agentName,
-					Type:     sessionBeadType,
-					Labels:   []string{sessionBeadLabel, "agent:" + agentName},
-					Metadata: meta,
+				beadID, err := sessionFrontDoor(store).CreateSession(session.CreateSpec{
+					Title:     agentName,
+					AgentName: agentName,
+					Metadata:  meta,
 				})
+				if err != nil {
+					return beads.Bead{}, err
+				}
+				return store.Get(beadID)
 			}
 			var (
 				newBead            beads.Bead
