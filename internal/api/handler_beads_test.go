@@ -804,6 +804,77 @@ func TestBeadReady(t *testing.T) {
 	}
 }
 
+// TestBeadReadyFederatesCityStore asserts that city-scope ready work surfaces
+// through GET /beads/ready. The pre-fix handler queried only the per-rig
+// BeadStores() and dropped beads that live in the city store.
+func TestBeadReadyFederatesCityStore(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	cityBead, err := state.cityBeadStore.Create(beads.Bead{Title: "city-scope ready"})
+	if err != nil {
+		t.Fatalf("Create(cityBead): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/beads/ready"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var resp struct {
+		Items []beads.Bead `json:"items"`
+		Total int          `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	found := false
+	for _, b := range resp.Items {
+		if b.ID == cityBead.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ready Items = %+v, want city bead %s", resp.Items, cityBead.ID)
+	}
+}
+
+// TestBeadReadyDedupesCityAliasedStore mirrors the production wiring where
+// BeadStores() also returns the city store keyed by CityName(). The handler
+// must surface a city-scope ready bead exactly once and must not record a
+// duplicate partial error for the doubly-federated city store.
+func TestBeadReadyDedupesCityAliasedStore(t *testing.T) {
+	state := newFakeState(t)
+	store := beads.NewMemStore()
+	state.cityBeadStore = store
+	state.stores[state.cityName] = store
+	cityBead, err := store.Create(beads.Bead{Title: "city-scope ready"})
+	if err != nil {
+		t.Fatalf("Create(cityBead): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/beads/ready"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var resp struct {
+		Items         []beads.Bead `json:"items"`
+		Total         int          `json:"total"`
+		PartialErrors []string     `json:"partial_errors"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	count := 0
+	for _, b := range resp.Items {
+		if b.ID == cityBead.ID {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("city bead %s appeared %d times in Items %+v, want exactly 1", cityBead.ID, count, resp.Items)
+	}
+	if len(resp.PartialErrors) != 0 {
+		t.Fatalf("PartialErrors = %v, want empty", resp.PartialErrors)
+	}
+}
+
 func TestBeadListInProgressUsesLiveLookup(t *testing.T) {
 	state := newFakeState(t)
 	backing := beads.NewMemStore()

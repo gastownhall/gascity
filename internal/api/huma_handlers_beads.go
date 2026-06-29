@@ -307,11 +307,18 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			all = append(all, b)
 		}
 	}
-	// The city store is NOT among the per-rig BeadStores(); city-scope ready work
-	// (graph.v2 molecules in a single-HQ city, control beads) lives there, so
-	// federate it first or HTTP `bd ready` would never surface it.
+	// City-scope ready work (graph.v2 molecules in a single-HQ city, control
+	// beads) lives in the city store, so federate it explicitly first or HTTP
+	// `bd ready` would never surface it. In production BeadStores() also returns
+	// the city store keyed by CityName() (cmd/gc/api_state.go), so skip that
+	// duplicate key in the rig loop below to avoid querying it twice.
 	federate("city", s.state.CityBeadStore())
+	cityName := s.state.CityName()
 	for _, rigName := range rigNames {
+		if rigName == cityName {
+			continue // city store already federated explicitly above; production
+			// BeadStores() also returns it under cityName (cmd/gc/api_state.go)
+		}
 		federate("rig "+rigName, stores[rigName])
 	}
 	if pa.totalOutage() {
