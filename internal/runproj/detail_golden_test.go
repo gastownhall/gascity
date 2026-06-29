@@ -10,12 +10,12 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// detailGoldenRunID is the graph.v2 run captured as the FormulaRunDetail golden;
-// it must match DETAIL_RUN_ID in the TS golden generator.
+// detailGoldenRunID is the graph.v2 run captured as the FormulaRunDetail golden
+// (rundetail_golden.json), the Go-owned reference fixture.
 const detailGoldenRunID = "dt-adopt1"
 
-// detailGoldenSnapshotVersion / detailGoldenSnapshotEventSeq mirror the generator
-// constants (snapshot_version=1, snapshot_event_seq=100) that appear verbatim in
+// detailGoldenSnapshotVersion / detailGoldenSnapshotEventSeq are the
+// snapshot_version=1 / snapshot_event_seq=100 constants that appear verbatim in
 // the golden's snapshotVersion/snapshotEventSeq.
 const (
 	detailGoldenSnapshotVersion  = 1

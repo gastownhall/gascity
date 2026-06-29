@@ -27,7 +27,9 @@ func TestEnrichRunSummaryGolden(t *testing.T) {
 	inFlight = append(inFlight, base.BlockedLanes...)
 	marks := AdvanceProgressMarks(nil, inFlight)
 
-	// Must equal ENRICHED_GENERATION_MS in gen-run-goldens.mts.
+	// Must equal the generation time frozen into runsummary_enriched_golden.json
+	// (captured from the now-retired gen-run-goldens.mts; the golden is the
+	// Go-owned source of truth).
 	nowMs := mustMillis(t, "2026-06-09T00:00:00Z")
 	enriched := EnrichRunSummary(base, sessions, true, nowMs, marks)
 

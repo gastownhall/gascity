@@ -12,26 +12,13 @@ export * from './session-id.js';
 export * from './work-in-flight.js';
 export type * from './viewing-as.js';
 export * from './agents/needsYou.js';
-export * from './runs/bead-fields.js';
+// The run-fold/graph-layout pipeline moved to Go (internal/runproj); the SPA is
+// a pure renderer of the RunSummary / FormulaRunDetail DTOs. Only these run
+// presentation helpers stay client-side: the blocked-runs selector, the
+// needs-operator accessor, and the active-lane window size.
 export * from './runs/blocked.js';
-export * from './runs/display-state.js';
-export * from './runs/edges.js';
-export * from './runs/enrich.js';
-export * from './runs/execution-instances.js';
-export * from './runs/execution-path.js';
-export * from './runs/formula-name.js';
-export * from './runs/formula-order.js';
-export * from './runs/formula-run.js';
-export * from './runs/groups.js';
 export * from './runs/health.js';
-export * from './runs/lanes.js';
-export * from './runs/liveness.js';
-export * from './runs/node-shape.js';
-export * from './runs/phaseMapping.js';
-export * from './runs/runtime-state.js';
-export * from './runs/session-link.js';
 export * from './runs/summary.js';
-export * from './runs/status.js';
 export * from './bead-id.js';
 export * from './links.js';
 export * from './links/build-link-view.js';
