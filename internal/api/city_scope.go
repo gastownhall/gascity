@@ -136,16 +136,20 @@ func cityGet[I any, O any](sm *SupervisorMux, tail string,
 // per-input-struct boilerplate.
 func cityPost[I any, O any](sm *SupervisorMux, tail string,
 	fn func(*Server, context.Context, *I) (*O, error),
+	opts ...func(o *huma.Operation),
 ) {
-	huma.Post(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn), addMutationCSRFParam)
+	huma.Post(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn),
+		append([]func(o *huma.Operation){addMutationCSRFParam}, opts...)...)
 }
 
 // cityPut is the PUT sibling of cityGet. See cityPost for the CSRF
 // header rationale.
 func cityPut[I any, O any](sm *SupervisorMux, tail string,
 	fn func(*Server, context.Context, *I) (*O, error),
+	opts ...func(o *huma.Operation),
 ) {
-	huma.Put(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn), addMutationCSRFParam)
+	huma.Put(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn),
+		append([]func(o *huma.Operation){addMutationCSRFParam}, opts...)...)
 }
 
 // cityPatch is the PATCH sibling of cityGet. See cityPost for the CSRF

@@ -277,3 +277,18 @@ type StateMutator interface {
 	// DisableOrder disables an order via overrides in city.toml.
 	DisableOrder(name, rig string) error
 }
+
+// FormulaMutator is an optional State extension for editing city-local formula
+// sources (separate TOML files under <cityRoot>/formulas, not city.toml). Like
+// StateMutator it is type-asserted by handlers, so a State that does not support
+// formula edits simply does not implement it.
+type FormulaMutator interface {
+	// FormulaSource returns the raw TOML of an editable city-local formula, or
+	// ok=false when no such source exists.
+	FormulaSource(name string) (content []byte, ok bool, err error)
+	// UpsertFormula creates or replaces a city-local formula source. Callers
+	// must validate the content first; the write is atomic and refreshes state.
+	UpsertFormula(name string, content []byte) error
+	// DeleteFormula removes a city-local formula source.
+	DeleteFormula(name string) error
+}

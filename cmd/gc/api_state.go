@@ -1233,6 +1233,45 @@ func (cs *controllerState) CreateAgent(a config.Agent) error {
 	})
 }
 
+// FormulaSource returns the raw TOML of an editable city-local formula. It is a
+// read, so it does not refresh or poke.
+func (cs *controllerState) FormulaSource(name string) ([]byte, bool, error) {
+	return cs.editor.FormulaSource(name)
+}
+
+// UpsertFormula creates or replaces a city-local formula source, then refreshes
+// the config snapshot so the new formula is re-discovered (FormulaLayers is
+// recomputed during composition) and pokes the reconciler. If the post-write
+// refresh fails, the prior on-disk source is restored so the file write does not
+// outlive a rolled-back mutation.
+func (cs *controllerState) UpsertFormula(name string, content []byte) error {
+	prior, hadPrior, _ := cs.editor.FormulaSource(name)
+	err := cs.mutateAndPoke(func() error {
+		return cs.editor.UpsertFormula(name, content)
+	})
+	if err != nil {
+		if hadPrior {
+			_ = cs.editor.UpsertFormula(name, prior)
+		} else {
+			_ = cs.editor.DeleteFormula(name)
+		}
+	}
+	return err
+}
+
+// DeleteFormula removes a city-local formula source and refreshes state. A failed
+// refresh restores the prior source.
+func (cs *controllerState) DeleteFormula(name string) error {
+	prior, hadPrior, _ := cs.editor.FormulaSource(name)
+	err := cs.mutateAndPoke(func() error {
+		return cs.editor.DeleteFormula(name)
+	})
+	if err != nil && hadPrior {
+		_ = cs.editor.UpsertFormula(name, prior)
+	}
+	return err
+}
+
 // WaitForAgentVisibility blocks until findAgent in the controller's hot-reloaded
 // config snapshot resolves the given qualified agent name. CreateAgent already
 // refreshes cs.cfg from disk, so the first check normally succeeds; the wait
