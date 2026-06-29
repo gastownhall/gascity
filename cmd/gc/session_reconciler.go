@@ -2935,6 +2935,7 @@ func firstOpenAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifier
 	if store == nil {
 		return beads.Bead{}, false, nil
 	}
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
 	seen := make(map[string]struct{}, len(identifiers))
 	for _, status := range []string{"in_progress", "open"} {
 		for _, assignee := range identifiers {
@@ -2946,7 +2947,7 @@ func firstOpenAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifier
 				continue
 			}
 			seen[key] = struct{}{}
-			items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true, TierMode: beads.TierBoth})
+			items, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
 			if err != nil {
 				return beads.Bead{}, false, err
 			}
@@ -3108,12 +3109,13 @@ func collectSessionAssignedWork(cityPath string, cfg *config.City, store beads.S
 		if s == nil {
 			return nil
 		}
+		wa := workAssignmentForStore(beads.WorkStore{Store: s})
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
 				if assignee == "" {
 					continue
 				}
-				items, err := s.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true, TierMode: beads.TierBoth})
+				items, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
 				if err != nil {
 					return err
 				}
@@ -3235,45 +3237,34 @@ func sessionHasInProgressAssignedWorkForTier(store beads.Store, assignee string,
 }
 
 func sessionHasOpenAssignedWispWork(store beads.Store, assignee, status string) (bool, error) {
-	query := beads.ListQuery{Assignee: assignee, Status: status, TierMode: beads.TierWisps}
-	if cache, ok := store.(interface {
-		CachedList(beads.ListQuery) ([]beads.Bead, bool)
-	}); ok {
-		// This positive-only probe intentionally keeps the tier-scoped cache
-		// helper: HandlesFor(...).Cached.List reads both tiers by contract.
-		if items, ok := cache.CachedList(query); ok {
-			if hasNonSessionAssignedWork(items) {
-				return true, nil
-			}
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
+	// This positive-only probe intentionally keeps the tier-scoped cache
+	// helper: HandlesFor(...).Cached.List reads both tiers by contract. The
+	// CachedList assertion lives inside the façade on the unwrapped .Store.
+	if items, ok := wa.CachedOpenAssignedWisps(assignee, status); ok {
+		if wa.HasNonSessionWork(items) {
+			return true, nil
 		}
 	}
 	return sessionHasOpenAssignedWorkForTier(store, assignee, status, beads.TierWisps, true)
 }
 
 func sessionHasReadyAssignedWorkForTier(store beads.Store, assignee string, tierMode beads.TierMode) (bool, error) {
-	items, err := beads.ReadyLive(store, beads.ReadyQuery{Assignee: assignee, TierMode: tierMode})
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
+	items, err := wa.ReadyAssignedTo(assignee, tierMode)
 	if err != nil {
 		return false, err
 	}
-	return hasNonSessionAssignedWork(items), nil
+	return wa.HasNonSessionWork(items), nil
 }
 
 func sessionHasOpenAssignedWorkForTier(store beads.Store, assignee, status string, tierMode beads.TierMode, live bool) (bool, error) {
-	items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status, Live: live, TierMode: tierMode})
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
+	items, err := wa.OpenAssignedTo(assignee, status, tierMode, live)
 	if err != nil {
 		return false, err
 	}
-	return hasNonSessionAssignedWork(items), nil
-}
-
-func hasNonSessionAssignedWork(items []beads.Bead) bool {
-	for _, item := range items {
-		if sessionpkg.IsSessionBeadOrRepairable(item) {
-			continue
-		}
-		return true
-	}
-	return false
+	return wa.HasNonSessionWork(items), nil
 }
 
 // namedSessionActivityThreshold is the maximum age of the last reliable
