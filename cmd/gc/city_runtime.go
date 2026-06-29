@@ -600,7 +600,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 
 		if cr.sessionDrains != nil {
-			cr.beadReconcileTick(ctx, result, sessionBeads, startupTrace)
+			cr.beadReconcileTick(ctx, result, sessionBeads, startupTrace, true)
 		}
 		completion = TraceCompletionCompleted
 		startupComplete = true
@@ -1245,7 +1245,7 @@ func (cr *CityRuntime) tick(
 	// Bead-driven reconciliation (requires bead store / drain tracker).
 	if cr.sessionDrains != nil {
 		phaseStart = time.Now()
-		cr.beadReconcileTick(ctx, result, sessionBeads, trace)
+		cr.beadReconcileTick(ctx, result, sessionBeads, trace, false)
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
 	}
 
@@ -2117,18 +2117,22 @@ func (cr *CityRuntime) stopConfigWatcher() {
 	}
 }
 
-// beadReconcileTick runs one reconciliation tick using the bead-driven
-// reconciler. It loads session beads from the store, uses the provided
-// desired state, and delegates to reconcileSessionBeads.
-func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStateResult, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) {
+// beadReconcileTick runs one bead-driven reconciliation pass. bootReconcile is
+// true only for the synchronous pass on the startup path: that pass must flip
+// readiness quickly, so it skips the undesired-pool-session sweep (a heavy
+// candidate × store × status × identifier bd-read fan-out that, serialized on
+// the readiness path, can exceed the startup watchdog on a heavy-session city —
+// gastownhall/gascity#3288). The first steady-state tick performs the sweep.
+func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStateResult, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle, bootReconcile bool) {
 	desiredState := result.State
 	store := cr.cityBeadStore()
 	if store == nil {
 		return
 	}
 	// Session-class ops (pool-session sweep, wait-wake state, reconcile) route
-	// through the typed session store; it wraps the same underlying store value
-	// as the work store today, so behavior is unchanged.
+	// through the typed session store (gastownhall/gascity#3773); it wraps the
+	// same underlying store value as the work store today, so behavior is
+	// unchanged.
 	sessStore := cr.sessionsBeadStore()
 	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
 		if trace != nil {
@@ -2209,21 +2213,35 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			fmt.Fprintf(cr.stderr, "scaleCheck: %s = %d\n", tmpl, count) //nolint:errcheck
 		}
 	}
-	phaseStart = time.Now()
-	if sweepUndesiredPoolSessionBeads(
-		sessStore,
-		rigStores,
-		sessionBeads,
-		desiredState,
-		cr.cfg,
-		cr.sp,
-		result.snapshotQueryPartial(),
-	) > 0 {
-		var sessionQueryPartial bool
-		sessionBeads, sessionQueryPartial = cr.loadSessionBeadSnapshotWithPartial()
-		result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
+	// #3288: defer the undesired-pool-session sweep on the boot tick. The sweep
+	// probes each sweepable candidate against the city store + N rig stores × 2
+	// statuses × identifiers, each a `bd` read (listWispsTier fires two
+	// subprocesses); serialized on the synchronous readiness path that fan-out
+	// can exceed the startup watchdog on a heavy-session city and hang boot.
+	// Skipping it on boot lets readiness flip without waiting on those reads; the
+	// first steady-state tick (fired moments later by the startup poke / patrol
+	// ticker) performs the identical sweep. Safe to defer: the sweep only closes
+	// not-running, unassigned ephemeral pool-session beads and fails closed on
+	// query error, so a few seconds of staleness cannot wrongly close live work.
+	if bootReconcile {
+		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.sweep_undesired_pool_sessions.deferred_on_boot", time.Now(), traceSessionSnapshotFields(sessionBeads))
+	} else {
+		phaseStart = time.Now()
+		if sweepUndesiredPoolSessionBeads(
+			sessStore,
+			rigStores,
+			sessionBeads,
+			desiredState,
+			cr.cfg,
+			cr.sp,
+			result.snapshotQueryPartial(),
+		) > 0 {
+			var sessionQueryPartial bool
+			sessionBeads, sessionQueryPartial = cr.loadSessionBeadSnapshotWithPartial()
+			result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
+		}
+		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.sweep_undesired_pool_sessions", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	}
-	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.sweep_undesired_pool_sessions", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	open := sessionBeads.Open()
 
 	// Use cr.cityName consistently — it's the authoritative runtime name.
@@ -2256,6 +2274,20 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
 	})
 	phaseStart = time.Now()
+	reconcileStartOptions := []startExecutionOption{
+		withAsyncStartExecution(),
+		withAsyncStartFollowUp(cr.requestAsyncStartFollowUpTick),
+		withAsyncStartLimiter(cr.ensureAsyncStartLimiter()),
+		withAsyncStartTracker(&cr.asyncStarts),
+		withAsyncDrainAckStopTracker(&cr.asyncStops),
+		withMaxSessionAgeTracker(cr.mat),
+	}
+	if bootReconcile {
+		// #3288: skip the per-session orphan/failed-create session-bead closes on
+		// the boot tick so readiness does not wait on their wisp-tier work-probe
+		// fan-out; the first steady-state tick performs them.
+		reconcileStartOptions = append(reconcileStartOptions, withDeferSessionClosesOnBoot())
+	}
 	reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,
 		cr.dops,
@@ -2267,12 +2299,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		cr.it, clock.Real{}, cr.rec, cr.cfg.Session.StartupTimeoutDuration(),
 		cr.cfg.Daemon.DriftDrainTimeoutDuration(),
 		cr.stdout, cr.stderr, trace,
-		withAsyncStartExecution(),
-		withAsyncStartFollowUp(cr.requestAsyncStartFollowUpTick),
-		withAsyncStartLimiter(cr.ensureAsyncStartLimiter()),
-		withAsyncStartTracker(&cr.asyncStarts),
-		withAsyncDrainAckStopTracker(&cr.asyncStops),
-		withMaxSessionAgeTracker(cr.mat),
+		reconcileStartOptions...,
 	)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.reconcile_sessions", phaseStart, map[string]any{
 		"open_session_count":             len(open),

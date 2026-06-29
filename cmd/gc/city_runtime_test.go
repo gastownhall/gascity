@@ -93,6 +93,99 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 }
 
+// wispBlockingStore blocks every wisp-tier read until unblocked, signaling each
+// attempt on hit. The undesired-pool-session sweep's per-candidate wisp probe
+// (sessionHasOpenAssignedWispWork -> List(TierWisps)) is the distinctive read it
+// makes; blocking only TierWisps isolates the sweep from the other boot-path
+// reads (which use TierIssues/Live), so we can prove the boot tick does NOT wait
+// on the sweep while the steady-state tick does.
+type wispBlockingStore struct {
+	beads.Store
+	block <-chan struct{}
+	hit   chan struct{}
+}
+
+func (w *wispBlockingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.TierMode == beads.TierWisps {
+		select {
+		case w.hit <- struct{}{}:
+		default:
+		}
+		<-w.block
+	}
+	return w.Store.List(q)
+}
+
+// TestCityRuntimeBeadReconcileTick_BootDoesNotBlockOnWispSweep verifies the
+// gastownhall/gascity#3288 boot-hang fix: the boot reconcile pass must NOT run
+// the undesired-pool-session sweep, whose synchronous wisp-tier read fan-out
+// (serialized over candidate × store × status × identifier) can exceed the
+// startup watchdog on a heavy-session city. With a store that blocks on every
+// wisp-tier read, the boot tick must still return promptly (sweep deferred),
+// while the first steady-state tick must reach the wisp read (sweep runs).
+func TestCityRuntimeBeadReconcileTick_BootDoesNotBlockOnWispSweep(t *testing.T) {
+	base := beads.NewMemStore()
+	bead, err := base.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-wispblock",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	block := make(chan struct{})
+	var unblockOnce sync.Once
+	unblock := func() { unblockOnce.Do(func() { close(block) }) }
+	t.Cleanup(unblock) // free any goroutine parked on a wisp read
+	store := &wispBlockingStore{Store: base, block: block, hit: make(chan struct{}, 8)}
+
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "maintainer-city",
+		cfg:                 &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		sp:                  runtime.NewFake(), // session NOT running + absent from desiredState => sweepable
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+	snap := func() *sessionBeadSnapshot { return newSessionBeadSnapshot([]beads.Bead{bead}) }
+	result := func() DesiredStateResult { return DesiredStateResult{State: map[string]TemplateParams{}} }
+
+	// Boot tick must NOT block on the wisp-tier sweep read.
+	bootDone := make(chan struct{})
+	go func() { cr.beadReconcileTick(context.Background(), result(), snap(), nil, true); close(bootDone) }()
+	select {
+	case <-bootDone:
+	case <-store.hit:
+		t.Fatal("#3288: boot reconcile attempted a wisp-tier read; the undesired-pool sweep was NOT deferred")
+	case <-time.After(10 * time.Second):
+		t.Fatal("#3288: boot reconcile blocked (~watchdog); the undesired-pool sweep was NOT deferred")
+	}
+
+	// Steady-state tick MUST reach the wisp-tier sweep read.
+	go cr.beadReconcileTick(context.Background(), result(), snap(), nil, false)
+	select {
+	case <-store.hit:
+		// good: the steady-state tick ran the sweep and reached the wisp read.
+	case <-time.After(10 * time.Second):
+		t.Fatal("steady-state reconcile did not reach the wisp-tier sweep read; sweep did not run")
+	}
+	unblock()
+}
+
 func TestPoolSweepWouldDrain(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
@@ -2905,7 +2998,7 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 		ScaleCheckCounts:  map[string]int{"worker": 0},
 		StoreQueryPartial: true,
 	}
-	cr.beadReconcileTick(context.Background(), partialResult, newSessionBeadSnapshot([]beads.Bead{session}), nil)
+	cr.beadReconcileTick(context.Background(), partialResult, newSessionBeadSnapshot([]beads.Bead{session}), nil, false)
 
 	afterPartial, err := store.Get(session.ID)
 	if err != nil {
@@ -2925,7 +3018,7 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 			workBead("ga-live", "worker", "worker-bd-123", "in_progress", 5),
 		},
 	}
-	cr.beadReconcileTick(context.Background(), recoveredResult, cr.loadSessionBeadSnapshot(), nil)
+	cr.beadReconcileTick(context.Background(), recoveredResult, cr.loadSessionBeadSnapshot(), nil, false)
 
 	afterRecovered, err := store.Get(session.ID)
 	if err != nil {
@@ -3028,7 +3121,7 @@ func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialKeepsOnlyAffectedPoolSess
 	if !result.ScaleCheckPartialTemplates["worker"] || result.ScaleCheckPartialTemplates["helper"] {
 		t.Fatalf("ScaleCheckPartialTemplates = %v, want only worker", result.ScaleCheckPartialTemplates)
 	}
-	cr.beadReconcileTick(context.Background(), result, snapshot, nil)
+	cr.beadReconcileTick(context.Background(), result, snapshot, nil, false)
 
 	if drain := cr.sessionDrains.get(worker.ID); drain != nil {
 		t.Fatalf("affected worker session was scheduled for drain: reason=%s", drain.reason)
@@ -3094,7 +3187,7 @@ func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialPreservesDormantAffectedP
 		t.Fatalf("affected dormant worker session not preserved in desired state: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
 	}
 
-	cr.beadReconcileTick(context.Background(), result, snapshot, nil)
+	cr.beadReconcileTick(context.Background(), result, snapshot, nil, false)
 
 	if drain := cr.sessionDrains.get(worker.ID); drain != nil {
 		t.Fatalf("affected dormant worker session was scheduled for drain: reason=%s", drain.reason)
@@ -3153,7 +3246,7 @@ func TestCityRuntimeBeadReconcileTick_StoreQueryPartialDoesNotReleaseAssignedWor
 		AssignedWorkBeads:  []beads.Bead{work},
 		AssignedWorkStores: []beads.Store{store},
 		StoreQueryPartial:  true,
-	}, newSessionBeadSnapshot(nil), nil)
+	}, newSessionBeadSnapshot(nil), nil, false)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -3203,7 +3296,7 @@ func TestCityRuntimeBeadReconcileTick_SessionQueryPartialDoesNotReleaseAssignedW
 		ScaleCheckCounts:   map[string]int{"worker": 0},
 		AssignedWorkBeads:  []beads.Bead{work},
 		AssignedWorkStores: []beads.Store{store},
-	}, nil, nil)
+	}, nil, nil, false)
 
 	got, err := base.Get(work.ID)
 	if err != nil {
@@ -3346,7 +3439,7 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 	}
 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{session})
-	cr.beadReconcileTick(context.Background(), result, sessionBeads, nil)
+	cr.beadReconcileTick(context.Background(), result, sessionBeads, nil, false)
 
 	got, err := store.Get(session.ID)
 	if err != nil {
@@ -3419,7 +3512,7 @@ func TestCityRuntimeBeadReconcileTick_SweepRespectsLiveAssignedWork(t *testing.T
 	}
 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{session})
-	cr.beadReconcileTick(context.Background(), result, sessionBeads, nil)
+	cr.beadReconcileTick(context.Background(), result, sessionBeads, nil, false)
 
 	got, err := store.Get(session.ID)
 	if err != nil {

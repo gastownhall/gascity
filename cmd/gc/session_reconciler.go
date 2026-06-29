@@ -1267,7 +1267,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if trace != nil {
 						trace.recordDecision("reconciler.session.close_failed_create", template, name, string(sessionpkg.StateFailedCreate), "closed", nil, nil, "")
 					}
-					if storeQueryPartial {
+					if storeQueryPartial || reconcileOpts.deferSessionClosesOnBoot {
 						continue
 					}
 					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr) {
@@ -1491,7 +1491,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if trace != nil {
 						trace.recordDecision("reconciler.session.close_orphan", template, name, reason, "closed", nil, nil, "")
 					}
-					if storeQueryPartial {
+					if storeQueryPartial || reconcileOpts.deferSessionClosesOnBoot {
 						continue
 					}
 					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, reason, clk.Now().UTC(), stderr) {

@@ -265,6 +265,15 @@ type startExecutionOptions struct {
 	asyncStopTracker *asyncStartTracker
 	maxSessionAgeTr  maxSessionAgeTracker
 	workDirResolver  taskWorkDirResolver
+	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
+	// session-bead closes during the synchronous boot reconcile. Those closes
+	// gate on a per-session open-work probe that reads the wisp tier
+	// (sessionHasOpenAssignedWispWork); serialized over every candidate on the
+	// readiness path that fan-out can exceed the startup watchdog on a
+	// heavy-session city (gastownhall/gascity#3288). The first steady-state tick
+	// performs the closes. Safe to defer: the closes already fail closed and are
+	// deferred under storeQueryPartial today.
+	deferSessionClosesOnBoot bool
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -312,6 +321,16 @@ func withMaxSessionAgeTracker(tr maxSessionAgeTracker) startExecutionOption {
 func withTaskWorkDirResolver(resolver taskWorkDirResolver) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.workDirResolver = resolver
+	}
+}
+
+// withDeferSessionClosesOnBoot defers the per-session orphan/failed-create
+// session-bead closes for this reconcile pass (gastownhall/gascity#3288). Used
+// only on the synchronous boot reconcile so readiness does not wait on the
+// per-session wisp-tier work probe; the first steady-state tick performs them.
+func withDeferSessionClosesOnBoot() startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.deferSessionClosesOnBoot = true
 	}
 }
 

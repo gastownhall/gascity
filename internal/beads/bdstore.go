@@ -2247,7 +2247,11 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	}
 	args = append(args, "--limit", strconv.Itoa(wispsLimit))
 
-	out, err := s.runner(s.dir, "bd", args...)
+	// #3288: route the wisp `bd query` through the retried/deadline-bounded
+	// transient-read path (as listViaBDList already does) so BOTH subprocesses
+	// inside listWispsTier are bounded — a bare s.runner call here would be the
+	// one unretried read on the hot tier-merge path.
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdQueryUnsupported(err) {
 			return nil, nil
