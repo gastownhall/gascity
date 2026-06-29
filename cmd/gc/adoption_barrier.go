@@ -230,13 +230,11 @@ func runAdoptionBarrier(
 		alreadyHadBead := false
 		createSessionBead := func() error {
 			meta["synced_at"] = clk.Now().UTC().Format("2006-01-02T15:04:05Z07:00")
-			_, err := store.Create(beads.Bead{
-				Title:    detail.AgentName,
-				Type:     sessionBeadType,
-				Labels:   []string{sessionBeadLabel, "agent:" + detail.AgentName},
-				Metadata: meta,
-			})
-			if err != nil {
+			if _, err := sessionFrontDoor(store).CreateSession(sessionpkg.CreateSpec{
+				Title:     detail.AgentName,
+				AgentName: detail.AgentName,
+				Metadata:  meta,
+			}); err != nil {
 				return fmt.Errorf("creating session bead for %q: %w", sessionName, err)
 			}
 			return nil

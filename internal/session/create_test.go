@@ -142,6 +142,68 @@ func TestCreateSessionByteIdenticalPoolWithExplicitID(t *testing.T) {
 	}
 }
 
+// TestCreateSessionByteIdenticalAdoptionBarrier proves CreateSession emits a
+// Create byte-identical to the raw store.Create the adoption barrier performed
+// in cmd/gc/adoption_barrier.go: no explicit ID (store-assigned), Title and
+// AgentName both the adopted agent name, the session Type, the
+// [gc:session, agent:<name>] label pair, and the barrier-assembled metadata
+// (state:"active", instance_token, synced_at, no template/pending_create_claim)
+// passed verbatim.
+func TestCreateSessionByteIdenticalAdoptionBarrier(t *testing.T) {
+	mem := beads.NewMemStore()
+	rec := beadstest.NewRecordingStore(mem)
+	is := NewInfoStore(beads.SessionStore{Store: rec})
+
+	// The metadata vocabulary runAdoptionBarrier assembles inline for an
+	// adopted running session (no template/pending_create_claim — the barrier
+	// adopts an already-live session; syncSessionBeads backfills hashes).
+	meta := map[string]string{
+		"session_name":       "tower-worker-3",
+		"state":              "active",
+		"generation":         "1",
+		"continuation_epoch": "1",
+		"instance_token":     "tok-adopt",
+		"agent_name":         "tower/worker-3",
+		"pool_slot":          "3",
+		"synced_at":          "2026-06-29T00:00:00Z",
+	}
+
+	id, err := is.CreateSession(CreateSpec{
+		Title:     "tower/worker-3",
+		AgentName: "tower/worker-3",
+		Metadata:  meta,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if id == "" {
+		t.Fatal("CreateSession returned empty id")
+	}
+
+	calls := rec.CallsForOp("Create")
+	if len(calls) != 1 {
+		t.Fatalf("want 1 Create, got %d", len(calls))
+	}
+	got := calls[0].Bead
+
+	if got.ID != "" {
+		t.Errorf("Create bead ID = %q, want empty (no explicit id)", got.ID)
+	}
+	if got.Title != "tower/worker-3" {
+		t.Errorf("Create bead Title = %q, want tower/worker-3", got.Title)
+	}
+	if got.Type != BeadType {
+		t.Errorf("Create bead Type = %q, want %q", got.Type, BeadType)
+	}
+	wantLabels := []string{LabelSession, "agent:tower/worker-3"}
+	if !reflect.DeepEqual(got.Labels, wantLabels) {
+		t.Errorf("Create bead Labels = %#v, want %#v", got.Labels, wantLabels)
+	}
+	if !reflect.DeepEqual(got.Metadata, meta) {
+		t.Errorf("Create bead Metadata = %#v, want %#v", got.Metadata, meta)
+	}
+}
+
 // TestCreateSessionReturnsAssignedID proves CreateSession returns the id the
 // underlying store assigned when no explicit ID is supplied (the create sites
 // read newBead.ID after the raw Create).
