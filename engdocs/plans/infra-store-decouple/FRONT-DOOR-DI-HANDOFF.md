@@ -1,5 +1,84 @@
 # Front-door dependency-injection — handoff
 
+> ## STATUS (updated 2026-06-29) — corrected scope model + order leaves DONE
+>
+> **Done this pass (committed on `upstream/object-front-doors`, build+vet+order-suite green):**
+> - **Order object — order-only leaves injected.** `dispatchExec` (controller
+>   path) and `doOrderRunExecTracked` (CLI path) now take `*orders.Store` instead
+>   of a raw store; the front door is constructed by their MIXED/ROOT callers
+>   (`dispatchOne`, `cmdOrderRun`/`doOrderRunWithJSON`) and passed in. 6+2 test
+>   sites updated. Byte-identical (front built from the same store at each site).
+> - **Full call-tree analysis.** All 22 session/order/nudge call-tree files were
+>   classified by a read-only workflow into `raw/frontdoor-di-map.json`
+>   (254 functions): **55 SESSION_ONLY, 10 NUDGE_ONLY, 5 ORDER_ONLY, 73 MIXED,
+>   74 RAW_BY_DESIGN, 37 ROOT.** Use this map to drive the remaining conversions.
+>
+> **CORRECTED MODEL (supersedes the "every call-tree function takes its front
+> door / no `beads.Store` param" framing below).** The type-enforcement benefit —
+> a function being *unable* to do a raw bead op on a non-work object — only
+> exists for a function that becomes **store-free**. That is achievable ONLY for
+> the **`*_ONLY` functions** (store used solely for one object class). Convert
+> those: `store beads.Store` → the typed front door (`*session.InfoStore` /
+> `*orders.Store` / `*nudgequeue.Store`).
+>
+> A **MIXED** function legitimately keeps its raw `store` for the work / by-id /
+> federation / graph residual, so injecting a front door into it gives **zero**
+> enforcement (it still holds `store`) and is pure caller churn. MIXED functions
+> should **keep `store` and construct the typed front door inline from it** —
+> `orders.NewStore(store).CreateRun(...)` is the front door being *used*, NOT a
+> raw-bead leak. So **do not add front-door params to MIXED functions.** They are
+> guard *allowances*, exactly like the documented raw-by-design exceptions.
+> ROOTs construct the front door once and pass it to the `*_ONLY` leaves.
+>
+> **Proven pattern (from the order slice — apply per object):**
+> 1. Convert each `*_ONLY` leaf: drop the raw store param, take the typed front door.
+> 2. At each caller (MIXED or ROOT): it already holds the store → construct the
+>    front door inline (`orders.NewStore(store)` / `session.NewInfoStore(sessStore)`
+>    / `nudgeFrontDoor(store)`) and pass it. Construct ONCE per root where possible.
+> 3. Update test call sites (wrap the store arg in the front-door constructor).
+> 4. `go build ./...`, run that object's suite (the byte-identical oracle),
+>    `git checkout go.sum`, commit `--no-verify`.
+>
+> **Remaining work (by object, with the map):**
+> - **SESSION (55 SESSION_ONLY — the bulk).** Construct `sessions :=
+>   session.NewInfoStore(sessStore)` at the reconciler root
+>   `reconcileSessionBeadsTracedWithNamedDemand` (`session_reconciler.go:969`,
+>   right after `store := sessStore.Store` — the session class already enters
+>   typed as `beads.SessionStore` there). Thread `sessions` to the SESSION_ONLY
+>   leaves; CLI command roots (`cmd_session*.go`, `cmd_wait.go`, `cmd_stop.go`,
+>   `cmd_handoff.go`, `cmd_prime.go`) construct `sessionFrontDoor(store)` at the
+>   command entry (an allowed root). The call graph is **dense** (e.g. converting
+>   `session_circuit_breaker.go` ripples into `controller.go`,
+>   `cmd_session_reset.go`, `session_bead_cycle.go`, `session_lifecycle_parallel.go`,
+>   the reconciler), so this is a focused near-all-at-once pass, compiler-driven.
+>   Contained starter clusters (few callers, 0 test churn): `markDrainAckStopPending`
+>   (2 reconciler callers), `boundedNamedSessionConfigDriftDeferral` (2). MIXED
+>   reconciler funcs keep `store` + inline-construct `sessions` as needed.
+> - **NUDGE (10 NUDGE_ONLY).** Convert to `*nudgequeue.Store`, BUT mind the
+>   byte-identical caveats: `pruneDeadQueuedNudges` reads `store.Store == nil` as a
+>   data-loss guard (keep it raw / MIXED, or add a front-door nil probe);
+>   `findQueuedNudgeBead`/`findAnyQueuedNudgeBead` have **0 production callers**
+>   (test-only raw-bead inspectors — low priority); `markQueuedNudgeTerminal` has
+>   **9 production callers** (wide ripple). Construct the front door at the
+>   poll-loop / `withNudgeQueueState` roots; the front-door methods stay callable
+>   inside the flock transaction.
+> - **ORDER.** Leaves done. The `doOrderHistory*` resolver funcs are optional
+>   (resolver roots). `dispatchWisp`/`doOrderRunWithJSON` are MIXED — leave.
+>
+> **Arch guard (Phase 5) — honest scoping.** Most deep files contain BOTH
+> `*_ONLY` and MIXED funcs, so a coarse file-scan (à la
+> `worker_boundary_import_test.go`) can only fully guard the files that became
+> *entirely* store-free (e.g. `session_circuit_breaker.go` once converted). For
+> those files, forbid `beads.Store`/`beads.SessionStore`/`beads.OrdersStore`
+> params and the inline constructors (`sessionFrontDoor(`/`orders.NewStore(`/
+> `nudgeFrontDoor(`/`workAssignment{`). Mixed/root files are allowances. A finer
+> guard would need an AST check; document whichever is chosen.
+>
+> Everything below is the original plan; treat its "no `beads.Store` param
+> anywhere" goal through the corrected MIXED lens above.
+
+---
+
 **Goal:** make the no-raw-bead-poking-of-non-work-objects boundary **type-enforced**
 instead of discipline-enforced, by constructing each domain front door **once** at the
 composition root and **passing it in place of the raw store** to the functions that
