@@ -1,8 +1,11 @@
 package main
 
 import (
+	"strings"
+
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -102,4 +105,74 @@ func (w workAssignment) HasNonSessionWork(items []beads.Bead) bool {
 		return true
 	}
 	return false
+}
+
+// OpenAssignedToBasic returns the WORK beads assigned to the given identity with
+// the given status, using the no-flags List{Assignee,Status} query (no Live, no
+// TierMode). It is the typed form of the raw probe in
+// releaseWorkFromClosedSessionBead, kept distinct from OpenAssignedTo because the
+// close-release path deliberately runs the unflagged query — making it byte-
+// identical to OpenAssignedTo's flagged query would change the emitted bead op.
+func (w workAssignment) OpenAssignedToBasic(assignee, status string) ([]beads.Bead, error) {
+	store := w.unwrapped()
+	if store == nil {
+		return nil, nil
+	}
+	return store.List(beads.ListQuery{Assignee: assignee, Status: status})
+}
+
+// ReleaseWorkBead detaches one WORK bead from its (closed/retired) session: it
+// clears the assignee (empty-string clear), clears stale session-affinity
+// metadata, and resets an in_progress bead to open so a fresh worker can
+// re-claim it via the routed queue. When runTargetFallback is non-empty AND the
+// bead carries neither run_target nor routed_to, the fallback route is stamped so
+// the reopened work stays reachable by the controller demand query. It emits the
+// exact beads.UpdateOpts the raw release ops in releaseWorkFromClosedSessionBead
+// and unclaimWorkAssignedToRetiredSessionBead emitted (proven byte-identical by
+// the recording-fake write tests). Pass runTargetFallback="" for the close-
+// release path, which never stamps a fallback.
+func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback string) error {
+	store := w.unwrapped()
+	if store == nil {
+		return nil
+	}
+	empty := ""
+	update := beads.UpdateOpts{
+		Assignee: &empty,
+		Metadata: withClearedSessionAffinityMetadata(nil),
+	}
+	if item.Status == "in_progress" {
+		open := "open"
+		update.Status = &open
+	}
+	if runTargetFallback != "" &&
+		strings.TrimSpace(item.Metadata[beadmeta.RunTargetMetadataKey]) == "" &&
+		strings.TrimSpace(item.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
+		update.Metadata[beadmeta.RunTargetMetadataKey] = runTargetFallback
+	}
+	return store.Update(item.ID, update)
+}
+
+// ReassignWorkBead re-homes one WORK bead onto a new session identity, emitting
+// the exact Update{Assignee:&new} the raw reassign op in
+// reassignWorkAssignedToRetiredSessionBead emitted. It deliberately touches
+// neither Status nor Metadata.
+func (w workAssignment) ReassignWorkBead(beadID, newSessionID string) error {
+	store := w.unwrapped()
+	if store == nil {
+		return nil
+	}
+	return store.Update(beadID, beads.UpdateOpts{Assignee: &newSessionID})
+}
+
+// ClearDetachedProbe clears the detached-probe metadata contract on a WORK bead,
+// emitting SetMetadata(id, gc.detached, "") — the empty-string clear semantics
+// the raw clearDetachedProbeMetadata op used. Best-effort: a nil store or empty
+// id is a no-op, and a write error is returned for the caller to log.
+func (w workAssignment) ClearDetachedProbe(beadID string) error {
+	store := w.unwrapped()
+	if store == nil || beadID == "" {
+		return nil
+	}
+	return store.SetMetadata(beadID, beadmeta.DetachedMetadataKey, "")
 }
