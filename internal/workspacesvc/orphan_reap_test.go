@@ -288,8 +288,18 @@ func TestUnsafeSignalTarget(t *testing.T) {
 			t.Errorf("unsafeSignalTarget(%d) = false, want true", pid)
 		}
 	}
-	if pid := syscall.Getpgrp() + 1; unsafeSignalTarget(pid) {
-		t.Errorf("unsafeSignalTarget(%d) = true for an ordinary pid, want false", pid)
+	// An ordinary pid — positive, not init, not the sweeper's own group — must
+	// be allowed. Derive it from the current group but force it past the pid<=1
+	// init guard: inside a fresh PID namespace (e.g. the CI bwrap sandbox)
+	// Getpgrp() can be 0, so a bare Getpgrp()+1 would be 1 and collide with that
+	// guard. The bumped value stays != Getpgrp() (0 vs 2), so it is genuinely
+	// ordinary.
+	ordinary := syscall.Getpgrp() + 1
+	if ordinary <= 1 {
+		ordinary = 2
+	}
+	if unsafeSignalTarget(ordinary) {
+		t.Errorf("unsafeSignalTarget(%d) = true for an ordinary pid, want false", ordinary)
 	}
 }
 

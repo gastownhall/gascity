@@ -29,6 +29,7 @@ func repoRoot() string {
 //   - internal/beads/ — that's where bd calls belong
 //   - test/integration/ — integration tests may use real bd for setup
 //   - Config defaults returning bd command templates (WorkQuery, SlingQuery)
+//     and command-name token consts (bdReadyOracleCommand = "bd ready")
 //   - Test fixture data (map keys, runner output, assertions)
 //   - Binary existence checks (LookPath)
 //   - Provider comparisons (== "bd", != "bd")
@@ -165,6 +166,15 @@ func isBdCommandAssignment(trimmed string) bool {
 	// commands for the SlingRunner pattern — architectural, not direct exec).
 	if strings.Contains(trimmed, "Errorf") || strings.Contains(trimmed, "Fprint") ||
 		strings.Contains(trimmed, "Sprintf") {
+		return false
+	}
+	// Category 2 targets commands BUILT for shell execution — dynamic arguments
+	// concatenated onto a "bd " prefix (cmd := "bd mol cook --formula=" + name).
+	// A complete standalone literal with no concatenation is a command-name
+	// token or config default (e.g. bdReadyOracleCommand = "bd ready", the
+	// ready-oracle template used for query rewriting), which this invariant
+	// explicitly allows — so require a concatenation before flagging.
+	if !strings.Contains(trimmed, "+") {
 		return false
 	}
 	return true
