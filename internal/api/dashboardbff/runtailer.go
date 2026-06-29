@@ -3,6 +3,7 @@ package dashboardbff
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
 )
@@ -101,6 +103,8 @@ type cityRunTailer struct {
 	mu      sync.RWMutex
 	summary runproj.RunSummary
 	marks   map[string]runproj.LaneProgressMark
+	beads   []beads.Bead
+	lastSeq uint64
 	ready   bool
 }
 
@@ -180,12 +184,58 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 	inFlight = append(inFlight, summary.BlockedLanes...)
 	marks := runproj.AdvanceProgressMarks(prevMarks, inFlight)
 
+	// Publish the deterministic warm bead slice + fold cursor alongside the
+	// summary so the detail endpoint can project any one run off the same warm
+	// projection (BuildRunDetail does its own member selection). proj.Beads()
+	// returns a fresh first-seen-ordered slice; the bead values are immutable
+	// after decode, so the snapshot is safe to read concurrently.
+	beadSlice := proj.Beads()
+	lastSeq := proj.LastSeq()
+
 	t.mu.Lock()
 	t.summary = summary
 	t.marks = marks
+	t.beads = beadSlice
+	t.lastSeq = lastSeq
 	t.ready = true
 	t.mu.Unlock()
 	return marks
+}
+
+// runDetailSnapshotVersion is the synthesized run-snapshot shape version the
+// bead-derived detail projection emits (the OSS-local analog of the supervisor's
+// snapshot_version). It matches the golden generator's snapshot_version.
+const runDetailSnapshotVersion = 1
+
+// detail projects one run into the run-detail DTO off the warm bead snapshot,
+// layering request-time session links from one loopback /v0 sessions read. It
+// waits briefly for the cold replay on a city's first request, like
+// enrichedSummary. The bool reports whether the cold replay had completed (a
+// not-found run during warming is reported as warming, not a hard 404).
+func (t *cityRunTailer) detail(ctx context.Context, runID string) (runproj.FormulaRunDetail, bool, error) {
+	select {
+	case <-t.readyCh:
+	case <-ctx.Done():
+	case <-time.After(runColdLoadWait):
+	}
+
+	t.mu.RLock()
+	beadSlice := t.beads
+	lastSeq := t.lastSeq
+	ready := t.ready
+	t.mu.RUnlock()
+
+	sessions, sessionsAvailable := t.mgr.fetchSessions(ctx, t.name)
+	var (
+		d   runproj.FormulaRunDetail
+		err error
+	)
+	if sessionsAvailable {
+		d, err = runproj.BuildRunDetailWithSessions(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq), sessions)
+	} else {
+		d, err = runproj.BuildRunDetail(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq))
+	}
+	return d, ready, err
 }
 
 // enrichedSummary returns the warm bead-derived summary with request-time
@@ -268,6 +318,46 @@ func (p *Plane) registerRunSummary() {
 			return
 		}
 		writeJSON(w, http.StatusOK, t.enrichedSummary(r.Context()))
+	})
+}
+
+// runDetailErrorBody carries an UnsupportedRunError's reason to the SPA, which
+// renders 'not_run_view' (an honest list-only run) differently from
+// 'invalid_snapshot' (a genuine load failure). Typed like the other plane wire
+// shapes (it extends the shared { error } body with the discriminating reason).
+type runDetailErrorBody struct {
+	Error  string `json:"error"`
+	Reason string `json:"reason"`
+}
+
+func (p *Plane) registerRunDetail() {
+	p.mux.HandleFunc("GET /api/city/{cityName}/runs/{runId}/detail", func(w http.ResponseWriter, r *http.Request) {
+		t, ok := p.cityRunTailer(r.PathValue("cityName"))
+		if !ok {
+			writeError(w, http.StatusNotFound, "unknown city")
+			return
+		}
+		detail, ready, err := t.detail(r.Context(), r.PathValue("runId"))
+		if err != nil {
+			var unsupported *runproj.UnsupportedRunError
+			if errors.As(err, &unsupported) {
+				writeJSON(w, http.StatusUnprocessableEntity, runDetailErrorBody{
+					Error:  unsupported.Message,
+					Reason: string(unsupported.Reason),
+				})
+				return
+			}
+			// The run root is absent from the warm projection. While the cold replay
+			// is still in flight the fold may be incomplete, so report warming (the
+			// client retries) rather than a hard 404 for a run that may yet appear.
+			if !ready {
+				writeError(w, http.StatusServiceUnavailable, "run view is warming")
+				return
+			}
+			writeError(w, http.StatusNotFound, "unknown run")
+			return
+		}
+		writeJSON(w, http.StatusOK, detail)
 	})
 }
 

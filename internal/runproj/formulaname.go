@@ -1,6 +1,9 @@
 package runproj
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // resolveRunFormulaIdentityLane resolves a run group's formula name for the
 // "lane" mode used by the summary builder. Faithful port of the lane path
@@ -74,7 +77,23 @@ func isTerminalRunRootStatus(status string) bool {
 }
 
 // nonEmpty trims a value and returns "" for empty/whitespace. Port of TS
-// nonEmpty (bead-fields.ts).
+// nonEmpty (bead-fields.ts), which trims the ECMAScript String.prototype.trim()
+// whitespace set. That set differs from Go's unicode.IsSpace in exactly two
+// codepoints with opposite membership: JS strips U+FEFF (ZWNBSP/BOM) but NOT
+// U+0085 (NEL). jsTrimCut applies that delta so the trim is byte-faithful.
 func nonEmpty(value string) string {
-	return strings.TrimSpace(value)
+	return strings.TrimFunc(value, jsTrimCut)
+}
+
+// jsTrimCut reports whether r is in the ECMAScript String.prototype.trim()
+// whitespace set: unicode.IsSpace, minus U+0085, plus U+FEFF.
+func jsTrimCut(r rune) bool {
+	switch r {
+	case '\u0085': // NEL: Go's unicode.IsSpace trims it, JS does not.
+		return false
+	case '\ufeff': // ZWNBSP/BOM: JS trims it, Go's unicode.IsSpace does not.
+		return true
+	default:
+		return unicode.IsSpace(r)
+	}
 }
