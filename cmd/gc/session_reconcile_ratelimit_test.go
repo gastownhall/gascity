@@ -370,7 +370,7 @@ func TestCheckStability_TerminalErrorScreen_MarksTerminalNotCrash(t *testing.T) 
 		return "model_not_found: gpt-5.3-codex-spark", nil
 	}
 
-	if !checkStability(&session, nil, false, dt, store, clk, peek) {
+	if !checkStability(&session, nil, false, dt, sessionFrontDoor(store), clk, peek) {
 		t.Fatal("checkStability should return true when it records a terminal provider error")
 	}
 	if got := session.Metadata["wake_attempts"]; got != "3" {
