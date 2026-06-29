@@ -2,7 +2,6 @@ package orders
 
 import (
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -21,11 +20,13 @@ import (
 //   - created-then-closed-immediately == cooldown-advance-only.
 //   - reads union the two tiers (wisps + issues) — TierBoth.
 //
-// PHASE 0 STATUS: the types + Store wrapper + method SIGNATURES are the
-// contract; the trivial/exact methods (CreateRun, SetOutcome, SetCursor,
-// CloseRun, LastRun, EventCursor) are implemented to emit byte-identical bead
-// writes to the raw ops they replace. Production call sites in order_dispatch.go
-// / cmd_order.go are routed in Phase 3.
+// The Store methods (CreateRun, CreateRunClosed, SetOutcome, SetCursor,
+// CloseRun, RecentRuns) emit byte-identical bead writes to the raw ops they
+// replace and are wired into order_dispatch.go / cmd_order.go. The cooldown
+// clock (last-run) and event-cursor READS the dispatch gate uses go through the
+// runtime helpers (LastRunFuncForStore/CursorFuncForStore and their
+// *AcrossStores forms), which the in-memory tracking index batches per store —
+// see cmd/gc/order_dispatch.go.
 
 // Order-class label constants. These MUST stay in sync with the canonical
 // declarations in cmd/gc/order_dispatch.go and the private mirrors in
@@ -247,11 +248,10 @@ func (s *Store) CreateRunClosed(scoped string, outcome RunOutcome, cursor *Event
 
 // RecentRuns lists the tracking/order-run beads for scoped newest-first
 // (including closed), decoded into OrderRun values. It is the typed face of the
-// `gc order history` read: it confines the order-run-label List and the
-// bead->OrderRun decode. It reads through the raw store with TierMode TierBoth
-// (unioning wisp + issue tiers), byte-identical to the `gc order history` loop
-// and the LastRun/EventCursor runtime helpers — NOT through Live.List, which the
-// open-work gate (OpenTracking) uses instead.
+// `gc order history` read (cmd_order.go): it confines the order-run-label List
+// and the bead->OrderRun decode. It reads through the raw store with TierMode
+// TierBoth (unioning wisp + issue tiers), byte-identical to the `gc order
+// history` loop.
 func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
@@ -267,46 +267,6 @@ func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
 		return decodeRuns(scoped, beadsList), err
 	}
 	return decodeRuns(scoped, beadsList), nil
-}
-
-// OpenTracking returns the OPEN tracking beads for scoped, decoded into
-// OrderRun values. An open tracking bead is the single-flight in-flight marker.
-// It is the typed face of listCanonicalOpenOrderTrackingBeads filtered to the
-// scoped order's order-run label.
-func (s *Store) OpenTracking(scoped string) ([]OrderRun, error) {
-	if s.store.Store == nil {
-		return nil, nil
-	}
-	beadsList, err := beads.HandlesFor(s.store.Store).Live.List(beads.ListQuery{
-		Label:    labelOrderRunPrefix + scoped,
-		Status:   "open",
-		Sort:     beads.SortCreatedDesc,
-		TierMode: beads.TierBoth,
-	})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]OrderRun, 0, len(beadsList))
-	for _, b := range beadsList {
-		if !beadLabelsContain(b.Labels, labelOrderTracking) {
-			continue
-		}
-		out = append(out, decodeRun(scoped, b))
-	}
-	return out, nil
-}
-
-// HasOpenWork reports whether any open tracking bead exists for scoped — the
-// single-flight gate that suppresses repeat dispatch while a run is in flight.
-// It only counts order-tracking beads (not wisp roots); the dispatcher's
-// wisp-aware open-work gate (hasOpenWorkStrict) layers descendant checks on top
-// and stays in cmd/gc.
-func (s *Store) HasOpenWork(scoped string) (bool, error) {
-	open, err := s.OpenTracking(scoped)
-	if err != nil {
-		return false, err
-	}
-	return len(open) > 0, nil
 }
 
 // decodeRun projects an order tracking/run bead onto an OrderRun. It is pure,
@@ -365,65 +325,3 @@ func beadLabelsContain(labels []string, want string) bool {
 	return false
 }
 
-// RecentRunsAcrossStores unions RecentRuns across a set of order stores,
-// returning the merged runs newest-first. It is the federated face of the
-// multi-scope `gc order history` read (city + per-rig). Each store is queried
-// independently; a partial failure returns the runs collected so far with the
-// error so the caller can degrade gracefully like the raw loop did.
-func RecentRunsAcrossStores(scoped string, limit int, stores ...beads.OrdersStore) ([]OrderRun, error) {
-	var all []OrderRun
-	for _, store := range stores {
-		if store.Store == nil {
-			continue
-		}
-		runs, err := NewStore(store).RecentRuns(scoped, limit)
-		all = append(all, runs...)
-		if err != nil {
-			return all, err
-		}
-	}
-	sortRunsCreatedDesc(all)
-	return all, nil
-}
-
-// EventCursorAcrossStores returns the max event-bus seq for scoped across a set
-// of order stores. It is the federated face of bdCursorAcrossStores.
-func EventCursorAcrossStores(scoped string, stores ...beads.OrdersStore) (EventCursor, error) {
-	var maxCur EventCursor
-	for _, store := range stores {
-		if store.Store == nil {
-			continue
-		}
-		cur, err := NewStore(store).EventCursor(scoped)
-		if err != nil {
-			return 0, err
-		}
-		if cur > maxCur {
-			maxCur = cur
-		}
-	}
-	return maxCur, nil
-}
-
-func sortRunsCreatedDesc(runs []OrderRun) {
-	sort.SliceStable(runs, func(i, j int) bool {
-		return runs[i].CreatedAt.After(runs[j].CreatedAt)
-	})
-}
-
-// LastRun returns the cooldown clock: the CreatedAt of the most recent
-// tracking/order-run bead for scoped across both tiers, and whether one exists.
-// It is the typed face of LastRunFuncForStore.
-func (s *Store) LastRun(scoped string) (time.Time, bool, error) {
-	ts, err := LastRunFuncForStore(s.store.Store)(scoped)
-	if err != nil {
-		return time.Time{}, false, err
-	}
-	return ts, !ts.IsZero(), nil
-}
-
-// EventCursor returns the max event-bus seq for scoped across both tiers. It is
-// the typed face of CursorFuncForStore, confining MaxSeqFromLabels inside.
-func (s *Store) EventCursor(scoped string) (EventCursor, error) {
-	return EventCursor(CursorFuncForStore(s.store.Store)(scoped)), nil
-}

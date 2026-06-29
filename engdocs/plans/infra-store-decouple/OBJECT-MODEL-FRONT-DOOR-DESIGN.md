@@ -482,6 +482,44 @@ cleanup.** Only if parity is desired. Promote graph DAG walks to typed reads;
 route the order-tracking sweep/backlog reads (`city_runtime.go:1481`) through the
 orders front door.
 
+**Phase 7 — DONE (scaffold cleanup pass).** The order front-door scaffold left
+four exported symbols with no non-test caller. They were removed rather than
+wired, because wiring could not be byte-identical:
+
+- `Store.OpenTracking` / `Store.HasOpenWork` did a per-scoped `Live.List`. The
+  dispatch open-work gate (`cmd/gc/order_dispatch.go`
+  `orderDispatchTrackingIndex.hasOpenTracking`/`hasOpenWork`) deliberately
+  batches *all* scoped orders per store into one query and layers a wisp-aware
+  descendant check on top (`hasOpenWorkStrict`); the per-scoped methods would
+  reintroduce the N-serial-query pattern #3201/#3191/#3197 eliminated.
+- `RecentRunsAcrossStores` could not replace the `gc order history` loop
+  (`cmd_order.go`) byte-identically: that loop preserves per-store error
+  semantics (`i == 0 && len(results) == 0`), dedups by
+  `scoped\x00id\x00createdAt`, and retains per-order `Name`/`Rig` attribution
+  the single-`scoped` free func discards.
+- `EventCursorAcrossStores` (and the `Store.EventCursor`/`Store.LastRun` methods
+  it kept alive) duplicated `CursorAcrossStores`/`LastRunAcrossStores`, which are
+  already the production cooldown/cursor read path; the dead variant even queried
+  a different label (`order:` vs `order-run:`), so it was not equivalent to
+  `bdCursorAcrossStores`.
+
+The wired-and-kept order front door is `CreateRun`/`CreateRunClosed`/
+`SetOutcome`/`SetCursor`/`CloseRun`/`RecentRuns`.
+
+**Permanent raw-by-design exceptions (NOT leaks, do not "front-door"):**
+
+1. The dispatch open-work gate's in-memory tracking index
+   (`orderDispatchTrackingIndex`) — a performance-critical batched read, not a
+   per-attribute op.
+2. The cooldown/cursor runtime helpers (`LastRunFuncForStore`,
+   `CursorFuncForStore`, and their `*AcrossStores` forms) — the production
+   gate-read path.
+3. The order-tracking sweep/backlog reads (`order_dispatch.go` sweeps,
+   `city_runtime.go:1481` `warnIfClosedOrderTrackingBacklog`) — distinct
+   tier/error semantics; left raw deliberately.
+4. The session reconciler close-gate re-read at `session_reconciler.go:342` — a
+   full status/metadata resync left raw BY DESIGN.
+
 ---
 
 ## 8. Invariants to preserve
