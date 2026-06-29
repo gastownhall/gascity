@@ -211,7 +211,9 @@ func TestWorkAssignmentWrite_NilStoreSafe(t *testing.T) {
 	if err := wa.ReassignWorkBead("x", "y"); err != nil {
 		t.Fatalf("nil store ReassignWorkBead: %v", err)
 	}
-	wa.ClearDetachedProbe("x") // must not panic
+	if err := wa.ClearDetachedProbe("x"); err != nil { // must not panic
+		t.Fatalf("nil store ClearDetachedProbe: %v", err)
+	}
 	if _, err := wa.OpenAssignedToBasic("a", "open"); err != nil {
 		t.Fatalf("nil store OpenAssignedToBasic: %v", err)
 	}

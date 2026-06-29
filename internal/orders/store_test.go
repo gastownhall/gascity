@@ -230,4 +230,3 @@ func TestRecentRunsReadsHistory(t *testing.T) {
 		}
 	}
 }
-

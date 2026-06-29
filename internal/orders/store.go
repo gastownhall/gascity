@@ -324,4 +324,3 @@ func beadLabelsContain(labels []string, want string) bool {
 	}
 	return false
 }
-
