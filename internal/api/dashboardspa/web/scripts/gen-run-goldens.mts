@@ -24,10 +24,18 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
-import { buildRunSummary } from '../shared/src/runs/summary.js';
+import { buildRunSummary, runCounts } from '../shared/src/runs/summary.js';
 import { fromDashboardBead } from '../shared/src/runs/phaseMapping.js';
 import { enrichFormulaRun } from '../shared/src/runs/enrich.js';
+import {
+  advanceProgressMarks,
+  buildCensus,
+  deriveRunHealth,
+  type LaneProgressMark,
+} from '../shared/src/runs/health.js';
+import { isStaleSessionlessLatch } from '../shared/src/runs/liveness.js';
 import type { DashboardBead } from '../shared/src/dashboard-beads.js';
+import type { DashboardSession } from '../shared/src/dashboard-sessions.js';
 import type { RunSnapshot, RunSnapshotBead } from '../shared/src/run-snapshot.js';
 import type { FormulaRunDetail } from '../shared/src/run-detail.js';
 import type { RunSummary } from '../shared/src/snapshot/types.js';
@@ -35,11 +43,18 @@ import type { RunSummary } from '../shared/src/snapshot/types.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const testdataDir = resolve(here, '../../../../runproj/testdata');
 const fixturePath = resolve(testdataDir, 'beads_fixture.json');
+const sessionsFixturePath = resolve(testdataDir, 'sessions_fixture.json');
 const summaryGoldenPath = resolve(testdataDir, 'runsummary_golden.json');
+const enrichedGoldenPath = resolve(testdataDir, 'runsummary_enriched_golden.json');
 const detailGoldenPath = resolve(testdataDir, 'rundetail_golden.json');
 
 // The graph.v2 run captured as the FormulaRunDetail golden.
 const DETAIL_RUN_ID = 'dt-adopt1';
+
+// Fixed snapshot-generation time for the enriched golden: the stale-session-less
+// latch demotion judges age against this, not a live clock, so the golden is
+// deterministic. The Go enrich test parses the same instant.
+const ENRICHED_GENERATION_MS = Date.parse('2026-06-09T00:00:00.000Z');
 
 /**
  * The `beads.Bead` event-payload JSON shape (internal/beads/beads.go). Only the
@@ -190,6 +205,52 @@ function buildSummaryGolden(beads: BeadPayload[]): RunSummary {
   return buildRunSummary(issues);
 }
 
+function loadSessions(): DashboardSession[] {
+  const raw = readFileSync(sessionsFixturePath, 'utf8');
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error(`sessions_fixture.json must be a JSON array, got ${typeof parsed}`);
+  }
+  return parsed as DashboardSession[];
+}
+
+/**
+ * The bead-derived summary with session enrichment layered on, captured as the
+ * oracle for the Go EnrichRunSummary port. This replicates the frontend
+ * enrichRunSummary composition (supervisor/runSummary.ts) for a single snapshot:
+ * a cold mark advance (no prior generation), deriveRunHealth against a fixture
+ * sessions list (sessionsAvailable: true), the blocked-lane split, the
+ * stale-session-less-latch demotion at a fixed generation time, then recomputed
+ * counts and census. The per-city progressStateByCity gating is a multi-call
+ * frontend concern that, for one generation from empty marks, reduces to a single
+ * advanceProgressMarks — exactly what the per-city tailer does server-side.
+ */
+function buildEnrichedGolden(beads: BeadPayload[], sessions: DashboardSession[]): RunSummary {
+  const base = buildSummaryGolden(beads);
+  const inFlight = [...base.lanes, ...base.blockedLanes];
+  const marks = advanceProgressMarks(new Map<string, LaneProgressMark>(), inFlight);
+  const { lanes } = deriveRunHealth({
+    lanes: inFlight,
+    sessions,
+    sessionsAvailable: true,
+    marks,
+  });
+  const blockedLanes = lanes.filter((lane) => lane.phase === 'blocked');
+  const activeEnriched = lanes.filter((lane) => lane.phase !== 'blocked');
+  const liveActive = activeEnriched.filter(
+    (lane) => !isStaleSessionlessLatch(lane, ENRICHED_GENERATION_MS, true),
+  );
+  const census = buildCensus([...liveActive, ...blockedLanes]);
+  return {
+    ...base,
+    totalActive: liveActive.length,
+    lanes: liveActive,
+    blockedLanes,
+    runCounts: runCounts(liveActive, liveActive.length, blockedLanes.length),
+    census: { status: 'available', data: census },
+  };
+}
+
 function buildDetailGolden(beads: BeadPayload[]): FormulaRunDetail {
   const snapshot = snapshotForRun(beads, DETAIL_RUN_ID);
   // No sessions / no formulaDetail: capture the BEAD-DERIVED detail only, so the
@@ -204,14 +265,17 @@ function stableJson(value: unknown): string {
 function main(): void {
   const check = process.argv.includes('--check');
   const beads = loadFixture();
+  const sessions = loadSessions();
 
   const summary = stableJson(buildSummaryGolden(beads));
+  const enriched = stableJson(buildEnrichedGolden(beads, sessions));
   const detail = stableJson(buildDetailGolden(beads));
 
   if (check) {
     const drift: string[] = [];
     for (const [path, next] of [
       [summaryGoldenPath, summary],
+      [enrichedGoldenPath, enriched],
       [detailGoldenPath, detail],
     ] as const) {
       let current = '';
@@ -232,8 +296,10 @@ function main(): void {
   }
 
   writeFileSync(summaryGoldenPath, summary);
+  writeFileSync(enrichedGoldenPath, enriched);
   writeFileSync(detailGoldenPath, detail);
   console.log(`wrote ${summaryGoldenPath}`);
+  console.log(`wrote ${enrichedGoldenPath}`);
   console.log(`wrote ${detailGoldenPath}`);
 }
 

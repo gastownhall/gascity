@@ -1,0 +1,40 @@
+[
+  {
+    "id": "sess-polecat-1",
+    "template": "polecat",
+    "session_name": "gascity-packs__polecat-1",
+    "title": "Polecat 1",
+    "alias": "polecat-1",
+    "state": "active",
+    "display_name": "Claude Code",
+    "created_at": "2026-06-01T10:00:00Z",
+    "last_active": "2026-06-01T12:29:30Z",
+    "attached": false,
+    "rig": "gascity-packs",
+    "pool": "polecats",
+    "agent_kind": "pool",
+    "running": true,
+    "model": "claude-opus-4-8",
+    "activity": "tool_use",
+    "provider": "claude"
+  },
+  {
+    "id": "sess-ralph-3",
+    "template": "ralph",
+    "session_name": "demo-app__ralph-3",
+    "title": "Ralph 3",
+    "alias": "ralph-3",
+    "state": "active",
+    "display_name": "Codex",
+    "created_at": "2026-06-02T00:00:00Z",
+    "last_active": "2026-06-02T00:04:45Z",
+    "attached": false,
+    "rig": "demo-app",
+    "pool": "ralphs",
+    "agent_kind": "pool",
+    "running": true,
+    "model": "gpt-5-codex",
+    "activity": "thinking",
+    "provider": "codex"
+  }
+]

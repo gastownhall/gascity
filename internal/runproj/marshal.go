@@ -165,10 +165,13 @@ func (a RunLaneStepAttempt) MarshalJSON() ([]byte, error) {
 	}
 }
 
-// MarshalJSON renders the lane-health arm. The builder only ever emits the
-// unavailable arm. TS: {status:'unavailable', error}.
+// MarshalJSON renders the active lane-health arm. BuildRunSummary emits the
+// unavailable arm; EnrichRunSummary emits the available arm. TS:
+// {status:'available', data} | {status:'unavailable', error}.
 func (h RunLaneHealthState) MarshalJSON() ([]byte, error) {
 	switch h.Status {
+	case "available":
+		return marshalObject([]kv{{"status", "available"}, {"data", h.Data}})
 	case "unavailable":
 		return marshalObject([]kv{{"status", "unavailable"}, {"error", h.Error}})
 	default:
@@ -176,13 +179,119 @@ func (h RunLaneHealthState) MarshalJSON() ([]byte, error) {
 	}
 }
 
-// MarshalJSON renders the census arm. The builder only ever emits the
-// unavailable arm. TS: {status:'unavailable', error}.
+// MarshalJSON renders RunLaneHealth in deriveRunHealth's object-literal order.
+func (h RunLaneHealth) MarshalJSON() ([]byte, error) {
+	return marshalObject([]kv{
+		{"phaseConfidence", h.PhaseConfidence},
+		{"needsOperator", h.NeedsOperator},
+		{"stuckNode", h.StuckNode},
+		{"thrashingDetected", h.ThrashingDetected},
+		{"session", h.Session},
+	})
+}
+
+// MarshalJSON renders the active stuck-node arm. TS: {status:'available', id} |
+// {status:'unavailable', error}.
+func (n RunLaneStuckNode) MarshalJSON() ([]byte, error) {
+	switch n.Status {
+	case "available":
+		return marshalObject([]kv{{"status", "available"}, {"id", n.ID}})
+	case "unavailable":
+		return marshalObject([]kv{{"status", "unavailable"}, {"error", n.Error}})
+	default:
+		return nil, fmt.Errorf("runproj: invalid RunLaneStuckNode status %q", n.Status)
+	}
+}
+
+// MarshalJSON renders the active session arm. TS: {status:'resolved', lastActive,
+// running, activity} | {status:'unresolved', error}.
+func (s RunLaneSessionState) MarshalJSON() ([]byte, error) {
+	switch s.Status {
+	case "resolved":
+		return marshalObject([]kv{
+			{"status", "resolved"},
+			{"lastActive", s.LastActive},
+			{"running", s.Running},
+			{"activity", s.Activity},
+		})
+	case "unresolved":
+		return marshalObject([]kv{{"status", "unresolved"}, {"error", s.Error}})
+	default:
+		return nil, fmt.Errorf("runproj: invalid RunLaneSessionState status %q", s.Status)
+	}
+}
+
+// MarshalJSON renders the active last-active arm. TS Avail<{at}>.
+func (l RunLaneSessionLastActive) MarshalJSON() ([]byte, error) {
+	switch l.Status {
+	case "available":
+		return marshalObject([]kv{{"status", "available"}, {"at", l.At}})
+	case "unavailable":
+		return marshalObject([]kv{{"status", "unavailable"}, {"error", l.Error}})
+	default:
+		return nil, fmt.Errorf("runproj: invalid RunLaneSessionLastActive status %q", l.Status)
+	}
+}
+
+// MarshalJSON renders the active running arm. TS Avail<{value}>.
+func (r RunLaneSessionRunning) MarshalJSON() ([]byte, error) {
+	switch r.Status {
+	case "available":
+		return marshalObject([]kv{{"status", "available"}, {"value", r.Value}})
+	case "unavailable":
+		return marshalObject([]kv{{"status", "unavailable"}, {"error", r.Error}})
+	default:
+		return nil, fmt.Errorf("runproj: invalid RunLaneSessionRunning status %q", r.Status)
+	}
+}
+
+// MarshalJSON renders the active activity arm. TS Avail<{value}>.
+func (a RunLaneSessionActivity) MarshalJSON() ([]byte, error) {
+	switch a.Status {
+	case "available":
+		return marshalObject([]kv{{"status", "available"}, {"value", a.Value}})
+	case "unavailable":
+		return marshalObject([]kv{{"status", "unavailable"}, {"error", a.Error}})
+	default:
+		return nil, fmt.Errorf("runproj: invalid RunLaneSessionActivity status %q", a.Status)
+	}
+}
+
+// MarshalJSON renders the active census arm. BuildRunSummary emits the
+// unavailable arm; EnrichRunSummary emits the available arm. TS:
+// {status:'available', data} | {status:'unavailable', error}.
 func (c RunCensusState) MarshalJSON() ([]byte, error) {
 	switch c.Status {
+	case "available":
+		return marshalObject([]kv{{"status", "available"}, {"data", c.Data}})
 	case "unavailable":
 		return marshalObject([]kv{{"status", "unavailable"}, {"error", c.Error}})
 	default:
 		return nil, fmt.Errorf("runproj: invalid RunCensusState status %q", c.Status)
 	}
+}
+
+// MarshalJSON renders RunCensus in buildCensus's object-literal order.
+func (c RunCensus) MarshalJSON() ([]byte, error) {
+	return marshalObject([]kv{
+		{"byPhase", c.ByPhase},
+		{"totalInFlight", c.TotalInFlight},
+		{"unverifiable", c.Unverifiable},
+		{"knownDenominator", c.KnownDenominator},
+		{"thrashing", c.Thrashing},
+	})
+}
+
+// MarshalJSON renders the per-phase tally in zeroByPhase()'s key order.
+func (b RunCensusByPhase) MarshalJSON() ([]byte, error) {
+	return marshalObject([]kv{
+		{"intake", b.Intake},
+		{"implementation", b.Implementation},
+		{"review", b.Review},
+		{"approval", b.Approval},
+		{"finalization", b.Finalization},
+		{"blocked", b.Blocked},
+		{"complete", b.Complete},
+		{"active", b.Active},
+	})
 }
