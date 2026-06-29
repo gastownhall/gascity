@@ -46,26 +46,8 @@ func TestDoltVersionPins(t *testing.T) {
 		assertContains(".github/scripts/install-dolt-archive.sh", doltPin+":"+platform)
 	}
 
-	workflowDir := filepath.Join(repoRoot, ".github", "workflows")
-	err := filepath.WalkDir(workflowDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || filepath.Ext(path) != ".yml" {
-			return nil
-		}
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if strings.Contains(string(content), "DOLT_VERSION:") &&
-			!strings.Contains(string(content), `DOLT_VERSION: "`+doltPin+`"`) {
-			rel, _ := filepath.Rel(repoRoot, path)
-			t.Fatalf("%s has DOLT_VERSION but is not pinned to %s", rel, doltPin)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk workflows: %v", err)
-	}
+	// Validate every DOLT_VERSION assignment in both .yml and .yaml workflows,
+	// using the same shared scanner as the bd pin guard so neither analog can
+	// false-pass on partial drift or a .yaml workflow.
+	assertWorkflowPins(t, repoRoot, "DOLT_VERSION", doltPin)
 }

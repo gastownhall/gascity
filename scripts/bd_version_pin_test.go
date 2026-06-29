@@ -3,9 +3,12 @@ package scripts_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/deps"
 )
 
 // TestBDVersionPins keeps every independently-edited bd version anchor in
@@ -46,22 +49,38 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatalf("deps.env BD_CURRENT_VERSION = %q, want a semver token", bdCurrent)
 	}
 
-	// The init hard-dependency floor must equal BD_VERSION (modulo the v prefix);
-	// these are the same fact stated in two languages (shell pin vs Go constant).
+	// Anchor roles, kept as distinct contracts so a promotion cannot quietly
+	// collapse them:
+	//   BD_PREV_VERSION -- the minimum-supported bd (the matrix floor cell).
+	//   BD_VERSION      -- the installable default; must be >= the floor.
+	// The init hard-dependency floor (bdMinVersion) is the minimum-supported
+	// version restated as a Go constant, so it must track BD_PREV_VERSION, not
+	// BD_VERSION. Tying it to BD_VERSION would drag the hard floor up the moment
+	// BD_VERSION is promoted (e.g. -> v1.0.5) and drop support for the
+	// min-supported matrix cell these contract tests exist to keep green.
 	bdMin := extractGoStringConst(t, root, "cmd/gc/init_provider_readiness.go", "bdMinVersion")
-	if bdMin != strings.TrimPrefix(bdVersion, "v") {
-		t.Fatalf("bdMinVersion = %q but deps.env BD_VERSION = %q (want %q); update both together",
-			bdMin, bdVersion, strings.TrimPrefix(bdVersion, "v"))
+	if bdMin != strings.TrimPrefix(bdPrev, "v") {
+		t.Fatalf("bdMinVersion = %q but deps.env BD_PREV_VERSION = %q (want %q); the init hard floor is the minimum-supported bd and must track BD_PREV_VERSION, not BD_VERSION",
+			bdMin, bdPrev, strings.TrimPrefix(bdPrev, "v"))
+	}
+	// The installable default may move ahead of the floor but never behind it.
+	if deps.CompareVersions(bdVersion, bdPrev) < 0 {
+		t.Fatalf("deps.env BD_VERSION = %q is older than BD_PREV_VERSION = %q; the installable default must be at least the minimum-supported version",
+			bdVersion, bdPrev)
 	}
 
-	// The ready-projection feature floor (#3135's regressing surface) must exist and
-	// be strictly newer than the init floor, otherwise the gated path is dead.
+	// The ready-projection feature floor (#3135's regressing surface) must exist
+	// and be strictly newer than the init floor, otherwise the gated path is dead
+	// for every supported bd. Compare semantically -- the same way the runtime
+	// gate in bdstore_ready_projection.go does (deps.CompareVersions) -- so a
+	// floor that is merely different from the init floor, including an older one,
+	// cannot pass.
 	readyFloor := extractGoStringConst(t, root, "internal/beads/bdstore_ready_projection.go", "bdReadyProjectionMinVersion")
 	if readyFloor == "" {
 		t.Fatal("internal/beads/bdstore_ready_projection.go missing bdReadyProjectionMinVersion const")
 	}
-	if readyFloor == bdMin {
-		t.Fatalf("bdReadyProjectionMinVersion (%q) must be newer than bdMinVersion (%q); a feature floor equal to the init floor gates nothing", readyFloor, bdMin)
+	if deps.CompareVersions(readyFloor, bdMin) <= 0 {
+		t.Fatalf("bdReadyProjectionMinVersion (%q) must be strictly newer than bdMinVersion (%q); a feature floor at or below the init floor gates nothing", readyFloor, bdMin)
 	}
 
 	// The bd_compatibility config enum is the operator-facing mirror of the two
@@ -73,24 +92,56 @@ func TestBDVersionPins(t *testing.T) {
 		}
 	}
 
-	// The minimum-supported matrix cell must install from a pinned SHA, never the
-	// API fallback. Require an explicit case-table entry for every os/arch.
+	// Every released bd that the required CI paths install from a tarball must
+	// carry a pinned SHA for every os/arch, never the API fallback. That is both
+	// the minimum-supported cell (BD_PREV_VERSION) and the installable default
+	// (BD_VERSION): they are the same value today but may diverge on a promotion,
+	// and main CI installs BD_VERSION directly. Deduplicate when they are equal.
 	install := readFile(t, root, ".github/scripts/install-bd-archive.sh")
-	for _, tuple := range []string{"linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"} {
-		want := bdPrev + ":" + tuple
-		if !strings.Contains(install, want) {
-			t.Fatalf(".github/scripts/install-bd-archive.sh missing SHA pin %q; BD_PREV_VERSION cannot install on the required path without it", want)
+	requiredReleases := []string{bdPrev}
+	if bdVersion != bdPrev {
+		requiredReleases = append(requiredReleases, bdVersion)
+	}
+	for _, release := range requiredReleases {
+		for _, tuple := range []string{"linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"} {
+			want := release + ":" + tuple
+			if !strings.Contains(install, want) {
+				t.Fatalf(".github/scripts/install-bd-archive.sh missing SHA pin %q; %s cannot install on the required path without it", want, release)
+			}
 		}
 	}
 
 	// Every workflow that pins BD_VERSION must pin the same value as deps.env, so a
-	// bump in one place cannot leave a stale matrix cell behind.
-	walkWorkflows(t, root, func(rel, content string) {
-		if strings.Contains(content, "BD_VERSION:") &&
-			!strings.Contains(content, `BD_VERSION: "`+bdVersion+`"`) {
-			t.Fatalf("%s pins BD_VERSION but not to %s (deps.env)", rel, bdVersion)
-		}
-	})
+	// bump in one place cannot leave a stale matrix cell behind. Validate every
+	// assignment in both .yml and .yaml workflows: a file-level presence check
+	// would let a stale pin ride along beside a correct one.
+	assertWorkflowPins(t, root, "BD_VERSION", bdVersion)
+}
+
+// TestScanPinAssignments proves the workflow pin scanner catches the partial
+// drift a file-level presence check missed: a stale BD_VERSION sharing a file
+// with a correct one is still reported with its line, while a
+// `${{ env.BD_VERSION }}` reference is not treated as an assignment.
+func TestScanPinAssignments(t *testing.T) {
+	const fixture = `env:
+  BD_VERSION: "v1.0.4"
+  DOLT_VERSION: "2.1.7"
+jobs:
+  stale:
+    env:
+      BD_VERSION: "v1.0.3"
+    steps:
+      - with:
+          bd-version: ${{ env.BD_VERSION }}
+`
+	got := scanPinAssignments("BD_VERSION", fixture)
+	want := []pinAssignment{
+		{line: 2, value: "v1.0.4"},
+		{line: 7, value: "v1.0.3"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("scanPinAssignments(BD_VERSION) = %+v, want %+v", got, want)
+	}
 }
 
 // readDotenv parses simple KEY=VALUE lines, ignoring comments and blanks.
@@ -125,10 +176,13 @@ func readFile(t *testing.T, root, rel string) string {
 }
 
 // extractGoStringConst returns the value of a `name = "..."` Go string constant,
-// or "" if the file does not declare it.
+// or "" if the file does not declare it. The pattern is anchored to a real
+// declaration form -- the identifier must start a line, optionally preceded by
+// indentation and the `const` keyword -- so a comment or prose example naming the
+// same identifier above the real const cannot be matched first.
 func extractGoStringConst(t *testing.T, root, rel, name string) string {
 	t.Helper()
-	re := regexp.MustCompile(regexp.QuoteMeta(name) + `\s*=\s*"([^"]+)"`)
+	re := regexp.MustCompile(`(?m)^\s*(?:const\s+)?` + regexp.QuoteMeta(name) + `\s*=\s*"([^"]+)"`)
 	m := re.FindStringSubmatch(readFile(t, root, rel))
 	if m == nil {
 		return ""
@@ -136,14 +190,45 @@ func extractGoStringConst(t *testing.T, root, rel, name string) string {
 	return m[1]
 }
 
-func walkWorkflows(t *testing.T, root string, check func(rel, content string)) {
+// pinAssignment is a single `KEY: value` mapping entry found in a workflow file,
+// carrying its 1-based line number for diagnostics.
+type pinAssignment struct {
+	line  int
+	value string
+}
+
+// scanPinAssignments returns every `key: value` assignment in content. It matches
+// only a mapping key -- optional indentation, the exact key, then a colon -- so a
+// reference such as `bd-version: ${{ env.BD_VERSION }}` is not mistaken for an
+// assignment of BD_VERSION. Surrounding quotes and any trailing comment are
+// stripped from the captured value.
+func scanPinAssignments(key, content string) []pinAssignment {
+	re := regexp.MustCompile(`^\s*` + regexp.QuoteMeta(key) + `:\s*["']?([^"'\s#]+)["']?`)
+	var out []pinAssignment
+	for i, line := range strings.Split(content, "\n") {
+		if m := re.FindStringSubmatch(line); m != nil {
+			out = append(out, pinAssignment{line: i + 1, value: m[1]})
+		}
+	}
+	return out
+}
+
+// assertWorkflowPins fails for every workflow assignment of key whose value is not
+// want, scanning both .yml and .yaml workflows and reporting each offending file
+// and line. Validating every assignment -- not just file-level presence -- catches
+// a file that mixes a correct pin with a stale one, and reporting via t.Errorf
+// rather than t.Fatalf surfaces all stale pins in a single run.
+func assertWorkflowPins(t *testing.T, root, key, want string) {
 	t.Helper()
 	dir := filepath.Join(root, ".github", "workflows")
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || filepath.Ext(path) != ".yml" {
+		if d.IsDir() {
+			return nil
+		}
+		if ext := filepath.Ext(path); ext != ".yml" && ext != ".yaml" {
 			return nil
 		}
 		content, err := os.ReadFile(path)
@@ -151,7 +236,11 @@ func walkWorkflows(t *testing.T, root string, check func(rel, content string)) {
 			return err
 		}
 		rel, _ := filepath.Rel(root, path)
-		check(rel, string(content))
+		for _, a := range scanPinAssignments(key, string(content)) {
+			if a.value != want {
+				t.Errorf("%s:%d pins %s to %q, want %q (deps.env)", rel, a.line, key, a.value, want)
+			}
+		}
 		return nil
 	})
 	if err != nil {
