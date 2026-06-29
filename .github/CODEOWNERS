@@ -17,5 +17,13 @@
 /cmd/gc/dashboard/web/package.json @gastownhall/gascity-admin
 /cmd/gc/dashboard/web/package-lock.json @gastownhall/gascity-admin
 
-# All docs/ is owned by csells (auto-requests review on any docs-touching PR).
-/docs/ @csells
+# Specific docs/ content folders are owned by csells (auto-requests review on
+# matching PRs). Intentionally scoped to authored-content areas, excluding
+# /docs/reference and top-level docs files.
+/docs/diagrams/ @csells
+/docs/getting-started/ @csells
+/docs/guides/ @csells
+/docs/images/ @csells
+/docs/runbooks/ @csells
+/docs/troubleshooting/ @csells
+/docs/tutorials/ @csells
