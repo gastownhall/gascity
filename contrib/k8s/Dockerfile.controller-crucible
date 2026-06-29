@@ -1,0 +1,44 @@
+# Gas City controller image for the Crucible-sandbox launch model (B6).
+#
+# The autonomous city-provisioner launches this as a Crucible gVisor sandbox with the city's env
+# (GC_CITY_NAME / GC_PACK / GC_DOLT_HOST / GC_DOLT_DATABASE / GC_WORKSPACE_ID). It extends the agent
+# image (gc + bd + dolt baked in) with an ENV-DRIVEN entrypoint that inits the city from its pack,
+# wires bd to the HOSTED beads ledger (never embedded dolt), and starts the controller in-foreground.
+#
+# Unlike Dockerfile.controller (the K8s copy-in model), there is no /city volume copy and no kubectl:
+# child agents are spawned via the Crucible API (Model B), not kubectl.
+#
+# Build (agent image first):
+#   go build -o gc ./cmd/gc && cp "$(which bd)" .
+#   docker build -f contrib/k8s/Dockerfile.base   -t gc-agent-base:latest .
+#   docker build -f contrib/k8s/Dockerfile.agent  -t gc-agent:latest .
+#   docker build -f contrib/k8s/Dockerfile.controller-crucible -t crucible-city-provisioner-controller:latest .
+
+ARG BASE=gc-agent:latest
+FROM ${BASE}
+
+USER root
+
+# Env-driven controller entrypoint.
+COPY contrib/k8s/gc-controller-crucible-entrypoint.sh /usr/local/bin/gc-controller-entrypoint
+RUN chmod 0755 /usr/local/bin/gc-controller-entrypoint
+
+# CREDENTIAL BOOTSTRAP (B6): the eia-helper re-mints a fresh ~90s aud=beads EIA (EIA-as-username) from
+# the controller's orchestrator key on each connect, so bd holds no long-lived ledger credential. It
+# is built from the crucible repo's cmd/eia-helper (reuses the red-teamed STSExchanger); place the
+# binary in the build context like bd/gc:
+#   (in the crucible repo) go build -o eia-helper ./cmd/eia-helper  &&  cp eia-helper <gascity build ctx>/contrib/k8s/eia-helper
+COPY contrib/k8s/eia-helper /usr/local/bin/eia-helper
+RUN chmod 0755 /usr/local/bin/eia-helper
+# bd runs this as its dolt credential command; the helper reads STS_MACHINE_URL/STS_TOKEN_URL +
+# ORCHESTRATOR_KEY_FILE + EIA_AUDIENCE/EIA_SCOPES from the env the entrypoint exports.
+ENV GC_DOLT_CRED_CMD=/usr/local/bin/eia-helper \
+    EIA_AUDIENCE=beads \
+    EIA_SCOPES="beads:read beads:write"
+# REMAINING (live, see B6 spec): mount the orchestrator key at ORCHESTRATOR_KEY_FILE (OpenBao/runtime)
+# and confirm bd's dolt credential-command contract consumes the helper's stdout as the gateway user.
+
+WORKDIR /city
+USER gcagent
+
+ENTRYPOINT ["/usr/local/bin/gc-controller-entrypoint"]
