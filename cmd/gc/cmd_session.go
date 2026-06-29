@@ -667,7 +667,7 @@ func waitForSession(sp runtime.Provider, sessionName string, timeout time.Durati
 		}
 		// Check for early failure: bead closed or stuck in creating.
 		if sessFront != nil && beadID != "" {
-			if b, err := sessFront.Store().Store.Get(beadID); err == nil {
+			if b, err := sessFront.Store().Get(beadID); err == nil {
 				if b.Status == "closed" {
 					return fmt.Errorf("session %q failed to start (bead %s closed)", sessionName, beadID)
 				}
