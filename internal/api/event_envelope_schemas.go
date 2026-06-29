@@ -131,6 +131,15 @@ func typedEventEnvelopeVariantSchema(r huma.Registry, variant typedEventEnvelope
 		"message": {
 			Type: huma.TypeString,
 		},
+		"run_id": {
+			Type: huma.TypeString,
+		},
+		"session_id": {
+			Type: huma.TypeString,
+		},
+		"step_id": {
+			Type: huma.TypeString,
+		},
 		"workflow": r.Schema(reflect.TypeOf(workflowEventProjection{}), true, "WorkflowEventProjection"),
 		"payload":  r.Schema(variant.payloadType, true, variant.payloadType.Name()),
 	}
@@ -174,6 +183,15 @@ func customEventEnvelopeVariantSchema(r huma.Registry, cfg typedEventEnvelopeSch
 			Type: huma.TypeString,
 		},
 		"message": {
+			Type: huma.TypeString,
+		},
+		"run_id": {
+			Type: huma.TypeString,
+		},
+		"session_id": {
+			Type: huma.TypeString,
+		},
+		"step_id": {
 			Type: huma.TypeString,
 		},
 		"workflow": r.Schema(reflect.TypeOf(workflowEventProjection{}), true, "WorkflowEventProjection"),

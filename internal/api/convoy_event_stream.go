@@ -49,13 +49,16 @@ type WorkflowAttemptSummary struct {
 // Payload is decoded via the events registry into a typed variant when
 // possible. Custom event types pass through with their raw JSON payload.
 type WireEvent struct {
-	Seq     uint64            `json:"seq"`
-	Type    string            `json:"type"`
-	Ts      time.Time         `json:"ts"`
-	Actor   string            `json:"actor"`
-	Subject string            `json:"subject,omitempty"`
-	Message string            `json:"message,omitempty"`
-	Payload EventPayloadUnion `json:"payload,omitempty"`
+	Seq       uint64            `json:"seq"`
+	Type      string            `json:"type"`
+	Ts        time.Time         `json:"ts"`
+	Actor     string            `json:"actor"`
+	Subject   string            `json:"subject,omitempty"`
+	Message   string            `json:"message,omitempty"`
+	Payload   EventPayloadUnion `json:"payload,omitempty"`
+	RunID     string            `json:"run_id,omitempty"`
+	SessionID string            `json:"session_id,omitempty"`
+	StepID    string            `json:"step_id,omitempty"`
 }
 
 // Schema makes list endpoints use the same envelope-discriminated schema as
@@ -97,13 +100,16 @@ func toWireEvent(e events.Event) (WireEvent, bool) {
 		payload = decoded
 	}
 	return WireEvent{
-		Seq:     e.Seq,
-		Type:    e.Type,
-		Ts:      e.Ts,
-		Actor:   e.Actor,
-		Subject: e.Subject,
-		Message: e.Message,
-		Payload: EventPayloadUnion{Value: payload},
+		Seq:       e.Seq,
+		Type:      e.Type,
+		Ts:        e.Ts,
+		Actor:     e.Actor,
+		Subject:   e.Subject,
+		Message:   e.Message,
+		Payload:   EventPayloadUnion{Value: payload},
+		RunID:     e.RunID,
+		SessionID: e.SessionID,
+		StepID:    e.StepID,
 	}, true
 }
 
@@ -126,29 +132,35 @@ func toWireTaggedEvent(te events.TaggedEvent) (WireTaggedEvent, bool) {
 // oneOf over every registered events.Payload variant. Consumers read
 // `type` to know which variant `payload` holds.
 type eventStreamEnvelope struct {
-	Seq      uint64                   `json:"seq"`
-	Type     string                   `json:"type"`
-	Ts       time.Time                `json:"ts"`
-	Actor    string                   `json:"actor"`
-	Subject  string                   `json:"subject,omitempty"`
-	Message  string                   `json:"message,omitempty"`
-	Payload  EventPayloadUnion        `json:"payload,omitempty"`
-	Workflow *workflowEventProjection `json:"workflow,omitempty"`
+	Seq       uint64                   `json:"seq"`
+	Type      string                   `json:"type"`
+	Ts        time.Time                `json:"ts"`
+	Actor     string                   `json:"actor"`
+	Subject   string                   `json:"subject,omitempty"`
+	Message   string                   `json:"message,omitempty"`
+	Payload   EventPayloadUnion        `json:"payload,omitempty"`
+	RunID     string                   `json:"run_id,omitempty"`
+	SessionID string                   `json:"session_id,omitempty"`
+	StepID    string                   `json:"step_id,omitempty"`
+	Workflow  *workflowEventProjection `json:"workflow,omitempty"`
 }
 
 // taggedEventStreamEnvelope is the supervisor-scope wire shape for
 // /v0/events/stream. Structurally identical to eventStreamEnvelope
 // plus a City field identifying which city emitted the event.
 type taggedEventStreamEnvelope struct {
-	Seq      uint64                   `json:"seq"`
-	Type     string                   `json:"type"`
-	Ts       time.Time                `json:"ts"`
-	Actor    string                   `json:"actor"`
-	Subject  string                   `json:"subject,omitempty"`
-	Message  string                   `json:"message,omitempty"`
-	Payload  EventPayloadUnion        `json:"payload,omitempty"`
-	City     string                   `json:"city"`
-	Workflow *workflowEventProjection `json:"workflow,omitempty"`
+	Seq       uint64                   `json:"seq"`
+	Type      string                   `json:"type"`
+	Ts        time.Time                `json:"ts"`
+	Actor     string                   `json:"actor"`
+	Subject   string                   `json:"subject,omitempty"`
+	Message   string                   `json:"message,omitempty"`
+	Payload   EventPayloadUnion        `json:"payload,omitempty"`
+	RunID     string                   `json:"run_id,omitempty"`
+	SessionID string                   `json:"session_id,omitempty"`
+	StepID    string                   `json:"step_id,omitempty"`
+	City      string                   `json:"city"`
+	Workflow  *workflowEventProjection `json:"workflow,omitempty"`
 }
 
 // EventPayloadUnion wraps any registered events.Payload or custom raw JSON
@@ -217,14 +229,17 @@ func wireEventFrom(e events.Event, workflow *workflowEventProjection) (eventStre
 		payload = decoded
 	}
 	return eventStreamEnvelope{
-		Seq:      e.Seq,
-		Type:     e.Type,
-		Ts:       e.Ts,
-		Actor:    e.Actor,
-		Subject:  e.Subject,
-		Message:  e.Message,
-		Payload:  EventPayloadUnion{Value: payload},
-		Workflow: workflow,
+		Seq:       e.Seq,
+		Type:      e.Type,
+		Ts:        e.Ts,
+		Actor:     e.Actor,
+		Subject:   e.Subject,
+		Message:   e.Message,
+		Payload:   EventPayloadUnion{Value: payload},
+		RunID:     e.RunID,
+		SessionID: e.SessionID,
+		StepID:    e.StepID,
+		Workflow:  workflow,
 	}, nil
 }
 
@@ -242,15 +257,18 @@ func wireTaggedEventFrom(te events.TaggedEvent, workflow *workflowEventProjectio
 		payload = decoded
 	}
 	return taggedEventStreamEnvelope{
-		Seq:      te.Seq,
-		Type:     te.Type,
-		Ts:       te.Ts,
-		Actor:    te.Actor,
-		Subject:  te.Subject,
-		Message:  te.Message,
-		Payload:  EventPayloadUnion{Value: payload},
-		City:     taggedEventWireCity(te),
-		Workflow: workflow,
+		Seq:       te.Seq,
+		Type:      te.Type,
+		Ts:        te.Ts,
+		Actor:     te.Actor,
+		Subject:   te.Subject,
+		Message:   te.Message,
+		Payload:   EventPayloadUnion{Value: payload},
+		RunID:     te.RunID,
+		SessionID: te.SessionID,
+		StepID:    te.StepID,
+		City:      taggedEventWireCity(te),
+		Workflow:  workflow,
 	}, nil
 }
 

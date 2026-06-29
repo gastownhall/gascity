@@ -2404,10 +2404,19 @@
           "payload": {
             "$ref": "#/components/schemas/EventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8035,10 +8044,19 @@
           "payload": {
             "$ref": "#/components/schemas/EventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8385,10 +8403,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadClaimRejectedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8427,10 +8454,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8469,10 +8505,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8511,10 +8556,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8553,10 +8607,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8595,10 +8658,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadWorktreeReapSkippedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8637,10 +8709,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadWorktreeReapedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8679,10 +8760,19 @@
           "payload": {
             "$ref": "#/components/schemas/CityLifecyclePayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8721,10 +8811,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8763,10 +8862,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8805,10 +8913,19 @@
           "payload": {
             "$ref": "#/components/schemas/CityLifecyclePayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8847,10 +8964,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8889,10 +9015,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8931,10 +9066,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -8973,10 +9117,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9013,10 +9166,19 @@
             "type": "string"
           },
           "payload": {},
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9128,10 +9290,19 @@
           "payload": {
             "$ref": "#/components/schemas/Record"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9170,10 +9341,19 @@
           "payload": {
             "$ref": "#/components/schemas/Record"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9212,10 +9392,19 @@
           "payload": {
             "$ref": "#/components/schemas/RotatedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9254,10 +9443,19 @@
           "payload": {
             "$ref": "#/components/schemas/AdapterEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9296,10 +9494,19 @@
           "payload": {
             "$ref": "#/components/schemas/AdapterEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9338,10 +9545,19 @@
           "payload": {
             "$ref": "#/components/schemas/BoundEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9380,10 +9596,19 @@
           "payload": {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9422,10 +9647,19 @@
           "payload": {
             "$ref": "#/components/schemas/InboundEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9464,10 +9698,19 @@
           "payload": {
             "$ref": "#/components/schemas/OutboundEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9506,10 +9749,19 @@
           "payload": {
             "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9548,10 +9800,19 @@
           "payload": {
             "$ref": "#/components/schemas/UnboundEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9590,10 +9851,19 @@
           "payload": {
             "$ref": "#/components/schemas/StoreDiskCriticalPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9632,10 +9902,19 @@
           "payload": {
             "$ref": "#/components/schemas/StoreDiskWarnPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9674,10 +9953,19 @@
           "payload": {
             "$ref": "#/components/schemas/StoreMaintenanceDonePayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9716,10 +10004,19 @@
           "payload": {
             "$ref": "#/components/schemas/StoreMaintenanceFailedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9758,10 +10055,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9800,10 +10106,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9842,10 +10157,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9884,10 +10208,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9926,10 +10259,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -9968,10 +10310,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10010,10 +10361,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10052,10 +10412,19 @@
           "payload": {
             "$ref": "#/components/schemas/MoleculeResolvedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10094,10 +10463,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10136,10 +10514,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10178,10 +10565,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10220,10 +10616,19 @@
           "payload": {
             "$ref": "#/components/schemas/PostgresCredentialResolvedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10262,10 +10667,19 @@
           "payload": {
             "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10304,10 +10718,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10346,10 +10769,19 @@
           "payload": {
             "$ref": "#/components/schemas/RequestFailedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10388,10 +10820,19 @@
           "payload": {
             "$ref": "#/components/schemas/CityCreateSucceededPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10430,10 +10871,19 @@
           "payload": {
             "$ref": "#/components/schemas/CityUnregisterSucceededPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10472,10 +10922,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10514,10 +10973,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionMessageSucceededPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10556,10 +11024,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10598,10 +11075,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10640,10 +11126,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10682,10 +11177,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionDrainAckedWithAssignedWorkPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10724,10 +11228,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10766,10 +11279,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10808,10 +11330,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10850,10 +11381,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10892,10 +11432,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionResetStalledPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10934,10 +11483,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -10976,10 +11534,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionStrandedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11018,10 +11585,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11060,10 +11636,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11102,10 +11687,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11144,10 +11738,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11186,10 +11789,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11228,10 +11840,19 @@
           "payload": {
             "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11270,10 +11891,19 @@
           "payload": {
             "$ref": "#/components/schemas/SupervisorRequestPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11312,10 +11942,19 @@
           "payload": {
             "$ref": "#/components/schemas/SupervisorShutdownPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11354,10 +11993,19 @@
           "payload": {
             "$ref": "#/components/schemas/SupervisorStartedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11396,10 +12044,19 @@
           "payload": {
             "$ref": "#/components/schemas/WorkerOperationEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11735,10 +12392,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadClaimRejectedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11781,10 +12447,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11827,10 +12502,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11873,10 +12557,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11919,10 +12612,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -11965,10 +12667,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadWorktreeReapSkippedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12011,10 +12722,19 @@
           "payload": {
             "$ref": "#/components/schemas/BeadWorktreeReapedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12057,10 +12777,19 @@
           "payload": {
             "$ref": "#/components/schemas/CityLifecyclePayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12103,10 +12832,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12149,10 +12887,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12195,10 +12942,19 @@
           "payload": {
             "$ref": "#/components/schemas/CityLifecyclePayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12241,10 +12997,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12287,10 +13052,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12333,10 +13107,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12379,10 +13162,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12423,10 +13215,19 @@
             "type": "string"
           },
           "payload": {},
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12542,10 +13343,19 @@
           "payload": {
             "$ref": "#/components/schemas/Record"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12588,10 +13398,19 @@
           "payload": {
             "$ref": "#/components/schemas/Record"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12634,10 +13453,19 @@
           "payload": {
             "$ref": "#/components/schemas/RotatedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12680,10 +13508,19 @@
           "payload": {
             "$ref": "#/components/schemas/AdapterEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12726,10 +13563,19 @@
           "payload": {
             "$ref": "#/components/schemas/AdapterEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12772,10 +13618,19 @@
           "payload": {
             "$ref": "#/components/schemas/BoundEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12818,10 +13673,19 @@
           "payload": {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12864,10 +13728,19 @@
           "payload": {
             "$ref": "#/components/schemas/InboundEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12910,10 +13783,19 @@
           "payload": {
             "$ref": "#/components/schemas/OutboundEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -12956,10 +13838,19 @@
           "payload": {
             "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13002,10 +13893,19 @@
           "payload": {
             "$ref": "#/components/schemas/UnboundEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13048,10 +13948,19 @@
           "payload": {
             "$ref": "#/components/schemas/StoreDiskCriticalPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13094,10 +14003,19 @@
           "payload": {
             "$ref": "#/components/schemas/StoreDiskWarnPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13140,10 +14058,19 @@
           "payload": {
             "$ref": "#/components/schemas/StoreMaintenanceDonePayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13186,10 +14113,19 @@
           "payload": {
             "$ref": "#/components/schemas/StoreMaintenanceFailedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13232,10 +14168,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13278,10 +14223,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13324,10 +14278,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13370,10 +14333,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13416,10 +14388,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13462,10 +14443,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13508,10 +14498,19 @@
           "payload": {
             "$ref": "#/components/schemas/MailEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13554,10 +14553,19 @@
           "payload": {
             "$ref": "#/components/schemas/MoleculeResolvedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13600,10 +14608,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13646,10 +14663,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13692,10 +14718,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13738,10 +14773,19 @@
           "payload": {
             "$ref": "#/components/schemas/PostgresCredentialResolvedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13784,10 +14828,19 @@
           "payload": {
             "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13830,10 +14883,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13876,10 +14938,19 @@
           "payload": {
             "$ref": "#/components/schemas/RequestFailedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13922,10 +14993,19 @@
           "payload": {
             "$ref": "#/components/schemas/CityCreateSucceededPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -13968,10 +15048,19 @@
           "payload": {
             "$ref": "#/components/schemas/CityUnregisterSucceededPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14014,10 +15103,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14060,10 +15158,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionMessageSucceededPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14106,10 +15213,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14152,10 +15268,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14198,10 +15323,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14244,10 +15378,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionDrainAckedWithAssignedWorkPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14290,10 +15433,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14336,10 +15488,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14382,10 +15543,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14428,10 +15598,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14474,10 +15653,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionResetStalledPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14520,10 +15708,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14566,10 +15763,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionStrandedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14612,10 +15818,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14658,10 +15873,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14704,10 +15928,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14750,10 +15983,19 @@
           "payload": {
             "$ref": "#/components/schemas/NoPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14796,10 +16038,19 @@
           "payload": {
             "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14842,10 +16093,19 @@
           "payload": {
             "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14888,10 +16148,19 @@
           "payload": {
             "$ref": "#/components/schemas/SupervisorRequestPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14934,10 +16203,19 @@
           "payload": {
             "$ref": "#/components/schemas/SupervisorShutdownPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -14980,10 +16258,19 @@
           "payload": {
             "$ref": "#/components/schemas/SupervisorStartedPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
@@ -15026,10 +16313,19 @@
           "payload": {
             "$ref": "#/components/schemas/WorkerOperationEventPayload"
           },
+          "run_id": {
+            "type": "string"
+          },
           "seq": {
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
           },
           "subject": {
             "type": "string"
