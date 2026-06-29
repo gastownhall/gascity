@@ -47,7 +47,7 @@ func TestCheckStability_RateLimitScreen_DoesNotCountAsCrash(t *testing.T) {
 		return paneContent, nil
 	}
 
-	if !checkStability(&session, nil, false, dt, store, clk, peek) {
+	if !checkStability(&session, nil, false, dt, sessionFrontDoor(store), clk, peek) {
 		t.Fatal("checkStability should return true when it records a rate-limit hold")
 	}
 
@@ -107,7 +107,7 @@ func TestCheckStability_RateLimitPendingCreateClearsStartedAt(t *testing.T) {
 		return "You've hit your limit, Pro plan\n\n/rate-limit-options", nil
 	}
 
-	if !checkStability(&session, nil, false, dt, store, clk, peek) {
+	if !checkStability(&session, nil, false, dt, sessionFrontDoor(store), clk, peek) {
 		t.Fatal("checkStability should return true when it records a rate-limit hold")
 	}
 	if session.Metadata["pending_create_claim"] != "" {
@@ -143,7 +143,7 @@ func TestCheckRateLimitStability_BeforeHealPreservesResumeMetadata(t *testing.T)
 		t.Fatal("rate-limit rapid exit should be recorded before advisory state healing")
 	}
 
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 
 	if got := session.Metadata["session_key"]; got != "keep-session" {
 		t.Errorf("session_key = %q, want preserved", got)
@@ -211,7 +211,7 @@ func TestCheckRateLimitStability_BatchFailureDoesNotClearLastWokeAt(t *testing.T
 	if !handled {
 		t.Fatal("rate-limit detection should retry on the next tick after a failed batch")
 	}
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 
 	if got := session.Metadata["session_key"]; got != "keep-session" {
 		t.Errorf("session_key = %q, want preserved", got)
@@ -262,7 +262,7 @@ func TestCheckRateLimitStability_BatchFailureRetriesAfterStabilityThreshold(t *t
 	if !handled {
 		t.Fatal("rate-limit detection should retry after the crash stability threshold")
 	}
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 
 	if got := session.Metadata["session_key"]; got != "keep-session" {
 		t.Errorf("session_key = %q, want preserved", got)
@@ -295,7 +295,7 @@ func TestCheckStability_RateLimitScreen_EmptyPaneStillCountsAsCrash(t *testing.T
 
 	peek := func(_ int) (string, error) { return "", nil }
 
-	if !checkStability(&session, nil, false, dt, store, clk, peek) {
+	if !checkStability(&session, nil, false, dt, sessionFrontDoor(store), clk, peek) {
 		t.Error("rapid exit with no rate-limit signature should report stability failure")
 	}
 	if got := session.Metadata["wake_attempts"]; got != "1" {
@@ -318,7 +318,7 @@ func TestCheckStability_RateLimitScreen_NilPeekFallsBackToCrash(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	if !checkStability(&session, nil, false, dt, store, clk, nil) {
+	if !checkStability(&session, nil, false, dt, sessionFrontDoor(store), clk, nil) {
 		t.Error("rapid exit with nil peek should fall back to crash-counting behavior")
 	}
 	if got := session.Metadata["wake_attempts"]; got != "1" {
@@ -341,7 +341,7 @@ func TestCheckStability_RateLimitScreen_PeekErrorFallsBackToCrash(t *testing.T) 
 		return "", errors.New("peek failed")
 	}
 
-	if !checkStability(&session, nil, false, dt, store, clk, peek) {
+	if !checkStability(&session, nil, false, dt, sessionFrontDoor(store), clk, peek) {
 		t.Error("rapid exit with peek error should fall back to crash-counting behavior")
 	}
 	if got := session.Metadata["wake_attempts"]; got != "1" {

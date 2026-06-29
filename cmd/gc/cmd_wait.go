@@ -737,8 +737,8 @@ func isWaitLookupLimitError(err error) bool {
 	return beads.IsLookupLimitError(err)
 }
 
-func stampWaitLookupCapDiagnostic(store beads.Store, sessionID string, err error, now time.Time, source string) {
-	if store == nil || strings.TrimSpace(sessionID) == "" {
+func stampWaitLookupCapDiagnostic(sessFront *sessionpkg.InfoStore, sessionID string, err error, now time.Time, source string) {
+	if sessFront == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
 	var limitErr beads.LookupLimitError
@@ -754,14 +754,14 @@ func stampWaitLookupCapDiagnostic(store beads.Store, sessionID string, err error
 	}
 	batch := map[string]string{}
 	sessionpkg.StampWaitLookupCapMetadata(batch, label, limitErr.Limit, now, source)
-	if err := sessionFrontDoor(store).ApplyPatch(sessionID, batch); err != nil {
+	if err := sessFront.ApplyPatch(sessionID, batch); err != nil {
 		log.Printf("gc wait: recording lookup cap diagnostic for session %s failed: %v", sessionID, err)
 	}
 }
 
-func stampGlobalWaitLookupCapDiagnostics(store beads.Store, sessionBeads *sessionBeadSnapshot, err error, now time.Time) {
+func stampGlobalWaitLookupCapDiagnostics(sessFront *sessionpkg.InfoStore, sessionBeads *sessionBeadSnapshot, err error, now time.Time) {
 	for _, sessionBead := range sessionBeads.Open() {
-		stampWaitLookupCapDiagnostic(store, sessionBead.ID, err, now, "wake-state-global")
+		stampWaitLookupCapDiagnostic(sessFront, sessionBead.ID, err, now, "wake-state-global")
 	}
 }
 
@@ -807,7 +807,7 @@ func loadWaitBeadsForWakeState(store beads.Store, sessionBeads *sessionBeadSnaps
 		if !isWaitLookupLimitError(err) {
 			return nil, err
 		}
-		stampGlobalWaitLookupCapDiagnostics(store, sessionBeads, err, time.Now().UTC())
+		stampGlobalWaitLookupCapDiagnostics(sessionFrontDoor(store), sessionBeads, err, time.Now().UTC())
 		log.Printf("gc wait: global wake-state wait lookup failed; continuing with open-session waits: %v", err)
 	}
 	for _, wait := range globalWaits {
@@ -837,7 +837,7 @@ func loadWaitBeadsForOpenSessionsWithSeen(store beads.Store, sessionBeads *sessi
 			if !isWaitLookupLimitError(err) {
 				return nil, seen, err
 			}
-			stampWaitLookupCapDiagnostic(store, sessionBead.ID, err, time.Now().UTC(), "wake-state-session")
+			stampWaitLookupCapDiagnostic(sessionFrontDoor(store), sessionBead.ID, err, time.Now().UTC(), "wake-state-session")
 			log.Printf("gc wait: session %s wait lookup capped; continuing with filtered partial waits: %v", sessionBead.ID, err)
 		}
 		for _, wait := range sessionWaits {
@@ -1163,7 +1163,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, stor
 		_, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(nudgeID)
 		if err != nil {
 			if beads.IsLookupLimitError(err) {
-				stampWaitLookupCapDiagnostic(store, sessionID, err, now, "ready-wait-nudge")
+				stampWaitLookupCapDiagnostic(sessionFrontDoor(store), sessionID, err, now, "ready-wait-nudge")
 				continue
 			}
 			return err
@@ -1230,7 +1230,7 @@ func finalizeReadyWaitFromNudge(store beads.Store, wait beads.Bead, now time.Tim
 	nudge, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).FindIncludingTerminal(nudgeID)
 	if err != nil {
 		if beads.IsLookupLimitError(err) {
-			stampWaitLookupCapDiagnostic(store, wait.Metadata["session_id"], err, now, "ready-wait-finalize-nudge")
+			stampWaitLookupCapDiagnostic(sessionFrontDoor(store), wait.Metadata["session_id"], err, now, "ready-wait-finalize-nudge")
 			return false, nil
 		}
 		return false, err
@@ -1277,7 +1277,7 @@ func cancelWaitsForSession(store beads.Store, sessionID string) error {
 	return err
 }
 
-func clearSessionWaitHold(store beads.Store, sessionID string) error {
+func clearSessionWaitHold(sessFront *sessionpkg.InfoStore, sessionID string) error {
 	if sessionID == "" {
 		return nil
 	}
@@ -1285,12 +1285,12 @@ func clearSessionWaitHold(store beads.Store, sessionID string) error {
 		"wait_hold":    "",
 		"sleep_intent": "",
 	}
-	if store != nil {
-		if markers, err := sessionFrontDoor(store).PersistedMarkers(sessionID); err == nil && markers.SleepReason == "wait-hold" {
+	if sessFront != nil {
+		if markers, err := sessFront.PersistedMarkers(sessionID); err == nil && markers.SleepReason == "wait-hold" {
 			batch["sleep_reason"] = ""
 		}
 	}
-	return sessionFrontDoor(store).ApplyPatch(sessionID, batch)
+	return sessFront.ApplyPatch(sessionID, batch)
 }
 
 func clearSessionWaitHoldIfIdle(store beads.Store, sessionID string) error {
@@ -1301,7 +1301,7 @@ func clearSessionWaitHoldIfIdle(store beads.Store, sessionID string) error {
 	if hasWaits {
 		return nil
 	}
-	return clearSessionWaitHold(store, sessionID)
+	return clearSessionWaitHold(sessionFrontDoor(store), sessionID)
 }
 
 func hasNonTerminalWaits(store beads.Store, sessionID string) (bool, error) {

@@ -148,12 +148,16 @@ func storedTemplateMatchesPoolTemplate(storedTemplate, template string, cfg *con
 }
 
 func createPoolSessionBead(
-	store beads.Store,
+	sessFront *sessionpkg.InfoStore,
 	template string,
 	now time.Time,
 	identity poolSessionCreateIdentity,
 ) (beads.Bead, error) {
-	return createPoolSessionBeadWithAlias(store, template, nil, nil, now, identity, "")
+	var raw beads.Store
+	if sessFront != nil {
+		raw = sessFront.Store().Store
+	}
+	return createPoolSessionBeadWithAlias(raw, template, nil, nil, now, identity, "")
 }
 
 // createPoolSessionBeadWithAlias creates a pool session bead and persists its

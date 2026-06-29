@@ -5643,7 +5643,7 @@ func TestBuildDesiredState_GH1654PoolReadyWorkGrowsPastMinActiveSessions(t *test
 	existingSessionNames := make(map[string]bool)
 	for slot := 1; slot <= 3; slot++ {
 		_, qualifiedInstance := poolInstanceIdentity(cfgAgent, slot, io.Discard)
-		session, err := createPoolSessionBead(store, cfgAgent.QualifiedName(), time.Now().UTC(), poolSessionCreateIdentity{
+		session, err := createPoolSessionBead(sessionFrontDoor(store), cfgAgent.QualifiedName(), time.Now().UTC(), poolSessionCreateIdentity{
 			AgentName: qualifiedInstance,
 			Alias:     qualifiedInstance,
 			Slot:      slot,

@@ -915,7 +915,7 @@ func TestMarkCityStopSessionSleepReasonSkipsCreatingSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	markCityStopSessionSleepReason(beads.SessionStore{Store: store}, ioDiscard{})
+	markCityStopSessionSleepReason(sessionFrontDoor(store), ioDiscard{})
 
 	activeUpdated, err := store.Get(active.ID)
 	if err != nil {

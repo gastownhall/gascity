@@ -1050,7 +1050,7 @@ func TestHealExpiredTimers_ClearsExpiredHold(t *testing.T) {
 		"sleep_reason": "user-hold",
 	})
 
-	healExpiredTimers(&session, store, clk)
+	healExpiredTimers(&session, sessionFrontDoor(store), clk)
 
 	if session.Metadata["held_until"] != "" {
 		t.Error("expected held_until to be cleared")
@@ -1071,7 +1071,7 @@ func TestHealExpiredTimers_KeepsActiveHold(t *testing.T) {
 		"sleep_reason": "user-hold",
 	})
 
-	healExpiredTimers(&session, store, clk)
+	healExpiredTimers(&session, sessionFrontDoor(store), clk)
 
 	if session.Metadata["held_until"] != future {
 		t.Error("active hold should not be cleared")
@@ -1089,7 +1089,7 @@ func TestHealExpiredTimers_ClearsExpiredQuarantine(t *testing.T) {
 		"sleep_reason":      "quarantine",
 	})
 
-	healExpiredTimers(&session, store, clk)
+	healExpiredTimers(&session, sessionFrontDoor(store), clk)
 
 	if session.Metadata["quarantined_until"] != "" {
 		t.Error("expected quarantined_until to be cleared")
@@ -1111,7 +1111,7 @@ func TestCheckStability_AliveReturnsFalse(t *testing.T) {
 		"last_woke_at": clk.Now().Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if checkStability(&session, nil, true, dt, store, clk, nil) {
+	if checkStability(&session, nil, true, dt, sessionFrontDoor(store), clk, nil) {
 		t.Error("alive session should not report stability failure")
 	}
 }
@@ -1127,7 +1127,7 @@ func TestCheckStability_RapidExit(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	if !checkStability(&session, nil, false, dt, store, clk, nil) {
+	if !checkStability(&session, nil, false, dt, sessionFrontDoor(store), clk, nil) {
 		t.Error("rapid exit should report stability failure")
 	}
 
@@ -1153,7 +1153,7 @@ func TestCheckStability_PendingCreateInFlightNotCounted(t *testing.T) {
 		"wake_attempts":        "0",
 	})
 
-	if checkStability(&session, nil, false, dt, store, clk, nil) {
+	if checkStability(&session, nil, false, dt, sessionFrontDoor(store), clk, nil) {
 		t.Fatal("in-flight pending create should not be counted as a rapid exit")
 	}
 	if got := session.Metadata["wake_attempts"]; got != "0" {
@@ -1175,7 +1175,7 @@ func TestCheckStability_PendingCreateClaimNotCountedAfterStartupLeaseExpires(t *
 		"wake_attempts":        "0",
 	})
 
-	if checkStability(&session, nil, false, dt, store, clk, nil) {
+	if checkStability(&session, nil, false, dt, sessionFrontDoor(store), clk, nil) {
 		t.Fatal("pending_create_claim should suppress stability counting until create recovery clears the claim")
 	}
 	if got := session.Metadata["wake_attempts"]; got != "0" {
@@ -1194,7 +1194,7 @@ func TestCheckStability_DrainingNotCounted(t *testing.T) {
 		"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if checkStability(&session, nil, false, dt, store, clk, nil) {
+	if checkStability(&session, nil, false, dt, sessionFrontDoor(store), clk, nil) {
 		t.Error("draining session death should not count as stability failure")
 	}
 }
@@ -1210,7 +1210,7 @@ func TestCheckStability_StableSession(t *testing.T) {
 		"last_woke_at": now.Add(-2 * time.Minute).Format(time.RFC3339),
 	})
 
-	if checkStability(&session, nil, false, dt, store, clk, nil) {
+	if checkStability(&session, nil, false, dt, sessionFrontDoor(store), clk, nil) {
 		t.Error("session that lived past threshold should not be stability failure")
 	}
 }
@@ -1229,7 +1229,7 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	if checkStability(&session, cfg, false, dt, store, clk, nil) {
+	if checkStability(&session, cfg, false, dt, sessionFrontDoor(store), clk, nil) {
 		t.Fatal("subprocess rapid exit should not be counted as a crash")
 	}
 	if got := session.Metadata["wake_attempts"]; got != "0" {
@@ -1249,7 +1249,7 @@ func TestRecordWakeFailure_Quarantine(t *testing.T) {
 		"wake_attempts": "4", // one below threshold
 	})
 
-	recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["wake_attempts"] != "5" {
 		t.Errorf("wake_attempts = %q, want 5", session.Metadata["wake_attempts"])
@@ -1271,7 +1271,7 @@ func TestRecordWakeFailure_BelowThreshold(t *testing.T) {
 		"wake_attempts": "1",
 	})
 
-	recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["wake_attempts"] != "2" {
 		t.Errorf("wake_attempts = %q, want 2", session.Metadata["wake_attempts"])
@@ -1291,7 +1291,7 @@ func TestRecordWakeFailure_ClearsStartedConfigHash(t *testing.T) {
 		"started_config_hash": "abc123",
 	})
 
-	recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["session_key"] != "" {
 		t.Errorf("session_key = %q, want empty", session.Metadata["session_key"])
@@ -1310,7 +1310,7 @@ func TestRecordWakeFailure_ClearsStartedConfigHashWhenSessionKeyAlreadyEmpty(t *
 		"started_config_hash": "abc123",
 	})
 
-	recordWakeFailure(&session, store, clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["started_config_hash"] != "" {
 		t.Errorf("started_config_hash = %q, want empty", session.Metadata["started_config_hash"])
@@ -1328,7 +1328,7 @@ func TestClearWakeFailures(t *testing.T) {
 		"quarantined_until": "2026-03-08T12:00:00Z",
 	})
 
-	clearWakeFailures(&session, store)
+	clearWakeFailures(&session, sessionFrontDoor(store))
 
 	if session.Metadata["wake_attempts"] != "0" {
 		t.Errorf("wake_attempts = %q, want 0", session.Metadata["wake_attempts"])
@@ -1354,7 +1354,7 @@ func TestClearWakeFailuresSkipsNoOpClear(t *testing.T) {
 			store := newTestStore()
 			session := makeBead("b1", tt.metadata)
 
-			clearWakeFailures(&session, store)
+			clearWakeFailures(&session, sessionFrontDoor(store))
 
 			if store.metadataBatchCalls != 0 {
 				t.Fatalf("SetMetadataBatch called %d times with %v, want 0", store.metadataBatchCalls, store.metadataBatchPatches)
@@ -1394,7 +1394,7 @@ func TestClearWakeFailuresWritesOnlyChangedFields(t *testing.T) {
 			store := newTestStore()
 			session := makeBead("b1", tt.metadata)
 
-			clearWakeFailures(&session, store)
+			clearWakeFailures(&session, sessionFrontDoor(store))
 
 			if store.metadataBatchCalls != 1 {
 				t.Fatalf("SetMetadataBatch called %d times, want 1", store.metadataBatchCalls)
@@ -1575,19 +1575,19 @@ func TestHealState(t *testing.T) {
 		"state": "asleep",
 	})
 
-	healState(&session, true, store, clk)
+	healState(&session, true, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "awake" {
 		t.Errorf("state = %q, want awake", session.Metadata["state"])
 	}
 
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Errorf("state = %q, want asleep", session.Metadata["state"])
 	}
 
 	// No-op when already correct.
 	prevCalls := len(store.metadata["b1"])
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 	if len(store.metadata["b1"]) != prevCalls {
 		t.Error("healState should not write when state unchanged")
 	}
@@ -1601,7 +1601,7 @@ func TestHealState_DeadActiveHealsToAsleep(t *testing.T) {
 		"state": "active",
 	})
 
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
 	}
@@ -1622,7 +1622,7 @@ func TestHealState_NoopOnClosedBead(t *testing.T) {
 	})
 	session.Status = "closed"
 
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 	if got := len(store.metadata["b1"]); got != 0 {
 		t.Errorf("healState wrote %d metadata entries on closed bead; want 0", got)
 	}
@@ -1643,7 +1643,7 @@ func TestHealState_PreservesCreatingWhileStartRequested(t *testing.T) {
 	})
 	session.CreatedAt = clk.Now().Add(-30 * time.Second)
 
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "creating" {
 		t.Fatalf("state = %q, want creating", session.Metadata["state"])
 	}
@@ -1662,7 +1662,7 @@ func TestHealState_StaleCreatingWithPendingClaimHealsToAsleep(t *testing.T) {
 	})
 	session.CreatedAt = clk.Now().Add(-2 * time.Minute)
 
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
 	}
@@ -1680,7 +1680,7 @@ func TestHealState_NeverStartedPendingCreateMigratesToStartPendingUntilRollbackL
 	})
 	session.CreatedAt = startedAt
 
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != string(sessionpkg.StateStartPending) {
 		t.Fatalf("state = %q, want start-pending while pending-create lease is active", session.Metadata["state"])
 	}
@@ -1698,7 +1698,7 @@ func TestHealState_PreservesFreshCreatingWithoutPendingClaim(t *testing.T) {
 	})
 	session.CreatedAt = clk.Now().Add(-30 * time.Second)
 
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "creating" {
 		t.Fatalf("state = %q, want creating", session.Metadata["state"])
 	}
@@ -1714,7 +1714,7 @@ func TestHealState_StaleCreatingWithoutPendingClaimHealsToAsleep(t *testing.T) {
 	// Past staleCreatingStateTimeout (60s).
 	session.CreatedAt = clk.Now().Add(-2 * time.Minute)
 
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
 	}
@@ -1748,7 +1748,7 @@ func TestHealState_StaleCreatingPendingClaimDoesNotOscillateBackToCreating(t *te
 
 	// First tick: stale creating → asleep+runtime-missing, with stale
 	// pending_create lease cleared in the same batch.
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 	if got := session.Metadata["state"]; got != "asleep" {
 		t.Fatalf("after first heal: state = %q, want asleep", got)
 	}
@@ -1766,7 +1766,7 @@ func TestHealState_StaleCreatingPendingClaimDoesNotOscillateBackToCreating(t *te
 	// back into state=creating. Advance the clock slightly to simulate
 	// the next reconciler tick.
 	clk.Time = clk.Time.Add(30 * time.Second)
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 	if got := session.Metadata["state"]; got != "asleep" {
 		t.Fatalf("after second heal: state = %q, want asleep (oscillation regression)", got)
 	}
@@ -2227,7 +2227,7 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 				session.Metadata[namedSessionIdentityMetadata] = "mayor"
 				session.Metadata[namedSessionModeMetadata] = "always"
 			}
-			healState(&session, false, store, clk)
+			healState(&session, false, sessionFrontDoor(store), clk)
 			keyAfter := session.Metadata["session_key"]
 			startedHashAfter := session.Metadata["started_config_hash"]
 			if tt.wantKeyCleared && keyAfter != "" {
@@ -2263,14 +2263,14 @@ func TestCheckStability_RapidExitAfterHealStateKeepsStartedConfigHashCleared(t *
 		"last_woke_at":        now.Add(-5 * time.Second).UTC().Format(time.RFC3339),
 	})
 
-	healState(&session, false, store, clk)
+	healState(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["session_key"] != "" {
 		t.Fatalf("healState session_key = %q, want empty", session.Metadata["session_key"])
 	}
 	if session.Metadata["started_config_hash"] != "" {
 		t.Fatalf("healState started_config_hash = %q, want empty", session.Metadata["started_config_hash"])
 	}
-	if !checkStability(&session, nil, false, nil, store, clk, nil) {
+	if !checkStability(&session, nil, false, nil, sessionFrontDoor(store), clk, nil) {
 		t.Fatal("checkStability should record the rapid exit")
 	}
 	if session.Metadata["started_config_hash"] != "" {
@@ -2550,7 +2550,7 @@ func TestCheckChurn_AliveReturnsFalse(t *testing.T) {
 		"last_woke_at": now.Add(-90 * time.Second).Format(time.RFC3339),
 	})
 
-	if checkChurn(&session, nil, true, dt, store, clk) {
+	if checkChurn(&session, nil, true, dt, sessionFrontDoor(store), clk) {
 		t.Error("alive session should not trigger churn")
 	}
 }
@@ -2568,7 +2568,7 @@ func TestCheckChurn_NonProductiveDeath(t *testing.T) {
 		"churn_count":  "0",
 	})
 
-	if !checkChurn(&session, nil, false, dt, store, clk) {
+	if !checkChurn(&session, nil, false, dt, sessionFrontDoor(store), clk) {
 		t.Error("non-productive death should trigger churn")
 	}
 	if session.Metadata["churn_count"] != "1" {
@@ -2591,7 +2591,7 @@ func TestCheckChurn_RapidExitIgnored(t *testing.T) {
 		"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if checkChurn(&session, nil, false, dt, store, clk) {
+	if checkChurn(&session, nil, false, dt, sessionFrontDoor(store), clk) {
 		t.Error("rapid exit should not trigger churn (handled by checkStability)")
 	}
 }
@@ -2607,7 +2607,7 @@ func TestCheckChurn_PendingCreateClaimNotCountedAfterStartupLeaseExpires(t *test
 		"churn_count":          "0",
 	})
 
-	if checkChurn(&session, nil, false, dt, store, clk) {
+	if checkChurn(&session, nil, false, dt, sessionFrontDoor(store), clk) {
 		t.Fatal("pending_create_claim should suppress churn counting until create recovery clears the claim")
 	}
 	if got := session.Metadata["churn_count"]; got != "0" {
@@ -2626,7 +2626,7 @@ func TestCheckChurn_ProductiveSessionIgnored(t *testing.T) {
 		"last_woke_at": now.Add(-10 * time.Minute).Format(time.RFC3339),
 	})
 
-	if checkChurn(&session, nil, false, dt, store, clk) {
+	if checkChurn(&session, nil, false, dt, sessionFrontDoor(store), clk) {
 		t.Error("productive session death should not trigger churn")
 	}
 }
@@ -2645,7 +2645,7 @@ func TestCheckChurn_DeadProductiveSessionClearsChurnCount(t *testing.T) {
 		"churn_count":  "2",
 	})
 
-	if checkChurn(&session, nil, false, dt, store, clk) {
+	if checkChurn(&session, nil, false, dt, sessionFrontDoor(store), clk) {
 		t.Error("dead productive session should not trigger churn")
 	}
 	if session.Metadata["churn_count"] != "0" {
@@ -2667,7 +2667,7 @@ func TestCheckChurn_ClearedLastWokeAtSkipsChurn(t *testing.T) {
 		"churn_count":  "2",
 	})
 
-	if checkChurn(&session, nil, false, dt, store, clk) {
+	if checkChurn(&session, nil, false, dt, sessionFrontDoor(store), clk) {
 		t.Error("session with cleared last_woke_at should not trigger churn")
 	}
 	if session.Metadata["churn_count"] != "2" {
@@ -2686,7 +2686,7 @@ func TestCheckChurn_DrainingNotCounted(t *testing.T) {
 		"last_woke_at": now.Add(-90 * time.Second).Format(time.RFC3339),
 	})
 
-	if checkChurn(&session, nil, false, dt, store, clk) {
+	if checkChurn(&session, nil, false, dt, sessionFrontDoor(store), clk) {
 		t.Error("draining session death should not count as churn")
 	}
 }
@@ -2704,7 +2704,7 @@ func TestCheckChurn_SubprocessProviderSkipped(t *testing.T) {
 		"last_woke_at": now.Add(-90 * time.Second).Format(time.RFC3339),
 	})
 
-	if checkChurn(&session, cfg, false, dt, store, clk) {
+	if checkChurn(&session, cfg, false, dt, sessionFrontDoor(store), clk) {
 		t.Error("subprocess sessions should not trigger churn")
 	}
 }
@@ -2723,7 +2723,7 @@ func TestCheckChurn_CityStopSleepReasonSkipped(t *testing.T) {
 		"continuation_reset_pending": "",
 	})
 
-	if checkChurn(&session, &config.City{}, false, dt, store, clk) {
+	if checkChurn(&session, &config.City{}, false, dt, sessionFrontDoor(store), clk) {
 		t.Fatal("city-stop sessions should not trigger churn")
 	}
 	if got := session.Metadata["session_key"]; got != "resume-key" {
@@ -2749,7 +2749,7 @@ func TestRecordChurn_Quarantine(t *testing.T) {
 		"churn_count": "2", // one below threshold (defaultMaxChurnCycles=3)
 	})
 
-	recordChurn(&session, store, clk, sessionAgentMetricIdentity(session, nil))
+	recordChurn(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["churn_count"] != "3" {
 		t.Errorf("churn_count = %q, want 3", session.Metadata["churn_count"])
@@ -2771,7 +2771,7 @@ func TestRecordChurn_BelowThreshold(t *testing.T) {
 		"churn_count": "0",
 	})
 
-	recordChurn(&session, store, clk, sessionAgentMetricIdentity(session, nil))
+	recordChurn(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["churn_count"] != "1" {
 		t.Errorf("churn_count = %q, want 1", session.Metadata["churn_count"])
@@ -2791,7 +2791,7 @@ func TestRecordChurn_ClearsSessionKey(t *testing.T) {
 		"session_key": "old-key-123",
 	})
 
-	recordChurn(&session, store, clk, sessionAgentMetricIdentity(session, nil))
+	recordChurn(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 
 	if session.Metadata["session_key"] != "" {
 		t.Error("session_key should be cleared on churn")
@@ -2808,7 +2808,7 @@ func TestClearChurn(t *testing.T) {
 		"churn_count": "2",
 	})
 
-	clearChurn(&session, store)
+	clearChurn(&session, sessionFrontDoor(store))
 
 	if session.Metadata["churn_count"] != "0" {
 		t.Errorf("churn_count = %q, want 0", session.Metadata["churn_count"])
@@ -2822,7 +2822,7 @@ func TestClearChurn_NoopWhenZero(t *testing.T) {
 		"churn_count": "0",
 	})
 
-	clearChurn(&session, store)
+	clearChurn(&session, sessionFrontDoor(store))
 
 	// Should not have written to store (no-op).
 	if _, ok := store.metadata["b1"]; ok {
@@ -2877,7 +2877,7 @@ func TestHealExpiredTimers_ClearsChurnOnQuarantineExpiry(t *testing.T) {
 		"sleep_reason":      "context-churn",
 	})
 
-	healExpiredTimers(&session, store, clk)
+	healExpiredTimers(&session, sessionFrontDoor(store), clk)
 
 	if session.Metadata["quarantined_until"] != "" {
 		t.Error("quarantined_until should be cleared")

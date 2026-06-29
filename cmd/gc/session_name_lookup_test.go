@@ -15,7 +15,7 @@ func TestCreatePoolSessionBead_SetsPendingCreateClaim(t *testing.T) {
 	store := beads.NewMemStore()
 	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
 
-	bead, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{})
+	bead, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, poolSessionCreateIdentity{})
 	if err != nil {
 		t.Fatalf("createPoolSessionBead: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestCreatePoolSessionBead_UsesExplicitIDThroughCachingStore(t *testing.T) {
 	store := beads.NewCachingStore(backing, nil)
 	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
 
-	bead, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{})
+	bead, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, poolSessionCreateIdentity{})
 	if err != nil {
 		t.Fatalf("createPoolSessionBead: %v", err)
 	}

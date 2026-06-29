@@ -147,7 +147,7 @@ func TestAdoptionBarrier_NoRunning(t *testing.T) {
 	cfg := &config.City{}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Error("barrier should pass with no running sessions")
 	}
@@ -165,7 +165,7 @@ func TestAdoptionBarrier_PartialListUsesVisibleSessionsButFailsBarrier(t *testin
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if passed {
 		t.Fatal("barrier should fail closed on partial session listing")
 	}
@@ -189,7 +189,7 @@ func TestAdoptionBarrier_AdoptsRunning(t *testing.T) {
 	var stderr bytes.Buffer
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 
-	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clk, &stderr, false)
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clk, &stderr, false)
 	if !passed {
 		t.Errorf("barrier should pass, stderr: %s", stderr.String())
 	}
@@ -251,7 +251,7 @@ func TestAdoptionBarrier_SkipsExistingBead(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Error("barrier should pass")
 	}
@@ -286,7 +286,7 @@ func TestAdoptionBarrier_ClosedBeadDoesNotBlock(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}}}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Error("barrier should pass")
 	}
@@ -302,13 +302,13 @@ func TestAdoptionBarrier_Rerunnable(t *testing.T) {
 	var stderr bytes.Buffer
 
 	// First run: adopts.
-	r1, _ := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	r1, _ := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if r1.Adopted != 1 {
 		t.Fatalf("first run Adopted = %d, want 1", r1.Adopted)
 	}
 
 	// Second run: dedup prevents duplicates.
-	r2, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	r2, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Error("second run: barrier should pass")
 	}
@@ -340,7 +340,7 @@ func TestAdoptionBarrier_IgnoresNonRepairableSessionBeadsInConfigSnapshot(t *tes
 	sp := &fakeAdoptionProvider{running: []string{sessionName}}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Fatalf("barrier should pass, result=%+v stderr=%q", result, stderr.String())
 	}
@@ -389,7 +389,7 @@ func TestAdoptionBarrier_SerializesCreateWithSessionIdentifierLock(t *testing.T)
 
 	err := session.WithCitySessionAliasLock(cityPath, agentName, func() error {
 		go func() {
-			result, passed := runAdoptionBarrier(cityPath, store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+			result, passed := runAdoptionBarrier(cityPath, sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 			done <- adoptionBarrierOutcome{result: result, passed: passed}
 		}()
 
@@ -457,7 +457,7 @@ func TestAdoptionBarrier_ReportsInLockListFailuresAsChecks(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}}}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if passed {
 		t.Fatal("barrier should fail when the in-lock bead check fails")
 	}
@@ -485,7 +485,7 @@ func TestAdoptionBarrier_StampsSyncedAtAtCreateTime(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}}}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", fakeClock, &stderr, false)
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", fakeClock, &stderr, false)
 	if !passed {
 		t.Fatalf("barrier should pass, result=%+v stderr=%q", result, stderr.String())
 	}
@@ -512,7 +512,7 @@ func TestAdoptionBarrier_DryRun(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, true)
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, true)
 	if !passed {
 		t.Error("dry run barrier should pass")
 	}
@@ -545,7 +545,7 @@ func TestAdoptionBarrier_SkipsDeadSessions(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
 	}
@@ -584,7 +584,7 @@ func TestAdoptionBarrier_UsesResolvedProviderProcessNames(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	_, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	_, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
 	}
@@ -615,7 +615,7 @@ func TestAdoptionBarrier_UsesProviderlessDetectedProcessNames(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	_, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	_, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
 	}
@@ -648,7 +648,7 @@ func TestAdoptionBarrier_PoolSlotDetection(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, _ := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, true)
+	result, _ := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, true)
 	// Pool instance "worker-3" should resolve to config agent "worker"
 	// via resolvePoolBase, with pool slot 3. AgentName should be the
 	// expanded instance name "worker-3" (matching syncSessionBeads).
@@ -688,7 +688,7 @@ func TestAdoptionBarrier_PoolSlotResolutionUsesLoadedSnapshot(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, _ := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, true)
+	result, _ := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, true)
 
 	found := false
 	for _, d := range result.Details {
@@ -713,7 +713,7 @@ func TestAdoptionBarrier_PoolOutOfBounds(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, _ := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, true)
+	result, _ := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, true)
 	found := false
 	for _, d := range result.Details {
 		if d.SessionName == "worker-7" && d.PoolSlot == 7 && d.OutOfBounds {
@@ -755,7 +755,7 @@ func TestAdoptionBarrier_SingletonWithNumericSuffix(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Errorf("barrier should pass, stderr: %s", stderr.String())
 	}
@@ -784,7 +784,7 @@ func TestAdoptionBarrier_StaleDashNSingletonAdoptsCanonicalIdentity(t *testing.T
 	}
 	var stderr bytes.Buffer
 
-	result, _ := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, _ := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if result.Adopted != 1 {
 		t.Errorf("Adopted = %d, want 1", result.Adopted)
 	}
@@ -815,7 +815,7 @@ func TestAdoptionBarrier_UnknownSession(t *testing.T) {
 	cfg := &config.City{} // no agents configured
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Error("barrier should pass (adopt permissively)")
 	}

@@ -477,7 +477,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			cr.onStatus("adopting_sessions")
 		}
 		if cr.cityBeadStore() != nil {
-			result, passed := runAdoptionBarrier(cr.cityPath, cr.sessionsBeadStore().Store, cr.sp, cr.cfg, cr.cityName, clock.Real{}, cr.stderr, false)
+			result, passed := runAdoptionBarrier(cr.cityPath, sessionFrontDoor(cr.sessionsBeadStore().Store), cr.sp, cr.cfg, cr.cityName, clock.Real{}, cr.stderr, false)
 			if result.Adopted > 0 {
 				fmt.Fprintf(cr.stdout, "Adopted %d running session(s) into bead store.\n", result.Adopted) //nolint:errcheck
 			}
@@ -2053,7 +2053,7 @@ func (cr *CityRuntime) applySoftReloadAcceptance(
 	if reply == nil {
 		return
 	}
-	result := acceptConfigDriftAcrossSessions(cr.sessionsBeadStore(), desired, sessionBeads, cr.sp, cr.sessionDrains, cr.stderr)
+	result := acceptConfigDriftAcrossSessions(sessionFrontDoor(cr.sessionsBeadStore().Store), desired, sessionBeads, cr.sp, cr.sessionDrains, cr.stderr)
 	accepted := result.Updated
 	reply.AcceptedDriftCount = &accepted
 	for _, warning := range result.warnings() {
@@ -3358,7 +3358,7 @@ func (cr *CityRuntime) shutdown() {
 			}
 		}
 		store := cr.sessionsBeadStore()
-		markCityStopSessionSleepReason(store, cr.stderr)
+		markCityStopSessionSleepReason(sessionFrontDoor(store.Store), cr.stderr)
 		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
 		if !asyncStartsDrained && cr.forceStopRequested() {
 			lateRunning, lateListErr := cr.sp.ListRunning("")
@@ -3370,7 +3370,7 @@ func (cr *CityRuntime) shutdown() {
 				}
 			}
 			if len(lateRunning) > 0 {
-				markCityStopSessionSleepReason(store, cr.stderr)
+				markCityStopSessionSleepReason(sessionFrontDoor(store.Store), cr.stderr)
 				gracefulStopAllWithForceSignal(lateRunning, cr.sp, 0, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
 			}
 		}
