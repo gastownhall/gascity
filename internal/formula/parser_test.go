@@ -230,6 +230,52 @@ description_file = "../prompts/operator.md"
 	}
 }
 
+// TestParseTOMLAtResolvesDescriptionFileRelativeToSourcePath pins that
+// ParseTOMLAt anchors a relative description_file to the supplied source path's
+// directory even though the draft bytes were never written there — so authoring
+// and validation paths can preflight a draft against its eventual on-disk
+// location. The strict graph.v2 contract still fails fast when the target is
+// missing at that anchor.
+func TestParseTOMLAtResolvesDescriptionFileRelativeToSourcePath(t *testing.T) {
+	dir := t.TempDir()
+	cityFormulas := filepath.Join(dir, "formulas")
+	cityPrompts := filepath.Join(dir, "prompts")
+	for _, d := range []string{cityFormulas, cityPrompts} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPrompts, "work.md"), []byte("anchored prompt body\n"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	const draftTemplate = `formula = "anchored"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Work"
+description_file = %q
+`
+	// srcPath sits in the city formulas dir, but no file is written there; the
+	// relative "../prompts/work.md" must still resolve against that directory.
+	srcPath := filepath.Join(cityFormulas, "anchored.toml")
+
+	parsed, err := NewParser(cityFormulas).ParseTOMLAt([]byte(fmt.Sprintf(draftTemplate, "../prompts/work.md")), srcPath)
+	if err != nil {
+		t.Fatalf("ParseTOMLAt: %v", err)
+	}
+	if got := parsed.Steps[0].Description; got != "anchored prompt body\n" {
+		t.Fatalf("step description = %q, want anchored prompt body", got)
+	}
+
+	if _, err := NewParser(cityFormulas).ParseTOMLAt([]byte(fmt.Sprintf(draftTemplate, "../prompts/missing.md")), srcPath); err == nil {
+		t.Fatal("ParseTOMLAt should fail for a missing strict graph.v2 description_file")
+	}
+}
+
 func TestLoadByNameDescriptionFileKeepsFormulaLocalAssetsPath(t *testing.T) {
 	tmp := t.TempDir()
 	coreFormulas := filepath.Join(tmp, "core", "formulas")

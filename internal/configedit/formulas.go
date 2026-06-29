@@ -17,6 +17,19 @@ import (
 // or leading/trailing punctuation that could escape the formulas directory.
 var formulaNameRE = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9_-]{0,62}[a-zA-Z0-9])?$`)
 
+// ValidFormulaName reports whether name is a legal city-local formula name: a
+// flat, traversal-safe slug that maps to exactly <formulas-dir>/<name>.toml. It
+// returns an ErrValidation-wrapped error describing the violation, or nil when
+// the name is acceptable. The formula write plane shares this with the editor so
+// the validate endpoint predicts the same accept/reject decision the upsert and
+// delete paths enforce, instead of accepting names that the later PUT rejects.
+func ValidFormulaName(name string) error {
+	if !formulaNameRE.MatchString(name) {
+		return fmt.Errorf("%w: invalid formula name %q", ErrValidation, name)
+	}
+	return nil
+}
+
 // UpsertFormula creates or replaces the city-local formula source at
 // <cityRoot>/formulas/<name>.toml. The write is atomic (temp + rename).
 // Callers MUST validate the formula content (parse + Validate + name match)
@@ -88,8 +101,8 @@ func (e *Editor) FormulaSource(name string) ([]byte, bool, error) {
 // turn every formula op into an arbitrary-path primitive. Both the dir and the
 // per-name target are re-checked for containment as defense in depth.
 func (e *Editor) formulaTarget(name string) (dir, target string, err error) {
-	if !formulaNameRE.MatchString(name) {
-		return "", "", fmt.Errorf("%w: invalid formula name %q", ErrValidation, name)
+	if err := ValidFormulaName(name); err != nil {
+		return "", "", err
 	}
 	cityRoot := filepath.Dir(e.tomlPath)
 	dir = citylayout.ResolveFormulasDir(cityRoot, "")

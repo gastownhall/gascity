@@ -60,6 +60,71 @@ func (f *corruptCityAfterRenameFS) Rename(oldpath, newpath string) error {
 	return err
 }
 
+// corruptCityThenFailFormulaRemoveFS corrupts city.toml right after the formula
+// file is written (forcing the post-write refresh to fail) and then fails the
+// Remove that the new-file rollback issues, so both the mutation and its rollback
+// fault. It exercises the double-fault path where the rollback error must be
+// surfaced rather than swallowed.
+type corruptCityThenFailFormulaRemoveFS struct {
+	fsys.OSFS
+	triggerPath string
+	cityToml    string
+	fired       bool
+}
+
+func (f *corruptCityThenFailFormulaRemoveFS) Rename(oldpath, newpath string) error {
+	err := f.OSFS.Rename(oldpath, newpath)
+	if err == nil && !f.fired && canonicalTestPath(newpath) == canonicalTestPath(f.triggerPath) {
+		f.fired = true
+		if writeErr := os.WriteFile(f.cityToml, []byte("["), 0o644); writeErr != nil {
+			return writeErr
+		}
+	}
+	return err
+}
+
+func (f *corruptCityThenFailFormulaRemoveFS) Remove(name string) error {
+	if canonicalTestPath(name) == canonicalTestPath(f.triggerPath) {
+		return fmt.Errorf("injected formula remove failure")
+	}
+	return f.OSFS.Remove(name)
+}
+
+// failFormulaReadFS fails ReadFile for one specific path (a city-local formula
+// source) while leaving every other filesystem op intact, so a controller
+// formula mutation cannot read its prior source. It exercises the guard that
+// aborts the mutation before touching disk rather than treating an unreadable
+// prior as absent and destroying the only restorable copy.
+type failFormulaReadFS struct {
+	fsys.OSFS
+	failReadPath string
+}
+
+func (f *failFormulaReadFS) ReadFile(name string) ([]byte, error) {
+	if canonicalTestPath(name) == canonicalTestPath(f.failReadPath) {
+		return nil, fmt.Errorf("injected formula read failure")
+	}
+	return f.OSFS.ReadFile(name)
+}
+
+// failFormulaWriteFS fails the atomic rename that publishes a city-local formula
+// file, so a brand-new formula write faults before the target file is ever
+// created. With no prior source on disk, the controller's new-file rollback then
+// issues a DeleteFormula against an absent file; this exercises that the
+// resulting ErrNotFound is treated as a satisfied rollback rather than joined
+// into the returned error (which would mis-map the real write failure to 404).
+type failFormulaWriteFS struct {
+	fsys.OSFS
+	formulaPath string
+}
+
+func (f *failFormulaWriteFS) Rename(oldpath, newpath string) error {
+	if canonicalTestPath(newpath) == canonicalTestPath(f.formulaPath) {
+		return fmt.Errorf("injected formula write failure")
+	}
+	return f.OSFS.Rename(oldpath, newpath)
+}
+
 type blockingLatestEventProvider struct {
 	*events.Fake
 	latestCalled chan struct{}
@@ -989,6 +1054,351 @@ func TestControllerStateMutationRollsBackAgentOverrideWhenRefreshFails(t *testin
 	}
 	if cs.configDirty.Load() {
 		t.Fatal("SuspendAgent should not mark config dirty after rollback")
+	}
+}
+
+func TestControllerStateUpsertFormulaRollsBackNewFileWhenRefreshFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	originalCity := []byte("[workspace]\nname = \"city1\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, originalCity, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaPath := filepath.Join(cityDir, "formulas", "hello.toml")
+
+	cs := newControllerState(context.Background(), &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.editor = configedit.NewEditor(&corruptCityAfterRenameFS{
+		triggerPath: formulaPath,
+		cityToml:    tomlPath,
+	}, tomlPath)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+	beforeCfg := cs.Config()
+
+	err := cs.UpsertFormula("hello", []byte("formula = \"hello\"\n"))
+	if err == nil {
+		t.Fatal("UpsertFormula should fail when refreshing the updated snapshot fails")
+	}
+	if _, statErr := os.Stat(formulaPath); !os.IsNotExist(statErr) {
+		t.Fatalf("formula stat err = %v, want file removed on rollback", statErr)
+	}
+	restored, readErr := os.ReadFile(tomlPath)
+	if readErr != nil {
+		t.Fatalf("read restored city.toml: %v", readErr)
+	}
+	if string(restored) != string(originalCity) {
+		t.Fatalf("city.toml = %q, want rollback to %q", restored, originalCity)
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("UpsertFormula should not poke the reconciler after rollback")
+	default:
+	}
+	if cs.configDirty.Load() {
+		t.Fatal("UpsertFormula should not mark config dirty after rollback")
+	}
+	if got := cs.Config(); got != beforeCfg {
+		t.Fatalf("Config() pointer changed after failed upsert: got %p want %p", got, beforeCfg)
+	}
+}
+
+// TestControllerStateUpsertFormulaNewFileWriteFailurePreservesErrorClass pins
+// that when a brand-new formula write itself faults (no prior file), the no-prior
+// rollback's DeleteFormula returning ErrNotFound — the desired absent post-state
+// — is not surfaced. Surfacing it would let the API layer map a failed create to
+// HTTP 404 and hide the real failure class.
+func TestControllerStateUpsertFormulaNewFileWriteFailurePreservesErrorClass(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaPath := filepath.Join(cityDir, "formulas", "hello.toml")
+
+	cs := newControllerState(context.Background(), &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.editor = configedit.NewEditor(&failFormulaWriteFS{formulaPath: formulaPath}, tomlPath)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+
+	err := cs.UpsertFormula("hello", []byte("formula = \"hello\"\n"))
+	if err == nil {
+		t.Fatal("UpsertFormula should fail when the new-formula write faults")
+	}
+	if errors.Is(err, configedit.ErrNotFound) {
+		t.Fatalf("UpsertFormula error = %v, must not surface rollback ErrNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "injected formula write failure") {
+		t.Fatalf("UpsertFormula error = %v, want the real write failure preserved", err)
+	}
+	if _, statErr := os.Stat(formulaPath); !os.IsNotExist(statErr) {
+		t.Fatalf("formula stat err = %v, want no file created on rollback", statErr)
+	}
+}
+
+func TestControllerStateUpsertFormulaRestoresExistingFileWhenRefreshFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	originalCity := []byte("[workspace]\nname = \"city1\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, originalCity, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaPath := filepath.Join(cityDir, "formulas", "hello.toml")
+	originalFormula := []byte("formula = \"hello\"\nmessage = \"original\"\n")
+	if err := os.MkdirAll(filepath.Dir(formulaPath), 0o755); err != nil {
+		t.Fatalf("mkdir formulas dir: %v", err)
+	}
+	if err := os.WriteFile(formulaPath, originalFormula, 0o644); err != nil {
+		t.Fatalf("write original formula: %v", err)
+	}
+
+	cs := newControllerState(context.Background(), &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.editor = configedit.NewEditor(&corruptCityAfterRenameFS{
+		triggerPath: formulaPath,
+		cityToml:    tomlPath,
+	}, tomlPath)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+	beforeCfg := cs.Config()
+
+	err := cs.UpsertFormula("hello", []byte("formula = \"hello\"\nmessage = \"updated\"\n"))
+	if err == nil {
+		t.Fatal("UpsertFormula should fail when refreshing the updated snapshot fails")
+	}
+	gotFormula, readErr := os.ReadFile(formulaPath)
+	if readErr != nil {
+		t.Fatalf("read restored formula: %v", readErr)
+	}
+	if string(gotFormula) != string(originalFormula) {
+		t.Fatalf("formula = %q, want rollback to %q", gotFormula, originalFormula)
+	}
+	restored, readErr := os.ReadFile(tomlPath)
+	if readErr != nil {
+		t.Fatalf("read restored city.toml: %v", readErr)
+	}
+	if string(restored) != string(originalCity) {
+		t.Fatalf("city.toml = %q, want rollback to %q", restored, originalCity)
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("UpsertFormula should not poke the reconciler after rollback")
+	default:
+	}
+	if cs.configDirty.Load() {
+		t.Fatal("UpsertFormula should not mark config dirty after rollback")
+	}
+	if got := cs.Config(); got != beforeCfg {
+		t.Fatalf("Config() pointer changed after failed upsert: got %p want %p", got, beforeCfg)
+	}
+}
+
+func TestControllerStateDeleteFormulaRestoresExistingFileWhenRefreshFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	originalCity := []byte("[workspace]\nname = \"city1\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, originalCity, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaPath := filepath.Join(cityDir, "formulas", "hello.toml")
+	originalFormula := []byte("formula = \"hello\"\nmessage = \"original\"\n")
+	if err := os.MkdirAll(filepath.Dir(formulaPath), 0o755); err != nil {
+		t.Fatalf("mkdir formulas dir: %v", err)
+	}
+	if err := os.WriteFile(formulaPath, originalFormula, 0o644); err != nil {
+		t.Fatalf("write original formula: %v", err)
+	}
+
+	cs := newControllerState(context.Background(), &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.editor = configedit.NewEditor(&corruptCityAfterRemoveFS{
+		triggerPath: formulaPath,
+		cityToml:    tomlPath,
+	}, tomlPath)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+	beforeCfg := cs.Config()
+
+	err := cs.DeleteFormula("hello")
+	if err == nil {
+		t.Fatal("DeleteFormula should fail when refreshing the updated snapshot fails")
+	}
+	gotFormula, readErr := os.ReadFile(formulaPath)
+	if readErr != nil {
+		t.Fatalf("read restored formula: %v", readErr)
+	}
+	if string(gotFormula) != string(originalFormula) {
+		t.Fatalf("formula = %q, want rollback to %q", gotFormula, originalFormula)
+	}
+	restored, readErr := os.ReadFile(tomlPath)
+	if readErr != nil {
+		t.Fatalf("read restored city.toml: %v", readErr)
+	}
+	if string(restored) != string(originalCity) {
+		t.Fatalf("city.toml = %q, want rollback to %q", restored, originalCity)
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("DeleteFormula should not poke the reconciler after rollback")
+	default:
+	}
+	if cs.configDirty.Load() {
+		t.Fatal("DeleteFormula should not mark config dirty after rollback")
+	}
+	if got := cs.Config(); got != beforeCfg {
+		t.Fatalf("Config() pointer changed after failed delete: got %p want %p", got, beforeCfg)
+	}
+}
+
+func TestControllerStateUpsertFormulaJoinsRollbackFailure(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	originalCity := []byte("[workspace]\nname = \"city1\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, originalCity, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaPath := filepath.Join(cityDir, "formulas", "hello.toml")
+
+	cs := newControllerState(context.Background(), &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.editor = configedit.NewEditor(&corruptCityThenFailFormulaRemoveFS{
+		triggerPath: formulaPath,
+		cityToml:    tomlPath,
+	}, tomlPath)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+
+	err := cs.UpsertFormula("hello", []byte("formula = \"hello\"\n"))
+	if err == nil {
+		t.Fatal("UpsertFormula should fail when both the refresh and its rollback fault")
+	}
+	if !strings.Contains(err.Error(), "rolling back formula") {
+		t.Fatalf("returned error should surface the rollback failure, got: %v", err)
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("UpsertFormula should not poke the reconciler after a faulted rollback")
+	default:
+	}
+}
+
+func TestControllerStateUpsertFormulaAbortsWhenPriorSourceUnreadable(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	originalCity := []byte("[workspace]\nname = \"city1\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, originalCity, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaPath := filepath.Join(cityDir, "formulas", "hello.toml")
+	originalFormula := []byte("formula = \"hello\"\nmessage = \"original\"\n")
+	if err := os.MkdirAll(filepath.Dir(formulaPath), 0o755); err != nil {
+		t.Fatalf("mkdir formulas dir: %v", err)
+	}
+	if err := os.WriteFile(formulaPath, originalFormula, 0o644); err != nil {
+		t.Fatalf("write original formula: %v", err)
+	}
+
+	cs := newControllerState(context.Background(), &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.editor = configedit.NewEditor(&failFormulaReadFS{failReadPath: formulaPath}, tomlPath)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+	beforeCfg := cs.Config()
+
+	err := cs.UpsertFormula("hello", []byte("formula = \"hello\"\nmessage = \"updated\"\n"))
+	if err == nil {
+		t.Fatal("UpsertFormula should fail when the prior source cannot be read")
+	}
+	if !strings.Contains(err.Error(), "reading prior formula") {
+		t.Fatalf("error = %v, want a prior-source read failure", err)
+	}
+	// The mutation must abort before any write, leaving the prior source as-is.
+	gotFormula, readErr := os.ReadFile(formulaPath)
+	if readErr != nil {
+		t.Fatalf("read formula: %v", readErr)
+	}
+	if string(gotFormula) != string(originalFormula) {
+		t.Fatalf("formula = %q, want untouched %q", gotFormula, originalFormula)
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("UpsertFormula should not poke the reconciler when it aborts early")
+	default:
+	}
+	if cs.configDirty.Load() {
+		t.Fatal("UpsertFormula should not mark config dirty when it aborts early")
+	}
+	if got := cs.Config(); got != beforeCfg {
+		t.Fatalf("Config() pointer changed after aborted upsert: got %p want %p", got, beforeCfg)
+	}
+}
+
+func TestControllerStateDeleteFormulaAbortsWhenPriorSourceUnreadable(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	originalCity := []byte("[workspace]\nname = \"city1\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, originalCity, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaPath := filepath.Join(cityDir, "formulas", "hello.toml")
+	originalFormula := []byte("formula = \"hello\"\nmessage = \"original\"\n")
+	if err := os.MkdirAll(filepath.Dir(formulaPath), 0o755); err != nil {
+		t.Fatalf("mkdir formulas dir: %v", err)
+	}
+	if err := os.WriteFile(formulaPath, originalFormula, 0o644); err != nil {
+		t.Fatalf("write original formula: %v", err)
+	}
+
+	cs := newControllerState(context.Background(), &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.editor = configedit.NewEditor(&failFormulaReadFS{failReadPath: formulaPath}, tomlPath)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+
+	err := cs.DeleteFormula("hello")
+	if err == nil {
+		t.Fatal("DeleteFormula should fail when the prior source cannot be read")
+	}
+	if !strings.Contains(err.Error(), "reading prior formula") {
+		t.Fatalf("error = %v, want a prior-source read failure", err)
+	}
+	// The delete must abort before mutating, leaving the prior source intact.
+	gotFormula, readErr := os.ReadFile(formulaPath)
+	if readErr != nil {
+		t.Fatalf("read formula: %v", readErr)
+	}
+	if string(gotFormula) != string(originalFormula) {
+		t.Fatalf("formula = %q, want untouched %q", gotFormula, originalFormula)
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("DeleteFormula should not poke the reconciler when it aborts early")
+	default:
+	}
+	if cs.configDirty.Load() {
+		t.Fatal("DeleteFormula should not mark config dirty when it aborts early")
 	}
 }
 

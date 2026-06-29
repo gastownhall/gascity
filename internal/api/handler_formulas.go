@@ -358,12 +358,25 @@ func discoverFormulaNamesFromSource(src formula.Source, paths []string) []string
 	return names
 }
 
-func loadResolvedWorkflowFormula(parser *formula.Parser, name string) (*formula.Formula, error) {
+// loadResolvedFormula loads a formula by name and resolves its extends chain
+// without constraining its type, so callers that accept any authorable formula
+// (workflow, expansion, or aspect) can reuse the parser's load+resolve to catch
+// missing parents and other resolution errors. It returns only resolution
+// failures, never a type mismatch.
+func loadResolvedFormula(parser *formula.Parser, name string) (*formula.Formula, error) {
 	loaded, err := parser.LoadByName(name)
 	if err != nil {
 		return nil, err
 	}
-	resolved, err := parser.Resolve(loaded)
+	return parser.Resolve(loaded)
+}
+
+// loadResolvedWorkflowFormula resolves a formula and additionally requires it to
+// be a workflow. The catalog and detail readers use the workflow gate to skip
+// non-workflow building blocks; authoring paths that accept those building
+// blocks call loadResolvedFormula instead.
+func loadResolvedWorkflowFormula(parser *formula.Parser, name string) (*formula.Formula, error) {
+	resolved, err := loadResolvedFormula(parser, name)
 	if err != nil {
 		return nil, err
 	}

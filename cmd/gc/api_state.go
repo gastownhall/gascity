@@ -1243,31 +1243,68 @@ func (cs *controllerState) FormulaSource(name string) ([]byte, bool, error) {
 // the config snapshot so the new formula is re-discovered (FormulaLayers is
 // recomputed during composition) and pokes the reconciler. If the post-write
 // refresh fails, the prior on-disk source is restored so the file write does not
-// outlive a rolled-back mutation.
+// outlive a rolled-back mutation. A rollback that itself fails (a double fault)
+// is joined into the returned error rather than swallowed, mirroring the
+// snapshot-restore discipline in mutateAndPoke, so disk-vs-memory divergence is
+// never silent. If a prior source exists but cannot be read, the mutation aborts
+// before any write, since rollback would have no basis to restore it.
 func (cs *controllerState) UpsertFormula(name string, content []byte) error {
-	prior, hadPrior, _ := cs.editor.FormulaSource(name)
+	// The read-prior -> write -> refresh -> rollback sequence is not atomic across
+	// concurrent editor ops (the pre-existing mutateAndPoke rollback race class):
+	// a same-name racing upsert could see this rollback's delete-on-no-prior erase
+	// its committed file. Very low risk on a single-operator control plane; a
+	// coarse per-city mutation lock is deferred as out of scope for this change.
+	prior, hadPrior, readErr := cs.editor.FormulaSource(name)
+	if readErr != nil {
+		// FormulaSource reports a missing source as (nil, false, nil); a non-nil
+		// error means a prior source exists but is unreadable. Treating that as
+		// absent would let a refresh failure delete or overwrite the only
+		// restorable copy, so abort before mutating.
+		return fmt.Errorf("reading prior formula %q before upsert: %w", name, readErr)
+	}
 	err := cs.mutateAndPoke(func() error {
 		return cs.editor.UpsertFormula(name, content)
 	})
 	if err != nil {
+		var rollbackErr error
 		if hadPrior {
-			_ = cs.editor.UpsertFormula(name, prior)
+			rollbackErr = cs.editor.UpsertFormula(name, prior)
 		} else {
-			_ = cs.editor.DeleteFormula(name)
+			// No prior file existed, so the desired rollback post-state is
+			// "absent". A brand-new write that faulted before creating the file
+			// leaves nothing to delete, and DeleteFormula then returns
+			// ErrNotFound — that desired state, not a rollback failure. Joining it
+			// would let mutationError map the create's real infrastructure or
+			// validation failure to HTTP 404, masking the true error class, so
+			// treat ErrNotFound here as a satisfied rollback.
+			if rb := cs.editor.DeleteFormula(name); rb != nil && !errors.Is(rb, configedit.ErrNotFound) {
+				rollbackErr = rb
+			}
+		}
+		if rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("rolling back formula %q write: %w", name, rollbackErr))
 		}
 	}
 	return err
 }
 
 // DeleteFormula removes a city-local formula source and refreshes state. A failed
-// refresh restores the prior source.
+// refresh restores the prior source; a restore that itself fails is joined into
+// the returned error rather than swallowed. If the prior source exists but cannot
+// be read, the delete aborts before mutating, since rollback would have no basis
+// to restore it.
 func (cs *controllerState) DeleteFormula(name string) error {
-	prior, hadPrior, _ := cs.editor.FormulaSource(name)
+	prior, hadPrior, readErr := cs.editor.FormulaSource(name)
+	if readErr != nil {
+		return fmt.Errorf("reading prior formula %q before delete: %w", name, readErr)
+	}
 	err := cs.mutateAndPoke(func() error {
 		return cs.editor.DeleteFormula(name)
 	})
 	if err != nil && hadPrior {
-		_ = cs.editor.UpsertFormula(name, prior)
+		if rollbackErr := cs.editor.UpsertFormula(name, prior); rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("rolling back formula %q delete: %w", name, rollbackErr))
+		}
 	}
 	return err
 }

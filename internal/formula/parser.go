@@ -134,22 +134,47 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
+	return p.parseResolvedAt(data, absPath, path)
+}
+
+// ParseTOMLAt parses formula content as though it had been read from srcPath,
+// resolving description_file references relative to srcPath's directory (the
+// documented ../assets/ form is still shadowed through the parser's layer order)
+// and caching the result under srcPath and the formula name. Authoring and
+// validation paths that hold draft bytes not yet written to disk use this so a
+// relative description_file such as "../prompts/x.md" resolves against the
+// draft's eventual on-disk location instead of an unrelated temporary directory.
+func (p *Parser) ParseTOMLAt(content []byte, srcPath string) (*Formula, error) {
+	absPath, err := filepath.Abs(srcPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve path: %w", err)
+	}
+	return p.parseResolvedAt(content, absPath, srcPath)
+}
+
+// parseResolvedAt parses formula bytes destined for absPath: it selects the
+// decoder from absPath's extension, stamps Source and ContentHash, resolves
+// description_file references relative to absPath's directory, and caches the
+// formula by absPath and name. label is the caller-facing path used in error
+// messages (the pre-Abs path the caller supplied).
+func (p *Parser) parseResolvedAt(data []byte, absPath, label string) (*Formula, error) {
 	// Detect format from extension
-	var formula *Formula
-	if IsTOMLFilename(path) {
-		formula, err = p.ParseTOML(data)
+	var f *Formula
+	var err error
+	if IsTOMLFilename(absPath) {
+		f, err = p.ParseTOML(data)
 	} else {
-		formula, err = p.Parse(data)
+		f, err = p.Parse(data)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", label, err)
 	}
 
-	formula.Source = absPath
-	formula.ContentHash = contentHash(data)
+	f.Source = absPath
+	f.ContentHash = contentHash(data)
 
 	// Set source tracing info on all steps (gt-8tmz.18)
-	SetSourceInfo(formula)
+	SetSourceInfo(f)
 
 	// Resolve description_file references relative to the real formula file's
 	// directory, with asset references shadowed through formula layer order.
@@ -158,20 +183,20 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	// formulas fail fast on missing files; legacy formulas keep the historical
 	// best-effort behavior.
 	formulaDir := descriptionFileBaseDir(absPath)
-	strictDescriptionFiles := UsesGraphCompiler(formula)
-	if err := p.resolveDescriptionFiles(formula.Steps, formulaDir, strictDescriptionFiles, formula.Vars); err != nil {
-		return nil, fmt.Errorf("resolve description_file in %s: %w", path, err)
+	strictDescriptionFiles := UsesGraphCompiler(f)
+	if err := p.resolveDescriptionFiles(f.Steps, formulaDir, strictDescriptionFiles, f.Vars); err != nil {
+		return nil, fmt.Errorf("resolve description_file in %s: %w", label, err)
 	}
-	if err := p.resolveDescriptionFiles(formula.Template, formulaDir, strictDescriptionFiles, formula.Vars); err != nil {
-		return nil, fmt.Errorf("resolve description_file in %s: %w", path, err)
+	if err := p.resolveDescriptionFiles(f.Template, formulaDir, strictDescriptionFiles, f.Vars); err != nil {
+		return nil, fmt.Errorf("resolve description_file in %s: %w", label, err)
 	}
 
-	p.cache[absPath] = formula
+	p.cache[absPath] = f
 
 	// Also cache by name for extends resolution
-	p.cache[formula.Formula] = formula
+	p.cache[f.Formula] = f
 
-	return formula, nil
+	return f, nil
 }
 
 func descriptionFileBaseDir(path string) string {
