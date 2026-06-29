@@ -1420,6 +1420,15 @@ type FormulaRunsResponse struct {
 	RunCount      int64                       `json:"run_count"`
 }
 
+// FormulaSourceOutputBody defines model for FormulaSourceOutputBody.
+type FormulaSourceOutputBody struct {
+	// Name Formula name.
+	Name string `json:"name"`
+
+	// Source Raw formula TOML source.
+	Source string `json:"source"`
+}
+
 // FormulaStepResponse defines model for FormulaStepResponse.
 type FormulaStepResponse struct {
 	Assignee *string            `json:"assignee,omitempty"`
@@ -1438,6 +1447,15 @@ type FormulaSummaryResponse struct {
 	RecentRuns  *[]FormulaRecentRunResponse `json:"recent_runs"`
 	RunCount    int64                       `json:"run_count"`
 	VarDefs     *[]FormulaVarDefResponse    `json:"var_defs"`
+}
+
+// FormulaValidateOutputBody defines model for FormulaValidateOutputBody.
+type FormulaValidateOutputBody struct {
+	// Errors Validation errors, if any.
+	Errors *[]string `json:"errors,omitempty"`
+
+	// Valid Whether the formula source is valid.
+	Valid bool `json:"valid"`
 }
 
 // FormulaVarDefResponse defines model for FormulaVarDefResponse.
@@ -5725,6 +5743,12 @@ type GetV0CityByCityNameFormulasFeedParams struct {
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
+// DeleteV0CityByCityNameFormulasByNameParams defines parameters for DeleteV0CityByCityNameFormulasByName.
+type DeleteV0CityByCityNameFormulasByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameFormulasByNameParams defines parameters for GetV0CityByCityNameFormulasByName.
 type GetV0CityByCityNameFormulasByNameParams struct {
 	// ScopeKind Scope kind (city or rig).
@@ -5735,6 +5759,12 @@ type GetV0CityByCityNameFormulasByNameParams struct {
 
 	// Target Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).
 	Target string `form:"target" json:"target"`
+}
+
+// PutV0CityByCityNameFormulasByNameParams defines parameters for PutV0CityByCityNameFormulasByName.
+type PutV0CityByCityNameFormulasByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // PostV0CityByCityNameFormulasByNamePreviewParams defines parameters for PostV0CityByCityNameFormulasByNamePreview.
@@ -5753,6 +5783,12 @@ type GetV0CityByCityNameFormulasByNameRunsParams struct {
 
 	// Limit Maximum number of recent runs to return. 0 = default.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// PostV0CityByCityNameFormulasByNameValidateParams defines parameters for PostV0CityByCityNameFormulasByNameValidate.
+type PostV0CityByCityNameFormulasByNameValidateParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameMailParams defines parameters for GetV0CityByCityNameMail.
@@ -12088,8 +12124,14 @@ type ClientInterface interface {
 	// GetV0CityByCityNameFormulasFeed request
 	GetV0CityByCityNameFormulasFeed(ctx context.Context, cityName string, params *GetV0CityByCityNameFormulasFeedParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// DeleteV0CityByCityNameFormulasByName request
+	DeleteV0CityByCityNameFormulasByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameFormulasByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameFormulasByName request
 	GetV0CityByCityNameFormulasByName(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutV0CityByCityNameFormulasByNameWithBody request with any body
+	PutV0CityByCityNameFormulasByNameWithBody(ctx context.Context, cityName string, name string, params *PutV0CityByCityNameFormulasByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameFormulasByNamePreviewWithBody request with any body
 	PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -12098,6 +12140,12 @@ type ClientInterface interface {
 
 	// GetV0CityByCityNameFormulasByNameRuns request
 	GetV0CityByCityNameFormulasByNameRuns(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameFormulasByNameSource request
+	GetV0CityByCityNameFormulasByNameSource(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameFormulasByNameValidateWithBody request with any body
+	PostV0CityByCityNameFormulasByNameValidateWithBody(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNameValidateParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameHealth request
 	GetV0CityByCityNameHealth(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13424,8 +13472,32 @@ func (c *Client) GetV0CityByCityNameFormulasFeed(ctx context.Context, cityName s
 	return c.Client.Do(req)
 }
 
+func (c *Client) DeleteV0CityByCityNameFormulasByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameFormulasByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameFormulasByNameRequest(c.Server, cityName, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) GetV0CityByCityNameFormulasByName(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameFormulasByNameRequest(c.Server, cityName, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutV0CityByCityNameFormulasByNameWithBody(ctx context.Context, cityName string, name string, params *PutV0CityByCityNameFormulasByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNameFormulasByNameRequestWithBody(c.Server, cityName, name, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -13462,6 +13534,30 @@ func (c *Client) PostV0CityByCityNameFormulasByNamePreview(ctx context.Context, 
 
 func (c *Client) GetV0CityByCityNameFormulasByNameRuns(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameFormulasByNameRunsRequest(c.Server, cityName, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameFormulasByNameSource(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameFormulasByNameSourceRequest(c.Server, cityName, name)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameFormulasByNameValidateWithBody(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNameValidateParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameFormulasByNameValidateRequestWithBody(c.Server, cityName, name, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -18835,6 +18931,60 @@ func NewGetV0CityByCityNameFormulasFeedRequest(server string, cityName string, p
 	return req, nil
 }
 
+// NewDeleteV0CityByCityNameFormulasByNameRequest generates requests for DeleteV0CityByCityNameFormulasByName
+func NewDeleteV0CityByCityNameFormulasByNameRequest(server string, cityName string, name string, params *DeleteV0CityByCityNameFormulasByNameParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "name", name, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/formulas/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameFormulasByNameRequest generates requests for GetV0CityByCityNameFormulasByName
 func NewGetV0CityByCityNameFormulasByNameRequest(server string, cityName string, name string, params *GetV0CityByCityNameFormulasByNameParams) (*http.Request, error) {
 	var err error
@@ -18921,6 +19071,62 @@ func NewGetV0CityByCityNameFormulasByNameRequest(server string, cityName string,
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPutV0CityByCityNameFormulasByNameRequestWithBody generates requests for PutV0CityByCityNameFormulasByName with any type of body
+func NewPutV0CityByCityNameFormulasByNameRequestWithBody(server string, cityName string, name string, params *PutV0CityByCityNameFormulasByNameParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "name", name, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/formulas/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -19083,6 +19289,103 @@ func NewGetV0CityByCityNameFormulasByNameRunsRequest(server string, cityName str
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameFormulasByNameSourceRequest generates requests for GetV0CityByCityNameFormulasByNameSource
+func NewGetV0CityByCityNameFormulasByNameSourceRequest(server string, cityName string, name string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "name", name, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/formulas/%s/source", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameFormulasByNameValidateRequestWithBody generates requests for PostV0CityByCityNameFormulasByNameValidate with any type of body
+func NewPostV0CityByCityNameFormulasByNameValidateRequestWithBody(server string, cityName string, name string, params *PostV0CityByCityNameFormulasByNameValidateParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "name", name, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/formulas/%s/validate", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -24424,8 +24727,14 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameFormulasFeedWithResponse request
 	GetV0CityByCityNameFormulasFeedWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameFormulasFeedParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulasFeedResponse, error)
 
+	// DeleteV0CityByCityNameFormulasByNameWithResponse request
+	DeleteV0CityByCityNameFormulasByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameFormulasByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameFormulasByNameResponse, error)
+
 	// GetV0CityByCityNameFormulasByNameWithResponse request
 	GetV0CityByCityNameFormulasByNameWithResponse(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulasByNameResponse, error)
+
+	// PutV0CityByCityNameFormulasByNameWithBodyWithResponse request with any body
+	PutV0CityByCityNameFormulasByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PutV0CityByCityNameFormulasByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameFormulasByNameResponse, error)
 
 	// PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse request with any body
 	PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error)
@@ -24434,6 +24743,12 @@ type ClientWithResponsesInterface interface {
 
 	// GetV0CityByCityNameFormulasByNameRunsWithResponse request
 	GetV0CityByCityNameFormulasByNameRunsWithResponse(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameRunsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulasByNameRunsResponse, error)
+
+	// GetV0CityByCityNameFormulasByNameSourceWithResponse request
+	GetV0CityByCityNameFormulasByNameSourceWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulasByNameSourceResponse, error)
+
+	// PostV0CityByCityNameFormulasByNameValidateWithBodyWithResponse request with any body
+	PostV0CityByCityNameFormulasByNameValidateWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNameValidateParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNameValidateResponse, error)
 
 	// GetV0CityByCityNameHealthWithResponse request
 	GetV0CityByCityNameHealthWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameHealthResponse, error)
@@ -26185,6 +26500,29 @@ func (r GetV0CityByCityNameFormulasFeedResponse) StatusCode() int {
 	return 0
 }
 
+type DeleteV0CityByCityNameFormulasByNameResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *OKResponseBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteV0CityByCityNameFormulasByNameResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteV0CityByCityNameFormulasByNameResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameFormulasByNameResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
@@ -26202,6 +26540,29 @@ func (r GetV0CityByCityNameFormulasByNameResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameFormulasByNameResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PutV0CityByCityNameFormulasByNameResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *OKResponseBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PutV0CityByCityNameFormulasByNameResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutV0CityByCityNameFormulasByNameResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -26248,6 +26609,52 @@ func (r GetV0CityByCityNameFormulasByNameRunsResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameFormulasByNameRunsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameFormulasByNameSourceResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *FormulaSourceOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameFormulasByNameSourceResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameFormulasByNameSourceResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameFormulasByNameValidateResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *FormulaValidateOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameFormulasByNameValidateResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameFormulasByNameValidateResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -28898,6 +29305,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameFormulasFeedWithResponse(ctx co
 	return ParseGetV0CityByCityNameFormulasFeedResponse(rsp)
 }
 
+// DeleteV0CityByCityNameFormulasByNameWithResponse request returning *DeleteV0CityByCityNameFormulasByNameResponse
+func (c *ClientWithResponses) DeleteV0CityByCityNameFormulasByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameFormulasByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameFormulasByNameResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameFormulasByName(ctx, cityName, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteV0CityByCityNameFormulasByNameResponse(rsp)
+}
+
 // GetV0CityByCityNameFormulasByNameWithResponse request returning *GetV0CityByCityNameFormulasByNameResponse
 func (c *ClientWithResponses) GetV0CityByCityNameFormulasByNameWithResponse(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulasByNameResponse, error) {
 	rsp, err := c.GetV0CityByCityNameFormulasByName(ctx, cityName, name, params, reqEditors...)
@@ -28905,6 +29321,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameFormulasByNameWithResponse(ctx 
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameFormulasByNameResponse(rsp)
+}
+
+// PutV0CityByCityNameFormulasByNameWithBodyWithResponse request with arbitrary body returning *PutV0CityByCityNameFormulasByNameResponse
+func (c *ClientWithResponses) PutV0CityByCityNameFormulasByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PutV0CityByCityNameFormulasByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameFormulasByNameResponse, error) {
+	rsp, err := c.PutV0CityByCityNameFormulasByNameWithBody(ctx, cityName, name, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutV0CityByCityNameFormulasByNameResponse(rsp)
 }
 
 // PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameFormulasByNamePreviewResponse
@@ -28931,6 +29356,24 @@ func (c *ClientWithResponses) GetV0CityByCityNameFormulasByNameRunsWithResponse(
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameFormulasByNameRunsResponse(rsp)
+}
+
+// GetV0CityByCityNameFormulasByNameSourceWithResponse request returning *GetV0CityByCityNameFormulasByNameSourceResponse
+func (c *ClientWithResponses) GetV0CityByCityNameFormulasByNameSourceWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulasByNameSourceResponse, error) {
+	rsp, err := c.GetV0CityByCityNameFormulasByNameSource(ctx, cityName, name, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameFormulasByNameSourceResponse(rsp)
+}
+
+// PostV0CityByCityNameFormulasByNameValidateWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameFormulasByNameValidateResponse
+func (c *ClientWithResponses) PostV0CityByCityNameFormulasByNameValidateWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNameValidateParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNameValidateResponse, error) {
+	rsp, err := c.PostV0CityByCityNameFormulasByNameValidateWithBody(ctx, cityName, name, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameFormulasByNameValidateResponse(rsp)
 }
 
 // GetV0CityByCityNameHealthWithResponse request returning *GetV0CityByCityNameHealthResponse
@@ -31898,6 +32341,39 @@ func ParseGetV0CityByCityNameFormulasFeedResponse(rsp *http.Response) (*GetV0Cit
 	return response, nil
 }
 
+// ParseDeleteV0CityByCityNameFormulasByNameResponse parses an HTTP response from a DeleteV0CityByCityNameFormulasByNameWithResponse call
+func ParseDeleteV0CityByCityNameFormulasByNameResponse(rsp *http.Response) (*DeleteV0CityByCityNameFormulasByNameResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteV0CityByCityNameFormulasByNameResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OKResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseGetV0CityByCityNameFormulasByNameResponse parses an HTTP response from a GetV0CityByCityNameFormulasByNameWithResponse call
 func ParseGetV0CityByCityNameFormulasByNameResponse(rsp *http.Response) (*GetV0CityByCityNameFormulasByNameResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -31914,6 +32390,39 @@ func ParseGetV0CityByCityNameFormulasByNameResponse(rsp *http.Response) (*GetV0C
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest FormulaDetailResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePutV0CityByCityNameFormulasByNameResponse parses an HTTP response from a PutV0CityByCityNameFormulasByNameWithResponse call
+func ParsePutV0CityByCityNameFormulasByNameResponse(rsp *http.Response) (*PutV0CityByCityNameFormulasByNameResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutV0CityByCityNameFormulasByNameResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OKResponseBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -31980,6 +32489,72 @@ func ParseGetV0CityByCityNameFormulasByNameRunsResponse(rsp *http.Response) (*Ge
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest FormulaRunsResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameFormulasByNameSourceResponse parses an HTTP response from a GetV0CityByCityNameFormulasByNameSourceWithResponse call
+func ParseGetV0CityByCityNameFormulasByNameSourceResponse(rsp *http.Response) (*GetV0CityByCityNameFormulasByNameSourceResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameFormulasByNameSourceResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FormulaSourceOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameFormulasByNameValidateResponse parses an HTTP response from a PostV0CityByCityNameFormulasByNameValidateWithResponse call
+func ParsePostV0CityByCityNameFormulasByNameValidateResponse(rsp *http.Response) (*PostV0CityByCityNameFormulasByNameValidateResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameFormulasByNameValidateResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FormulaValidateOutputBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
