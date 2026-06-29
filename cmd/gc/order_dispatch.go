@@ -1109,7 +1109,13 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	})
 
 	if a.IsExec() {
-		m.dispatchExec(childCtx, store, target, a, cityPath, trackingID)
+		// dispatchExec is order-only: hand it the typed order front door so the
+		// goroutine leaf has no raw beads.Store to misuse. Constructed here (the
+		// per-order coordination point that still holds the raw store for the
+		// closeOrderTrackingBead defer) from the same store, so the bead writes
+		// stay byte-identical.
+		front := orders.NewStore(beads.OrdersStore{Store: store})
+		m.dispatchExec(childCtx, front, target, a, cityPath, trackingID)
 	} else {
 		m.dispatchWisp(childCtx, store, a, cityPath, trackingID)
 	}
@@ -1220,9 +1226,8 @@ func openOrderTrackingIDs(store beads.Store, ids []string) ([]string, error) {
 }
 
 // dispatchExec runs an exec order's shell command.
-func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
 	scoped := a.ScopedName()
-	front := orders.NewStore(beads.OrdersStore{Store: store})
 	outcome := orders.RunOutcomeExec
 	var headSeq uint64
 	var hasEventCursor bool

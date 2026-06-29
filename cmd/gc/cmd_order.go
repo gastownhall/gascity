@@ -598,7 +598,7 @@ func cmdOrderRun(name, rig string, jsonOutput bool, stdout, stderr io.Writer) in
 			}
 			defer ep.Close() //nolint:errcheck // best-effort
 		}
-		return doOrderRunExecTracked(a, cityPath, cfg, store, ep, stdout, stderr)
+		return doOrderRunExecTracked(a, cityPath, cfg, orders.NewStore(store), ep, stdout, stderr)
 	}
 	store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
 	if store.Store == nil {
@@ -650,7 +650,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return doOrderRunExecTracked(a, cityPath, cfg, store, ep, stdout, stderr)
+		return doOrderRunExecTracked(a, cityPath, cfg, orders.NewStore(store), ep, stdout, stderr)
 	}
 
 	// Capture event head before wisp creation (race-free cursor). Event runs
@@ -780,13 +780,16 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	return 0
 }
 
-func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, store beads.OrdersStore, ep events.Provider, stdout, stderr io.Writer) int {
+func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, front *orders.Store, ep events.Provider, stdout, stderr io.Writer) int {
 	scoped := a.ScopedName()
 
 	// Event-triggered orders capture the event cursor before the side effect so
 	// the controller cursor isn't left stale; cooldown/cron orders only need the
 	// run record. Reading the cursor up front keeps a cursor failure from leaving
 	// an orphaned tracking bead.
+	//
+	// The order front door is injected (constructed once at the composition
+	// root) so this exec-tracking leaf holds no raw beads.Store.
 	var cursor *orders.EventCursor
 	if a.Trigger == "event" && ep != nil {
 		headSeq, err := ep.LatestSeq()
@@ -803,7 +806,6 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, st
 	// formula path. Without this, a manual `gc order run --rig` is invisible to
 	// the labelOrderTracking history index and the order re-fires every tick
 	// (#3570).
-	front := orders.NewStore(store)
 	run, err := front.CreateRun(scoped, orders.RunOpts{})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
