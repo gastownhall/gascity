@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -683,14 +682,13 @@ func unclaimWorkAssignedToRetiredSessionBead(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	empty := ""
-	open := "open"
 	identifiers := sessionAssignmentIdentifiers(sessionBead)
 	seen := make(map[string]struct{})
 	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
+		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
-				work, err := ownerStore.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true, TierMode: beads.TierBoth})
+				work, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
 				if err != nil {
 					fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s via %q: %v\n", sessionBead.ID, assignee, err) //nolint:errcheck
 					continue
@@ -705,28 +703,15 @@ func unclaimWorkAssignedToRetiredSessionBead(
 					}
 					seen[key] = struct{}{}
 					// The session owning this work is retired, so the work is fully
-					// detached (not preserved to a new assignee). Clear the stale
-					// session-affinity metadata too, or the next claim re-pins the
-					// reopened work onto the dead session's continuation group — the
-					// same stale-affinity bug fixed on the retry, reopen, orphan-pool,
-					// and closed-session release paths.
-					update := beads.UpdateOpts{
-						Assignee: &empty,
-						Metadata: withClearedSessionAffinityMetadata(nil),
-					}
-					// Clearing assignee on an in_progress bead leaves it invisible to
-					// the work_query: Tier 1 needs an assignee match, Tiers 2/3 only
-					// match "ready" status. Reset to "open" so a fresh worker can
-					// re-claim via the routed queue.
-					if item.Status == "in_progress" {
-						update.Status = &open
-					}
-					if fallbackRoute != "" &&
-						strings.TrimSpace(item.Metadata[beadmeta.RunTargetMetadataKey]) == "" &&
-						strings.TrimSpace(item.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
-						update.Metadata[beadmeta.RunTargetMetadataKey] = fallbackRoute
-					}
-					if err := ownerStore.Update(item.ID, update); err != nil {
+					// detached (not preserved to a new assignee). The release
+					// primitive clears the assignee (empty-string) and stale
+					// session-affinity metadata, resets in_progress to open
+					// (otherwise the bead stays invisible to the work_query — Tier 1
+					// needs an assignee match, Tiers 2/3 only match "ready"), and
+					// stamps fallbackRoute run_target only when the bead is otherwise
+					// unrouted — the same stale-affinity bug fixed on the retry,
+					// reopen, orphan-pool, and closed-session release paths.
+					if err := wa.ReleaseWorkBead(item, fallbackRoute); err != nil {
 						fmt.Fprintf(stderr, "session beads: unclaiming work %s assigned to retired session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
 					}
 				}
@@ -751,9 +736,10 @@ func reassignWorkAssignedToRetiredSessionBead(
 	identifiers := sessionAssignmentIdentifiers(retiredSession)
 	seen := make(map[string]struct{})
 	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
+		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
-				work, err := ownerStore.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true, TierMode: beads.TierBoth})
+				work, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
 				if err != nil {
 					fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s via %q: %v\n", retiredSession.ID, assignee, err) //nolint:errcheck
 					continue
@@ -767,7 +753,7 @@ func reassignWorkAssignedToRetiredSessionBead(
 						continue
 					}
 					seen[key] = struct{}{}
-					if err := ownerStore.Update(item.ID, beads.UpdateOpts{Assignee: &newSessionID}); err != nil {
+					if err := wa.ReassignWorkBead(item.ID, newSessionID); err != nil {
 						fmt.Fprintf(stderr, "session beads: reassigning work %s from retired session %s to %s: %v\n", item.ID, retiredSession.ID, newSessionID, err) //nolint:errcheck
 					}
 				}
@@ -2411,11 +2397,10 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 	}
 
 	seenWork := make(map[string]struct{})
-	empty := ""
-	openStatus := "open"
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
 	for assignee := range seenAssignees {
 		for _, status := range []string{"in_progress", "open"} {
-			work, err := store.List(beads.ListQuery{Assignee: assignee, Status: status})
+			work, err := wa.OpenAssignedToBasic(assignee, status)
 			if err != nil {
 				fmt.Fprintf(stderr, "session beads: listing work assigned to closing session %s (%s): %v\n", sessionBead.ID, assignee, err) //nolint:errcheck
 				continue
@@ -2429,19 +2414,13 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 				}
 				seenWork[item.ID] = struct{}{}
 				// The session owning this work is closing, so the work is
-				// fully detached (not preserved to a new assignee). Clear the
-				// stale session-affinity metadata too, or the next claim
-				// re-pins the reopened work onto the dead session's group —
-				// the same stale-affinity bug fixed on the retry, reopen, and
-				// orphan-pool release paths.
-				update := beads.UpdateOpts{
-					Assignee: &empty,
-					Metadata: withClearedSessionAffinityMetadata(nil),
-				}
-				if item.Status == "in_progress" {
-					update.Status = &openStatus
-				}
-				if err := store.Update(item.ID, update); err != nil {
+				// fully detached (not preserved to a new assignee). The
+				// release primitive clears the assignee (empty-string) and
+				// stale session-affinity metadata and resets in_progress to
+				// open — the same stale-affinity bug fixed on the retry,
+				// reopen, and orphan-pool release paths. No run_target
+				// fallback on the close-release path (passed "").
+				if err := wa.ReleaseWorkBead(item, ""); err != nil {
 					fmt.Fprintf(stderr, "session beads: releasing work %s from closing session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
 				}
 			}

@@ -240,7 +240,12 @@ func clearDetachedProbeMetadata(store beads.Store, id string) {
 	if store == nil || id == "" {
 		return
 	}
-	if err := store.SetMetadata(id, detachedProbeMetadataKey, ""); err != nil {
+	// The detached-probe metadata contract lives on a WORK bead, so route the
+	// clear through the work-assignment front door rather than reaching the WORK
+	// store directly. The façade emits the same SetMetadata(id, gc.detached, "")
+	// empty-string clear (proven byte-identical by the recording-fake write test).
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
+	if err := wa.ClearDetachedProbe(id); err != nil {
 		log.Printf("clearing detached probe metadata for %s: %v", id, err)
 	}
 }
