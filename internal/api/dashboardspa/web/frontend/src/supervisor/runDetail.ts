@@ -10,10 +10,13 @@ import { api, ApiClientError } from '../api/client';
 // the projection derives a run's scope from its own root bead — though the
 // route still parses scope for the separate run-diff endpoint.
 
-// The endpoint returns 503 while a city's projection is still cold-replaying
-// (bounded server-side to ~5s). Retry a few times so the first navigation to a
-// large city resolves instead of surfacing a transient "unavailable"; SSE
-// refresh and the manual Refresh button recover anything past the budget.
+// Retry transient failures a few times before surfacing one: the BFF's 503
+// warming signal while a city's projection cold-replays (bounded server-side to
+// ~5s), a 5xx upstream-proxy blip, or a network-level fetch reject. This
+// restores the single-transient-retry resilience the pre-cutover supervisor
+// read had (fetchCoreRead). A 4xx (404 unknown run, 422 unsupported) is
+// definitive and surfaces immediately; SSE refresh and the manual Refresh
+// button recover anything past the budget.
 const WARMING_RETRY_DELAYS_MS = [600, 1_200, 2_400];
 
 export async function loadSupervisorFormulaRunDetail(runId: string): Promise<FormulaRunDetail> {
@@ -22,13 +25,22 @@ export async function loadSupervisorFormulaRunDetail(runId: string): Promise<For
       return await api.runDetail(runId);
     } catch (err) {
       const delayMs = WARMING_RETRY_DELAYS_MS[attempt];
-      if (err instanceof ApiClientError && err.status === 503 && delayMs !== undefined) {
+      if (delayMs !== undefined && isTransientDetailError(err)) {
         await delay(delayMs);
         continue;
       }
       throw err;
     }
   }
+}
+
+// A 4xx (404/422) is a definitive answer about the run — never retry it. The
+// BFF's 503 warming signal and any 5xx are transient, as is a network-level
+// fetch reject (a TypeError, e.g. "Failed to fetch"); a malformed-body decode
+// error (ApiResponseDecodeError) is NOT transient and surfaces immediately.
+function isTransientDetailError(err: unknown): boolean {
+  if (err instanceof ApiClientError) return err.status >= 500;
+  return err instanceof TypeError;
 }
 
 function delay(ms: number): Promise<void> {

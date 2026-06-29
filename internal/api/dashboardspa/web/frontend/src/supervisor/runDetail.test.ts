@@ -23,7 +23,7 @@ const detailBody = {
   snapshotVersion: 1,
   snapshotEventSeq: { kind: 'known', seq: 100 },
   completeness: { kind: 'complete' },
-  progress: {},
+  progress: { statusCounts: {} },
   phase: 'intake',
   stages: [],
   nodes: [],
@@ -97,6 +97,21 @@ describe('loadSupervisorFormulaRunDetail', () => {
     const err = await loadSupervisorFormulaRunDetail('v1-run').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiClientError);
     expect(err).toMatchObject({ status: 422, reason: 'not_run_view' });
+  });
+
+  it('retries a transient 5xx (not just 503) and resolves', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ error: 'bad gateway' }, 502))
+      .mockResolvedValueOnce(jsonResponse(detailBody, 200));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = loadSupervisorFormulaRunDetail('mol-adopt-1');
+    await vi.advanceTimersByTimeAsync(600);
+
+    await expect(pending).resolves.toMatchObject({ runId: 'mol-adopt-1' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('does not retry a 404', async () => {

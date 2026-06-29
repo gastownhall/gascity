@@ -116,6 +116,10 @@ export function useRunSummarySubscription(): RunSummarySubscription {
     if (result.status !== 'error') {
       // The active source now returns the COMPLETE server-enriched snapshot
       // (full historical lanes included), so an SSE refresh publishes it as-is.
+      // The BFF folds the whole event log atomically (ColdLoad → BuildRunSummary
+      // produces active + historical + blocked buckets together, never
+      // staggered), so there is no intermediate active-but-empty-history state
+      // the old client-side history-merge had to paper over.
       // There is no longer a cheap/wide split whose partial history must be
       // reconciled against last-good. We still do NOT clear staleDueToFailureRef
       // here: a fast SSE refresh succeeding does not retroactively prove a prior

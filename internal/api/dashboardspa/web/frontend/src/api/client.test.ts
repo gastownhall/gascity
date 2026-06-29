@@ -296,7 +296,7 @@ describe('run projection endpoints', () => {
       'fetch',
       vi.fn(
         async () =>
-          new Response(JSON.stringify({ totalActive: 0 }), {
+          new Response(JSON.stringify({ totalActive: 0, totalHistorical: 0 }), {
             status: 200,
             headers: { 'content-type': 'application/json' },
           }),
@@ -324,7 +324,7 @@ describe('run projection endpoints', () => {
       snapshotVersion: 1,
       snapshotEventSeq: { kind: 'known', seq: 100 },
       completeness: { kind: 'complete' },
-      progress: {},
+      progress: { statusCounts: {} },
       phase: 'intake',
       stages: [],
       nodes: [],

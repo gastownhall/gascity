@@ -164,6 +164,10 @@ function requireBooleanField(record: JsonRecord, url: string, label: string, fie
   if (typeof record[field] !== 'boolean') failDecode(url, `${label}.${field} must be a boolean`);
 }
 
+function requireNumberField(record: JsonRecord, url: string, label: string, field: string): void {
+  if (typeof record[field] !== 'number') failDecode(url, `${label}.${field} must be a number`);
+}
+
 function requireArrayField(record: JsonRecord, url: string, label: string, field: string): void {
   if (!Array.isArray(record[field])) failDecode(url, `${label}.${field} must be an array`);
 }
@@ -305,6 +309,12 @@ const decodeRunDiff = objectDecoder<RunDiffResponse>('run diff', (record, url) =
 // edge (matching decodeRunDiff's depth) so a wire-shape regression fails here
 // rather than mis-rendering deep in a lane or diagram component.
 const decodeRunSummary = objectDecoder<RunSummary>('run summary', (record, url) => {
+  // Validate every field a renderer dereferences: RunMap reads the counts,
+  // the lane arrays, and totalActive/totalHistorical. The DTO is golden-gated
+  // against the Go projection, so this edge check is defensive — but it is now
+  // the ONLY backstop (the client-side fold that used to rebuild this is gone).
+  requireNumberField(record, url, 'run summary', 'totalActive');
+  requireNumberField(record, url, 'run summary', 'totalHistorical');
   requireArrayField(record, url, 'run summary', 'lanes');
   requireArrayField(record, url, 'run summary', 'historicalLanes');
   requireArrayField(record, url, 'run summary', 'blockedLanes');
@@ -319,7 +329,14 @@ const decodeFormulaRunDetail = objectDecoder<FormulaRunDetail>(
     requireObjectField(record, url, 'formula run detail', 'formula');
     requireObjectField(record, url, 'formula run detail', 'formulaDetail');
     requireObjectField(record, url, 'formula run detail', 'executionPath');
-    requireObjectField(record, url, 'formula run detail', 'progress');
+    // The detail renderer hard-derefs these union/nested fields (snapshotLabel
+    // reads snapshotEventSeq.kind, the partial notice reads completeness.kind,
+    // the status summary reads progress.statusCounts[...]), so validate them at
+    // the edge rather than let a malformed wire value throw deep in the diagram.
+    requireObjectField(record, url, 'formula run detail', 'snapshotEventSeq');
+    requireObjectField(record, url, 'formula run detail', 'completeness');
+    const progress = requireRecord(record['progress'], url, 'formula run detail.progress');
+    requireObjectField(progress, url, 'formula run detail.progress', 'statusCounts');
     requireArrayField(record, url, 'formula run detail', 'stages');
     requireArrayField(record, url, 'formula run detail', 'nodes');
     requireArrayField(record, url, 'formula run detail', 'edges');

@@ -162,6 +162,19 @@ describe('useFormulaRunDetail', () => {
     await waitFor(() => expect(result.current.kind).toBe('failed'));
   });
 
+  it('surfaces an exhausted 503 warming budget as a generic failure, never not_found/unsupported', async () => {
+    // The loader retries 503 internally and, once the budget is spent, re-throws
+    // the ApiClientError(503). The hook must route that to the generic 'failed'
+    // state — a 503 is neither an honest list-only run nor a missing one.
+    mockLoadDetail.mockRejectedValue(new ApiClientError(503, 'run view is warming'));
+
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+
+    await waitFor(() => expect(result.current.kind).toBe('failed'));
+    expect(result.current.kind).not.toBe('not_found');
+    expect(result.current.kind).not.toBe('unsupported');
+  });
+
   it('surfaces a 404 as not_found, not v1-unsupported', async () => {
     // gascity-dashboard (Major 2): a 404 (no run root in the projection) is
     // AMBIGUOUS — a v1/wisp id, a completed run whose events rotated out, a

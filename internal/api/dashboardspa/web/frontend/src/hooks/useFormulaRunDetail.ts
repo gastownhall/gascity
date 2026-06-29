@@ -16,19 +16,19 @@ type FormulaRunRefreshState =
   | { kind: 'failed'; error: string };
 
 // gascity-dashboard-9w3k: a v1 / wisp run (not graph.v2) is surfaced in the run
-// list but has no graph.v2 step-detail view. When its snapshot LOADS but isn't a
-// run view, enrichFormulaRun throws UnsupportedRunError('not_run_view') — the
-// RELIABLE v1 signal. We carry that as a DISTINCT 'unsupported' payload (not a
-// thrown error → not the generic failed state) so the page can render an honest
-// "list-only" message instead of the opaque "Formula run unavailable." dead-end.
+// list but has no graph.v2 step-detail view. The BFF detail endpoint rejects it
+// with 422 + reason 'not_run_view' — the RELIABLE v1 signal. We carry that as a
+// DISTINCT 'unsupported' payload (not a thrown error → not the generic failed
+// state) so the page can render an honest "list-only" message instead of the
+// opaque "Formula run unavailable." dead-end.
 //
-// gascity-dashboard (Major 2): a raw SupervisorApiError 404 (no snapshot at all)
-// is AMBIGUOUS — it can be a v1/wisp id the workflow endpoint never knew, a
-// completed run whose snapshot wasn't retained, a pruned/deleted run, or a
-// stale/wrong derived scope. We must NOT assert it is definitively v1. It maps
-// to a distinct 'not_found' payload with honest copy that lists the
-// possibilities, kept separate from both 'unsupported' (which over-claims v1)
-// and the generic transport 'failed' state. No shared wire-shape field is added.
+// gascity-dashboard (Major 2): a 404 (no run root in the projection) is
+// AMBIGUOUS — it can be a v1/wisp id, a completed run whose events rotated out,
+// a pruned/deleted run, or a stale/wrong derived scope. We must NOT assert it is
+// definitively v1. It maps to a distinct 'not_found' payload with honest copy
+// that lists the possibilities, kept separate from both 'unsupported' (which
+// over-claims v1) and the generic transport 'failed' state. A malformed graph.v2
+// snapshot (422 + 'invalid_snapshot') stays in that generic 'failed' state.
 type FormulaRunDetailPayload =
   | { kind: 'unrequested' }
   | { kind: 'unsupported' }
