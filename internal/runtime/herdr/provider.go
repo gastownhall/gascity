@@ -95,7 +95,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// send), and the reconciler tolerates a slow Start
 		// (pendingCreateNeverStartedTimeout = 10m).
 		_ = p.WaitForIdle(ctx, name, startupNudgeIdleTimeout)
-		_ = p.c.deliverNudge(ctx, info.PaneID, name, cfg.Nudge)
+		if err := p.c.deliverNudge(ctx, info.PaneID, name, cfg.Nudge); err != nil {
+			// Best-effort: the submit didn't confirm (TUI race under boot load).
+			// Surface it rather than silently leaving a stranded startup nudge;
+			// nudgeStalledPoolClaims is the reconcile-tick backstop of last resort.
+			fmt.Fprintf(os.Stderr, "herdr: startup nudge for %q not confirmed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
+		}
 	}
 	return nil
 }
