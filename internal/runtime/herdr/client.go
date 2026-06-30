@@ -179,12 +179,6 @@ func (c *client) processInfo(ctx context.Context, paneID string) (shellPID int, 
 	return wrap.ProcessInfo.ShellPID, wrap.ProcessInfo.ForegroundProcesses, nil
 }
 
-// send → `herdr agent send <name> <text>` (literal text, no Enter).
-func (c *client) send(ctx context.Context, name, text string) error {
-	_, err := c.run(ctx, "agent", "send", name, text)
-	return err
-}
-
 // sendKeys → `herdr pane send-keys <paneID> <key…>` (raw keys, e.g. ctrl+c, enter).
 func (c *client) sendKeys(ctx context.Context, paneID string, keys ...string) error {
 	args := append([]string{"pane", "send-keys", paneID}, keys...)
