@@ -399,12 +399,13 @@ func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookSt
 // against that store's captured rows, against that store's dir/env.
 //
 // When a selected store still reports ready work but every claimable row is lost
-// to another claimant before the mutation, the single-store claim drains as
-// "no work". That would strand routed work waiting in a LATER federated store
-// behind the lost race, so this loop drops the exhausted store and reselects
-// across the remaining stores. It writes the no-work drain exactly once, after
-// every store has been exhausted. emitFailure surfaces a work-query timeout on
-// the event bus when eligible.
+// to another claimant before the mutation, the single-store claim drains without
+// work. That would strand routed work waiting in a LATER federated store behind
+// the lost race, so this loop drops the exhausted store and reselects across the
+// remaining stores. It writes the shared drain exactly once, after every store
+// has been exhausted; the drain reason is claims_errored when any exhausted
+// store's eligible claims errored rather than merely lost the race, else no_work.
+// emitFailure surfaces a work-query timeout on the event bus when eligible.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
 	// primary is the agent's own store (the first entry). It is captured once
@@ -417,6 +418,10 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		primary = stores[0]
 	}
 	remaining := stores
+	// claimsErrored aggregates the per-store signal that a store reported ready
+	// work but every eligible claim mutation errored, so the shared drain below can
+	// report claims_errored instead of laundering a write failure into no_work.
+	claimsErrored := false
 	for len(remaining) > 0 {
 		_, selected, err := firstStoreWithWork(workQuery, remaining, primary, run)
 		if err != nil {
@@ -451,13 +456,18 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if res.terminal {
 			return res.code
 		}
-		// This store reported ready work but the claim acquired nothing (every
-		// claimable row was lost to another claimant, or none matched this
-		// session). Drop it and reselect from the remaining stores so routed work
-		// in a later federated store is not stranded behind it.
+		if res.claimsErrored {
+			claimsErrored = true
+		}
+		// This store reported ready work but the claim acquired nothing — every
+		// claimable row was lost to another claimant, none matched this session, or
+		// every claimable row's claim mutation errored and was skipped. Drop it and
+		// reselect from the remaining stores so routed work in a later federated
+		// store is not stranded behind it; claimsErrored carries any write-failure
+		// signal to the shared drain.
 		remaining = removeHookStore(remaining, claimStore)
 	}
-	return writeHookClaimNoWork(claimOpts, ops, stdout, stderr)
+	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, stdout, stderr)
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {

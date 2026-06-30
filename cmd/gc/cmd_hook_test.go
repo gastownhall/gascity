@@ -2273,3 +2273,106 @@ func TestDoHookClaimSkipsUnclaimableCandidateError(t *testing.T) {
 		t.Fatalf("expected stderr to record the skipped claim error; got %q", stderr.String())
 	}
 }
+
+func TestDoHookClaimDrainsClaimsErroredWhenEveryCandidateErrors(t *testing.T) {
+	// When a store reports ready work but EVERY eligible candidate's claim
+	// mutation errors — the can-read-but-can't-write window of store contention
+	// or a controller-socket flap between the work query and the claim — the hook
+	// must still drain (the work is reclaimed next tick via NDI) but must surface
+	// a distinct claims_errored reason. Laundering an operational write failure
+	// into a healthy no_work idle would hide sustained contention from any monitor
+	// keying on the drain reason.
+	var attempts []string
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"hw-a","status":"open","metadata":{"gc.routed_to":"worker"}},
+			{"id":"hw-b","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	drained := false
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			attempts = append(attempts, beadID)
+			return beads.Bead{}, false, fmt.Errorf("claiming %s: store write timeout", beadID)
+		},
+		DrainAck: func(io.Writer) error {
+			drained = true
+			return nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(all candidates error) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !drained {
+		t.Fatal("drain ack was not called")
+	}
+	if got := strings.Join(attempts, ","); got != "hw-a,hw-b" {
+		t.Fatalf("claim attempts = %q, want hw-a,hw-b (every eligible candidate attempted before drain)", got)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != "claims_errored" {
+		t.Fatalf("claim result = %+v, want drain/claims_errored (operational write failure kept visible)", result)
+	}
+}
+
+func TestClaimHookWorkDrainsClaimsErroredWhenEveryCandidateErrors(t *testing.T) {
+	// The federated drain must carry the claims_errored signal too: a store
+	// reports ready work, but every claim against its captured rows errors, so the
+	// store is exhausted and the shared drain fires. The reason must distinguish
+	// the write-path failure from an ordinary idle no_work.
+	stores := []hookStore{
+		{dir: "city", env: []string{"GC_STORE=city"}},
+	}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir != "city" {
+			t.Fatalf("unexpected store dir %q", dir)
+		}
+		return `[{"id":"hw-city","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			return beads.Bead{}, false, fmt.Errorf("claiming %s: store write timeout", beadID)
+		},
+		EmitClaimRejected: func(string, string, string) {},
+		ResolveWorkBranch: func(string) string { return "" },
+		DrainAck:          func(io.Writer) error { return nil },
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}
+
+	emitted := false
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) { emitted = true }, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner(all candidates error) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if emitted {
+		t.Fatal("a skipped claim error is not a work-query failure and must not emit one")
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != "claims_errored" {
+		t.Fatalf("claim result = %+v, want drain/claims_errored", result)
+	}
+}

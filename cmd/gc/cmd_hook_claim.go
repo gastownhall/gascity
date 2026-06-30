@@ -78,12 +78,20 @@ type hookClaimJSONResult struct {
 // captured work-query output. A terminal result has already written its final
 // output — a claim, an existing assignment, or a hard error — and the caller
 // must return code as-is. A non-terminal result means the store yielded no
-// claimable work (it was empty/unready, or every claimable candidate was lost to
-// another claimant) and NO terminal output was written, so a federated caller
-// may try a later store before writing the single no-work drain.
+// claimable work (it was empty/unready, every claimable candidate was lost to
+// another claimant, or every claimable candidate's claim mutation errored and was
+// skipped) and NO terminal output was written, so a federated caller may try a
+// later store before writing the single no-work drain.
 type hookClaimResult struct {
 	terminal bool
 	code     int
+	// claimsErrored is set on a NON-terminal result when one or more eligible
+	// candidates' claim mutations errored and nothing was ultimately claimed. It
+	// lets the shared no-work drain report a distinct "claims_errored" reason
+	// instead of a healthy "no_work", so an operational write failure (store
+	// contention or a controller-socket flap in the read→write window) is not
+	// laundered into an idle signal. Meaningless on a terminal result.
+	claimsErrored bool
 }
 
 func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
@@ -91,7 +99,7 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 	if res.terminal {
 		return res.code
 	}
-	return writeHookClaimNoWork(opts, ops, stdout, stderr)
+	return writeHookClaimNoWork(opts, ops, res.claimsErrored, stdout, stderr)
 }
 
 // tryHookClaim runs the work query for one store (dir, via ops.Runner) and
@@ -179,25 +187,39 @@ func (ops *hookClaimOps) applyDefaults() {
 // claimFirstEligibleHookCandidate claims the first unassigned, route-matched
 // candidate and returns a terminal result carrying the exit code of the
 // work-result write. A claim lost to a different live claimant is surfaced as a
-// bead.claim_rejected event before moving on. When no candidate can be claimed —
-// none match this session, or every claimable one was lost to another claimant —
-// it returns a non-terminal result (no output written) so a federated caller can
-// try a later store before the shared no-work drain.
+// bead.claim_rejected event before moving on. A candidate whose claim mutation
+// errors is logged and skipped so one unclaimable id cannot wedge the hook. When
+// no candidate can be claimed — none match this session, every claimable one was
+// lost to another claimant, or every claimable one errored — it returns a
+// non-terminal result (no output written) so a federated caller can try a later
+// store before the shared no-work drain; the result's claimsErrored flag records
+// whether any skip was an error so that drain stays distinguishable from idle.
 func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
+	claimsErrored := false
 	for _, candidate := range candidates {
 		if !hookCandidateClaimable(candidate, opts.RouteTargets) {
 			continue
 		}
+		if ctx.Err() != nil {
+			// The shared claim budget is spent (an earlier slow-failing claim
+			// consumed it). Stop rather than attempting the remaining candidates
+			// with an already-expired context, which would only manufacture
+			// deadline-exceeded skips on ids never really tried; they are reclaimed
+			// next tick (NDI).
+			break
+		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		if err != nil {
-			// A single unclaimable candidate (e.g. a routed id whose bead was
-			// deleted, or one that no longer resolves in the store this context
-			// can reach) must not wedge the whole hook. Record it and try the
-			// next candidate; if none claim, we fall through to drain and retry
-			// next tick (NDI) instead of halting the agent.
+			// A single unclaimable candidate (a routed id whose bead was deleted,
+			// one that no longer resolves in the store this context can reach, or a
+			// transient write failure) must not wedge the whole hook. Record it and
+			// try the next candidate. If none claim, claimsErrored makes the shared
+			// drain report claims_errored instead of a healthy no_work so the write
+			// failure stays visible; the work is reclaimed next tick (NDI) either way.
 			fmt.Fprintf(stderr, "gc hook --claim: skipping %s: %v\n", candidate.ID, err) //nolint:errcheck
+			claimsErrored = true
 			continue
 		}
 		if !ok {
@@ -226,7 +248,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, stdout, stderr)}
 	}
 
-	return hookClaimResult{}
+	return hookClaimResult{claimsErrored: claimsErrored}
 }
 
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
@@ -305,13 +327,22 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	return 0
 }
 
-func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
+// writeHookClaimNoWork writes the single drain result for a hook that claimed
+// nothing. The reason is "no_work" for a genuinely idle store; it is
+// "claims_errored" when claimsErrored is set — ready work existed but every
+// eligible claim mutation errored — so an operational write failure stays
+// distinguishable from idle even though both still drain and reclaim next tick.
+func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored bool, stdout, stderr io.Writer) int {
+	reason := "no_work"
+	if claimsErrored {
+		reason = "claims_errored"
+	}
 	result := hookClaimJSONResult{
 		SchemaVersion: "1",
 		OK:            true,
 		Command:       hookClaimCommandName,
 		Action:        "drain",
-		Reason:        "no_work",
+		Reason:        reason,
 	}
 	if opts.DrainAck {
 		if err := ops.DrainAck(stderr); err != nil {
