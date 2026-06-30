@@ -255,6 +255,12 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	if err != nil || !ok || a.Cwd == "" {
 		return nil
 	}
+	// An empty relDst means "into the workdir under the source's own name".
+	// Joining "" targets the directory itself, which copyPath cannot write a
+	// file to — preserve the basename, as the other providers do.
+	if relDst == "" {
+		relDst = filepath.Base(src)
+	}
 	return copyPath(src, filepath.Join(a.Cwd, relDst))
 }
 

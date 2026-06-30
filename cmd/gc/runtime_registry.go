@@ -80,7 +80,7 @@ func buildRuntimeRegistry() *registry.Registry {
 	// herdr (https://herdr.dev): opt-in multiplexer backend. One shared herdr
 	// session-server per city; one workspace per rig/town, one tab per agent.
 	// tmux stays the default; select "herdr" per-agent/city to pilot it. See
-	// internal/runtime/herdr/herdr-provider-design.md.
+	// internal/runtime/herdr-provider-design.md.
 	must(r.Register("herdr", func(_ string, _ config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		session := cityName
 		if session == "" {
