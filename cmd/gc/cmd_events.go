@@ -41,26 +41,32 @@ type eventsAPITransportError struct {
 }
 
 type cliWireEvent struct {
-	Actor   string          `json:"actor"`
-	Message string          `json:"message,omitempty"`
-	Payload json.RawMessage `json:"payload,omitempty"`
-	Seq     int64           `json:"seq"`
-	Subject string          `json:"subject,omitempty"`
-	Ts      time.Time       `json:"ts"`
-	Type    string          `json:"type"`
-	OK      bool            `json:"ok"`
+	Actor     string          `json:"actor"`
+	Message   string          `json:"message,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	RunID     string          `json:"run_id,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
+	StepID    string          `json:"step_id,omitempty"`
+	Seq       int64           `json:"seq"`
+	Subject   string          `json:"subject,omitempty"`
+	Ts        time.Time       `json:"ts"`
+	Type      string          `json:"type"`
+	OK        bool            `json:"ok"`
 }
 
 type cliWireTaggedEvent struct {
-	Actor   string          `json:"actor"`
-	City    string          `json:"city"`
-	Message string          `json:"message,omitempty"`
-	Payload json.RawMessage `json:"payload,omitempty"`
-	Seq     int64           `json:"seq"`
-	Subject string          `json:"subject,omitempty"`
-	Ts      time.Time       `json:"ts"`
-	Type    string          `json:"type"`
-	OK      bool            `json:"ok"`
+	Actor     string          `json:"actor"`
+	City      string          `json:"city"`
+	Message   string          `json:"message,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	RunID     string          `json:"run_id,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
+	StepID    string          `json:"step_id,omitempty"`
+	Seq       int64           `json:"seq"`
+	Subject   string          `json:"subject,omitempty"`
+	Ts        time.Time       `json:"ts"`
+	Type      string          `json:"type"`
+	OK        bool            `json:"ok"`
 }
 
 type cliEventsRotateResponse struct {
@@ -691,11 +697,14 @@ func eventsSinceCutoff(sinceFlag string) (time.Time, error) {
 
 func localWireEvent(e events.Event, _ io.Writer) cliWireEvent {
 	item := cliWireEvent{
-		Actor: e.Actor,
-		Seq:   int64(e.Seq),
-		Ts:    e.Ts,
-		Type:  e.Type,
-		OK:    true,
+		Actor:     e.Actor,
+		Seq:       int64(e.Seq),
+		Ts:        e.Ts,
+		Type:      e.Type,
+		RunID:     e.RunID,
+		SessionID: e.SessionID,
+		StepID:    e.StepID,
+		OK:        true,
 	}
 	if e.Subject != "" {
 		item.Subject = e.Subject

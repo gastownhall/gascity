@@ -754,6 +754,143 @@ func TestDoEventsWatchSupervisorBufferedReplayUsesTaggedEnvelopeSchema(t *testin
 	}
 }
 
+// assertCorrelationIDsInJSON decodes a single line of `gc events` stdout JSON
+// through an independent struct (not the CLI wire structs under test) and
+// asserts the run_id/session_id/step_id keys survived to the wire. Decoding
+// into a fresh struct proves the keys are present in the emitted JSON rather
+// than merely re-reading the producer's own struct.
+func assertCorrelationIDsInJSON(t *testing.T, line, wantRun, wantSession, wantStep string) {
+	t.Helper()
+	var got struct {
+		RunID     string `json:"run_id"`
+		SessionID string `json:"session_id"`
+		StepID    string `json:"step_id"`
+	}
+	if err := json.Unmarshal([]byte(line), &got); err != nil {
+		t.Fatalf("unmarshal correlation ids: %v; line=%q", err, line)
+	}
+	if got.RunID != wantRun || got.SessionID != wantSession || got.StepID != wantStep {
+		t.Fatalf("correlation ids = run_id=%q session_id=%q step_id=%q, want %q/%q/%q; line=%q",
+			got.RunID, got.SessionID, got.StepID, wantRun, wantSession, wantStep, line)
+	}
+}
+
+func TestDoEventsCityListForwardsCorrelationFields(t *testing.T) {
+	items := []cliWireEvent{
+		{Actor: "gc", Seq: 1, Subject: "gcg-1", Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created", RunID: "run-abc", SessionID: "sess-1", StepID: "step-7"},
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-GC-Index", "1")
+			writeJSONResponse(t, w, cityEventsListResponse(t, items))
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "", "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	assertCorrelationIDsInJSON(t, strings.TrimSpace(stdout.String()), "run-abc", "sess-1", "step-7")
+}
+
+func TestDoEventsSupervisorListForwardsCorrelationFields(t *testing.T) {
+	items := []cliWireTaggedEvent{
+		{Actor: "gc", City: "alpha", Seq: 3, Subject: "gcg-2", Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created", RunID: "run-xyz", SessionID: "sess-2", StepID: "step-9"},
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		supervisorEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONResponse(t, w, supervisorEventsListResponse(t, items))
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{apiURL: server.URL}, "", "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	assertCorrelationIDsInJSON(t, strings.TrimSpace(stdout.String()), "run-xyz", "sess-2", "step-9")
+}
+
+func TestDoEventsWatchCityBufferedReplayForwardsCorrelationFields(t *testing.T) {
+	items := []cliWireEvent{
+		{Actor: "human", Seq: 1, Subject: "gc-1", Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
+		{Actor: "gc", Seq: 2, Subject: "gc-2", Ts: time.Unix(1700000010, 0).UTC(), Type: "mail.sent", RunID: "run-abc", SessionID: "sess-1", StepID: "step-7"},
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-GC-Index", "2")
+			writeJSONResponse(t, w, cityEventsListResponse(t, items))
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsWatch(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "", nil, 1, "", 50*time.Millisecond, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsWatch = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	assertCorrelationIDsInJSON(t, strings.TrimSpace(stdout.String()), "run-abc", "sess-1", "step-7")
+}
+
+func TestDoEventsWatchSupervisorBufferedReplayForwardsCorrelationFields(t *testing.T) {
+	items := []cliWireTaggedEvent{
+		{Actor: "human", City: "alpha", Seq: 2, Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
+		{Actor: "gc", City: "beta", Seq: 5, Ts: time.Unix(1700000010, 0).UTC(), Type: "session.woke", RunID: "run-xyz", SessionID: "sess-2", StepID: "step-9"},
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		supervisorEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONResponse(t, w, supervisorEventsListResponse(t, items))
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsWatch(eventsAPIScope{apiURL: server.URL}, "", nil, 0, "alpha:2", 50*time.Millisecond, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsWatch = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	assertCorrelationIDsInJSON(t, strings.TrimSpace(stdout.String()), "run-xyz", "sess-2", "step-9")
+}
+
+func TestDoEventsLocalCityFallbackForwardsCorrelationFields(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{
+		Type:      events.SessionStopped,
+		Actor:     "gc",
+		Subject:   "worker",
+		Message:   "stopped",
+		RunID:     "run-local",
+		SessionID: "sess-local",
+		StepID:    "step-local",
+	})
+
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponse(t, w, genclient.ErrorModel{
+				Status: notFoundStatusPtr(),
+				Title:  stringPtr("Not Found"),
+				Detail: stringPtr(gcapi.CityNotFoundOrNotRunningDetail("mc-city")),
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{
+		apiURL:   server.URL,
+		cityName: "mc-city",
+		cityPath: cityDir,
+	}, events.SessionStopped, "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	assertCorrelationIDsInJSON(t, strings.TrimSpace(stdout.String()), "run-local", "sess-local", "step-local")
+}
+
 func TestDoEventsWatchTimesOutWithoutMatch(t *testing.T) {
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {

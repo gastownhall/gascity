@@ -405,3 +405,159 @@ func TestProjectWorkflowEventDropsNonWorkflowRoot(t *testing.T) {
 		t.Fatalf("projection = %+v, want nil for non-workflow root", projection)
 	}
 }
+
+// Correlation ids shared by the event-wire forwarding assertions below.
+const (
+	testEventRunID     = "run_abc"
+	testEventSessionID = "sess_xyz"
+	testEventStepID    = "step_42"
+)
+
+// TestEventWireBuildersForwardCorrelationFields guards the run_id/session_id/
+// step_id copy that every wire builder makes from events.Event. The same
+// three-field forwarding is duplicated across the list and SSE builders, so a
+// future refactor could silently drop one — exactly the omission this fix
+// closed. Each builder is exercised for both the Go struct field and the
+// emitted JSON key.
+func TestEventWireBuildersForwardCorrelationFields(t *testing.T) {
+	base := events.Event{
+		Seq:       7,
+		Type:      "custom.correlation.test",
+		Ts:        time.Unix(1711300000, 0).UTC(),
+		Actor:     "cache-reconcile",
+		RunID:     testEventRunID,
+		SessionID: testEventSessionID,
+		StepID:    testEventStepID,
+	}
+	tagged := events.TaggedEvent{Event: base, City: "gascity"}
+
+	t.Run("toWireEvent", func(t *testing.T) {
+		wire, ok := toWireEvent(base)
+		if !ok {
+			t.Fatal("toWireEvent ok = false, want true")
+		}
+		assertCorrelationFields(t, wire.RunID, wire.SessionID, wire.StepID)
+		assertJSONCarriesCorrelation(t, wire)
+	})
+
+	t.Run("toWireTaggedEvent", func(t *testing.T) {
+		wire, ok := toWireTaggedEvent(tagged)
+		if !ok {
+			t.Fatal("toWireTaggedEvent ok = false, want true")
+		}
+		assertCorrelationFields(t, wire.RunID, wire.SessionID, wire.StepID)
+		assertJSONCarriesCorrelation(t, wire)
+	})
+
+	t.Run("wireEventFrom", func(t *testing.T) {
+		env, err := wireEventFrom(base, nil)
+		if err != nil {
+			t.Fatalf("wireEventFrom: %v", err)
+		}
+		assertCorrelationFields(t, env.RunID, env.SessionID, env.StepID)
+		assertJSONCarriesCorrelation(t, env)
+	})
+
+	t.Run("wireTaggedEventFrom", func(t *testing.T) {
+		env, err := wireTaggedEventFrom(tagged, nil)
+		if err != nil {
+			t.Fatalf("wireTaggedEventFrom: %v", err)
+		}
+		assertCorrelationFields(t, env.RunID, env.SessionID, env.StepID)
+		assertJSONCarriesCorrelation(t, env)
+	})
+}
+
+// TestEventWireBuildersOmitEmptyCorrelationFields locks in the `omitempty`
+// contract: events recorded without correlation ids (mail, session, and
+// request-result paths carry empty run_id) must not emit the keys at all,
+// so clients can distinguish "absent" from "present but empty".
+func TestEventWireBuildersOmitEmptyCorrelationFields(t *testing.T) {
+	base := events.Event{
+		Seq:   8,
+		Type:  "custom.correlation.empty",
+		Ts:    time.Unix(1711300000, 0).UTC(),
+		Actor: "session",
+	}
+	tagged := events.TaggedEvent{Event: base, City: "gascity"}
+
+	wire, ok := toWireEvent(base)
+	if !ok {
+		t.Fatal("toWireEvent ok = false, want true")
+	}
+	assertJSONOmitsCorrelation(t, wire)
+
+	taggedWire, ok := toWireTaggedEvent(tagged)
+	if !ok {
+		t.Fatal("toWireTaggedEvent ok = false, want true")
+	}
+	assertJSONOmitsCorrelation(t, taggedWire)
+
+	env, err := wireEventFrom(base, nil)
+	if err != nil {
+		t.Fatalf("wireEventFrom: %v", err)
+	}
+	assertJSONOmitsCorrelation(t, env)
+
+	taggedEnv, err := wireTaggedEventFrom(tagged, nil)
+	if err != nil {
+		t.Fatalf("wireTaggedEventFrom: %v", err)
+	}
+	assertJSONOmitsCorrelation(t, taggedEnv)
+}
+
+func assertCorrelationFields(t *testing.T, gotRun, gotSession, gotStep string) {
+	t.Helper()
+	if gotRun != testEventRunID {
+		t.Errorf("RunID = %q, want %q", gotRun, testEventRunID)
+	}
+	if gotSession != testEventSessionID {
+		t.Errorf("SessionID = %q, want %q", gotSession, testEventSessionID)
+	}
+	if gotStep != testEventStepID {
+		t.Errorf("StepID = %q, want %q", gotStep, testEventStepID)
+	}
+}
+
+func assertJSONCarriesCorrelation(t *testing.T, v any) {
+	t.Helper()
+	fields := marshalToJSONFields(t, v)
+	for key, want := range map[string]string{"run_id": testEventRunID, "session_id": testEventSessionID, "step_id": testEventStepID} {
+		raw, ok := fields[key]
+		if !ok {
+			t.Errorf("JSON missing %q", key)
+			continue
+		}
+		var got string
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Errorf("unmarshal JSON %q: %v", key, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("JSON %q = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func assertJSONOmitsCorrelation(t *testing.T, v any) {
+	t.Helper()
+	fields := marshalToJSONFields(t, v)
+	for _, key := range []string{"run_id", "session_id", "step_id"} {
+		if _, ok := fields[key]; ok {
+			t.Errorf("JSON carries %q for an empty value; want omitempty", key)
+		}
+	}
+}
+
+func marshalToJSONFields(t *testing.T, v any) map[string]json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("Unmarshal wire JSON: %v", err)
+	}
+	return fields
+}
