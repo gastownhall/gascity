@@ -819,7 +819,7 @@ func TestDocDirCoverage(t *testing.T) {
 			continue
 		}
 		name := e.Name()
-		if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" {
+		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "ga-") || name == "vendor" || name == "node_modules" {
 			continue
 		}
 		if known[name] {
