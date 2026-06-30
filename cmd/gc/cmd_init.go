@@ -1411,10 +1411,12 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// When a hosted/external Dolt endpoint was supplied, write the full
 	// canonical external config now (R2/R3/R4/R5) so the unconditional
 	// initDirIfReady that follows resolves the city as external and skips the
-	// managed-local Dolt bootstrap. Requires a bd-backed beads provider.
+	// managed-local Dolt bootstrap. Reject incompatible effective backends
+	// (file or doltlite) before writing any canonical files so a rejected init
+	// leaves no mixed ledger state.
 	if wiz.hostedDolt.enabled() {
-		if !cityUsesBdStoreContract(cityPath) {
-			fmt.Fprintln(stderr, "gc init: --dolt-host requires a bd-backed beads provider (use the gascity or gastown template)") //nolint:errcheck // best-effort stderr
+		if err := hostedDoltBackendError(cityPath); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, wiz.hostedDolt); err != nil {

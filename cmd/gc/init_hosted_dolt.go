@@ -13,8 +13,11 @@ import (
 
 // Environment fallbacks for the hosted-dolt init flags. These mirror the
 // variables the create-city controller already exports, so a controller
-// entrypoint can reduce to "set env -> gc init -> gc start" without passing
-// flags explicitly.
+// entrypoint can supply the external Dolt endpoint through the environment as
+// "set env -> gc init -> gc start" without passing the --dolt-* flags
+// explicitly. The env vars only fill the --dolt-* endpoint inputs; the
+// controller still selects the city template and provider, because a
+// non-interactive bd-backed `gc init` requires --template/--default-provider.
 const (
 	envDoltHost       = "GC_DOLT_HOST"
 	envDoltPort       = "GC_DOLT_PORT"
@@ -162,6 +165,30 @@ func cityExternalDoltEndpointUnverified(cityPath string) bool {
 	}
 	return state.EndpointOrigin == contract.EndpointOriginCityCanonical &&
 		state.EndpointStatus == contract.EndpointStatusUnverified
+}
+
+// hostedDoltBackendError reports why a city's effective beads backend cannot
+// host the external Dolt *server* endpoint pinned by --dolt-host, or nil when
+// the backend is compatible. The effective provider and backend are resolved
+// from the same env/city.toml inputs the runtime uses, so this init-time guard
+// agrees with how the city will actually resolve its ledger:
+//
+//   - a non-bd (file) store cannot carry the bd Dolt-server contract; and
+//   - the doltlite backend is a local embedded store, not an external server,
+//     so pinning --dolt-host would write backend=dolt server metadata that
+//     permanently disagrees with the configured doltlite backend (split-brain)
+//     and skip the external-endpoint init defer.
+//
+// Both incompatibilities must be rejected before any canonical hosted-Dolt
+// files are written so a rejected init leaves no mixed ledger state behind.
+func hostedDoltBackendError(cityPath string) error {
+	if !cityUsesBdStoreContract(cityPath) {
+		return fmt.Errorf("--dolt-host requires a bd-backed beads provider (use the gascity or gastown template)")
+	}
+	if cityUsesDoltliteBeadsBackend(cityPath) {
+		return fmt.Errorf("--dolt-host configures an external Dolt server and is incompatible with the doltlite beads backend; unset the doltlite backend (GC_BEADS_BACKEND or [beads] backend) to use the dolt (server) backend")
+	}
+	return nil
 }
 
 // applyInitHostedDoltCanonicalConfig writes the full canonical external

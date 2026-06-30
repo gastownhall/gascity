@@ -340,12 +340,15 @@ func TestInitDirIfReadyInitsVerifiedExternalDolt(t *testing.T) {
 	}
 }
 
-// The controller contract is "set env -> gc init -> gc start": the hosted
-// endpoint can be supplied entirely through GC_DOLT_*/GC_BEADS_PROJECT_ID.
-// This exercises that path end to end through finalizeInit with no provider
-// readiness and confirms init exits 0 without any managed-local bootstrap or
-// live connection (AC1/AC3/R5), recording the env-derived endpoint.
-func TestGcInitHostedDoltEnvOnlyEndToEnd(t *testing.T) {
+// Command-level regression: the hosted endpoint can be supplied entirely
+// through GC_DOLT_*/GC_BEADS_PROJECT_ID, mirroring the --dolt-* flags so the
+// create-city controller need not pass them explicitly. The controller still
+// selects the city template/provider, so this drives the real
+// newInitCmd(...).Execute() path with the hosted env vars set (no --dolt-*
+// flags) and --template/--default-provider supplied, and confirms init exits 0
+// recording the env-derived endpoint without a managed-local bootstrap or live
+// connection (R5): verification is deferred to gc start.
+func TestGcInitCommandHostedDoltEnvOnlyEndpoint(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("GC_SESSION", "fake")
@@ -359,35 +362,21 @@ func TestGcInitHostedDoltEnvOnlyEndToEnd(t *testing.T) {
 
 	stubInitDependencyChecks(t)
 	stubInitDoltAuthorIdentity(t, map[string]string{"user.name": "ci", "user.email": "ci@example.com"})
-	origRegister := registerCityWithSupervisorTestHook
-	registerCityWithSupervisorTestHook = func(_, _ string, _, _ io.Writer) (bool, int) { return true, 0 }
-	t.Cleanup(func() { registerCityWithSupervisorTestHook = origRegister })
-
-	// Resolve the hosted endpoint from the environment exactly as the init
-	// command's RunE does (no --dolt-* flags supplied).
-	hosted := resolveHostedDoltInitOptions(hostedDoltInitFlagValues{}, os.Getenv)
-	if !hosted.enabled() || hosted.Database != "bd_prj_envonly" || hosted.ProjectID != "prj_envonly" {
-		t.Fatalf("env resolution = %+v", hosted)
-	}
-	wiz := wizardConfig{
-		configName:      "gascity",
-		defaultProvider: "claude",
-		provider:        "claude",
-		providers:       []string{"claude"},
-		hostedDolt:      hosted,
-	}
 
 	cityPath := filepath.Join(t.TempDir(), "env-city")
 	var stdout, stderr bytes.Buffer
-	if code := doInit(fsys.OSFS{}, cityPath, wiz, "env-city", &stdout, &stderr, false); code != 0 {
-		t.Fatalf("doInit = %d, want 0; stderr=%s", code, stderr.String())
-	}
-	code := finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
-		commandName:           "gc init",
-		skipProviderReadiness: true,
+	cmd := newInitCmd(&stdout, &stderr)
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{
+		"--template", "gascity",
+		"--default-provider", "claude",
+		"--skip-provider-readiness",
+		"--no-start",
+		cityPath,
 	})
-	if code != 0 {
-		t.Fatalf("finalizeInit = %d, want 0; stderr=%s", code, stderr.String())
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc init env-only hosted dolt = %v, want success; stderr=%s", err, stderr.String())
 	}
 
 	if !isExternalDolt(cityPath) {
@@ -402,6 +391,37 @@ func TestGcInitHostedDoltEnvOnlyEndToEnd(t *testing.T) {
 			t.Fatalf("metadata.json missing env-derived %q:\n%s", want, metaRaw)
 		}
 	}
+}
+
+// Command-level regression for the controller contract boundary: env-only
+// hosted-Dolt input does NOT make `gc init` flagless — the controller must
+// still pass --template/--default-provider. With the hosted endpoint supplied
+// through the environment and no provider flags, the real
+// newInitCmd(...).Execute() path rejects the invocation at the existing
+// provider requirement (the default gascity template needs a provider) rather
+// than silently dropping the hosted endpoint into an interactive wizard, and
+// writes no ledger artifacts.
+func TestGcInitCommandHostedDoltEnvOnlyRequiresProvider(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "")
+	t.Setenv(envDoltHost, "gateway.example.com")
+	t.Setenv(envDoltPort, "4406")
+	t.Setenv(envDoltDatabase, "bd_prj_x")
+	t.Setenv(envBeadsProjectID, "prj_x")
+
+	cityPath := filepath.Join(t.TempDir(), "env-noprov-city")
+	var stdout, stderr bytes.Buffer
+	cmd := newInitCmd(&stdout, &stderr)
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"--skip-provider-readiness", "--no-start", cityPath})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("gc init env-only hosted dolt without --default-provider = nil error, want failure; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "default-provider") {
+		t.Fatalf("stderr = %q, want a --default-provider requirement", stderr.String())
+	}
+	assertNoHostedDoltStoreArtifacts(t, cityPath)
 }
 
 // A hosted endpoint only makes sense for a bd-backed ledger; supplying
@@ -423,5 +443,121 @@ func TestDoInitHostedDoltRequiresBdBackedProvider(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "bd-backed") {
 		t.Fatalf("stderr = %q, want a bd-backed-provider error", stderr.String())
+	}
+	assertNoHostedDoltStoreArtifacts(t, cityPath)
+}
+
+// The doltlite backend is bd-backed (so the provider guard passes) but is a
+// local embedded store, not an external Dolt server. Pinning --dolt-host for a
+// doltlite city would write backend=dolt server metadata that permanently
+// disagrees with the configured doltlite backend (split-brain) and skip the
+// external-endpoint defer, so init must reject it before writing any canonical
+// hosted-Dolt files. The backend is supplied through GC_BEADS_BACKEND, the
+// documented "set env -> gc init -> gc start" controller path.
+func TestDoInitHostedDoltRejectsDoltliteBackend(t *testing.T) {
+	t.Setenv("GC_BEADS_BACKEND", "doltlite")
+	t.Setenv("GC_DOLT", "")
+	cityPath := filepath.Join(t.TempDir(), "doltlite-city")
+	wiz := wizardConfig{
+		configName:      "gascity",
+		defaultProvider: "claude",
+		provider:        "claude",
+		providers:       []string{"claude"},
+		hostedDolt:      hostedDoltInitOptions{Host: "gateway.example.com", Port: "4406", Database: "bd_prj_x", ProjectID: "prj_x"},
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doInit(fsys.OSFS{}, cityPath, wiz, "doltlite-city", &stdout, &stderr, false); code == 0 {
+		t.Fatalf("doInit = 0, want failure for hosted dolt on a doltlite city; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "doltlite") {
+		t.Fatalf("stderr = %q, want a doltlite-incompatibility error", stderr.String())
+	}
+	assertNoHostedDoltStoreArtifacts(t, cityPath)
+}
+
+// Command-level regression: the real `gc init` RunE resolves --dolt-* flags,
+// reads GC_BEADS_BACKEND, builds the wizard config, and runs doInit. A doltlite
+// effective backend must fail the command and leave no canonical/mixed ledger
+// artifacts behind.
+func TestGcInitCommandHostedDoltRejectsDoltliteBackend(t *testing.T) {
+	t.Setenv("GC_BEADS_BACKEND", "doltlite")
+	t.Setenv("GC_DOLT", "")
+	cityPath := filepath.Join(t.TempDir(), "doltlite-cmd-city")
+	var stdout, stderr bytes.Buffer
+	cmd := newInitCmd(&stdout, &stderr)
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{
+		"--template", "gascity",
+		"--default-provider", "claude",
+		"--skip-provider-readiness",
+		"--no-start",
+		"--dolt-host", "gateway.example.com",
+		"--dolt-port", "4406",
+		"--dolt-database", "bd_prj_x",
+		"--dolt-project-id", "prj_x",
+		cityPath,
+	})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("gc init --dolt-host with doltlite backend = nil error, want failure; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "doltlite") {
+		t.Fatalf("stderr = %q, want a doltlite-incompatibility error", stderr.String())
+	}
+	assertNoHostedDoltStoreArtifacts(t, cityPath)
+}
+
+// Command-level regression: a non-bd (file) effective backend must fail the
+// real `gc init` command with a clear bd-backed-provider error and leave no
+// canonical/mixed ledger artifacts behind. This is the full-RunE sibling of
+// TestGcInitCommandHostedDoltRejectsDoltliteBackend, closing the RunE
+// flag/env-wiring coverage gap for the file case.
+func TestGcInitCommandHostedDoltRejectsFileBackend(t *testing.T) {
+	t.Setenv("GC_BEADS", "file") // force a non-bd backend
+	t.Setenv("GC_DOLT", "")
+	cityPath := filepath.Join(t.TempDir(), "file-cmd-city")
+	var stdout, stderr bytes.Buffer
+	cmd := newInitCmd(&stdout, &stderr)
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{
+		"--template", "gascity",
+		"--default-provider", "claude",
+		"--skip-provider-readiness",
+		"--no-start",
+		"--dolt-host", "gateway.example.com",
+		"--dolt-port", "4406",
+		"--dolt-database", "bd_prj_x",
+		"--dolt-project-id", "prj_x",
+		cityPath,
+	})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("gc init --dolt-host with file backend = nil error, want failure; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "bd-backed") {
+		t.Fatalf("stderr = %q, want a bd-backed-provider error", stderr.String())
+	}
+	assertNoHostedDoltStoreArtifacts(t, cityPath)
+}
+
+// assertNoHostedDoltStoreArtifacts fails when a rejected hosted-Dolt init left
+// any canonical Dolt ledger files or file-store markers on disk — the contract
+// is that an incompatible-backend rejection writes no ledger state, so reruns
+// after fixing the backend are not poisoned by a split-brain scaffold.
+func assertNoHostedDoltStoreArtifacts(t *testing.T, cityPath string) {
+	t.Helper()
+	for _, rel := range []string{
+		filepath.Join(".beads", "config.yaml"),
+		filepath.Join(".beads", "metadata.json"),
+		filepath.Join(".beads", "identity.toml"),
+		filepath.Join(".gc", "beads.json"),
+		filepath.Join(".gc", "file-beads-layout"),
+	} {
+		switch _, err := os.Stat(filepath.Join(cityPath, rel)); {
+		case err == nil:
+			t.Fatalf("rejected hosted-dolt init left a store artifact: %s", rel)
+		case !os.IsNotExist(err):
+			t.Fatalf("stat %s: %v", rel, err)
+		}
 	}
 }
