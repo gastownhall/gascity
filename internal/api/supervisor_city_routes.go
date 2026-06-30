@@ -248,6 +248,15 @@ func (sm *SupervisorMux) registerCityRoutes() {
 
 	// Packs.
 	cityGet(sm, "/packs", (*Server).humaHandlePackList)
+	cityRegister(sm, huma.Operation{
+		OperationID:   "add-pack",
+		Method:        http.MethodPost,
+		Path:          "/packs",
+		Summary:       "Add a pack",
+		Description:   "Imports a pack into the city by source (a remote git URL or registry ref), resolving + installing it so its templates compose into the city.",
+		DefaultStatus: http.StatusCreated,
+	}, (*Server).humaHandlePackAdd)
+	cityDelete(sm, "/packs/{name}", (*Server).humaHandlePackRemove)
 
 	// Sling.
 	cityPost(sm, "/sling", (*Server).humaHandleSling)

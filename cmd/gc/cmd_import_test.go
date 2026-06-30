@@ -1397,8 +1397,29 @@ func TestDoImportAddRejectsReservedDefaultRigPrefix(t *testing.T) {
 	if code == 0 {
 		t.Fatal("expected reserved prefix import add to fail")
 	}
-	if !strings.Contains(stderr.String(), "reserved prefix") {
-		t.Fatalf("stderr = %q", stderr.String())
+	// The historical CLI printed this bare, with no source-quoted prefix and no
+	// "invalid import source:" wrapper. Pin the exact line to catch drift.
+	want := "gc import add: import name \"default-rig:worker\" uses reserved prefix \"default-rig:\"\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+func TestDoImportAddBareMessageWhenNameUnderivable(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, "[pack]\nname = \"demo\"\nschema = 1\n")
+
+	var stdout, stderr bytes.Buffer
+	// A bare scheme with no path derives to an empty name.
+	code := doImportAdd(fsys.OSFS{}, dir, "https://", "", "", &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected underivable name to fail")
+	}
+	want := "gc import add: could not derive import name; use --name\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
 }
 
