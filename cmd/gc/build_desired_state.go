@@ -25,6 +25,17 @@ import (
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
+// storeScopedBeadKey identifies an assigned-work bead by its store ref and ID.
+// AssignedWorkBeads can carry the same bead ID from independent city and rig
+// stores (see AssignedWorkStores/AssignedWorkStoreRefs), so wake-demand
+// readiness must be scoped by store ref. A plain ID key would let a ready bead
+// in one store mark a blocked open bead with the same ID in another store as
+// ready and reintroduce the awake-demand hang this readiness fix prevents.
+type storeScopedBeadKey struct {
+	StoreRef string
+	ID       string
+}
+
 // DesiredStateResult bundles the desired session state with the scale_check
 // counts that produced it. Callers that need poolDesired for wake decisions
 // can pass ScaleCheckCounts to ComputePoolDesiredStates without re-running
@@ -55,13 +66,16 @@ type DesiredStateResult struct {
 	// direct assignee demand (Assignee == identity). The reconciler merges this
 	// into poolDesired so that on-demand named sessions remain config-eligible.
 	NamedSessionDemand map[string]bool
-	// ReadyAssignedIDs is the set of AssignedWorkBeads IDs that carry real
-	// wake-demand readiness: in-progress work, assigned molecule roots, and
-	// store-Ready()/deps-gated open work. Beads admitted only by the
-	// open-routed orphan-release pass are absent, so the awake bridge does not
-	// treat a blocked open bead as live wake demand. The reconciler threads
-	// this into buildAwakeInputFromReconciler for the AwakeWorkBead.Ready flag.
-	ReadyAssignedIDs map[string]bool
+	// ReadyAssigned is the set of AssignedWorkBeads that carry real wake-demand
+	// readiness, keyed by store ref + bead ID: in-progress work, assigned
+	// molecule roots, and store-Ready()/deps-gated open work. Beads admitted
+	// only by the open-routed orphan-release pass are absent, so the awake
+	// bridge does not treat a blocked open bead as live wake demand. The key is
+	// store-scoped because the same bead ID can appear in independent city and
+	// rig stores; see storeScopedBeadKey. The reconciler resolves this into a
+	// per-bead readiness slice for buildAwakeInputFromReconciler's
+	// AwakeWorkBead.Ready flag.
+	ReadyAssigned map[storeScopedBeadKey]bool
 	// StoreQueryPartial is true when one or more bead store work queries
 	// failed. When set, the reconciler must NOT drain sessions based on the
 	// incomplete desired state — a transient failure would cause running
@@ -682,7 +696,7 @@ func buildDesiredStateWithSessionBeads(
 	var assignedWorkBeads []beads.Bead
 	var assignedWorkStores []beads.Store
 	var assignedWorkStoreRefs []string
-	var readyAssignedIDs map[string]bool
+	var readyAssigned map[storeScopedBeadKey]bool
 	var storePartial bool
 	var scaleCheckCounts map[string]int
 	var scaleCheckDemandByTemplate map[string]scaleCheckDemand
@@ -691,7 +705,7 @@ func buildDesiredStateWithSessionBeads(
 	var scaleCheckPartialTemplates map[string]bool
 	var namedDefaultDemand map[string]bool
 	if store != nil {
-		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssignedIDs, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads)
+		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads)
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
@@ -864,7 +878,11 @@ func buildDesiredStateWithSessionBeads(
 			switch wb.Status {
 			case "in_progress":
 			case "open":
-				if !readyAssignedIDs[wb.ID] {
+				ref := ""
+				if i < len(assignedWorkStoreRefs) {
+					ref = assignedWorkStoreRefs[i]
+				}
+				if !readyAssigned[storeScopedBeadKey{StoreRef: ref, ID: wb.ID}] {
 					continue
 				}
 			default:
@@ -945,7 +963,7 @@ func buildDesiredStateWithSessionBeads(
 		AssignedWorkBeads:               assignedWorkBeads,
 		AssignedWorkStores:              assignedWorkStores,
 		AssignedWorkStoreRefs:           assignedWorkStoreRefs,
-		ReadyAssignedIDs:                readyAssignedIDs,
+		ReadyAssigned:                   readyAssigned,
 		NamedSessionDemand:              namedWorkReady,
 		StoreQueryPartial:               storePartial,
 		BeaconTime:                      beaconTime,
@@ -1096,19 +1114,21 @@ func collectAssignedWorkBeads(
 }
 
 // collectAssignedWorkBeadsWithStores returns the actionable assigned-work
-// snapshot plus index-aligned stores/storeRefs, the set of bead IDs that
-// carry real wake-demand readiness (readyAssignedIDs), and a partial flag.
-// readyAssignedIDs holds only beads admitted by the in-progress pass, the
+// snapshot plus index-aligned stores/storeRefs, the store-scoped set of beads
+// that carry real wake-demand readiness (readyAssigned), and a partial flag.
+// readyAssigned holds only beads admitted by the in-progress pass, the
 // assigned-molecule pass, and the store Ready()/deps pass — never the
 // open-routed orphan-release pass, whose beads have not passed a readiness
-// gate and must not, by status alone, hold a session awake.
+// gate and must not, by status alone, hold a session awake. It is keyed by
+// store ref + bead ID so a ready bead in one store cannot mark a blocked open
+// bead with the same ID in another store as ready (storeScopedBeadKey).
 func collectAssignedWorkBeadsWithStores(
 	cfg *config.City,
 	cityStore beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 	sessionBeads *sessionBeadSnapshot,
-) ([]beads.Bead, []beads.Store, []string, map[string]bool, bool) {
+) ([]beads.Bead, []beads.Store, []string, map[storeScopedBeadKey]bool, bool) {
 	// Work arm of the reconciler frame: iterate the work-class candidate fan-out
 	// (city + non-suspended rigs). The city store carries the empty store-ref so
 	// the index-aligned workBeads/workStores slices stay per-bead aligned for the
@@ -1119,6 +1139,7 @@ func collectAssignedWorkBeadsWithStores(
 	stores := coordClassStoreCandidates(cfg, cityStore, rigStores, suspendedRigPaths, "")
 
 	type storeAssignedWorkResult struct {
+		ref       string // store ref these beads came from (empty = city store)
 		beads     []beads.Bead
 		stores    []beads.Store
 		storeRefs []string
@@ -1170,7 +1191,7 @@ func collectAssignedWorkBeadsWithStores(
 					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 				}
 			}
-			results[idx] = storeAssignedWorkResult{beads: result, stores: resultStores, storeRefs: resultStoreRefs, readyIDs: readyIDs, errs: errs}
+			results[idx] = storeAssignedWorkResult{ref: source.ref, beads: result, stores: resultStores, storeRefs: resultStoreRefs, readyIDs: readyIDs, errs: errs}
 		}()
 	}
 	wg.Wait()
@@ -1178,14 +1199,18 @@ func collectAssignedWorkBeadsWithStores(
 	var result []beads.Bead
 	var resultStores []beads.Store
 	var resultStoreRefs []string
-	readyAssignedIDs := make(map[string]bool)
+	// readyAssigned is the store-scoped wake-demand verdict so neither the awake
+	// bridge nor the assignee-probe-skip set below can mistake a blocked open
+	// rig bead for a ready city bead with the same ID. It is keyed by store ref
+	// + bead ID (storeScopedBeadKey).
+	readyAssigned := make(map[storeScopedBeadKey]bool)
 	var partial bool
 	for _, r := range results {
 		result = append(result, r.beads...)
 		resultStores = append(resultStores, r.stores...)
 		resultStoreRefs = append(resultStoreRefs, r.storeRefs...)
 		for id := range r.readyIDs {
-			readyAssignedIDs[id] = true
+			readyAssigned[storeScopedBeadKey{StoreRef: r.ref, ID: id}] = true
 		}
 		for _, err := range r.errs {
 			log.Printf("collectAssignedWorkBeads: %v", err)
@@ -1193,16 +1218,18 @@ func collectAssignedWorkBeadsWithStores(
 		}
 	}
 	// Skip the Ready handoff probe only for assignees that already have a
-	// GENUINELY-ready captured bead (in-progress, molecule root, or a prior
-	// Ready() match) — never for an assignee whose only captured bead came
-	// from the open-routed orphan-release pass. Those beads carry no readiness
-	// verdict; skipping their assignee here would leave readyAssignedIDs blind
-	// to a real Ready() match and silently treat blocked work as live demand.
-	skipReadyAssignees := readyCapturedAssigneeSet(result, readyAssignedIDs)
+	// GENUINELY-ready captured bead in that store (in-progress, molecule root,
+	// or a prior Ready() match) — never for an assignee whose only captured
+	// bead came from the open-routed orphan-release pass. Those beads carry no
+	// readiness verdict; skipping their assignee would silently treat blocked
+	// work as live demand. The lookup is store-scoped (result and
+	// resultStoreRefs are index-aligned), so a ready bead in one store cannot
+	// suppress the Ready probe for a same-ID assignee in another store.
+	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
 	assignees := readyAssignedWorkAssignees(cfg, sessionBeads, skipReadyAssignees)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
-		return result, resultStores, resultStoreRefs, readyAssignedIDs, partial
+		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
 
 	readyResults := make([]storeAssignedWorkResult, len(stores))
@@ -1234,7 +1261,7 @@ func collectAssignedWorkBeadsWithStores(
 			readyIDs := make(map[string]bool)
 			seen := make(map[string]struct{})
 			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, readyIDs, ready, seen, source.store, source.ref)
-			readyResults[idx] = storeAssignedWorkResult{beads: readyBeads, stores: readyStores, storeRefs: readyStoreRefs, readyIDs: readyIDs, errs: errs}
+			readyResults[idx] = storeAssignedWorkResult{ref: source.ref, beads: readyBeads, stores: readyStores, storeRefs: readyStoreRefs, readyIDs: readyIDs, errs: errs}
 		}()
 	}
 	wg.Wait()
@@ -1243,14 +1270,14 @@ func collectAssignedWorkBeadsWithStores(
 		resultStores = append(resultStores, r.stores...)
 		resultStoreRefs = append(resultStoreRefs, r.storeRefs...)
 		for id := range r.readyIDs {
-			readyAssignedIDs[id] = true
+			readyAssigned[storeScopedBeadKey{StoreRef: r.ref, ID: id}] = true
 		}
 		for _, err := range r.errs {
 			log.Printf("collectAssignedWorkBeads: %v", err)
 			partial = true
 		}
 	}
-	return result, resultStores, resultStoreRefs, readyAssignedIDs, partial
+	return result, resultStores, resultStoreRefs, readyAssigned, partial
 }
 
 func assignedWorkReadyLimit(cfg *config.City) int {
@@ -1261,17 +1288,20 @@ func assignedWorkReadyLimit(cfg *config.City) int {
 }
 
 // readyCapturedAssigneeSet returns the assignees of work beads that have
-// already been captured WITH a readiness verdict (their ID is in readyIDs):
-// in-progress work, assigned molecule roots, and any prior Ready() match.
-// Beads captured only by the open-routed orphan-release pass are excluded, so
-// their assignee is still probed by the Ready handoff pass rather than assumed
-// ready by virtue of having been collected.
-func readyCapturedAssigneeSet(work []beads.Bead, readyIDs map[string]bool) map[string]struct{} {
+// already been captured WITH a readiness verdict in their own store (their
+// store-scoped key is in readyAssigned): in-progress work, assigned molecule
+// roots, and any prior Ready() match. Beads captured only by the open-routed
+// orphan-release pass are excluded, so their assignee is still probed by the
+// Ready handoff pass rather than assumed ready by virtue of having been
+// collected. The readiness lookup is store-scoped: a ready bead in one store
+// never marks a same-ID blocked bead's assignee in another store as
+// already-ready (storeScopedBeadKey). work and storeRefs are index-aligned.
+func readyCapturedAssigneeSet(work []beads.Bead, storeRefs []string, readyAssigned map[storeScopedBeadKey]bool) map[string]struct{} {
 	if len(work) == 0 {
 		return nil
 	}
 	result := make(map[string]struct{})
-	for _, bead := range work {
+	for i, bead := range work {
 		assignee := strings.TrimSpace(bead.Assignee)
 		if assignee == "" {
 			continue
@@ -1279,7 +1309,12 @@ func readyCapturedAssigneeSet(work []beads.Bead, readyIDs map[string]bool) map[s
 		if bead.Status != "open" && bead.Status != "in_progress" {
 			continue
 		}
-		if !readyIDs[bead.ID] {
+		// Fail safe (probe rather than skip) when the index-aligned store ref
+		// is missing, so a short slice never suppresses a real Ready probe.
+		if i >= len(storeRefs) {
+			continue
+		}
+		if !readyAssigned[storeScopedBeadKey{StoreRef: storeRefs[i], ID: bead.ID}] {
 			continue
 		}
 		result[assignee] = struct{}{}

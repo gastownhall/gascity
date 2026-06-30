@@ -42,13 +42,16 @@ func TestFilterAssignedWorkBeadsForSessionWakeKeepsOnlyReachableAssigneeSources(
 	}
 	storeRefs := []string{"", "riga", "", "riga"}
 
-	got := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, sessions, work, storeRefs)
+	got, gotRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, sessions, work, storeRefs)
 
 	if len(got) != 2 {
 		t.Fatalf("filtered work length = %d, want 2: %#v", len(got), got)
 	}
 	if got[0].ID != "rig-named" || got[1].ID != "rig-session" {
 		t.Fatalf("filtered work IDs = [%s %s], want [rig-named rig-session]", got[0].ID, got[1].ID)
+	}
+	if len(gotRefs) != len(got) || gotRefs[0] != "riga" || gotRefs[1] != "riga" {
+		t.Fatalf("filtered store refs = %#v, want [riga riga] aligned with beads", gotRefs)
 	}
 }
 
@@ -78,10 +81,13 @@ func TestFilterAssignedWorkBeadsForSessionWakeCityScopedAgentIsCrossStoreEligibl
 	}
 	storeRefs := []string{"", "riga"} // city store + rig store
 
-	got := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, nil, work, storeRefs)
+	got, gotRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, nil, work, storeRefs)
 
 	if len(got) != 2 {
 		t.Fatalf("city-scoped %q must be reachable from BOTH stores; got %d: %#v", identity, len(got), got)
+	}
+	if len(gotRefs) != len(got) || gotRefs[0] != "" || gotRefs[1] != "riga" {
+		t.Fatalf("filtered store refs = %#v, want [\"\" riga] aligned with beads", gotRefs)
 	}
 }
 

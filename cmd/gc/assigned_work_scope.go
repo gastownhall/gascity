@@ -140,19 +140,22 @@ func filterAssignedWorkBeadsForPoolDemand(
 }
 
 // filterAssignedWorkBeadsForSessionWake resolves work through assignment
-// identities because session wake decisions are per concrete session owner.
+// identities because session wake decisions are per concrete session owner. It
+// returns the filtered beads plus their store refs, index-aligned, so callers
+// can resolve store-scoped wake-demand readiness (storeScopedBeadKey) for the
+// surviving beads without re-deriving each bead's originating store.
 func filterAssignedWorkBeadsForSessionWake(
 	cfg *config.City,
 	cityPath string,
 	sessionBeads []beads.Bead,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
-) []beads.Bead {
+) ([]beads.Bead, []string) {
 	if len(assignedWorkBeads) == 0 || len(assignedWorkStoreRefs) == 0 {
-		return assignedWorkBeads
+		return assignedWorkBeads, assignedWorkStoreRefs
 	}
 	if cfg == nil {
-		return assignedWorkBeads
+		return assignedWorkBeads, assignedWorkStoreRefs
 	}
 	reachableRefsByAssignee := make(map[string]map[string]struct{})
 	// crossStore identities belong to city-scoped (cross-store-eligible) agents
@@ -210,6 +213,7 @@ func filterAssignedWorkBeadsForSessionWake(
 	}
 
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
+	filteredRefs := make([]string, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
 		if i >= len(assignedWorkStoreRefs) {
 			continue
@@ -221,13 +225,38 @@ func filterAssignedWorkBeadsForSessionWake(
 		if _, ok := crossStore[assignee]; ok {
 			// City-scoped assignee: reachable from any store (vp-kvp).
 			filtered = append(filtered, wb)
+			filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
 			continue
 		}
 		if refs := reachableRefsByAssignee[assignee]; refs != nil {
 			if _, ok := refs[assignedWorkStoreRefs[i]]; ok {
 				filtered = append(filtered, wb)
+				filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
 			}
 		}
 	}
-	return filtered
+	return filtered, filteredRefs
+}
+
+// readyAssignedFlagsForBeads resolves the store-scoped wake-demand readiness of
+// each assigned-work bead into a slice index-aligned with beadList. Readiness is
+// keyed by (store ref, bead ID) because AssignedWorkBeads can carry the same
+// bead ID from independent city and rig stores; a plain ID lookup would let a
+// ready bead in one store mark a blocked open bead with the same ID in another
+// store as ready and reintroduce the awake-demand hang. storeRefs must be the
+// refs returned alongside beadList by filterAssignedWorkBeadsForSessionWake. A
+// bead whose store ref is unavailable resolves to not-ready, matching the
+// nil-map default the awake bridge applied before readiness was store-scoped.
+func readyAssignedFlagsForBeads(readyAssigned map[storeScopedBeadKey]bool, beadList []beads.Bead, storeRefs []string) []bool {
+	if len(beadList) == 0 {
+		return nil
+	}
+	flags := make([]bool, len(beadList))
+	for i := range beadList {
+		if i >= len(storeRefs) {
+			continue
+		}
+		flags[i] = readyAssigned[storeScopedBeadKey{StoreRef: storeRefs[i], ID: beadList[i].ID}]
+	}
+	return flags
 }

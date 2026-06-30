@@ -336,7 +336,7 @@ func TestReconcileSessionBeads_AssignedNamedSessionByBeadIDOverridesNonInteracti
 		0,
 		&env.stdout,
 		&env.stderr,
-		withReadyAssignedIDs(map[string]bool{work.ID: true}),
+		withReadyAssignedFlags([]bool{true}),
 	)
 
 	if woken != 0 {
@@ -497,7 +497,7 @@ func TestReconcileSessionBeads_AssignedWorkWithReadyWaitOverridesNonInteractiveS
 		0,
 		&env.stdout,
 		&env.stderr,
-		withReadyAssignedIDs(map[string]bool{work.ID: true}),
+		withReadyAssignedFlags([]bool{true}),
 	)
 
 	if woken != 0 {
@@ -616,7 +616,7 @@ func TestReconcileSessionBeads_AssignedWorkWakesIdleLatchedInteractiveSession(t 
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
 		env.store, nil, []beads.Bead{work}, nil, env.dt, map[string]int{}, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
-		withReadyAssignedIDs(map[string]bool{work.ID: true}),
+		withReadyAssignedFlags([]bool{true}),
 	)
 
 	if woken != 1 {

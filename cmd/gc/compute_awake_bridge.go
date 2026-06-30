@@ -24,7 +24,7 @@ func buildAwakeInputFromReconciler(
 	workSet map[string]bool,
 	readyWaitSet map[string]bool,
 	assignedWorkBeads []beads.Bead,
-	readyAssignedIDs map[string]bool,
+	readyAssignedFlags []bool,
 	wakeTargets []wakeTarget,
 	sp runtime.Provider,
 	clk time.Time,
@@ -73,18 +73,22 @@ func buildAwakeInputFromReconciler(
 		})
 	}
 
-	// Work beads. Readiness is the store's verdict (readyAssignedIDs), not a
+	// Work beads. Readiness is the store's verdict (readyAssignedFlags), not a
 	// status-only guess: assignedWorkBeads mixes the open-routed orphan-release
 	// pass (which admits any open assigned+routed bead with no deps check) into
 	// the same slice as the genuinely-ready passes. Fabricating Ready from
 	// status alone held a blocked open bead's session awake forever (it never
-	// slept, so the resume-on-ShouldWake path never fired). readyAssignedIDs is
-	// populated only by the ready passes, matching gc hook --claim's deps gate.
-	for _, wb := range assignedWorkBeads {
+	// slept, so the resume-on-ShouldWake path never fired). readyAssignedFlags is
+	// index-aligned with assignedWorkBeads and resolved from the store-scoped
+	// readiness verdict, so a blocked open rig bead is not marked ready by a
+	// same-ID ready bead in another store. A missing flag defaults to not-ready.
+	for i := range assignedWorkBeads {
+		wb := assignedWorkBeads[i]
 		a := strings.TrimSpace(wb.Assignee)
 		if a != "" && (wb.Status == "open" || wb.Status == "in_progress") {
+			ready := i < len(readyAssignedFlags) && readyAssignedFlags[i]
 			input.WorkBeads = append(input.WorkBeads, AwakeWorkBead{
-				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: readyAssignedIDs[wb.ID],
+				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: ready,
 			})
 		}
 	}

@@ -274,7 +274,7 @@ type startExecutionOptions struct {
 	// performs the closes. Safe to defer: the closes already fail closed and are
 	// deferred under storeQueryPartial today.
 	deferSessionClosesOnBoot bool
-	readyAssignedIDs         map[string]bool
+	readyAssignedFlags       []bool
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -335,14 +335,15 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 	}
 }
 
-// withReadyAssignedIDs installs the set of assigned-work bead IDs that carry
-// real wake-demand readiness (from DesiredStateResult.ReadyAssignedIDs). The
-// awake bridge uses it to set AwakeWorkBead.Ready from the store's deps gate
-// rather than guessing from status, so a blocked open bead does not hold its
-// session awake. Nil leaves every open assigned bead non-ready.
-func withReadyAssignedIDs(readyAssignedIDs map[string]bool) startExecutionOption {
+// withReadyAssignedFlags installs the per-bead wake-demand readiness slice,
+// index-aligned with the assignedWorkBeads passed to the same reconcile pass
+// and resolved from DesiredStateResult.ReadyAssigned. The awake bridge uses it
+// to set AwakeWorkBead.Ready from the store's deps gate rather than guessing
+// from status, so a blocked open bead does not hold its session awake. Nil
+// leaves every open assigned bead non-ready.
+func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
-		opts.readyAssignedIDs = readyAssignedIDs
+		opts.readyAssignedFlags = readyAssignedFlags
 	}
 }
 

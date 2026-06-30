@@ -2412,7 +2412,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	phaseStart = time.Now()
 	awakeInput := buildAwakeInputFromReconciler(
 		cfg, cityPath, ordered, poolDesired, namedSessionDemand, workSet, readyWaitSet,
-		assignedWorkBeads, reconcileOpts.readyAssignedIDs, wakeTargets, sp, clk.Now(),
+		assignedWorkBeads, reconcileOpts.readyAssignedFlags, wakeTargets, sp, clk.Now(),
 	)
 	awakeDecisions := ComputeAwakeSet(awakeInput)
 	wakeEvals := awakeSetToWakeEvals(awakeDecisions, awakeInput.SessionBeads)

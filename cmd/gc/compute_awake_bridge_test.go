@@ -224,7 +224,7 @@ func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T)
 
 // TestBuildAwakeInputFromReconciler_BlockedAssignedOpenBeadDoesNotKeepSessionAwake
 // pins the reconciler readiness fix: a blocked open assigned bead arrives via
-// the open-routed orphan-release pass with readyAssignedIDs[id]=false. It must
+// the open-routed orphan-release pass with readyAssignedFlags[i]=false. It must
 // NOT keep its owning session awake — neither via assigned-work nor via
 // named-demand — so the session can sleep and the existing resume-on-ShouldWake
 // path can later re-wake it once its blocker clears (graph-store hang).
@@ -257,7 +257,7 @@ func TestBuildAwakeInputFromReconciler_BlockedAssignedOpenBeadDoesNotKeepSession
 		nil,
 		nil,
 		[]beads.Bead{blockedWork},
-		map[string]bool{}, // readyAssignedIDs: blocked bead is NOT ready
+		[]bool{false}, // readyAssignedFlags: blocked bead is NOT ready
 		nil,
 		runtime.NewFake(),
 		now,
@@ -279,7 +279,7 @@ func TestBuildAwakeInputFromReconciler_BlockedAssignedOpenBeadDoesNotKeepSession
 
 // TestBuildAwakeInputFromReconciler_ReadyAssignedOpenBeadWakesSession is the
 // positive companion: the same open assigned bead admitted via the Ready()/deps
-// pass (readyAssignedIDs[id]=true) still wakes/holds its session.
+// pass (readyAssignedFlags[i]=true) still wakes/holds its session.
 func TestBuildAwakeInputFromReconciler_ReadyAssignedOpenBeadWakesSession(t *testing.T) {
 	now := time.Now().UTC()
 	cfg := &config.City{Agents: []config.Agent{{Name: "gc.run-operator"}}}
@@ -309,7 +309,7 @@ func TestBuildAwakeInputFromReconciler_ReadyAssignedOpenBeadWakesSession(t *test
 		nil,
 		nil,
 		[]beads.Bead{readyWork},
-		map[string]bool{"ga-ready": true}, // readyAssignedIDs: bead IS ready
+		[]bool{true}, // readyAssignedFlags: bead IS ready
 		nil,
 		runtime.NewFake(),
 		now,
@@ -328,7 +328,7 @@ func TestBuildAwakeInputFromReconciler_ReadyAssignedOpenBeadWakesSession(t *test
 
 // TestBuildAwakeInputFromReconciler_InProgressAssignedBeadStillWakes is the
 // regression guard: in-progress assigned work keeps its session awake
-// regardless of readyAssignedIDs (workBeadHasAwakeDemand returns true for
+// regardless of readyAssignedFlags (workBeadHasAwakeDemand returns true for
 // in_progress unconditionally).
 func TestBuildAwakeInputFromReconciler_InProgressAssignedBeadStillWakes(t *testing.T) {
 	now := time.Now().UTC()
@@ -358,7 +358,7 @@ func TestBuildAwakeInputFromReconciler_InProgressAssignedBeadStillWakes(t *testi
 		nil,
 		nil,
 		[]beads.Bead{inProgressWork},
-		nil, // readyAssignedIDs omitted entirely: in_progress must still wake
+		nil, // readyAssignedFlags omitted entirely: in_progress must still wake
 		nil,
 		runtime.NewFake(),
 		now,
@@ -368,6 +368,99 @@ func TestBuildAwakeInputFromReconciler_InProgressAssignedBeadStillWakes(t *testi
 	got := decisions["gc__run-operator-mc-1"]
 	if !got.ShouldWake || got.Reason != "assigned-work" {
 		t.Fatalf("in-progress assigned bead should wake session; got decision = %+v", got)
+	}
+}
+
+// TestBuildAwakeInputFromReconciler_CrossStoreSameIDReadinessIsStoreScoped pins
+// the cross-store readiness fix: AssignedWorkBeads can carry the same bead ID
+// from independent city and rig stores. A ready city bead must NOT mark a
+// blocked open rig bead with the SAME ID as ready in the awake bridge — that
+// store-blind leak (readiness keyed by bead ID alone) reintroduced the
+// awake-demand hang. readyAssignedFlagsForBeads resolves readiness by
+// (store ref, bead ID), so the blocked rig bead reaches the bridge Ready=false
+// and its session sleeps while the ready city bead's session wakes.
+func TestBuildAwakeInputFromReconciler_CrossStoreSameIDReadinessIsStoreScoped(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{Agents: []config.Agent{{Name: "gc.run-operator"}}}
+	citySession := beads.Bead{
+		ID:     "mc-session-city",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":        "active",
+			"session_name": "gc__run-operator-city",
+			"template":     "gc.run-operator",
+		},
+	}
+	rigSession := beads.Bead{
+		ID:     "mc-session-rig",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":        "active",
+			"session_name": "gc__run-operator-rig",
+			"template":     "gc.run-operator",
+		},
+	}
+	// Same bead ID lives in two stores: the city copy is genuinely ready, the rig
+	// copy is a blocked open bead admitted via the open-routed orphan-release pass.
+	const sharedID = "ga-shared"
+	cityWork := beads.Bead{
+		ID:       sharedID,
+		Status:   "open",
+		Assignee: "gc__run-operator-city",
+		Metadata: map[string]string{"gc.routed_to": "gc.run-operator"},
+	}
+	rigWork := beads.Bead{
+		ID:       sharedID,
+		Status:   "open",
+		Assignee: "gc__run-operator-rig",
+		Metadata: map[string]string{"gc.routed_to": "gc.run-operator"},
+	}
+
+	work := []beads.Bead{cityWork, rigWork}
+	storeRefs := []string{"", "repo"}
+	// Store-scoped readiness verdict: only the city copy (store ref "") is ready.
+	readyAssigned := map[storeScopedBeadKey]bool{
+		{StoreRef: "", ID: sharedID}: true,
+	}
+	flags := readyAssignedFlagsForBeads(readyAssigned, work, storeRefs)
+	if len(flags) != 2 || !flags[0] || flags[1] {
+		t.Fatalf("readyAssignedFlagsForBeads = %#v, want [true false] (city ready, rig blocked despite shared ID)", flags)
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"",
+		[]beads.Bead{citySession, rigSession},
+		nil,
+		nil,
+		nil,
+		nil,
+		work,
+		flags,
+		nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	readyByAssignee := make(map[string]bool, len(input.WorkBeads))
+	for _, wb := range input.WorkBeads {
+		readyByAssignee[wb.Assignee] = wb.Ready
+	}
+	if !readyByAssignee["gc__run-operator-city"] {
+		t.Fatal("city copy of the shared-ID bead must reach the bridge Ready=true")
+	}
+	if readyByAssignee["gc__run-operator-rig"] {
+		t.Fatal("rig copy of the shared-ID bead must reach the bridge Ready=false (store-scoped readiness)")
+	}
+
+	decisions := ComputeAwakeSet(input)
+	if got := decisions["gc__run-operator-rig"]; got.ShouldWake {
+		t.Fatalf("rig session should sleep for its blocked same-ID bead; got decision = %+v", got)
+	}
+	if got := decisions["gc__run-operator-city"]; !got.ShouldWake || got.Reason != "assigned-work" {
+		t.Fatalf("city session should wake for its ready bead; got decision = %+v", got)
 	}
 }
 
