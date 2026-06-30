@@ -34,10 +34,10 @@ func idleClaimPoolSession() beads.Bead {
 	}
 }
 
-func runningFake(t *testing.T, name string) *runtime.Fake {
+func runningFake(t *testing.T) *runtime.Fake {
 	t.Helper()
 	sp := runtime.NewFake()
-	if err := sp.Start(context.TODO(), name, runtime.Config{}); err != nil {
+	if err := sp.Start(context.TODO(), "worker-1", runtime.Config{}); err != nil {
 		t.Fatalf("fake start: %v", err)
 	}
 	return sp
@@ -46,7 +46,7 @@ func runningFake(t *testing.T, name string) *runtime.Fake {
 // A slot handed work it never claimed (trigger bead still open) is observed on
 // the first tick (grace), then nudged once the grace elapses.
 func TestNudgeStalledPoolClaims_NudgesAfterGrace(t *testing.T) {
-	sp := runningFake(t, "worker-1")
+	sp := runningFake(t)
 	cfg := idleClaimTestCfg()
 	sessions := []beads.Bead{idleClaimPoolSession()}
 	work := []beads.Bead{{ID: "w-1", Status: "open"}} // unclaimed
@@ -76,7 +76,7 @@ func TestNudgeStalledPoolClaims_NudgesAfterGrace(t *testing.T) {
 // The instant a slot claims (trigger bead flips to in_progress) it must never be
 // touched — this is the inversion that the reverted #312 nudger got wrong.
 func TestNudgeStalledPoolClaims_NeverTouchesWorkingSlot(t *testing.T) {
-	sp := runningFake(t, "worker-1")
+	sp := runningFake(t)
 	cfg := idleClaimTestCfg()
 	sessions := []beads.Bead{idleClaimPoolSession()}
 	work := []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "worker-1"}}
@@ -97,7 +97,7 @@ func TestNudgeStalledPoolClaims_NeverTouchesWorkingSlot(t *testing.T) {
 // After the attempt cap is reached the backstop gives up — bounded, never an
 // every-tick loop.
 func TestNudgeStalledPoolClaims_GivesUpAtCap(t *testing.T) {
-	sp := runningFake(t, "worker-1")
+	sp := runningFake(t)
 	cfg := idleClaimTestCfg()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s := idleClaimPoolSession()
@@ -117,7 +117,7 @@ func TestNudgeStalledPoolClaims_GivesUpAtCap(t *testing.T) {
 
 // A non-pool session is ignored entirely.
 func TestNudgeStalledPoolClaims_SkipsNonPool(t *testing.T) {
-	sp := runningFake(t, "worker-1")
+	sp := runningFake(t)
 	cfg := idleClaimTestCfg()
 	s := idleClaimPoolSession()
 	delete(s.Metadata, "pool_managed")
