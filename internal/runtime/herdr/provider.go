@@ -34,12 +34,15 @@ var (
 
 // New builds a herdr Provider. herdrSession is the shared per-city herdr session
 // name; metaDir is a writable directory for sidecar session metadata (a temp
-// fallback is used when empty, e.g. a city-less standalone construction).
-func New(herdrSession, metaDir string) *Provider {
+// fallback is used when empty, e.g. a city-less standalone construction); cityRoot
+// is the city directory used as the shared server's launch cwd and as the
+// effectiveWorkDir fallback for sessions whose WorkDir doesn't exist yet (empty in
+// city-less construction).
+func New(herdrSession, metaDir, cityRoot string) *Provider {
 	if metaDir == "" {
 		metaDir = filepath.Join(os.TempDir(), "gc-herdr-meta", sanitize(herdrSession))
 	}
-	return &Provider{c: newClient(herdrSession), metaDir: metaDir}
+	return &Provider{c: newClient(herdrSession, cityRoot), metaDir: metaDir}
 }
 
 // ── ServerLifecycleProvider: own the shared herdr session-server ─────────────
@@ -74,7 +77,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err != nil {
 		return fmt.Errorf("herdr: place %q: %w", name, err)
 	}
-	info, err := p.c.startAgent(ctx, name, tabID, effectiveWorkDir(cfg), cfg.Env, shellArgv(cfg.Command))
+	info, err := p.c.startAgent(ctx, name, tabID, effectiveWorkDir(cfg, p.c.cityRoot), cfg.Env, shellArgv(cfg.Command))
 	if err != nil {
 		return fmt.Errorf("herdr: start %q: %w", name, err)
 	}
@@ -443,20 +446,32 @@ func lastSegment(s string) string {
 }
 
 // effectiveWorkDir picks the directory the agent should launch in. herdr falls
-// back to $HOME when --cwd points at a path that does not exist, and Claude Code
-// never persists trust acceptance from $HOME — so it re-prompts "trust this
-// folder?" on every launch. Ephemeral pool wisps are started before their
-// per-bead worktree is created, so cfg.WorkDir may not exist yet at launch;
-// fall back to the city root (a stable project dir where trust is saved once)
-// rather than let herdr land the session in $HOME. An empty result lets herdr
-// use its own server cwd (also the city root).
-func effectiveWorkDir(cfg runtime.Config) string {
+// back to its server cwd when --cwd is empty and to $HOME when --cwd points at a
+// path that does not exist, and Claude Code never persists trust acceptance from
+// $HOME — so it re-prompts "trust this folder?" on every launch and (worse) an
+// ephemeral pool spawn that lands in $HOME boots a different shell state that
+// swallows the startup nudge, leaving it idle and unclaimed. Ephemeral pool wisps
+// are started before their per-bead worktree is created, so cfg.WorkDir may not
+// exist yet at launch; fall back to the city root (a stable project dir where
+// trust is saved once) rather than let herdr land the session in $HOME.
+//
+// Resolution order: an existing cfg.WorkDir; else a non-empty GC_CITY_ROOT env
+// (legacy/explicit override); else the provider's cityRoot. The final fallback is
+// the fix for the pool-spawn-in-$HOME bug: GC_CITY_ROOT is not actually populated
+// in cfg.Env today, so before this the result was "" and herdr used its server
+// cwd — which is $HOME whenever the daemon was launched from a login shell. An
+// empty cityRoot (city-less construction) returns "" and defers to the server cwd
+// (now itself pinned to the city root in startServer).
+func effectiveWorkDir(cfg runtime.Config, cityRoot string) string {
 	if cfg.WorkDir != "" {
 		if _, err := os.Stat(cfg.WorkDir); err == nil {
 			return cfg.WorkDir
 		}
 	}
-	return cfg.Env["GC_CITY_ROOT"]
+	if root := cfg.Env["GC_CITY_ROOT"]; root != "" {
+		return root
+	}
+	return cityRoot
 }
 
 // translateKey maps tmux-style key names (SendKeys uses "Enter"/"C-c"/"Down")

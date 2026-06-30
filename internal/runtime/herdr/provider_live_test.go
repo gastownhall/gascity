@@ -20,7 +20,7 @@ func TestProviderLive(t *testing.T) {
 		t.Skip("herdr not installed")
 	}
 
-	p := New("gctest-live", t.TempDir())
+	p := New("gctest-live", t.TempDir(), t.TempDir())
 	_ = p.Stop("smoke") // clear any leftover from a crashed prior run
 	t.Cleanup(func() { _ = p.Stop("smoke"); _ = p.TeardownServer() })
 

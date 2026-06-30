@@ -30,12 +30,13 @@ import (
 // client runs `herdr` CLI verbs against a named herdr session and decodes the
 // response envelope ({"id":…,"result":…} | {"id":…,"error":{code,message}}).
 type client struct {
-	session string // herdr named session (shared per city)
-	bin     string // herdr binary (default "herdr")
+	session  string // herdr named session (shared per city)
+	bin      string // herdr binary (default "herdr")
+	cityRoot string // city root: the shared server's launch cwd, and the effectiveWorkDir fallback when a session's WorkDir doesn't exist yet (empty in city-less/standalone construction)
 }
 
-func newClient(session string) *client {
-	return &client{session: session, bin: "herdr"}
+func newClient(session, cityRoot string) *client {
+	return &client{session: session, bin: "herdr", cityRoot: cityRoot}
 }
 
 type herdrError struct {
@@ -456,6 +457,12 @@ func (c *client) startServer() error {
 	defer func() { _ = devnull.Close() }()
 	cmd := exec.Command(c.bin, "--session", c.session, "server")
 	cmd.Stdout, cmd.Stderr = devnull, devnull
+	// Launch the shared daemon in the city root, not the inherited cwd (which is
+	// often $HOME when gc is invoked from a login shell). Sessions whose --cwd is
+	// empty/nonexistent fall back to this server cwd, so a $HOME-rooted server
+	// stranded ephemeral pool spawns in $HOME (unprimed, re-prompted for trust).
+	// Empty cityRoot (city-less construction) leaves cwd inherited, as before.
+	cmd.Dir = c.cityRoot
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("herdr server start: %w", err)
 	}
