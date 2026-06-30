@@ -2206,6 +2206,10 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 	return cmd
 }
 
+// sessionKillPokeController is a mutable global test seam over pokeController.
+// Tests that swap it MUST NOT call t.Parallel().
+var sessionKillPokeController = pokeController
+
 // cmdSessionKill is the CLI entry point for "gc session kill".
 func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
 	asJSON := sessionJSONRequested(jsonOutput)
@@ -2273,6 +2277,17 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		if err := store.SetMetadataBatch(sessionID, patch); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		}
+	}
+
+	// Poke the controller after the asleep sync so the reconciler observes the
+	// killed state immediately instead of waiting a full patrol interval to
+	// revive an always-named session (#3812), the same poke-after-state-write
+	// approach the drain-ack path uses (doRuntimeDrainAck). Best-effort and
+	// unconditional: a poke failure (e.g. no controller running) is non-fatal,
+	// and a spurious poke when the asleep sync was skipped is harmless — the
+	// reconciler observes unchanged state and continues.
+	if err := sessionKillPokeController(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc session kill: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 
 	// Use the resolved session ID as the canonical Subject for event
