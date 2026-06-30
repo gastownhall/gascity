@@ -1,10 +1,12 @@
 package dispatch
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -135,6 +137,114 @@ func TestRunRalphCheckRejectsAssetPathWhenLayerNotTrusted(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected rejection for asset path outside trusted roots")
+	}
+}
+
+// End-to-end for the templated ../assets check-path fix: an expansion formula
+// authored with "../assets/scripts/checks/{target}.sh" is deferred at parse
+// time, then resolved when runtime fan-out (CompileExpansionFragment)
+// substitutes {target}. The materialized ralph control bead must carry the
+// ABSOLUTE highest-priority layer asset path in gc.check_path — not the relative
+// "../assets/..." form the runtime would resolve against the store/work dir and
+// fail to find — and that absolute path must pass the ralph runner's
+// trusted-roots gate and actually execute.
+func TestRunRalphCheckAcceptsExpandedTemplatedAssetPath(t *testing.T) {
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+
+	tmp := t.TempDir()
+	packFormulas := filepath.Join(tmp, "pack", "formulas")
+	packChecks := filepath.Join(tmp, "pack", "assets", "scripts", "checks")
+	cityFormulas := filepath.Join(tmp, "city", "formulas")
+	cityChecks := filepath.Join(tmp, "city", "assets", "scripts", "checks")
+	for _, dir := range []string{packFormulas, packChecks, cityFormulas, cityChecks} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	formulaText := `
+formula = "expand-gate"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.gate"
+title = "Gate"
+[template.ralph]
+max_attempts = 3
+[template.ralph.check]
+mode = "exec"
+path = "../assets/scripts/checks/{target}.sh"
+`
+	if err := os.WriteFile(filepath.Join(packFormulas, "expand-gate.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	// {target} -> "build"; both layers ship build.sh, city (highest) must win.
+	for _, dir := range []string{packChecks, cityChecks} {
+		if err := os.WriteFile(filepath.Join(dir, "build.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("write check %s: %v", dir, err)
+		}
+	}
+
+	searchPaths := []string{packFormulas, cityFormulas}
+	target := &formula.Step{ID: "build", Title: "Build"}
+	fragment, err := formula.CompileExpansionFragment(context.Background(), "expand-gate", searchPaths, target, nil)
+	if err != nil {
+		t.Fatalf("CompileExpansionFragment(expand-gate): %v", err)
+	}
+
+	var resolved string
+	for _, step := range fragment.Steps {
+		if p := step.Metadata[beadmeta.CheckPathMetadataKey]; p != "" {
+			resolved = p
+			break
+		}
+	}
+	if resolved == "" {
+		t.Fatal("no materialized step carried a gc.check_path")
+	}
+	if !filepath.IsAbs(resolved) {
+		t.Fatalf("materialized gc.check_path = %q, want an absolute layer asset path", resolved)
+	}
+	if want := filepath.Join(cityChecks, "build.sh"); resolved != want {
+		t.Fatalf("materialized gc.check_path = %q, want city shadow %q", resolved, want)
+	}
+
+	// The resolved absolute path must pass the runtime trusted-roots gate (via
+	// FormulaSearchPaths) and actually execute. CityPath/StorePath are unrelated
+	// to the script location on purpose.
+	cityPath := filepath.Join(tmp, "runtime-city")
+	storePath := filepath.Join(tmp, "runtime-store")
+	for _, dir := range []string{cityPath, storePath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-expanded-templated",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    resolved,
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-expanded-templated", Type: "task"}
+
+	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:           cityPath,
+		StorePath:          storePath,
+		FormulaSearchPaths: searchPaths,
+	})
+	if err != nil {
+		t.Fatalf("runRalphCheck rejected the expanded templated asset path: %v", err)
+	}
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("Outcome = %q (stderr=%q), want pass", result.Outcome, result.Stderr)
 	}
 }
 

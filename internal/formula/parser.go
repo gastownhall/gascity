@@ -874,7 +874,8 @@ func (p *Parser) winningAssetPath(rawPath string) (string, bool) {
 	return winner, true
 }
 
-// resolveCheckPaths rewrites ralph check paths written in the documented
+// resolveCheckPaths walks steps (and their children and loop bodies) and
+// rewrites each ralph check path written in the documented
 // "../assets/scripts/checks/<name>" form to the absolute path of the
 // highest-priority formula layer that ships the script, mirroring how
 // description_file assets shadow. Legacy/non-asset paths (e.g. ".gc/..." or
@@ -887,22 +888,8 @@ func (p *Parser) resolveCheckPaths(steps []*Step, baseDir string, strict bool) e
 		if step == nil {
 			continue
 		}
-		if step.Ralph != nil && step.Ralph.Check != nil {
-			raw := step.Ralph.Check.Path
-			// A check path that still carries a template placeholder (e.g.
-			// "../assets/scripts/checks/{target}.sh") is substituted later, at
-			// expand time, so it cannot be layer-resolved against on-disk files
-			// here. Leave it untouched rather than misresolving — or, in strict
-			// mode, erroring — on the literal placeholder.
-			if !strings.Contains(raw, "{") {
-				if resolved, ok := p.resolveCheckAssetPath(raw, baseDir); ok {
-					step.Ralph.Check.Path = resolved
-				} else if strict {
-					if _, isAsset := descriptionAssetRelPath(raw); isAsset {
-						return fmt.Errorf("step %q: check path %q not found in any formula layer", step.ID, raw)
-					}
-				}
-			}
+		if err := p.resolveStepCheckPath(step, baseDir, strict); err != nil {
+			return err
 		}
 		if err := p.resolveCheckPaths(step.Children, baseDir, strict); err != nil {
 			return err
@@ -914,6 +901,45 @@ func (p *Parser) resolveCheckPaths(steps []*Step, baseDir string, strict bool) e
 		}
 	}
 	return nil
+}
+
+// resolveStepCheckPath rewrites a single step's "../assets/..." ralph check
+// path to its absolute layer asset. A path that still carries a template
+// placeholder (e.g. "../assets/scripts/checks/{target}.sh") is deferred: the
+// placeholder is substituted at expand time, so it cannot be matched against
+// on-disk files here. resolveExpandedCheckPaths re-runs this resolution once
+// expansion has substituted the placeholder. In strict (graph.v2) mode a
+// non-templated ../assets path that no formula layer ships is a compile error.
+func (p *Parser) resolveStepCheckPath(step *Step, baseDir string, strict bool) error {
+	if step.Ralph == nil || step.Ralph.Check == nil {
+		return nil
+	}
+	raw := step.Ralph.Check.Path
+	if strings.Contains(raw, "{") {
+		return nil
+	}
+	if resolved, ok := p.resolveCheckAssetPath(raw, baseDir); ok {
+		step.Ralph.Check.Path = resolved
+		return nil
+	}
+	if strict {
+		if _, isAsset := descriptionAssetRelPath(raw); isAsset {
+			return fmt.Errorf("step %q: check path %q not found in any formula layer", step.ID, raw)
+		}
+	}
+	return nil
+}
+
+// resolveExpandedCheckPaths re-resolves "../assets/..." ralph check paths after
+// expansion substitutes {target}/{{var}} placeholders into them. A templated
+// check path is deferred at parse time (see resolveStepCheckPath); once
+// expansion makes it concrete the path must be resolved to its absolute layer
+// asset before ApplyRalph stamps it into gc.check_path, otherwise the runtime
+// receives a relative "../assets/..." path, resolves it against the store/work
+// dir, and the check fails instead of running the shipped script. Idempotent
+// for paths that are already absolute, non-asset, or still templated.
+func (p *Parser) resolveExpandedCheckPaths(f *Formula) error {
+	return p.resolveCheckPaths(f.Steps, descriptionFileBaseDir(f.Source), UsesGraphCompiler(f))
 }
 
 // resolveCheckAssetPath resolves a "../assets/<rel>" check path to an absolute
