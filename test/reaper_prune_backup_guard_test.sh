@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test: reaper Step 6 bd-prune backup-age guard (vp-pt73.5 T-007/T-008)
+# Test: reaper Step 6 bd-prune backup-age guard
 #
 # Acceptance criteria:
 #   1. No backup_state.json present  → bd NOT called, anomaly recorded
