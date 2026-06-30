@@ -3,6 +3,8 @@ package runproj
 import (
 	"sort"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // runNodeGroup is one semantic node and the physical beads grouped under it.
@@ -101,7 +103,7 @@ func buildRunNodeGroup(semanticNodeID string, beads []runSnapshotBead, rootBeadI
 	shapeBead := preferredShapeBead(beads, rootBeadID)
 	constructKind := constructKindFor(shapeBead, rootBeadID)
 	scopeRef := groupOptional(beads, shapeBead, func(b runSnapshotBead) string {
-		if v := beadMeta(b, "gc.scope_ref"); v != "" {
+		if v := beadMeta(b, beadmeta.ScopeRefMetadataKey); v != "" {
 			return v
 		}
 		return nonEmpty(b.scopeRef)
@@ -328,7 +330,7 @@ func visibleNodeAliases(b runSnapshotBead, rootBeadID string, identity *beadIden
 	if v, ok := stableSemanticIdentity(b, rootBeadID); ok {
 		raw = append(raw, v)
 	}
-	if v := beadMeta(b, "gc.step_id"); v != "" {
+	if v := beadMeta(b, beadmeta.StepIDMetadataKey); v != "" {
 		raw = append(raw, v)
 	}
 	if v, ok := fullStepRefIdentity(normalizedStepRef(b)); ok {
@@ -385,7 +387,7 @@ func resolveBadgeTarget(b runSnapshotBead, rootBeadID string, aliases map[string
 // against. Port of TS hiddenBadgeTargetCandidates.
 func hiddenBadgeTargetCandidates(b runSnapshotBead, fallback string) []string {
 	var sources []string
-	if v := beadMeta(b, "gc.control_for"); v != "" {
+	if v := beadMeta(b, beadmeta.ControlForMetadataKey); v != "" {
 		sources = append(sources, v)
 	}
 	if v, ok := hiddenBadgeFullTargetFor(b); ok {
@@ -413,7 +415,7 @@ func stableSemanticIdentity(b runSnapshotBead, rootBeadID string) (string, bool)
 	if explicit := explicitLogicalBeadID(b); explicit != "" {
 		return externalizeID(explicit), true
 	}
-	if stepID := beadMeta(b, "gc.step_id"); stepID != "" {
+	if stepID := beadMeta(b, beadmeta.StepIDMetadataKey); stepID != "" {
 		return externalizeID(stepID), true
 	}
 	return fullStepRefIdentity(normalizedStepRef(b))
@@ -422,7 +424,7 @@ func stableSemanticIdentity(b runSnapshotBead, rootBeadID string) (string, bool)
 // hiddenBadgeFullTargetFor resolves the full-ref target of a hidden badge. Port
 // of TS hiddenBadgeFullTargetFor (bool mirrors undefined).
 func hiddenBadgeFullTargetFor(b runSnapshotBead) (string, bool) {
-	if controlFor := beadMeta(b, "gc.control_for"); controlFor != "" {
+	if controlFor := beadMeta(b, beadmeta.ControlForMetadataKey); controlFor != "" {
 		return externalizeID(stripScopeCheckSuffix(controlFor)), true
 	}
 	return fullStepRefIdentity(stripScopeCheckSuffix(normalizedStepRef(b)))

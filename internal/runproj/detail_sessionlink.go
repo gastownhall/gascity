@@ -1,6 +1,10 @@
 package runproj
 
-import "regexp"
+import (
+	"regexp"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+)
 
 // sessionIDRe gates a value before it is fed to the supervisor session routes.
 // Port of TS SESSION_ID_RE (session-id.ts) — lowercase-only, case-sensitive.
@@ -70,10 +74,10 @@ func runSessionLinkFor(bead runSnapshotBead, status string, ctx runSessionLinkCo
 func sessionIDFromBead(bead runSnapshotBead, assignee string) string {
 	rawSessionID := beadMeta(bead, "session_id")
 	if rawSessionID == "" {
-		rawSessionID = beadMeta(bead, "gc.session_id")
+		rawSessionID = beadMeta(bead, beadmeta.SessionIDMetadataKey)
 	}
 	if rawSessionID == "" {
-		rawSessionID = beadMeta(bead, "gc.sessionId")
+		rawSessionID = beadMeta(bead, beadmeta.SessionIDCamelMetadataKey)
 	}
 	if rawSessionID == "" {
 		rawSessionID = assignee
@@ -90,10 +94,10 @@ func sessionNameFromBead(bead runSnapshotBead, assignee, sessionID string) strin
 	if v := beadMeta(bead, "session_name"); v != "" {
 		return v
 	}
-	if v := beadMeta(bead, "gc.session_name"); v != "" {
+	if v := beadMeta(bead, beadmeta.SessionNameMetadataKey); v != "" {
 		return v
 	}
-	if v := beadMeta(bead, "gc.sessionName"); v != "" {
+	if v := beadMeta(bead, beadmeta.SessionNameCamelMetadataKey); v != "" {
 		return v
 	}
 	if assignee != "" {

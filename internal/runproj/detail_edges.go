@@ -1,5 +1,7 @@
 package runproj
 
+import "github.com/gastownhall/gascity/internal/beadmeta"
+
 // buildRunDisplayEdges projects a run snapshot's dependency edges into the
 // display graph, preferring logical edges and bridging across hidden scope-check
 // nodes. Port of TS buildRunDisplayEdges (edges.ts).
@@ -112,7 +114,7 @@ func bridgeableScopeCheckIDs(raw runSnapshot) map[string]bool {
 		if id == "" {
 			continue
 		}
-		kind := nonEmpty(bead.metadata["gc.kind"])
+		kind := nonEmpty(bead.metadata[beadmeta.KindMetadataKey])
 		if kind == "" {
 			kind = nonEmpty(bead.kind)
 		}

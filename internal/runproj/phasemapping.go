@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // runIssue is the phase classifier's input shape, a faithful port of the TS
@@ -206,7 +208,7 @@ func fallbackPhase(issues []runIssue) phaseMapping {
 // stepSignalText is the step-identity text for fallback scanning: title plus any
 // gc.step_id. Port of TS stepSignalText.
 func stepSignalText(issue runIssue) string {
-	stepID := stringValue(issue.metadata["gc.step_id"])
+	stepID := stringValue(issue.metadata[beadmeta.StepIDMetadataKey])
 	parts := make([]string, 0, 2)
 	if issue.title != "" {
 		parts = append(parts, issue.title)
@@ -597,7 +599,7 @@ func latestStepID(issues []runIssue) (string, bool) {
 		return byMostRecentThenStage(sorted[i], sorted[j]) < 0
 	})
 	for _, i := range sorted {
-		if s := stringValue(i.metadata["gc.step_id"]); s != "" {
+		if s := stringValue(i.metadata[beadmeta.StepIDMetadataKey]); s != "" {
 			return s, true
 		}
 	}
@@ -609,7 +611,7 @@ func latestStepID(issues []runIssue) (string, bool) {
 func furthestStageStepID(issues []runIssue) (string, bool) {
 	var stepIDs []string
 	for _, i := range issues {
-		if id := stringValue(i.metadata["gc.step_id"]); id != "" {
+		if id := stringValue(i.metadata[beadmeta.StepIDMetadataKey]); id != "" {
 			stepIDs = append(stepIDs, id)
 		}
 	}
@@ -655,8 +657,8 @@ func byMostRecentThenStage(a, b runIssue) int {
 		}
 		return 1
 	}
-	aStep := stringValue(a.metadata["gc.step_id"])
-	bStep := stringValue(b.metadata["gc.step_id"])
+	aStep := stringValue(a.metadata[beadmeta.StepIDMetadataKey])
+	bStep := stringValue(b.metadata[beadmeta.StepIDMetadataKey])
 	rankDelta := stageRank(stepIDPhase(bStep)) - stageRank(stepIDPhase(aStep))
 	if rankDelta != 0 {
 		return rankDelta
@@ -675,7 +677,7 @@ func byMostRecentThenStage(a, b runIssue) int {
 func stepIssues(issues []runIssue, step string) []runIssue {
 	var out []runIssue
 	for _, i := range issues {
-		if stringValue(i.metadata["gc.step_id"]) == step {
+		if stringValue(i.metadata[beadmeta.StepIDMetadataKey]) == step {
 			out = append(out, i)
 		}
 	}
@@ -685,7 +687,7 @@ func stepIssues(issues []runIssue, step string) []runIssue {
 // isPrimaryStepIssue excludes spec / scope-check / workflow-finalize kinds.
 // Port of TS isPrimaryStepIssue.
 func isPrimaryStepIssue(issue runIssue) bool {
-	kind := stringValue(issue.metadata["gc.kind"])
+	kind := stringValue(issue.metadata[beadmeta.KindMetadataKey])
 	return kind != "spec" && kind != "scope-check" && kind != "workflow-finalize"
 }
 

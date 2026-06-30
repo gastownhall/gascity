@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -154,10 +155,10 @@ func isRunGroup(rootID string, issues []runIssue) bool {
 		return false
 	}
 	md := root.metadata
-	return stringValue(md["gc.formula_contract"]) == "graph.v2" ||
+	return stringValue(md[beadmeta.FormulaContractMetadataKey]) == "graph.v2" ||
 		root.issueType == "molecule" ||
-		stringValue(md["gc.kind"]) == "run" ||
-		stringValue(md["gc.formula"]) != ""
+		stringValue(md[beadmeta.KindMetadataKey]) == "run" ||
+		stringValue(md[beadmeta.FormulaMetadataKey]) != ""
 }
 
 // runCounts tallies lanes per kind. Port of TS runCounts.
@@ -265,10 +266,10 @@ func runRootID(issue runIssue) string {
 		return sourceRoot
 	}
 	md := issue.metadata
-	if explicit := stringValue(md["gc.root_bead_id"]); explicit != "" {
+	if explicit := stringValue(md[beadmeta.RootBeadIDMetadataKey]); explicit != "" {
 		return explicit
 	}
-	if stringValue(md["gc.kind"]) == "run" || issue.issueType == "molecule" {
+	if stringValue(md[beadmeta.KindMetadataKey]) == "run" || issue.issueType == "molecule" {
 		return issue.id
 	}
 	if moleculeID := stringValue(md["molecule_id"]); moleculeID != "" {
@@ -316,7 +317,7 @@ func runScope(rootID string, issues []runIssue, feedScopes map[string]RunFeedSco
 		ordered = issues
 	}
 
-	rootStoreRef := metadataString(ordered, "gc.root_store_ref")
+	rootStoreRef := metadataString(ordered, beadmeta.RootStoreRefMetadataKey)
 
 	// Build the metadata map fromRootMetadataScope consumes: root metadata,
 	// then overlay gc.root_store_ref and the resolved gc.scope_ref.
@@ -327,16 +328,16 @@ func runScope(rootID string, issues []runIssue, feedScopes map[string]RunFeedSco
 		}
 	}
 	if rootStoreRef != "" {
-		scopeMeta["gc.root_store_ref"] = rootStoreRef
+		scopeMeta[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
 	}
 	scopeRef := ""
 	if hasRoot {
-		scopeRef = stringValue(root.metadata["gc.scope_ref"])
+		scopeRef = stringValue(root.metadata[beadmeta.ScopeRefMetadataKey])
 	}
 	if scopeRef == "" {
-		scopeRef = metadataString(ordered, "gc.scope_ref")
+		scopeRef = metadataString(ordered, beadmeta.ScopeRefMetadataKey)
 	}
-	scopeMeta["gc.scope_ref"] = scopeRef
+	scopeMeta[beadmeta.ScopeRefMetadataKey] = scopeRef
 
 	if ms, ok := fromRootMetadataScope(scopeMeta); ok {
 		return availableScope(ms.scopeKind, ms.scopeRef, ms.rootStoreRef)
@@ -591,7 +592,7 @@ func RunBeadFilter(b beads.Bead) bool {
 	if engineeringTypes[b.Type] {
 		return true
 	}
-	return stringValue(b.Metadata["gc.kind"]) == "run"
+	return stringValue(b.Metadata[beadmeta.KindMetadataKey]) == "run"
 }
 
 // runProgress resolves the lane's progress union. Port of TS runProgress.
@@ -643,7 +644,7 @@ func runStepAttempt(issues []runIssue, stepID string) RunLaneStepAttempt {
 func fromBead(b beads.Bead) runIssue {
 	parent := b.ParentID
 	if parent == "" {
-		parent = stringValue(b.Metadata["gc.parent_bead_id"])
+		parent = stringValue(b.Metadata[beadmeta.ParentBeadIDMetadataKey])
 	}
 
 	updatedAt := b.UpdatedAt

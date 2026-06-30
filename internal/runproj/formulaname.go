@@ -3,6 +3,8 @@ package runproj
 import (
 	"strings"
 	"unicode"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // resolveRunFormulaIdentityLane resolves a run group's formula name for the
@@ -21,7 +23,7 @@ func resolveRunFormulaIdentityLane(root *runIssue, issues []runIssue) (string, b
 	if name := metadataNonEmptyAcrossIssues(issues, "pr_review.workflow_formula"); name != "" {
 		return name, true
 	}
-	if name := metadataNonEmptyAcrossIssues(issues, "gc.formula"); name != "" {
+	if name := metadataNonEmptyAcrossIssues(issues, beadmeta.FormulaMetadataKey); name != "" {
 		return name, true
 	}
 
@@ -49,8 +51,8 @@ func runFormulaTitleFallbackLane(root *runIssue) (string, bool) {
 	if root == nil {
 		return "", false
 	}
-	if nonEmpty(root.metadata["gc.formula_contract"]) != "graph.v2" ||
-		nonEmpty(root.metadata["gc.run_target"]) == "" ||
+	if nonEmpty(root.metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
+		nonEmpty(root.metadata[beadmeta.RunTargetMetadataKey]) == "" ||
 		isTerminalRunRootStatus(root.status) {
 		return "", false
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -85,7 +86,7 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 		b := beadList[i]
 		if b.ID == rootID ||
 			b.ParentID == rootID ||
-			b.Metadata["gc.root_bead_id"] == rootID ||
+			b.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID ||
 			strings.HasPrefix(b.ID, rootID+".") {
 			members = append(members, b)
 		}
@@ -97,14 +98,14 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 	}
 
 	seq := eventSeq
-	rootStoreRef := root.Metadata["gc.root_store_ref"]
+	rootStoreRef := root.Metadata[beadmeta.RootStoreRefMetadataKey]
 	return runSnapshot{
 		runID:             rootID,
 		rootBeadID:        rootID,
 		rootStoreRef:      rootStoreRef,
 		resolvedRootStore: rootStoreRef,
-		scopeKind:         root.Metadata["gc.scope_kind"],
-		scopeRef:          root.Metadata["gc.scope_ref"],
+		scopeKind:         root.Metadata[beadmeta.ScopeKindMetadataKey],
+		scopeRef:          root.Metadata[beadmeta.ScopeRefMetadataKey],
 		snapshotVersion:   version,
 		snapshotEventSeq:  &seq,
 		partial:           false,
@@ -121,7 +122,7 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 // from metadata).
 func toRunSnapshotBead(b beads.Bead) runSnapshotBead {
 	kind := b.Type
-	if v, ok := b.Metadata["gc.original_kind"]; ok {
+	if v, ok := b.Metadata[beadmeta.OriginalKindMetadataKey]; ok {
 		kind = v
 	}
 	return runSnapshotBead{
@@ -131,8 +132,8 @@ func toRunSnapshotBead(b beads.Bead) runSnapshotBead {
 		kind:          kind,
 		stepRef:       b.Ref,
 		assignee:      b.Assignee,
-		scopeRef:      b.Metadata["gc.scope_ref"],
-		logicalBeadID: b.Metadata["gc.logical_bead_id"],
+		scopeRef:      b.Metadata[beadmeta.ScopeRefMetadataKey],
+		logicalBeadID: b.Metadata[beadmeta.LogicalBeadIDMetadataKey],
 		metadata:      b.Metadata,
 	}
 }
@@ -328,7 +329,7 @@ func fromRunSnapshotBead(bead runSnapshotBead) runIssue {
 	if bead.assignee != "" {
 		issue.assignee = bead.assignee
 	}
-	if parent := beadMeta(bead, "gc.parent_bead_id"); parent != "" {
+	if parent := beadMeta(bead, beadmeta.ParentBeadIDMetadataKey); parent != "" {
 		issue.parent = parent
 	}
 	return issue
@@ -456,7 +457,7 @@ func formulaRunCompleteness(reasons []string) FormulaRunCompleteness {
 // graph.v2. Port of TS isGraphV2.
 func isGraphV2(raw runSnapshot) bool {
 	root := rootBead(raw.beads, raw.rootBeadID)
-	return rootMetaPtr(root, "gc.formula_contract") == "graph.v2"
+	return rootMetaPtr(root, beadmeta.FormulaContractMetadataKey) == "graph.v2"
 }
 
 // rootBead finds the root bead by id. Port of TS rootBead (nil mirrors undefined).

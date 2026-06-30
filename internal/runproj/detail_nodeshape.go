@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // ── bead-fields.ts ──────────────────────────────────────────────────────────
@@ -19,7 +21,7 @@ func beadMeta(b runSnapshotBead, key string) string {
 // normalizedStepRef resolves a bead's step ref: gc.step_ref metadata, else the
 // step_ref column. Port of TS normalizedStepRef ("" mirrors null).
 func normalizedStepRef(b runSnapshotBead) string {
-	if ref := beadMeta(b, "gc.step_ref"); ref != "" {
+	if ref := beadMeta(b, beadmeta.StepRefMetadataKey); ref != "" {
 		return ref
 	}
 	return nonEmpty(b.stepRef)
@@ -28,7 +30,7 @@ func normalizedStepRef(b runSnapshotBead) string {
 // iterationFor resolves a bead's loop iteration. Port of TS iterationFor. The
 // bool mirrors TS's `number | undefined`.
 func iterationFor(b runSnapshotBead) (int, bool) {
-	if v, ok := numericMeta(b, "gc.iteration"); ok {
+	if v, ok := numericMeta(b, beadmeta.IterationMetadataKey); ok {
 		return v, true
 	}
 	if v, ok := numericRefSegment(b, "iteration"); ok {
@@ -39,7 +41,7 @@ func iterationFor(b runSnapshotBead) (int, bool) {
 
 // attemptFor resolves a bead's attempt number. Port of TS attemptFor.
 func attemptFor(b runSnapshotBead) (int, bool) {
-	if v, ok := numericMeta(b, "gc.attempt"); ok {
+	if v, ok := numericMeta(b, beadmeta.AttemptMetadataKey); ok {
 		return v, true
 	}
 	if b.attempt != nil {
@@ -172,7 +174,7 @@ func numericFieldInt(value int) (int, bool) {
 // Port of TS presentationStatus.
 func presentationStatus(b runSnapshotBead) string {
 	raw := strings.ToLower(nonEmpty(b.status))
-	outcome := strings.ToLower(beadMeta(b, "gc.outcome"))
+	outcome := strings.ToLower(beadMeta(b, beadmeta.OutcomeMetadataKey))
 	if raw == "closed" || raw == "completed" || raw == "done" {
 		if outcome == "fail" || outcome == "failed" {
 			return "failed"
@@ -244,7 +246,7 @@ func semanticNodeIDFor(b runSnapshotBead, rootBeadID string) string {
 	if explicit := explicitLogicalBeadID(b); explicit != "" {
 		return externalizeID(explicit)
 	}
-	if stepID := beadMeta(b, "gc.step_id"); stepID != "" {
+	if stepID := beadMeta(b, beadmeta.StepIDMetadataKey); stepID != "" {
 		return externalizeID(stepID)
 	}
 	if ref := normalizedStepRef(b); ref != "" {
@@ -264,7 +266,7 @@ func hiddenBadgeTargetFor(b runSnapshotBead, rootBeadID string) string {
 	if constructKindFor(b, rootBeadID) == "run-finalize" {
 		return rootBeadID
 	}
-	if controlRef := beadMeta(b, "gc.control_for"); controlRef != "" {
+	if controlRef := beadMeta(b, beadmeta.ControlForMetadataKey); controlRef != "" {
 		if target, ok := semanticIDFromControlRef(controlRef); ok {
 			return externalizeID(target)
 		}
@@ -351,7 +353,7 @@ func badgeLabelFor(kind string) string {
 // loopControlNodeIDFor resolves the loop-control node id for a bead. Port of TS
 // loopControlNodeIdFor ("" mirrors undefined).
 func loopControlNodeIDFor(b runSnapshotBead) string {
-	scopeRef := beadMeta(b, "gc.scope_ref")
+	scopeRef := beadMeta(b, beadmeta.ScopeRefMetadataKey)
 	if scopeRef == "" {
 		scopeRef = nonEmpty(b.scopeRef)
 	}
@@ -369,10 +371,10 @@ func loopControlNodeIDFor(b runSnapshotBead) string {
 
 // rawKind resolves a bead's raw kind. Port of TS rawKind.
 func rawKind(b runSnapshotBead) string {
-	if k := beadMeta(b, "gc.kind"); k != "" {
+	if k := beadMeta(b, beadmeta.KindMetadataKey); k != "" {
 		return k
 	}
-	if k := beadMeta(b, "gc.original_kind"); k != "" {
+	if k := beadMeta(b, beadmeta.OriginalKindMetadataKey); k != "" {
 		return k
 	}
 	return nonEmpty(b.kind)
@@ -381,7 +383,7 @@ func rawKind(b runSnapshotBead) string {
 // explicitLogicalBeadID resolves the explicit logical bead id. Mirrors the TS
 // `meta(bead, 'gc.logical_bead_id') ?? nonEmpty(bead.logical_bead_id)` idiom.
 func explicitLogicalBeadID(b runSnapshotBead) string {
-	if v := beadMeta(b, "gc.logical_bead_id"); v != "" {
+	if v := beadMeta(b, beadmeta.LogicalBeadIDMetadataKey); v != "" {
 		return v
 	}
 	return nonEmpty(b.logicalBeadID)

@@ -4,6 +4,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // formulaPreviewNode mirrors a compiled-formula preview/step node. Port of TS
@@ -122,7 +124,7 @@ func beadAliases(bead runSnapshotBead, formulaName string) []string {
 	if v := explicitLogicalBeadID(bead); v != "" {
 		sources = append(sources, v)
 	}
-	if v := beadMeta(bead, "gc.step_id"); v != "" {
+	if v := beadMeta(bead, beadmeta.StepIDMetadataKey); v != "" {
 		sources = append(sources, v)
 	}
 	if v := normalizedStepRef(bead); v != "" {

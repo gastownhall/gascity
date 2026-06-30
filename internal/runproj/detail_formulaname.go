@@ -1,5 +1,7 @@
 package runproj
 
+import "github.com/gastownhall/gascity/internal/beadmeta"
+
 // resolveRunFormulaIdentityDetailState resolves a run root's formula name,
 // provenance, and target for the 'detail'/'state' modes. Port of the
 // non-lane path through TS resolveRunFormulaIdentity (formula-name.ts): the
@@ -26,10 +28,10 @@ func resolveRunFormulaIdentityDetailState(root *runSnapshotBead, formulaDetailNa
 // runFormulaMetadataNameRoot resolves the explicit formula name from root
 // metadata. Port of the non-lane runFormulaMetadataName.
 func runFormulaMetadataNameRoot(root *runSnapshotBead) string {
-	if v := rootMetaPtr(root, "gc.formula"); v != "" {
+	if v := rootMetaPtr(root, beadmeta.FormulaMetadataKey); v != "" {
 		return v
 	}
-	return rootMetaPtr(root, "gc.formula_name")
+	return rootMetaPtr(root, beadmeta.FormulaNameMetadataKey)
 }
 
 // runFormulaTitleFallbackDetail is the graph.v2 title fallback for the
@@ -39,8 +41,8 @@ func runFormulaTitleFallbackDetail(root *runSnapshotBead) (string, bool) {
 	if root == nil {
 		return "", false
 	}
-	if rootMetaPtr(root, "gc.formula_contract") != "graph.v2" ||
-		rootMetaPtr(root, "gc.run_target") == "" ||
+	if rootMetaPtr(root, beadmeta.FormulaContractMetadataKey) != "graph.v2" ||
+		rootMetaPtr(root, beadmeta.RunTargetMetadataKey) == "" ||
 		isTerminalRunRootStatus(root.status) {
 		return "", false
 	}
@@ -54,10 +56,10 @@ func runFormulaTitleFallbackDetail(root *runSnapshotBead) (string, bool) {
 // runFormulaTarget resolves the run's routing target. Port of TS runFormulaTarget
 // ("" mirrors null).
 func runFormulaTarget(root *runSnapshotBead) string {
-	if v := rootMetaPtr(root, "gc.run_target"); v != "" {
+	if v := rootMetaPtr(root, beadmeta.RunTargetMetadataKey); v != "" {
 		return v
 	}
-	if v := rootMetaPtr(root, "gc.routed_to"); v != "" {
+	if v := rootMetaPtr(root, beadmeta.RoutedToMetadataKey); v != "" {
 		return v
 	}
 	if root != nil {
@@ -101,7 +103,7 @@ func resolveRunExecutionPath(root *runSnapshotBead, beads []runSnapshotBead, rig
 }
 
 func executionWorkDirs(bead runSnapshotBead) (string, bool) {
-	for _, key := range []string{"gc.cwd", "cwd", "gc.work_dir", "work_dir"} {
+	for _, key := range []string{beadmeta.CwdMetadataKey, "cwd", beadmeta.WorkDirMetadataKey, "work_dir"} {
 		if v := beadMeta(bead, key); v != "" {
 			return v, true
 		}
@@ -117,7 +119,7 @@ func executionWorkDirsPtr(bead *runSnapshotBead) (string, bool) {
 }
 
 func rigRoots(bead runSnapshotBead) (string, bool) {
-	for _, key := range []string{"gc.rig_root", "rig_root"} {
+	for _, key := range []string{beadmeta.RigRootMetadataKey, "rig_root"} {
 		if v := beadMeta(bead, key); v != "" {
 			return v, true
 		}

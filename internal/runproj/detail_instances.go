@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // buildRunDisplayNode projects one semantic group into a display node, including
@@ -190,7 +192,7 @@ func attemptSummaryFor(instances []RunExecutionInstance, beads []runSnapshotBead
 func attemptBadgeFor(beads []runSnapshotBead) (string, bool) {
 	maxAttempts, hasMax := 0, false
 	for _, bead := range beads {
-		if v, ok := positiveIntegerMeta(bead, "gc.max_attempts"); ok {
+		if v, ok := positiveIntegerMeta(bead, beadmeta.MaxAttemptsMetadataKey); ok {
 			maxAttempts, hasMax = v, true
 			break
 		}

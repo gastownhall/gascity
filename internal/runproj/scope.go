@@ -3,6 +3,8 @@ package runproj
 import (
 	"regexp"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // scopeRefRe validates a scope ref. Port of TS SCOPE_REF_RE
@@ -28,11 +30,11 @@ func parseRunScopeKind(value string) (string, bool) {
 // gc.root_store_ref fallback. Port of TS fromRootMetadataScope. The bool mirrors
 // TS's `null`.
 func fromRootMetadataScope(metadata map[string]string) (runScopeWithStoreRef, bool) {
-	rootStoreRef := stringValueOrEmpty(metadata["gc.root_store_ref"])
+	rootStoreRef := stringValueOrEmpty(metadata[beadmeta.RootStoreRefMetadataKey])
 
 	// Primary: explicit gc.scope_kind / gc.scope_ref pair.
-	scopeKind, kindOK := parseRunScopeKind(metadata["gc.scope_kind"])
-	scopeRef := stringValueOrEmpty(metadata["gc.scope_ref"])
+	scopeKind, kindOK := parseRunScopeKind(metadata[beadmeta.ScopeKindMetadataKey])
+	scopeRef := stringValueOrEmpty(metadata[beadmeta.ScopeRefMetadataKey])
 	if kindOK && scopeRef != "" && scopeRefRe.MatchString(scopeRef) {
 		rsr := rootStoreRef
 		if rsr == "" {
