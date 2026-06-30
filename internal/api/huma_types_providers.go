@@ -70,6 +70,7 @@ type ProviderCreateInput struct {
 		ReadyDelayMs       int               `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
 		Env                map[string]string `json:"env,omitempty" doc:"Environment variables."`
 		OptionsSchemaMerge *string           `json:"options_schema_merge,omitempty" doc:"Options schema merge mode across inheritance chain."`
+		OptionDefaults     map[string]string `json:"option_defaults,omitempty" doc:"Provider option defaults (e.g. model). Keys are merged on update."`
 	}
 }
 
@@ -90,6 +91,7 @@ type ProviderUpdateInput struct {
 		ReadyDelayMs       *int              `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
 		Env                map[string]string `json:"env,omitempty" doc:"Environment variables."`
 		OptionsSchemaMerge *string           `json:"options_schema_merge,omitempty" doc:"Options schema merge mode across inheritance chain."`
+		OptionDefaults     map[string]string `json:"option_defaults,omitempty" doc:"Provider option defaults (e.g. model). Keys are merged on update."`
 	}
 }
 

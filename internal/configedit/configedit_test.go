@@ -2317,6 +2317,118 @@ func TestUpdateProvider_PreservesUnchangedFields(t *testing.T) {
 	}
 }
 
+// cityWithModelProvider returns a city.toml with a custom provider whose
+// options_schema declares model + permission_mode, so option_defaults for
+// those keys pass schema validation.
+func cityWithModelProvider() string {
+	return `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+provider = "custom"
+
+[providers.custom]
+command = "custom-cli"
+
+[[providers.custom.options_schema]]
+key = "model"
+label = "Model"
+type = "select"
+default = "x"
+
+  [[providers.custom.options_schema.choices]]
+  value = "x"
+  label = "X"
+  flag_args = ["--model", "x"]
+
+  [[providers.custom.options_schema.choices]]
+  value = "y"
+  label = "Y"
+  flag_args = ["--model", "y"]
+
+[[providers.custom.options_schema]]
+key = "permission_mode"
+label = "Permission Mode"
+type = "select"
+default = "plan"
+
+  [[providers.custom.options_schema.choices]]
+  value = "plan"
+  label = "Plan"
+  flag_args = ["--permission-mode", "plan"]
+
+  [[providers.custom.options_schema.choices]]
+  value = "unrestricted"
+  label = "Unrestricted"
+  flag_args = ["--dangerously-skip-permissions"]
+`
+}
+
+// TestCreateProvider_OptionDefaults verifies a create with an option_defaults
+// map (e.g. model) round-trips to the provider's TOML.
+func TestCreateProvider_OptionDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	spec := config.ProviderSpec{
+		Command: "custom-cli",
+		OptionsSchema: []config.ProviderOption{{
+			Key:   "model",
+			Label: "Model",
+			Type:  "select",
+			Choices: []config.OptionChoice{
+				{Value: "x", Label: "X", FlagArgs: []string{"--model", "x"}},
+				{Value: "y", Label: "Y", FlagArgs: []string{"--model", "y"}},
+			},
+		}},
+		OptionDefaults: map[string]string{"model": "x"},
+	}
+	if err := ed.CreateProvider("myprov", spec); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+
+	cfg := readTOML(t, path)
+	got := cfg.Providers["myprov"]
+	if got.OptionDefaults["model"] != "x" {
+		t.Errorf("OptionDefaults[model] = %q, want %q", got.OptionDefaults["model"], "x")
+	}
+}
+
+// TestUpdateProvider_OptionDefaultsMergeNotReplace verifies that updating
+// option_defaults merges keys: a model-only edit changes model while leaving
+// a pre-existing unrelated option-default key untouched.
+func TestUpdateProvider_OptionDefaultsMergeNotReplace(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, cityWithModelProvider())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	// Seed a provider with two option defaults.
+	if err := ed.UpdateProvider("custom", configedit.ProviderUpdate{
+		OptionDefaults: map[string]string{"model": "x", "permission_mode": "unrestricted"},
+	}); err != nil {
+		t.Fatalf("seed UpdateProvider: %v", err)
+	}
+
+	// Edit only model; permission_mode must survive.
+	if err := ed.UpdateProvider("custom", configedit.ProviderUpdate{
+		OptionDefaults: map[string]string{"model": "y"},
+	}); err != nil {
+		t.Fatalf("UpdateProvider: %v", err)
+	}
+
+	cfg := readTOML(t, path)
+	got := cfg.Providers["custom"]
+	if got.OptionDefaults["model"] != "y" {
+		t.Errorf("OptionDefaults[model] = %q, want %q", got.OptionDefaults["model"], "y")
+	}
+	if got.OptionDefaults["permission_mode"] != "unrestricted" {
+		t.Errorf("OptionDefaults[permission_mode] = %q, want %q (merge, not replace)",
+			got.OptionDefaults["permission_mode"], "unrestricted")
+	}
+}
+
 func TestDeleteProvider(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, cityWithProvider())

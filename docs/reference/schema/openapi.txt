@@ -5318,6 +5318,13 @@
             "minLength": 1,
             "type": "string"
           },
+          "option_defaults": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Provider option defaults (e.g. model). Keys are merged on update.",
+            "type": "object"
+          },
           "options_schema_merge": {
             "description": "Options schema merge mode across inheritance chain.",
             "type": "string"
@@ -5839,6 +5846,13 @@
               "type": "string"
             },
             "description": "Environment variables.",
+            "type": "object"
+          },
+          "option_defaults": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Provider option defaults (e.g. model). Keys are merged on update.",
             "type": "object"
           },
           "options_schema_merge": {

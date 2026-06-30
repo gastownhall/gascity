@@ -389,6 +389,14 @@ func (f *fakeMutatorState) UpdateProvider(name string, patch ProviderUpdate) err
 	if patch.OptionsSchema != nil {
 		spec.OptionsSchema = append([]config.ProviderOption(nil), patch.OptionsSchema...)
 	}
+	if len(patch.OptionDefaults) > 0 {
+		if spec.OptionDefaults == nil {
+			spec.OptionDefaults = make(map[string]string, len(patch.OptionDefaults))
+		}
+		for k, v := range patch.OptionDefaults {
+			spec.OptionDefaults[k] = v
+		}
+	}
 	f.cfg.Providers[name] = spec
 	return nil
 }

@@ -2252,6 +2252,9 @@ type ProviderCreateInputBody struct {
 	// Name Provider name.
 	Name string `json:"name"`
 
+	// OptionDefaults Provider option defaults (e.g. model). Keys are merged on update.
+	OptionDefaults *map[string]string `json:"option_defaults,omitempty"`
+
 	// OptionsSchemaMerge Options schema merge mode across inheritance chain.
 	OptionsSchemaMerge *string `json:"options_schema_merge,omitempty"`
 
@@ -2423,6 +2426,9 @@ type ProviderUpdateInputBody struct {
 
 	// Env Environment variables.
 	Env *map[string]string `json:"env,omitempty"`
+
+	// OptionDefaults Provider option defaults (e.g. model). Keys are merged on update.
+	OptionDefaults *map[string]string `json:"option_defaults,omitempty"`
 
 	// OptionsSchemaMerge Options schema merge mode across inheritance chain.
 	OptionsSchemaMerge *string `json:"options_schema_merge,omitempty"`

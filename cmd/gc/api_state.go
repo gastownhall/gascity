@@ -1559,6 +1559,7 @@ func (cs *controllerState) UpdateProvider(name string, patch api.ProviderUpdate)
 			Env:                patch.Env,
 			OptionsSchemaMerge: patch.OptionsSchemaMerge,
 			OptionsSchema:      patch.OptionsSchema,
+			OptionDefaults:     patch.OptionDefaults,
 		})
 	})
 }

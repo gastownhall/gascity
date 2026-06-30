@@ -1251,6 +1251,7 @@ type ProviderUpdate struct {
 	Env                map[string]string // nil = not set, non-nil = additive merge
 	OptionsSchemaMerge *string
 	OptionsSchema      []config.ProviderOption // nil = not set, non-nil = replace
+	OptionDefaults     map[string]string       // nil = not set, non-nil = additive merge
 }
 
 // CreateProvider adds a new city-level provider to the config.
@@ -1329,6 +1330,14 @@ func (e *Editor) UpdateProvider(name string, patch ProviderUpdate) error {
 		}
 		if patch.OptionsSchema != nil {
 			spec.OptionsSchema = append([]config.ProviderOption(nil), patch.OptionsSchema...)
+		}
+		if len(patch.OptionDefaults) > 0 {
+			if spec.OptionDefaults == nil {
+				spec.OptionDefaults = make(map[string]string, len(patch.OptionDefaults))
+			}
+			for k, v := range patch.OptionDefaults {
+				spec.OptionDefaults[k] = v
+			}
 		}
 		cfg.Providers[name] = spec
 		return nil

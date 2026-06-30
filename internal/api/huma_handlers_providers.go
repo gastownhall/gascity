@@ -154,6 +154,9 @@ func (s *Server) humaHandleProviderCreate(_ context.Context, input *ProviderCrea
 	if input.Body.OptionsSchemaMerge != nil {
 		spec.OptionsSchemaMerge = *input.Body.OptionsSchemaMerge
 	}
+	if input.Body.OptionDefaults != nil {
+		spec.OptionDefaults = input.Body.OptionDefaults
+	}
 
 	if err := sm.CreateProvider(input.Body.Name, spec); err != nil {
 		return nil, mutationError(err)
@@ -183,6 +186,7 @@ func (s *Server) humaHandleProviderUpdate(_ context.Context, input *ProviderUpda
 		ReadyDelayMs:       input.Body.ReadyDelayMs,
 		Env:                input.Body.Env,
 		OptionsSchemaMerge: input.Body.OptionsSchemaMerge,
+		OptionDefaults:     input.Body.OptionDefaults,
 	}
 	if input.Body.Base != nil {
 		patch.Base = &input.Body.Base

@@ -61,6 +61,59 @@ func TestHandleProviderCreate_PersistsACPTransportOverrides(t *testing.T) {
 	}
 }
 
+func TestHandleProviderCreate_PersistsOptionDefaults(t *testing.T) {
+	fs := newFakeMutatorState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/providers"), strings.NewReader(
+		`{"name":"custom-model","command":"custom","option_defaults":{"model":"x"}}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	spec, ok := fs.cfg.Providers["custom-model"]
+	if !ok {
+		t.Fatal("provider custom-model not created")
+	}
+	if spec.OptionDefaults["model"] != "x" {
+		t.Fatalf("OptionDefaults[model] = %q, want %q", spec.OptionDefaults["model"], "x")
+	}
+}
+
+func TestHandleProviderUpdate_OptionDefaultsMergeNotReplace(t *testing.T) {
+	fs := newFakeMutatorState(t)
+	fs.cfg.Providers["custom"] = config.ProviderSpec{
+		Command:        "custom",
+		OptionDefaults: map[string]string{"model": "x", "permission_mode": "unrestricted"},
+	}
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	// Edit only the model; permission_mode must survive.
+	req := httptest.NewRequest(http.MethodPatch, cityURL(fs, "/provider/custom"), strings.NewReader(
+		`{"option_defaults":{"model":"y"}}`))
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	spec := fs.cfg.Providers["custom"]
+	if spec.OptionDefaults["model"] != "y" {
+		t.Fatalf("OptionDefaults[model] = %q, want %q", spec.OptionDefaults["model"], "y")
+	}
+	if spec.OptionDefaults["permission_mode"] != "unrestricted" {
+		t.Fatalf("OptionDefaults[permission_mode] = %q, want %q (merge, not replace)",
+			spec.OptionDefaults["permission_mode"], "unrestricted")
+	}
+}
+
 func TestHandleProviderUpdate_UpdatesInheritanceFields(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	fs.cfg.Providers["custom"] = fs.cfg.Providers["test-agent"]
