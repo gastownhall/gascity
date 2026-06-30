@@ -79,6 +79,21 @@ vulnerabilities:
       - "usr/local/bin/kubectl"
     expired_at: 2026-07-07
     statement: Go stdlib MIME-header DoS (CVE-2026-42504), fixed in Go 1.26.4 / 1.25.11. bd, br, dolt, and kubectl still embed an older Go stdlib; remove once each rebuilds against 1.26.4+. gh cleared by v2.94.0 on rebuild; gc cleared by go.mod bump to 1.26.4 (PR #3297).
+  - id: CVE-2026-27145
+    paths:
+      - "usr/local/bin/bd"
+    expired_at: 2026-07-07
+    statement: Go stdlib x509 hostname verification issue (CVE-2026-27145), fixed in Go 1.26.4 / 1.25.11. bd v1.0.4 is the deliberate beads repin; remove once the bundled CLI rebuilds against 1.26.4+.
+  - id: CVE-2026-27145
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-07-07
+    statement: Go stdlib x509 hostname verification issue (CVE-2026-27145), fixed in Go 1.26.4 / 1.25.11. Dolt v2.1.7 still embeds Go 1.26.2; remove once upstream rebuilds against 1.26.4+.
+  - id: CVE-2026-27145
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-07-07
+    statement: Go stdlib x509 hostname verification issue (CVE-2026-27145), fixed in Go 1.26.4 / 1.25.11. kubectl in the base image still embeds Go 1.26.2; remove once the bundled CLI rebuilds against 1.26.4+.
   - id: CVE-2026-41602
     paths:
       - "usr/local/bin/dolt"
