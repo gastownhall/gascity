@@ -527,6 +527,44 @@ func TestHandleConfigExplain_PackDerivedAgent(t *testing.T) {
 	}
 }
 
+// TestAgentPackProvenance_NilRawNeverFalseNegative is the belt-and-suspenders
+// for the MUST-FIX: when raw config is genuinely unavailable, the read signal
+// must never be a confident pack_derived=false for an agent that the 409 gate
+// would treat as pack-derived. An import-expanded agent always carries a
+// BindingName, which is positive proof of pack origin independent of raw.
+func TestAgentPackProvenance_NilRawNeverFalseNegative(t *testing.T) {
+	expanded := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig", BindingName: "gastown"},
+		},
+	}
+	// raw == nil simulates a transient load failure with no cached snapshot.
+	pack, derived := agentPackProvenance(expanded.Agents[0], nil, expanded)
+	if !derived {
+		t.Error("derived = false with nil raw; a binding-stamped agent must report pack-derived")
+	}
+	if pack != "gastown" {
+		t.Errorf("pack = %q, want %q", pack, "gastown")
+	}
+}
+
+// TestAgentPackProvenance_NilRawPatchPresence keeps the existing patch-presence
+// positive signal: a pack agent with a [[patches.agent]] override is detected
+// as pack-derived even when raw is unavailable and it has no binding name.
+func TestAgentPackProvenance_NilRawPatchPresence(t *testing.T) {
+	a := config.Agent{Name: "worker", Dir: "myrig"}
+	expanded := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{a},
+	}
+	expanded.Patches.Agents = []config.AgentPatch{{Dir: "myrig", Name: "worker"}}
+	_, derived := agentPackProvenance(a, nil, expanded)
+	if !derived {
+		t.Error("derived = false with nil raw + patch present; want pack-derived")
+	}
+}
+
 // TestHandleConfigDefaults_FullyDefaultedCity verifies the baseline a
 // city with no overrides would have: name-derived prefix, builtin
 // providers, and no declared agents or rigs.

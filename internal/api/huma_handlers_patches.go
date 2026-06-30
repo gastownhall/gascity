@@ -58,6 +58,7 @@ func (s *Server) humaHandleAgentPatchSet(_ context.Context, input *AgentPatchSet
 	patch := config.AgentPatch{
 		Dir:       input.Body.Dir,
 		Name:      input.Body.Name,
+		Provider:  input.Body.Provider,
 		WorkDir:   input.Body.WorkDir,
 		TmuxAlias: input.Body.TmuxAlias,
 		Scope:     input.Body.Scope,

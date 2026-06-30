@@ -26,6 +26,14 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	sessTmpl := cfg.Workspace.SessionTemplate
 	wantPeek := input.Peek
 
+	// Raw config drives accurate provenance detection (pack-derived vs.
+	// city-native). Optional capability: when absent, agentOrigin falls
+	// back to the patch-presence heuristic.
+	var rawCfg *config.City
+	if rcp, ok := s.state.(RawConfigProvider); ok {
+		rawCfg = rcp.RawConfig()
+	}
+
 	index := s.latestIndex()
 	cacheKey := ""
 	if !wantPeek {
@@ -42,6 +50,9 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 	var agents []agentResponse
 	for _, a := range cfg.Agents {
+		// Provenance is a property of the declared agent, shared by every
+		// pool-expanded instance, so compute it once per source agent.
+		pack, packDerived := agentPackProvenance(a, rawCfg, cfg)
 		expanded := expandAgent(a, cityName, sessTmpl, sp)
 		for _, ea := range expanded {
 			if input.Rig != "" && ea.rig != input.Rig {
@@ -91,6 +102,8 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				DisplayName:       displayName,
 				Available:         available,
 				UnavailableReason: unavailableReason,
+				PackDerived:       packDerived,
+				Pack:              pack,
 			}
 
 			var lastActivity *time.Time
@@ -192,6 +205,12 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		}
 	}
 
+	var rawCfg *config.City
+	if rcp, ok := s.state.(RawConfigProvider); ok {
+		rawCfg = rcp.RawConfig()
+	}
+	pack, packDerived := agentPackProvenance(agentCfg, rawCfg, cfg)
+
 	resp := agentResponse{
 		Name:              name,
 		Description:       agentCfg.Description,
@@ -202,6 +221,8 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		DisplayName:       displayName,
 		Available:         available,
 		UnavailableReason: unavailableReason,
+		PackDerived:       packDerived,
+		Pack:              pack,
 	}
 	if isMultiSessionAgent(agentCfg) {
 		resp.Pool = agentCfg.QualifiedName()

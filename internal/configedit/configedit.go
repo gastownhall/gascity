@@ -173,6 +173,17 @@ func (e *Editor) loadForEdit() (*config.City, error) {
 	return cfg, nil
 }
 
+// LoadRaw returns the raw (pre-expansion, site-bound) city config — the exact
+// basis the mutation gate uses for provenance. UpdateAgent/DeleteAgent decide
+// pack-derived-ness via AgentOrigin(raw, expanded, name) where raw comes from
+// loadForEdit; read paths that surface provenance (e.g. pack_derived on
+// GET /agents) call this so the read agrees with the 409 gate instead of
+// re-parsing city.toml independently. The returned config is a fresh snapshot
+// the caller owns; it carries no pack-expanded agents.
+func (e *Editor) LoadRaw() (*config.City, error) {
+	return e.loadForEdit()
+}
+
 // write persists city.toml first, then .gc/site.toml. A crash between the
 // two writes leaves city.toml with rig paths stripped while .gc/site.toml
 // retains its previous state — producing an orphan legacy/unbound rig

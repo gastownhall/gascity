@@ -49,6 +49,18 @@ type agentResponse struct {
 	Provider    string `json:"provider,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
 
+	// PackDerived reports whether this agent originates from an imported
+	// pack. When true, the agent cannot be mutated directly (a direct
+	// PATCH/DELETE returns ErrPackDerived / 409); edits must go through the
+	// patch overlay (PUT /patches/agents). When false, the agent is declared
+	// inline in city.toml and is editable via the direct PATCH /agent/{name}
+	// route.
+	PackDerived bool `json:"pack_derived"`
+	// Pack is the import binding name (the [imports.<name>] key) that brought
+	// this agent into scope. Populated only when PackDerived is true; empty
+	// for city-native agents.
+	Pack string `json:"pack,omitempty"`
+
 	State string `json:"state"`
 
 	Available         bool   `json:"available"`

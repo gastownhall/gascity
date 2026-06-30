@@ -298,6 +298,33 @@ func TestAgentOrigin_Inline(t *testing.T) {
 	}
 }
 
+// TestLoadRaw_MatchesGateBasis verifies Editor.LoadRaw returns the same raw
+// (pre-expansion, site-bound) config the mutation gate uses. The read path's
+// provenance must be computed from this exact basis so pack_derived agrees
+// with the ErrPackDerived/409 gate (Editor.UpdateAgent → AgentOrigin).
+func TestLoadRaw_MatchesGateBasis(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	raw, err := ed.LoadRaw()
+	if err != nil {
+		t.Fatalf("LoadRaw: %v", err)
+	}
+	if raw == nil {
+		t.Fatal("LoadRaw returned nil config")
+	}
+	// minimalCity declares "mayor" inline. AgentOrigin computed against the
+	// LoadRaw basis must agree it is inline (not pack-derived), which is the
+	// exact decision the 409 gate makes.
+	if got := configedit.AgentOrigin(raw, raw, "mayor"); got != configedit.OriginInline {
+		t.Errorf("AgentOrigin(LoadRaw) = %v, want OriginInline", got)
+	}
+	if len(raw.Agents) != 1 || raw.Agents[0].Name != "mayor" {
+		t.Errorf("LoadRaw agents = %+v, want single inline mayor", raw.Agents)
+	}
+}
+
 func TestAgentOrigin_Derived(t *testing.T) {
 	raw := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},

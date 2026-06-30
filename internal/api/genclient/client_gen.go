@@ -473,6 +473,9 @@ type AgentPatchSetInputBody struct {
 	// Name Agent name.
 	Name *string `json:"name,omitempty"`
 
+	// Provider Override the agent's provider.
+	Provider *string `json:"provider,omitempty"`
+
 	// Scope Override agent scope.
 	Scope *string `json:"scope,omitempty"`
 
@@ -498,6 +501,8 @@ type AgentResponse struct {
 	LastOutput        *string      `json:"last_output,omitempty"`
 	Model             *string      `json:"model,omitempty"`
 	Name              string       `json:"name"`
+	Pack              *string      `json:"pack,omitempty"`
+	PackDerived       bool         `json:"pack_derived"`
 	Pool              *string      `json:"pool,omitempty"`
 	Provider          *string      `json:"provider,omitempty"`
 	Rig               *string      `json:"rig,omitempty"`
