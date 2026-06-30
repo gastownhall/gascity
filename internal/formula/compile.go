@@ -181,6 +181,14 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	}
 	resolved.Steps = retrySteps
 
+	// Resolve "../assets/..." check paths whose {target}/{{var}} placeholders
+	// expansion has now substituted, before ApplyRalph freezes them into
+	// gc.check_path. Parse time defers templated asset paths; this is where the
+	// now-concrete path becomes the absolute layer asset.
+	if err := parser.resolveExpandedCheckPaths(resolved); err != nil {
+		return nil, fmt.Errorf("resolving expanded check paths in %q: %w", name, err)
+	}
+
 	// Stage 11: Expand inline Ralph steps
 	ralphSteps, err := ApplyRalph(resolved.Steps)
 	if err != nil {

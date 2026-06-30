@@ -2,7 +2,9 @@ package citywriteauth
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,7 +54,7 @@ func fixture(t *testing.T, now time.Time) (*Verifier, ed25519.PrivateKey, Grant,
 		t.Fatalf("New: %v", err)
 	}
 	body := []byte(`{"name":"worker"}`)
-	digest := ReqDigest("POST", "/v0/city/acme/agents", body)
+	digest := ReqDigest("POST", "/v0/city/acme/agents", "", body)
 	g := Grant{
 		Kid:   "k1",
 		Aud:   "gc-city-write",
@@ -151,7 +153,7 @@ func TestVerify_Rejections(t *testing.T) {
 		{
 			name: "request binding mismatch",
 			expect: func(e *Expect) {
-				e.ReqDigest = ReqDigest("POST", "/v0/city/acme/agents", []byte(`{"name":"tampered"}`))
+				e.ReqDigest = ReqDigest("POST", "/v0/city/acme/agents", "", []byte(`{"name":"tampered"}`))
 			},
 			wantErr: ErrReqMismatch,
 		},
@@ -264,7 +266,7 @@ func TestVerify_ReplaySurvivesSweepInSkewWindow(t *testing.T) {
 	// window, so Verify accepts it.
 	exp := realNow.Add(-1 * time.Minute)
 	iat := exp.Add(-20 * time.Second)
-	digest := ReqDigest("POST", "/v0/city/acme/agents", []byte(`{}`))
+	digest := ReqDigest("POST", "/v0/city/acme/agents", "", []byte(`{}`))
 	g := Grant{
 		Kid: "k1", Aud: "gc-city-write", City: "acme", Epoch: 7,
 		IAT: iat.Unix(), Exp: exp.Unix(), JTI: "jti-replay", Req: digest,
@@ -300,7 +302,7 @@ func (g replayErrGuard) Use(string, time.Time) error { return g.err }
 func TestVerify_ReplayGuardErrorClassification(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	body := []byte(`{"name":"worker"}`)
-	digest := ReqDigest("POST", "/v0/city/acme/agents", body)
+	digest := ReqDigest("POST", "/v0/city/acme/agents", "", body)
 	newGrant := func() Grant {
 		return Grant{
 			Kid: "k1", Aud: "gc-city-write", City: "acme", Epoch: 7,
@@ -417,26 +419,54 @@ func TestNew_RejectsBadOptions(t *testing.T) {
 
 func TestReqDigest(t *testing.T) {
 	body := []byte(`{"a":1}`)
-	base := ReqDigest("POST", "/v0/city/acme/agents", body)
+	const path = "/v0/city/acme/agents"
+	base := ReqDigest("POST", path, "", body)
 
 	if base == "" {
 		t.Fatal("ReqDigest returned empty")
 	}
-	if got := ReqDigest("POST", "/v0/city/acme/agents", body); got != base {
+	if got := ReqDigest("POST", path, "", body); got != base {
 		t.Fatalf("ReqDigest not deterministic: %q vs %q", got, base)
 	}
 	// Sensitivity to each component.
-	if ReqDigest("PUT", "/v0/city/acme/agents", body) == base {
+	if ReqDigest("PUT", path, "", body) == base {
 		t.Fatal("ReqDigest insensitive to method")
 	}
-	if ReqDigest("POST", "/v0/city/acme/providers", body) == base {
+	if ReqDigest("POST", "/v0/city/acme/providers", "", body) == base {
 		t.Fatal("ReqDigest insensitive to path")
 	}
-	if ReqDigest("POST", "/v0/city/acme/agents", []byte(`{"a":2}`)) == base {
+	if ReqDigest("POST", path, "", []byte(`{"a":2}`)) == base {
 		t.Fatal("ReqDigest insensitive to body")
 	}
-	if ReqDigest("POST", "/v0/city/acme/agents", nil) == base {
+	if ReqDigest("POST", path, "", nil) == base {
 		t.Fatal("ReqDigest insensitive to empty vs non-empty body")
+	}
+
+	// The query-less preimage must stay byte-identical to the original
+	// method"\n"path"\n"hex(sha256(body)) contract, so grants minted by the
+	// cross-repo crucible (which computes the query-less digest) and the pinned
+	// golden vector keep verifying. Pin the exact preimage independently.
+	bodyHash := sha256.Sum256(body)
+	want := sha256.Sum256([]byte("POST\n" + path + "\n" + hex.EncodeToString(bodyHash[:])))
+	if base != hex.EncodeToString(want[:]) {
+		t.Fatalf("query-less preimage drifted: got %s want %s", base, hex.EncodeToString(want[:]))
+	}
+
+	// A query is bound: the destructive ?delete=true variant must not share the
+	// cancel-only (query-less) digest, and scope selectors must change it too.
+	if ReqDigest("DELETE", path, "delete=true", body) == base {
+		t.Fatal("ReqDigest must bind the query: ?delete=true matched the query-less digest")
+	}
+	if ReqDigest("DELETE", path, "scope_kind=rig", body) == ReqDigest("DELETE", path, "scope_kind=city", body) {
+		t.Fatal("ReqDigest insensitive to query value")
+	}
+	// Canonicalization: parameter order is irrelevant (handlers read r.URL.Query).
+	if ReqDigest("DELETE", path, "a=1&b=2", body) != ReqDigest("DELETE", path, "b=2&a=1", body) {
+		t.Fatal("ReqDigest must be order-independent over query parameters")
+	}
+	// A semantically-empty query collapses back to the query-less digest.
+	if ReqDigest("POST", path, "&", body) != base {
+		t.Fatal("semantically-empty query must equal the query-less digest")
 	}
 }
 
@@ -466,7 +496,7 @@ func TestNew_DeepCopiesKeys(t *testing.T) {
 	}
 
 	body := []byte(`{"name":"worker"}`)
-	digest := ReqDigest("POST", "/v0/city/acme/agents", body)
+	digest := ReqDigest("POST", "/v0/city/acme/agents", "", body)
 	g := Grant{
 		Kid: "k1", Aud: "gc-city-write", City: "acme", Epoch: 7,
 		IAT: now.Unix(), Exp: now.Add(30 * time.Second).Unix(), JTI: "jti-1", Req: digest,

@@ -123,6 +123,14 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 	}
 	resolved.Steps = retrySteps
 
+	// Resolve "../assets/..." check paths whose {target}/{{var}} placeholders
+	// MaterializeExpansionForTarget has now substituted, before ApplyRalph
+	// freezes them into gc.check_path. Without this a templated asset check
+	// materializes a relative path the runtime cannot find in the layer tree.
+	if err := parser.resolveExpandedCheckPaths(resolved); err != nil {
+		return nil, fmt.Errorf("resolving expanded check paths in expansion %q: %w", name, err)
+	}
+
 	ralphSteps, err := ApplyRalph(resolved.Steps)
 	if err != nil {
 		return nil, fmt.Errorf("applying ralph transforms to expansion %q: %w", name, err)

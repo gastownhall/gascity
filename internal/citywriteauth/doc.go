@@ -27,18 +27,28 @@
 //	jti    unique token id; single-use, enforced by a ReplayGuard
 //	req    request binding; see [ReqDigest]
 //
-// The req binding ties a grant to exactly one method+path+body, so a captured
-// grant cannot be repurposed for a different mutation even by a caller able to
-// read it.
+// The req binding ties a grant to exactly one method+path+query+body, so a
+// captured grant cannot be repurposed for a different mutation even by a caller
+// able to read it. The query is folded into the digest only when the request
+// carries one (see [ReqDigest]), so a narrow ?delete=true or scope-selector
+// variant cannot be reached with a grant minted for the query-less request.
 //
-// # Integration status
+// # Integration
 //
-// This package is verify-only and is not yet wired into a request path. No
-// middleware currently buffers the request body, computes [ReqDigest], derives
-// the expected city from the {cityName} path segment, sources the verifying
-// keys, and calls [Verifier.Verify] to fail closed on a missing or invalid
-// X-GC-City-Write header. Until that integration lands, importing this package
-// grants no protection on its own. The supervisor/API integration and a
-// request-level integration test that drives a real request through [Expect]
-// and [Verifier.Verify] are tracked as follow-up work in ga-wojrnk.
+// The supervisor/API layer wires this verifier into a request path. When a
+// verifying key is configured, an mux-level middleware buffers the request
+// body, computes [ReqDigest] from the method, path, query, and body, derives
+// the expected city from the {cityName} path segment, and calls
+// [Verifier.Verify] to fail closed on a missing or invalid X-GC-City-Write
+// header. The gate is per-city: it covers every mutating request to an
+// already-registered city under /v0/city/{cityName}, while registry creation
+// (POST /v0/city) is carved out because a not-yet-created city has no
+// path-resident name to bind a grant to. With no key configured the middleware
+// is not installed and mutations follow the prior CSRF/read-only guards.
+//
+// Because this package mints nothing, the in-tree callers carry no grant: the
+// bundled gc API client and dashboard SPA send only the CSRF header. Enabling
+// the gate therefore turns their direct city mutations away fail-closed; a
+// deployment that gates writes fronts mutations through the external trusted
+// authority that mints grants, not through those first-party clients.
 package citywriteauth

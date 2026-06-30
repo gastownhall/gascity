@@ -82,9 +82,10 @@ type wizardConfig struct {
 	configName       string // canonical values: "minimal", "gastown", "gascity", or "custom"
 	defaultProvider  string // selected default provider key
 	providers        []string
-	provider         string // compatibility mirror for older internal callers
-	startCommand     string // custom start command (workspace-level)
-	bootstrapProfile string // hosted bootstrap profile, or "" for local defaults
+	provider         string                // compatibility mirror for older internal callers
+	startCommand     string                // custom start command (workspace-level)
+	bootstrapProfile string                // hosted bootstrap profile, or "" for local defaults
+	hostedDolt       hostedDoltInitOptions // external/hosted Dolt ledger endpoint (disabled when zero)
 	err              error
 }
 
@@ -320,6 +321,11 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var providersFlag []string
 	var defaultProviderFlag string
 	var bootstrapProfileFlag string
+	var doltHostFlag string
+	var doltPortFlag string
+	var doltUserFlag string
+	var doltDatabaseFlag string
+	var doltProjectIDFlag string
 	var skipProviderReadiness bool
 	var preserveExisting bool
 	var jsonOut bool
@@ -348,7 +354,10 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
   gc init --name my-city
   gc init --from ~/elan --name elan /city
   gc init --file ./my-city.toml ~/bright-lights
-  gc init --file city.toml --preserve-existing .`,
+  gc init --file city.toml --preserve-existing .
+  gc init --template gascity --default-provider claude \
+    --dolt-host db.example.com --dolt-port 4406 \
+    --dolt-database bd_prj_x --dolt-project-id prj_x --no-start /city`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(runCmd *cobra.Command, args []string) error {
 			out := stdout
@@ -366,7 +375,14 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 				code := cmdInitFromFileWithOptionsInternal(fileFlag, args, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, noStart)
 				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, "", "", nil, bootstrapProfileFlag, mode, stdout)
 			}
-			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag)
+			hosted := resolveHostedDoltInitOptions(hostedDoltInitFlagValues{
+				Host:      doltHostFlag,
+				Port:      doltPortFlag,
+				User:      doltUserFlag,
+				Database:  doltDatabaseFlag,
+				ProjectID: doltProjectIDFlag,
+			}, os.Getenv)
+			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag, hosted)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 				return err
@@ -386,6 +402,11 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringArrayVar(&providersFlag, "providers", nil, "readiness-aware providers to write to city.toml (repeatable or comma-separated)")
 	cmd.Flags().StringVar(&templateFlag, "template", "", "non-interactive template to write: minimal, gastown, gascity, or custom")
 	cmd.Flags().StringVar(&bootstrapProfileFlag, "bootstrap-profile", "", "bootstrap profile to apply for hosted/container defaults")
+	cmd.Flags().StringVar(&doltHostFlag, "dolt-host", "", "external/hosted Dolt host for the city beads ledger (or "+envDoltHost+"); pins the city to an external endpoint instead of bootstrapping a managed-local Dolt")
+	cmd.Flags().StringVar(&doltPortFlag, "dolt-port", "", "external/hosted Dolt port (or "+envDoltPort+"); required with --dolt-host")
+	cmd.Flags().StringVar(&doltUserFlag, "dolt-user", "", "external/hosted Dolt user (or "+envDoltUser+"); optional")
+	cmd.Flags().StringVar(&doltDatabaseFlag, "dolt-database", "", "hosted beads project database, e.g. bd_prj_… (or "+envDoltDatabase+"); required with --dolt-host")
+	cmd.Flags().StringVar(&doltProjectIDFlag, "dolt-project-id", "", "authoritative beads project_id for the identity handshake (or "+envBeadsProjectID+"); derived from a bd_<id> --dolt-database when omitted")
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
 	cmd.Flags().BoolVar(&noStart, "no-start", false, "initialize files and imports without registering or starting the city")
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
@@ -402,6 +423,10 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.MarkFlagsMutuallyExclusive("template", "from")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "file")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "from")
+	for _, doltFlag := range []string{"dolt-host", "dolt-port", "dolt-user", "dolt-database", "dolt-project-id"} {
+		cmd.MarkFlagsMutuallyExclusive(doltFlag, "file")
+		cmd.MarkFlagsMutuallyExclusive(doltFlag, "from")
+	}
 	_ = cmd.Flags().MarkHidden("provider")
 	return cmd
 }
@@ -570,15 +595,18 @@ func initWizardConfig(providerFlag, bootstrapProfileFlag string) (wizardConfig, 
 	}, nil
 }
 
-func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProviderFlag string, providersFlag []string, templateFlag, bootstrapProfileFlag string) (wizardConfig, string, error) {
+func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProviderFlag string, providersFlag []string, templateFlag, bootstrapProfileFlag string, hosted hostedDoltInitOptions) (wizardConfig, string, error) {
 	legacyChanged := cmd.Flags().Changed("provider")
 	defaultChanged := cmd.Flags().Changed("default-provider")
 	providersChanged := cmd.Flags().Changed("providers")
 	templateChanged := cmd.Flags().Changed("template")
 	bootstrapChanged := strings.TrimSpace(bootstrapProfileFlag) != ""
 
-	if !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged {
+	if !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged && !hosted.enabled() {
 		return wizardConfig{}, "", nil
+	}
+	if err := hosted.validate(); err != nil {
+		return wizardConfig{}, "", err
 	}
 	if legacyChanged && defaultChanged {
 		return wizardConfig{}, "", fmt.Errorf("--provider is deprecated; use --default-provider, not both")
@@ -633,6 +661,7 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 		providers:        providers,
 		provider:         defaultProvider,
 		bootstrapProfile: bootstrapProfile,
+		hostedDolt:       hosted,
 	}, mode, nil
 }
 
@@ -1313,6 +1342,12 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		cfg = config.DefaultCity(cityName)
 	}
 	applyBootstrapProfile(&cfg, wiz.bootstrapProfile)
+	if wiz.hostedDolt.enabled() {
+		if err := wiz.hostedDolt.applyToCityConfig(&cfg); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
 
 	// Write prompt files only for the agents declared by the init template.
@@ -1371,6 +1406,23 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	if err := persistInitWorkspaceIdentity(fs, cityPath, tomlPath, &cityCfg, cityName, cityPrefix); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+
+	// When a hosted/external Dolt endpoint was supplied, write the full
+	// canonical external config now (R2/R3/R4/R5) so the unconditional
+	// initDirIfReady that follows resolves the city as external and skips the
+	// managed-local Dolt bootstrap. Reject incompatible effective backends
+	// (file or doltlite) before writing any canonical files so a rejected init
+	// leaves no mixed ledger state.
+	if wiz.hostedDolt.enabled() {
+		if err := hostedDoltBackendError(cityPath); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, wiz.hostedDolt); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	// Write .gitignore entries for city-managed directories.

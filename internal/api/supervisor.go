@@ -14,6 +14,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/cityinit"
+	"github.com/gastownhall/gascity/internal/citywriteauth"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -114,6 +115,7 @@ type SupervisorMux struct {
 	allowedOrigins []string
 	allowedHosts   []string
 	allowAnyHost   bool
+	writeAuth      *citywriteauth.Verifier
 	server         *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
@@ -202,7 +204,13 @@ func (sm *SupervisorMux) serveCitySvcProxy(w http.ResponseWriter, r *http.Reques
 //   - /svc/* paths bypass CSRF/read-only entirely (workspace services apply
 //     their own publication rules).
 func (sm *SupervisorMux) Handler() http.Handler {
-	root := http.HandlerFunc(sm.ServeHTTP)
+	var root http.Handler = http.HandlerFunc(sm.ServeHTTP)
+	// When a verifying key is configured, gate city-scoped mutations on a
+	// signed grant. Wrapping root (innermost, after host/CORS checks) gives the
+	// middleware the request body to bind the grant to, just before dispatch.
+	if sm.writeAuth != nil {
+		root = writeAuthMiddleware(sm.writeAuth, sm.readOnly, root)
+	}
 	audit := requestAuditConfig{
 		recorder:       sm.supervisorEventRecorder(),
 		allowedOrigins: sm.allowedOrigins,
@@ -254,6 +262,15 @@ func (sm *SupervisorMux) WithAPIPlane(h http.Handler) *SupervisorMux {
 		return sm
 	}
 	sm.humaMux.Handle("/api/", h)
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+// WithWriteAuth installs the write-auth verifier so city-scoped mutations are
+// gated on a signed grant, and rebuilds the internal http.Server handler. A nil
+// verifier leaves write-auth disabled. Must be called before Serve.
+func (sm *SupervisorMux) WithWriteAuth(v *citywriteauth.Verifier) *SupervisorMux {
+	sm.writeAuth = v
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
 }

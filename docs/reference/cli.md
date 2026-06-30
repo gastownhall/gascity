@@ -1930,12 +1930,20 @@ gc init --name my-city
 gc init --from ~/elan --name elan /city
 gc init --file ./my-city.toml ~/bright-lights
 gc init --file city.toml --preserve-existing .
+gc init --template gascity --default-provider claude \
+  --dolt-host db.example.com --dolt-port 4406 \
+  --dolt-database bd_prj_x --dolt-project-id prj_x --no-start /city
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--default-provider` | string |  | default readiness-aware provider to select from --providers |
+| `--dolt-database` | string |  | hosted beads project database, e.g. bd_prj_… (or GC_DOLT_DATABASE); required with --dolt-host |
+| `--dolt-host` | string |  | external/hosted Dolt host for the city beads ledger (or GC_DOLT_HOST); pins the city to an external endpoint instead of bootstrapping a managed-local Dolt |
+| `--dolt-port` | string |  | external/hosted Dolt port (or GC_DOLT_PORT); required with --dolt-host |
+| `--dolt-project-id` | string |  | authoritative beads project_id for the identity handshake (or GC_BEADS_PROJECT_ID); derived from a bd_&lt;id&gt; --dolt-database when omitted |
+| `--dolt-user` | string |  | external/hosted Dolt user (or GC_DOLT_USER); optional |
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
 | `--json` | bool |  | emit JSON summary |

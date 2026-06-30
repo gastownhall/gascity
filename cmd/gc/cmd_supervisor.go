@@ -1261,6 +1261,13 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if len(supCfg.Supervisor.AllowedHosts) > 0 {
 		apiMux.WithAllowedHosts(supCfg.Supervisor.AllowedHosts)
 	}
+	// Gate city-config mutations on a signed write grant when configured. Fail
+	// closed at boot if write-auth is required but no key is set, so the
+	// multi-city supervisor cannot silently serve mutations unguarded.
+	if err := api.InstallWriteAuth(apiMux, supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: write-auth: %v\n", err) //nolint:errcheck
+		return 1
+	}
 
 	// Host the embedded dashboard SPA + host-side /api plane on the same
 	// listener (same-origin), so the supervisor serves the dashboard for all

@@ -254,7 +254,7 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 }
 
 func ralphCheckTrustedAbsoluteRoots(cityPath, storePath string, formulaSearchPaths []string) []string {
-	roots := make([]string, 0, 2+2*len(formulaSearchPaths))
+	roots := make([]string, 0, 2+3*len(formulaSearchPaths))
 	add := func(root string) {
 		root = strings.TrimSpace(root)
 		if root == "" {
@@ -278,6 +278,11 @@ func ralphCheckTrustedAbsoluteRoots(cityPath, storePath string, formulaSearchPat
 		}
 		clean := filepath.Clean(formulaPath)
 		add(clean)
+		// formula.winningAssetPath resolves a step's "../assets/..." check path
+		// to the layer's sibling assets/ tree, regardless of the layer dir's
+		// name, so trust that sibling for every layer — a formula layer need not
+		// be named "formulas" (e.g. a custom or absolute formulas_dir).
+		add(filepath.Join(filepath.Dir(clean), "assets"))
 		if filepath.Base(clean) == "formulas" {
 			add(filepath.Dir(clean))
 		}
