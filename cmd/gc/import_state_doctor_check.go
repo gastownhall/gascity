@@ -42,7 +42,7 @@ func (c *importStateDoctorCheck) Name() string { return "packv2-import-state" }
 func (c *importStateDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
 
-	imports, err := collectAllImportsFS(fsys.OSFS{}, c.cityPath)
+	imports, err := collectAllImportsFS(c.cityPath)
 	if err != nil {
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("reading declared imports: %v", err)
@@ -109,7 +109,7 @@ func durableRegistryImportDetails(imports map[string]config.Import) []string {
 func (c *importStateDoctorCheck) CanFix() bool { return true }
 
 func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
-	imports, err := collectAllImportsFS(fsys.OSFS{}, c.cityPath)
+	imports, err := collectAllImportsFS(c.cityPath)
 	if err != nil {
 		return fmt.Errorf("reading declared imports: %w", err)
 	}
@@ -124,7 +124,7 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 		if _, err := rewriteLegacyPublicPackImportsFS(fsys.OSFS{}, c.cityPath, targets); err != nil {
 			return err
 		}
-		imports, err = collectAllImportsFS(fsys.OSFS{}, c.cityPath)
+		imports, err = collectAllImportsFS(c.cityPath)
 		if err != nil {
 			return fmt.Errorf("reading migrated imports: %w", err)
 		}
@@ -133,7 +133,7 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 		if err := rewriteSupersededBundledPinsFS(fsys.OSFS{}, c.cityPath); err != nil {
 			return err
 		}
-		imports, err = collectAllImportsFS(fsys.OSFS{}, c.cityPath)
+		imports, err = collectAllImportsFS(c.cityPath)
 		if err != nil {
 			return fmt.Errorf("reading re-pinned imports: %w", err)
 		}

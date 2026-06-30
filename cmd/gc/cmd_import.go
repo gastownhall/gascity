@@ -393,17 +393,13 @@ func findNearestImportRoot(dir string) (string, bool, error) {
 // writeCityPackManifest, ...) are mirrored in internal/importsvc, which the
 // add/remove path now delegates to. The other gc import subcommands (install /
 // check / upgrade / list / why) still use these package-main copies. Keep the
-// two copies behaviour-equivalent: any change to the pack.toml round-trip rules
+// two copies behavior-equivalent: any change to the pack.toml round-trip rules
 // here must be mirrored in internal/importsvc/manifest.go (and vice versa) until
 // those subcommands are migrated to delegate as well.
 type importScopeState struct {
 	imports      map[string]config.Import
 	syntheticTag string
 	save         func() error
-}
-
-func (s *importScopeState) syntheticKey(name string) string {
-	return s.syntheticTag + name
 }
 
 func (s *importScopeState) isRootPackScope() bool {
@@ -456,7 +452,8 @@ func loadImportScopeFS(fs fsys.FS, cityPath string) (*importScopeState, error) {
 	}, nil
 }
 
-func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import, error) {
+func collectAllImportsFS(cityPath string) (map[string]config.Import, error) {
+	fs := fsys.OSFS{}
 	all := make(map[string]config.Import)
 
 	packManifest, err := loadCityPackManifestFS(fs, cityPath)
@@ -664,7 +661,7 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 }
 
 func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
-	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
 		return 1
@@ -689,7 +686,7 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 }
 
 func doImportCheck(cityPath string, stdout, stderr io.Writer) int {
-	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import check: %v\n", err) //nolint:errcheck
 		return 1
@@ -741,7 +738,7 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	allImports, collectErr := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	allImports, collectErr := collectAllImportsFS(cityPath)
 	if collectErr != nil {
 		fmt.Fprintf(stderr, "gc import upgrade: %v\n", collectErr) //nolint:errcheck
 		return 1
@@ -818,7 +815,7 @@ func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
 		return 1

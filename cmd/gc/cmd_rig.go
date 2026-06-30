@@ -738,7 +738,7 @@ func ensureBundledRigImportsInstalled(cityPath string, imports []config.BoundImp
 	if len(declared) == 0 {
 		return pinned, nil, nil
 	}
-	existing, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	existing, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		return nil, nil, err
 	}

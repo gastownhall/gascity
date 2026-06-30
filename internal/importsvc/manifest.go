@@ -11,7 +11,7 @@
 // unimportable package-main copies in cmd/gc (cmd_import.go still keeps
 // loadCityPackManifestFS/collectAllImportsFS/loadImportScopeFS, shared with the
 // other gc import subcommands). The two copies must stay byte-equivalent in
-// behaviour; a divergence in pack.toml round-trip rules would silently desync
+// behavior; a divergence in pack.toml round-trip rules would silently desync
 // the CLI and the HTTP path. The intended end state is for cmd/gc to delegate
 // these reads to importsvc too; until then, treat any edit here as needing the
 // mirror edit in cmd_import.go (and vice versa).
