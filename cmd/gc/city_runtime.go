@@ -2324,7 +2324,16 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	cr.nudgeDispatchTick(ctx)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_dispatch_tick", phaseStart, nil)
 
-	// Idle recovery: detect pool sessions stuck at the prompt after
+	// Idle recovery: re-nudge pool slots that are running but never claimed
+	// their assigned trigger bead. Gated to runtimes the controller cannot see
+	// activity for (herdr): tmux self-heals a missed startup nudge through its
+	// relaunch/respawn path and reports activity, so it neither needs nor runs
+	// this. See nudgeStalledPoolClaims for the churn-free state machine.
+	if !cr.sp.Capabilities().CanReportActivity {
+		phaseStart = time.Now()
+		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, open, assignedWorkBeads, time.Now(), cr.stdout)
+		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
+	}
 }
 
 // recordReconcileTraceInputs records the per-template baseline, the cycle input
