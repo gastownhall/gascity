@@ -49,8 +49,8 @@ type controllerState struct {
 	// re-parsing city.toml per request. Refreshed on every cfg swap; left
 	// at its prior value if a refresh load fails so the read never falls
 	// back to a nil-raw heuristic on a transient error.
-	rawCfg *config.City
-	sp     runtime.Provider
+	rawCfg                 *config.City
+	sp                     runtime.Provider
 	cacheCtx               context.Context
 	beadStores             map[string]beads.Store
 	cityBeadStore          beads.Store // city-level store for session beads
