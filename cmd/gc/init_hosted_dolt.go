@@ -169,10 +169,11 @@ func cityExternalDoltEndpointUnverified(cityPath string) bool {
 // shape to what `gc beads city use-external --adopt-unverified` produces plus
 // the pinned dolt_database and project identity:
 //
-//   - .beads/identity.toml  — the authoritative project_id (L1 identity)
+//   - the L1 project identity (contract.ProjectIdentityPath) — the
+//     authoritative project_id, written via contract.WriteProjectIdentity
 //   - .beads/config.yaml     — city_canonical + unverified + dolt host/port/user
 //   - .beads/metadata.json   — backend=dolt, dolt_mode=server, dolt_database,
-//     and project_id (stamped from identity.toml)
+//     and project_id (stamped from the L1 identity)
 //
 // It writes the identity first so the canonical metadata write picks up
 // project_id. No live connection is attempted.
