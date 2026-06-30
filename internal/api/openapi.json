@@ -570,6 +570,10 @@
             "description": "Agent name.",
             "type": "string"
           },
+          "provider": {
+            "description": "Override the agent's provider.",
+            "type": "string"
+          },
           "scope": {
             "description": "Override agent scope.",
             "type": "string"
@@ -624,6 +628,12 @@
           "name": {
             "type": "string"
           },
+          "pack": {
+            "type": "string"
+          },
+          "pack_derived": {
+            "type": "boolean"
+          },
           "pool": {
             "type": "string"
           },
@@ -653,6 +663,7 @@
           "name",
           "running",
           "suspended",
+          "pack_derived",
           "state",
           "available"
         ],

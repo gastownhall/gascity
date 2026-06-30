@@ -308,6 +308,48 @@ func TestControllerStateUpdate(t *testing.T) {
 	}
 }
 
+// TestControllerStateRawConfigCachedFromGateBasis verifies RawConfig returns a
+// cached raw snapshot loaded from the same basis the mutation gate uses, so a
+// provenance read (pack_derived) agrees with the ErrPackDerived/409 decision.
+// The snapshot is captured at construction and refreshed on update — not
+// re-parsed per call — and a read of an inline agent's origin against it must
+// match the gate's AgentOrigin verdict.
+func TestControllerStateRawConfigCachedFromGateBasis(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	cityToml := "[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n\n[[agent]]\nname = \"mayor\"\nprovider = \"claude\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Agents:    []config.Agent{{Name: "mayor", Provider: "claude"}},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+
+	raw := cs.RawConfig()
+	if raw == nil {
+		t.Fatal("RawConfig() = nil; want cached raw snapshot")
+	}
+	// The cached basis must agree with the mutation gate: "mayor" is inline.
+	if got := configedit.AgentOrigin(raw, raw, "mayor"); got != configedit.OriginInline {
+		t.Errorf("AgentOrigin(RawConfig) = %v, want OriginInline (must match the 409 gate)", got)
+	}
+
+	// A second read returns the same cached pointer (no per-request re-parse).
+	if cs.RawConfig() != raw {
+		t.Error("RawConfig() re-parsed instead of returning the cached snapshot")
+	}
+
+	// After an update, the snapshot refreshes from disk and stays non-nil.
+	cs.update(&config.City{Workspace: config.Workspace{Name: "city1"}}, runtime.NewFake())
+	if cs.RawConfig() == nil {
+		t.Error("RawConfig() = nil after update; the cache must refresh, not clear")
+	}
+}
+
 func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 

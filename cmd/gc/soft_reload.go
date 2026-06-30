@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 type softReloadAcceptanceResult struct {
@@ -80,7 +81,7 @@ func formatSoftReloadFailedSessions(names []string) string {
 // Returns accepted-session, failed-session, stale-drain-cancelation, and
 // empty-desired-state diagnostics for the controller reply.
 func acceptConfigDriftAcrossSessions(
-	store beads.SessionStore,
+	sessFront *session.InfoStore,
 	desired map[string]TemplateParams,
 	sessionBeads *sessionBeadSnapshot,
 	sp runtime.Provider,
@@ -88,12 +89,12 @@ func acceptConfigDriftAcrossSessions(
 	stderr io.Writer,
 ) softReloadAcceptanceResult {
 	result := softReloadAcceptanceResult{DesiredEmpty: len(desired) == 0}
-	if store.Store == nil {
+	if sessFront == nil || sessFront.Store().Store == nil {
 		return result
 	}
 	if sessionBeads == nil {
 		var err error
-		sessionBeads, err = loadSessionBeadSnapshot(store.Store)
+		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
 		if err != nil {
 			fmt.Fprintf(stderr, "soft reload: listing session beads: %v\n", err) //nolint:errcheck // best-effort stderr
 			return result
@@ -143,7 +144,7 @@ func acceptConfigDriftAcrossSessions(
 			fmt.Fprintf(stderr, "soft reload: preparing config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+		if err := sessFront.ApplyPatch(session.ID, metadata); err != nil {
 			result.Failed++
 			result.FailedSessions = append(result.FailedSessions, name)
 			fmt.Fprintf(stderr, "soft reload: updating config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr

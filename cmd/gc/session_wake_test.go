@@ -72,7 +72,7 @@ func TestPreWakeCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	newGen, token, err := preWakeCommit(&b, store, clk)
+	newGen, token, err := preWakeCommit(&b, sessionFrontDoor(store), clk)
 	if err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestPreWakeCommitUsesSingleBatchMetadataWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	if store.batchCalls != 1 {
@@ -143,7 +143,7 @@ func TestPreWakeCommit_InvalidName(t *testing.T) {
 		},
 	})
 
-	_, _, err := preWakeCommit(&b, store, clk)
+	_, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk)
 	if err == nil {
 		t.Error("expected error for invalid session_name")
 	}
@@ -169,7 +169,7 @@ func TestPreWakeCommit_BumpsContinuationEpochForFreshWake(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	got, _ := store.Get(b.ID)
@@ -204,7 +204,7 @@ func TestPreWakeCommit_FreshModeClearsPreviousConversationMetadata(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	got, _ := store.Get(b.ID)
@@ -254,7 +254,7 @@ func TestPreWakeCommit_ResumeModePreservesPreviousConversationMetadata(t *testin
 		t.Fatal(err)
 	}
 
-	newGen, token, err := preWakeCommit(&b, store, clk)
+	newGen, token, err := preWakeCommit(&b, sessionFrontDoor(store), clk)
 	if err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestPreWakeCommit_FreshModeTraceLogsClearedProviderMetadata(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 
@@ -374,7 +374,7 @@ func TestPreWakeCommit_FreshModeTraceSilentWhenTraceDisabled(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	if strings.TrimSpace(logBuf.String()) != "" {
@@ -413,7 +413,7 @@ func TestPreWakeCommit_FreshModeTraceSilentWhenNothingCleared(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	if strings.TrimSpace(logBuf.String()) != "" {
@@ -457,7 +457,7 @@ func TestPreWakeCommit_ResumeModeTraceSilent(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	if strings.TrimSpace(logBuf.String()) != "" {
@@ -504,7 +504,7 @@ func TestPreWakeCommit_FreshModeTraceSilentOnStoreFailure(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, store, clk); err == nil {
+	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err == nil {
 		t.Fatal("preWakeCommit: expected error")
 	}
 	if strings.TrimSpace(logBuf.String()) != "" {
@@ -531,7 +531,7 @@ func TestPreWakeCommit_BumpsContinuationEpochForPendingReset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	got, _ := store.Get(b.ID)
@@ -1357,7 +1357,7 @@ func TestCompleteDrain_ClearsLastWokeAt(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(&b, store, ds, clk)
+	completeDrain(&b, sessionFrontDoor(store), ds, clk)
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["last_woke_at"] != "" {
@@ -1388,7 +1388,7 @@ func TestCompleteDrain_FreshModeClearsIdentity(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(&b, store, ds, clk)
+	completeDrain(&b, sessionFrontDoor(store), ds, clk)
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["session_key"] != "" {
@@ -1422,7 +1422,7 @@ func TestCompleteDrain_ResumeModePreservesIdentity(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(&b, store, ds, clk)
+	completeDrain(&b, sessionFrontDoor(store), ds, clk)
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["session_key"] != "resume-key" {
@@ -1450,7 +1450,7 @@ func TestCompleteDrain_ClearsPendingCreateClaim(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(&b, store, ds, clk)
+	completeDrain(&b, sessionFrontDoor(store), ds, clk)
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["pending_create_claim"] != "" {

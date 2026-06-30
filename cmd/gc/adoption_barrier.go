@@ -54,7 +54,7 @@ var poolSlotPattern = regexp.MustCompile(`-(\d+)$`)
 // sessions have beads).
 func runAdoptionBarrier(
 	cityPath string,
-	store beads.Store,
+	sessFront *sessionpkg.InfoStore,
 	sp runtime.Provider,
 	cfg *config.City,
 	cityName string,
@@ -64,9 +64,13 @@ func runAdoptionBarrier(
 ) (adoptionResult, bool) {
 	var result adoptionResult
 
-	if store == nil {
+	if sessFront == nil {
 		return result, false
 	}
+	// Session-bead list queries below go through the raw store the front door
+	// wraps (sessionpkg.ListAllSessionBeads takes a beads.Store); creates go
+	// through the front door. Same underlying store, so behavior is unchanged.
+	store := sessFront.Store().Store
 
 	// Step 1: List all running sessions.
 	running, err := sp.ListRunning("")
@@ -230,19 +234,17 @@ func runAdoptionBarrier(
 		alreadyHadBead := false
 		createSessionBead := func() error {
 			meta["synced_at"] = clk.Now().UTC().Format("2006-01-02T15:04:05Z07:00")
-			_, err := store.Create(beads.Bead{
-				Title:    detail.AgentName,
-				Type:     sessionBeadType,
-				Labels:   []string{sessionBeadLabel, "agent:" + detail.AgentName},
-				Metadata: meta,
-			})
-			if err != nil {
+			if _, err := sessFront.CreateSession(sessionpkg.CreateSpec{
+				Title:     detail.AgentName,
+				AgentName: detail.AgentName,
+				Metadata:  meta,
+			}); err != nil {
 				return fmt.Errorf("creating session bead for %q: %w", sessionName, err)
 			}
 			return nil
 		}
 		createErr := sessionpkg.WithCitySessionIdentifierLocks(cityPath, []string{sessionName, detail.AgentName}, func() error {
-			hasBead, err := openSessionBeadExists(store, sessionName)
+			hasBead, err := openSessionBeadExists(sessFront, sessionName)
 			if err != nil {
 				return err
 			}
@@ -272,8 +274,8 @@ func runAdoptionBarrier(
 	return result, passed
 }
 
-func openSessionBeadExists(store beads.Store, sessionName string) (bool, error) {
-	existing, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{
+func openSessionBeadExists(sessFront *sessionpkg.InfoStore, sessionName string) (bool, error) {
+	existing, err := sessionpkg.ListAllSessionBeads(sessFront.Store().Store, beads.ListQuery{
 		Metadata: map[string]string{"session_name": sessionName},
 		Live:     true,
 	})

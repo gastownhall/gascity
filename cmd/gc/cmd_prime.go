@@ -585,7 +585,7 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 	if existing := strings.TrimSpace(sessionBead.Metadata["session_key"]); existing != "" {
 		return
 	}
-	if err := store.SetMetadata(gcSessionID, "session_key", providerSessionID); err != nil {
+	if err := sessionFrontDoor(store).SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
 		warn("writing session_key for session %q: %v", gcSessionID, err)
 	}
 }

@@ -592,13 +592,13 @@ func TestPersistSessionCircuitBreakerMetadataSkipsUnchangedSnapshot(t *testing.T
 	const id = "rig-a/session-a"
 	cb.RecordRestart(id, t0)
 
-	if err := persistSessionCircuitBreakerMetadata(store, &session, cb, id, t0); err != nil {
+	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), &session, cb, id, t0); err != nil {
 		t.Fatalf("first persist: %v", err)
 	}
 	if store.writes != 1 {
 		t.Fatalf("metadata writes = %d, want 1", store.writes)
 	}
-	if err := persistSessionCircuitBreakerMetadata(store, &session, cb, id, t0); err != nil {
+	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), &session, cb, id, t0); err != nil {
 		t.Fatalf("second persist: %v", err)
 	}
 	if store.writes != 1 {
@@ -606,7 +606,7 @@ func TestPersistSessionCircuitBreakerMetadataSkipsUnchangedSnapshot(t *testing.T
 	}
 
 	cb.RecordRestart(id, t0.Add(time.Minute))
-	if err := persistSessionCircuitBreakerMetadata(store, &session, cb, id, t0.Add(time.Minute)); err != nil {
+	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), &session, cb, id, t0.Add(time.Minute)); err != nil {
 		t.Fatalf("changed persist: %v", err)
 	}
 	if store.writes != 2 {
@@ -661,7 +661,7 @@ func TestPersistSessionCircuitBreakerMetadataWritesAutoResetClosedState(t *testi
 	if !reset {
 		t.Fatal("restoreFromMetadata reset = false, want true")
 	}
-	if err := persistSessionCircuitBreakerMetadata(store, &session, cb, id, t0.Add(2*time.Hour)); err != nil {
+	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), &session, cb, id, t0.Add(2*time.Hour)); err != nil {
 		t.Fatalf("persist: %v", err)
 	}
 	updated, err := store.Get(session.ID)

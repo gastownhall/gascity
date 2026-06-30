@@ -80,7 +80,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		return 1
 	}
 	if !hasRunnableTemplate && sessionWakeRequestedCreate(b) {
-		if err := store.SetMetadataBatch(id, map[string]string{
+		if err := sessionFrontDoor(store).ApplyPatch(id, map[string]string{
 			"state":                     string(session.StateAsleep),
 			"state_reason":              "",
 			"pending_create_claim":      "",

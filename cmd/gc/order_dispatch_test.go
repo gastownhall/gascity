@@ -771,7 +771,7 @@ func TestOrderDispatchEventExecLatestSeqErrorDoesNotRunExec(t *testing.T) {
 	mad.stderr = &stderr
 
 	logs := captureCmdOrderLogs(t, func() {
-		mad.dispatchExec(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID)
+		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID)
 	})
 
 	if calls != 0 {
@@ -795,7 +795,7 @@ func TestOrderDispatchEventExecLatestSeqErrorDoesNotRunExec(t *testing.T) {
 	eventLog := events.NewFake()
 	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
 	mad.ep = eventLog
-	mad.dispatchExec(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID)
+	mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID)
 
 	if calls != 1 {
 		t.Fatalf("exec calls after cursor read recovers = %d, want 1", calls)
@@ -1643,7 +1643,7 @@ func TestOrderDispatchExecFailure(t *testing.T) {
 	mad.stderr = &stderr
 
 	logs := captureCmdOrderLogs(t, func() {
-		mad.dispatchExec(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, aa[0], t.TempDir(), tracking.ID)
+		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, aa[0], t.TempDir(), tracking.ID)
 	})
 
 	// Check tracking bead has exec-failed label.
@@ -1700,7 +1700,7 @@ dolt.auto-start: false
 	mad.stderr = &stderr
 
 	logs := captureCmdOrderLogs(t, func() {
-		mad.dispatchExec(context.Background(), store, execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "ct"}, a, cityDir, tracking.ID)
+		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "ct"}, a, cityDir, tracking.ID)
 	})
 
 	all := trackingBeads(t, store, "order-run:pg-env")
@@ -1750,7 +1750,7 @@ func TestOrderDispatchExecFailureRedactsSecrets(t *testing.T) {
 	mad.stderr = &stderr
 
 	logs := captureCmdOrderLogs(t, func() {
-		mad.dispatchExec(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, aa[0], t.TempDir(), tracking.ID)
+		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, aa[0], t.TempDir(), tracking.ID)
 	})
 
 	combined := logs + "\n" + stderr.String()

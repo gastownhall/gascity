@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -269,7 +270,7 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 	cityName := loadedCityName(cfg, cityPath)
 
 	store, _ := openCityStoreAt(cityPath)
-	markCityStopSessionSleepReason(beads.SessionStore{Store: store}, stderr)
+	markCityStopSessionSleepReason(sessionFrontDoor(store), stderr)
 
 	// If a controller is running, ask it to shut down (it stops agents).
 	if tryStopControllerWithForce(cityPath, stdout, force) {
@@ -321,7 +322,7 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 
 	// Clean up orphan sessions (sessions with the city prefix that are
 	// not in the current config).
-	stopOrphans(sp, desired, cfg, store, graceTimeout, recorder, stdout, stderr)
+	stopOrphans(sp, desired, cfg, sessionFrontDoor(store), graceTimeout, recorder, stdout, stderr)
 
 	teardownServerForStop(sp, stderr)
 
@@ -344,25 +345,25 @@ func teardownServerForStop(sp runtime.Provider, stderr io.Writer) {
 	}
 }
 
-func markCityStopSessionSleepReason(store beads.SessionStore, stderr io.Writer) {
-	if store.Store == nil {
+func markCityStopSessionSleepReason(sessFront *session.InfoStore, stderr io.Writer) {
+	if sessFront == nil || sessFront.Store().Store == nil {
 		return
 	}
-	sessions, err := store.ListByLabel("gc:session", 0)
+	sessions, err := sessFront.Store().ListByLabel("gc:session", 0)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: marking sessions: %v\n", err) //nolint:errcheck // best-effort warning
 		return
 	}
-	for _, session := range sessions {
-		state := sessionMetadataState(session)
+	for _, s := range sessions {
+		state := sessionMetadataState(s)
 		if state != "active" {
 			continue
 		}
-		if strings.TrimSpace(session.Metadata["sleep_reason"]) != "" {
+		if strings.TrimSpace(s.Metadata["sleep_reason"]) != "" {
 			continue
 		}
-		if err := store.SetMetadata(session.ID, "sleep_reason", sleepReasonCityStop); err != nil {
-			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", session.ID, err) //nolint:errcheck // best-effort warning
+		if err := sessFront.SetMarker(s.ID, "sleep_reason", sleepReasonCityStop); err != nil {
+			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", s.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}
 }
@@ -442,7 +443,7 @@ func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
 // stopOrphans stops sessions that are not in the desired set. Used by gc stop
 // to clean up orphans after stopping config agents. With per-city socket
 // isolation, all sessions on the socket belong to this city.
-func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, store beads.Store,
+func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessFront *session.InfoStore,
 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
 ) {
 	running, err := sp.ListRunning("")
@@ -461,7 +462,7 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 		}
 		orphans = append(orphans, name)
 	}
-	gracefulStopAll(orphans, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr)
+	gracefulStopAll(orphans, sp, timeout, rec, cfg, sessFront.Store(), stdout, stderr)
 }
 
 // tryStopController connects to the controller socket and sends "stop".

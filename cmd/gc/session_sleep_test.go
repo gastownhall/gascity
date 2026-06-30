@@ -984,7 +984,7 @@ func TestRecoverPendingIdleSleep_PreservesPreDrainFingerprint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !recoverPendingIdleSleep(&session, store, false, clk) {
+	if !recoverPendingIdleSleep(&session, sessionFrontDoor(store), false, clk) {
 		t.Fatal("expected pending idle sleep to recover")
 	}
 	got, err := store.Get(session.ID)

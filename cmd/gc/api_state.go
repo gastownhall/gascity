@@ -40,8 +40,16 @@ import (
 // Protected by an RWMutex for hot-reload: readers take RLock,
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
-	mu                     sync.RWMutex
-	cfg                    *config.City
+	mu  sync.RWMutex
+	cfg *config.City
+	// rawCfg is the raw (pre-expansion, site-bound) config snapshot captured
+	// at the same generation as cfg. It is the basis the mutation gate uses
+	// (Editor.UpdateAgent → AgentOrigin), cached here so provenance reads
+	// (pack_derived on GET /agents) agree with the 409 gate without
+	// re-parsing city.toml per request. Refreshed on every cfg swap; left
+	// at its prior value if a refresh load fails so the read never falls
+	// back to a nil-raw heuristic on a transient error.
+	rawCfg                 *config.City
 	sp                     runtime.Provider
 	cacheCtx               context.Context
 	beadStores             map[string]beads.Store
@@ -138,6 +146,10 @@ func newControllerState(
 		beadEventStartSeq: beadEventStartSeq,
 	}
 	cs.beadStores = cs.buildStores(cfg)
+	// Capture the initial raw config snapshot so provenance reads before the
+	// first reload still use the gate's basis. nil is tolerated: RawConfig
+	// lazily retries on the first read.
+	cs.rawCfg = cs.loadRawSnapshot()
 	// Open city-level store for session beads and mail (best-effort).
 	if opened, err := newControllerStateOpenCityStore(cityPath); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
@@ -607,6 +619,9 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// Build new stores outside the lock (may do file I/O / subprocess spawns).
 	stores := cs.buildStores(cfg)
 	storeSignature := storeMetadataSignature(cs.cityPath, cfg)
+	// Capture the raw config from the same on-disk generation as cfg, outside
+	// the lock (it does a TOML parse). nil signals "keep the prior snapshot".
+	rawCfg := cs.loadRawSnapshot()
 	// Recompute the usage sink so a changed [usage].provider takes effect on
 	// reload instead of writing to the old sink until the controller restarts.
 	usageSink := usageSinkForCity(cfg, cs.cityPath)
@@ -631,6 +646,9 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var oldRigStores map[string]beads.Store
 	cs.mu.Lock()
 	cs.cfg = cfg
+	if rawCfg != nil {
+		cs.rawCfg = rawCfg
+	}
 	cs.sp = sp
 	cs.usageSink = usageSink
 	oldRigStores = cs.beadStores
@@ -755,8 +773,12 @@ func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runt
 	// Recompute the usage sink so a changed [usage].provider takes effect even on
 	// the store-reuse reload path.
 	usageSink := usageSinkForCity(cfg, cs.cityPath)
+	rawCfg := cs.loadRawSnapshot()
 	cs.mu.Lock()
 	cs.cfg = cfg
+	if rawCfg != nil {
+		cs.rawCfg = rawCfg
+	}
 	cs.sp = sp
 	cs.usageSink = usageSink
 	cs.mu.Unlock()
@@ -1104,20 +1126,57 @@ func (cs *controllerState) ClearCrashHistory(sessionName string) {
 	ct.clearHistory(sessionName)
 }
 
-// RawConfig returns the raw (pre-expansion) config for provenance detection.
-// Implements api.RawConfigProvider.
-//
-// Holds cs.mu.RLock during the load to ensure the raw config is from the
-// same generation as the expanded cs.cfg snapshot.
-func (cs *controllerState) RawConfig() *config.City {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
+// loadRawSnapshot loads the raw (pre-expansion, site-bound) config using the
+// same basis as the mutation gate (Editor.UpdateAgent → AgentOrigin), so a
+// cached snapshot drives provenance reads that must agree with the
+// ErrPackDerived/409 gate. Returns nil on any load error; callers treat nil as
+// "keep the previous snapshot" rather than poisoning the cache. Does no
+// locking — call it outside cs.mu (it does TOML I/O).
+func (cs *controllerState) loadRawSnapshot() *config.City {
+	if cs.editor != nil {
+		if raw, err := cs.editor.LoadRaw(); err == nil {
+			return raw
+		}
+		return nil
+	}
+	// Defensive fallback for states constructed without an editor (e.g. some
+	// tests): load directly. Still nil-on-error.
 	tomlPath := filepath.Join(cs.cityPath, "city.toml")
 	raw, err := config.Load(fsys.OSFS{}, tomlPath)
 	if err != nil {
 		return nil
 	}
 	return raw
+}
+
+// RawConfig returns the cached raw (pre-expansion) config for provenance
+// detection. Implements api.RawConfigProvider.
+//
+// The snapshot is captured at every cfg swap from the same on-disk generation
+// as cs.cfg, so reads are O(1) (no per-request TOML parse) and agree with the
+// mutation gate. If a swap-time load failed, the prior snapshot is retained,
+// and on the very first reads before any swap-time capture it falls back to a
+// one-time load so provenance is never decided on a nil-raw heuristic.
+func (cs *controllerState) RawConfig() *config.City {
+	cs.mu.RLock()
+	cached := cs.rawCfg
+	cs.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+	// First-read fallback: no snapshot captured yet. Load once and memoize so
+	// the read path still uses the gate's basis rather than nil.
+	raw := cs.loadRawSnapshot()
+	if raw == nil {
+		return nil
+	}
+	cs.mu.Lock()
+	if cs.rawCfg == nil {
+		cs.rawCfg = raw
+	}
+	cached = cs.rawCfg
+	cs.mu.Unlock()
+	return cached
 }
 
 // CityBeadStore returns the city-level bead store for session beads.

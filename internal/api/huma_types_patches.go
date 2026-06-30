@@ -39,6 +39,7 @@ type AgentPatchSetInput struct {
 	Body struct {
 		Dir       string            `json:"dir,omitempty" doc:"Agent directory scope."`
 		Name      string            `json:"name,omitempty" doc:"Agent name."`
+		Provider  *string           `json:"provider,omitempty" doc:"Override the agent's provider."`
 		WorkDir   *string           `json:"work_dir,omitempty" doc:"Override session working directory."`
 		TmuxAlias *string           `json:"tmux_alias,omitempty" doc:"Override tmux session name template."`
 		Scope     *string           `json:"scope,omitempty" doc:"Override agent scope."`

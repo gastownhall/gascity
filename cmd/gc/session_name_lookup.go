@@ -148,12 +148,16 @@ func storedTemplateMatchesPoolTemplate(storedTemplate, template string, cfg *con
 }
 
 func createPoolSessionBead(
-	store beads.Store,
+	sessFront *sessionpkg.InfoStore,
 	template string,
 	now time.Time,
 	identity poolSessionCreateIdentity,
 ) (beads.Bead, error) {
-	return createPoolSessionBeadWithAlias(store, template, nil, nil, now, identity, "")
+	var raw beads.Store
+	if sessFront != nil {
+		raw = sessFront.Store().Store
+	}
+	return createPoolSessionBeadWithAlias(raw, template, nil, nil, now, identity, "")
 }
 
 // createPoolSessionBeadWithAlias creates a pool session bead and persists its
@@ -216,27 +220,30 @@ func createPoolSessionBeadWithAlias(
 		}
 		meta[key] = strings.TrimSpace(value)
 	}
-	bead, err := store.Create(beads.Bead{
-		ID:       explicitID,
-		Title:    title,
-		Type:     sessionBeadType,
-		Labels:   []string{sessionBeadLabel, "agent:" + agentName},
-		Metadata: meta,
+	beadID, err := sessionFrontDoor(store).CreateSession(sessionpkg.CreateSpec{
+		ID:        explicitID,
+		Title:     title,
+		AgentName: agentName,
+		Metadata:  meta,
 	})
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	bead, err := store.Get(beadID)
 	if err != nil {
 		return beads.Bead{}, err
 	}
 	sessionName, err = derivePoolSessionName(store, cfg, template, bead.ID, resolvedTmuxAlias, sessionBeads)
 	if err != nil {
-		_ = store.Close(bead.ID)
+		_ = sessionFrontDoor(store).CloseWithoutReason(bead.ID)
 		return beads.Bead{}, err
 	}
 	if bead.Metadata == nil {
 		bead.Metadata = map[string]string{}
 	}
 	if bead.Metadata["session_name"] != sessionName {
-		if err := store.SetMetadata(bead.ID, "session_name", sessionName); err != nil {
-			_ = store.Close(bead.ID)
+		if err := sessionFrontDoor(store).SetMarker(bead.ID, "session_name", sessionName); err != nil {
+			_ = sessionFrontDoor(store).CloseWithoutReason(bead.ID)
 			return beads.Bead{}, err
 		}
 		bead.Metadata["session_name"] = sessionName

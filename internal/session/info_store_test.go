@@ -169,6 +169,31 @@ func TestInfoFromPersistedBeadProjectionDeterminism(t *testing.T) {
 	}
 }
 
+// TestInfoFromPersistedBeadProjectsContinuationAndSleepReason proves the
+// additive Info.ContinuationEpoch / Info.SleepReason fields project verbatim
+// from plain bead metadata, keeping the projection backend-invariant. These
+// fields exist only for internal session reads (cmd_wait registration / retry /
+// wait-hold clear); they are NOT emitted on the HTTP session-response wire.
+func TestInfoFromPersistedBeadProjectsContinuationAndSleepReason(t *testing.T) {
+	b := sessionBeadFixture("s-cont", "open", map[string]string{
+		"session_name":       "polecat-1",
+		"continuation_epoch": "9",
+		"sleep_reason":       "wait-hold",
+	})
+	info := InfoFromPersistedBead(b)
+	if info.ContinuationEpoch != "9" {
+		t.Errorf("ContinuationEpoch = %q, want %q", info.ContinuationEpoch, "9")
+	}
+	if info.SleepReason != "wait-hold" {
+		t.Errorf("SleepReason = %q, want %q", info.SleepReason, "wait-hold")
+	}
+	// Unset markers project to empty (no error, no default).
+	bare := sessionBeadFixture("s-bare", "open", map[string]string{"state": "active"})
+	if got := InfoFromPersistedBead(bare); got.ContinuationEpoch != "" || got.SleepReason != "" {
+		t.Errorf("unset markers projected non-empty: epoch=%q reason=%q", got.ContinuationEpoch, got.SleepReason)
+	}
+}
+
 func infoIDs(in []Info) []string {
 	out := make([]string, 0, len(in))
 	for _, i := range in {

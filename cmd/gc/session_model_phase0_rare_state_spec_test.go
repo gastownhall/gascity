@@ -392,7 +392,7 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 		t.Fatalf("Create session bead: %v", err)
 	}
 
-	reason, deferDrift, err := shouldDeferNamedSessionConfigDrift(session, store, provider, name, clk, "drift-1")
+	reason, deferDrift, err := shouldDeferNamedSessionConfigDrift(session, sessionFrontDoor(store), provider, name, clk, "drift-1")
 	if err != nil {
 		t.Fatalf("shouldDeferNamedSessionConfigDrift: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 	}
 
 	clk.Time = clk.Now().Add(namedSessionActivityThreshold + time.Second)
-	_, deferDrift, err = shouldDeferNamedSessionConfigDrift(session, store, provider, name, clk, "drift-1")
+	_, deferDrift, err = shouldDeferNamedSessionConfigDrift(session, sessionFrontDoor(store), provider, name, clk, "drift-1")
 	if err != nil {
 		t.Fatalf("shouldDeferNamedSessionConfigDrift after threshold: %v", err)
 	}
@@ -422,7 +422,7 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 		t.Fatal("expected unknown-activity config drift to stop deferring after threshold")
 	}
 
-	reason, deferDrift, err = shouldDeferNamedSessionConfigDrift(session, store, provider, name, clk, "drift-2")
+	reason, deferDrift, err = shouldDeferNamedSessionConfigDrift(session, sessionFrontDoor(store), provider, name, clk, "drift-2")
 	if err != nil {
 		t.Fatalf("shouldDeferNamedSessionConfigDrift new drift: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get session bead after new drift: %v", err)
 	}
-	if err := clearSessionConfigDriftDeferral(session, store); err != nil {
+	if err := clearSessionConfigDriftDeferral(session, sessionFrontDoor(store)); err != nil {
 		t.Fatalf("clearSessionConfigDriftDeferral: %v", err)
 	}
 	session, err = store.Get(session.ID)
@@ -469,7 +469,7 @@ func TestShouldDeferNamedSessionConfigDriftDoesNotDeferWhenMarkerWriteFails(t *t
 		},
 	}
 
-	_, deferDrift, err := shouldDeferNamedSessionConfigDrift(session, beads.NewMemStore(), provider, name, clk, "drift-1")
+	_, deferDrift, err := shouldDeferNamedSessionConfigDrift(session, sessionFrontDoor(beads.NewMemStore()), provider, name, clk, "drift-1")
 	if err == nil {
 		t.Fatal("expected marker write error")
 	}

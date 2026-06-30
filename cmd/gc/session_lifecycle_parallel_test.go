@@ -3683,7 +3683,7 @@ func TestCommitStartResult_SessionInitializingClearsInFlightLease(t *testing.T) 
 		rollbackPending: true,
 	}
 
-	if commitStartResult(result, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+	if commitStartResult(result, sessionFrontDoor(store), clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
 		t.Fatal("session_initializing result should not count as committed")
 	}
 	updated, err := store.Get(session.ID)
@@ -3739,7 +3739,7 @@ func TestCommitStartResult_RollbackPendingErrorClearsInFlightLeaseWhenCloseFails
 		rollbackPending: true,
 	}
 
-	if commitStartResult(result, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+	if commitStartResult(result, sessionFrontDoor(store), clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
 		t.Fatal("rollback-pending error should not count as committed")
 	}
 	updated, err := store.Get(session.ID)
@@ -3801,7 +3801,7 @@ func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
 		finished: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC),
 	}
 
-	ok := commitStartResult(result, store, &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}, events.Discard, 0, ioDiscard{}, ioDiscard{})
+	ok := commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}, events.Discard, 0, ioDiscard{}, ioDiscard{})
 	if ok {
 		t.Fatal("commitStartResult returned true, want false when metadata batch fails (state transition lost)")
 	}
@@ -3868,7 +3868,7 @@ func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T
 			t.Fatal(err)
 		}
 		rec := events.NewFake()
-		if commitStartResult(successResult(&session), store, clk, rec, 0, ioDiscard{}, ioDiscard{}) {
+		if commitStartResult(successResult(&session), sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, ioDiscard{}) {
 			t.Fatal("commitStartResult returned true, want false when metadata batch fails")
 		}
 		woke, err := rec.List(events.Filter{Type: events.SessionWoke})
@@ -3892,7 +3892,7 @@ func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T
 			t.Fatal(err)
 		}
 		rec := events.NewFake()
-		if !commitStartResult(successResult(&session), store, clk, rec, 0, ioDiscard{}, ioDiscard{}) {
+		if !commitStartResult(successResult(&session), sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, ioDiscard{}) {
 			t.Fatal("commitStartResult returned false for successful start")
 		}
 		woke, err := rec.List(events.Filter{Type: events.SessionWoke})
@@ -4140,7 +4140,7 @@ func TestCommitStartResult_AtomicBatchLandsStateAndClaimClearTogether(t *testing
 	}
 
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
-	ok := commitStartResult(result, store, &clock.Fake{Time: clkTime}, events.Discard, 0, ioDiscard{}, ioDiscard{})
+	ok := commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: clkTime}, events.Discard, 0, ioDiscard{}, ioDiscard{})
 	if !ok {
 		t.Fatal("commitStartResult returned false for successful start")
 	}
@@ -4857,7 +4857,7 @@ func TestCommitStartResult_LogsSuccessOutcome(t *testing.T) {
 	}
 	rec := events.NewFake()
 	var stdout, stderr bytes.Buffer
-	ok := commitStartResult(result, store, &clock.Fake{Time: time.Unix(3, 0)}, rec, 0, &stdout, &stderr)
+	ok := commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: time.Unix(3, 0)}, rec, 0, &stdout, &stderr)
 	if !ok {
 		t.Fatal("commitStartResult returned false for success")
 	}
@@ -4882,7 +4882,7 @@ func TestCommitStartResult_SanitizesMultilineError(t *testing.T) {
 		outcome:  "panic_recovered",
 	}
 	var stderr bytes.Buffer
-	ok := commitStartResult(result, store, &clock.Fake{Time: time.Unix(3, 0)}, events.NewFake(), 0, ioDiscard{}, &stderr)
+	ok := commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: time.Unix(3, 0)}, events.NewFake(), 0, ioDiscard{}, &stderr)
 	if ok {
 		t.Fatal("commitStartResult returned true for error result")
 	}
@@ -4916,7 +4916,7 @@ func TestCommitStartResult_TerminalProviderErrorMarksUnhealthy(t *testing.T) {
 		outcome:  "provider_error",
 	}
 
-	if commitStartResult(result, store, &clock.Fake{Time: time.Unix(3, 0)}, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+	if commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: time.Unix(3, 0)}, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
 		t.Fatal("commitStartResult returned true for terminal provider error")
 	}
 	got := store.metadata[session.ID]
@@ -6029,7 +6029,7 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 		t.Fatal("expected startup-death error")
 	}
 
-	if commitStartResult(results[0], store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+	if commitStartResult(results[0], sessionFrontDoor(store), clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
 		t.Fatal("startup rate-limit hold should not count as a committed wake")
 	}
 	got, err := store.Get(session.ID)
@@ -6124,7 +6124,7 @@ func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *test
 		t.Fatal("pending-create startup death should still classify provider rate-limit screen")
 	}
 
-	if commitStartResult(results[0], store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+	if commitStartResult(results[0], sessionFrontDoor(store), clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
 		t.Fatal("startup rate-limit hold should not count as a committed wake")
 	}
 	got, err := store.Get(session.ID)
@@ -6529,7 +6529,7 @@ func TestCommitStartResult_TransitionsCreatingToActive(t *testing.T) {
 		finished: time.Unix(101, 0),
 	}
 	rec := events.NewFake()
-	ok := commitStartResult(result, store, &clock.Fake{Time: time.Unix(102, 0)}, rec, 0, ioDiscard{}, ioDiscard{})
+	ok := commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: time.Unix(102, 0)}, rec, 0, ioDiscard{}, ioDiscard{})
 	if !ok {
 		t.Fatal("commitStartResult returned false for successful start")
 	}
@@ -6603,7 +6603,7 @@ func TestCommitStartResult_PersistsMCPIdentityForACPStart(t *testing.T) {
 		finished: time.Unix(101, 0),
 	}
 	rec := events.NewFake()
-	ok := commitStartResult(result, store, &clock.Fake{Time: time.Unix(102, 0)}, rec, 0, ioDiscard{}, ioDiscard{})
+	ok := commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: time.Unix(102, 0)}, rec, 0, ioDiscard{}, ioDiscard{})
 	if !ok {
 		t.Fatal("commitStartResult returned false for successful start")
 	}
@@ -6690,7 +6690,7 @@ func TestClearStaleResumeKeyMetadata(t *testing.T) {
 		t.Fatalf("seed metadata: %v", err)
 	}
 
-	clearStaleResumeKeyMetadata(bead, store)
+	clearStaleResumeKeyMetadata(bead, sessionFrontDoor(store))
 
 	if got := bead.Metadata["session_key"]; got != "" {
 		t.Fatalf("in-memory session_key = %q, want empty", got)

@@ -2783,7 +2783,7 @@ func TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if closeFailedCreateBead(store, b.ID, now, ioDiscard{}) {
+	if closeFailedCreateBead(sessionFrontDoor(store), b.ID, now, ioDiscard{}) {
 		t.Fatal("closeFailedCreateBead returned true, want false when Close fails")
 	}
 	got, err := store.Get(b.ID)
@@ -3040,7 +3040,7 @@ func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
 	sp := runtime.NewFake()
 	template := "pack/worker"
 
-	owner, err := createPoolSessionBead(store, template, clk.Now(), poolSessionCreateIdentity{})
+	owner, err := createPoolSessionBead(sessionFrontDoor(store), template, clk.Now(), poolSessionCreateIdentity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3305,7 +3305,7 @@ func TestSyncDesiredPoolSlotsUsesDesiredSlotBeforeSortedBackfill(t *testing.T) {
 		"session-b": {TemplateName: template, InstanceName: "pack/worker-2", PoolSlot: 2},
 	}
 
-	syncDesiredPoolSlots(store, desired, open, index, cfg, now, io.Discard)
+	syncDesiredPoolSlots(sessionFrontDoor(store), desired, open, index, cfg, now, io.Discard)
 
 	gotFirst, err := store.Get(first.ID)
 	if err != nil {
@@ -3362,7 +3362,7 @@ func TestSyncDesiredPoolSlotsDoesNotPersistSyntheticBackfillSlot(t *testing.T) {
 		},
 	}
 
-	syncDesiredPoolSlots(store, desired, open, index, cfg, now, io.Discard)
+	syncDesiredPoolSlots(sessionFrontDoor(store), desired, open, index, cfg, now, io.Discard)
 
 	got, err := store.Get(bead.ID)
 	if err != nil {
@@ -4081,7 +4081,7 @@ func TestCreatePoolSessionBead_MetadataFailureLeavesReachablePlaceholder(t *test
 	store := &failingPoolSessionNameStore{MemStore: beads.NewMemStore()}
 	template := "pack/worker"
 
-	if _, err := createPoolSessionBead(store, template, time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC), poolSessionCreateIdentity{}); err == nil {
+	if _, err := createPoolSessionBead(sessionFrontDoor(store), template, time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC), poolSessionCreateIdentity{}); err == nil {
 		t.Fatal("createPoolSessionBead returned nil error, want session_name metadata failure")
 	}
 
@@ -7820,7 +7820,7 @@ func TestCloseFailedCreateBeadCascadesExtmsgState(t *testing.T) {
 
 	var stderr bytes.Buffer
 	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
-	if !closeFailedCreateBead(store, sessionBead.ID, now, &stderr) {
+	if !closeFailedCreateBead(sessionFrontDoor(store), sessionBead.ID, now, &stderr) {
 		t.Fatalf("closeFailedCreateBead returned false; want true: stderr=%s", stderr.String())
 	}
 
