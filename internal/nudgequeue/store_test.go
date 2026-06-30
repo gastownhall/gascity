@@ -347,3 +347,38 @@ func TestNewStoreHoldsTypedStore(t *testing.T) {
 		t.Errorf("NewStore did not retain the embedded store")
 	}
 }
+
+// TestNilStoreIsNoOp pins the nil-receiver contract: a nil *Store is the front
+// door cmd/gc passes when the shadow bead store fails to open (openNudgeBeadStore
+// returns a zero NudgesStore). The flock'd state.json — not the shadow bead — is
+// the queue authority, so a missing shadow store must degrade every method to a
+// no-op instead of panicking the command. A nil-receiver dereference here used to
+// crash the expired-nudge cleanup helpers in a loop.
+func TestNilStoreIsNoOp(t *testing.T) {
+	var s *Store // nil receiver: shadow bead store unavailable
+	item := sampleNudgeItem()
+	item.BeadID = "gc-1"
+	now := time.Now().UTC()
+
+	if err := s.Terminalize(item, "expired", "expired", "", now); err != nil {
+		t.Errorf("Terminalize on nil store = %v, want nil no-op", err)
+	}
+	if beadID, created, err := s.Save(item); err != nil || created || beadID != "" {
+		t.Errorf("Save on nil store = (%q,%v,%v), want (\"\",false,nil)", beadID, created, err)
+	}
+	if err := s.RollbackEnqueue("gc-1"); err != nil {
+		t.Errorf("RollbackEnqueue on nil store = %v, want nil no-op", err)
+	}
+	if shadow, ok, err := s.Find(item.ID); err != nil || ok {
+		t.Errorf("Find on nil store = (%+v,%v,%v), want (zero,false,nil)", shadow, ok, err)
+	}
+	if shadow, ok, err := s.FindIncludingTerminal(item.ID); err != nil || ok {
+		t.Errorf("FindIncludingTerminal on nil store = (%+v,%v,%v), want (zero,false,nil)", shadow, ok, err)
+	}
+	if b, ok, err := s.FindBead(item.ID); err != nil || ok || b.ID != "" {
+		t.Errorf("FindBead on nil store = (%+v,%v,%v), want (zero,false,nil)", b, ok, err)
+	}
+	if b, ok, err := s.FindBeadIncludingTerminal(item.ID); err != nil || ok || b.ID != "" {
+		t.Errorf("FindBeadIncludingTerminal on nil store = (%+v,%v,%v), want (zero,false,nil)", b, ok, err)
+	}
+}

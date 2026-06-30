@@ -69,6 +69,11 @@ type NudgeShadow struct {
 
 // Store is the nudge-class domain wrapper. It holds the strongly-typed
 // beads.NudgesStore by value and confines the Item<->Bead codec.
+//
+// Every method is nil-receiver safe: a nil *Store (the value cmd/gc passes when
+// the shadow bead store fails to open) and a *Store over a nil embedded store both
+// degrade to a no-op. The flock'd state.json — not this shadow bead — is the queue
+// authority, so a missing shadow store must never panic a caller mid-transaction.
 type Store struct {
 	store beads.NudgesStore
 }
@@ -137,7 +142,7 @@ const EnqueueRollbackCloseReason = "nudge rollback: enqueue transaction failed"
 // helper: an existence check by the durable nudge label, then a single Create
 // when absent.
 func (s *Store) Save(item Item) (beadID string, created bool, err error) {
-	if s.store.Store == nil {
+	if s == nil || s.store.Store == nil {
 		return "", false, nil
 	}
 	existing, ok, err := s.find(item.ID, false)
@@ -188,7 +193,7 @@ func (s *Store) Save(item Item) (beadID string, created bool, err error) {
 // helper (SetMetadataBatch with the same keys, then Close), tolerating a missing
 // bead as a no-op.
 func (s *Store) Terminalize(item Item, state, reason, commitBoundary string, now time.Time) error {
-	if s.store.Store == nil {
+	if s == nil || s.store.Store == nil {
 		return nil
 	}
 	update := map[string]string{
@@ -246,7 +251,7 @@ func (s *Store) Terminalize(item Item, state, reason, commitBoundary string, now
 // enqueueQueuedNudgeWithStore. Errors are joined and returned by the caller so a
 // leaked open bead is diagnosable.
 func (s *Store) RollbackEnqueue(beadID string) error {
-	if s.store.Store == nil || beadID == "" {
+	if s == nil || s.store.Store == nil || beadID == "" {
 		return nil
 	}
 	var errs error
@@ -287,7 +292,7 @@ func (s *Store) FindIncludingTerminal(nudgeID string) (NudgeShadow, bool, error)
 // durable "nudge:<id>" label, applying the lookup cap and the open-vs-terminal
 // selection rules. It is backend-invariant: it reads only bead fields.
 func (s *Store) find(nudgeID string, includeClosed bool) (beads.Bead, bool, error) {
-	if s.store.Store == nil || nudgeID == "" {
+	if s == nil || s.store.Store == nil || nudgeID == "" {
 		return beads.Bead{}, false, nil
 	}
 	items, err := s.store.List(beads.ListQuery{

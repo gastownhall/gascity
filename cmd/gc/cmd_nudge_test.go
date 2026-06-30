@@ -396,6 +396,70 @@ func TestPruneExpiredQueuedNudgesWithAmbiguousBeadIDContinues(t *testing.T) {
 	}
 }
 
+// TestExpiredNudgeCleanupSurvivesNilFrontDoor is a regression test for the
+// nil-pointer panic that hit the expired-nudge cleanup when the shadow bead store
+// was unavailable. openNudgeBeadStore returns a zero NudgesStore (Store == nil) on
+// any open error, so claimDueQueuedNudgesMatching/listQueuedNudges build a nil
+// *nudgequeue.Store front and then run recoverExpiredInFlightNudges +
+// pruneExpiredQueuedNudges over the flock'd state.json, which remains the queue
+// authority. With a nil front the unguarded front.Terminalize calls dereferenced a
+// nil receiver and crashed the command — and because the panic aborted the state
+// transaction before the flush, the expired item stayed Pending and the next poll
+// re-panicked in a loop. Both helpers must instead complete and move the expired
+// pending and in-flight items to Dead even with no shadow store.
+func TestExpiredNudgeCleanupSurvivesNilFrontDoor(t *testing.T) {
+	var front *nudgequeue.Store // nil: shadow bead store failed to open
+	now := time.Now().UTC()
+	state := &nudgeQueueState{
+		Pending: []queuedNudge{{
+			ID:           "nudge-pending-expired",
+			BeadID:       "gc-700",
+			Agent:        "worker",
+			SessionID:    "sess-1",
+			Source:       "session",
+			Message:      "follow up",
+			CreatedAt:    now.Add(-2 * time.Hour),
+			DeliverAfter: now.Add(-2 * time.Hour),
+			ExpiresAt:    now.Add(-time.Hour),
+		}},
+		InFlight: []queuedNudge{{
+			ID:           "nudge-inflight-expired",
+			BeadID:       "gc-701",
+			Agent:        "worker",
+			SessionID:    "sess-1",
+			Source:       "session",
+			Message:      "follow up",
+			CreatedAt:    now.Add(-2 * time.Hour),
+			DeliverAfter: now.Add(-2 * time.Hour),
+			ExpiresAt:    now.Add(-time.Hour),
+			ClaimedAt:    now.Add(-90 * time.Minute),
+			LeaseUntil:   now.Add(-80 * time.Minute),
+		}},
+	}
+
+	if err := recoverExpiredInFlightNudges(state, front, now); err != nil {
+		t.Fatalf("recoverExpiredInFlightNudges with nil front: %v", err)
+	}
+	if err := pruneExpiredQueuedNudges(state, front, now); err != nil {
+		t.Fatalf("pruneExpiredQueuedNudges with nil front: %v", err)
+	}
+
+	if len(state.Pending) != 0 {
+		t.Fatalf("pending = %d, want 0", len(state.Pending))
+	}
+	if len(state.InFlight) != 0 {
+		t.Fatalf("inFlight = %d, want 0", len(state.InFlight))
+	}
+	if len(state.Dead) != 2 {
+		t.Fatalf("dead = %d, want 2 (both expired items moved to dead)", len(state.Dead))
+	}
+	for _, d := range state.Dead {
+		if d.LastError != "expired" {
+			t.Errorf("dead item %q LastError = %q, want expired", d.ID, d.LastError)
+		}
+	}
+}
+
 func TestDeliverSessionNudgeWithProviderWaitIdleQueuesForCodex(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
