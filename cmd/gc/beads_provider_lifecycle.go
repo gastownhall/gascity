@@ -260,6 +260,16 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 			return false, err
 		}
 		if !owned {
+			// An unverified external (hosted) endpoint has no guaranteed
+			// credentials at init time. Write the canonical scope files and
+			// defer the live bd init to gc start, which carries the credential
+			// command; init never requires a live connection (R5).
+			if cityExternalDoltEndpointUnverified(cityPath) {
+				if err := seedDeferredManagedBeadsErr(cityPath, dir, prefix, ""); err != nil {
+					return false, err
+				}
+				return true, nil
+			}
 			if err := initDirIfReadyInitAndHookDir(cityPath, dir, prefix); err != nil {
 				return false, err
 			}
