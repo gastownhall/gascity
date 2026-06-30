@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // Provider implements runtime.Provider (and ServerLifecycleProvider) backed by
@@ -82,27 +83,60 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if strayPane != "" && strayPane != info.PaneID {
 		_ = p.c.closePane(ctx, strayPane)
 	}
-	if cfg.Nudge != "" && info.PaneID != "" {
+	// Deliver the agent's first turn. Two mutually-exclusive sources: a pool/sling
+	// slot carries its claim instruction in cfg.Nudge; a named always-awake Claude
+	// session carries its behavioral prime in cfg.PromptSuffix (PromptMode=arg).
+	// herdr launches via exec argv and — unlike tmux/acp/t3bridge — has no shell-arg
+	// slot to ride PromptSuffix onto, so without this it would drop the prime, boot
+	// a bare `claude` REPL, and (because the resolver already set
+	// startupPromptDeliveredEnv, suppressing the SessionStart hook's copy of the
+	// prime) leave the agent wholly unprimed and idle. Route both through the one
+	// hardened post-idle paste+submit path; cfg.Nudge takes precedence so the
+	// working pool path is byte-for-byte unchanged. See startupDeliveryText.
+	if startupText := startupDeliveryText(cfg); startupText != "" && info.PaneID != "" {
 		// A freshly-spawned agent boots through a shell→TUI handoff before its
 		// input prompt is listening. The paste buffers and survives that window,
 		// but the submit CR does not: delivered too early it is swallowed, leaving
-		// the startup nudge typed-but-unsubmitted in the box — and the agent then
-		// idles forever at its prompt instead of running its first patrol. Wait
-		// for herdr to report the agent idle (its prompt rendered) before
-		// delivering, mirroring how tmux's doStartSession waits for readiness
-		// before its Step-6 startup nudge. Bounded and best-effort: on a boot that
-		// never idles we deliver anyway (no worse than the prior unconditional
-		// send), and the reconciler tolerates a slow Start
-		// (pendingCreateNeverStartedTimeout = 10m).
+		// the text typed-but-unsubmitted in the box — and the agent then idles
+		// forever instead of running its first turn. Wait for herdr to report the
+		// agent idle (its prompt rendered) before delivering, mirroring how tmux's
+		// doStartSession waits for readiness before its Step-6 startup nudge.
+		// Bounded and best-effort: on a boot that never idles we deliver anyway (no
+		// worse than the prior unconditional send), and the reconciler tolerates a
+		// slow Start (pendingCreateNeverStartedTimeout = 10m).
 		_ = p.WaitForIdle(ctx, name, startupNudgeIdleTimeout)
-		if err := p.c.deliverNudge(ctx, info.PaneID, name, cfg.Nudge); err != nil {
+		if err := p.c.deliverNudge(ctx, info.PaneID, name, startupText); err != nil {
 			// Best-effort: the submit didn't confirm (TUI race under boot load).
-			// Surface it rather than silently leaving a stranded startup nudge;
+			// Surface it rather than silently leaving a stranded startup turn;
 			// nudgeStalledPoolClaims is the reconcile-tick backstop of last resort.
-			fmt.Fprintf(os.Stderr, "herdr: startup nudge for %q not confirmed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
+			fmt.Fprintf(os.Stderr, "herdr: startup delivery for %q not confirmed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
 		}
 	}
 	return nil
+}
+
+// startupDeliveryText resolves the first-turn text Start delivers to a freshly
+// spawned agent. A pool/sling slot carries its claim instruction in cfg.Nudge and
+// is delivered unchanged (it takes precedence, so the working pool path is
+// untouched). A named always-awake Claude session instead carries its behavioral
+// prime in cfg.PromptSuffix (PromptMode=arg, shell-quoted for argv use that herdr's
+// exec launch has no slot for); unquote it — mirroring the parts[0] round-trip used
+// on the resume path in session_lifecycle_parallel.go — and deliver it through the
+// same post-idle paste+submit path. Returns "" when there is nothing to deliver
+// (deterministic workers, suppressed startup prompt). Falls back to the raw string
+// if PromptSuffix somehow fails to unquote: delivering something beats stranding the
+// agent idle.
+func startupDeliveryText(cfg runtime.Config) string {
+	if cfg.Nudge != "" {
+		return cfg.Nudge
+	}
+	if cfg.PromptSuffix == "" {
+		return ""
+	}
+	if parts := shellquote.Split(cfg.PromptSuffix); len(parts) > 0 {
+		return parts[0]
+	}
+	return cfg.PromptSuffix
 }
 
 // startupNudgeIdleTimeout bounds how long Start waits for a freshly-spawned
