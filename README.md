@@ -35,7 +35,7 @@ trying to port the entire Town architecture literally.
 ## What You Get
 
 - Declarative city configuration in `city.toml`
-- Multiple runtime providers: tmux, subprocess, exec, ACP, and Kubernetes
+- Multiple runtime providers: tmux, subprocess, exec, ACP, Kubernetes, and herdr
 - Beads-backed work tracking, formulas, molecules, waits, and mail
 - A controller/supervisor loop that reconciles desired state to running state
 - Packs, overrides, and rig-scoped orchestration for multi-project setups
@@ -61,6 +61,12 @@ Gas City requires the following tools on your system. `gc init` and
 | flock | Beads provider `bd` | — | `brew install flock` | `apt install util-linux` |
 | gh | Optional GitHub gates | — | `brew install gh` | [cli.github.com](https://cli.github.com/) |
 | claude / codex / gemini | Per provider | — | See provider docs | See provider docs |
+
+tmux is the default session backend **and** the fallback, so it stays required
+even if you run agents on another backend. [herdr](https://herdr.dev) is an
+optional alternative backend — see
+[herdr Session Provider](docs/reference/herdr-provider.md) to enable it
+per-agent, per-rig, or city-wide.
 
 The `bd` (beads) provider is the default. To use a file-based store instead
 (no dolt/bd/flock needed), set `GC_BEADS=file` or add `[beads] provider = "file"`
@@ -158,7 +164,7 @@ make docs-dev
 | Path | What it contains |
 |---|---|
 | `cmd/gc/` | CLI entrypoints, controller wiring, runtime assembly, and command handlers |
-| `internal/runtime/` | Runtime provider abstraction plus tmux, subprocess, exec, ACP, K8s, and hybrid implementations |
+| `internal/runtime/` | Runtime provider abstraction plus tmux, subprocess, exec, ACP, K8s, hybrid, and herdr implementations |
 | `internal/config/` | `city.toml` schema, validation, composition, packs, patches, and override resolution |
 | `internal/beads/` | Store abstraction and provider implementations for beads (work, mail, convoys) and waits |
 | `internal/session/` | Session bead metadata, wait lifecycle helpers, and session identity utilities |

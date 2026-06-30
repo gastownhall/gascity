@@ -233,7 +233,8 @@
               "reference/system-packs",
               "reference/exec-session-provider",
               "reference/exec-beads-provider",
-              "reference/tmux-agent-slice"
+              "reference/tmux-agent-slice",
+              "reference/herdr-provider"
             ]
           },
           {
