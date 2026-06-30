@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -91,7 +92,7 @@ type Verifier struct {
 // Expect carries the request-derived values a valid grant must be bound to.
 type Expect struct {
 	City      string // the city segment of the request path
-	ReqDigest string // ReqDigest(method, path, body) for this exact request
+	ReqDigest string // ReqDigest(method, path, rawQuery, body) for this exact request
 }
 
 // New builds a Verifier, validating that the security-critical options are set.
@@ -253,14 +254,46 @@ func splitToken(token string) (payload, sig []byte, err error) {
 
 // ReqDigest binds a grant to one request. It is the lowercase hex SHA-256 of
 //
-//	method "\n" path "\n" hex(sha256(body))
+//	method "\n" path [ "\n" canonicalQuery ] "\n" hex(sha256(body))
 //
-// method is the uppercase HTTP method; path is the request path without query.
+// method is the uppercase HTTP method; path is the request path without query;
+// rawQuery is the request's raw URL query (r.URL.RawQuery). The canonical query
+// — the sorted, percent-encoded form the handler sees via r.URL.Query() — is
+// folded into the preimage ONLY when the request carries one, so a query-less
+// request keeps the original method"\n"path"\n"hex(body) preimage byte-for-byte.
+// Existing query-less grants and the pinned cross-repo golden vector therefore
+// verify unchanged, while a query-bearing request is bound strictly more tightly:
+// a grant minted for DELETE .../workflow/{id} no longer authorizes the
+// destructive .../workflow/{id}?delete=true variant, and a narrow
+// ?scope_kind=rig selector cannot be broadened by dropping the query.
+//
 // The minter computes the identical value from the buffered request, so a
 // captured grant cannot be repurposed for a different mutation.
-func ReqDigest(method, path string, body []byte) string {
+func ReqDigest(method, path, rawQuery string, body []byte) string {
 	bodyHash := sha256.Sum256(body)
-	preimage := method + "\n" + path + "\n" + hex.EncodeToString(bodyHash[:])
+	preimage := method + "\n" + path
+	if canonical := canonicalizeQuery(rawQuery); canonical != "" {
+		preimage += "\n" + canonical
+	}
+	preimage += "\n" + hex.EncodeToString(bodyHash[:])
 	sum := sha256.Sum256([]byte(preimage))
 	return hex.EncodeToString(sum[:])
+}
+
+// canonicalizeQuery returns the order-independent encoding of a raw URL query —
+// the same view a handler gets from r.URL.Query() — so the digest binds exactly
+// what the handler acts on regardless of parameter order. A genuinely empty (or
+// semantically empty, e.g. "&") query returns "", which keeps the query-less
+// preimage byte-identical to the pre-query-binding contract. A query that fails
+// to parse falls back to its raw bytes so it still binds fail-closed rather than
+// silently dropping a behavior-affecting parameter out of the digest.
+func canonicalizeQuery(rawQuery string) string {
+	if rawQuery == "" {
+		return ""
+	}
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return rawQuery
+	}
+	return values.Encode()
 }

@@ -50,10 +50,17 @@ func mintToken(t *testing.T, priv ed25519.PrivateKey, g citywriteauth.Grant) str
 }
 
 func grantFor(now time.Time, city, method, path string, body []byte, jti string) citywriteauth.Grant {
+	return grantForQuery(now, city, method, path, "", body, jti)
+}
+
+// grantForQuery is grantFor with an explicit raw query bound into the request
+// digest, for tests that exercise query-scoped authorization (for example the
+// destructive ?delete=true workflow variant or scope_* selectors).
+func grantForQuery(now time.Time, city, method, path, rawQuery string, body []byte, jti string) citywriteauth.Grant {
 	return citywriteauth.Grant{
 		Kid: "k1", Aud: writeAuthAudience, City: city, Epoch: 0,
 		IAT: now.Unix(), Exp: now.Add(30 * time.Second).Unix(),
-		JTI: jti, Req: citywriteauth.ReqDigest(method, path, body),
+		JTI: jti, Req: citywriteauth.ReqDigest(method, path, rawQuery, body),
 	}
 }
 
@@ -73,7 +80,7 @@ func TestWriteAuthMiddleware_AllowsNonMutation(t *testing.T) {
 	pub, _ := mustKeypair(t)
 	var seen bool
 	var got []byte
-	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), echoNext(&seen, &got))
+	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
 	req := httptest.NewRequest(http.MethodGet, "/v0/city/acme/agents", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -87,7 +94,7 @@ func TestWriteAuthMiddleware_RejectsMissingGrant(t *testing.T) {
 	pub, _ := mustKeypair(t)
 	var seen bool
 	var got []byte
-	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), echoNext(&seen, &got))
+	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
 	req := httptest.NewRequest(http.MethodPost, "/v0/city/acme/agents", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -107,9 +114,10 @@ func TestWriteAuthMiddleware_AcceptsValidGrantAndResetsBody(t *testing.T) {
 	tok := mintToken(t, priv, grantFor(now, "acme", "POST", path, body, "j1"))
 	var seen bool
 	var got []byte
-	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), echoNext(&seen, &got))
+	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
 	req.Header.Set(writeAuthHeader, tok)
+	req.Header.Set(csrfHeaderName, "1")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if !seen || rec.Code != http.StatusOK {
@@ -130,9 +138,10 @@ func TestWriteAuthMiddleware_GatesOtherMutationMethods(t *testing.T) {
 	tok := mintToken(t, priv, grantFor(now, "acme", "PUT", path, body, "jput"))
 	var seen bool
 	var got []byte
-	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), echoNext(&seen, &got))
+	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
 	req := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(body))
 	req.Header.Set(writeAuthHeader, tok)
+	req.Header.Set(csrfHeaderName, "1")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if !seen || rec.Code != http.StatusOK {
@@ -141,7 +150,7 @@ func TestWriteAuthMiddleware_GatesOtherMutationMethods(t *testing.T) {
 
 	// DELETE without a grant is rejected.
 	seen = false
-	h = writeAuthMiddleware(newTestWriteVerifier(t, pub, now), echoNext(&seen, &got))
+	h = writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
 	req = httptest.NewRequest(http.MethodDelete, path, nil)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -157,9 +166,10 @@ func TestWriteAuthMiddleware_RejectsWrongCity(t *testing.T) {
 	tok := mintToken(t, priv, grantFor(now, "other", "POST", "/v0/city/acme/agents", body, "j1"))
 	var seen bool
 	var got []byte
-	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), echoNext(&seen, &got))
+	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
 	req := httptest.NewRequest(http.MethodPost, "/v0/city/acme/agents", bytes.NewReader(body))
 	req.Header.Set(writeAuthHeader, tok)
+	req.Header.Set(csrfHeaderName, "1")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if seen || rec.Code != http.StatusForbidden {
@@ -174,14 +184,77 @@ func TestWriteAuthMiddleware_RejectsBodyTamper(t *testing.T) {
 	tok := mintToken(t, priv, grantFor(now, "acme", "POST", path, []byte(`{"name":"orig"}`), "j1"))
 	var seen bool
 	var got []byte
-	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), echoNext(&seen, &got))
+	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(`{"name":"tampered"}`)))
 	req.Header.Set(writeAuthHeader, tok)
+	req.Header.Set(csrfHeaderName, "1")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if seen || rec.Code != http.StatusForbidden {
 		t.Fatalf("body tamper: seen=%v code=%d", seen, rec.Code)
 	}
+}
+
+// The query string is part of the request binding: a grant minted for one query
+// variant must not authorize another. This guards the escalation where a
+// cancel-only DELETE grant would otherwise authorize the ?delete=true permanent
+// purge, and where a narrow scope selector could be widened by dropping it.
+func TestWriteAuthMiddleware_RejectsQueryTamper(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pub, priv := mustKeypair(t)
+	const path = "/v0/city/acme/workflow/wf-1"
+
+	// Each call gets a fresh verifier so the single-use replay guard never
+	// crosses cases; every request here carries an empty body.
+	run := func(t *testing.T, tok, target string) (seen bool, code int) {
+		t.Helper()
+		var got []byte
+		h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
+		req := httptest.NewRequest(http.MethodDelete, target, nil)
+		if tok != "" {
+			req.Header.Set(writeAuthHeader, tok)
+			req.Header.Set(csrfHeaderName, "1")
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return seen, rec.Code
+	}
+
+	// A grant minted for the cancel-only DELETE (no query) must NOT authorize the
+	// destructive ?delete=true purge: method+path+body are identical, only the
+	// now-bound query differs.
+	t.Run("cancel grant cannot purge", func(t *testing.T) {
+		tok := mintToken(t, priv, grantForQuery(now, "acme", "DELETE", path, "", nil, "jq1"))
+		if seen, code := run(t, tok, path+"?delete=true"); seen || code != http.StatusForbidden {
+			t.Fatalf("?delete=true with cancel grant: seen=%v code=%d want 403", seen, code)
+		}
+	})
+
+	// The grant minted for the purge variant authorizes exactly that request.
+	t.Run("purge grant authorizes purge", func(t *testing.T) {
+		tok := mintToken(t, priv, grantForQuery(now, "acme", "DELETE", path, "delete=true", nil, "jq2"))
+		if seen, code := run(t, tok, path+"?delete=true"); !seen || code != http.StatusOK {
+			t.Fatalf("?delete=true with matching grant: seen=%v code=%d want 200", seen, code)
+		}
+	})
+
+	// A grant minted for a narrow scope selector must NOT be broadened to every
+	// store by dropping the scope query.
+	t.Run("scope selector cannot be dropped", func(t *testing.T) {
+		tok := mintToken(t, priv, grantForQuery(now, "acme", "DELETE", path, "scope_kind=rig&scope_ref=alpha", nil, "jq3"))
+		if seen, code := run(t, tok, path); seen || code != http.StatusForbidden {
+			t.Fatalf("scope drop with scoped grant: seen=%v code=%d want 403", seen, code)
+		}
+	})
+
+	// Canonicalization: the grant binds the semantic query, so reordering the
+	// parameters on the wire still verifies.
+	t.Run("query order independent", func(t *testing.T) {
+		tok := mintToken(t, priv, grantForQuery(now, "acme", "DELETE", path, "scope_kind=rig&scope_ref=alpha", nil, "jq4"))
+		if seen, code := run(t, tok, path+"?scope_ref=alpha&scope_kind=rig"); !seen || code != http.StatusOK {
+			t.Fatalf("reordered query with matching grant: seen=%v code=%d want 200", seen, code)
+		}
+	})
 }
 
 func TestWriteAuthMiddleware_GatesBareCityPatch(t *testing.T) {
@@ -192,7 +265,7 @@ func TestWriteAuthMiddleware_GatesBareCityPatch(t *testing.T) {
 	// No grant -> 401.
 	var seen bool
 	var got []byte
-	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), echoNext(&seen, &got))
+	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
 	req := httptest.NewRequest(http.MethodPatch, path, strings.NewReader(`{"suspended":true}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -204,9 +277,10 @@ func TestWriteAuthMiddleware_GatesBareCityPatch(t *testing.T) {
 	body := []byte(`{"suspended":true}`)
 	tok := mintToken(t, priv, grantFor(now, "acme", "PATCH", path, body, "jpatch"))
 	seen = false
-	h = writeAuthMiddleware(newTestWriteVerifier(t, pub, now), echoNext(&seen, &got))
+	h = writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
 	req = httptest.NewRequest(http.MethodPatch, path, bytes.NewReader(body))
 	req.Header.Set(writeAuthHeader, tok)
+	req.Header.Set(csrfHeaderName, "1")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if !seen || rec.Code != http.StatusOK {
@@ -214,17 +288,69 @@ func TestWriteAuthMiddleware_GatesBareCityPatch(t *testing.T) {
 	}
 }
 
-func TestWriteAuthMiddleware_PassesThroughNonCityMutation(t *testing.T) {
+// POST /v0/city (city registry creation) is intentionally outside the
+// write-auth gate: a grant binds a path-resident city name, and a not-yet-
+// created city carries none, so creation stays governed by the existing
+// supervisor-registry guards (CSRF/read-only). This is the documented carve-out
+// in cityScopedObjectMutation and docs/reference/config.md, not an oversight.
+func TestWriteAuthMiddleware_PassesThroughCityRegistryCreate(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	pub, _ := mustKeypair(t)
 	var seen bool
 	var got []byte
-	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), echoNext(&seen, &got))
+	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
 	req := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if !seen {
-		t.Fatal("non-city-scoped mutation should pass through to existing guards")
+		t.Fatal("POST /v0/city (registry creation) must pass through to the supervisor-registry guards")
+	}
+}
+
+// The gate is a general per-city write gate, not config-only: every mutating
+// request to an already-registered city is gated, including high-traffic
+// runtime writes such as bead mutations, mail sends, and session message
+// submits. Pinning this guards the documented contract against a future
+// narrowing of the matcher silently dropping the gate on non-config routes.
+func TestWriteAuthMiddleware_GatesNonConfigPerCityWrites(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pub, _ := mustKeypair(t)
+	for _, path := range []string{
+		"/v0/city/acme/bead/bd-1/update",   // bead mutation
+		"/v0/city/acme/mail",               // mail send
+		"/v0/city/acme/session/s-1/submit", // session message submit
+	} {
+		t.Run(path, func(t *testing.T) {
+			var seen bool
+			var got []byte
+			h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if seen || rec.Code != http.StatusUnauthorized {
+				t.Fatalf("%s without grant: seen=%v code=%d want 401", path, seen, rec.Code)
+			}
+		})
+	}
+}
+
+// A control character decoded into the gated path (for example %0A) is rejected
+// before the digest is computed, closing the newline-delimiter ambiguity in the
+// preimage. No grant could bind such a path and it fails routing anyway, so the
+// guard is pure fail-closed defense in depth.
+func TestWriteAuthMiddleware_RejectsControlCharPath(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pub, _ := mustKeypair(t)
+	var seen bool
+	var got []byte
+	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
+	req := httptest.NewRequest(http.MethodPost, "/v0/city/acme/agents", strings.NewReader(`{}`))
+	req.URL.Path = "/v0/city/acme/agents\ndelete=true" // decoded %0A in the path
+	req.Header.Set(writeAuthHeader, "bogus")           // path check must fire before token checks
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if seen || rec.Code != http.StatusBadRequest {
+		t.Fatalf("control-char path: seen=%v code=%d want 400", seen, rec.Code)
 	}
 }
 
@@ -233,7 +359,7 @@ func TestWriteAuthMiddleware_ExemptsSvc(t *testing.T) {
 	pub, _ := mustKeypair(t)
 	var seen bool
 	var got []byte
-	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), echoNext(&seen, &got))
+	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
 	req := httptest.NewRequest(http.MethodPost, "/v0/city/acme/svc/foo", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -252,9 +378,10 @@ func TestWriteAuthMiddleware_RejectsReplay(t *testing.T) {
 	do := func() int {
 		var seen bool
 		var got []byte
-		h := writeAuthMiddleware(v, echoNext(&seen, &got))
+		h := writeAuthMiddleware(v, false, echoNext(&seen, &got))
 		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
 		req.Header.Set(writeAuthHeader, tok)
+		req.Header.Set(csrfHeaderName, "1")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec.Code
@@ -275,13 +402,91 @@ func TestWriteAuthMiddleware_RejectsOversizeBody(t *testing.T) {
 	tok := mintToken(t, priv, grantFor(now, "acme", "POST", path, big, "j1"))
 	var seen bool
 	var got []byte
-	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), echoNext(&seen, &got))
+	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(big))
 	req.Header.Set(writeAuthHeader, tok)
+	req.Header.Set(csrfHeaderName, "1")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if seen || rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversize: seen=%v code=%d want 413", seen, rec.Code)
+	}
+}
+
+// A valid grant on a request missing the X-GC-Request CSRF header is rejected
+// before the grant is verified, so the single-use jti is NOT consumed. This is
+// the regression guard for the ordering bug where the downstream CSRF rejection
+// ran only after write-auth had already spent the grant, making the caller's
+// legitimate retry look like a replay.
+func TestWriteAuthMiddleware_DoesNotConsumeGrantWhenCSRFMissing(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pub, priv := mustKeypair(t)
+	body := []byte(`{"name":"worker"}`)
+	path := "/v0/city/acme/agents"
+	tok := mintToken(t, priv, grantFor(now, "acme", "POST", path, body, "j1"))
+	v := newTestWriteVerifier(t, pub, now)
+
+	// First attempt: valid grant, but the client forgot X-GC-Request.
+	var seen bool
+	var got []byte
+	h := writeAuthMiddleware(v, false, echoNext(&seen, &got))
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	req.Header.Set(writeAuthHeader, tok)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if seen || rec.Code != http.StatusForbidden {
+		t.Fatalf("missing CSRF: seen=%v code=%d want 403 and handler not reached", seen, rec.Code)
+	}
+
+	// Retry the SAME grant with the CSRF header: it must still verify, proving the
+	// first attempt did not consume the jti.
+	seen = false
+	h = writeAuthMiddleware(v, false, echoNext(&seen, &got))
+	req = httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	req.Header.Set(writeAuthHeader, tok)
+	req.Header.Set(csrfHeaderName, "1")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !seen || rec.Code != http.StatusOK {
+		t.Fatalf("retry with CSRF: seen=%v code=%d want 200 (grant must not have been consumed)", seen, rec.Code)
+	}
+}
+
+// In read-only mode every mutation is refused, so a valid grant must be rejected
+// before it is verified and the single-use jti must survive. Otherwise a grant
+// is silently burned against a server that never performs the write.
+func TestWriteAuthMiddleware_DoesNotConsumeGrantWhenReadOnly(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pub, priv := mustKeypair(t)
+	body := []byte(`{"name":"worker"}`)
+	path := "/v0/city/acme/agents"
+	tok := mintToken(t, priv, grantFor(now, "acme", "POST", path, body, "j1"))
+	v := newTestWriteVerifier(t, pub, now)
+
+	// Read-only middleware: a fully valid, CSRF-bearing request is still refused.
+	var seen bool
+	var got []byte
+	h := writeAuthMiddleware(v, true, echoNext(&seen, &got))
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	req.Header.Set(writeAuthHeader, tok)
+	req.Header.Set(csrfHeaderName, "1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if seen || rec.Code != http.StatusForbidden {
+		t.Fatalf("read-only: seen=%v code=%d want 403 and handler not reached", seen, rec.Code)
+	}
+
+	// The same grant verifies once mutations are allowed, proving the read-only
+	// rejection did not consume the jti.
+	seen = false
+	h = writeAuthMiddleware(v, false, echoNext(&seen, &got))
+	req = httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	req.Header.Set(writeAuthHeader, tok)
+	req.Header.Set(csrfHeaderName, "1")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !seen || rec.Code != http.StatusOK {
+		t.Fatalf("after read-only lifted: seen=%v code=%d want 200 (grant must not have been consumed)", seen, rec.Code)
 	}
 }
 
@@ -313,6 +518,44 @@ func TestSupervisorMux_WriteAuthGuardsMutation(t *testing.T) {
 	}
 }
 
+// Opt-in/off-by-default contract: with no verifying key configured the gate is
+// not installed, so a first-party mutation carrying only the CSRF header — what
+// the bundled gc API client and dashboard SPA send — is never turned away for a
+// missing grant. This is the other half of the write-auth contract: enabling
+// the gate is what fronts first-party clients with the authority
+// (TestSupervisorMux_WriteAuthGuardsMutation covers the gate-on rejection);
+// leaving it unconfigured preserves the prior CSRF/read-only behavior.
+func TestSupervisorMux_NoWriteAuthAllowsFirstPartyMutation(t *testing.T) {
+	sm := NewSupervisorMux(nil, nil, false, "test", "", time.Now()).
+		WithAnyHostAllowed()
+	if sm.writeAuth != nil {
+		t.Fatal("write-auth must be disabled when no key is configured")
+	}
+
+	srv := httptest.NewServer(sm.Handler())
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v0/city/acme/agents", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-GC-Request", "true") // the only header first-party clients attach
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// The gate is off, so whatever the (backend-less) downstream does, the
+	// response must not be the write-auth missing-grant rejection.
+	if resp.StatusCode == http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		if strings.Contains(string(body), writeAuthHeader) {
+			t.Fatalf("first-party mutation gated by write-auth when no key configured: %s", body)
+		}
+	}
+}
+
 func TestCityScopedObjectMutation(t *testing.T) {
 	cases := []struct {
 		path string
@@ -322,6 +565,9 @@ func TestCityScopedObjectMutation(t *testing.T) {
 		{"/v0/city/acme/agents", "acme", true},
 		{"/v0/city/acme/providers/inline/x", "acme", true},
 		{"/v0/city/acme/unregister", "acme", true},
+		{"/v0/city/acme/bead/bd-1/update", "acme", true},   // runtime write: bead mutation
+		{"/v0/city/acme/mail", "acme", true},               // runtime write: mail send
+		{"/v0/city/acme/session/s-1/submit", "acme", true}, // runtime write: session submit
 		{"/v0/city/acme/svc/foo", "", false},
 		{"/v0/city/acme/svc", "", false},
 		{"/v0/city/acme", "acme", true}, // bare-city PATCH (suspend/resume) is gated

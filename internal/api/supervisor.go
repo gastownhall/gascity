@@ -209,7 +209,7 @@ func (sm *SupervisorMux) Handler() http.Handler {
 	// signed grant. Wrapping root (innermost, after host/CORS checks) gives the
 	// middleware the request body to bind the grant to, just before dispatch.
 	if sm.writeAuth != nil {
-		root = writeAuthMiddleware(sm.writeAuth, root)
+		root = writeAuthMiddleware(sm.writeAuth, sm.readOnly, root)
 	}
 	audit := requestAuditConfig{
 		recorder:       sm.supervisorEventRecorder(),

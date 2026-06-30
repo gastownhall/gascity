@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,12 +16,19 @@ import (
 	"github.com/gastownhall/gascity/internal/citywriteauth"
 )
 
-// Write-auth gates city-config mutations on a signed, single-use, request-bound
-// grant when a verifying key is configured. It is an opt-in hardening on top of
-// the existing CSRF/read-only checks: with no key configured the middleware is
-// not installed and mutations follow the prior guards; with a key configured it
-// is fail-closed — every city-scoped mutation must present a valid grant minted
-// by the configured trusted authority.
+// Write-auth gates per-city write mutations on a signed, single-use,
+// request-bound grant when a verifying key is configured. It covers every
+// mutating request to an already-registered city (the routes under
+// /v0/city/{cityName}), not only config edits. It is an opt-in hardening on top
+// of the existing CSRF/read-only checks: with no key configured the middleware
+// is not installed and mutations follow the prior guards; with a key configured
+// it is fail-closed — every city-scoped mutation must present a valid grant
+// minted by the configured trusted authority.
+//
+// The bundled first-party callers (the gc API client and dashboard SPA) send
+// only the CSRF header and mint no grant, so enabling the gate turns their
+// direct city mutations away with a clear 401; an authority-fronted deployment
+// supplies grants out of band rather than minting them in this process.
 const (
 	writeAuthHeader   = "X-GC-City-Write"
 	writeAuthAudience = "gc-city-write"
@@ -38,11 +44,16 @@ const (
 	writeAuthSkew   = 30 * time.Second
 )
 
-// cityScopedObjectMutation reports whether path targets a city the write-auth
-// gate must cover, returning the city name. It matches the per-city typed gc
-// routes: /v0/city/{cityName} (the suspend/resume PATCH) and
+// cityScopedObjectMutation reports whether path targets an existing city whose
+// config the write-auth gate must cover, returning the city name. It matches the
+// per-city typed gc routes: /v0/city/{cityName} (the suspend/resume PATCH) and
 // /v0/city/{cityName}/<sub-resource>. It excludes:
-//   - the bare /v0/city/ (empty name), /v0/cities, and any non-city path,
+//   - registry creation (POST /v0/city) and the bare /v0/city/ (empty name): a
+//     grant binds a path-resident city name, so creating a city — which carries
+//     no city in its path yet — stays governed by the prior supervisor-registry
+//     guards, not this gate. Write-auth covers mutations of cities that already
+//     exist (including unregister, which does carry the city in its path).
+//   - any other non-city path,
 //   - an empty sub-resource (/v0/city/{name}/),
 //   - the /svc/ workspace-service pass-through, which cannot mutate gc config
 //     objects and applies its own publication rules.
@@ -78,8 +89,15 @@ func cityScopedObjectMutation(path string) (city string, ok bool) {
 // writeAuthMiddleware enforces a valid X-GC-City-Write grant on every
 // city-scoped mutation. Non-mutations and non-city-scoped routes pass through
 // untouched. It buffers and resets the body so the downstream handler still
-// parses it, and binds the grant to this exact method+path+body.
-func writeAuthMiddleware(v *citywriteauth.Verifier, next http.Handler) http.Handler {
+// parses it, and binds the grant to this exact method+path+query+body.
+//
+// The single-use grant is verified — and its jti consumed — only after the
+// front-door mutation guards (CSRF token presence and read-only mode) accept
+// the request. Those guards live downstream in the Huma stack, but the
+// consuming Verify call is here at the mux layer, so a request they would
+// reject must be turned away here first; otherwise a valid grant is spent on a
+// request that never mutates and the legitimate retry is misread as a replay.
+func writeAuthMiddleware(v *citywriteauth.Verifier, readOnly bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isMutationMethod(r.Method) {
 			next.ServeHTTP(w, r)
@@ -91,42 +109,106 @@ func writeAuthMiddleware(v *citywriteauth.Verifier, next http.Handler) http.Hand
 			return
 		}
 
+		// Fail closed on control characters in a gated path. The digest preimage
+		// is newline-delimited and r.URL.Path can carry a decoded \n/\r/NUL from
+		// %0A/%0D/%00, so reject before digesting — otherwise a query-bearing
+		// grant could share a preimage with a newline-bearing, query-less path.
+		// Such paths also fail exact-match routing, so this rejects nothing a
+		// handler would otherwise serve.
+		if strings.ContainsAny(r.URL.Path, "\n\r\x00") {
+			problemWriteAuthBadPath.writeTo(w)
+			return
+		}
+
 		token := r.Header.Get(writeAuthHeader)
 		if token == "" {
-			writeAuthError(w, http.StatusUnauthorized, "missing "+writeAuthHeader+" grant")
+			problemWriteAuthMissingGrant.writeTo(w)
+			return
+		}
+
+		// Front-door mutation guards run before the grant is verified so a
+		// request the server will reject anyway never consumes the single-use
+		// grant. These mirror the downstream Huma CSRF and read-only guards, but
+		// the consuming Verify call sits here at the mux layer ahead of them, so
+		// the cheaper rejections must be evaluated here too — otherwise the jti is
+		// spent and the caller's legitimate retry is misclassified as replay.
+		if r.Header.Get(csrfHeaderName) == "" {
+			problemWriteAuthCSRF.writeTo(w)
+			return
+		}
+		if readOnly {
+			problemWriteAuthReadOnly.writeTo(w)
 			return
 		}
 
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWriteBodyBytes))
 		if err != nil {
-			writeAuthError(w, http.StatusRequestEntityTooLarge, "request body exceeds limit")
+			// Fail closed either way, but report the genuine cause: a 413 only
+			// for an oversize body, otherwise a 400 for a transport-level read
+			// failure (client disconnect, reset, timeout) so audit logs are not
+			// all mislabelled "body too large".
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				problemWriteAuthBodyTooLarge.writeTo(w)
+			} else {
+				problemWriteAuthBadBody.writeTo(w)
+			}
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 
 		expect := citywriteauth.Expect{
 			City:      city,
-			ReqDigest: citywriteauth.ReqDigest(r.Method, r.URL.Path, body),
+			ReqDigest: citywriteauth.ReqDigest(r.Method, r.URL.Path, r.URL.RawQuery, body),
 		}
 		if _, err := v.Verify(token, expect); err != nil {
 			// Deliberately generic to the client (no verification oracle); the
 			// specific reason is for server-side audit, not the response.
-			writeAuthError(w, http.StatusForbidden, "write grant rejected")
+			problemWriteAuthRejected.writeTo(w)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func writeAuthError(w http.ResponseWriter, status int, detail string) {
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"title":  http.StatusText(status),
-		"status": status,
-		"detail": detail,
-	})
-}
+// Pre-serialized RFC 9457 problem responses for the write-auth gate. Like the
+// other mux-level problemBody values, pre-serialization keeps json.Marshal off
+// the rejection path (Principle 8) and matches the typed-wire convention instead
+// of hand-encoding a map[string]any.
+var (
+	problemWriteAuthMissingGrant = problemBody{
+		status: http.StatusUnauthorized,
+		body:   []byte(`{"status":401,"title":"Unauthorized","detail":"missing ` + writeAuthHeader + ` grant"}`),
+	}
+	problemWriteAuthRejected = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"write grant rejected"}`),
+	}
+	problemWriteAuthBodyTooLarge = problemBody{
+		status: http.StatusRequestEntityTooLarge,
+		body:   []byte(`{"status":413,"title":"Request Entity Too Large","detail":"request body exceeds limit"}`),
+	}
+	problemWriteAuthBadBody = problemBody{
+		status: http.StatusBadRequest,
+		body:   []byte(`{"status":400,"title":"Bad Request","detail":"could not read request body"}`),
+	}
+	problemWriteAuthBadPath = problemBody{
+		status: http.StatusBadRequest,
+		body:   []byte(`{"status":400,"title":"Bad Request","detail":"invalid characters in request path"}`),
+	}
+	// problemWriteAuthCSRF and problemWriteAuthReadOnly are emitted by the
+	// write-auth gate for the front-door checks it evaluates ahead of grant
+	// consumption. Their detail text matches the downstream Huma CSRF/read-only
+	// guards so a client sees the same rejection whether or not write-auth is on.
+	problemWriteAuthCSRF = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"csrf: X-GC-Request header required on mutation endpoints"}`),
+	}
+	problemWriteAuthReadOnly = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"read_only: mutations disabled: server bound to non-localhost address"}`),
+	}
+)
 
 // parseVerifyKeys parses a verifying-key set of the form
 // "kid:base64,kid2:base64" where each base64 is the standard-encoded 32-byte

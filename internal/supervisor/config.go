@@ -39,8 +39,11 @@ type Section struct {
 	AllowMutations bool     `toml:"allow_mutations,omitempty"`
 	AllowedOrigins []string `toml:"allowed_origins,omitempty"`
 	AllowedHosts   []string `toml:"allowed_hosts,omitempty"`
-	// WriteAuthVerifyKey / WriteAuthRequired gate city-config mutations on a
-	// signed write grant (see config.APIConfig for the format and semantics).
+	// WriteAuthVerifyKey / WriteAuthRequired require a signed write grant on
+	// every mutating request to an already-registered city (the per-city routes
+	// under /v0/city/{cityName}); city registry creation (POST /v0/city) stays
+	// on the supervisor-registry guards. See config.APIConfig for the key format
+	// and full semantics.
 	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
 	WriteAuthRequired  bool   `toml:"write_auth_required,omitempty"`
 }
