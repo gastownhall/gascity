@@ -13,7 +13,12 @@ env GC_DOLT=skip
 env GC_SESSION=fake
 
 # Initialize a real city scaffold, then swap in the pack-import config.
-exec gc init $WORK/city
+# Use the minimal template: the default gascity template seeds the gc-roles
+# pack as a default-rig import (gascity#3832), and swapping in the ops-only
+# city.toml below would orphan that pack's packs.lock entry, tripping the
+# packv2-import-state doctor check. The minimal scaffold imports only the
+# bundled core pack, which the swap leaves declared and reachable.
+exec gc init --template minimal --default-provider claude $WORK/city
 cp $WORK/city.toml.custom $WORK/city/city.toml
 cp $WORK/site.toml.custom $WORK/city/.gc/site.toml
 
