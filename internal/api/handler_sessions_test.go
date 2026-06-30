@@ -1896,6 +1896,44 @@ func TestHandleSessionListIncludesReason(t *testing.T) {
 	}
 }
 
+func TestHandleSessionListShowsAlwaysStartupFailureReason(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Mayor")
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
+		"state":                 "asleep",
+		"configured_named_mode": "always",
+		"sleep_reason":          "context-churn",
+		"churn_count":           "3",
+		"quarantined_until":     time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("set startup failure metadata: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var body struct {
+		Items []sessionResponse `json:"items"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("got %d items, want 1", len(body.Items))
+	}
+	if body.Items[0].Reason != "startup-failure" {
+		t.Fatalf("reason = %q, want startup-failure", body.Items[0].Reason)
+	}
+}
+
 func TestHandleSessionListShowsResetPendingForLiveRuntime(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
