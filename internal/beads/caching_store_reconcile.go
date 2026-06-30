@@ -312,7 +312,6 @@ func (c *CachingStore) runReconciliation() {
 	}
 	enriched, enrichErr := c.enrichReadyProjectionForCache(fresh)
 	bdLatency := time.Since(bdStart)
-	projectionFailed := enrichErr != nil
 	if enrichErr != nil {
 		c.recordProblem("reconcile ready projection", enrichErr)
 	} else {
@@ -334,9 +333,16 @@ func (c *CachingStore) runReconciliation() {
 
 	c.mu.Lock()
 	now := time.Now()
-	if projectionFailed {
-		c.preserveCachedReadyProjectionLocked(freshByID, depMap, useFreshDeps)
-	}
+	// Preserve a cached is_blocked for any row the projection did not return
+	// this cycle. Two cases land here: a full projection failure (enrichErr
+	// left every row unenriched) and the narrower race where a row is still
+	// open in the list snapshot but closes before the bounded active-row
+	// projection query, so the SQL no longer returns it. Without preservation
+	// the row's is_blocked flips false->nil and beadChanged emits a spurious
+	// bead.updated. The guards inside drop the preservation when the row's deps
+	// or a blocking target's status actually changed, so a real transition is
+	// never masked.
+	c.preserveCachedReadyProjectionLocked(freshByID, depMap, useFreshDeps)
 	if c.mutationSeq != startSeq {
 		var adds, removes, updates int64
 		notifications := make([]cacheNotification, 0, len(freshByID))

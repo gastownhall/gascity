@@ -3317,8 +3317,8 @@ func TestCachingStoreBdPrimeActiveUsesReadyProjectionForBD105(t *testing.T) {
 			if strings.Contains(query, " in ('bd-ready'") || strings.Contains(query, " in (\"bd-ready\"") {
 				t.Fatalf("ready projection SQL = %q, must not use per-id IN list", query)
 			}
-			if strings.Contains(query, "status") || !strings.Contains(query, "from issues union all") {
-				t.Fatalf("ready projection SQL = %q, want unfiltered row projection", query)
+			if !strings.Contains(query, "status <> 'closed'") || !strings.Contains(query, "from issues where") || !strings.Contains(query, "from wisps where") {
+				t.Fatalf("ready projection SQL = %q, want active row projection", query)
 			}
 			return []byte(`[
 					{"id":"bd-ready","is_blocked":0},
@@ -3603,6 +3603,78 @@ func TestCachingStoreBdReconcileDropsPreservedReadyProjectionWhenDepTargetStatus
 	}
 }
 
+// TestCachingStoreBdReconcilePreservesReadyProjectionForRacedClosedRowBD105 is
+// the reconcile-level regression for the race the bounded projection cannot see
+// directly: a bead that is still open in the list snapshot but closes before the
+// active-row projection query runs drops out of the projection entirely. The
+// reconciler must preserve its last cached is_blocked rather than flip it to nil
+// and emit a spurious bead.updated.
+func TestCachingStoreBdReconcilePreservesReadyProjectionForRacedClosedRowBD105(t *testing.T) {
+	t.Parallel()
+
+	racedClosed := false
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			// The bounded active-row projection stops returning the bead once it
+			// closes, exactly as the production status<>'closed' SQL would.
+			if racedClosed {
+				return []byte(`[]`), nil
+			}
+			return []byte(`[{"id":"bd-raced","is_blocked":0}]`), nil
+		case "list":
+			// The list snapshot is taken before the close lands, so the bead is
+			// still reported open on the racing reconcile cycle.
+			return []byte(`[
+				{"id":"bd-raced","title":"raced","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}}
+			]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+
+	var events []string
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	initial, err := cache.Get("bd-raced")
+	if err != nil {
+		t.Fatalf("Get initial: %v", err)
+	}
+	if initial.IsBlocked == nil || *initial.IsBlocked {
+		t.Fatalf("initial IsBlocked = %v, want false projection", initial.IsBlocked)
+	}
+
+	events = nil
+	racedClosed = true
+	cache.runReconciliation()
+
+	if len(events) != 0 {
+		t.Fatalf("events after raced-closed projection reconcile = %v, want none (cached IsBlocked preserved)", events)
+	}
+	got, err := cache.Get("bd-raced")
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.IsBlocked == nil || *got.IsBlocked {
+		t.Fatalf("IsBlocked after raced-closed projection reconcile = %v, want preserved false", got.IsBlocked)
+	}
+}
+
 func TestCachingStoreBdPrimeActiveToleratesMissingReadyProjectionRowsBD105(t *testing.T) {
 	t.Parallel()
 
@@ -3620,8 +3692,8 @@ func TestCachingStoreBdPrimeActiveToleratesMissingReadyProjectionRowsBD105(t *te
 		case "sql":
 			sqlCalls++
 			query := args[1]
-			if strings.Contains(query, "status") || !strings.Contains(query, "from issues union all") {
-				t.Fatalf("ready projection SQL = %q, want unfiltered row projection", query)
+			if !strings.Contains(query, "status <> 'closed'") || !strings.Contains(query, "from issues where") || !strings.Contains(query, "from wisps where") {
+				t.Fatalf("ready projection SQL = %q, want active row filter", query)
 			}
 			return []byte(`[
 				{"id":"bd-ready","is_blocked":0}
@@ -3693,8 +3765,8 @@ func TestCachingStoreBdPrimeProjectsIsBlockedForAllBDRowsBD105(t *testing.T) {
 			if strings.Contains(query, " in ('bd-ready'") || strings.Contains(query, " in (\"bd-ready\"") {
 				t.Fatalf("ready projection SQL = %q, must not use per-id IN list", query)
 			}
-			if strings.Contains(query, "status") || !strings.Contains(query, "from issues union all") {
-				t.Fatalf("ready projection SQL = %q, want every row", query)
+			if !strings.Contains(query, "status <> 'closed'") || !strings.Contains(query, "from issues where") || !strings.Contains(query, "from wisps where") {
+				t.Fatalf("ready projection SQL = %q, want every active row", query)
 			}
 			return []byte(`[
 					{"id":"bd-ready","is_blocked":0},
