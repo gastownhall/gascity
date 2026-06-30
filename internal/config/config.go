@@ -4992,9 +4992,13 @@ func GastownCity(name, provider, startCommand string) City {
 
 // GascityCityWithProviders returns a minimal managed city that imports the
 // public gascity planning/implementation skills pack: a single mayor agent
-// plus [imports.gascity] pinned to the registry release. The pack ships
-// skills and formulas only (no agents), so the city shape matches the
-// minimal template with the pack layered on top.
+// plus [imports.gascity] (skills and formulas) pinned to the registry release.
+// The gascity formulas route their steps to role agents (gc.run-operator,
+// gc.requirements-planner, ...) that ship in the separate gc-roles subpack, so
+// the template also seeds that pack as a default rig import bound "gc" — every
+// rig added to the city then inherits the providerless, rig-scoped roles the
+// formulas coordinate. Without it a fresh city can discover a formula but fails
+// to launch with `agent "gc.run-operator" not found in city.toml` (gascity#3832).
 func GascityCityWithProviders(name, defaultProvider string, providers []string) City {
 	city := WizardCityWithProviders(name, defaultProvider, providers)
 	city.Imports = map[string]Import{
@@ -5003,6 +5007,13 @@ func GascityCityWithProviders(name, defaultProvider string, providers []string) 
 			Version: PublicGascityPackVersion,
 		},
 	}
+	city.DefaultRigImports = map[string]Import{
+		"gc": {
+			Source:  PublicGascityRolesPackSource,
+			Version: PublicGascityPackVersion,
+		},
+	}
+	city.DefaultRigImportOrder = []string{"gc"}
 	return city
 }
 

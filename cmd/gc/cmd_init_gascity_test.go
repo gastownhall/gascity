@@ -131,6 +131,44 @@ func TestDoInitWithGascityTemplate(t *testing.T) {
 	}
 }
 
+// TestDoInitGascityTemplateSeedsRolesDefaultRigImport pins gascity#3832: a
+// fresh gascity city must seed the gc-roles pack as a default rig import (bound
+// "gc") so rigs added to the city receive the role agents the built-in formulas
+// route to (gc.run-operator, ...). doInit writes default rig imports into
+// city.toml under [defaults.rig.imports]. Without this a freshly initialized
+// city failed `build-from-requirements` with `agent "gc.run-operator" not found
+// in city.toml`.
+func TestDoInitGascityTemplateSeedsRolesDefaultRigImport(t *testing.T) {
+	f := fsys.NewFake()
+
+	wiz := defaultWizardConfig()
+	wiz.configName = "gascity"
+	wiz.provider = "claude"
+	wiz.providers = []string{"claude"}
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/bright-lights", wiz, "", &stdout, &stderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	cityData := f.Files[filepath.Join("/bright-lights", "city.toml")]
+	cityCfg, err := config.Parse(cityData)
+	if err != nil {
+		t.Fatalf("parsing city.toml: %v", err)
+	}
+	roles, ok := cityCfg.Defaults.Rig.Imports["gc"]
+	if !ok {
+		t.Fatalf("city.toml [defaults.rig.imports] = %v, want gc roles entry:\n%s", cityCfg.Defaults.Rig.Imports, cityData)
+	}
+	if roles.Source != config.PublicGascityRolesPackSource {
+		t.Errorf("roles default rig import source = %q, want %q", roles.Source, config.PublicGascityRolesPackSource)
+	}
+	if roles.Version != config.PublicGascityPackVersion {
+		t.Errorf("roles default rig import version = %q, want %q", roles.Version, config.PublicGascityPackVersion)
+	}
+}
+
 // TestInitTemplateHelpAndErrorAdvertiseAcceptedTemplates keeps the public
 // --template flag help and the unknown-template error synchronized with the
 // set normalizeInitTemplate accepts. gascity regressed here once: the parser

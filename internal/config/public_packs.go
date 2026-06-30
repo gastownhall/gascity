@@ -19,6 +19,15 @@ const (
 	// (gascity 0.1.6).
 	PublicGascityPackVersion = "sha:3b3b89f2011e06d84459aa7bea1552382f13930a"
 
+	// PublicGascityRolesPackSource is the concrete durable source for the
+	// gascity role-agents subpack (gc-roles): the providerless, rig-scoped
+	// agents (run-operator, requirements-planner, design-author, ...) that the
+	// gascity formulas route to. It lives in the same repo as
+	// PublicGascityPackSource and is pinned to the same release commit
+	// (PublicGascityPackVersion), so a fresh gascity city's formulas and the
+	// rig roles they coordinate always come from one matching release.
+	PublicGascityRolesPackSource = "https://github.com/gastownhall/gascity-packs/tree/main/gascity/roles"
+
 	// BundledPackImportVersion pins the [imports.core]/[imports.bd] entries
 	// gc init writes for the gascity.git packs bundled with the binary.
 	// This is the CANONICAL pin: the only commit the binary pre-seeds into

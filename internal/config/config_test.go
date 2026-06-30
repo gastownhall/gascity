@@ -1197,6 +1197,37 @@ func TestGastownCity(t *testing.T) {
 	}
 }
 
+// TestGascityCitySeedsRolesDefaultRigImport pins gascity#3832: the gascity
+// template imports the formulas pack at city scope AND seeds the gc-roles pack
+// as a default rig import bound "gc", so every rig added to the city receives
+// the providerless role agents (gc.run-operator, gc.requirements-planner, ...)
+// that the built-in formulas route to. Without this, a fresh city could launch
+// a formula but failed with `agent "gc.run-operator" not found in city.toml`.
+func TestGascityCitySeedsRolesDefaultRigImport(t *testing.T) {
+	c := GascityCityWithProviders("bright-lights", "claude", []string{"claude"})
+
+	// City-scope formulas/skills import is unchanged.
+	if len(c.Imports) != 1 || c.Imports["gascity"].Source != PublicGascityPackSource || c.Imports["gascity"].Version != PublicGascityPackVersion {
+		t.Errorf("Imports = %v, want gascity=%s %s", c.Imports, PublicGascityPackSource, PublicGascityPackVersion)
+	}
+
+	// Roles ride along as a default rig import, bound "gc" so the formula's
+	// gc.* targets resolve, pinned to the same commit as the formulas pack.
+	roles, ok := c.DefaultRigImports["gc"]
+	if !ok || len(c.DefaultRigImports) != 1 {
+		t.Fatalf("DefaultRigImports = %v, want single gc entry", c.DefaultRigImports)
+	}
+	if roles.Source != PublicGascityRolesPackSource {
+		t.Errorf("roles import source = %q, want %q", roles.Source, PublicGascityRolesPackSource)
+	}
+	if roles.Version != PublicGascityPackVersion {
+		t.Errorf("roles import version = %q, want %q (same commit as the formulas pack)", roles.Version, PublicGascityPackVersion)
+	}
+	if len(c.DefaultRigImportOrder) != 1 || c.DefaultRigImportOrder[0] != "gc" {
+		t.Errorf("DefaultRigImportOrder = %v, want [gc]", c.DefaultRigImportOrder)
+	}
+}
+
 func TestGastownCityStartCommand(t *testing.T) {
 	c := GastownCity("test", "", "my-agent --auto")
 	if c.Workspace.StartCommand != "my-agent --auto" {
