@@ -398,6 +398,111 @@ func TestDispatchAllQueuedNudgesNilCfg(t *testing.T) {
 	}
 }
 
+// TestDispatchAllQueuedNudgesWakesDormantSession is the regression guard for
+// issue #1543: a managed pool session that has gone dormant (process gone,
+// obs.Running == false) but that has a due queued nudge must be WOKEN by the
+// supervisor dispatcher, not silently skipped. Prior to the fix the dispatcher
+// hit the `!obs.Running` branch and `continue`d, so the queued item stranded
+// forever and routed work handed to an idle/dormant pool session was never
+// picked up. The fix routes the dormant case through the SAME managed-wake
+// primitive the direct `gc session nudge` path uses
+// (requestManagedNudgeWake -> session.WakeSession), which stamps
+// wake_request=explicit so the reconciler restarts the session; the queued
+// item stays Pending and is delivered exactly once after restart.
+func TestDispatchAllQueuedNudgesWakesDormantSession(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+
+	// Create a managed session, then Suspend it so obs.Running == false while
+	// the session bead remains in a wakeable (non-terminal) lifecycle state.
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	// Consider the managed reconciler active for this city and count controller
+	// pokes so we can assert the dispatcher kicks the reconciler tick promptly.
+	prevManaged := nudgeCityUsesManagedReconciler
+	prevPoke := nudgePokeController
+	pokes := 0
+	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
+	nudgePokeController = func(cityPath string) error {
+		if cityPath != dir {
+			t.Fatalf("poke cityPath = %q, want %q", cityPath, dir)
+		}
+		pokes++
+		return nil
+	}
+	t.Cleanup(func() {
+		nudgeCityUsesManagedReconciler = prevManaged
+		nudgePokeController = prevPoke
+	})
+
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	snapshot, err := loadSessionBeadSnapshot(store.Store)
+	if err != nil {
+		t.Fatalf("loadSessionBeadSnapshot: %v", err)
+	}
+
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store.Store, fake, snapshot)
+	if err != nil {
+		t.Fatalf("dispatchAllQueuedNudges: %v", err)
+	}
+
+	// Core assertion: the dormant session bead is stamped with an explicit wake
+	// request so the reconciler will restart it. RED before the fix (dispatcher
+	// just `continue`s → no wake), GREEN after.
+	updated, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := updated.Metadata["wake_request"]; got != string(session.WakeCauseExplicit) {
+		t.Fatalf("wake_request = %q, want %q (dormant session must be woken for issue #1543)", got, string(session.WakeCauseExplicit))
+	}
+	if got := updated.Metadata["wake_requested_at"]; got == "" {
+		t.Fatal("wake_requested_at = empty, want timestamp after dormant wake")
+	}
+
+	// The controller must be poked so the reconciler tick runs promptly.
+	if pokes != 1 {
+		t.Fatalf("pokes = %d, want 1 (controller must be kicked to restart the dormant session)", pokes)
+	}
+
+	// A wake is NOT a live delivery: the dispatcher must not send-keys to a
+	// stopped pane, and must not count the wake as a delivery (preserves the
+	// existing delivered-count contract). Guards against an over-eager fix.
+	if delivered != 0 {
+		t.Fatalf("delivered = %d, want 0 (waking a dormant session is not a live delivery)", delivered)
+	}
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("dispatcher delivered to a stopped session; saw runtime call %+v", call)
+		}
+	}
+
+	// The queued item is preserved (still Pending) so the woken session's
+	// start-hook drain / next dispatcher tick delivers it once it is running.
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("queue not preserved for post-wake delivery: pending=%d inFlight=%d dead=%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+}
+
 // TestMaybeStartNudgePollerSkipsACPSessionInLegacyMode verifies the
 // legacy per-session poller still skips ACP sessions. A sidecar `gc
 // nudge poll` process can observe the ACP control socket, but it does
