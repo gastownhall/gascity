@@ -152,23 +152,24 @@ func TestDiscoverPathCodexPrefersProviderSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	targetPath := filepath.Join(codexDir, "rollout-target.jsonl")
+	targetPath := filepath.Join(codexDir, "rollout-2026-05-19T04-46-07-"+targetID+".jsonl")
 	if err := os.WriteFile(targetPath, append(targetPayload, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
+	newerID := "019e3e8e-ffff-7000-a1ef-8b9e882bea2f"
 	newerPayload, err := json.Marshal(map[string]any{
 		"timestamp": "2026-05-19T05:46:07.848Z",
 		"type":      "session_meta",
 		"payload": map[string]string{
-			"id":  "019e3e8e-ffff-7000-a1ef-8b9e882bea2f",
+			"id":  newerID,
 			"cwd": workDir,
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	newerPath := filepath.Join(codexDir, "rollout-newer.jsonl")
+	newerPath := filepath.Join(codexDir, "rollout-2026-05-19T05-46-07-"+newerID+".jsonl")
 	if err := os.WriteFile(newerPath, append(newerPayload, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}

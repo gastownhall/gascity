@@ -10,6 +10,14 @@ import (
 	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
+// anchoredCodexSession is a same-workdir Codex session paired with its resolved
+// start-time anchor and the tiebreak key used to order equal-start sessions.
+type anchoredCodexSession struct {
+	id     string
+	start  time.Time
+	tieKey string
+}
+
 // ResolveCodexTranscriptBySessionOrder maps an ambiguous same-workdir Codex
 // session group to a transcript by using each session's wake/start timestamp.
 // It returns empty unless the target session has a unique transcript in its
@@ -18,12 +26,28 @@ func ResolveCodexTranscriptBySessionOrder(searchPaths []string, provider, workDi
 	if sessionlog.ProviderFamily(provider) != "codex" || strings.TrimSpace(workDir) == "" || strings.TrimSpace(targetID) == "" {
 		return ""
 	}
-	type anchoredSession struct {
-		id     string
-		start  time.Time
-		tieKey string
+	anchored := collectAnchoredCodexSessions(sessions, workDir)
+	if len(anchored) < 2 {
+		return ""
 	}
-	var anchored []anchoredSession
+	sortAnchoredCodexSessions(anchored)
+	if hasDuplicateAnchorStart(anchored) {
+		return ""
+	}
+	for i, item := range anchored {
+		if item.id != targetID {
+			continue
+		}
+		end := codexSessionWindowEnd(anchored, i)
+		return workertranscript.DiscoverCodexPathInTimeWindow(searchPaths, workDir, item.start, end)
+	}
+	return ""
+}
+
+// collectAnchoredCodexSessions keeps the same-workdir sessions that carry a
+// non-zero start anchor, dropping ones without an id or a resolvable anchor.
+func collectAnchoredCodexSessions(sessions []beads.Bead, workDir string) []anchoredCodexSession {
+	var anchored []anchoredCodexSession
 	for _, b := range sessions {
 		if b.ID == "" || strings.TrimSpace(b.Metadata["work_dir"]) != workDir {
 			continue
@@ -32,15 +56,18 @@ func ResolveCodexTranscriptBySessionOrder(searchPaths []string, provider, workDi
 		if start.IsZero() {
 			continue
 		}
-		anchored = append(anchored, anchoredSession{
+		anchored = append(anchored, anchoredCodexSession{
 			id:     b.ID,
 			start:  start,
 			tieKey: strings.TrimSpace(b.Metadata["session_name"]),
 		})
 	}
-	if len(anchored) < 2 {
-		return ""
-	}
+	return anchored
+}
+
+// sortAnchoredCodexSessions orders sessions by start time, breaking ties on the
+// session name and then the id so ordering is deterministic.
+func sortAnchoredCodexSessions(anchored []anchoredCodexSession) {
 	sort.Slice(anchored, func(i, j int) bool {
 		if anchored[i].start.Equal(anchored[j].start) {
 			if anchored[i].tieKey == anchored[j].tieKey {
@@ -50,29 +77,45 @@ func ResolveCodexTranscriptBySessionOrder(searchPaths []string, provider, workDi
 		}
 		return anchored[i].start.Before(anchored[j].start)
 	})
-	for i := 1; i < len(anchored); i++ {
-		if anchored[i].start.Equal(anchored[i-1].start) {
-			return ""
-		}
-	}
-	for i, item := range anchored {
-		if item.id != targetID {
-			continue
-		}
-		var end time.Time
-		for j := i + 1; j < len(anchored); j++ {
-			if anchored[j].start.After(item.start) {
-				end = anchored[j].start
-				break
-			}
-		}
-		return workertranscript.DiscoverCodexPathInTimeWindow(searchPaths, workDir, item.start, end)
-	}
-	return ""
 }
 
+// hasDuplicateAnchorStart reports whether any two adjacent (already sorted)
+// sessions share the same start anchor, which collapses the group to ambiguous.
+func hasDuplicateAnchorStart(anchored []anchoredCodexSession) bool {
+	for i := 1; i < len(anchored); i++ {
+		if anchored[i].start.Equal(anchored[i-1].start) {
+			return true
+		}
+	}
+	return false
+}
+
+// codexSessionWindowEnd returns the exclusive end of the start-time window for
+// the session at index i: the next strictly-later session start, or zero when i
+// is the last session (an open-ended window).
+func codexSessionWindowEnd(anchored []anchoredCodexSession, i int) time.Time {
+	for j := i + 1; j < len(anchored); j++ {
+		if anchored[j].start.After(anchored[i].start) {
+			return anchored[j].start
+		}
+	}
+	return time.Time{}
+}
+
+// transcriptStartAnchor returns the best available "start of this session" time
+// for windowing its Codex transcript. Preference runs most-precise first:
+// last_woke_at and pending_create_started_at pin an in-flight wake/create, but
+// both are cleared when a session sleeps or drains (SleepPatch,
+// AcknowledgeDrainPatch). awake_started_at is the immutable
+// start-of-awake-interval epoch that survives those teardowns, so it is
+// preferred over creation_complete_at, which is stamped when the runtime
+// finishes coming up and can land several seconds after the rollout's
+// session_meta timestamp. Anchoring a slept or drained session on
+// creation_complete_at would push the [start-2s, end) window past the true
+// transcript and drop it; awake_started_at keeps the window aligned with the
+// rollout. CreatedAt is the final fallback.
 func transcriptStartAnchor(b beads.Bead) time.Time {
-	for _, key := range []string{"last_woke_at", "pending_create_started_at", "creation_complete_at"} {
+	for _, key := range []string{"last_woke_at", "pending_create_started_at", "awake_started_at", "creation_complete_at"} {
 		if parsed := parseTranscriptAnchorTime(b.Metadata[key]); !parsed.IsZero() {
 			return parsed
 		}

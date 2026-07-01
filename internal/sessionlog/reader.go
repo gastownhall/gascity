@@ -1035,44 +1035,87 @@ func startOfLocalDay(t time.Time) time.Time {
 // requested workdir.
 type CodexSessionCandidate struct {
 	Path      string
-	SessionID string
 	WorkDir   string
 	StartedAt time.Time
 	ModTime   time.Time
 }
 
-// FindCodexSessionCandidates returns Codex transcripts matching workDir,
-// newest first by transcript start time and then file modification time.
-func FindCodexSessionCandidates(searchPaths []string, workDir string) []CodexSessionCandidate {
+// FindCodexSessionFileByIDNoWindow resolves a Codex transcript by provider
+// session ID without a creation/wake window. Codex names rollouts
+// "rollout-<localtime>-<session-uuid>.jsonl", so the id keys the file by its
+// exact filename suffix. The scan walks date directories newest-first and
+// returns the first "rollout-*-<sessionID>.jsonl" whose session_meta cwd equals
+// workDir; only that matched transcript is opened, so cost scales with matches
+// rather than with total Codex history. A session id containing path separators
+// or ".." is rejected. Callers that have a creation/wake window should prefer
+// FindCodexSessionFileByID, which bounds the scan by date and refuses ambiguous
+// matches.
+func FindCodexSessionFileByIDNoWindow(searchPaths []string, workDir, sessionID string) string {
 	workDir = strings.TrimSpace(workDir)
-	if workDir == "" {
-		return nil
-	}
-	var candidates []CodexSessionCandidate
-	for _, root := range mergeCodexSearchPaths(searchPaths) {
-		candidates = append(candidates, findCodexSessionCandidatesIn(root, workDir, make(map[string]bool))...)
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		left := codexCandidateSortTime(candidates[i])
-		right := codexCandidateSortTime(candidates[j])
-		if left.Equal(right) {
-			return candidates[i].Path > candidates[j].Path
-		}
-		return left.After(right)
-	})
-	return candidates
-}
-
-// FindCodexSessionFileByIDFromCandidates resolves a Codex transcript by provider
-// session ID while still requiring the embedded cwd to match workDir.
-func FindCodexSessionFileByIDFromCandidates(searchPaths []string, workDir, sessionID string) string {
 	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" || strings.Contains(sessionID, "..") || strings.ContainsAny(sessionID, `/\`) {
+	if workDir == "" || sessionID == "" || strings.Contains(sessionID, "..") || strings.ContainsAny(sessionID, `/\`) {
 		return ""
 	}
-	for _, candidate := range FindCodexSessionCandidates(searchPaths, workDir) {
-		if candidate.SessionID == sessionID || strings.Contains(filepath.Base(candidate.Path), sessionID) {
-			return candidate.Path
+	suffix := "-" + sessionID + ".jsonl"
+	seen := make(map[string]bool)
+	for _, root := range mergeCodexSearchPaths(searchPaths) {
+		if path := findCodexRolloutBySuffixIn(root, workDir, suffix, seen); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
+// findCodexRolloutBySuffixIn walks a Codex sessions directory newest-first and
+// returns the first "rollout-*<suffix>" transcript whose session_meta cwd
+// matches workDir. It recurses into symlinked non-date roots (aimux account
+// roots) like findCodexSessionFileIn, guarding against symlink cycles via seen.
+func findCodexRolloutBySuffixIn(sessDir, workDir, suffix string, seen map[string]bool) string {
+	cleaned := filepath.Clean(sessDir)
+	if seen[cleaned] {
+		return ""
+	}
+	seen[cleaned] = true
+	yearDirs, extraRoots := splitCodexSessionRoots(cleaned)
+	sort.Sort(sort.Reverse(sort.StringSlice(yearDirs)))
+	for _, year := range yearDirs {
+		yearDir := filepath.Join(cleaned, year)
+		for _, month := range listDirsReverse(yearDir) {
+			monthDir := filepath.Join(yearDir, month)
+			for _, day := range listDirsReverse(monthDir) {
+				if path := findCodexRolloutBySuffixInDir(filepath.Join(monthDir, day), workDir, suffix); path != "" {
+					return path
+				}
+			}
+		}
+	}
+	for _, root := range extraRoots {
+		resolved, err := filepath.EvalSymlinks(filepath.Join(cleaned, root))
+		if err != nil {
+			continue
+		}
+		if path := findCodexRolloutBySuffixIn(resolved, workDir, suffix, seen); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
+// findCodexRolloutBySuffixInDir returns the first rollout in dir whose name
+// carries suffix and whose session_meta cwd matches workDir.
+func findCodexRolloutBySuffixInDir(dir, workDir, suffix string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if codexSessionCWD(path) == workDir {
+			return path
 		}
 	}
 	return ""
@@ -1081,29 +1124,103 @@ func FindCodexSessionFileByIDFromCandidates(searchPaths []string, workDir, sessi
 // FindCodexSessionFileInTimeWindow resolves a Codex transcript whose metadata
 // start time uniquely falls inside [start, end). A zero end leaves the window
 // open-ended. If the window matches zero or multiple transcripts, it returns
-// empty to preserve same-workdir ambiguity guards.
+// empty to preserve same-workdir ambiguity guards. The disk scan is bounded to
+// the date directories overlapping the window (padded one day for local-time
+// skew) so cost scales with the window, not with total Codex history, and
+// physical duplicates reachable through more than one merged root are counted
+// once.
 func FindCodexSessionFileInTimeWindow(searchPaths []string, workDir string, start, end time.Time) string {
 	if start.IsZero() {
 		return ""
 	}
-	var matches []CodexSessionCandidate
-	for _, candidate := range FindCodexSessionCandidates(searchPaths, workDir) {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return ""
+	}
+	firstDay := startOfLocalDay(start.In(time.Local)).AddDate(0, 0, -1)
+	lastDay := startOfLocalDay(start.In(time.Local)).AddDate(0, 0, 1)
+	if !end.IsZero() {
+		lastDay = startOfLocalDay(end.In(time.Local)).AddDate(0, 0, 1)
+	}
+	if lastDay.Before(firstDay) {
+		return ""
+	}
+	var candidates []CodexSessionCandidate
+	seen := make(map[string]bool)
+	for _, root := range mergeCodexSearchPaths(searchPaths) {
+		collectCodexCandidatesInDays(root, workDir, firstDay, lastDay, true, seen, &candidates)
+	}
+	windowStart := start.Add(-2 * time.Second)
+	match := ""
+	for _, candidate := range candidates {
 		candidateTime := codexCandidateSortTime(candidate)
-		if candidateTime.IsZero() {
-			continue
-		}
-		if candidateTime.Before(start.Add(-2 * time.Second)) {
+		if candidateTime.IsZero() || candidateTime.Before(windowStart) {
 			continue
 		}
 		if !end.IsZero() && !candidateTime.Before(end) {
 			continue
 		}
-		matches = append(matches, candidate)
+		if match != "" {
+			return ""
+		}
+		match = candidate.Path
 	}
-	if len(matches) != 1 {
-		return ""
+	return match
+}
+
+// collectCodexCandidatesInDays appends Codex candidates matching workDir whose
+// date directory falls within [firstDay, lastDay], newest day first and capped
+// at codexByIDDayDirCap so an oversized range cannot become an unbounded sweep.
+// Physical duplicates (symlink aliases across merged roots) are dropped via
+// seen. followExtraRoots permits one level of recursion into symlinked non-date
+// roots, mirroring collectCodexRolloutsByID.
+func collectCodexCandidatesInDays(root, workDir string, firstDay, lastDay time.Time, followExtraRoots bool, seen map[string]bool, out *[]CodexSessionCandidate) {
+	scanned := 0
+	for day := lastDay; !day.Before(firstDay) && scanned < codexByIDDayDirCap; day = day.AddDate(0, 0, -1) {
+		scanned++
+		dayDir := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
+		appendCodexCandidatesFromDir(dayDir, workDir, seen, out)
 	}
-	return matches[0].Path
+	if !followExtraRoots {
+		return
+	}
+	_, extraRoots := splitCodexSessionRoots(root)
+	for _, name := range extraRoots {
+		resolved, err := filepath.EvalSymlinks(filepath.Join(root, name))
+		if err != nil {
+			continue
+		}
+		collectCodexCandidatesInDays(resolved, workDir, firstDay, lastDay, false, seen, out)
+	}
+}
+
+// appendCodexCandidatesFromDir appends every Codex transcript in dir whose
+// session_meta cwd matches workDir, deduplicated by physical file identity via
+// seen so a rollout reachable through more than one root is counted once.
+func appendCodexCandidatesFromDir(dir, workDir string, seen map[string]bool, out *[]CodexSessionCandidate) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		key := path
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			key = resolved
+		}
+		if seen[key] {
+			continue
+		}
+		candidate, ok := codexSessionCandidate(path)
+		if !ok || candidate.WorkDir != workDir {
+			continue
+		}
+		seen[key] = true
+		*out = append(*out, candidate)
+	}
 }
 
 func codexCandidateSortTime(candidate CodexSessionCandidate) time.Time {
@@ -1113,19 +1230,15 @@ func codexCandidateSortTime(candidate CodexSessionCandidate) time.Time {
 	return candidate.ModTime
 }
 
-// findCodexSessionFileIn searches a Codex sessions directory for the most
-// recent session matching workDir. Scans date directories in reverse
-// chronological order for efficiency. Also recurses into symlinked
-// subdirectories that aren't date components (e.g., aimux session roots).
-func findCodexSessionFileIn(sessDir, workDir string) string {
-	entries, err := os.ReadDir(sessDir)
+// splitCodexSessionRoots reads a Codex sessions directory and separates
+// four-digit year directories (the YYYY/MM/DD date tree) from symlinked
+// non-date roots (aimux-managed account roots). Entries that are neither a
+// directory nor a symlink are ignored, and a read error yields empty slices.
+func splitCodexSessionRoots(dir string) (yearDirs, extraRoots []string) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return ""
+		return nil, nil
 	}
-
-	// Separate date-tree roots (YYYY dirs) from symlinked session roots.
-	var yearDirs []string
-	var extraRoots []string
 	for _, e := range entries {
 		if !e.IsDir() && e.Type()&os.ModeSymlink == 0 {
 			continue
@@ -1134,10 +1247,18 @@ func findCodexSessionFileIn(sessDir, workDir string) string {
 		if len(name) == 4 && name >= "2000" && name <= "2099" {
 			yearDirs = append(yearDirs, name)
 		} else if e.Type()&os.ModeSymlink != 0 {
-			// Symlinked directory — treat as an additional session root.
 			extraRoots = append(extraRoots, name)
 		}
 	}
+	return yearDirs, extraRoots
+}
+
+// findCodexSessionFileIn searches a Codex sessions directory for the most
+// recent session matching workDir. Scans date directories in reverse
+// chronological order for efficiency. Also recurses into symlinked
+// subdirectories that aren't date components (e.g., aimux session roots).
+func findCodexSessionFileIn(sessDir, workDir string) string {
+	yearDirs, extraRoots := splitCodexSessionRoots(sessDir)
 
 	// Scan year dirs in reverse chronological order.
 	sort.Sort(sort.Reverse(sort.StringSlice(yearDirs)))
@@ -1147,9 +1268,7 @@ func findCodexSessionFileIn(sessDir, workDir string) string {
 
 	// Scan symlinked session roots (aimux-managed accounts).
 	for _, root := range extraRoots {
-		rootDir := filepath.Join(sessDir, root)
-		// Resolve symlink to get the actual directory.
-		resolved, err := filepath.EvalSymlinks(rootDir)
+		resolved, err := filepath.EvalSymlinks(filepath.Join(sessDir, root))
 		if err != nil {
 			continue
 		}
@@ -1158,75 +1277,6 @@ func findCodexSessionFileIn(sessDir, workDir string) string {
 		}
 	}
 	return ""
-}
-
-func findCodexSessionCandidatesIn(sessDir, workDir string, seen map[string]bool) []CodexSessionCandidate {
-	if sessDir == "" {
-		return nil
-	}
-	cleaned := filepath.Clean(sessDir)
-	if seen[cleaned] {
-		return nil
-	}
-	seen[cleaned] = true
-	entries, err := os.ReadDir(cleaned)
-	if err != nil {
-		return nil
-	}
-
-	var candidates []CodexSessionCandidate
-	var yearDirs []string
-	var extraRoots []string
-	for _, e := range entries {
-		if !e.IsDir() && e.Type()&os.ModeSymlink == 0 {
-			continue
-		}
-		name := e.Name()
-		if len(name) == 4 && name >= "2000" && name <= "2099" {
-			yearDirs = append(yearDirs, name)
-		} else if e.Type()&os.ModeSymlink != 0 {
-			extraRoots = append(extraRoots, name)
-		}
-	}
-
-	for _, year := range yearDirs {
-		yearDir := filepath.Join(cleaned, year)
-		for _, month := range listDirsReverse(yearDir) {
-			monthDir := filepath.Join(yearDir, month)
-			for _, day := range listDirsReverse(monthDir) {
-				candidates = append(candidates, findCodexSessionCandidatesInDir(filepath.Join(monthDir, day), workDir)...)
-			}
-		}
-	}
-	for _, root := range extraRoots {
-		rootDir := filepath.Join(cleaned, root)
-		resolved, err := filepath.EvalSymlinks(rootDir)
-		if err != nil {
-			continue
-		}
-		candidates = append(candidates, findCodexSessionCandidatesIn(resolved, workDir, seen)...)
-	}
-	return candidates
-}
-
-func findCodexSessionCandidatesInDir(dir, workDir string) []CodexSessionCandidate {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var candidates []CodexSessionCandidate
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		candidate, ok := codexSessionCandidate(path)
-		if !ok || candidate.WorkDir != workDir {
-			continue
-		}
-		candidates = append(candidates, candidate)
-	}
-	return candidates
 }
 
 // scanYearDirs scans YYYY/MM/DD date tree for matching Codex sessions.
@@ -1315,7 +1365,6 @@ func codexSessionCandidate(path string) (CodexSessionCandidate, bool) {
 		Timestamp string `json:"timestamp"`
 		Payload   struct {
 			CWD       string `json:"cwd"`
-			ID        string `json:"id"`
 			Timestamp string `json:"timestamp"`
 		} `json:"payload"`
 	}
@@ -1336,7 +1385,6 @@ func codexSessionCandidate(path string) (CodexSessionCandidate, bool) {
 	}
 	return CodexSessionCandidate{
 		Path:      path,
-		SessionID: strings.TrimSpace(meta.Payload.ID),
 		WorkDir:   meta.Payload.CWD,
 		StartedAt: startedAt,
 		ModTime:   modTime,

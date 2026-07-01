@@ -179,6 +179,97 @@ func TestSessionHandleWritesCodexSidecarByID(t *testing.T) {
 	}
 }
 
+// TestSessionHandleCodexSidecarIgnoresOutOfWindowDuplicate is the 1:1 attribution
+// guard for codex: KeyedTranscriptPath (the sidecar path) must resolve the codex
+// rollout by the window-bounded, ambiguity-refusing lookup (FindCodexSessionFileByID),
+// NOT by the newest-first no-window resolver that history rendering uses. When a
+// copied or stale duplicate rollout carries the same session uuid + workdir but
+// sits outside the session's creation/wake window, the newest-wins resolver would
+// stamp this session's id onto that newer duplicate — a silent misattribution that
+// breaks writeTranscriptSessionMeta's documented 1:1 mapping. The sidecar must land
+// on the in-window rollout and leave the out-of-window duplicate untouched.
+func TestSessionHandleCodexSidecarIgnoresOutOfWindowDuplicate(t *testing.T) {
+	transcriptmeta.SetEnabled(true)
+	t.Cleanup(func() { transcriptmeta.SetEnabled(false) })
+
+	const (
+		workDir = "/work/codex-dup"
+		uuid    = "019e9966-cccc-7000-8000-26a2dd7e15b3" // synthetic; never collides with a real rollout
+	)
+	root := t.TempDir()
+
+	// writeRollout drops a codex rollout named "rollout-<localtime>-<uuid>.jsonl"
+	// under YYYY/MM/DD for ts, with session_meta cwd == workDir so both resolvers
+	// would consider it. Returns the rollout path.
+	writeRollout := func(ts time.Time) string {
+		t.Helper()
+		local := ts.In(time.Local)
+		dir := filepath.Join(root, local.Format("2006"), local.Format("01"), local.Format("02"))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rollout := filepath.Join(dir, "rollout-"+local.Format("2006-01-02T15-04-05")+"-"+uuid+".jsonl")
+		meta := fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"id":%q,"timestamp":%q,"cwd":%q,"originator":"codex-tui","cli_version":"0.121.0","source":"cli","model_provider":"openai"}}`+"\n",
+			ts.UTC().Format(time.RFC3339Nano), uuid, ts.UTC().Format(time.RFC3339Nano), workDir)
+		if err := os.WriteFile(rollout, []byte(meta), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return rollout
+	}
+
+	now := time.Now()
+	// The legit rollout is created ~now, inside the started session's
+	// [CreatedAt-1day, wake+1day] window (a fresh test session's CreatedAt is now).
+	inWindow := writeRollout(now)
+	// A copied/stale duplicate with the SAME uuid + workdir, dated well past the
+	// window and NEWER than the legit rollout, so the newest-first no-window
+	// resolver would prefer it. The window-bounded lookup must never scan its day.
+	outOfWindow := writeRollout(now.AddDate(0, 0, 5))
+
+	handle, _, _, manager := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileCodexTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "codex",
+		WorkDir:  workDir,
+		Provider: "codex",
+	})
+	handle.adapter.SearchPaths = []string{root}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := handle.currentSessionID()
+	// Stamp the codex session_key (production stamps it from the SessionStart hook).
+	if err := manager.PersistSessionKey(id, uuid); err != nil {
+		t.Fatalf("PersistSessionKey: %v", err)
+	}
+
+	// KeyedTranscriptPath must resolve to the in-window rollout, not the newer
+	// out-of-window duplicate the newest-wins resolver would return.
+	got, err := manager.KeyedTranscriptPath(id, []string{root})
+	if err != nil {
+		t.Fatalf("KeyedTranscriptPath: %v", err)
+	}
+	if got != inWindow {
+		t.Fatalf("KeyedTranscriptPath = %q, want in-window rollout %q (out-of-window duplicate %q must be ignored)", got, inWindow, outOfWindow)
+	}
+
+	handle.writeTranscriptSessionMeta()
+
+	// The sidecar lands on the in-window rollout and carries the session bead id.
+	sidecar, err := os.ReadFile(inWindow + transcriptmeta.Suffix)
+	if err != nil {
+		t.Fatalf("read in-window sidecar: %v", err)
+	}
+	if strings.TrimSpace(string(sidecar)) != id {
+		t.Fatalf("in-window sidecar = %q, want session bead id %q", strings.TrimSpace(string(sidecar)), id)
+	}
+	// The out-of-window duplicate must be left untouched — no misattributed sidecar.
+	if _, err := os.Stat(outOfWindow + transcriptmeta.Suffix); !os.IsNotExist(err) {
+		t.Fatalf("out-of-window duplicate got a sidecar (misattribution); stat err = %v", err)
+	}
+}
+
 // TestSessionHandleSkipsSidecarForWorkdirOnlyProvider is the HIGH-finding guard:
 // gemini (like opencode/mimocode) has no 1:1 by-id transcript lookup, so even
 // with a session key present KeyedTranscriptPath returns "" and no sidecar is

@@ -41,7 +41,7 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 	}
 	switch sessionlog.ProviderFamily(provider) {
 	case "codex":
-		return sessionlog.FindCodexSessionFileByIDFromCandidates(searchPaths, workDir, gcSessionID)
+		return sessionlog.FindCodexSessionFileByIDNoWindow(searchPaths, workDir, gcSessionID)
 	case "kimi":
 		return sessionlog.FindKimiSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "pi":

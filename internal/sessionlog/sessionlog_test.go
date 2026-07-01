@@ -1710,7 +1710,7 @@ func TestFindCodexSessionFileUsesObservedRoots(t *testing.T) {
 	}
 }
 
-func TestFindCodexSessionFileByIDUsesSessionMetaID(t *testing.T) {
+func TestFindCodexSessionFileByIDNoWindowMatchesRolloutSuffix(t *testing.T) {
 	sessDir := t.TempDir()
 	workDir := "/data/projects/myproject"
 	dayDir := filepath.Join(sessDir, "2026", "05", "19")
@@ -1719,19 +1719,53 @@ func TestFindCodexSessionFileByIDUsesSessionMetaID(t *testing.T) {
 	}
 
 	targetID := "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
-	targetFile := filepath.Join(dayDir, "rollout-target.jsonl")
-	targetMeta := fmt.Sprintf(`{"timestamp":"2026-05-19T04:46:07.848Z","type":"session_meta","payload":{"id":%q,"timestamp":"2026-05-19T04:46:07.761Z","cwd":%q}}`, targetID, workDir)
+	targetFile := filepath.Join(dayDir, "rollout-2026-05-19T04-46-07-"+targetID+".jsonl")
+	targetMeta := fmt.Sprintf(`{"timestamp":"2026-05-19T04:46:07.848Z","type":"session_meta","payload":{"id":%q,"cwd":%q}}`, targetID, workDir)
 	if err := os.WriteFile(targetFile, []byte(targetMeta+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	otherFile := filepath.Join(dayDir, "rollout-other.jsonl")
-	otherMeta := fmt.Sprintf(`{"timestamp":"2026-05-19T04:47:07.848Z","type":"session_meta","payload":{"id":"019e3e8e-ffff-7000-a1ef-8b9e882bea2f","cwd":%q}}`, workDir)
+	otherID := "019e3e8e-ffff-7000-a1ef-8b9e882bea2f"
+	otherFile := filepath.Join(dayDir, "rollout-2026-05-19T04-47-07-"+otherID+".jsonl")
+	otherMeta := fmt.Sprintf(`{"timestamp":"2026-05-19T04:47:07.848Z","type":"session_meta","payload":{"id":%q,"cwd":%q}}`, otherID, workDir)
 	if err := os.WriteFile(otherFile, []byte(otherMeta+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if got := FindCodexSessionFileByIDFromCandidates([]string{sessDir}, workDir, targetID); got != targetFile {
-		t.Fatalf("FindCodexSessionFileByIDFromCandidates() = %q, want %q", got, targetFile)
+	if got := FindCodexSessionFileByIDNoWindow([]string{sessDir}, workDir, targetID); got != targetFile {
+		t.Fatalf("FindCodexSessionFileByIDNoWindow() = %q, want %q", got, targetFile)
+	}
+	// A workDir mismatch must refuse attribution even when the id suffix matches.
+	if got := FindCodexSessionFileByIDNoWindow([]string{sessDir}, "/data/projects/other", targetID); got != "" {
+		t.Fatalf("FindCodexSessionFileByIDNoWindow(other workDir) = %q, want empty", got)
+	}
+}
+
+func TestFindCodexSessionFileByIDNoWindowRejectsSubstringKey(t *testing.T) {
+	sessDir := t.TempDir()
+	workDir := "/data/projects/myproject"
+	dayDir := filepath.Join(sessDir, "2026", "05", "19")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fullID := "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
+	// The id appears as a substring in these filenames but never as the exact
+	// "-<id>.jsonl" suffix, so the keyed lookup must refuse both.
+	prefixFile := filepath.Join(dayDir, "rollout-2026-05-19T04-46-07-"+fullID+"-resumed.jsonl")
+	meta := fmt.Sprintf(`{"timestamp":"2026-05-19T04:46:07.848Z","type":"session_meta","payload":{"cwd":%q}}`, workDir)
+	if err := os.WriteFile(prefixFile, []byte(meta+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A truncated key is a substring of the real filename suffix; the old
+	// strings.Contains matcher would have accepted it, the suffix matcher must not.
+	truncated := fullID[:len(fullID)-4]
+	if got := FindCodexSessionFileByIDNoWindow([]string{sessDir}, workDir, truncated); got != "" {
+		t.Fatalf("FindCodexSessionFileByIDNoWindow(truncated) = %q, want empty (no substring match)", got)
+	}
+	// The full id is present but only as a non-suffix substring; still no match.
+	if got := FindCodexSessionFileByIDNoWindow([]string{sessDir}, workDir, fullID); got != "" {
+		t.Fatalf("FindCodexSessionFileByIDNoWindow(non-suffix substring) = %q, want empty", got)
 	}
 }
 
@@ -1754,6 +1788,34 @@ func TestFindCodexSessionFileInTimeWindowRequiresUniqueMatch(t *testing.T) {
 
 	if got := FindCodexSessionFileInTimeWindow([]string{sessDir}, workDir, start, start.Add(time.Minute)); got != "" {
 		t.Fatalf("FindCodexSessionFileInTimeWindow() = %q, want empty for non-unique window", got)
+	}
+}
+
+func TestFindCodexSessionFileInTimeWindowDedupsSymlinkAliasRoots(t *testing.T) {
+	base := t.TempDir()
+	workDir := "/data/projects/myproject"
+	dayDir := filepath.Join(base, "2026", "05", "19")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Date(2026, 5, 19, 4, 46, 7, 0, time.UTC)
+	rollout := filepath.Join(dayDir, "rollout-2026-05-19T04-46-07-019e3e8e-3591-7532-a1ef-8b9e882bea2f.jsonl")
+	meta := fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"cwd":%q}}`, start.Format(time.RFC3339), workDir)
+	if err := os.WriteFile(rollout, []byte(meta+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A symlinked "account root" that resolves back into base, so the single
+	// physical rollout is reachable via both the direct date tree and the
+	// symlinked root. Without physical-identity dedup it is counted twice and
+	// the uniqueness gate wrongly collapses the window to empty.
+	if err := os.Symlink(base, filepath.Join(base, "account-alias")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	if got := FindCodexSessionFileInTimeWindow([]string{base}, workDir, start, time.Time{}); got != rollout {
+		t.Fatalf("FindCodexSessionFileInTimeWindow() = %q, want %q (symlink alias must not double-count)", got, rollout)
 	}
 }
 
