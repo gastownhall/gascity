@@ -65,6 +65,11 @@ type Bead struct {
 	Labels       []string          `json:"labels,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Dependencies []Dep             `json:"dependencies,omitempty"`
+	// DependencyCount carries bd's count of active blocking dependencies when
+	// available from list-style output. It is not a count of all relationship
+	// edges; non-blocking links such as tracks/parent-child may still appear in
+	// Dependencies without making this value non-zero.
+	DependencyCount int `json:"dependency_count,omitempty"`
 	// Ephemeral routes the bead to the wisps tier on Create. Wisps live in
 	// a separate Dolt table, are not git-synced, and are eligible for TTL
 	// garbage collection. Reads must opt in via ListQuery.TierMode (or the

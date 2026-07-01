@@ -1841,7 +1841,7 @@ func TestBdStoreListDecodesIsBlockedProjection(t *testing.T) {
 	}{
 		`bd list --json --include-infra --include-gates --limit 0`: {
 			out: []byte(`[
-				{"id":"bd-blocked","title":"blocked","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","is_blocked":1},
+				{"id":"bd-blocked","title":"blocked","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","is_blocked":1,"dependency_count":2},
 				{"id":"bd-ready","title":"ready","status":"open","issue_type":"task","created_at":"2025-01-15T10:31:00Z","is_blocked":false}
 			]`),
 		},
@@ -1856,6 +1856,9 @@ func TestBdStoreListDecodesIsBlockedProjection(t *testing.T) {
 	}
 	if got[0].IsBlocked == nil || !*got[0].IsBlocked {
 		t.Fatalf("got[0].IsBlocked = %v, want true", got[0].IsBlocked)
+	}
+	if got[0].DependencyCount != 2 {
+		t.Fatalf("got[0].DependencyCount = %d, want 2", got[0].DependencyCount)
 	}
 	if got[1].IsBlocked == nil || *got[1].IsBlocked {
 		t.Fatalf("got[1].IsBlocked = %v, want false", got[1].IsBlocked)

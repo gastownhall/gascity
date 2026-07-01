@@ -599,10 +599,13 @@ type bdIssue struct {
 	Labels       []string     `json:"labels"`
 	Metadata     StringMap    `json:"metadata,omitempty"`
 	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
-	Ephemeral    bool         `json:"ephemeral,omitempty"`
-	NoHistory    bool         `json:"no_history,omitempty"`
-	DeferUntil   *time.Time   `json:"defer_until,omitempty"`
-	IsBlocked    optionalBool `json:"is_blocked,omitempty"`
+	// dependency_count is bd's active-blocker count, not simply
+	// len(dependencies). It excludes non-blocking relationships such as tracks.
+	DependencyCount int          `json:"dependency_count,omitempty"`
+	Ephemeral       bool         `json:"ephemeral,omitempty"`
+	NoHistory       bool         `json:"no_history,omitempty"`
+	DeferUntil      *time.Time   `json:"defer_until,omitempty"`
+	IsBlocked       optionalBool `json:"is_blocked,omitempty"`
 }
 
 type bdIssueDep struct {
@@ -735,26 +738,27 @@ func (b *bdIssue) toBead() Bead {
 		}
 	}
 	return Bead{
-		ID:           b.ID,
-		Title:        b.Title,
-		Status:       mapBdStatus(b.Status),
-		Type:         b.IssueType,
-		Priority:     cloneIntPtr(b.Priority),
-		CreatedAt:    b.CreatedAt.Truncate(time.Second),
-		UpdatedAt:    b.UpdatedAt.Truncate(time.Second),
-		Assignee:     b.Assignee,
-		From:         from,
-		ParentID:     parentID,
-		Ref:          b.Ref,
-		Needs:        b.Needs,
-		Description:  b.Description,
-		Labels:       b.Labels,
-		Metadata:     b.Metadata,
-		Dependencies: deps,
-		Ephemeral:    b.Ephemeral,
-		NoHistory:    b.NoHistory,
-		DeferUntil:   cloneTimePtr(b.DeferUntil),
-		IsBlocked:    b.IsBlocked.ptr(),
+		ID:              b.ID,
+		Title:           b.Title,
+		Status:          mapBdStatus(b.Status),
+		Type:            b.IssueType,
+		Priority:        cloneIntPtr(b.Priority),
+		CreatedAt:       b.CreatedAt.Truncate(time.Second),
+		UpdatedAt:       b.UpdatedAt.Truncate(time.Second),
+		Assignee:        b.Assignee,
+		From:            from,
+		ParentID:        parentID,
+		Ref:             b.Ref,
+		Needs:           b.Needs,
+		Description:     b.Description,
+		Labels:          b.Labels,
+		Metadata:        b.Metadata,
+		Dependencies:    deps,
+		DependencyCount: b.DependencyCount,
+		Ephemeral:       b.Ephemeral,
+		NoHistory:       b.NoHistory,
+		DeferUntil:      cloneTimePtr(b.DeferUntil),
+		IsBlocked:       b.IsBlocked.ptr(),
 	}
 }
 
