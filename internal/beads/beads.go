@@ -55,16 +55,24 @@ type Bead struct {
 	Priority  *int      `json:"priority,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is zero for legacy beads; UpdatedBefore falls back to CreatedAt.
-	UpdatedAt    time.Time         `json:"updated_at,omitempty,omitzero"`
-	Assignee     string            `json:"assignee,omitempty"`
-	From         string            `json:"from,omitempty"`
-	ParentID     string            `json:"parent,omitempty"`      // step → molecule; matches bd wire format
-	Ref          string            `json:"ref,omitempty"`         // formula step ID or formula name
-	Needs        []string          `json:"needs,omitempty"`       // dependency step refs
-	Description  string            `json:"description,omitempty"` // step instructions
-	Labels       []string          `json:"labels,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
-	Dependencies []Dep             `json:"dependencies,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty,omitzero"`
+	Assignee    string    `json:"assignee,omitempty"`
+	From        string    `json:"from,omitempty"`
+	ParentID    string    `json:"parent,omitempty"`      // step → molecule; matches bd wire format
+	Ref         string    `json:"ref,omitempty"`         // formula step ID or formula name
+	Needs       []string  `json:"needs,omitempty"`       // dependency step refs
+	Description string    `json:"description,omitempty"` // step instructions
+	Labels      []string  `json:"labels,omitempty"`
+	// Metadata uses StringMap (not map[string]string) so decode tolerates the
+	// non-string JSON values the external bd CLI emits — `--set-metadata
+	// key=true` is type-inferred to a JSON boolean, and a strict decode of a
+	// single such bead used to poison the whole `gc hook --claim` work_query
+	// batch, blocking every worker in the rig from claiming. StringMap coerces
+	// bool/number values to their string form on decode and its underlying type
+	// is map[string]string, so every read/write call site is unaffected and the
+	// marshaled wire form is unchanged (still string-valued).
+	Metadata     StringMap `json:"metadata,omitempty"`
+	Dependencies []Dep     `json:"dependencies,omitempty"`
 	// Ephemeral routes the bead to the wisps tier on Create. Wisps live in
 	// a separate Dolt table, are not git-synced, and are eligible for TTL
 	// garbage collection. Reads must opt in via ListQuery.TierMode (or the
