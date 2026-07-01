@@ -98,12 +98,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// working pool path is byte-for-byte unchanged. See startupDeliveryText.
 	if startupText := startupDeliveryText(cfg); startupText != "" && info.PaneID != "" {
 		// A freshly-spawned agent boots through a shell→TUI handoff before its
-		// input prompt is listening. The paste buffers and survives that window,
-		// but the submit CR does not: delivered too early it is swallowed, leaving
-		// the text typed-but-unsubmitted in the box — and the agent then idles
-		// forever instead of running its first turn. Wait for herdr to report the
-		// agent idle (its prompt rendered) before delivering, mirroring how tmux's
-		// doStartSession waits for readiness before its Step-6 startup nudge.
+		// input prompt is listening; a paste or submit delivered in that window is
+		// silently swallowed, leaving the agent idle forever instead of running its
+		// first turn. Wait for herdr to report the agent idle (its prompt rendered)
+		// before delivering, mirroring how tmux's doStartSession waits for readiness
+		// before its Step-6 startup nudge. Idle is necessary but not sufficient —
+		// input-readiness lags it — so deliverNudge additionally verifies the paste
+		// visibly lands (re-pasting until it does) rather than trusting `pane run`,
+		// which reports success even on a swallowed paste.
 		// Bounded and best-effort: on a boot that never idles we deliver anyway (no
 		// worse than the prior unconditional send), and the reconciler tolerates a
 		// slow Start (pendingCreateNeverStartedTimeout = 10m).

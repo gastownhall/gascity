@@ -192,40 +192,53 @@ func (c *client) paneRun(ctx context.Context, paneID, command string) error {
 	return err
 }
 
-// deliverNudge types a nudge into the agent's input and submits it, then
-// confirms the submit actually landed. The text is injected with `pane run`
-// (paste semantics: multi-line content is preserved and the paste's own trailing
-// newline is swallowed by the TUI, so the text never submits on its own).
+// deliverNudge types a nudge into the agent's input and submits it, closing the
+// loop on *both* the paste and the submit before it trusts either landed.
 //
-// Submission is the hard part. Two facts, learned empirically against herdr 0.7.1
-// + the Claude Code TUI:
+// Injection is `pane run` (paste semantics: multi-line content is preserved and
+// the paste's own trailing newline is swallowed by the TUI, so the text never
+// submits on its own). Submission is a real Enter key event (`pane send-keys`,
+// which commits where a pasted `\r` does not).
 //
-//   - The TUI must be at a ready input prompt: a submit delivered mid-boot is
-//     swallowed. Callers deliver to a ready agent — Start waits for idle first
-//     (see startupNudgeIdleTimeout); the Nudge path targets running agents.
-//   - A submit that races the paste-commit is swallowed, stranding the prompt
-//     typed-but-unsubmitted — the agent then idles forever with work it never
-//     began (the missed startup-nudge stall).
+// Both steps are fragile against a freshly-spawned pane, learned empirically
+// against herdr 0.7.1 + the Claude Code TUI. Start waits for the agent to report
+// idle before delivering (see startupNudgeIdleTimeout), but idle (prompt process
+// up) precedes input-readiness (the shell→TUI handoff is still settling): a paste
+// or submit delivered in that window is silently swallowed. Critically, `pane run`
+// reports success even when the paste never lands (empty output → nil), so a
+// swallowed paste leaves an *empty* box that no Enter can ever submit — the missed
+// startup-nudge stall. (Observed directly: the box shows nothing at all, so this
+// is not "typed-but-unsubmitted" — there is nothing typed.)
 //
-// The prior open-loop form (settle → CR → settle → CR, via `agent send "\r"`) was
-// not enough under concurrent restart-time boot load: both CRs raced the paste
-// and the nudge stranded, and the swallowed result hid it. This is now
-// closed-loop: press Enter as a real key event (`pane send-keys`, which submits
-// reliably where a pasted `\r` did not), then verify via `agent get` that the
-// agent actually left its idle prompt. Retry the Enter until it does, bounded so
-// a nudge that legitimately produces no work cannot spin. A redundant Enter on an
-// already-submitted/empty prompt is a harmless no-op. Returns an error if the
-// submit never confirms, so the caller can surface it instead of silently
-// leaving a stranded agent.
+// So each attempt snapshots the visible screen, pastes, and re-reads: a paste that
+// landed changes the screen (its text, or a "[Pasted text]" pill); a swallowed one
+// leaves it identical, so we re-paste on the next attempt. Only once the paste is
+// visibly in the box do we spend an Enter, then confirm via `agent get` that the
+// agent left idle (submit landed). Verifying the paste landed doubles as the
+// input-readiness gate the bare idle check lacked — we never Enter into a dead box.
+// Bounded so a nudge that legitimately produces no work cannot spin; returns an
+// error if delivery never confirms, so the caller can surface a stranded agent
+// instead of hiding it.
 //
-// Contract: inject + submit by pane id, confirm by agent name.
+// Contract: inject + submit by pane id, observe (read/confirm) by agent name.
 func (c *client) deliverNudge(ctx context.Context, paneID, name, text string) error {
-	if err := c.paneRun(ctx, paneID, text); err != nil {
-		return err
-	}
-	time.Sleep(submitSettleDelay) // let the paste commit before the first submit
 	var lastErr error
 	for attempt := 0; attempt < submitMaxAttempts; attempt++ {
+		before, rerr := c.read(ctx, name, "visible", 0)
+		if rerr != nil {
+			lastErr = rerr // transient read failure; retry within the bound
+		}
+		if err := c.paneRun(ctx, paneID, text); err != nil {
+			return err
+		}
+		time.Sleep(submitSettleDelay) // let the paste commit before we check it + submit
+		after, rerr := c.read(ctx, name, "visible", 0)
+		if rerr != nil {
+			lastErr = rerr // transient read failure; retry within the bound
+		}
+		if strings.TrimSpace(before) == strings.TrimSpace(after) {
+			continue // paste swallowed — pane not input-ready yet; re-paste next attempt
+		}
 		if err := c.sendKeys(ctx, paneID, "Enter"); err != nil {
 			lastErr = err // transient send failure; verify + retry within the bound
 		}
@@ -241,9 +254,9 @@ func (c *client) deliverNudge(ctx context.Context, paneID, name, text string) er
 		}
 	}
 	if lastErr != nil {
-		return fmt.Errorf("herdr deliverNudge: %q still idle after %d submit attempts: %w", name, submitMaxAttempts, lastErr)
+		return fmt.Errorf("herdr deliverNudge: %q not confirmed after %d attempts: %w", name, submitMaxAttempts, lastErr)
 	}
-	return fmt.Errorf("herdr deliverNudge: %q still idle after %d submit attempts (nudge typed-but-unsubmitted?)", name, submitMaxAttempts)
+	return fmt.Errorf("herdr deliverNudge: %q still idle after %d attempts (paste never landed or submit unconfirmed)", name, submitMaxAttempts)
 }
 
 // submitSettleDelay is how long deliverNudge waits for a `pane run` paste to
@@ -252,9 +265,10 @@ func (c *client) deliverNudge(ctx context.Context, paneID, name, text string) er
 // under the concurrent boot load of a town-wide restart.
 const submitSettleDelay = 1 * time.Second
 
-// submitMaxAttempts bounds the closed-loop submit: ~submitMaxAttempts·settle is
-// the worst-case latency before deliverNudge gives up and returns an error. Sized
-// to cover a slow paste-commit under restart-time load without spinning on a
+// submitMaxAttempts bounds the closed-loop delivery: with two settle waits per
+// attempt (post-paste landed-check + post-submit confirm), ~2·submitMaxAttempts·settle
+// is the worst-case latency before deliverNudge gives up and returns an error. Sized
+// to cover a slow shell→TUI handoff under restart-time load without spinning on a
 // nudge that legitimately leaves the agent idle.
 const submitMaxAttempts = 5
 
