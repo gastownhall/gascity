@@ -1124,13 +1124,23 @@ func resolvePreparedTaskWorkDir(
 // retargetPreStartWorkDir rewrites PreStart command strings rendered against
 // oldWorkDir so they instead reference newWorkDir. A no-op when the task
 // work_dir override left WorkDir unchanged, which is the common case.
+//
+// The generated materialize-skills and project-mcp PreStart commands embed the
+// workdir as a shell-quoted token (see appendMaterializeSkillsPreStart and
+// appendProjectMCPPreStart). Swap the shell-quoted old token for the
+// shell-quoted new token so the rewritten `sh -c` command keeps valid POSIX
+// quoting even when the resolved workdir contains spaces or shell
+// metacharacters. Splicing the raw path in would break argument boundaries or
+// open a command-substitution surface.
 func retargetPreStartWorkDir(preStart []string, oldWorkDir, newWorkDir string) []string {
 	if oldWorkDir == "" || newWorkDir == "" || oldWorkDir == newWorkDir || len(preStart) == 0 {
 		return preStart
 	}
+	oldToken := shellquote.Join([]string{oldWorkDir})
+	newToken := shellquote.Join([]string{newWorkDir})
 	retargeted := make([]string, len(preStart))
 	for i, cmd := range preStart {
-		retargeted[i] = strings.ReplaceAll(cmd, oldWorkDir, newWorkDir)
+		retargeted[i] = strings.ReplaceAll(cmd, oldToken, newToken)
 	}
 	return retargeted
 }

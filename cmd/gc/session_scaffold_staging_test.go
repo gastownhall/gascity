@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 func TestPrepareStartCandidateStagesScaffoldInResolvedTaskWorkDirWhenCWDIsSharedWorktree(t *testing.T) {
@@ -143,4 +144,95 @@ func writeScaffoldFixture(t *testing.T, path, content string) {
 
 func intPtrScaffoldRegression(n int) *int {
 	return &n
+}
+
+// TestRetargetPreStartWorkDirPreservesShellQuoting proves that retargeting a
+// generated materialize-skills / project-mcp PreStart command onto a resolved
+// task work_dir keeps the `--workdir` argument shell-safe. The generators emit
+// the workdir as a shell-quoted token; a resolved work_dir that contains a
+// space (macOS "/Users/First Last/...") or a shell metacharacter must not be
+// spliced in raw, or the rendered `sh -c` command breaks argument boundaries or
+// opens a command-substitution surface.
+func TestRetargetPreStartWorkDirPreservesShellQuoting(t *testing.T) {
+	t.Parallel()
+
+	const (
+		agentName  = "gascity/builder"
+		identity   = "gascity/gc.builder"
+		oldWorkDir = "/data/worktrees/gascity/builder/ga-clean"
+	)
+
+	generators := []struct {
+		label    string
+		preStart func(workDir string) []string
+	}{
+		{
+			label: "materialize-skills",
+			preStart: func(workDir string) []string {
+				return appendMaterializeSkillsPreStart(nil, agentName, workDir)
+			},
+		},
+		{
+			label: "project-mcp",
+			preStart: func(workDir string) []string {
+				return appendProjectMCPPreStart(nil, agentName, identity, workDir)
+			},
+		},
+	}
+
+	cases := []struct {
+		name       string
+		newWorkDir string
+	}{
+		{name: "space", newWorkDir: "/Users/John Doe/city/worktrees/gascity/builder/ga-target"},
+		{name: "command_substitution_with_space", newWorkDir: "/opt/proj $(touch pwned)/builder"},
+		{name: "command_substitution_no_space", newWorkDir: "/opt/$(id)/builder"},
+	}
+
+	for _, g := range generators {
+		for _, tc := range cases {
+			t.Run(g.label+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				retargeted := retargetPreStartWorkDir(g.preStart(oldWorkDir), oldWorkDir, tc.newWorkDir)
+				if len(retargeted) != 1 {
+					t.Fatalf("retarget produced %d entries, want 1: %v", len(retargeted), retargeted)
+				}
+				cmd := retargeted[0]
+
+				// Structural: the new value must be embedded shell-quoted, exactly as
+				// a from-scratch generation would emit it. This catches metacharacter
+				// injection even when no whitespace forces a re-split.
+				wantToken := "--workdir " + shellquote.Join([]string{tc.newWorkDir})
+				if !strings.Contains(cmd, wantToken) {
+					t.Errorf("retargeted command missing shell-quoted workdir token %q:\n%s", wantToken, cmd)
+				}
+
+				// Behavioral: parsing the command with the same quoting rules the
+				// generator used must recover the intended workdir as a single arg.
+				if got := workdirArgFromCommand(t, cmd); got != tc.newWorkDir {
+					t.Errorf("parsed --workdir = %q, want %q\ncommand: %s", got, tc.newWorkDir, cmd)
+				}
+
+				// The stale pre-override path must be gone entirely.
+				if strings.Contains(cmd, oldWorkDir) {
+					t.Errorf("retargeted command still references old workdir %q:\n%s", oldWorkDir, cmd)
+				}
+			})
+		}
+	}
+}
+
+// workdirArgFromCommand parses a generated PreStart command with the same
+// POSIX quoting rules the generators use and returns the argument following the
+// final --workdir flag.
+func workdirArgFromCommand(t *testing.T, command string) string {
+	t.Helper()
+	args := shellquote.Split(command)
+	for i := len(args) - 1; i > 0; i-- {
+		if args[i-1] == "--workdir" {
+			return args[i]
+		}
+	}
+	t.Fatalf("no --workdir argument in command: %s", command)
+	return ""
 }
