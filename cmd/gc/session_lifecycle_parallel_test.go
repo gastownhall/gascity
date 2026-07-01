@@ -6021,6 +6021,7 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 		&config.City{},
 		10*time.Second,
 		1,
+		nil,
 	)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
@@ -6113,6 +6114,7 @@ func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *test
 		&config.City{},
 		10*time.Second,
 		1,
+		nil,
 	)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))

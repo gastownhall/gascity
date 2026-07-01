@@ -110,8 +110,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		_ = p.WaitForIdle(ctx, name, startupNudgeIdleTimeout)
 		if err := p.c.deliverNudge(ctx, info.PaneID, name, startupText); err != nil {
 			// Best-effort: the submit didn't confirm (TUI race under boot load).
-			// Surface it rather than silently leaving a stranded startup turn;
-			// nudgeStalledPoolClaims is the reconcile-tick backstop of last resort.
+			// Surface it rather than silently leaving a stranded startup turn; the
+			// warm-bind claim nudge (startPreparedStartCandidate's warm-reuse branch)
+			// re-delivers on the next reconcile tick — by then the slot is running with
+			// its trigger still unclaimed, which is precisely that hook's condition.
 			fmt.Fprintf(os.Stderr, "herdr: startup delivery for %q not confirmed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
 		}
 	}

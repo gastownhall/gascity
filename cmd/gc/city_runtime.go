@@ -2282,6 +2282,17 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withAsyncDrainAckStopTracker(&cr.asyncStops),
 		withMaxSessionAgeTracker(cr.mat),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
+		// Warm-bind claim nudge: deliver a pool slot's claim instruction to an
+		// already-running, idle slot that had on-demand work bound to it after it
+		// last Started (bindPoolSessionTriggerBead), which cold Start's nudge cannot
+		// cover. The probe resolves the bound trigger from its owning store (via the
+		// cached rig stores) to confirm it is still unclaimed; the delivery + the
+		// once-per-binding marker live in startPreparedStartCandidate's warm-reuse
+		// branch. Provider-agnostic (not CanReportActivity-gated): on herdr this is
+		// the only closer of the warm-bind gap; on tmux it is the fast primary nudge
+		// ahead of the idle-timeout relaunch backstop, deduped by the marker + the
+		// unclaimed-trigger gate.
+		withWarmClaimProbe(buildWarmClaimTriggerProbe(store, rigStores)),
 	}
 	if bootReconcile {
 		// #3288: skip the per-session orphan/failed-create session-bead closes on
@@ -2324,16 +2335,10 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	cr.nudgeDispatchTick(ctx)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_dispatch_tick", phaseStart, nil)
 
-	// Idle recovery: re-nudge pool slots that are running but never claimed
-	// their assigned trigger bead. Gated to runtimes the controller cannot see
-	// activity for (herdr): tmux self-heals a missed startup nudge through its
-	// relaunch/respawn path and reports activity, so it neither needs nor runs
-	// this. See nudgeStalledPoolClaims for the churn-free state machine.
-	if !cr.sp.Capabilities().CanReportActivity {
-		phaseStart = time.Now()
-		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, open, assignedWorkBeads, time.Now(), cr.stdout)
-		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
-	}
+	// Idle recovery for a warm pool slot handed on-demand work it never claimed is
+	// now event-based, delivered from startPreparedStartCandidate's warm-reuse
+	// branch (withWarmClaimProbe above) instead of a separate reconcile-tick poll —
+	// symmetric with cold Start, keyed on a persisted once-per-binding marker.
 }
 
 // recordReconcileTraceInputs records the per-template baseline, the cycle input
