@@ -1965,6 +1965,12 @@ export type ProviderCreateInputBody = {
      */
     name: string;
     /**
+     * Provider option defaults (e.g. model). Keys are merged on update.
+     */
+    option_defaults?: {
+        [key: string]: string;
+    };
+    /**
      * Options schema merge mode across inheritance chain.
      */
     options_schema_merge?: string;
@@ -2168,6 +2174,12 @@ export type ProviderUpdateInputBody = {
      * Environment variables.
      */
     env?: {
+        [key: string]: string;
+    };
+    /**
+     * Provider option defaults (e.g. model). Keys are merged on update.
+     */
+    option_defaults?: {
         [key: string]: string;
     };
     /**

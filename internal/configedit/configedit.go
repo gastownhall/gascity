@@ -1269,6 +1269,23 @@ func (e *Editor) CreateProvider(name string, spec config.ProviderSpec) error {
 	})
 }
 
+// mergeStringMapInto additively merges src into dst, lazily allocating dst
+// when it is nil. Keys present in src overwrite those in dst; an empty src
+// leaves dst unchanged. It returns the (possibly newly allocated) destination
+// so callers can assign it back onto the target field.
+func mergeStringMapInto(dst, src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]string, len(src))
+	}
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
 // UpdateProvider partially updates an existing city-level provider.
 // Returns an error if the provider is not found in the raw config
 // (builtin-only providers cannot be updated directly — use patches).
@@ -1317,28 +1334,14 @@ func (e *Editor) UpdateProvider(name string, patch ProviderUpdate) error {
 		if patch.ReadyDelayMs != nil {
 			spec.ReadyDelayMs = *patch.ReadyDelayMs
 		}
-		if len(patch.Env) > 0 {
-			if spec.Env == nil {
-				spec.Env = make(map[string]string, len(patch.Env))
-			}
-			for k, v := range patch.Env {
-				spec.Env[k] = v
-			}
-		}
+		spec.Env = mergeStringMapInto(spec.Env, patch.Env)
 		if patch.OptionsSchemaMerge != nil {
 			spec.OptionsSchemaMerge = *patch.OptionsSchemaMerge
 		}
 		if patch.OptionsSchema != nil {
 			spec.OptionsSchema = append([]config.ProviderOption(nil), patch.OptionsSchema...)
 		}
-		if len(patch.OptionDefaults) > 0 {
-			if spec.OptionDefaults == nil {
-				spec.OptionDefaults = make(map[string]string, len(patch.OptionDefaults))
-			}
-			for k, v := range patch.OptionDefaults {
-				spec.OptionDefaults[k] = v
-			}
-		}
+		spec.OptionDefaults = mergeStringMapInto(spec.OptionDefaults, patch.OptionDefaults)
 		cfg.Providers[name] = spec
 		return nil
 	})
