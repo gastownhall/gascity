@@ -38,6 +38,11 @@ var (
 	registerCityWithSupervisorTestHook func(cityPath, commandName string, stdout, stderr io.Writer) (bool, int)
 	supervisorCityErrorHook            = supervisorCityError
 	reloadSupervisorNoWaitHook         = reloadSupervisorNoWait
+	// controllerAliveHook is the standalone-controller probe. Defaults to the
+	// real socket probe; tests override it to detect a controller without
+	// depending on a live socket-accept handshake racing the probe's read
+	// deadline under parallel/high-load runs (#3847).
+	controllerAliveHook = controllerAlive
 )
 
 // assumeYesForSupervisorCycle is set by the --yes flag on commands that
@@ -179,7 +184,7 @@ func cityUsesManagedReconciler(cityPath string) bool {
 var justRestartedSupervisorPID int
 
 func ensureNoStandaloneController(cityPath string) (int, error) {
-	if pid := controllerAlive(cityPath); pid != 0 {
+	if pid := controllerAliveHook(cityPath); pid != 0 {
 		// If we just auto-restarted the supervisor in this invocation,
 		// the new supervisor process is briefly visible on the controller
 		// socket before the registry catches up. Treat that as our own
