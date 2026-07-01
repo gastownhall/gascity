@@ -1,5 +1,0 @@
-<<<<<<<< HEAD:internal/api/dashboardspa/dist/assets/Field-CQOLMLGH.js
-import{j as e}from"./index-zPatq59W.js";function i({label:t,children:s,variant:a="definition"}){return a==="form"?e.jsxs("label",{className:"block space-y-1.5",children:[e.jsx("span",{className:"text-label uppercase tracking-wider text-fg-muted",children:t}),s]}):e.jsxs("div",{children:[e.jsx("dt",{className:"text-label uppercase tracking-wider text-fg-faint mb-1",children:t}),e.jsx("dd",{className:"text-body text-fg",children:s})]})}export{i as F};
-========
-import{j as e}from"./index-BRyrQZhc.js";function i({label:t,children:s,variant:a="definition"}){return a==="form"?e.jsxs("label",{className:"block space-y-1.5",children:[e.jsx("span",{className:"text-label uppercase tracking-wider text-fg-muted",children:t}),s]}):e.jsxs("div",{children:[e.jsx("dt",{className:"text-label uppercase tracking-wider text-fg-faint mb-1",children:t}),e.jsx("dd",{className:"text-body text-fg",children:s})]})}export{i as F};
->>>>>>>> a1dd81a3b (chore(dashboard): rebuild dist after rebase onto origin/main):internal/api/dashboardspa/dist/assets/Field-DPjooF7j.js
