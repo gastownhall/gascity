@@ -271,6 +271,9 @@ mode = "always"
 	if !strings.Contains(r.FixHint, "defaults.rig.imports") {
 		t.Errorf("FixHint = %q, want it to mention [defaults.rig.imports] to guide the operator to the actual config knob", r.FixHint)
 	}
+	if strings.Contains(r.FixHint, "pack.toml") {
+		t.Errorf("FixHint = %q, want default rig imports to point at city.toml", r.FixHint)
+	}
 }
 
 // TestRigPackCoverageCheck_PackWithoutRigSessions asserts that a pack

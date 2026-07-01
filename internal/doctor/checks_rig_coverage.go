@@ -112,7 +112,7 @@ func (c *RigPackCoverageCheck) Run(_ *CheckContext) *CheckResult {
 	r.Status = StatusWarning
 	r.Message = fmt.Sprintf("%d rig-scoped named_session(s) not covered by rig imports", len(issues))
 	r.Details = issues
-	r.FixHint = "add [defaults.rig.imports.<pack>] to pack.toml or add the pack to each rig's [imports]"
+	r.FixHint = "add [defaults.rig.imports.<pack>] to city.toml or add the pack to each rig's [imports]"
 	return r
 }
 
