@@ -926,6 +926,45 @@ type orderCheckJSONRow struct {
 	Reason     string `json:"reason"`
 }
 
+const orderLastRunLookupConcurrency = 8
+
+type orderCheckReadModelRow struct {
+	stores  []beads.Store
+	lastRun time.Time
+}
+
+func loadOrderCheckReadModel(aa []orders.Order, resolveStores orderStoresResolver) ([]orderCheckReadModelRow, error) {
+	model := make([]orderCheckReadModelRow, len(aa))
+	requests := make([]orders.LastRunRequest, 0, len(aa))
+	requestRows := make([]int, 0, len(aa))
+	for i, a := range aa {
+		if err := validateOrderCheckPreflight(a); err != nil {
+			return nil, err
+		}
+		typedStores, err := resolveStores(a)
+		if err != nil {
+			return nil, err
+		}
+		model[i].stores = unwrapOrdersStores(typedStores)
+		if !orderTriggerUsesLastRun(a) {
+			continue
+		}
+		requests = append(requests, orders.LastRunRequest{
+			Name:   a.ScopedName(),
+			Stores: model[i].stores,
+		})
+		requestRows = append(requestRows, i)
+	}
+
+	for i, result := range orders.LoadLastRuns(requests, orderLastRunLookupConcurrency) {
+		if result.Err != nil {
+			return nil, fmt.Errorf("reading last run for %s: %w", result.Name, result.Err)
+		}
+		model[requestRows[i]].lastRun = result.LastRun
+	}
+	return model, nil
+}
+
 func doOrderCheckJSON(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, jsonOutput bool, stdout, stderr io.Writer) int {
 	if len(aa) == 0 {
 		if jsonOutput {
@@ -1033,6 +1072,11 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
 		return 1
 	}
+	model, err := loadOrderCheckReadModel(aa, resolveStores)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	if jsonOutput {
 		result := orderCheckJSON{
@@ -1041,26 +1085,9 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			OrdersTotal:   len(aa),
 			Orders:        make([]orderCheckJSONRow, 0, len(aa)),
 		}
-		for _, a := range aa {
-			if err := validateOrderCheckPreflight(a); err != nil {
-				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			typedStores, err := resolveStores(a)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			stores := unwrapOrdersStores(typedStores)
-			baseLastRunFn := orders.LastRunAcrossStores(stores...)
-			var lastRunErr error
-			lastRunFn := func(orderName string) (time.Time, error) {
-				last, err := baseLastRunFn(orderName)
-				if err != nil {
-					lastRunErr = err
-				}
-				return last, err
-			}
+		for i, a := range aa {
+			stores := model[i].stores
+			lastRunFn := func(string) (time.Time, error) { return model[i].lastRun, nil }
 			cursorFn := orders.CursorAcrossStores(stores...)
 			if a.Trigger == "event" {
 				cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
@@ -1078,10 +1105,6 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				return 1
 			}
 			check := orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
-			if lastRunErr != nil {
-				fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
-				return 1
-			}
 			if check.Due {
 				result.AnyDue = true
 				result.DueTotal++
@@ -1111,26 +1134,9 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", "NAME", "TRIGGER", "DUE", "REASON") //nolint:errcheck
 	}
 	anyDue := false
-	for _, a := range aa {
-		if err := validateOrderCheckPreflight(a); err != nil {
-			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		typedStores, err := resolveStores(a)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		stores := unwrapOrdersStores(typedStores)
-		baseLastRunFn := orders.LastRunAcrossStores(stores...)
-		var lastRunErr error
-		lastRunFn := func(orderName string) (time.Time, error) {
-			last, err := baseLastRunFn(orderName)
-			if err != nil {
-				lastRunErr = err
-			}
-			return last, err
-		}
+	for i, a := range aa {
+		stores := model[i].stores
+		lastRunFn := func(string) (time.Time, error) { return model[i].lastRun, nil }
 		cursorFn := orders.CursorAcrossStores(stores...)
 		if a.Trigger == "event" {
 			cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
@@ -1148,10 +1154,6 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			return 1
 		}
 		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
-		if lastRunErr != nil {
-			fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
-			return 1
-		}
 		due := "no"
 		if result.Due {
 			due = "yes"

@@ -298,21 +298,31 @@ type memoryOrderDispatcher struct {
 }
 
 type orderDispatchTrackingIndex struct {
-	// mu guards entries and errs. dispatch shares ONE index across every
+	// mu guards entries, errs, and the per-tick latest-run prime. dispatch shares ONE index across every
 	// order's open-work gate, and gateOpenWorkBounded runs each gate in a
 	// goroutine it abandons on timeout/ctx-cancel (#2893) — so multiple gate
 	// goroutines touch these maps concurrently. The lock is held only around
 	// the map reads/writes below, never across the listCanonical* bd calls, so
 	// one slow or contended store read cannot stall sibling gates (the property
 	// gateOpenWorkBounded exists to preserve).
-	mu      sync.Mutex
-	entries map[string]map[string]orderTrackingSummary
-	errs    map[string]error
+	mu          sync.Mutex
+	entries     map[string]map[string]orderTrackingSummary
+	errs        map[string]error
+	lastRuns    map[string]time.Time
+	lastRunErrs map[string]error
 }
 
 type orderTrackingSummary struct {
 	openTracking bool
 	lastRun      time.Time
+}
+
+type preparedOrderDispatchStore struct {
+	target     execStoreTarget
+	store      beads.Store
+	gateStores []beads.Store
+	gateKeys   []string
+	ok         bool
 }
 
 // buildOrderDispatcher scans formula layers for orders and returns a
@@ -423,6 +433,39 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 	}
 }
 
+func (m *memoryOrderDispatcher) prepareOrderDispatchStore(cityPath string, a orders.Order, stores map[string]beads.Store) (preparedOrderDispatchStore, error) {
+	target, err := resolveOrderStoreTarget(cityPath, m.cfg, a)
+	if err != nil {
+		return preparedOrderDispatchStore{}, fmt.Errorf("resolving target: %w", err)
+	}
+	storeKey := orderStoreTargetKey(target)
+	store, ok := stores[storeKey]
+	if !ok {
+		store, err = m.storeFn(target)
+		if err != nil {
+			return preparedOrderDispatchStore{}, fmt.Errorf("opening %s store: %w", target.ScopeKind, err)
+		}
+		stores[storeKey] = store
+	}
+
+	resolved := preparedOrderDispatchStore{
+		target:     target,
+		store:      store,
+		gateStores: []beads.Store{store},
+		gateKeys:   []string{storeKey},
+		ok:         true,
+	}
+	legacyStore, err := m.legacyCityStoreForTarget(cityPath, target, stores)
+	if err != nil {
+		return preparedOrderDispatchStore{}, err
+	}
+	if legacyStore != nil {
+		resolved.gateStores = append(resolved.gateStores, legacyStore)
+		resolved.gateKeys = append(resolved.gateKeys, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
+	}
+	return resolved, nil
+}
+
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {
 	// Skip all order dispatch when the city is suspended. Use the
 	// dispatcher's in-scope city path so suspension state resolves
@@ -462,6 +505,40 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	if total == 0 {
 		return
 	}
+	prepared := make([]preparedOrderDispatchStore, total)
+	lastRunRequests := make([]orders.LastRunRequest, 0, total)
+	lastRunRequestIndexes := make([]int, 0, total)
+	for i, a := range m.aa {
+		if m.orderRigSuspended(a) {
+			continue
+		}
+		resolved, err := m.prepareOrderDispatchStore(cityPath, a, stores)
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: preparing stores for %s: %v", a.ScopedName(), err)
+			continue
+		}
+		prepared[i] = resolved
+		if !orderTriggerUsesLastRun(a) {
+			continue
+		}
+		if cached, ok := m.peekCachedLastRun(a.ScopedName(), resolved.gateKeys); ok {
+			cachedResult := orders.CheckTrigger(a, now, func(string) (time.Time, error) {
+				return cached, nil
+			}, nil, nil)
+			if !cachedResult.Due {
+				continue
+			}
+		}
+		lastRunRequests = append(lastRunRequests, orders.LastRunRequest{
+			Name:   a.ScopedName(),
+			Stores: resolved.gateStores,
+		})
+		lastRunRequestIndexes = append(lastRunRequestIndexes, i)
+	}
+	for i, result := range orders.LoadLastRuns(lastRunRequests, orderLastRunLookupConcurrency) {
+		resolved := prepared[lastRunRequestIndexes[i]]
+		trackingIndex.primeLastRun(result.Name, resolved.gateKeys, result.LastRun, result.Err)
+	}
 	start := 0
 	if m.maxDispatchesPerTick > 0 {
 		start = m.nextDispatchStart % total
@@ -477,40 +554,14 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	for offset := 0; offset < total; offset++ {
 		idx := (start + offset) % total
 		a := m.aa[idx]
-		// Skip orders targeting suspended rigs.
-		if m.orderRigSuspended(a) {
+		resolved := prepared[idx]
+		if !resolved.ok {
 			continue
 		}
-
-		target, err := resolveOrderStoreTarget(cityPath, m.cfg, a)
-		if err != nil {
-			logDispatchError(m.stderr, "gc: order dispatch: resolving target for %s: %v", a.ScopedName(), err)
-			continue
-		}
-
-		storeKey := orderStoreTargetKey(target)
-		store, ok := stores[storeKey]
-		if !ok {
-			store, err = m.storeFn(target)
-			if err != nil {
-				logDispatchError(m.stderr, "gc: order dispatch: opening %s store for %s: %v", target.ScopeKind, a.ScopedName(), err)
-				continue
-			}
-			stores[storeKey] = store
-		}
-
-		storesForGate := []beads.Store{store}
-		legacyStore, legacyOK := m.legacyCityStoreForTarget(cityPath, target, stores)
-		if !legacyOK {
-			continue
-		}
-		if legacyStore != nil {
-			storesForGate = append(storesForGate, legacyStore)
-		}
-		storeKeysForGate := []string{storeKey}
-		if legacyStore != nil {
-			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
-		}
+		target := resolved.target
+		store := resolved.store
+		storesForGate := resolved.gateStores
+		storeKeysForGate := resolved.gateKeys
 		scoped := a.ScopedName()
 		if m.gateBackoffActive(scoped, now) {
 			continue
@@ -736,9 +787,38 @@ func (m *memoryOrderDispatcher) drain(ctx context.Context) bool {
 
 func newOrderDispatchTrackingIndex() *orderDispatchTrackingIndex {
 	return &orderDispatchTrackingIndex{
-		entries: make(map[string]map[string]orderTrackingSummary),
-		errs:    make(map[string]error),
+		entries:     make(map[string]map[string]orderTrackingSummary),
+		errs:        make(map[string]error),
+		lastRuns:    make(map[string]time.Time),
+		lastRunErrs: make(map[string]error),
 	}
+}
+
+func (idx *orderDispatchTrackingIndex) primeLastRun(orderName string, storeKeys []string, lastRun time.Time, err error) {
+	if idx == nil {
+		return
+	}
+	key := orderHistoryCacheKey(orderName, storeKeys)
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.lastRuns[key] = lastRun
+	if err != nil {
+		idx.lastRunErrs[key] = err
+	}
+}
+
+func (idx *orderDispatchTrackingIndex) primedLastRun(orderName string, storeKeys []string) (time.Time, bool, error) {
+	if idx == nil {
+		return time.Time{}, false, nil
+	}
+	key := orderHistoryCacheKey(orderName, storeKeys)
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if err, ok := idx.lastRunErrs[key]; ok {
+		return time.Time{}, true, err
+	}
+	lastRun, ok := idx.lastRuns[key]
+	return lastRun, ok, nil
 }
 
 func (idx *orderDispatchTrackingIndex) hasOpenTracking(
@@ -812,6 +892,9 @@ func (idx *orderDispatchTrackingIndex) lastRunFunc(
 	return func(scopedName string) (time.Time, error) {
 		if idx == nil {
 			return fallback(scopedName)
+		}
+		if lastRun, ok, err := idx.primedLastRun(scopedName, storeKeys); ok {
+			return lastRun, err
 		}
 		var latest time.Time
 		for i, store := range stores {
@@ -937,22 +1020,21 @@ func indexStoreKey(storeKeys []string, index int) string {
 	return fmt.Sprintf("store:%d", index)
 }
 
-func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target execStoreTarget, stores map[string]beads.Store) (beads.Store, bool) {
+func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target execStoreTarget, stores map[string]beads.Store) (beads.Store, error) {
 	if !legacyOrderCityFallbackNeeded(cityPath, target) {
-		return nil, true
+		return nil, nil
 	}
 	legacyTarget := legacyOrderCityTarget(cityPath, m.cfg)
 	key := orderStoreTargetKey(legacyTarget)
 	if store, ok := stores[key]; ok {
-		return store, true
+		return store, nil
 	}
 	store, err := m.storeFn(legacyTarget)
 	if err != nil {
-		logDispatchError(m.stderr, "gc: order dispatch: opening legacy city store for rig order fallback: %v", err)
-		return nil, false
+		return nil, fmt.Errorf("opening legacy city store for rig order fallback: %w", err)
 	}
 	stores[key] = store
-	return store, true
+	return store, nil
 }
 
 func (m *memoryOrderDispatcher) cachedLastRun(orderName string, storeKeys []string, read orders.LastRunFunc) (time.Time, bool, error) {
@@ -972,6 +1054,14 @@ func (m *memoryOrderDispatcher) cachedLastRun(orderName string, storeKeys []stri
 	}
 	m.rememberLastRun(orderName, storeKeys, last)
 	return last, false, nil
+}
+
+func (m *memoryOrderDispatcher) peekCachedLastRun(orderName string, storeKeys []string) (time.Time, bool) {
+	key := orderHistoryCacheKey(orderName, storeKeys)
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	lastRun, ok := m.lastRunCache[key]
+	return lastRun, ok
 }
 
 func (m *memoryOrderDispatcher) rememberLastRun(orderName string, storeKeys []string, last time.Time) {

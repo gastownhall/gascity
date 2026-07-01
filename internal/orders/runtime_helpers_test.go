@@ -4,11 +4,77 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+type concurrentLastRunStore struct {
+	beads.Store
+
+	mu        sync.Mutex
+	active    int
+	maxActive int
+}
+
+func (s *concurrentLastRunStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	s.active++
+	if s.active > s.maxActive {
+		s.maxActive = s.active
+	}
+	s.mu.Unlock()
+
+	time.Sleep(10 * time.Millisecond)
+
+	s.mu.Lock()
+	s.active--
+	s.mu.Unlock()
+	return []beads.Bead{{
+		ID:        query.Label,
+		CreatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		Labels:    []string{query.Label},
+	}}, nil
+}
+
+func TestLoadLastRunsBoundsConcurrentStoreQueries(t *testing.T) {
+	store := &concurrentLastRunStore{Store: beads.NewMemStore()}
+	requests := make([]LastRunRequest, 16)
+	for i := range requests {
+		requests[i] = LastRunRequest{
+			Name:   fmt.Sprintf("order-%02d", i),
+			Stores: []beads.Store{store},
+		}
+	}
+
+	results := LoadLastRuns(requests, 4)
+	if len(results) != len(requests) {
+		t.Fatalf("LoadLastRuns returned %d results, want %d", len(results), len(requests))
+	}
+	for i, result := range results {
+		if result.Name != requests[i].Name {
+			t.Fatalf("result[%d].Name = %q, want %q", i, result.Name, requests[i].Name)
+		}
+		if result.Err != nil {
+			t.Fatalf("result[%d].Err = %v", i, result.Err)
+		}
+		if result.LastRun.IsZero() {
+			t.Fatalf("result[%d].LastRun is zero", i)
+		}
+	}
+
+	store.mu.Lock()
+	maxActive := store.maxActive
+	store.mu.Unlock()
+	if maxActive <= 1 {
+		t.Fatalf("max concurrent List calls = %d, want > 1", maxActive)
+	}
+	if maxActive > 4 {
+		t.Fatalf("max concurrent List calls = %d, want <= 4", maxActive)
+	}
+}
 
 type rowsErrorStore struct {
 	*beads.MemStore
