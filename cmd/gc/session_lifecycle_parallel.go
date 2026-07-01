@@ -873,8 +873,10 @@ func buildPreparedStartWithWorkDirResolver(
 
 	if wd := resolvePreparedTaskWorkDir(candidate, cfg, store, workDirResolver); wd != "" {
 		agentCfg.WorkDir = wd
-	} else if wd := session.Metadata["work_dir"]; wd != "" {
-		agentCfg.WorkDir = wd
+	} else if agentCfg.WorkDir == "" {
+		if wd := session.Metadata["work_dir"]; wd != "" {
+			agentCfg.WorkDir = wd
+		}
 	}
 	// Pre-flight stale-resume guard: if the bead carries a session_key whose
 	// keyed transcript is no longer on disk (provider session retention

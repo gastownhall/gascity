@@ -773,6 +773,88 @@ func TestPrepareStartCandidate_UsesSessionIDForTaskWorkDir(t *testing.T) {
 	}
 }
 
+func TestBuildPreparedStartPrefersConfiguredWorkDirOverSessionMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker",
+			"work_dir":     "/stale/workspace",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := buildPreparedStart(startCandidate{
+		session: &session,
+		tp: TemplateParams{
+			TemplateName: "worker",
+			SessionName:  "worker",
+			WorkDir:      "/configured/root",
+		},
+	}, &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}, store)
+	if err != nil {
+		t.Fatalf("buildPreparedStart: %v", err)
+	}
+	if prepared.cfg.WorkDir != "/configured/root" {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want configured workdir", prepared.cfg.WorkDir)
+	}
+}
+
+func TestBuildPreparedStartTaskWorkDirOverridesConfiguredWorkDir(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskWorkDir := t.TempDir()
+	task, err := store.Create(beads.Bead{
+		Title: "task",
+		Metadata: map[string]string{
+			"work_dir": taskWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	assignee := session.ID
+	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := buildPreparedStart(startCandidate{
+		session: &session,
+		tp: TemplateParams{
+			TemplateName: "worker",
+			SessionName:  "worker",
+			WorkDir:      "/configured/root",
+		},
+	}, &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}, store)
+	if err != nil {
+		t.Fatalf("buildPreparedStart: %v", err)
+	}
+	if prepared.cfg.WorkDir != taskWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want task workdir %q", prepared.cfg.WorkDir, taskWorkDir)
+	}
+}
+
 func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing.T) {
 	base := beads.NewMemStore()
 	store := &taskWorkDirLiveListCountingStore{Store: base}
