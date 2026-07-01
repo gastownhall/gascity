@@ -240,8 +240,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// Enter (deliverStartupTurn). An error here means even recovery could not
 		// confirm the first turn started — the session is live, so failing Start
 		// would only trigger a respawn storm; record the strand durably instead
-		// so it is machine-visible and countable. nudgeStalledPoolClaims remains
-		// the reconcile-tick backstop of last resort for pool slots.
+		// so it is machine-visible and countable. For a warm-bind slot, the
+		// event-based claim nudge (startPreparedStartCandidate's warm-reuse
+		// branch) also re-delivers on the next reconcile tick; for every other
+		// path nudgeStalledPoolClaims remains the reconcile-tick backstop of
+		// last resort.
 		if err := p.c.deliverStartupTurn(ctx, info.PaneID, startupText); err != nil {
 			p.recordStartupDeliveryUnconfirmed(name, info.PaneID, idleOutcome, err)
 		}
