@@ -616,7 +616,7 @@ func TestResolveTaskWorkDirIncludesAssignedWisp(t *testing.T) {
 		t.Fatalf("mark wisp in progress: %v", err)
 	}
 
-	if got := resolveTaskWorkDir(store, "worker-session"); got != workDir {
+	if got := resolveTaskWorkDir("", store, "worker-session"); got != workDir {
 		t.Fatalf("resolveTaskWorkDir = %q, want assigned wisp work_dir %q", got, workDir)
 	}
 }

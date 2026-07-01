@@ -820,7 +820,7 @@ func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing
 		Agents: []config.Agent{
 			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
 		},
-	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver([]beads.Bead{task}))
+	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver("", []beads.Bead{task}))
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}

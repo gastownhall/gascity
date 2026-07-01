@@ -16,6 +16,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -1007,7 +1008,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	}
 	effectiveStartOptions := startOptions
 	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
-		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(assignedWorkBeads)))
+		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
 	}
 	if startupTimeout <= 0 && cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
@@ -3848,12 +3849,26 @@ func clearMissingIdleProbes(dt *drainTracker, beadByID map[string]*beads.Bead) {
 	}
 }
 
+// resolveWorkDirAgainstCity anchors a bead-stored work_dir value to the city
+// root. Worktree-per-bead dispatch stores this metadata city-relative (e.g.
+// ".gc/worktrees/gascity/builder/<slug>") so the value stays valid across
+// machines with different absolute city paths; resolving it with os.Stat
+// directly would instead resolve against the calling process's cwd, which is
+// how scaffold staging leaked into shared long-lived worktrees (ga-ajw1no).
+// Already-absolute values (the legacy convention) pass through unchanged.
+func resolveWorkDirAgainstCity(cityPath, workDir string) string {
+	if workDir == "" || cityPath == "" || filepath.IsAbs(workDir) {
+		return workDir
+	}
+	return filepath.Join(cityPath, workDir)
+}
+
 // resolveTaskWorkDir checks the agent's assigned task beads for a work_dir
 // metadata field. If a task bead has work_dir set and the directory exists
 // on disk, that path is returned. This lets the reconciler start the agent
 // in the worktree that the previous session (or this session's prior run)
 // created, without any prompt-side logic.
-func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
+func resolveTaskWorkDir(cityPath string, store beads.Store, assignees ...string) string {
 	if store == nil {
 		return ""
 	}
@@ -3876,10 +3891,12 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 		}
 		for _, b := range assigned {
 			wd := strings.TrimSpace(b.Metadata["work_dir"])
-			if wd != "" {
-				if info, err := os.Stat(wd); err == nil && info.IsDir() {
-					return wd
-				}
+			if wd == "" {
+				continue
+			}
+			resolved := resolveWorkDirAgainstCity(cityPath, wd)
+			if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+				return resolved
 			}
 		}
 	}
@@ -3962,7 +3979,7 @@ type assignedTaskWorkDir struct {
 
 // newAssignedTaskWorkDirResolver resolves work_dir values from the
 // reconciler's snapshot; misses intentionally fall back to the live lookup.
-func newAssignedTaskWorkDirResolver(assignedWorkBeads []beads.Bead) taskWorkDirResolver {
+func newAssignedTaskWorkDirResolver(cityPath string, assignedWorkBeads []beads.Bead) taskWorkDirResolver {
 	index := make(map[string]assignedTaskWorkDir)
 	for _, bead := range assignedWorkBeads {
 		if bead.Status != "in_progress" {
@@ -3976,6 +3993,7 @@ func newAssignedTaskWorkDirResolver(assignedWorkBeads []beads.Bead) taskWorkDirR
 		if workDir == "" {
 			continue
 		}
+		workDir = resolveWorkDirAgainstCity(cityPath, workDir)
 		info, err := os.Stat(workDir)
 		if err != nil || !info.IsDir() {
 			continue

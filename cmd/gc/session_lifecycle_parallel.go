@@ -780,7 +780,7 @@ func prepareStartCandidateForCity(
 		return nil, err
 	}
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
-	return buildPreparedStartWithWorkDirResolver(candidate, cfg, store, workDirResolver)
+	return buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
 }
 
 func refreshConfiguredNamedStartCandidate(
@@ -822,11 +822,12 @@ func buildPreparedStart(
 	cfg *config.City,
 	store beads.Store,
 ) (*preparedStart, error) {
-	return buildPreparedStartWithWorkDirResolver(candidate, cfg, store, nil)
+	return buildPreparedStartWithWorkDirResolver(candidate, "", cfg, store, nil)
 }
 
 func buildPreparedStartWithWorkDirResolver(
 	candidate startCandidate,
+	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
@@ -871,11 +872,18 @@ func buildPreparedStartWithWorkDirResolver(
 		applySchemaOptionOverridesForLaunch(&agentCfg, &tp, session.ID, launchOverrides)
 	}
 
-	if wd := resolvePreparedTaskWorkDir(candidate, cfg, store, workDirResolver); wd != "" {
+	preOverrideWorkDir := agentCfg.WorkDir
+	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
 		agentCfg.WorkDir = wd
 	} else if wd := session.Metadata["work_dir"]; wd != "" {
-		agentCfg.WorkDir = wd
+		agentCfg.WorkDir = resolveWorkDirAgainstCity(cityPath, wd)
 	}
+	// The task work_dir override above can replace agentCfg.WorkDir after
+	// template resolution already rendered PreStart commands (materialize-
+	// skills, MCP projection) against the pre-override directory. Retarget
+	// those already-rendered strings so scaffold staging lands next to the
+	// session it actually launches into, not the directory templating assumed.
+	agentCfg.PreStart = retargetPreStartWorkDir(agentCfg.PreStart, preOverrideWorkDir, agentCfg.WorkDir)
 	// Pre-flight stale-resume guard: if the bead carries a session_key whose
 	// keyed transcript is no longer on disk (provider session retention
 	// disabled, manual cleanup, worktree rebuild), a resume would hard-fail
@@ -1100,6 +1108,7 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 
 func resolvePreparedTaskWorkDir(
 	candidate startCandidate,
+	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
@@ -1109,7 +1118,21 @@ func resolvePreparedTaskWorkDir(
 			return workDir
 		}
 	}
-	return resolveTaskWorkDir(store, taskWorkDirAssignees(candidate, cfg)...)
+	return resolveTaskWorkDir(cityPath, store, taskWorkDirAssignees(candidate, cfg)...)
+}
+
+// retargetPreStartWorkDir rewrites PreStart command strings rendered against
+// oldWorkDir so they instead reference newWorkDir. A no-op when the task
+// work_dir override left WorkDir unchanged, which is the common case.
+func retargetPreStartWorkDir(preStart []string, oldWorkDir, newWorkDir string) []string {
+	if oldWorkDir == "" || newWorkDir == "" || oldWorkDir == newWorkDir || len(preStart) == 0 {
+		return preStart
+	}
+	retargeted := make([]string, len(preStart))
+	for i, cmd := range preStart {
+		retargeted[i] = strings.ReplaceAll(cmd, oldWorkDir, newWorkDir)
+	}
+	return retargeted
 }
 
 func taskWorkDirAssignees(candidate startCandidate, cfg *config.City) []string {
