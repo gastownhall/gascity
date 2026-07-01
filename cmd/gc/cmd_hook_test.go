@@ -1617,8 +1617,12 @@ printf '[]'
 	if result.Action != "drain" || result.Reason != "no_work" {
 		t.Fatalf("result = %+v, want action=drain reason=no_work", result)
 	}
+	// A foreign in_progress bead must never reach the claim mutation. bd may
+	// not run at all once the candidate is excluded from both the adoption
+	// and fresh-claim paths — that's an even stronger signal than an empty
+	// log, so a missing log file is not a failure.
 	logData, err := os.ReadFile(logPath)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("ReadFile(%s): %v", logPath, err)
 	}
 	if strings.Contains(string(logData), "--claim") {

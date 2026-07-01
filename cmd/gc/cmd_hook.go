@@ -367,13 +367,22 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		assignee := firstNonEmptyHookValue(sessionName, sessionID, alias, agentForQuery, resolvedAgentName)
 		claimOpts := hookClaimOptions{
 			Assignee: assignee,
+			// IdentityCandidates governs ADOPTION of already-owned in_progress/open
+			// work (hookClaimExistingOrAssigned); it must be scoped to this
+			// session's OWN runtime identity, never the bare pool template. A
+			// suffixed pool worker resolves config via the GC_TEMPLATE fallback, so
+			// resolvedAgentName == a.QualifiedName() is the bare template, which is
+			// ALSO the [[named_session]] holder's identity — including it let a
+			// suffixed worker adopt the holder's in_progress bead (ga-80pen8). The
+			// bare template stays in RouteTargets, which governs FRESH claims of
+			// UNASSIGNED routed work. The canonical slot / named holder keep it via
+			// `alias` (GC_ALIAS == qualified bare name); only suffixed workers drop it.
 			IdentityCandidates: hookClaimIdentityCandidates(
 				assignee,
 				sessionID,
 				sessionName,
 				alias,
 				agentForQuery,
-				resolvedAgentName,
 			),
 			RouteTargets: hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"])),
 			Env:          queryEnv,
