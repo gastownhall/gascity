@@ -137,8 +137,8 @@ func TestCreateSessionByteIdenticalPoolWithExplicitID(t *testing.T) {
 	if !reflect.DeepEqual(got.Labels, wantLabels) {
 		t.Errorf("Create bead Labels = %#v, want %#v", got.Labels, wantLabels)
 	}
-	if !reflect.DeepEqual(got.Metadata, meta) {
-		t.Errorf("Create bead Metadata = %#v, want %#v", got.Metadata, meta)
+	if !reflect.DeepEqual(got.Metadata, beads.StringMap(meta)) {
+		t.Errorf("Create bead Metadata = %#v, want %#v", got.Metadata, beads.StringMap(meta))
 	}
 }
 
@@ -199,8 +199,8 @@ func TestCreateSessionByteIdenticalAdoptionBarrier(t *testing.T) {
 	if !reflect.DeepEqual(got.Labels, wantLabels) {
 		t.Errorf("Create bead Labels = %#v, want %#v", got.Labels, wantLabels)
 	}
-	if !reflect.DeepEqual(got.Metadata, meta) {
-		t.Errorf("Create bead Metadata = %#v, want %#v", got.Metadata, meta)
+	if !reflect.DeepEqual(got.Metadata, beads.StringMap(meta)) {
+		t.Errorf("Create bead Metadata = %#v, want %#v", got.Metadata, beads.StringMap(meta))
 	}
 }
 

@@ -50,7 +50,7 @@ func TestSaveEmitsByteIdenticalCreate(t *testing.T) {
 		t.Fatalf("Create calls = %d, want 1", len(creates))
 	}
 	got := creates[0].Bead
-	wantMeta := map[string]string{
+	wantMeta := beads.StringMap{
 		"nudge_id":           "nudge-xyz",
 		"agent":              "polecat-3",
 		"session_id":         "sess-1",
