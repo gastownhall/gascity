@@ -63,11 +63,11 @@ func newKillPokeSession(t *testing.T, identity, sessionName string) (beads.Store
 }
 
 // TestCmdSessionKill_PokesControllerAfterSleep pins #3812: a successful
-// `gc session kill` of an always-named session must poke the controller so the
-// reconciler revives it on the next poke-driven tick instead of waiting a full
-// patrol interval. The poke must fire exactly once, with the resolved cityPath,
-// and only AFTER the bead has been synced asleep (so the reconciler observes
-// the killed state when it converges).
+// `gc session kill` must poke the controller so the reconciler observes the
+// killed state promptly instead of waiting a full patrol interval. The poke
+// must fire exactly once, with the resolved cityPath, and only AFTER the bead
+// has been synced asleep (so the reconciler observes the killed state when it
+// converges).
 func TestCmdSessionKill_PokesControllerAfterSleep(t *testing.T) {
 	const identity = "session-a"
 	const sessionName = "s-gc-kill-poke"
@@ -104,7 +104,8 @@ func TestCmdSessionKill_PokesControllerAfterSleep(t *testing.T) {
 
 // TestCmdSessionKill_PokeFailureIsNonFatal pins the best-effort contract: a
 // poke failure (e.g. no controller running) must not fail the kill — the
-// session is already synced asleep and revives on the next patrol tick.
+// session state has already been synced asleep, so the reconciler observes it
+// on its normal convergence pass regardless of whether the poke landed.
 func TestCmdSessionKill_PokeFailureIsNonFatal(t *testing.T) {
 	const identity = "session-a"
 	const sessionName = "s-gc-kill-poke-fail"
