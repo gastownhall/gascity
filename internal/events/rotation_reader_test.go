@@ -176,6 +176,85 @@ func TestReadFilteredTailFallsBackToNewestArchive(t *testing.T) {
 	}
 }
 
+func TestReadFilteredTailBoundsArchiveFallback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	rec.Record(Event{Type: SessionWoke, Actor: "human", Subject: "too-old"})
+	res, err := rec.ForceRotate()
+	if err != nil {
+		t.Fatalf("ForceRotate matching archive: %v", err)
+	}
+	if res.Done != nil {
+		<-res.Done
+	}
+
+	for i := 0; i < 12; i++ {
+		rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: fmt.Sprintf("archive-%02d", i)})
+		res, err = rec.ForceRotate()
+		if err != nil {
+			t.Fatalf("ForceRotate %d: %v", i, err)
+		}
+		if res.Done != nil {
+			<-res.Done
+		}
+	}
+
+	got, err := ReadFilteredTail(path, Filter{Type: SessionWoke}, 1000)
+	if err != nil {
+		t.Fatalf("ReadFilteredTail: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ReadFilteredTail returned %d sparse matches, want 0", len(got))
+	}
+}
+
+func TestReadFilteredTailSkipsUnreadableArchive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "archive-match"})
+	res, err := rec.ForceRotate()
+	if err != nil {
+		t.Fatalf("ForceRotate valid archive: %v", err)
+	}
+	if res.Done != nil {
+		<-res.Done
+	}
+
+	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "bad-archive"})
+	res, err = rec.ForceRotate()
+	if err != nil {
+		t.Fatalf("ForceRotate corrupt archive target: %v", err)
+	}
+	if res.Done != nil {
+		<-res.Done
+	}
+	if err := os.WriteFile(res.ArchivePath, []byte("not gzip"), 0o644); err != nil {
+		t.Fatalf("corrupt archive: %v", err)
+	}
+
+	got, err := ReadFilteredTail(path, Filter{Type: BeadCreated}, 1)
+	if err != nil {
+		t.Fatalf("ReadFilteredTail: %v", err)
+	}
+	if len(got) != 1 || got[0].Subject != "archive-match" {
+		t.Fatalf("ReadFilteredTail = %+v, want valid older archive match", got)
+	}
+}
+
 func TestReadLatestSeqSpansArchiveOnlyLog(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")

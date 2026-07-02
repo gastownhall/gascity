@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
 )
+
+const readFilteredTailArchiveScanLimit = 8
 
 // Filter specifies predicates for ReadFiltered. Zero values are ignored.
 type Filter struct {
@@ -253,12 +256,22 @@ func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 	if err != nil {
 		return result, nil
 	}
+	archivesScanned := 0
 	for i := len(archives) - 1; i >= 0 && len(result) < limit; i-- {
+		if !archiveOverlapsFilter(archives[i], filter) {
+			continue
+		}
+		if archivesScanned >= readFilteredTailArchiveScanLimit {
+			log.Printf("events: tail fallback: archive scan cap reached after %d archives for %s", archivesScanned, filepath.Base(path))
+			break
+		}
+		archivesScanned++
 		remaining := limit - len(result)
 		archivePath := filepath.Join(filepath.Dir(path), archives[i].Basename)
 		tail, err := readFilteredTailFromArchive(archivePath, filter, remaining)
 		if err != nil {
-			return result, fmt.Errorf("reading archive %q tail: %w", archives[i].Basename, err)
+			log.Printf("events: tail fallback: skipping archive %q: %v", archives[i].Basename, err)
+			continue
 		}
 		if len(tail) == 0 {
 			continue

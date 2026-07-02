@@ -192,6 +192,25 @@ func TestLastMaintenanceUsesTailProvider(t *testing.T) {
 	}
 }
 
+func TestLastMaintenanceUsesLatestAppendedEvent(t *testing.T) {
+	olderTs := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+	newerTs := time.Date(2026, 4, 9, 3, 0, 0, 0, time.UTC)
+	ep := &listOnlyMaintenanceProvider{
+		events: []events.Event{
+			{Type: events.StoreMaintenanceFailed, Ts: newerTs},
+			{Type: events.StoreMaintenanceDone, Ts: olderTs},
+		},
+	}
+
+	ts, status := LastMaintenance(ep)
+	if !ts.Equal(olderTs) {
+		t.Fatalf("ts = %v, want latest-appended timestamp %v", ts, olderTs)
+	}
+	if status != "success" {
+		t.Fatalf("status = %q, want success from latest-appended event", status)
+	}
+}
+
 func TestLastMaintenanceOnlyDoneEvents(t *testing.T) {
 	ep := events.NewFake()
 	t1 := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
@@ -246,3 +265,21 @@ func (p *tailOnlyMaintenanceProvider) Watch(context.Context, uint64) (events.Wat
 }
 
 func (p *tailOnlyMaintenanceProvider) Close() error { return nil }
+
+type listOnlyMaintenanceProvider struct {
+	events []events.Event
+}
+
+func (p *listOnlyMaintenanceProvider) Record(events.Event) {}
+
+func (p *listOnlyMaintenanceProvider) List(filter events.Filter) ([]events.Event, error) {
+	return events.ApplyFilter(p.events, filter), nil
+}
+
+func (p *listOnlyMaintenanceProvider) LatestSeq() (uint64, error) { return 0, nil }
+
+func (p *listOnlyMaintenanceProvider) Watch(context.Context, uint64) (events.Watcher, error) {
+	return nil, errors.New("watch not implemented")
+}
+
+func (p *listOnlyMaintenanceProvider) Close() error { return nil }
