@@ -24,6 +24,9 @@ const sharedSkillCatalogSnapshotEnvVar = "GC_SHARED_SKILL_CATALOG_SNAPSHOT"
 //
 //	tmux, subprocess → eligible. Scope root on the host; agent reads
 //	                   files from that host filesystem.
+//	herdr            → eligible. Agents are panes of a local herdr
+//	                   session-server — host processes reading the
+//	                   same host filesystem as tmux panes.
 //	""               → eligible (workspace default is tmux).
 //	acp              → ineligible. In-process agent; scope-root files
 //	                   aren't what it reads from.
@@ -46,7 +49,7 @@ func canStage1Materialize(citySessionProvider string, agent *config.Agent) bool 
 		return false
 	}
 	switch strings.TrimSpace(citySessionProvider) {
-	case "", "tmux", "subprocess":
+	case "", "tmux", "subprocess", "herdr":
 		return true
 	default:
 		return false
@@ -60,6 +63,9 @@ func canStage1Materialize(citySessionProvider string, agent *config.Agent) bool 
 //
 //	tmux  → eligible. PreStart runs on the host via tmux/adapter.go
 //	        runPreStart before the tmux session is created.
+//	herdr → eligible. PreStart runs on the host via herdr/provider.go
+//	        runPreStart before the agent is spawned (same shared
+//	        runtime.RunSetupCommand semantics as tmux).
 //	""    → eligible (workspace default maps to tmux).
 //	acp   → ineligible. Session runs in-process; out of scope v0.15.1.
 //	k8s   → ineligible. PreStart runs inside the pod; gc binary and
@@ -92,7 +98,7 @@ func isStage2EligibleSession(citySessionProvider string, agent *config.Agent) bo
 		return false
 	}
 	switch strings.TrimSpace(citySessionProvider) {
-	case "", "tmux":
+	case "", "tmux", "herdr":
 		return true
 	default:
 		// subprocess, k8s, acp, fake, fail, hybrid, exec:<script>, ...
