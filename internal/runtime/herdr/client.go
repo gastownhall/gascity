@@ -36,6 +36,7 @@ type client struct {
 	bin      string     // herdr binary (default "herdr")
 	cityRoot string     // city root: the shared server's launch cwd, and the effectiveWorkDir fallback when a session's WorkDir doesn't exist yet (empty in city-less/standalone construction)
 	serverMu sync.Mutex // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
+	sockPath string     // test override for socketPath (unit tests point it at a fake server)
 }
 
 func newClient(session, cityRoot string) *client {
@@ -102,6 +103,11 @@ type agentInfo struct {
 	TerminalID  string `json:"terminal_id"`
 	AgentStatus string `json:"agent_status"`
 	Cwd         string `json:"cwd"`
+	// Revision is the pane's output revision counter. The activity tracker
+	// diffs it for sessions herdr cannot classify (agent_status "unknown").
+	// Verified live on 0.7.3: it moves only while a client renders the pane;
+	// a headless server holds it at 0.
+	Revision uint64 `json:"revision"`
 }
 
 // agentStartTimeoutMS bounds herdr's own wait for the launched agent TUI to
@@ -464,6 +470,9 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 
 // socketPath is the unix socket for this client's herdr session.
 func (c *client) socketPath() string {
+	if c.sockPath != "" {
+		return c.sockPath
+	}
 	home, _ := os.UserHomeDir()
 	if c.session == "" || c.session == "default" {
 		return filepath.Join(home, ".config", "herdr", "herdr.sock")

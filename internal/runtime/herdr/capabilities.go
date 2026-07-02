@@ -12,7 +12,8 @@ import (
 // ProcessTableScanner, InterruptBoundaryWait, and DialogProvider are
 // deliberately omitted from the first cut — the reconciler degrades gracefully
 // when a provider lacks them: Relaunch falls back to Stop+Start, the others to
-// no-op/default behavior.)
+// no-op/default behavior.) SessionEventProvider is implemented in events.go
+// over the socket API's events.subscribe stream.
 var (
 	_ runtime.IdleWaitProvider       = (*Provider)(nil)
 	_ runtime.ImmediateNudgeProvider = (*Provider)(nil)
@@ -20,6 +21,9 @@ var (
 	// agent-status instead of the host process-table walk (see
 	// provider.go ObserveLiveness).
 	_ runtime.LivenessObserver = (*Provider)(nil)
+	// SessionEventProvider is implemented in events.go over the socket API's
+	// events.subscribe stream (see #4217 herdr-first-class).
+	_ runtime.SessionEventProvider = (*Provider)(nil)
 )
 
 // WaitForIdle blocks until herdr reports the agent idle or the timeout elapses,
