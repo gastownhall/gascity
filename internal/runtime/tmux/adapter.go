@@ -784,8 +784,6 @@ const (
 	maxReadyProbeTimeout     = 60 * time.Second
 	readyProbeSlack          = 5 * time.Second
 	startupPaneCaptureLines  = 80
-	setupCommandOutputLimit  = 4096
-	setupCommandWaitDelay    = 2 * time.Second
 )
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
@@ -895,96 +893,21 @@ func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
 	return nil
 }
 
+// runSetupCommand executes one setup command host-side via the shared
+// runtime.RunSetupCommand (timeout, GC_DIR cwd, env merge, bounded output
+// tails folded into failures), adding the tmux-specific GC_TMUX_SOCKET so
+// session_setup scripts can use "tmux -L $GC_TMUX_SOCKET" to reach the
+// correct server.
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	c := exec.CommandContext(ctx, "sh", "-c", cmd)
-	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
-		c.Dir = workDir
-	}
-	c.Env = os.Environ()
-	for k, v := range env {
-		c.Env = append(c.Env, k+"="+v)
-	}
-	// Expose the tmux socket name so session_setup scripts can use
-	// "tmux -L $GC_TMUX_SOCKET" to reach the correct server.
 	if o.tm.cfg.SocketName != "" {
-		c.Env = append(c.Env, "GC_TMUX_SOCKET="+o.tm.cfg.SocketName)
-	}
-	stdout := newCommandOutputTail(setupCommandOutputLimit)
-	stderr := newCommandOutputTail(setupCommandOutputLimit)
-	c.Stdout = stdout
-	c.Stderr = stderr
-	// WaitDelay ensures Go forcibly closes the capture pipes after the
-	// command exits or the timeout fires, even if background descendants
-	// spawned by the command still hold them open.
-	c.WaitDelay = setupCommandWaitDelay
-	if err := c.Run(); err != nil {
-		// ErrWaitDelay means the command itself exited successfully and
-		// only the force-closed pipes ended the wait: a setup command that
-		// daemonizes a child holding inherited stdio and exits 0 succeeded.
-		if errors.Is(err, exec.ErrWaitDelay) {
-			return nil
+		merged := make(map[string]string, len(env)+1)
+		for k, v := range env {
+			merged[k] = v
 		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = fmt.Errorf("%w: %w", ctxErr, err)
-		}
-		return setupCommandFailure(err, stdout, stderr)
+		merged["GC_TMUX_SOCKET"] = o.tm.cfg.SocketName
+		env = merged
 	}
-	return nil
-}
-
-type commandOutputTail struct {
-	limit   int
-	written int
-	buf     []byte
-}
-
-func newCommandOutputTail(limit int) *commandOutputTail {
-	return &commandOutputTail{limit: limit}
-}
-
-func (b *commandOutputTail) Write(p []byte) (int, error) {
-	b.written += len(p)
-	if b.limit <= 0 {
-		return len(p), nil
-	}
-	if len(p) >= b.limit {
-		b.buf = append(b.buf[:0], p[len(p)-b.limit:]...)
-		return len(p), nil
-	}
-	b.buf = append(b.buf, p...)
-	if len(b.buf) > b.limit {
-		copy(b.buf, b.buf[len(b.buf)-b.limit:])
-		b.buf = b.buf[:b.limit]
-	}
-	return len(p), nil
-}
-
-func (b *commandOutputTail) Detail(label string) string {
-	text := strings.TrimSpace(string(b.buf))
-	if text == "" {
-		return ""
-	}
-	if b.written > len(b.buf) {
-		text = "... " + text
-	}
-	return label + ": " + text
-}
-
-func setupCommandFailure(err error, stdout, stderr *commandOutputTail) error {
-	stderrDetail := stderr.Detail("stderr")
-	stdoutDetail := stdout.Detail("stdout")
-	switch {
-	case stderrDetail != "" && stdoutDetail != "":
-		return fmt.Errorf("%w; %s; %s", err, stderrDetail, stdoutDetail)
-	case stderrDetail != "":
-		return fmt.Errorf("%w; %s", err, stderrDetail)
-	case stdoutDetail != "":
-		return fmt.Errorf("%w; %s", err, stdoutDetail)
-	default:
-		return err
-	}
+	return runtime.RunSetupCommand(ctx, cmd, env, timeout)
 }
 
 func startupReadyProbeTimeout(cfg runtime.Config) time.Duration {
