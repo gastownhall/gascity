@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -191,7 +192,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		}
 		persistPrimeHookProviderSessionKey(hookContext.ProviderSessionID, stderr)
 	}
-	if !strictMode {
+	if !strictMode && !primeHookSessionStart(hookContext) {
 		runHookSideEffects()
 	}
 
@@ -201,8 +202,19 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			fmt.Fprintf(stderr, "gc prime: no city config found: %v\n", err) //nolint:errcheck
 			return 1
 		}
+		if hookMode && primeHookSessionStart(hookContext) {
+			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false)
+			return 0
+		}
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
 		return 0
+	}
+	if hookMode && primeHookSessionStart(hookContext) && !primeHookHasLiveManagedSession(cityPath) {
+		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false)
+		return 0
+	}
+	if !strictMode && primeHookSessionStart(hookContext) {
+		runHookSideEffects()
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
@@ -454,6 +466,45 @@ func managedSessionHookPromptAlreadyDelivered(ctx primeHookContext) bool {
 		return false
 	}
 	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
+}
+
+func primeHookSessionStart(ctx primeHookContext) bool {
+	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
+}
+
+func primeHookHasLiveManagedSession(cityPath string) bool {
+	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	if sessionID == "" {
+		return false
+	}
+	sessionName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+	if sessionName == "" {
+		return false
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		return false
+	}
+	b, err := store.Get(sessionID)
+	if err != nil || !sessionpkg.IsSessionBeadOrRepairable(b) {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(b.Status), "closed") {
+		return false
+	}
+	if strings.TrimSpace(b.Metadata["session_name"]) != sessionName {
+		return false
+	}
+	if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" &&
+		strings.TrimSpace(b.Metadata["template"]) != template {
+		return false
+	}
+	switch sessionpkg.State(strings.TrimSpace(b.Metadata["state"])) {
+	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateCreating, sessionpkg.StateStartPending:
+		return true
+	default:
+		return false
+	}
 }
 
 func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool) {
