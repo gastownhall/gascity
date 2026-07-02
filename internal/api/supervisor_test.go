@@ -806,6 +806,7 @@ func TestSupervisorEventListFilterIsEmptyMatchesEventsFilterZeroValue(t *testing
 		filter events.Filter
 	}{
 		{name: "type", filter: events.Filter{Type: events.BeadCreated}},
+		{name: "types", filter: events.Filter{Types: []string{events.BeadCreated}}},
 		{name: "actor", filter: events.Filter{Actor: "human"}},
 		{name: "subject", filter: events.Filter{Subject: "gc-1"}},
 		{name: "since", filter: events.Filter{Since: time.Unix(1, 0)}},

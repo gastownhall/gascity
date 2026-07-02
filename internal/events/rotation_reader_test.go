@@ -134,6 +134,48 @@ func TestReadFilteredAcrossArchivesAppliesLimit(t *testing.T) {
 	}
 }
 
+func TestReadFilteredTailFallsBackToNewestArchive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "old-archive"})
+	res, err := rec.ForceRotate()
+	if err != nil {
+		t.Fatalf("ForceRotate old archive: %v", err)
+	}
+	if res.Done != nil {
+		<-res.Done
+	}
+
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "newest-archive"})
+	res, err = rec.ForceRotate()
+	if err != nil {
+		t.Fatalf("ForceRotate newest archive: %v", err)
+	}
+	if res.Done != nil {
+		<-res.Done
+	}
+
+	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "active-nonmatch"})
+
+	got, err := ReadFilteredTail(path, Filter{Type: BeadCreated}, 1)
+	if err != nil {
+		t.Fatalf("ReadFilteredTail: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ReadFilteredTail returned %d events, want 1", len(got))
+	}
+	if got[0].Subject != "newest-archive" {
+		t.Fatalf("ReadFilteredTail subject = %q, want newest-archive", got[0].Subject)
+	}
+}
+
 func TestReadLatestSeqSpansArchiveOnlyLog(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")

@@ -1,7 +1,9 @@
 package storehealth
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -165,6 +167,31 @@ func TestLastMaintenanceReturnsLatestAcrossTypes(t *testing.T) {
 	}
 }
 
+func TestLastMaintenanceUsesTailProvider(t *testing.T) {
+	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+	ep := &tailOnlyMaintenanceProvider{
+		events: []events.Event{
+			{Type: events.StoreMaintenanceDone, Ts: older},
+			{Type: events.StoreMaintenanceFailed, Ts: newer},
+		},
+	}
+
+	ts, status := LastMaintenance(ep)
+	if !ts.Equal(newer) {
+		t.Fatalf("ts = %v, want %v", ts, newer)
+	}
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+	if ep.listCalls != 0 {
+		t.Fatalf("LastMaintenance called full List %d times; want tail-only lookup", ep.listCalls)
+	}
+	if ep.tailCalls != 1 {
+		t.Fatalf("LastMaintenance called ListTail %d times, want 1", ep.tailCalls)
+	}
+}
+
 func TestLastMaintenanceOnlyDoneEvents(t *testing.T) {
 	ep := events.NewFake()
 	t1 := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
@@ -189,3 +216,33 @@ func TestLastMaintenanceNoEvents(t *testing.T) {
 		t.Fatalf("LastMaintenance(empty) = (%v,%q), want (zero,\"\")", ts, status)
 	}
 }
+
+type tailOnlyMaintenanceProvider struct {
+	events    []events.Event
+	listCalls int
+	tailCalls int
+}
+
+func (p *tailOnlyMaintenanceProvider) Record(events.Event) {}
+
+func (p *tailOnlyMaintenanceProvider) List(events.Filter) ([]events.Event, error) {
+	p.listCalls++
+	return nil, errors.New("full list should not be used")
+}
+
+func (p *tailOnlyMaintenanceProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	p.tailCalls++
+	matches := events.ApplyFilter(p.events, filter)
+	if limit > 0 && len(matches) > limit {
+		matches = matches[len(matches)-limit:]
+	}
+	return matches, nil
+}
+
+func (p *tailOnlyMaintenanceProvider) LatestSeq() (uint64, error) { return 0, nil }
+
+func (p *tailOnlyMaintenanceProvider) Watch(context.Context, uint64) (events.Watcher, error) {
+	return nil, errors.New("watch not implemented")
+}
+
+func (p *tailOnlyMaintenanceProvider) Close() error { return nil }

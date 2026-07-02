@@ -36,6 +36,15 @@ func TestMatchesFilter_Until(t *testing.T) {
 	}
 }
 
+func TestMatchesFilter_Types(t *testing.T) {
+	if !matchesFilter(Event{Type: BeadClosed}, Filter{Types: []string{BeadCreated, BeadClosed}}) {
+		t.Error("event type in Types should match")
+	}
+	if matchesFilter(Event{Type: SessionWoke}, Filter{Types: []string{BeadCreated, BeadClosed}}) {
+		t.Error("event type outside Types should not match")
+	}
+}
+
 func TestFakeList_Limit(t *testing.T) {
 	// Create a fake with 5 events and request only 3.
 	f := NewFake()

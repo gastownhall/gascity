@@ -102,22 +102,30 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 		latestTs     time.Time
 		latestStatus string
 	)
-	for _, spec := range []struct {
-		typ    string
-		status string
-	}{
-		{events.StoreMaintenanceDone, "success"},
-		{events.StoreMaintenanceFailed, "failed"},
-	} {
-		evts, err := ep.List(events.Filter{Type: spec.typ})
-		if err != nil {
-			continue
-		}
-		for _, e := range evts {
-			if e.Ts.After(latestTs) {
-				latestTs = e.Ts
-				latestStatus = spec.status
-			}
+	statusForType := map[string]string{
+		events.StoreMaintenanceDone:   "success",
+		events.StoreMaintenanceFailed: "failed",
+	}
+	filter := events.Filter{Types: []string{
+		events.StoreMaintenanceDone,
+		events.StoreMaintenanceFailed,
+	}}
+	var (
+		evts []events.Event
+		err  error
+	)
+	if tail, ok := ep.(events.TailProvider); ok {
+		evts, err = tail.ListTail(filter, 1)
+	} else {
+		evts, err = ep.List(filter)
+	}
+	if err != nil {
+		return latestTs, latestStatus
+	}
+	for _, e := range evts {
+		if e.Ts.After(latestTs) {
+			latestTs = e.Ts
+			latestStatus = statusForType[e.Type]
 		}
 	}
 	return latestTs, latestStatus

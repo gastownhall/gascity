@@ -16,6 +16,7 @@ import (
 // Filter specifies predicates for ReadFiltered. Zero values are ignored.
 type Filter struct {
 	Type     string    // match events with this Type
+	Types    []string  // match events with any of these types
 	Actor    string    // match events with this Actor
 	Subject  string    // match events with this Subject
 	Since    time.Time // match events at or after this time
@@ -32,6 +33,18 @@ func matchesFilter(e Event, f Filter) bool {
 	}
 	if f.Type != "" && e.Type != f.Type {
 		return false
+	}
+	if len(f.Types) > 0 {
+		matched := false
+		for _, typ := range f.Types {
+			if e.Type == typ {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
 	if f.Actor != "" && e.Actor != f.Actor {
 		return false
@@ -208,27 +221,73 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 	return nil
 }
 
-// ReadFilteredTail reads the trailing matching events from path. A positive
-// limit returns at most that many events in chronological order; limit <= 0
-// falls back to ReadFiltered.
+// ReadFilteredTail reads the trailing matching events from path and canonical
+// sibling archives. A positive limit returns at most that many events in
+// chronological order; limit <= 0 falls back to ReadFiltered.
 func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 	if limit <= 0 {
 		return ReadFiltered(path, filter)
 	}
+	var result []Event
 	f, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("reading events tail: %w", err)
 		}
-		return nil, fmt.Errorf("reading events tail: %w", err)
-	}
-	defer f.Close() //nolint:errcheck // read-only file
+	} else {
+		defer f.Close() //nolint:errcheck // read-only file
 
-	info, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat events tail: %w", err)
+		info, err := f.Stat()
+		if err != nil {
+			return nil, fmt.Errorf("stat events tail: %w", err)
+		}
+		result, err = readFilteredTailFromFile(f, info.Size(), filter, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(result) >= limit {
+			return result, nil
+		}
 	}
-	return readFilteredTailFromFile(f, info.Size(), filter, limit)
+	archives, err := archiveFilesIn(filepath.Dir(path))
+	if err != nil {
+		return result, nil
+	}
+	for i := len(archives) - 1; i >= 0 && len(result) < limit; i-- {
+		remaining := limit - len(result)
+		archivePath := filepath.Join(filepath.Dir(path), archives[i].Basename)
+		tail, err := readFilteredTailFromArchive(archivePath, filter, remaining)
+		if err != nil {
+			return result, fmt.Errorf("reading archive %q tail: %w", archives[i].Basename, err)
+		}
+		if len(tail) == 0 {
+			continue
+		}
+		combined := make([]Event, 0, len(tail)+len(result))
+		combined = append(combined, tail...)
+		combined = append(combined, result...)
+		result = combined
+	}
+	return result, nil
+}
+
+func readFilteredTailFromArchive(path string, filter Filter, limit int) ([]Event, error) {
+	var tail []Event
+	err := streamArchive(path, filter, func(e Event) bool {
+		if !matchesFilter(e, filter) {
+			return true
+		}
+		tail = append(tail, e)
+		if len(tail) > limit {
+			copy(tail, tail[1:])
+			tail = tail[:limit]
+		}
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return tail, nil
 }
 
 func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) ([]Event, error) {

@@ -679,7 +679,14 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 }
 
 func supervisorEventListFilterIsEmpty(filter events.Filter) bool {
-	return filter == (events.Filter{})
+	return filter.Type == "" &&
+		len(filter.Types) == 0 &&
+		filter.Actor == "" &&
+		filter.Subject == "" &&
+		filter.Since.IsZero() &&
+		filter.Until.IsZero() &&
+		filter.AfterSeq == 0 &&
+		filter.Limit == 0
 }
 
 func (sm *SupervisorMux) currentSupervisorEventTotal() int {

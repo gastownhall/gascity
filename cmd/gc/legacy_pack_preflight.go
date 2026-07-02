@@ -71,10 +71,10 @@ func lockedBundledCanonicalImports(cityPath string) ([]lockedBundledImport, erro
 // ensureBundledLockedRemoteImportsCached hydrates the shared repo cache for
 // every bundled pack source pinned in packs.lock so config load can resolve
 // locked bundled imports without network access or a prior "gc import
-// install". A cache that already validates is skipped lock-free; only on
-// validation failure does the preflight take the write-locked
-// packman.EnsureRepoInCache repair path, which revalidates under the lock
-// (a concurrent repair between the two checks is therefore benign).
+// install". A cache that already passes marker/hash validation is skipped
+// lock-free; only on validation failure does the preflight take the
+// write-locked packman.EnsureRepoInCache repair path, which revalidates under
+// the lock (a concurrent repair between the two checks is therefore benign).
 func ensureBundledLockedRemoteImportsCached(cityPath string) error {
 	imports, err := lockedBundledCanonicalImports(cityPath)
 	if err != nil {
@@ -85,7 +85,7 @@ func ensureBundledLockedRemoteImportsCached(cityPath string) error {
 		if err != nil {
 			return fmt.Errorf("resolving cache path for bundled import %q from packs.lock: %w", imp.source, err)
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, imp.commit) == nil {
+		if builtinpacks.ValidateSyntheticRepoFast(cachePath, imp.commit) == nil {
 			continue
 		}
 		if _, err := packman.EnsureRepoInCache(imp.source, imp.commit); err != nil {
@@ -96,14 +96,15 @@ func ensureBundledLockedRemoteImportsCached(cityPath string) error {
 }
 
 // lockedBundledImportsUsable reports whether every bundled pack source pinned
-// at its canonical commit in packs.lock has a valid synthetic cache. The ready
-// fast path in EnsureBuiltinRuntimeAssets pairs it with
-// requiredBuiltinSourcesUsable so an evicted or corrupted optional locked
-// bundled cache (for example gastown or gascity) still forces re-hydration
-// after the city was marked ready, instead of letting config load fail on the
-// locked-but-missing synthetic cache. A lockfile that cannot be read or that
-// has a malformed entry is reported unusable so the caller falls through to
-// ensureBundledLockedRemoteImportsCached, which surfaces the underlying error.
+// at its canonical commit in packs.lock has a marker/hash-valid synthetic
+// cache. The ready fast path in EnsureBuiltinRuntimeAssets pairs it with
+// requiredBuiltinSourcesUsable so an evicted or marker/hash-invalid optional
+// locked bundled cache (for example gastown or gascity) still forces
+// re-hydration after the city was marked ready, instead of letting config load
+// fail on the locked-but-missing synthetic cache. A lockfile that cannot be
+// read or that has a malformed entry is reported unusable so the caller falls
+// through to ensureBundledLockedRemoteImportsCached, which surfaces the
+// underlying error.
 func lockedBundledImportsUsable(cityPath string) bool {
 	imports, err := lockedBundledCanonicalImports(cityPath)
 	if err != nil {
@@ -114,7 +115,7 @@ func lockedBundledImportsUsable(cityPath string) bool {
 		if err != nil {
 			return false
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, imp.commit) != nil {
+		if builtinpacks.ValidateSyntheticRepoFast(cachePath, imp.commit) != nil {
 			return false
 		}
 	}
