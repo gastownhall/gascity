@@ -92,3 +92,42 @@ func TestDoHookClaimUsesSelectedStoreContextForMutationAndContinuation(t *testin
 		t.Fatalf("assignedBead = %q, want sib-1", assignedBead)
 	}
 }
+
+// TestDoHookClaimSkipsBlockedRoutedHeadAndClaimsReadyBehindIt guards the
+// widened-routed-tier fix: a routed tier's oldest candidate can be
+// is_blocked (e.g. gated on a PR), and the hook must fall through to a
+// Ready routed bead behind it rather than idle-exiting on the blocked head.
+func TestDoHookClaimSkipsBlockedRoutedHeadAndClaimsReadyBehindIt(t *testing.T) {
+	candidates := []beads.Bead{
+		{ID: "blocked-head", Status: "open", IsBlocked: boolPtr(true), Metadata: map[string]string{"gc.routed_to": "route-1"}},
+		{ID: "ready-behind", Status: "open", Metadata: map[string]string{"gc.routed_to": "route-1"}},
+	}
+	output, err := json.Marshal(candidates)
+	if err != nil {
+		t.Fatalf("marshal candidates: %v", err)
+	}
+
+	var claimedBead string
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) { return string(output), nil },
+		Claim: func(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimedBead = beadID
+			return beads.Bead{ID: beadID, Assignee: assignee, Status: "in_progress"}, true, nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", ".", hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"route-1"},
+		JSON:               true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if claimedBead != "ready-behind" {
+		t.Fatalf("claimedBead = %q, want ready-behind (blocked-head must be skipped)", claimedBead)
+	}
+}

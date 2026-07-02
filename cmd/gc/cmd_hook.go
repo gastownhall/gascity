@@ -653,10 +653,11 @@ func workQueryHasReadyWork(output string) bool {
 }
 
 // filterUnreadyHookCandidates strips beads from work_query output that fail
-// bd ready semantics: future defer_until, or any open blocking dep in the
-// row's blocked_by array. The work_query is expected to gate these, but
-// defensive filtering here prevents a single broken query from cascading
-// into agent action on a bead it cannot progress.
+// bd ready semantics: future defer_until, any open blocking dep in the row's
+// blocked_by array, or the row's own is_blocked / status=="blocked" marker.
+// The work_query is expected to gate these, but defensive filtering here
+// prevents a single broken query from cascading into agent action on a bead
+// it cannot progress.
 // Pure function over JSON; takes time.Time so tests stay deterministic.
 func filterUnreadyHookCandidates(output string, now time.Time) string {
 	if output == "" {
@@ -681,6 +682,9 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 			continue
 		}
 		if isDepBlockedHookCandidate(obj) {
+			continue
+		}
+		if isSelfBlockedHookCandidate(obj) {
 			continue
 		}
 		filtered = append(filtered, obj)
@@ -726,6 +730,22 @@ func isDepBlockedHookCandidate(item map[string]any) bool {
 		if status != "" && !strings.EqualFold(status, "closed") {
 			return true
 		}
+	}
+	return false
+}
+
+// isSelfBlockedHookCandidate reports whether a candidate carries bd's own
+// is_blocked marker or an explicit status=="blocked", independent of the
+// blocked_by dependency array checked by isDepBlockedHookCandidate. An
+// absent is_blocked field is treated as NOT blocked — bd's denormalized
+// projection is not always populated, and over-filtering here would strand
+// otherwise-ready work.
+func isSelfBlockedHookCandidate(item map[string]any) bool {
+	if blocked, ok := item["is_blocked"].(bool); ok && blocked {
+		return true
+	}
+	if status, ok := item["status"].(string); ok && strings.EqualFold(strings.TrimSpace(status), "blocked") {
+		return true
 	}
 	return false
 }

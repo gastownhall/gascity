@@ -3589,8 +3589,12 @@ func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
 
 func routedReadyTierCommand(includeEphemeralReady bool) string {
 	// The shared predicate stays order-free so the count-form does no wasted
-	// sorting; the worker first-row path asks bd for the oldest candidate.
-	return bdReadyPoolDemandShell("--sort oldest --limit=1", includeEphemeralReady) + ` 2>/dev/null`
+	// sorting; the worker first-row path asks bd for the oldest candidates.
+	// The tier is widened past a single row (limit=20, not limit=1) so a
+	// self-blocked head (is_blocked / status==blocked) has Ready routed work
+	// behind it to fall through to instead of idle-exiting; the hook layer
+	// (filterUnreadyHookCandidates) strips the blocked head from the result.
+	return bdReadyPoolDemandShell("--sort oldest --limit=20", includeEphemeralReady) + ` 2>/dev/null`
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
