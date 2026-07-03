@@ -16,9 +16,8 @@ import {
   type RunLane,
   type RunSummary,
   type SourceState,
-  UnsupportedRunError,
 } from 'gas-city-dashboard-shared';
-import { SupervisorApiError } from '../supervisor/errors';
+import { ApiClientError } from '../api/client';
 import rawFormulaRunDetailFixture from '../test/fixtures/formula-run-detail.json';
 
 const loadSupervisorFormulaRunDetail = vi.hoisted(() => vi.fn());
@@ -480,11 +479,10 @@ describe('FormulaRunDetailPage', () => {
     await screen.findByRole('heading', { name: /adopt pr #42/i });
 
     const runUrls = fetchUrls.filter((url) => url.startsWith('/api/city/test-city/runs/'));
-    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledWith(
-      'gc-adopt-pr-active',
-      'city',
-      'racoon-city',
-    );
+    // The detail loader is scope-independent now (the BFF projection derives the
+    // run's scope from its own root bead); the route's scope still drives the
+    // separate run-diff fetch below.
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledWith('gc-adopt-pr-active');
     expect(runUrls).toContain(
       '/api/city/test-city/runs/gc-adopt-pr-active/diff?scope_kind=city&scope_ref=racoon-city',
     );
@@ -661,10 +659,10 @@ describe('FormulaRunDetailPage', () => {
 
   it('renders an informative list-only message for a v1 / wisp (unsupported) run, not the generic failure (gascity-dashboard-9w3k)', async () => {
     // A v1 / wisp run is clickable in the run list but has no graph.v2 detail
-    // view: enrichFormulaRun throws UnsupportedRunError('not_run_view'). The page
-    // must explain that clearly rather than show the opaque generic fallback.
+    // view: the BFF rejects it with 422 + reason 'not_run_view'. The page must
+    // explain that clearly rather than show the opaque generic fallback.
     loadSupervisorFormulaRunDetail.mockImplementation(async () => {
-      throw new UnsupportedRunError('run is not a graph.v2 run', 'not_run_view');
+      throw new ApiClientError(422, 'run is not a graph.v2 run', undefined, 'not_run_view');
     });
 
     renderPage();
@@ -679,13 +677,13 @@ describe('FormulaRunDetailPage', () => {
   });
 
   it('renders an honest not-found message for a raw 404 (ambiguous), not the v1 over-claim or the generic failure (Major 2)', async () => {
-    // gascity-dashboard (Major 2): a raw SupervisorApiError 404 (no snapshot at
-    // all) is ambiguous — it can be a v1/wisp id, a completed run whose snapshot
-    // wasn't retained, a pruned run, or a stale/wrong derived scope. The page
-    // must NOT assert it is definitively v1 (the 'unsupported' copy) and must NOT
-    // fall to the generic "Formula run unavailable." dead-end either.
+    // gascity-dashboard (Major 2): a 404 (no run root in the projection) is
+    // ambiguous — it can be a v1/wisp id, a completed run whose events rotated
+    // out, a pruned run, or a stale/wrong derived scope. The page must NOT assert
+    // it is definitively v1 (the 'unsupported' copy) and must NOT fall to the
+    // generic "Formula run unavailable." dead-end either.
     loadSupervisorFormulaRunDetail.mockImplementation(async () => {
-      throw new SupervisorApiError(404, 'workflow gc-p7yf1m not found', undefined);
+      throw new ApiClientError(404, 'unknown run');
     });
 
     renderPage();
@@ -699,10 +697,10 @@ describe('FormulaRunDetailPage', () => {
   });
 
   it('still shows the generic failure for a malformed graph.v2 snapshot (invalid_snapshot)', async () => {
-    // A genuine load failure (malformed graph.v2 snapshot, or any other
-    // UnsupportedRunError reason) must NOT be mistaken for a v1 list-only run.
+    // A genuine load failure (malformed graph.v2 snapshot: 422 +
+    // 'invalid_snapshot') must NOT be mistaken for a v1 list-only run.
     loadSupervisorFormulaRunDetail.mockImplementation(async () => {
-      throw new UnsupportedRunError('run snapshot identity is missing or invalid');
+      throw new ApiClientError(422, 'run snapshot is invalid', undefined, 'invalid_snapshot');
     });
 
     renderPage();

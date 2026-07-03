@@ -71,11 +71,12 @@ type PoolJSON struct {
 
 // StatusRigJSON represents a rig in the JSON status output.
 type StatusRigJSON struct {
-	Name               string `json:"name"`
-	Path               string `json:"path"`
-	Prefix             string `json:"prefix,omitempty"`
-	Suspended          bool   `json:"suspended"`
-	DefaultSlingTarget string `json:"default_sling_target,omitempty"`
+	Name                string   `json:"name"`
+	Path                string   `json:"path"`
+	Prefix              string   `json:"prefix,omitempty"`
+	Suspended           bool     `json:"suspended"`
+	DefaultSlingTarget  string   `json:"default_sling_target,omitempty"`
+	DefaultSlingTargets []string `json:"default_sling_targets,omitempty"`
 }
 
 // StatusSummaryJSON is the agent count summary in JSON output.

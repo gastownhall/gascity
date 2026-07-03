@@ -5744,6 +5744,32 @@ func TestDefaultSlingTargetRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDefaultSlingTargetsRoundTrip(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Rigs: []Rig{
+			{Name: "hello-world", Path: "/tmp/hw", DefaultSlingTargets: []string{"hello-world/polecat-a", "hello-world/polecat-b"}},
+		},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(Marshal output): %v", err)
+	}
+	want := []string{"hello-world/polecat-a", "hello-world/polecat-b"}
+	if len(got.Rigs[0].DefaultSlingTargets) != len(want) {
+		t.Fatalf("DefaultSlingTargets len = %d, want %d", len(got.Rigs[0].DefaultSlingTargets), len(want))
+	}
+	for i, v := range want {
+		if got.Rigs[0].DefaultSlingTargets[i] != v {
+			t.Errorf("DefaultSlingTargets[%d] = %q, want %q", i, got.Rigs[0].DefaultSlingTargets[i], v)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SessionConfig accessor tests
 // ---------------------------------------------------------------------------

@@ -5,10 +5,117 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+// writeJSONLEvents writes seq-stamped bead.created events to path as plain JSONL,
+// one per line — the on-disk shape of an active log or an in-flight rotating file.
+func writeJSONLEvents(t *testing.T, path string, seqs ...uint64) {
+	t.Helper()
+	var b strings.Builder
+	for _, s := range seqs {
+		fmt.Fprintf(&b, `{"seq":%d,"type":%q,"subject":"s%d"}`+"\n", s, string(BeadCreated), s)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func seqsOf(evts []Event) []uint64 {
+	out := make([]uint64, 0, len(evts))
+	for _, e := range evts {
+		out = append(out, e.Seq)
+	}
+	return out
+}
+
+// TestReadFilteredWithInFlightIncludesRotatingFiles is the reader-level guard for
+// the async-compression drop: a just-rotated active log is renamed to a plain
+// events.jsonl.rotating-* file and gzipped in the background, so between the
+// rename and the canonical .gz those events are visible to neither the archive
+// walker nor the active-file scan. ReadFiltered misses them; ReadFilteredWithInFlight
+// folds them back in, in seq order.
+func TestReadFilteredWithInFlightIncludesRotatingFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+
+	// A fully-compressed earlier rotation: seq 1 lives only in a canonical .gz.
+	gzSrc := filepath.Join(dir, "events.jsonl.rotating-20260507T120000Z-seq-1-1")
+	writeJSONLEvents(t, gzSrc, 1)
+	gz := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC), 1, 1))
+	var stderr bytes.Buffer
+	if err := gzipAndArchive(gzSrc, gz, &stderr); err != nil {
+		t.Fatalf("gzipAndArchive: %v", err)
+	}
+
+	// An in-flight rotation whose gzip has NOT finished: seq 2,3 live only in the
+	// plain-JSONL rotating-* file (no .gz yet).
+	writeJSONLEvents(t, filepath.Join(dir, "events.jsonl.rotating-20260507T120500Z-seq-2-3"), 2, 3)
+
+	// The fresh active file opened after that rotation.
+	writeJSONLEvents(t, path, 4, 5)
+
+	// Baseline: ReadFiltered lists only .gz archives + active, so it MISSES the
+	// in-flight window (seq 2,3) — the exact drop this guards.
+	base, err := ReadFiltered(path, Filter{})
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if got := seqsOf(base); !reflect.DeepEqual(got, []uint64{1, 4, 5}) {
+		t.Fatalf("ReadFiltered seqs = %v, want [1 4 5] (the in-flight gap)", got)
+	}
+
+	// ReadFilteredWithInFlight folds the rotating window back in, in seq order.
+	all, err := ReadFilteredWithInFlight(path, Filter{})
+	if err != nil {
+		t.Fatalf("ReadFilteredWithInFlight: %v", err)
+	}
+	if got := seqsOf(all); !reflect.DeepEqual(got, []uint64{1, 2, 3, 4, 5}) {
+		t.Fatalf("ReadFilteredWithInFlight seqs = %v, want [1 2 3 4 5]", got)
+	}
+
+	// AfterSeq fully excludes the rotating window (last seq 3 <= 3) without opening it.
+	after, err := ReadFilteredWithInFlight(path, Filter{AfterSeq: 3})
+	if err != nil {
+		t.Fatalf("ReadFilteredWithInFlight(AfterSeq=3): %v", err)
+	}
+	if got := seqsOf(after); !reflect.DeepEqual(got, []uint64{4, 5}) {
+		t.Fatalf("ReadFilteredWithInFlight(AfterSeq=3) seqs = %v, want [4 5]", got)
+	}
+}
+
+// TestReadFilteredWithInFlightDedupsArchiveRotatingOverlap covers the instant
+// after gzipAndArchive renames the .gz into place but before it removes the
+// source rotating file: both cover the same seq window and the merged read must
+// emit each event once, not twice.
+func TestReadFilteredWithInFlightDedupsArchiveRotatingOverlap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+
+	// The in-flight rotating file (stays on disk).
+	writeJSONLEvents(t, filepath.Join(dir, "events.jsonl.rotating-20260507T120500Z-seq-2-3"), 2, 3)
+	// A canonical .gz for the SAME window, gzipped from a throwaway source so the
+	// rotating file above is left in place — modeling the coexistence window.
+	gzSrc := filepath.Join(dir, "gz-source.jsonl")
+	writeJSONLEvents(t, gzSrc, 2, 3)
+	gz := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 5, 0, 0, time.UTC), 2, 3))
+	var stderr bytes.Buffer
+	if err := gzipAndArchive(gzSrc, gz, &stderr); err != nil {
+		t.Fatalf("gzipAndArchive: %v", err)
+	}
+	writeJSONLEvents(t, path, 4)
+
+	all, err := ReadFilteredWithInFlight(path, Filter{})
+	if err != nil {
+		t.Fatalf("ReadFilteredWithInFlight: %v", err)
+	}
+	if got := seqsOf(all); !reflect.DeepEqual(got, []uint64{2, 3, 4}) {
+		t.Fatalf("overlap seqs = %v, want [2 3 4] (deduped)", got)
+	}
+}
 
 // seedRecorderWithRotation creates a fresh recorder, writes recordsBefore
 // events, force-rotates, then writes recordsAfter events. Returns the

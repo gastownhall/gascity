@@ -114,33 +114,19 @@ export function useRunSummarySubscription(): RunSummarySubscription {
       }),
     );
     if (result.status !== 'error') {
-      // A cheap (active-only) success does NOT prove the WIDE failure recovered:
-      // the wide retry loop must keep driving off staleDueToFailureRef until a
-      // wide refresh actually lands (refreshWithLastGoodRetention clears it). So
-      // we deliberately do NOT clear the flag here.
-      const lastGood = lastGoodRef.current;
-      const borrowedHistorical = lastGood?.data.historicalLanes ?? [];
-      // Reconcile the borrowed history against the CURRENT active/blocked set: a
-      // run that was historical in last-good but is active or blocked again in
-      // this fresh snapshot would otherwise appear in BOTH sets (double-display).
-      // Drop any historical lane whose run is now live; recompute the count to
-      // match. (A run that completes between wide refreshes still lags into
-      // History on the next wide scan — accepted; this only kills the overlap.)
-      const liveIds = new Set<string>([
-        ...result.data.lanes.map((lane) => lane.id),
-        ...result.data.blockedLanes.map((lane) => lane.id),
-      ]);
-      const historicalLanes = borrowedHistorical.filter((lane) => !liveIds.has(lane.id));
-      const dropped = borrowedHistorical.length - historicalLanes.length;
-      const totalHistorical = Math.max(0, (lastGood?.data.totalHistorical ?? 0) - dropped);
-      return {
-        ...result,
-        data: {
-          ...result.data,
-          historicalLanes,
-          totalHistorical,
-        },
-      };
+      // The active source now returns the COMPLETE server-enriched snapshot
+      // (full historical lanes included), so an SSE refresh publishes it as-is.
+      // The BFF folds the whole event log atomically (ColdLoad → BuildRunSummary
+      // produces active + historical + blocked buckets together, never
+      // staggered), so there is no intermediate active-but-empty-history state
+      // the old client-side history-merge had to paper over.
+      // There is no longer a cheap/wide split whose partial history must be
+      // reconciled against last-good. We still do NOT clear staleDueToFailureRef
+      // here: a fast SSE refresh succeeding does not retroactively prove a prior
+      // wide-refresh failure recovered — refreshWithLastGoodRetention owns
+      // clearing the flag — so the degraded-retry loop keeps driving until an
+      // explicit refresh lands.
+      return result;
     }
     const lastGood = lastGoodRef.current;
     if (lastGood === null) return result;

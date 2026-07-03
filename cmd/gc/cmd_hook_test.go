@@ -1548,6 +1548,195 @@ esac
 	}
 }
 
+// TestCmdHookClaimSuffixedPoolWorkerDoesNotAdoptBareTemplateInProgressWork is
+// the ga-80pen8 end-to-end regression: "builder" is BOTH a [[named_session]]
+// holder's own identity AND a pool template shared by suffixed instances
+// (max_active_sessions > 1), mirroring the config shape confirmed in the
+// field incident. A suffixed pool worker resolves its config via the
+// GC_TEMPLATE fallback, so its resolvedAgentName is the bare template — which
+// is ALSO the named holder's identity. Before the fix, that let the worker
+// adopt the holder's in_progress bead through hookClaimExistingOrAssigned
+// without ever going through the store.Claim CAS, so two identities worked
+// (and closed) the same bead. The worker must instead drain no_work, and the
+// claim mutation must never run for a bead it does not own.
+func TestCmdHookClaimSuffixedPoolWorkerDoesNotAdoptBareTemplateInProgressWork(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "builder"
+max_active_sessions = 3
+work_query = "printf '[{\"id\":\"ga-frpt4k\",\"status\":\"in_progress\",\"assignee\":\"builder\",\"metadata\":{\"gc.routed_to\":\"builder\"}}]'"
+
+[[named_session]]
+template = "builder"
+mode = "on_demand"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+printf '[]'
+`, logPath)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	// Suffixed pool worker: GC_TEMPLATE is the bare pool binding, GC_ALIAS and
+	// GC_SESSION_NAME are this instance's own suffixed runtime identity.
+	t.Setenv("GC_TEMPLATE", "builder")
+	t.Setenv("GC_ALIAS", "builder-1")
+	t.Setenv("GC_SESSION_NAME", "builder-1")
+	t.Setenv("GC_SESSION_ID", "session-builder-1")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithOptions(--claim, suffixed pool worker) = %d, want 1 (no_work drain); stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action == "work" && result.Reason == "existing_assignment" {
+		t.Fatalf("REGRESSION ga-80pen8: suffixed pool worker %q adopted named holder %q's in_progress bead %q (%+v)",
+			"builder-1", "builder", result.BeadID, result)
+	}
+	if result.Action != "drain" || result.Reason != "no_work" {
+		t.Fatalf("result = %+v, want action=drain reason=no_work", result)
+	}
+	// A foreign in_progress bead must never reach the claim mutation. bd may
+	// not run at all once the candidate is excluded from both the adoption
+	// and fresh-claim paths — that's an even stronger signal than an empty
+	// log, so a missing log file is not a failure.
+	logData, err := os.ReadFile(logPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(%s): %v", logPath, err)
+	}
+	if strings.Contains(string(logData), "--claim") {
+		t.Fatalf("claim mutation ran for a foreign in_progress bead; bd log:\n%s", logData)
+	}
+}
+
+// TestCmdHookClaimNamedHolderStillAdoptsOwnInProgressWork is the companion
+// guard for ga-80pen8: the named-session holder (or a canonical max=1 pool
+// slot) whose own runtime identity IS the bare template must still adopt its
+// own in_progress bead. Its alias/assignee already carry the bare qualified
+// name via GC_ALIAS independent of resolvedAgentName, so the fix (dropping
+// resolvedAgentName from the suffixed-worker IdentityCandidates) must not
+// change this case.
+func TestCmdHookClaimNamedHolderStillAdoptsOwnInProgressWork(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "builder"
+max_active_sessions = 3
+work_query = "printf '[{\"id\":\"ga-frpt4k\",\"status\":\"in_progress\",\"assignee\":\"builder\",\"metadata\":{\"gc.routed_to\":\"builder\"}}]'"
+
+[[named_session]]
+template = "builder"
+mode = "on_demand"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte("#!/bin/sh\nprintf '[]'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	// Named holder / canonical slot: GC_ALIAS IS the bare template.
+	t.Setenv("GC_TEMPLATE", "builder")
+	t.Setenv("GC_ALIAS", "builder")
+	t.Setenv("GC_SESSION_NAME", "builder-session")
+	t.Setenv("GC_SESSION_ID", "session-builder")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithOptions(--claim, named holder) = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "existing_assignment" || result.BeadID != "ga-frpt4k" {
+		t.Fatalf("over-fix regression: named holder no longer adopts its own in_progress bead: %+v", result)
+	}
+}
+
+// TestPoolWorkerIdentityCandidatesExcludeBareTemplate is a mechanism-level
+// guard for ga-80pen8, pinned to the post-fix contract: a suffixed pool
+// worker's claim IdentityCandidates must never include the bare pool
+// template, because the bare template is also the [[named_session]] holder's
+// own identity. Including it let a suffixed worker adopt the holder's
+// in_progress bead via hookClaimExistingOrAssigned without ever reaching the
+// store.Claim CAS.
+func TestPoolWorkerIdentityCandidatesExcludeBareTemplate(t *testing.T) {
+	const (
+		poolTemplate  = "gascity/builder"   // bare template == named-session holder's identity
+		workerReal    = "gascity/builder-1" // this suffixed pool worker's own identity
+		foreignBeadID = "ga-frpt4k"
+	)
+	// Fixed contract: cmd_hook.go's --claim block passes only this session's
+	// own runtime identity (assignee, sessionID, sessionName, alias,
+	// agentForQuery) into hookClaimIdentityCandidates — never the bare
+	// template resolved via the GC_TEMPLATE fallback.
+	identityCandidates := hookClaimIdentityCandidates(workerReal, "", workerReal, workerReal, workerReal)
+	runner := func(string, string) (string, error) {
+		return `[{"id":"` + foreignBeadID + `","status":"in_progress","assignee":"` + poolTemplate +
+			`","metadata":{"gc.routed_to":"` + poolTemplate + `"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			t.Fatal("store.Claim ran: a foreign in_progress bead must never reach the CAS")
+			return beads.Bead{}, false, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           workerReal,
+		IdentityCandidates: identityCandidates,
+		RouteTargets:       hookClaimRouteTargets(poolTemplate, poolTemplate),
+		JSON:               true,
+	}
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action == "work" && result.Reason == "existing_assignment" {
+		t.Fatalf("REGRESSION ga-80pen8: pool worker %q adopted %q's in_progress bead %q (%+v)",
+			workerReal, poolTemplate, result.BeadID, result)
+	}
+	if result.Action != "drain" || result.Reason != "no_work" || code != 1 {
+		t.Fatalf("want no_work drain, got action=%q reason=%q code=%d", result.Action, result.Reason, code)
+	}
+}
+
 func TestHookInjectAlwaysExitsZero(t *testing.T) {
 	// Even on command failure, inject mode exits 0.
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }

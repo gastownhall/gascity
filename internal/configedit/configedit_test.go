@@ -5,7 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -162,6 +165,58 @@ func TestEdit_SetsAgentSuspended(t *testing.T) {
 		}
 	}
 	t.Error("mayor not found after edit")
+}
+
+// TestDo_SerializesConcurrentCalls proves Editor.Do runs its callbacks under
+// the same mutex as Edit, so a config-write surface that runs outside the
+// load→mutate→write shape (pack import add/remove) never overlaps another
+// mutation of the same city. If Do did not lock, the concurrent callbacks would
+// observe more than one in-flight at once.
+func TestDo_SerializesConcurrentCalls(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	var inFlight, overlaps, ran int32
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = ed.Do(func() error {
+				if atomic.AddInt32(&inFlight, 1) != 1 {
+					atomic.StoreInt32(&overlaps, 1)
+				}
+				time.Sleep(time.Millisecond)
+				atomic.AddInt32(&ran, 1)
+				atomic.AddInt32(&inFlight, -1)
+				return nil
+			})
+		}()
+	}
+	wg.Wait()
+
+	if overlaps != 0 {
+		t.Fatal("Editor.Do allowed concurrent callbacks to overlap; the lock did not serialize")
+	}
+	if ran != 32 {
+		t.Fatalf("ran = %d, want 32", ran)
+	}
+}
+
+// TestDo_PropagatesResult confirms Do surfaces the callback's error unchanged.
+func TestDo_PropagatesResult(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	sentinel := errors.New("boom")
+	if err := ed.Do(func() error { return sentinel }); !errors.Is(err, sentinel) {
+		t.Fatalf("Do error = %v, want %v", err, sentinel)
+	}
+	if err := ed.Do(func() error { return nil }); err != nil {
+		t.Fatalf("Do(nil) = %v, want nil", err)
+	}
 }
 
 func TestEdit_ValidationFailure(t *testing.T) {

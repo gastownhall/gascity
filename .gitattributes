@@ -1,0 +1,6 @@
+# The dashboard SPA bundle under internal/api/dashboardspa/dist is emitted by the
+# Vite build and embedded into the gc binary. Treat it as generated output: skip
+# textual diffing and the whitespace lint (`git diff --check`) on the minified
+# assets, and collapse it in review UIs. Drift is still caught by the content-based
+# `git diff --quiet -- internal/api/dashboardspa/dist` gate in the Makefile.
+internal/api/dashboardspa/dist/** -diff linguist-generated

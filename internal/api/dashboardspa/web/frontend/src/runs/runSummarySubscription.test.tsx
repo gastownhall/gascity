@@ -402,11 +402,13 @@ describe('useRunSummarySubscription / RunSummaryProvider (gascity-dashboard-2j8e
     await waitFor(() => expect(screen.getByTestId('page').textContent).toBe('error:-1'));
   });
 
-  it('reconciles merged history against the fresh active set on a cheap refresh (no double-display)', async () => {
-    // MAJOR 1: the cheap refresh borrows historicalLanes from the last wide
-    // snapshot. If a run that WAS historical is now active/blocked again, it must
-    // appear ONLY in the live set, not in both. The wide upgrade seeds history
-    // with gc-1 (historical); the cheap refresh then reports gc-1 as active again.
+  it('publishes the active source snapshot verbatim on a cheap refresh (server owns the active/historical split)', async () => {
+    // The cheap SSE refresh now hits the same complete BFF read as the wide one,
+    // so the active source returns the authoritative active+historical split and
+    // the subscription publishes it directly — NO borrowing history from the last
+    // wide snapshot, no client-side reconciliation. The discriminating assertion:
+    // an active read with empty history publishes empty history (a borrow would
+    // have re-surfaced gc-2 from the seeded wide snapshot).
     mockFull.mockResolvedValue(buildLaneSource({ active: [], historical: ['gc-1', 'gc-2'] }));
 
     render(
@@ -420,16 +422,15 @@ describe('useRunSummarySubscription / RunSummaryProvider (gascity-dashboard-2j8e
       expect(screen.getByTestId('page').textContent).toBe('live=[] hist=[gc-1,gc-2] totalHist=2'),
     );
 
-    // A bead event lands and the cheap active read now reports gc-1 active again.
+    // A bead event lands; the cheap active read returns its OWN complete snapshot
+    // (gc-1 active, no historical). Published verbatim — gc-2 is NOT borrowed back.
     mockActive.mockResolvedValue(buildLaneSource({ active: ['gc-1'], historical: [] }));
     await act(async () => {
       lastHookCall.onMatch?.();
     });
 
-    // gc-1 appears ONLY in the live set; the borrowed history drops it and the
-    // count is recomputed. gc-2 (still only historical) stays in history.
     await waitFor(() =>
-      expect(screen.getByTestId('page').textContent).toBe('live=[gc-1] hist=[gc-2] totalHist=1'),
+      expect(screen.getByTestId('page').textContent).toBe('live=[gc-1] hist=[] totalHist=0'),
     );
   });
 

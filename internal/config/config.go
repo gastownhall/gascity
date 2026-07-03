@@ -616,6 +616,12 @@ type Rig struct {
 	// invoked with only a bead ID (no explicit target). Resolved via
 	// resolveAgentIdentity. Example: "rig/polecat"
 	DefaultSlingTarget string `toml:"default_sling_target,omitempty"`
+	// DefaultSlingTargets is the plural form of DefaultSlingTarget.
+	// When set, targetless gc sling picks one entry at random each dispatch.
+	// Takes precedence over DefaultSlingTarget when non-empty. Each entry is
+	// resolved the same way as DefaultSlingTarget. Example:
+	//   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"]
+	DefaultSlingTargets []string `toml:"default_sling_targets,omitempty"`
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`

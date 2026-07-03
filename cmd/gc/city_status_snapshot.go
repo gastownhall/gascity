@@ -291,11 +291,12 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 			}
 		}
 		snapshot.Rigs = append(snapshot.Rigs, StatusRigJSON{
-			Name:               r.Name,
-			Path:               r.Path,
-			Prefix:             r.EffectivePrefix(),
-			Suspended:          suspended,
-			DefaultSlingTarget: r.DefaultSlingTarget,
+			Name:                r.Name,
+			Path:                r.Path,
+			Prefix:              r.EffectivePrefix(),
+			Suspended:           suspended,
+			DefaultSlingTarget:  r.DefaultSlingTarget,
+			DefaultSlingTargets: r.DefaultSlingTargets,
 		})
 	}
 

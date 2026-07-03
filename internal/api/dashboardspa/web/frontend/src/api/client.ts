@@ -12,6 +12,8 @@ import type {
   RunDiffRequest,
   RunDiffResponse,
   RunScopeKind,
+  RunSummary,
+  FormulaRunDetail,
 } from 'gas-city-dashboard-shared';
 import { cityPath } from './cityBase';
 
@@ -55,7 +57,7 @@ async function performRequest<T>(
     const bodyText = await res.text();
     const payload = parseApiErrorBody(bodyText);
     const message = payload?.error ?? (bodyText.trim() || res.statusText || `HTTP ${res.status}`);
-    throw new ApiClientError(res.status, message, payload?.kind);
+    throw new ApiClientError(res.status, message, payload?.kind, payload?.reason);
   }
   let json: unknown;
   try {
@@ -80,7 +82,8 @@ function isApiError(value: unknown): value is ApiError {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Record<string, unknown>;
   if (typeof record.error !== 'string') return false;
-  return record.kind === undefined || typeof record.kind === 'string';
+  if (record.kind !== undefined && typeof record.kind !== 'string') return false;
+  return record.reason === undefined || typeof record.reason === 'string';
 }
 
 // The /api plane uses the same-origin custom-header CSRF model (X-GC-Request),
@@ -103,6 +106,9 @@ export class ApiClientError extends Error {
     public readonly status: number,
     message: string,
     public readonly kind?: string,
+    // The BFF run-detail discriminator (see ApiError.reason): 'not_run_view'
+    // vs 'invalid_snapshot' on a 422. Absent on every other endpoint.
+    public readonly reason?: string,
   ) {
     super(message);
     this.name = 'ApiClientError';
@@ -156,6 +162,10 @@ function requireNullableStringField(
 
 function requireBooleanField(record: JsonRecord, url: string, label: string, field: string): void {
   if (typeof record[field] !== 'boolean') failDecode(url, `${label}.${field} must be a boolean`);
+}
+
+function requireNumberField(record: JsonRecord, url: string, label: string, field: string): void {
+  if (typeof record[field] !== 'number') failDecode(url, `${label}.${field} must be a number`);
 }
 
 function requireArrayField(record: JsonRecord, url: string, label: string, field: string): void {
@@ -293,6 +303,46 @@ const decodeRunDiff = objectDecoder<RunDiffResponse>('run diff', (record, url) =
   requireStringField(record, url, 'run diff', 'patch');
   requireBooleanField(record, url, 'run diff', 'truncated');
 });
+// The run summary/detail DTOs are produced by the Go run projection
+// (internal/runproj), which is golden-gated byte-for-byte against these exact
+// shapes. Validate the structural arrays/objects the renderers iterate at the
+// edge (matching decodeRunDiff's depth) so a wire-shape regression fails here
+// rather than mis-rendering deep in a lane or diagram component.
+const decodeRunSummary = objectDecoder<RunSummary>('run summary', (record, url) => {
+  // Validate every field a renderer dereferences: RunMap reads the counts,
+  // the lane arrays, and totalActive/totalHistorical. The DTO is golden-gated
+  // against the Go projection, so this edge check is defensive — but it is now
+  // the ONLY backstop (the client-side fold that used to rebuild this is gone).
+  requireNumberField(record, url, 'run summary', 'totalActive');
+  requireNumberField(record, url, 'run summary', 'totalHistorical');
+  requireArrayField(record, url, 'run summary', 'lanes');
+  requireArrayField(record, url, 'run summary', 'historicalLanes');
+  requireArrayField(record, url, 'run summary', 'blockedLanes');
+  requireArrayField(record, url, 'run summary', 'recentChanges');
+  requireObjectField(record, url, 'run summary', 'runCounts');
+  requireObjectField(record, url, 'run summary', 'census');
+});
+const decodeFormulaRunDetail = objectDecoder<FormulaRunDetail>(
+  'formula run detail',
+  (record, url) => {
+    requireStringField(record, url, 'formula run detail', 'runId');
+    requireObjectField(record, url, 'formula run detail', 'formula');
+    requireObjectField(record, url, 'formula run detail', 'formulaDetail');
+    requireObjectField(record, url, 'formula run detail', 'executionPath');
+    // The detail renderer hard-derefs these union/nested fields (snapshotLabel
+    // reads snapshotEventSeq.kind, the partial notice reads completeness.kind,
+    // the status summary reads progress.statusCounts[...]), so validate them at
+    // the edge rather than let a malformed wire value throw deep in the diagram.
+    requireObjectField(record, url, 'formula run detail', 'snapshotEventSeq');
+    requireObjectField(record, url, 'formula run detail', 'completeness');
+    const progress = requireRecord(record['progress'], url, 'formula run detail.progress');
+    requireObjectField(progress, url, 'formula run detail.progress', 'statusCounts');
+    requireArrayField(record, url, 'formula run detail', 'stages');
+    requireArrayField(record, url, 'formula run detail', 'nodes');
+    requireArrayField(record, url, 'formula run detail', 'edges');
+    requireArrayField(record, url, 'formula run detail', 'lanes');
+  },
+);
 export interface ApiErrorParts {
   message: string;
   status?: number;
@@ -357,6 +407,20 @@ export const api = {
       decodeRunDiff,
       body,
     );
+  },
+  // The run view reads its summary and per-run detail from the BFF run
+  // projection (internal/api/dashboardbff/runtailer.go), a sub-second warm
+  // fold of the city event log that already layers session health/census.
+  // Both DTOs are the same shapes the SPA used to reconstruct client-side.
+  runSummary(): Promise<RunSummary> {
+    return request('GET', cityPath('/runs/summary'), decodeRunSummary);
+  },
+  // 200 → FormulaRunDetail. The endpoint rejects a non-graph.v2 run with
+  // 422 + reason 'not_run_view' (list-only) or 'invalid_snapshot' (load
+  // failure), an unknown run with 404, and a still-warming projection with
+  // 503 — surfaced to callers as ApiClientError (status + reason).
+  runDetail(runId: string): Promise<FormulaRunDetail> {
+    return request('GET', cityPath(`/runs/${encodeURIComponent(runId)}/detail`), decodeFormulaRunDetail);
   },
 };
 

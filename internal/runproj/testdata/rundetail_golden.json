@@ -1,0 +1,359 @@
+{
+  "runId": "dt-adopt1",
+  "rootBeadId": "dt-adopt1",
+  "rootStoreRef": "rig:gascity-packs",
+  "resolvedRootStore": "rig:gascity-packs",
+  "scopeKind": "rig",
+  "scopeRef": "gascity-packs",
+  "title": "mol-adopt-pr-v2",
+  "formula": {
+    "kind": "known",
+    "name": "mol-adopt-pr-v2",
+    "source": "metadata"
+  },
+  "formulaDetail": {
+    "kind": "unavailable",
+    "reason": "fetch_failed",
+    "name": "mol-adopt-pr-v2",
+    "target": "rig:gascity-packs",
+    "failure": "upstream_error"
+  },
+  "executionPath": {
+    "kind": "unavailable",
+    "reason": "missing_cwd_and_rig_root"
+  },
+  "snapshotVersion": 1,
+  "snapshotEventSeq": {
+    "kind": "known",
+    "seq": 100
+  },
+  "completeness": {
+    "kind": "complete"
+  },
+  "progress": {
+    "snapshotVersion": 1,
+    "snapshotEventSeq": {
+      "kind": "known",
+      "seq": 100
+    },
+    "snapshotPartial": false,
+    "totalNodeCount": 5,
+    "visibleNodeCount": 5,
+    "edgeCount": 4,
+    "executionInstanceCount": 5,
+    "sessionLinkCount": 0,
+    "streamableSessionCount": 0,
+    "streamableSessionIds": [],
+    "statusCounts": {
+      "ready": 1,
+      "completed": 3,
+      "active": 1
+    },
+    "allStatusCounts": {
+      "ready": 1,
+      "completed": 3,
+      "active": 1
+    }
+  },
+  "phase": "review",
+  "stages": [
+    {
+      "key": "preflight",
+      "label": "Preflight",
+      "status": "complete"
+    },
+    {
+      "key": "rebase",
+      "label": "Worktree / rebase",
+      "status": "complete"
+    },
+    {
+      "key": "review",
+      "label": "Review loop",
+      "status": "active"
+    },
+    {
+      "key": "ci",
+      "label": "Pre-approval CI",
+      "status": "pending"
+    },
+    {
+      "key": "approval",
+      "label": "Human approval",
+      "status": "pending"
+    },
+    {
+      "key": "finalize",
+      "label": "Merge-ready",
+      "status": "pending"
+    },
+    {
+      "key": "cleanup",
+      "label": "Cleanup",
+      "status": "pending"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "dt-adopt1",
+      "semanticNodeId": "dt-adopt1",
+      "title": "mol-adopt-pr-v2",
+      "kind": "run",
+      "constructKind": "run-root",
+      "status": "ready",
+      "currentBeadId": "dt-adopt1",
+      "scope": {
+        "kind": "scoped",
+        "ref": "gascity-packs"
+      },
+      "visibleInGraph": true,
+      "historicalOnly": false,
+      "iterationSummary": {
+        "kind": "single"
+      },
+      "attemptSummary": {
+        "kind": "none"
+      },
+      "visibleExecutionInstanceId": "dt-adopt1",
+      "executionInstances": [
+        {
+          "id": "dt-adopt1",
+          "semanticNodeId": "dt-adopt1",
+          "beadId": "dt-adopt1",
+          "iteration": {
+            "kind": "base"
+          },
+          "attempt": {
+            "kind": "untracked"
+          },
+          "label": "base",
+          "status": "ready",
+          "session": {
+            "kind": "none",
+            "reason": "not_started"
+          },
+          "currentIteration": true,
+          "historical": false
+        }
+      ],
+      "controlBadges": [
+        {
+          "id": "dt-adopt1.fin",
+          "label": "finalize",
+          "status": "pending"
+        }
+      ]
+    },
+    {
+      "id": "preflight",
+      "semanticNodeId": "preflight",
+      "title": "Preflight checks",
+      "kind": "step",
+      "constructKind": "step",
+      "status": "completed",
+      "currentBeadId": "dt-adopt1.1",
+      "scope": {
+        "kind": "scoped",
+        "ref": "gascity-packs"
+      },
+      "visibleInGraph": true,
+      "historicalOnly": false,
+      "iterationSummary": {
+        "kind": "single"
+      },
+      "attemptSummary": {
+        "kind": "none"
+      },
+      "visibleExecutionInstanceId": "dt-adopt1.1",
+      "executionInstances": [
+        {
+          "id": "dt-adopt1.1",
+          "semanticNodeId": "preflight",
+          "beadId": "dt-adopt1.1",
+          "iteration": {
+            "kind": "base"
+          },
+          "attempt": {
+            "kind": "untracked"
+          },
+          "label": "base",
+          "status": "completed",
+          "session": {
+            "kind": "none",
+            "reason": "session_unresolved"
+          },
+          "currentIteration": true,
+          "historical": false
+        }
+      ],
+      "controlBadges": []
+    },
+    {
+      "id": "rebase-check",
+      "semanticNodeId": "rebase-check",
+      "title": "Worktree rebase check",
+      "kind": "step",
+      "constructKind": "step",
+      "status": "completed",
+      "currentBeadId": "dt-adopt1.2",
+      "scope": {
+        "kind": "scoped",
+        "ref": "gascity-packs"
+      },
+      "visibleInGraph": true,
+      "historicalOnly": false,
+      "iterationSummary": {
+        "kind": "single"
+      },
+      "attemptSummary": {
+        "kind": "none"
+      },
+      "visibleExecutionInstanceId": "dt-adopt1.2",
+      "executionInstances": [
+        {
+          "id": "dt-adopt1.2",
+          "semanticNodeId": "rebase-check",
+          "beadId": "dt-adopt1.2",
+          "iteration": {
+            "kind": "base"
+          },
+          "attempt": {
+            "kind": "untracked"
+          },
+          "label": "base",
+          "status": "completed",
+          "session": {
+            "kind": "none",
+            "reason": "session_unresolved"
+          },
+          "currentIteration": true,
+          "historical": false
+        }
+      ],
+      "controlBadges": []
+    },
+    {
+      "id": "review-loop",
+      "semanticNodeId": "review-loop",
+      "title": "Review loop",
+      "kind": "step",
+      "constructKind": "step",
+      "status": "active",
+      "currentBeadId": "dt-adopt1.3",
+      "scope": {
+        "kind": "scoped",
+        "ref": "gascity-packs"
+      },
+      "visibleInGraph": true,
+      "historicalOnly": false,
+      "iterationSummary": {
+        "kind": "single"
+      },
+      "attemptSummary": {
+        "kind": "none"
+      },
+      "visibleExecutionInstanceId": "dt-adopt1.3",
+      "executionInstances": [
+        {
+          "id": "dt-adopt1.3",
+          "semanticNodeId": "review-loop",
+          "beadId": "dt-adopt1.3",
+          "iteration": {
+            "kind": "base"
+          },
+          "attempt": {
+            "kind": "untracked"
+          },
+          "label": "base",
+          "status": "active",
+          "session": {
+            "kind": "none",
+            "reason": "session_unresolved"
+          },
+          "currentIteration": true,
+          "historical": false
+        }
+      ],
+      "controlBadges": []
+    },
+    {
+      "id": "dt-adopt1.3a",
+      "semanticNodeId": "dt-adopt1.3a",
+      "title": "Claude review",
+      "kind": "step",
+      "constructKind": "step",
+      "status": "completed",
+      "currentBeadId": "dt-adopt1.3a",
+      "scope": {
+        "kind": "scoped",
+        "ref": "gascity-packs"
+      },
+      "visibleInGraph": true,
+      "historicalOnly": false,
+      "iterationSummary": {
+        "kind": "single"
+      },
+      "attemptSummary": {
+        "kind": "none"
+      },
+      "visibleExecutionInstanceId": "dt-adopt1.3a",
+      "executionInstances": [
+        {
+          "id": "dt-adopt1.3a",
+          "semanticNodeId": "dt-adopt1.3a",
+          "beadId": "dt-adopt1.3a",
+          "iteration": {
+            "kind": "base"
+          },
+          "attempt": {
+            "kind": "untracked"
+          },
+          "label": "base",
+          "status": "completed",
+          "session": {
+            "kind": "none",
+            "reason": "session_unresolved"
+          },
+          "currentIteration": true,
+          "historical": false
+        }
+      ],
+      "controlBadges": []
+    }
+  ],
+  "edges": [
+    {
+      "from": "dt-adopt1",
+      "to": "preflight",
+      "kind": "parent"
+    },
+    {
+      "from": "dt-adopt1",
+      "to": "rebase-check",
+      "kind": "parent"
+    },
+    {
+      "from": "dt-adopt1",
+      "to": "review-loop",
+      "kind": "parent"
+    },
+    {
+      "from": "dt-adopt1",
+      "to": "dt-adopt1.3a",
+      "kind": "parent"
+    }
+  ],
+  "lanes": [
+    {
+      "id": "gascity-packs",
+      "label": "gascity-packs",
+      "nodeIds": [
+        "dt-adopt1",
+        "preflight",
+        "rebase-check",
+        "review-loop",
+        "dt-adopt1.3a"
+      ]
+    }
+  ]
+}

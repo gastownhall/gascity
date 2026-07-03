@@ -60,6 +60,7 @@ const (
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
 	CurrentRunIDMetadataKey              = "gc.current_run_id"
+	CwdMetadataKey                       = "gc.cwd"
 	// ActiveWorkBeadMetadataKey is the session bead's current-pointer to the STEP it
 	// is executing — the work bead's bare gc.step_id (NOT its namespaced bead id),
 	// stamped at the claim hook and read at the usage record site to populate
@@ -102,6 +103,7 @@ const (
 	FanoutStateMetadataKey               = "gc.fanout_state"
 	FinalDispositionMetadataKey          = "gc.final_disposition"
 	ForEachMetadataKey                   = "gc.for_each"
+	FormulaMetadataKey                   = "gc.formula"
 	FormulaContractMetadataKey           = "gc.formula_contract"
 	FormulaHashMetadataKey               = "gc.formula_hash"
 	FormulaNameMetadataKey               = "gc.formula_name"
@@ -111,6 +113,7 @@ const (
 	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
 	InputConvoyIDMetadataKey             = "gc.input_convoy_id"
 	InstantiatingMetadataKey             = "gc.instantiating"
+	IterationMetadataKey                 = "gc.iteration"
 	ItemRootKeyMetadataKey               = "gc.item_root_key"
 	KindMetadataKey                      = "gc.kind"
 	LastFailureClassMetadataKey          = "gc.last_failure_class"
@@ -128,6 +131,7 @@ const (
 	OutcomeMetadataKey                   = "gc.outcome"
 	OutputJSONMetadataKey                = "gc.output_json"
 	OutputJSONRequiredMetadataKey        = "gc.output_json_required"
+	ParentBeadIDMetadataKey              = "gc.parent_bead_id"
 	ParentConvoyIDMetadataKey            = "gc.parent_convoy_id"
 	PartialFragmentMetadataKey           = "gc.partial_fragment"
 	PartialRetryMetadataKey              = "gc.partial_retry"
@@ -143,6 +147,7 @@ const (
 	RetryFromMetadataKey                 = "gc.retry_from"
 	RetrySessionRecycledMetadataKey      = "gc.retry_session_recycled"
 	RetryStateMetadataKey                = "gc.retry_state"
+	RigRootMetadataKey                   = "gc.rig_root"
 	RootBeadIDMetadataKey                = "gc.root_bead_id"
 	RootStoreRefMetadataKey              = "gc.root_store_ref"
 	RoutedToMetadataKey                  = "gc.routed_to"
@@ -154,31 +159,38 @@ const (
 	ScopeRoleMetadataKey                 = "gc.scope_role"
 	SessionAffinityMetadataKey           = "gc.session_affinity"
 	SessionIDMetadataKey                 = "gc.session_id"
-	SessionNameMetadataKey               = "gc.session_name"
-	SourceBeadIDMetadataKey              = "gc.source_bead_id"
-	SourceStepSpecMetadataKey            = "gc.source_step_spec"
-	SourceStoreRefMetadataKey            = "gc.source_store_ref"
-	SpawnedCountMetadataKey              = "gc.spawned_count"
-	SpecForMetadataKey                   = "gc.spec_for"
-	SpecForRefMetadataKey                = "gc.spec_for_ref"
-	StderrMetadataKey                    = "gc.stderr"
-	StdoutMetadataKey                    = "gc.stdout"
-	StepIDMetadataKey                    = "gc.step_id"
-	StepRefMetadataKey                   = "gc.step_ref"
-	StepTimeoutMetadataKey               = "gc.step_timeout"
-	SyntheticKindMetadataKey             = "gc.synthetic_kind"
-	SyntheticMetadataKey                 = "gc.synthetic"
-	TemplateMetadataKey                  = "gc.template"
-	TerminalMetadataKey                  = "gc.terminal"
-	TriggerBeadIDMetadataKey             = "gc.trigger_bead_id"
-	TriggerBeadStoreRefMetadataKey       = "gc.trigger_bead_store_ref"
-	TruncatedMetadataKey                 = "gc.truncated"
-	WorkBranchMetadataKey                = "gc.work_branch"
-	WorkCommitMetadataKey                = "gc.work_commit"
-	WorkDirMetadataKey                   = "gc.work_dir"
-	WorkOutcomeMetadataKey               = "gc.work_outcome"
-	WorkVerificationMetadataKey          = "gc.work_verification"
-	WorkflowIDMetadataKey                = "gc.workflow_id"
+	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
+	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
+	// bead's session link.
+	SessionIDCamelMetadataKey = "gc.sessionId"
+	SessionNameMetadataKey    = "gc.session_name"
+	// SessionNameCamelMetadataKey is the camelCase variant of SessionNameMetadataKey,
+	// mirroring SessionIDCamelMetadataKey.
+	SessionNameCamelMetadataKey    = "gc.sessionName"
+	SourceBeadIDMetadataKey        = "gc.source_bead_id"
+	SourceStepSpecMetadataKey      = "gc.source_step_spec"
+	SourceStoreRefMetadataKey      = "gc.source_store_ref"
+	SpawnedCountMetadataKey        = "gc.spawned_count"
+	SpecForMetadataKey             = "gc.spec_for"
+	SpecForRefMetadataKey          = "gc.spec_for_ref"
+	StderrMetadataKey              = "gc.stderr"
+	StdoutMetadataKey              = "gc.stdout"
+	StepIDMetadataKey              = "gc.step_id"
+	StepRefMetadataKey             = "gc.step_ref"
+	StepTimeoutMetadataKey         = "gc.step_timeout"
+	SyntheticKindMetadataKey       = "gc.synthetic_kind"
+	SyntheticMetadataKey           = "gc.synthetic"
+	TemplateMetadataKey            = "gc.template"
+	TerminalMetadataKey            = "gc.terminal"
+	TriggerBeadIDMetadataKey       = "gc.trigger_bead_id"
+	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
+	TruncatedMetadataKey           = "gc.truncated"
+	WorkBranchMetadataKey          = "gc.work_branch"
+	WorkCommitMetadataKey          = "gc.work_commit"
+	WorkDirMetadataKey             = "gc.work_dir"
+	WorkOutcomeMetadataKey         = "gc.work_outcome"
+	WorkVerificationMetadataKey    = "gc.work_verification"
+	WorkflowIDMetadataKey          = "gc.workflow_id"
 )
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
@@ -263,6 +275,7 @@ var KnownMetadataKeys = []string{
 	ControllerRetryableMetadataKey,
 	CurrentRunIDMetadataKey,
 	ActiveWorkBeadMetadataKey,
+	CwdMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
@@ -299,6 +312,7 @@ var KnownMetadataKeys = []string{
 	FanoutStateMetadataKey,
 	FinalDispositionMetadataKey,
 	ForEachMetadataKey,
+	FormulaMetadataKey,
 	FormulaContractMetadataKey,
 	FormulaHashMetadataKey,
 	FormulaNameMetadataKey,
@@ -308,6 +322,7 @@ var KnownMetadataKeys = []string{
 	IdempotencyKeyMetadataKey,
 	InputConvoyIDMetadataKey,
 	InstantiatingMetadataKey,
+	IterationMetadataKey,
 	ItemRootKeyMetadataKey,
 	KindMetadataKey,
 	LastFailureClassMetadataKey,
@@ -325,6 +340,7 @@ var KnownMetadataKeys = []string{
 	OutcomeMetadataKey,
 	OutputJSONMetadataKey,
 	OutputJSONRequiredMetadataKey,
+	ParentBeadIDMetadataKey,
 	ParentConvoyIDMetadataKey,
 	PartialFragmentMetadataKey,
 	PartialRetryMetadataKey,
@@ -340,6 +356,7 @@ var KnownMetadataKeys = []string{
 	RetryFromMetadataKey,
 	RetrySessionRecycledMetadataKey,
 	RetryStateMetadataKey,
+	RigRootMetadataKey,
 	RootBeadIDMetadataKey,
 	RootStoreRefMetadataKey,
 	RoutedToMetadataKey,
@@ -351,7 +368,9 @@ var KnownMetadataKeys = []string{
 	ScopeRoleMetadataKey,
 	SessionAffinityMetadataKey,
 	SessionIDMetadataKey,
+	SessionIDCamelMetadataKey,
 	SessionNameMetadataKey,
+	SessionNameCamelMetadataKey,
 	SourceBeadIDMetadataKey,
 	SourceStepSpecMetadataKey,
 	SourceStoreRefMetadataKey,

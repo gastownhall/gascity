@@ -238,7 +238,7 @@ func runInitProviderPreflightForConfig(cityPath string, cfg *config.City, stdout
 }
 
 func initHasRemoteImports(cityPath string) (bool, error) {
-	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		return false, err
 	}

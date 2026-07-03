@@ -2132,18 +2132,50 @@ type OutputTurn struct {
 	Timestamp *string `json:"timestamp,omitempty"`
 }
 
+// PackAddInputBody defines model for PackAddInputBody.
+type PackAddInputBody struct {
+	// Name Optional local binding name override; derived from the source when omitted.
+	Name *string `json:"name,omitempty"`
+
+	// Source Pack source: a remote git URL or registry ref (a sub-path of a repo is allowed).
+	Source string `json:"source"`
+
+	// Version Optional semver constraint for a git-backed pack.
+	Version *string `json:"version,omitempty"`
+}
+
+// PackAddedOutputBody defines model for PackAddedOutputBody.
+type PackAddedOutputBody struct {
+	// GitBacked Whether the resolved source is git-backed (has a lock entry).
+	GitBacked bool `json:"git_backed"`
+
+	// Name The local binding name written to [imports.<name>].
+	Name string `json:"name"`
+
+	// Source The canonical source string written to the manifest.
+	Source string `json:"source"`
+
+	// Version The version constraint written, if any.
+	Version *string `json:"version,omitempty"`
+}
+
 // PackListBody defines model for PackListBody.
 type PackListBody struct {
 	// Packs Registered packs.
 	Packs *[]PackResponse `json:"packs"`
 }
 
+// PackRemovedOutputBody defines model for PackRemovedOutputBody.
+type PackRemovedOutputBody struct {
+	// Name The binding name removed.
+	Name string `json:"name"`
+}
+
 // PackResponse defines model for PackResponse.
 type PackResponse struct {
-	Name   string  `json:"name"`
-	Path   *string `json:"path,omitempty"`
-	Ref    *string `json:"ref,omitempty"`
-	Source *string `json:"source,omitempty"`
+	Name    string  `json:"name"`
+	Source  *string `json:"source,omitempty"`
+	Version *string `json:"version,omitempty"`
 }
 
 // PaginationInfo defines model for PaginationInfo.
@@ -6390,6 +6422,18 @@ type GetV0CityByCityNameOrdersHistoryParams struct {
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
 }
 
+// AddPackParams defines parameters for AddPack.
+type AddPackParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNamePacksByNameParams defines parameters for DeleteV0CityByCityNamePacksByName.
+type DeleteV0CityByCityNamePacksByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // DeleteV0CityByCityNamePatchesAgentByBaseParams defines parameters for DeleteV0CityByCityNamePatchesAgentByBase.
 type DeleteV0CityByCityNamePatchesAgentByBaseParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -6806,6 +6850,9 @@ type SendMailJSONRequestBody = MailSendInputBody
 
 // ReplyMailJSONRequestBody defines body for ReplyMail for application/json ContentType.
 type ReplyMailJSONRequestBody = MailReplyInputBody
+
+// AddPackJSONRequestBody defines body for AddPack for application/json ContentType.
+type AddPackJSONRequestBody = PackAddInputBody
 
 // PutV0CityByCityNamePatchesAgentsJSONRequestBody defines body for PutV0CityByCityNamePatchesAgents for application/json ContentType.
 type PutV0CityByCityNamePatchesAgentsJSONRequestBody = AgentPatchSetInputBody
@@ -12660,6 +12707,14 @@ type ClientInterface interface {
 	// GetV0CityByCityNamePacks request
 	GetV0CityByCityNamePacks(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// AddPackWithBody request with any body
+	AddPackWithBody(ctx context.Context, cityName string, params *AddPackParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AddPack(ctx context.Context, cityName string, params *AddPackParams, body AddPackJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteV0CityByCityNamePacksByName request
+	DeleteV0CityByCityNamePacksByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePacksByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DeleteV0CityByCityNamePatchesAgentByBase request
 	DeleteV0CityByCityNamePatchesAgentByBase(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -14289,6 +14344,42 @@ func (c *Client) GetV0CityByCityNameOrdersHistory(ctx context.Context, cityName 
 
 func (c *Client) GetV0CityByCityNamePacks(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNamePacksRequest(c.Server, cityName)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AddPackWithBody(ctx context.Context, cityName string, params *AddPackParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAddPackRequestWithBody(c.Server, cityName, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AddPack(ctx context.Context, cityName string, params *AddPackParams, body AddPackJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAddPackRequest(c.Server, cityName, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteV0CityByCityNamePacksByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePacksByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNamePacksByNameRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -21293,6 +21384,120 @@ func NewGetV0CityByCityNamePacksRequest(server string, cityName string) (*http.R
 	return req, nil
 }
 
+// NewAddPackRequest calls the generic AddPack builder with application/json body
+func NewAddPackRequest(server string, cityName string, params *AddPackParams, body AddPackJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAddPackRequestWithBody(server, cityName, params, "application/json", bodyReader)
+}
+
+// NewAddPackRequestWithBody generates requests for AddPack with any type of body
+func NewAddPackRequestWithBody(server string, cityName string, params *AddPackParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/packs", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteV0CityByCityNamePacksByNameRequest generates requests for DeleteV0CityByCityNamePacksByName
+func NewDeleteV0CityByCityNamePacksByNameRequest(server string, cityName string, name string, params *DeleteV0CityByCityNamePacksByNameParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "name", name, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/packs/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewDeleteV0CityByCityNamePatchesAgentByBaseRequest generates requests for DeleteV0CityByCityNamePatchesAgentByBase
 func NewDeleteV0CityByCityNamePatchesAgentByBaseRequest(server string, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams) (*http.Request, error) {
 	var err error
@@ -25263,6 +25468,14 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNamePacksWithResponse request
 	GetV0CityByCityNamePacksWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePacksResponse, error)
 
+	// AddPackWithBodyWithResponse request with any body
+	AddPackWithBodyWithResponse(ctx context.Context, cityName string, params *AddPackParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AddPackResponse, error)
+
+	AddPackWithResponse(ctx context.Context, cityName string, params *AddPackParams, body AddPackJSONRequestBody, reqEditors ...RequestEditorFn) (*AddPackResponse, error)
+
+	// DeleteV0CityByCityNamePacksByNameWithResponse request
+	DeleteV0CityByCityNamePacksByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePacksByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePacksByNameResponse, error)
+
 	// DeleteV0CityByCityNamePatchesAgentByBaseWithResponse request
 	DeleteV0CityByCityNamePatchesAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByBaseResponse, error)
 
@@ -27604,6 +27817,52 @@ func (r GetV0CityByCityNamePacksResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNamePacksResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type AddPackResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON201                       *PackAddedOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r AddPackResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AddPackResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteV0CityByCityNamePacksByNameResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *PackRemovedOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteV0CityByCityNamePacksByNameResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteV0CityByCityNamePacksByNameResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -30031,6 +30290,32 @@ func (c *ClientWithResponses) GetV0CityByCityNamePacksWithResponse(ctx context.C
 		return nil, err
 	}
 	return ParseGetV0CityByCityNamePacksResponse(rsp)
+}
+
+// AddPackWithBodyWithResponse request with arbitrary body returning *AddPackResponse
+func (c *ClientWithResponses) AddPackWithBodyWithResponse(ctx context.Context, cityName string, params *AddPackParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AddPackResponse, error) {
+	rsp, err := c.AddPackWithBody(ctx, cityName, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAddPackResponse(rsp)
+}
+
+func (c *ClientWithResponses) AddPackWithResponse(ctx context.Context, cityName string, params *AddPackParams, body AddPackJSONRequestBody, reqEditors ...RequestEditorFn) (*AddPackResponse, error) {
+	rsp, err := c.AddPack(ctx, cityName, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAddPackResponse(rsp)
+}
+
+// DeleteV0CityByCityNamePacksByNameWithResponse request returning *DeleteV0CityByCityNamePacksByNameResponse
+func (c *ClientWithResponses) DeleteV0CityByCityNamePacksByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePacksByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePacksByNameResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNamePacksByName(ctx, cityName, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteV0CityByCityNamePacksByNameResponse(rsp)
 }
 
 // DeleteV0CityByCityNamePatchesAgentByBaseWithResponse request returning *DeleteV0CityByCityNamePatchesAgentByBaseResponse
@@ -33724,6 +34009,72 @@ func ParseGetV0CityByCityNamePacksResponse(rsp *http.Response) (*GetV0CityByCity
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest PackListBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAddPackResponse parses an HTTP response from a AddPackWithResponse call
+func ParseAddPackResponse(rsp *http.Response) (*AddPackResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AddPackResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest PackAddedOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteV0CityByCityNamePacksByNameResponse parses an HTTP response from a DeleteV0CityByCityNamePacksByNameWithResponse call
+func ParseDeleteV0CityByCityNamePacksByNameResponse(rsp *http.Response) (*DeleteV0CityByCityNamePacksByNameResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteV0CityByCityNamePacksByNameResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PackRemovedOutputBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

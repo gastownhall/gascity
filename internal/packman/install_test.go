@@ -56,6 +56,88 @@ schema = 1
 	}
 }
 
+// TestSyncLockWithPolicyBlocksTransitiveInternalImport is the regression for the
+// transitive-import SSRF finding: a public top-level pack that passes the caller's
+// source fence can declare a nested internal/link-local/file import in its
+// pack.toml, and SyncLock resolves that closure. SyncLockWithPolicy must apply the
+// untrusted-source policy to every reachable source — including transitive ones —
+// so the nested internal import is rejected before any git/cache seam runs for it.
+func TestSyncLockWithPolicyBlocksTransitiveInternalImport(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+
+	const internalSource = "http://169.254.169.254/b.git"
+	lock := &Lockfile{
+		Packs: map[string]LockedPack{
+			"https://example.com/a.git": {Version: "1.2.0", Commit: "aaaa", Fetched: time.Unix(10, 0).UTC()},
+			internalSource:              {Version: "2.0.0", Commit: "bbbb", Fetched: time.Unix(20, 0).UTC()},
+		},
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	// A public top-level pack whose pack.toml pulls an internal transitive import.
+	stageCachedPack(t, "https://example.com/a.git", "aaaa", `
+[pack]
+name = "a"
+schema = 1
+
+[imports.b]
+source = "http://169.254.169.254/b.git"
+version = "^2.0"
+`)
+	stageCachedPack(t, internalSource, "bbbb", `
+[pack]
+name = "b"
+schema = 1
+`)
+
+	direct := map[string]config.Import{
+		"a": {Source: "https://example.com/a.git", Version: "^1.0"},
+	}
+
+	// Without a policy the closure walks cleanly, so the block below is provably the
+	// policy's doing and not a broken graph.
+	if got, err := SyncLock(city, direct, InstallFromLock); err != nil {
+		t.Fatalf("SyncLock (no policy): %v", err)
+	} else if len(got.Packs) != 2 {
+		t.Fatalf("SyncLock (no policy) len(Packs) = %d, want 2", len(got.Packs))
+	}
+
+	// The policy fences internal hosts. The direct public source passes; the
+	// transitive internal import must be rejected.
+	var consulted []string
+	policy := func(source string) error {
+		consulted = append(consulted, source)
+		if strings.Contains(source, "169.254.169.254") {
+			return fmt.Errorf("blocked internal source %q", source)
+		}
+		return nil
+	}
+	_, err := SyncLockWithPolicy(city, direct, InstallFromLock, policy)
+	if err == nil {
+		t.Fatal("SyncLockWithPolicy allowed a transitive internal import; want rejection")
+	}
+	if !strings.Contains(err.Error(), "169.254.169.254") {
+		t.Fatalf("error = %v, want it to name the blocked internal host", err)
+	}
+	if !contains(consulted, internalSource) {
+		t.Fatalf("policy was not consulted for the transitive internal source; saw %v", consulted)
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSyncLockHonorsTransitiveFalse(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()

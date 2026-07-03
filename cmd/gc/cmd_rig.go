@@ -738,7 +738,7 @@ func ensureBundledRigImportsInstalled(cityPath string, imports []config.BoundImp
 	if len(declared) == 0 {
 		return pinned, nil, nil
 	}
-	existing, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	existing, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1086,21 +1086,24 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 			prefix := rig.Prefix
 			defaultBranch := rig.DefaultBranch
 			defaultSlingTarget := ""
+			var defaultSlingTargets []string
 			if cfgRig, ok := rigsByName[rig.Name]; ok {
 				path = cfgRig.Path
 				prefix = cfgRig.EffectivePrefix()
 				defaultBranch = cfgRig.EffectiveDefaultBranch()
 				defaultSlingTarget = cfgRig.DefaultSlingTarget
+				defaultSlingTargets = cfgRig.DefaultSlingTargets
 			}
 			result.Rigs = append(result.Rigs, RigListItem{
-				Name:               rig.Name,
-				Path:               path,
-				Prefix:             prefix,
-				DefaultBranch:      defaultBranch,
-				Suspended:          rig.Suspended,
-				Running:            rig.RunningCount > 0,
-				DefaultSlingTarget: defaultSlingTarget,
-				Beads:              rigBeadsStatus(fs, path),
+				Name:                rig.Name,
+				Path:                path,
+				Prefix:              prefix,
+				DefaultBranch:       defaultBranch,
+				Suspended:           rig.Suspended,
+				Running:             rig.RunningCount > 0,
+				DefaultSlingTarget:  defaultSlingTarget,
+				DefaultSlingTargets: defaultSlingTargets,
+				Beads:               rigBeadsStatus(fs, path),
 			})
 		}
 		result.Summary.Total = len(result.Rigs)
@@ -1182,14 +1185,15 @@ type RigListItem struct {
 	// Path is the absolute filesystem path to the rig directory, resolved from
 	// city.toml by resolveRigPaths. Always absolute in output, regardless of
 	// the relative form stored in city.toml.
-	Path               string `json:"path"`
-	Prefix             string `json:"prefix"`
-	DefaultBranch      string `json:"default_branch,omitempty"`
-	HQ                 bool   `json:"hq"`
-	Suspended          bool   `json:"suspended"`
-	Running            bool   `json:"running"`
-	DefaultSlingTarget string `json:"default_sling_target,omitempty"`
-	Beads              string `json:"beads"`
+	Path                string   `json:"path"`
+	Prefix              string   `json:"prefix"`
+	DefaultBranch       string   `json:"default_branch,omitempty"`
+	HQ                  bool     `json:"hq"`
+	Suspended           bool     `json:"suspended"`
+	Running             bool     `json:"running"`
+	DefaultSlingTarget  string   `json:"default_sling_target,omitempty"`
+	DefaultSlingTargets []string `json:"default_sling_targets,omitempty"`
+	Beads               string   `json:"beads"`
 }
 
 type RigListSummary struct {
@@ -1253,14 +1257,15 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		for i := range cfg.Rigs {
 			running := rigHasRunningAgent(cfg, cfg.Rigs[i].Name, sp)
 			result.Rigs = append(result.Rigs, RigListItem{
-				Name:               cfg.Rigs[i].Name,
-				Path:               cfg.Rigs[i].Path,
-				Prefix:             cfg.Rigs[i].EffectivePrefix(),
-				DefaultBranch:      cfg.Rigs[i].EffectiveDefaultBranch(),
-				Suspended:          suspNames[cfg.Rigs[i].Name],
-				Running:            running,
-				DefaultSlingTarget: cfg.Rigs[i].DefaultSlingTarget,
-				Beads:              rigBeadsStatus(fs, cfg.Rigs[i].Path),
+				Name:                cfg.Rigs[i].Name,
+				Path:                cfg.Rigs[i].Path,
+				Prefix:              cfg.Rigs[i].EffectivePrefix(),
+				DefaultBranch:       cfg.Rigs[i].EffectiveDefaultBranch(),
+				Suspended:           suspNames[cfg.Rigs[i].Name],
+				Running:             running,
+				DefaultSlingTarget:  cfg.Rigs[i].DefaultSlingTarget,
+				DefaultSlingTargets: cfg.Rigs[i].DefaultSlingTargets,
+				Beads:               rigBeadsStatus(fs, cfg.Rigs[i].Path),
 			})
 		}
 		result.Summary.Total = len(result.Rigs)

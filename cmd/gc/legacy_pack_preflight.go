@@ -124,7 +124,7 @@ func lockedBundledImportsUsable(cityPath string) bool {
 var ensureInitRemoteImportsInstalled = installInitRemoteImports
 
 func installInitRemoteImports(cityPath string) error {
-	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		return err
 	}

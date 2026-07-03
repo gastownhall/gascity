@@ -257,3 +257,131 @@ describe('api client error handling', () => {
     });
   });
 });
+
+describe('run projection endpoints', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const emptyRunSummary = {
+    totalActive: 0,
+    totalHistorical: 0,
+    runCounts: { active: 0, blocked: 0, complete: 0 },
+    lanes: [],
+    historicalLanes: [],
+    blockedLanes: [],
+    recentChanges: [],
+    census: { status: 'unavailable' },
+  };
+
+  it('reads the run summary from the city-scoped BFF endpoint', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify(emptyRunSummary), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.runSummary()).resolves.toMatchObject({ totalActive: 0 });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/city/test-city/runs/summary',
+      expect.objectContaining({ method: 'GET' }),
+    );
+  });
+
+  it('rejects a run-summary body missing its lane arrays at the edge', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ totalActive: 0, totalHistorical: 0 }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+      ),
+    );
+
+    await expect(api.runSummary()).rejects.toMatchObject({
+      name: 'ApiResponseDecodeError',
+      message: expect.stringContaining('run summary.lanes must be an array'),
+    });
+  });
+
+  it('reads the run detail from the city-scoped BFF endpoint, encoding the run id', async () => {
+    const detail = {
+      runId: 'mol:adopt-1',
+      rootBeadId: 'b-1',
+      rootStoreRef: 'rig:demo',
+      resolvedRootStore: 'rig:demo',
+      scopeKind: 'rig',
+      scopeRef: 'demo',
+      title: 'Adopt PR',
+      formula: { kind: 'unavailable', reason: 'missing_formula_metadata' },
+      formulaDetail: { kind: 'unavailable', reason: 'missing_formula_metadata' },
+      executionPath: { kind: 'unavailable', reason: 'missing_cwd_and_rig_root' },
+      snapshotVersion: 1,
+      snapshotEventSeq: { kind: 'known', seq: 100 },
+      completeness: { kind: 'complete' },
+      progress: { statusCounts: {} },
+      phase: 'intake',
+      stages: [],
+      nodes: [],
+      edges: [],
+      lanes: [],
+    };
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify(detail), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.runDetail('mol:adopt-1')).resolves.toMatchObject({ runId: 'mol:adopt-1' });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/city/test-city/runs/mol%3Aadopt-1/detail',
+      expect.objectContaining({ method: 'GET' }),
+    );
+  });
+
+  it('surfaces the 422 run-detail reason on the thrown ApiClientError', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: 'run is not a graph.v2 run', reason: 'not_run_view' }), {
+            status: 422,
+            headers: { 'content-type': 'application/json' },
+          }),
+      ),
+    );
+
+    await expect(api.runDetail('v1-run')).rejects.toMatchObject({
+      name: 'ApiClientError',
+      status: 422,
+      reason: 'not_run_view',
+      message: 'run is not a graph.v2 run',
+    });
+  });
+
+  it('surfaces a 404 run-detail as an ApiClientError without a reason', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: 'unknown run' }), {
+            status: 404,
+            headers: { 'content-type': 'application/json' },
+          }),
+      ),
+    );
+
+    const err = await api.runDetail('ghost').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiClientError);
+    expect(err).toMatchObject({ status: 404, message: 'unknown run' });
+    expect((err as ApiClientError).reason).toBeUndefined();
+  });
+});

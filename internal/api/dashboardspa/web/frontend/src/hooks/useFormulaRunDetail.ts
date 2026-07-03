@@ -1,8 +1,8 @@
 import type { FormulaRunDetail, RunScopeKind } from 'gas-city-dashboard-shared';
-import { errorMessage, UnsupportedRunError } from 'gas-city-dashboard-shared';
+import { errorMessage } from 'gas-city-dashboard-shared';
 import { reportClientError } from '../lib/clientErrorReporting';
 import { loadSupervisorFormulaRunDetail } from '../supervisor/runDetail';
-import { SupervisorApiError } from '../supervisor/errors';
+import { ApiClientError } from '../api/client';
 import { useCachedData } from './useCachedData';
 
 interface FormulaRunDetailState {
@@ -16,19 +16,19 @@ type FormulaRunRefreshState =
   | { kind: 'failed'; error: string };
 
 // gascity-dashboard-9w3k: a v1 / wisp run (not graph.v2) is surfaced in the run
-// list but has no graph.v2 step-detail view. When its snapshot LOADS but isn't a
-// run view, enrichFormulaRun throws UnsupportedRunError('not_run_view') — the
-// RELIABLE v1 signal. We carry that as a DISTINCT 'unsupported' payload (not a
-// thrown error → not the generic failed state) so the page can render an honest
-// "list-only" message instead of the opaque "Formula run unavailable." dead-end.
+// list but has no graph.v2 step-detail view. The BFF detail endpoint rejects it
+// with 422 + reason 'not_run_view' — the RELIABLE v1 signal. We carry that as a
+// DISTINCT 'unsupported' payload (not a thrown error → not the generic failed
+// state) so the page can render an honest "list-only" message instead of the
+// opaque "Formula run unavailable." dead-end.
 //
-// gascity-dashboard (Major 2): a raw SupervisorApiError 404 (no snapshot at all)
-// is AMBIGUOUS — it can be a v1/wisp id the workflow endpoint never knew, a
-// completed run whose snapshot wasn't retained, a pruned/deleted run, or a
-// stale/wrong derived scope. We must NOT assert it is definitively v1. It maps
-// to a distinct 'not_found' payload with honest copy that lists the
-// possibilities, kept separate from both 'unsupported' (which over-claims v1)
-// and the generic transport 'failed' state. No shared wire-shape field is added.
+// gascity-dashboard (Major 2): a 404 (no run root in the projection) is
+// AMBIGUOUS — it can be a v1/wisp id, a completed run whose events rotated out,
+// a pruned/deleted run, or a stale/wrong derived scope. We must NOT assert it is
+// definitively v1. It maps to a distinct 'not_found' payload with honest copy
+// that lists the possibilities, kept separate from both 'unsupported' (which
+// over-claims v1) and the generic transport 'failed' state. A malformed graph.v2
+// snapshot (422 + 'invalid_snapshot') stays in that generic 'failed' state.
 type FormulaRunDetailPayload =
   | { kind: 'unrequested' }
   | { kind: 'unsupported' }
@@ -58,7 +58,7 @@ export function useFormulaRunDetail(
   const key = formulaRunDetailCacheKey(runId, scopeKind, scopeRef);
   const { data, loading, error, refresh } = useCachedData(
     key,
-    () => loadFormulaRunDetail(runId, scopeKind, scopeRef),
+    () => loadFormulaRunDetail(runId),
     {
       onError: (err) => {
         if (runId !== undefined) reportRunDetailError('load detail', runId, err);
@@ -81,34 +81,30 @@ export function useFormulaRunDetail(
   return { kind: 'loading', refresh };
 }
 
-async function loadFormulaRunDetail(
-  runId: string | undefined,
-  scopeKind?: RunScopeKind,
-  scopeRef?: string,
-): Promise<FormulaRunDetailPayload> {
+async function loadFormulaRunDetail(runId: string | undefined): Promise<FormulaRunDetailPayload> {
   if (!runId) return { kind: 'unrequested' };
-  const params: { scopeKind?: RunScopeKind; scopeRef?: string } = {};
-  if (scopeKind !== undefined) params.scopeKind = scopeKind;
-  if (scopeRef !== undefined) params.scopeRef = scopeRef;
   try {
-    const detail = await loadSupervisorFormulaRunDetail(runId, params.scopeKind, params.scopeRef);
+    const detail = await loadSupervisorFormulaRunDetail(runId);
     return { kind: 'loaded', detail };
   } catch (err) {
-    // gascity-dashboard-9w3k: a snapshot that LOADS but isn't a graph.v2 run
-    // view throws UnsupportedRunError('not_run_view'). That is the RELIABLE v1 /
-    // wisp signal, so it maps to the 'unsupported' payload and the page renders
-    // the honest list-only message instead of a raw error.
-    if (err instanceof UnsupportedRunError && err.reason === 'not_run_view') {
+    // gascity-dashboard-9w3k: a v1 / wisp run (not graph.v2) loads but has no
+    // graph.v2 step-detail view. The BFF rejects it with 422 + reason
+    // 'not_run_view' — the RELIABLE list-only signal — which maps to the
+    // distinct 'unsupported' payload so the page renders an honest list-only
+    // message instead of a raw error. A malformed graph.v2 snapshot
+    // (422 + 'invalid_snapshot') and any other failure propagate as a generic
+    // load error.
+    if (err instanceof ApiClientError && err.status === 422 && err.reason === 'not_run_view') {
       return { kind: 'unsupported' };
     }
-    // gascity-dashboard (Major 2): a raw SupervisorApiError 404 (no snapshot at
-    // all) is AMBIGUOUS — v1/wisp id the workflow endpoint never knew, a
-    // completed run whose snapshot wasn't retained, a pruned/deleted run, or a
-    // stale/wrong derived scope. We do NOT claim it is definitively v1; it maps
-    // to the distinct 'not_found' payload whose copy lists the possibilities
-    // without over-claiming. A malformed graph.v2 snapshot ('invalid_snapshot')
-    // and any other transport failure still propagate as a generic load error.
-    if (err instanceof SupervisorApiError && err.status === 404) {
+    // gascity-dashboard (Major 2): a 404 (no run root in the projection) is
+    // AMBIGUOUS — a v1/wisp id the projection never saw, a completed run whose
+    // events rotated out, a pruned/deleted run, or a stale/wrong derived scope.
+    // We do NOT claim it is definitively v1; it maps to the distinct 'not_found'
+    // payload whose copy lists the possibilities without over-claiming, kept
+    // separate from 'unsupported' (which over-claims v1) and the generic
+    // transport 'failed' state.
+    if (err instanceof ApiClientError && err.status === 404) {
       return { kind: 'not_found' };
     }
     throw err;

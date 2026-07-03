@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/importsvc"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -2152,15 +2155,20 @@ func TestBeadUpdateParentOpenAPISchemaAllowsNull(t *testing.T) {
 	}
 }
 
+// GET /packs lists the import-binding namespace (the same scope add/remove
+// operate on), via the packListImports seam, so the list shape matches the
+// forge-web {name, source, version} contract.
 func TestPackList(t *testing.T) {
-	state := newFakeState(t)
-	state.cfg.Packs = map[string]config.PackSource{
-		"gastown": {
-			Source: "https://github.com/example/gastown-pack",
-			Ref:    "v1.0.0",
-			Path:   "packs/gastown",
-		},
+	orig := packListImports
+	packListImports = func(_ fsys.FS, _ string) (map[string]config.Import, error) {
+		return map[string]config.Import{
+			"gastown": {Source: "https://github.com/example/gastown-pack", Version: "^1.0.0"},
+			"local":   {Source: "../packs/local"},
+		}, nil
 	}
+	defer func() { packListImports = orig }()
+
+	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/packs"), nil)
@@ -2175,18 +2183,31 @@ func TestPackList(t *testing.T) {
 		Packs []packResponse `json:"packs"`
 	}
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if len(resp.Packs) != 1 {
-		t.Fatalf("packs count = %d, want 1", len(resp.Packs))
+	if len(resp.Packs) != 2 {
+		t.Fatalf("packs count = %d, want 2: %#v", len(resp.Packs), resp.Packs)
 	}
+	// Bindings are returned sorted by name.
 	if resp.Packs[0].Name != "gastown" {
-		t.Errorf("Name = %q, want %q", resp.Packs[0].Name, "gastown")
+		t.Errorf("Packs[0].Name = %q, want gastown", resp.Packs[0].Name)
 	}
 	if resp.Packs[0].Source != "https://github.com/example/gastown-pack" {
-		t.Errorf("Source = %q", resp.Packs[0].Source)
+		t.Errorf("Packs[0].Source = %q", resp.Packs[0].Source)
+	}
+	if resp.Packs[0].Version != "^1.0.0" {
+		t.Errorf("Packs[0].Version = %q, want ^1.0.0", resp.Packs[0].Version)
+	}
+	if resp.Packs[1].Name != "local" || resp.Packs[1].Version != "" {
+		t.Errorf("Packs[1] = %#v, want local with empty version", resp.Packs[1])
 	}
 }
 
 func TestPackListEmpty(t *testing.T) {
+	orig := packListImports
+	packListImports = func(_ fsys.FS, _ string) (map[string]config.Import, error) {
+		return map[string]config.Import{}, nil
+	}
+	defer func() { packListImports = orig }()
+
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 
@@ -2204,6 +2225,81 @@ func TestPackListEmpty(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if len(resp.Packs) != 0 {
 		t.Errorf("packs count = %d, want 0", len(resp.Packs))
+	}
+}
+
+// TestPackListAddRemoveShareNamespace is the regression for the red-team
+// MUST-FIX: a binding surfaced by add must be listable by GET and removable by
+// DELETE {name}. All three handlers are stubbed at the importsvc seam, and the
+// stub's in-memory binding store is the single namespace they share.
+func TestPackListAddRemoveShareNamespace(t *testing.T) {
+	bindings := map[string]config.Import{}
+
+	origList, origAdd, origRemove := packListImports, packAddImport, packRemoveImport
+	packListImports = func(_ fsys.FS, _ string) (map[string]config.Import, error) {
+		out := make(map[string]config.Import, len(bindings))
+		for k, v := range bindings {
+			out[k] = v
+		}
+		return out, nil
+	}
+	packAddImport = func(_ fsys.FS, _, source, name, version string) (*importsvc.AddResult, error) {
+		if name == "" {
+			name = "review"
+		}
+		bindings[name] = config.Import{Source: source, Version: version}
+		return &importsvc.AddResult{Name: name, Source: source, Version: version, GitBacked: true}, nil
+	}
+	packRemoveImport = func(_ fsys.FS, _, name string) (*importsvc.RemoveResult, error) {
+		if _, ok := bindings[name]; !ok {
+			return nil, importsvc.ErrNotFound
+		}
+		delete(bindings, name)
+		return &importsvc.RemoveResult{Name: name}, nil
+	}
+	defer func() {
+		packListImports, packAddImport, packRemoveImport = origList, origAdd, origRemove
+	}()
+
+	state := newFakeMutatorState(t)
+	h := newTestCityHandler(t, state)
+
+	doReq := func(method, path, body string) *httptest.ResponseRecorder {
+		var rdr io.Reader
+		if body != "" {
+			rdr = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, cityURL(state, path), rdr)
+		req.Header.Set("X-GC-Request", "true")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// POST a pack -> it must appear in the GET listing by the same binding name.
+	if rec := doReq("POST", "/packs", `{"source":"https://github.com/org/repo/tree/main/packs/review"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("POST status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+	rec := doReq("GET", "/packs", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", rec.Code)
+	}
+	var resp struct {
+		Packs []packResponse `json:"packs"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if len(resp.Packs) != 1 || resp.Packs[0].Name != "review" {
+		t.Fatalf("GET after POST = %#v, want one binding named review", resp.Packs)
+	}
+
+	// DELETE by that listed name -> the GET listing is empty again.
+	if rec := doReq("DELETE", "/packs/review", ""); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	rec = doReq("GET", "/packs", "")
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if len(resp.Packs) != 0 {
+		t.Fatalf("GET after DELETE = %#v, want empty", resp.Packs)
 	}
 }
 

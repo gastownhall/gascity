@@ -178,7 +178,13 @@ func TestExecCommandRunnerStopsBDSlowTimerForFastBDCommand(t *testing.T) {
 	}
 
 	oldThreshold := bdSlowTelemetryThreshold
-	bdSlowTelemetryThreshold = 30 * time.Millisecond
+	// Use a large threshold (5 s) so a trivial shell script reliably
+	// completes before the timer fires even on a heavily-loaded parallel
+	// test runner. 30 ms was too tight and caused spurious "bd.slow" fires
+	// (ga-2dd). The sleep after the call is decoupled from the threshold:
+	// we only need to drain any in-flight timer goroutine, not wait for the
+	// timer to expire. 100 ms is ample for the exporter to flush.
+	bdSlowTelemetryThreshold = 5 * time.Second
 	t.Cleanup(func() { bdSlowTelemetryThreshold = oldThreshold })
 
 	exp := installBeadsRecordingLogExporter(t)
@@ -191,7 +197,11 @@ printf '[]\n'
 	if _, err := ExecCommandRunner()(t.TempDir(), "bd", "list"); err != nil {
 		t.Fatalf("ExecCommandRunner bd: %v", err)
 	}
-	time.Sleep(2 * bdSlowTelemetryThreshold)
+	// After ExecCommandRunner returns, defer slowTimer.Stop() has already
+	// been called. If Stop returned true the timer was defused; if false it
+	// fired and the goroutine may still be recording. 100 ms gives that
+	// goroutine time to complete before we assert.
+	time.Sleep(100 * time.Millisecond)
 	if got := exp.countByBody("bd.slow"); got != 0 {
 		t.Fatalf("bd.slow records = %d, want 0 for fast bd command", got)
 	}

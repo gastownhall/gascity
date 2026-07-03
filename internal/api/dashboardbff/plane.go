@@ -62,6 +62,7 @@ type Plane struct {
 	exec       *execRunner
 	mux        *http.ServeMux
 	samplers   *samplerManager
+	runTailers *runTailerManager
 	localTools *localToolsCache
 
 	wg   sync.WaitGroup
@@ -73,6 +74,7 @@ type Plane struct {
 func New(deps Deps) *Plane {
 	p := &Plane{deps: deps, exec: newExecRunner(), mux: http.NewServeMux(), localTools: &localToolsCache{}}
 	p.samplers = newSamplerManager(deps, p.exec)
+	p.runTailers = newRunTailerManager(deps)
 	p.registerRoutes()
 	return p
 }
@@ -88,6 +90,7 @@ func (p *Plane) Handler() http.Handler { return p.guard(p.mux) }
 func (p *Plane) Start(ctx context.Context) {
 	ctx, p.stop = context.WithCancel(ctx)
 	p.samplers.enable(ctx, &p.wg)
+	p.runTailers.enable(ctx, &p.wg)
 }
 
 // Stop signals the samplers to halt and waits for them to drain.
@@ -178,6 +181,8 @@ func (p *Plane) registerRoutes() {
 	p.registerHealth()
 	p.registerRunDiff()
 	p.registerSamplers()
+	p.registerRunSummary()
+	p.registerRunDetail()
 }
 
 // resolveCityPath validates a city name and resolves its host root path. It
