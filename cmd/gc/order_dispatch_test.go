@@ -688,6 +688,52 @@ func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
 	}
 }
 
+// Guards against event-triggered orders firing on their own internal
+// order-tracking bead lifecycle events.
+func TestOrderDispatchEventIgnoresInternalOrderTrackingBeadEvents(t *testing.T) {
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{
+		Type:  events.BeadUpdated,
+		Actor: "bd-hook",
+		Payload: []byte(`{
+			"bead": {
+				"id": "iy-wisp-tracking",
+				"title": "order:nudge-on-route",
+				"labels": ["order-run:nudge-on-route", "order-tracking", "seq:42"],
+				"no_history": true
+			}
+		}`),
+	})
+
+	var calls int
+	execRun := func(context.Context, string, string, []string) ([]byte, error) {
+		calls++
+		return []byte("ok"), nil
+	}
+
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:    "nudge-on-route",
+		Trigger: "event",
+		On:      events.BeadUpdated,
+		Exec:    "scripts/nudge.sh",
+	}}, store, eventLog, execRun, events.Discard)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	all := trackingBeads(t, store, "order-run:nudge-on-route")
+	if len(all) != 0 {
+		t.Fatalf("tracking beads with order-run label = %d, want 0", len(all))
+	}
+	if calls != 0 {
+		t.Fatalf("exec calls = %d, want 0", calls)
+	}
+}
+
 func TestOrderDispatchEventExecFailureAdvancesCursor(t *testing.T) {
 	store := beads.NewMemStore()
 	eventLog := events.NewFake()

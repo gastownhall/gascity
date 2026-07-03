@@ -38,6 +38,9 @@ type TriggerOptions struct {
 	ConditionDir     string
 	ConditionEnv     []string
 	ConditionTimeout time.Duration
+	// EventPredicate optionally filters events after type and cursor matching.
+	// Returning false excludes the event from making an event trigger due.
+	EventPredicate func(events.Event) bool
 }
 
 var (
@@ -67,7 +70,7 @@ func CheckTriggerWithOptions(a Order, now time.Time, lastRunFn LastRunFunc, ep e
 	case "condition":
 		return checkCondition(a, opts)
 	case "event":
-		return checkEvent(a, ep, cursorFn)
+		return checkEvent(a, ep, cursorFn, opts.EventPredicate)
 	case "manual":
 		return TriggerResult{Due: false, Reason: "manual trigger — use gc order run"}
 	default:
@@ -235,7 +238,7 @@ func mergeConditionEnv(environ, extra []string) []string {
 }
 
 // checkEvent checks if matching events exist after the last cursor position.
-func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult {
+func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc, predicate func(events.Event) bool) TriggerResult {
 	if ep == nil {
 		return TriggerResult{Due: false, Reason: "event: no events provider"}
 	}
@@ -250,6 +253,15 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 	})
 	if err != nil {
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("event: read error: %v", err)}
+	}
+	if predicate != nil {
+		filtered := matched[:0]
+		for _, event := range matched {
+			if predicate(event) {
+				filtered = append(filtered, event)
+			}
+		}
+		matched = filtered
 	}
 	if len(matched) == 0 {
 		return TriggerResult{Due: false, Reason: "event: no matching events"}

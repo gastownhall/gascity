@@ -816,6 +816,41 @@ func TestOrderCheckWithStoresResolverUsesLegacyCityStore(t *testing.T) {
 	}
 }
 
+func TestOrderCheckIgnoresNoHistoryBeadEvents(t *testing.T) {
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{
+		Type:  events.BeadClosed,
+		Actor: "bd-hook",
+		Payload: []byte(`{
+			"bead": {
+				"id": "iy-wisp-session",
+				"title": "bd.dog-1",
+				"labels": ["gc:session", "agent:bd.dog-1"],
+				"no_history": true
+			}
+		}`),
+	})
+
+	aa := []orders.Order{{
+		Name:    "cascade-nudge-on-blocker-close",
+		Trigger: "event",
+		On:      events.BeadClosed,
+		Exec:    "scripts/cascade.sh",
+	}}
+	resolver := func(orders.Order) ([]beads.OrdersStore, error) {
+		return []beads.OrdersStore{{Store: beads.NewMemStore()}}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolverScoped(t.TempDir(), &config.City{}, aa, time.Now(), eventLog, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolverScoped = %d, want 1; stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "no") {
+		t.Fatalf("stdout missing not-due row:\n%s", stdout.String())
+	}
+}
+
 func TestOrderCheckConditionUsesCityScope(t *testing.T) {
 	cityDir := t.TempDir()
 	orderDir := filepath.Join(cityDir, "packs", "workflows", "orders")

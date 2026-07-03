@@ -216,8 +216,9 @@ func isReservedOrderExecEnvKey(key string) bool {
 }
 
 func orderTriggerOptions(cityPath string, cfg *config.City, a orders.Order) (orders.TriggerOptions, error) {
+	opts := defaultOrderTriggerOptions()
 	if a.Trigger != "condition" || strings.TrimSpace(cityPath) == "" {
-		return orders.TriggerOptions{}, nil
+		return opts, nil
 	}
 	target, err := resolveOrderExecTarget(cityPath, cfg, a)
 	if err != nil {
@@ -227,17 +228,23 @@ func orderTriggerOptions(cityPath string, cfg *config.City, a orders.Order) (ord
 }
 
 func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) (orders.TriggerOptions, error) {
+	opts := defaultOrderTriggerOptions()
 	if a.Trigger != "condition" || strings.TrimSpace(cityPath) == "" {
-		return orders.TriggerOptions{}, nil
+		return opts, nil
 	}
 	env, err := orderExecEnvWithError(cityPath, cfg, target, a)
 	if err != nil {
 		return orders.TriggerOptions{}, err
 	}
+	opts.ConditionDir = target.ScopeRoot
+	opts.ConditionEnv = env
+	return opts, nil
+}
+
+func defaultOrderTriggerOptions() orders.TriggerOptions {
 	return orders.TriggerOptions{
-		ConditionDir: target.ScopeRoot,
-		ConditionEnv: env,
-	}, nil
+		EventPredicate: orderTriggerEventPredicate,
+	}
 }
 
 func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]string) {
