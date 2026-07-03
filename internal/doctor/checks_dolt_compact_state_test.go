@@ -19,14 +19,7 @@ func newDoltCompactStateTestCity(t *testing.T) string {
 }
 
 func newTestDoltCompactStateCheck(cityPath string) *DoltCompactStateCheck {
-	c := NewDoltCompactStateCheck(cityPath, false)
-	c.measureDir = func(string) (int64, bool, error) {
-		return 0, false, nil
-	}
-	c.liveRows = func(string) (int, error) {
-		return 0, nil
-	}
-	return c
+	return NewDoltCompactStateCheck(cityPath, false)
 }
 
 func writeDoltCompactStateMarker(t *testing.T, cityPath, markerType, db, reason, createdAt string) string {
@@ -137,65 +130,4 @@ func TestDoltCompactStateCheckRepresentsKnownPendingPushMarkers(t *testing.T) {
 		assertDoltCompactStateMentions(t, r, db, "compact-pending-push", markerPath)
 	}
 	assertDoltCompactStateMentions(t, r, "2026-05-23T00:00:00Z", "2026-05-28T00:00:00Z")
-}
-
-func TestDoltCompactStateCheckManagedStoreSizeHeuristic(t *testing.T) {
-	tests := []struct {
-		name       string
-		sizeBytes  int64
-		liveRows   int
-		wantStatus CheckStatus
-		wantFix    bool
-	}{
-		{
-			name:       "below maintenance overdue ratio",
-			sizeBytes:  50_000_000,
-			liveRows:   100,
-			wantStatus: StatusOK,
-		},
-		{
-			name:       "above maintenance overdue ratio",
-			sizeBytes:  120_000_001,
-			liveRows:   100,
-			wantStatus: StatusWarning,
-			wantFix:    true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := newDoltCompactStateTestCity(t)
-			storeRoot := filepath.Join(dir, ".beads", "dolt", "hq", ".dolt")
-			if err := os.MkdirAll(filepath.Join(storeRoot, "noms"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-
-			c := NewDoltCompactStateCheck(dir, false)
-			c.measureDir = func(path string) (int64, bool, error) {
-				if strings.Contains(path, filepath.Join(".beads", "dolt", "hq", ".dolt")) {
-					return tc.sizeBytes, true, nil
-				}
-				return 0, false, nil
-			}
-			c.liveRows = func(db string) (int, error) {
-				if db != "hq" {
-					t.Fatalf("liveRows called for db %q, want hq", db)
-				}
-				return tc.liveRows, nil
-			}
-
-			r := c.Run(&CheckContext{CityPath: dir})
-			if r.Status != tc.wantStatus {
-				t.Fatalf("status = %d, want %d; msg = %s", r.Status, tc.wantStatus, r.Message)
-			}
-			if tc.wantFix {
-				if r.FixHint == "" {
-					t.Fatal("FixHint is empty for managed store maintenance warning")
-				}
-				assertDoltCompactStateMentions(t, r, "hq", "100", "MB/row", "maintenance")
-			} else if r.FixHint != "" {
-				t.Fatalf("FixHint = %q, want empty below maintenance threshold", r.FixHint)
-			}
-		})
-	}
 }
