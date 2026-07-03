@@ -744,3 +744,39 @@ func TestParseWorktreeList_Empty(t *testing.T) {
 		t.Errorf("len(worktrees) = %d, want 0", len(wts))
 	}
 }
+
+// TestUntrustedRemoteGitConfigArgs pins the hardening applied to git invocations
+// whose remote URL is attacker-influenced (the pack-import add path). Redirect
+// following must be disabled and the transport allowlist constrained, so a
+// fenced public host cannot 30x to an internal target and a crafted URL cannot
+// escalate to a dangerous transport such as ext::.
+func TestUntrustedRemoteGitConfigArgs(t *testing.T) {
+	args := UntrustedRemoteGitConfigArgs()
+
+	// Every override is passed as a leading "-c key=value" pair.
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"-c http.followRedirects=false",
+		"-c protocol.allow=never",
+		"-c protocol.https.allow=always",
+		"-c protocol.http.allow=always",
+		"-c protocol.ssh.allow=always",
+		"-c protocol.git.allow=always",
+		"-c protocol.file.allow=always",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("UntrustedRemoteGitConfigArgs missing %q; got %v", want, args)
+		}
+	}
+
+	// The args must be well-formed -c pairs so they can be prepended before a git
+	// subcommand.
+	if len(args)%2 != 0 {
+		t.Fatalf("expected an even number of args (-c pairs), got %d: %v", len(args), args)
+	}
+	for i := 0; i < len(args); i += 2 {
+		if args[i] != "-c" {
+			t.Fatalf("arg %d = %q, want -c; full: %v", i, args[i], args)
+		}
+	}
+}

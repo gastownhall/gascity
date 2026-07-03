@@ -625,11 +625,15 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 	return 0
 }
 
-// importAddErrorLine reproduces the historical `gc import add` stderr lines so
-// the CLI's exit-1 messages stay byte-identical after the importsvc extraction.
-// Name-resolution failures (underivable name, reserved prefix) print bare with
-// no source; scope/ownership failures print bare with the source-less prefix;
-// everything from source normalization onward carries the source.
+// importAddErrorLine frames the `gc import add` exit-1 stderr line. The
+// name-resolution arms (underivable name, reserved prefix) are byte-identical
+// to the historical CLI: they print bare, with no source and no sentinel
+// wrapper. The scope/ownership and default arms print importsvc's typed error
+// verbatim, which now carries the sentinel prefix it wraps (for example
+// `import already exists: import "x" already exists` or `invalid import
+// source: ...`); this is the intended, clearer post-extraction contract, not
+// byte-identical to the pre-extraction line. The exact-match tests in
+// cmd_import_test.go pin each arm so the contract cannot drift silently.
 func importAddErrorLine(source, nameOverride string, err error) string {
 	switch {
 	case errors.Is(err, importsvc.ErrNameDerive):

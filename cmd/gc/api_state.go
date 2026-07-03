@@ -36,7 +36,8 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
-// controllerState implements api.State and api.StateMutator.
+// controllerState implements api.State, api.StateMutator, and
+// api.ConfigWriteSerializer.
 // Protected by an RWMutex for hot-reload: readers take RLock,
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
@@ -1297,6 +1298,18 @@ func (cs *controllerState) DisableOrder(name, rig string) error {
 		})
 	})
 }
+
+// SerializeConfigWrite runs fn under the same per-city mutation lock the
+// configedit.Editor uses for agent/rig/provider/formula edits. The HTTP pack
+// import add/remove handlers write pack.toml, packs.lock, and sometimes
+// city.toml outside the Editor callback shape, so routing them through this
+// shared lock keeps concurrent config writers from interleaving and losing an
+// update or desyncing the manifest and lockfile.
+func (cs *controllerState) SerializeConfigWrite(fn func() error) error {
+	return cs.editor.Do(fn)
+}
+
+var _ api.ConfigWriteSerializer = (*controllerState)(nil)
 
 // SuspendAgent writes suspended=true to durable agent config.
 // Uses configedit.Editor for provenance-aware edit (inline vs discovered vs patch).

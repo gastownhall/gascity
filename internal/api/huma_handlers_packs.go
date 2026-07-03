@@ -14,9 +14,26 @@ import (
 // network fetch (the same injection style cmd/gc uses for its import tests).
 var (
 	packListImports  = importsvc.ListImports
-	packAddImport    = importsvc.AddImport
-	packRemoveImport = importsvc.RemoveImport
+	packAddImport    = packAddImportFenced
+	packRemoveImport = packRemoveImportFenced
 )
+
+// packAddImportFenced is the default add seam. It threads validateHTTPPackSource
+// into importsvc as the untrusted-source policy so the SSRF fence covers not just
+// the caller-supplied source (also pre-checked in humaHandlePackAdd) but every
+// transitive import packman resolves during lock sync — a nested internal, file,
+// or link-local import in an accepted public pack's pack.toml is rejected before
+// its git/cache seam runs.
+func packAddImportFenced(fs fsys.FS, cityPath, source, name, version string) (*importsvc.AddResult, error) {
+	return importsvc.AddImportWith(fs, cityPath, source, name, version, importsvc.Deps{SourcePolicy: validateHTTPPackSource})
+}
+
+// packRemoveImportFenced is the default remove seam. Remove re-syncs the lock
+// graph, so it threads the same source policy to fence any transitive import a
+// re-resolution would otherwise fetch.
+func packRemoveImportFenced(fs fsys.FS, cityPath, name string) (*importsvc.RemoveResult, error) {
+	return importsvc.RemoveImportWith(fs, cityPath, name, importsvc.Deps{SourcePolicy: validateHTTPPackSource})
+}
 
 // PackListBody is the response body for GET /v0/packs.
 type PackListBody struct {
@@ -78,11 +95,24 @@ type PackAddedOutput struct {
 }
 
 // humaHandlePackAdd adds a pack to the city by import (the gc-import path):
-// validate the source, write the [imports.<name>] entry, resolve + lock + install,
-// so the pack's templates compose into the city. POST /v0/city/{cityName}/packs.
+// fence the caller-supplied source, write the [imports.<name>] entry, resolve +
+// lock + install, so the pack's templates compose into the city.
+// POST /v0/city/{cityName}/packs.
 func (s *Server) humaHandlePackAdd(_ context.Context, input *PackAddInput) (*PackAddedOutput, error) {
-	res, err := packAddImport(fsys.OSFS{}, s.state.CityPath(), input.Body.Source, input.Body.Name, input.Body.Version)
-	if err != nil {
+	// SSRF fence: AddImport shells `git ls-remote <source>` synchronously and
+	// its contract requires HTTP callers to validate the source first. Reject
+	// local/file sources and internal-network destinations before the import
+	// seam runs. Kept outside the write lock — it is read-only and may resolve
+	// DNS.
+	if err := validateHTTPPackSource(input.Body.Source); err != nil {
+		return nil, packImportHTTPError(err)
+	}
+	var res *importsvc.AddResult
+	if err := s.serializeConfigWrite(func() error {
+		var addErr error
+		res, addErr = packAddImport(fsys.OSFS{}, s.state.CityPath(), input.Body.Source, input.Body.Name, input.Body.Version)
+		return addErr
+	}); err != nil {
 		return nil, packImportHTTPError(err)
 	}
 	out := &PackAddedOutput{}
@@ -109,8 +139,12 @@ type PackRemovedOutput struct {
 // humaHandlePackRemove drops a pack import from the city; its templates leave the
 // composed config on the next reload. DELETE /v0/city/{cityName}/packs/{name}.
 func (s *Server) humaHandlePackRemove(_ context.Context, input *PackRemoveInput) (*PackRemovedOutput, error) {
-	res, err := packRemoveImport(fsys.OSFS{}, s.state.CityPath(), input.Name)
-	if err != nil {
+	var res *importsvc.RemoveResult
+	if err := s.serializeConfigWrite(func() error {
+		var rmErr error
+		res, rmErr = packRemoveImport(fsys.OSFS{}, s.state.CityPath(), input.Name)
+		return rmErr
+	}); err != nil {
 		return nil, packImportHTTPError(err)
 	}
 	out := &PackRemovedOutput{}
@@ -118,10 +152,26 @@ func (s *Server) humaHandlePackRemove(_ context.Context, input *PackRemoveInput)
 	return out, nil
 }
 
+// serializeConfigWrite runs fn under the per-city config write lock when the
+// state supports it, so pack import add/remove serialize against the
+// configedit.Editor boundary the other city-config mutation handlers use.
+// A State that does not implement ConfigWriteSerializer (e.g. a read-only test
+// double) runs fn directly.
+func (s *Server) serializeConfigWrite(fn func() error) error {
+	if ser, ok := s.state.(ConfigWriteSerializer); ok {
+		return ser.SerializeConfigWrite(fn)
+	}
+	return fn()
+}
+
 // packImportHTTPError maps importsvc sentinels to RFC 9457 problem responses.
 func packImportHTTPError(err error) error {
 	switch {
-	case errors.Is(err, importsvc.ErrInvalidSource), errors.Is(err, importsvc.ErrScopeLoad):
+	case errors.Is(err, importsvc.ErrInvalidSource), errors.Is(err, importsvc.ErrScopeLoad),
+		errors.Is(err, importsvc.ErrNameDerive), errors.Is(err, importsvc.ErrReservedPrefix):
+		// ErrNameDerive and ErrReservedPrefix are client input-validation failures
+		// (no derivable name, or a reserved "default-rig:" name), so they are 400s
+		// like ErrInvalidSource, not 500s.
 		return huma.Error400BadRequest(err.Error())
 	case errors.Is(err, importsvc.ErrImportExists):
 		return huma.Error409Conflict(err.Error())

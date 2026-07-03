@@ -145,12 +145,25 @@ func localGitRepoRoot(targetDir string) (string, bool, error) {
 	return strings.TrimSpace(string(out)), true, nil
 }
 
+// lsRemoteHeadArgs builds the `git ls-remote <url> HEAD` argument vector for the
+// remote HEAD probe, prefixed with the untrusted-remote hardening overrides so
+// the probe cannot follow a redirect off the fenced host or use an unexpected
+// transport.
+func lsRemoteHeadArgs(cloneURL string) []string {
+	args := git.UntrustedRemoteGitConfigArgs()
+	return append(args, "ls-remote", cloneURL, "HEAD")
+}
+
 // defaultHeadCommit is the single network/git-fetch line for remote HEAD
 // resolution. SSRF fencing for the HTTP handler must gate the source string
-// before AddImport reaches this probe; once here, the URL is shelled to git.
+// before AddImport reaches this probe; the host fence alone is not sufficient,
+// so this probe additionally disables HTTP redirect following and constrains
+// git transports (git.UntrustedRemoteGitConfigArgs) so a fenced public host
+// cannot redirect the probe to an internal target once the URL is shelled to
+// git.
 func defaultHeadCommit(source string) (string, error) {
 	cloneURL := config.NormalizeRemoteSource(source)
-	cmd := exec.Command("git", "ls-remote", cloneURL, "HEAD")
+	cmd := exec.Command("git", lsRemoteHeadArgs(cloneURL)...)
 	// Strip git-locating env vars so a leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE
 	// (or config injection) from a parent pre-commit hook or worktree tooling
 	// cannot perturb how this remote HEAD probe runs.

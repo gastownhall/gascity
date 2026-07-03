@@ -258,6 +258,74 @@ func TestListImportsRoundTripsAddedBinding(t *testing.T) {
 	}
 }
 
+// ListImports must surface city.toml root [imports] (which RemoveImport can
+// delete and AddImport rejects) so the list namespace matches add/remove.
+func TestListImportsSurfacesCityRootImports(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "city.toml"), `[workspace]
+name = "demo"
+
+[imports.cityonly]
+source = "https://github.com/example/cityonly.git"
+version = "^3.0"
+
+[imports.tools]
+source = "https://github.com/example/city-tools.git"
+version = "^9.9"
+`)
+	writeFile(t, filepath.Join(dir, "pack.toml"), `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://github.com/example/tools.git"
+version = "^1.4"
+`)
+
+	imports, err := ListImports(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("ListImports: %v", err)
+	}
+	// A city-only root import, invisible before this fix, is now listed.
+	if got, ok := imports["cityonly"]; !ok || got.Source != "https://github.com/example/cityonly.git" {
+		t.Fatalf("cityonly = %#v, ok=%v; want the city.toml root import surfaced", imports["cityonly"], ok)
+	}
+	// city.toml [imports] override wins over the same-named pack.toml entry, so
+	// the listed binding matches the effective (removable) one.
+	if got := imports["tools"]; got.Source != "https://github.com/example/city-tools.git" {
+		t.Fatalf("tools = %#v; want the city.toml override to win", got)
+	}
+}
+
+// ListImports must surface root default-rig imports keyed "default-rig:<name>",
+// the exact form DELETE /packs/{name} accepts to remove them.
+func TestListImportsSurfacesDefaultRigImports(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "city.toml"), `[workspace]
+name = "demo"
+
+[imports.tools]
+source = "https://github.com/example/tools.git"
+version = "^1.4"
+
+[defaults.rig.imports.shared]
+source = "https://github.com/example/shared.git"
+version = "^2.0"
+`)
+
+	imports, err := ListImports(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("ListImports: %v", err)
+	}
+	if _, ok := imports["tools"]; !ok {
+		t.Fatalf("root import missing: %#v", imports)
+	}
+	got, ok := imports["default-rig:shared"]
+	if !ok || got.Source != "https://github.com/example/shared.git" || got.Version != "^2.0" {
+		t.Fatalf("default-rig:shared = %#v, ok=%v; want the default-rig import surfaced", got, ok)
+	}
+}
+
 func TestRemoveImportFoundRewritesManifest(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "city.toml"), "[workspace]\nname = \"demo\"\n")
@@ -347,5 +415,151 @@ func TestAddImportDefaultExportsUsePackmanSeams(t *testing.T) {
 	}
 	if res.Name != "tools" || res.Version != "^1.4" {
 		t.Fatalf("res = %#v, want tools/^1.4", res)
+	}
+}
+
+// TestAddImportWithSourcePolicyFencesDirectSource is the regression for the
+// transitive-import SSRF fix at the service boundary: a SourcePolicy must fence
+// the resolved source before the HEAD probe or lock sync runs, so the injected
+// HTTP fence governs the direct git seam (and, via SyncLockWithPolicy, the
+// transitive one) rather than only the handler's pre-check.
+func TestAddImportWithSourcePolicyFencesDirectSource(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "city.toml"), "[workspace]\nname = \"demo\"\n")
+
+	sentinel := errors.New("blocked by source policy")
+	deps := Deps{
+		SourcePolicy: func(string) error { return sentinel },
+		ResolveHeadCommit: func(string) (string, error) {
+			t.Fatal("HEAD probe must not run when the source policy blocks")
+			return "", nil
+		},
+		ResolveVersion: func(string, string) (packman.ResolvedVersion, error) {
+			t.Fatal("version resolve must not run when the source policy blocks")
+			return packman.ResolvedVersion{}, nil
+		},
+		SyncLock: func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+			t.Fatal("SyncLock must not run when the source policy blocks")
+			return nil, nil
+		},
+	}
+	_, err := AddImportWith(fsys.OSFS{}, dir, "https://github.com/example/tools.git", "", "", deps)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("AddImportWith err = %v, want the source-policy sentinel", err)
+	}
+}
+
+// TestRemoveImportPeelsCityOverrideShadowingPack is the regression for the
+// GET/DELETE namespace mismatch: when a root name is defined by BOTH pack.toml
+// and a city.toml [imports] override, ListImports surfaces the city override as
+// the effective binding, so remove must peel that override (not reject it 409).
+// The shadowed pack.toml entry stays declared and becomes effective again, and
+// lock sync re-points to it rather than dropping the name.
+func TestRemoveImportPeelsCityOverrideShadowingPack(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "city.toml"), `[workspace]
+name = "demo"
+
+[imports.tools]
+source = "https://github.com/example/city-tools.git"
+version = "^9.9"
+`)
+	writeFile(t, filepath.Join(dir, "pack.toml"), `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://github.com/example/pack-tools.git"
+version = "^1.0"
+`)
+
+	// GET surfaces the city override as the effective binding.
+	before, err := ListImports(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("ListImports (before): %v", err)
+	}
+	if got := before["tools"]; got.Source != "https://github.com/example/city-tools.git" {
+		t.Fatalf("listed tools before remove = %#v; want the city override", got)
+	}
+
+	var captured map[string]config.Import
+	deps := Deps{
+		SyncLock: func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+			captured = imports
+			return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+		},
+	}
+	// The listed binding must be removable, not a 409.
+	res, err := RemoveImportWith(fsys.OSFS{}, dir, "tools", deps)
+	if err != nil {
+		t.Fatalf("RemoveImportWith(tools) = %v, want peel of the city override", err)
+	}
+	if res.Name != "tools" {
+		t.Fatalf("Name = %q, want tools", res.Name)
+	}
+
+	// The pack.toml entry survives the peel and is effective again...
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("Load(pack.toml): %v", err)
+	}
+	if got, ok := cfg.Imports["tools"]; !ok || got.Source != "https://github.com/example/pack-tools.git" {
+		t.Fatalf("pack.toml tools after peel = %#v ok=%v; want the pack entry preserved", got, ok)
+	}
+	// ...and the city override is gone, so a re-list shows the pack binding.
+	after, err := ListImports(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("ListImports (after): %v", err)
+	}
+	if got := after["tools"]; got.Source != "https://github.com/example/pack-tools.git" {
+		t.Fatalf("listed tools after remove = %#v; want the pack binding now effective", got)
+	}
+	// Lock sync must keep tools re-pointed to the pack value, not drop it.
+	synced, ok := captured["pack:tools"]
+	if !ok || synced.Source != "https://github.com/example/pack-tools.git" {
+		t.Fatalf("synced pack:tools = %#v ok=%v; want the pack binding preserved in the lock graph", synced, ok)
+	}
+}
+
+// TestRemoveRootImportKeepsSameNamedDefaultRig is the regression for the
+// lock-sync deletion bug: removing a bare root import named "shared" must NOT
+// also drop a same-named "default-rig:shared" binding from the synced graph.
+func TestRemoveRootImportKeepsSameNamedDefaultRig(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "city.toml"), `[workspace]
+name = "demo"
+
+[defaults.rig.imports.shared]
+source = "https://github.com/example/dr-shared.git"
+version = "^2.0"
+`)
+	writeFile(t, filepath.Join(dir, "pack.toml"), `[pack]
+name = "demo"
+schema = 1
+
+[imports.shared]
+source = "https://github.com/example/root-shared.git"
+version = "^1.0"
+`)
+
+	var captured map[string]config.Import
+	deps := Deps{
+		SyncLock: func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+			captured = imports
+			return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+		},
+	}
+	if _, err := RemoveImportWith(fsys.OSFS{}, dir, "shared", deps); err != nil {
+		t.Fatalf("RemoveImportWith(shared): %v", err)
+	}
+
+	// The removed root import is dropped from the graph...
+	if _, ok := captured["pack:shared"]; ok {
+		t.Fatalf("synced graph still contains removed root import: %#v", captured)
+	}
+	// ...but the same-named default-rig binding must survive.
+	dr, ok := captured["default-rig:shared"]
+	if !ok || dr.Source != "https://github.com/example/dr-shared.git" {
+		t.Fatalf("default-rig:shared = %#v ok=%v; a same-named default-rig import was dropped", dr, ok)
 	}
 }

@@ -359,6 +359,41 @@ func HermeticEnv() []string {
 	return cleaned
 }
 
+// UntrustedRemoteGitConfigArgs returns leading `git -c` overrides that harden a
+// network git invocation (ls-remote, fetch, clone) whose remote URL may be
+// attacker-influenced — the pack-import add path, where an API caller supplies
+// the source string. Callers prepend it to the git arguments, before the
+// subcommand.
+//
+// It closes the two classic ways a resolve-then-fetch SSRF host fence is
+// bypassed at the git subprocess:
+//
+//   - http.followRedirects=false stops git from following a 30x redirect, so a
+//     fenced public host cannot bounce the fetch to an internal target (e.g.
+//     169.254.169.254) after the host check has already passed.
+//   - protocol.allow=never plus an explicit allowlist constrains the transports
+//     git will use to the schemes pack sources legitimately need (https, http,
+//     ssh, git, and file for CLI-local packs), so a crafted URL, redirect, or
+//     submodule cannot escalate to a dangerous transport such as ext:: (which
+//     runs an arbitrary command).
+//
+// It does NOT close a DNS-rebinding TOCTOU window: git re-resolves the host at
+// fetch time, so a name that resolved to a public address during the fence can
+// still resolve to an internal one here. That residual is documented at the
+// pack SSRF fence (internal/api/pack_source_policy.go); pinning the resolved IP
+// is out of scope for this hardening.
+func UntrustedRemoteGitConfigArgs() []string {
+	return []string{
+		"-c", "http.followRedirects=false",
+		"-c", "protocol.allow=never",
+		"-c", "protocol.https.allow=always",
+		"-c", "protocol.http.allow=always",
+		"-c", "protocol.ssh.allow=always",
+		"-c", "protocol.git.allow=always",
+		"-c", "protocol.file.allow=always",
+	}
+}
+
 // sanitizeGitEnv returns environ with git-specific variables removed. It is the
 // single filtering implementation shared by SanitizedEnv and runCtx so the
 // blacklist has exactly one enforcement path.

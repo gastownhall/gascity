@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -158,6 +160,12 @@ func (f *fakeState) RawConfig() *config.City {
 type fakeMutatorState struct {
 	*fakeState
 	suspended map[string]bool
+
+	// serializeMu + serializeCalls make fakeMutatorState a ConfigWriteSerializer
+	// so pack handler tests exercise the real per-city write-lock seam and can
+	// assert mutations route through it.
+	serializeMu    sync.Mutex
+	serializeCalls atomic.Int32
 }
 
 func newFakeMutatorState(t *testing.T) *fakeMutatorState {
@@ -166,6 +174,15 @@ func newFakeMutatorState(t *testing.T) *fakeMutatorState {
 		fakeState: newFakeState(t),
 		suspended: make(map[string]bool),
 	}
+}
+
+// SerializeConfigWrite runs fn under a real lock and counts the call, mirroring
+// the production controllerState seam that shares the configedit.Editor lock.
+func (f *fakeMutatorState) SerializeConfigWrite(fn func() error) error {
+	f.serializeMu.Lock()
+	defer f.serializeMu.Unlock()
+	f.serializeCalls.Add(1)
+	return fn()
 }
 
 func (f *fakeMutatorState) SuspendAgent(name string) error { f.suspended[name] = true; return nil }

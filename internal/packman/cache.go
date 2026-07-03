@@ -252,11 +252,18 @@ func normalizeRemoteSource(source string) remoteSource {
 }
 
 func defaultRunGit(dir string, args ...string) (string, error) {
+	// The pack source URL can be attacker-influenced on the API import path, and
+	// this runner drives the network fetch/clone/ls-remote for it. Harden every
+	// invocation against redirect-based SSRF and transport abuse; the flags are
+	// inert for the local cache operations (rev-parse, checkout, reset, ...) that
+	// also flow through here. The remaining DNS-rebinding residual is documented
+	// at the pack SSRF fence (internal/api/pack_source_policy.go).
 	cmdArgs := append([]string{
 		"-c", "core.fsmonitor=false",
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.untrackedCache=false",
-	}, args...)
+	}, gitutil.UntrustedRemoteGitConfigArgs()...)
+	cmdArgs = append(cmdArgs, args...)
 	cmd := exec.Command("git", cmdArgs...)
 	if dir != "" {
 		cmd.Dir = dir

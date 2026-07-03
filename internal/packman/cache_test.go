@@ -3,6 +3,7 @@ package packman
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -392,5 +393,29 @@ func TestEnsureRepoInCacheReclonesCacheFileWithoutGit(t *testing.T) {
 	}
 	if got != path {
 		t.Fatalf("EnsureRepoInCache path = %q, want %q", got, path)
+	}
+}
+
+// TestDefaultRunGitBlocksDisallowedTransport is the regression for the API
+// pack-import SSRF hardening: defaultRunGit drives the attacker-influenced
+// clone/ls-remote, so it must constrain git transports. An ext:: URL (which
+// would otherwise execute an arbitrary command) must be refused by the
+// protocol allowlist rather than run.
+func TestDefaultRunGitBlocksDisallowedTransport(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// ext:: is not in the allowlist; git must refuse it before running the
+	// command. Without the hardening, git would execute `true` and fail with a
+	// different (protocol-parse) error instead.
+	_, err := defaultRunGit("", "ls-remote", "ext::true")
+	if err == nil {
+		t.Fatal("defaultRunGit ran a disallowed ext:: transport; want a protocol block")
+	}
+	msg := err.Error()
+	blocked := strings.Contains(msg, "ext") &&
+		(strings.Contains(msg, "not allowed") || strings.Contains(msg, "protocol"))
+	if !blocked {
+		t.Fatalf("error = %q; want a git transport 'ext' not allowed / protocol block", msg)
 	}
 }
