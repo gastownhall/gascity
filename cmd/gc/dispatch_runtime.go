@@ -63,6 +63,26 @@ var (
 	// (Complementary to the wake-debounce coalescing below, which only helps
 	// the event-arrival path; a raw-bd-write close publishes no event.)
 	workflowServeMaxIdleSleep = 5 * time.Second
+	// workflowServeDeepIdleSleep is the sleep cap once the loop has been
+	// continuously empty for workflowServeDeepIdleThreshold consecutive sweeps.
+	// Each sweep runs the full work query — a shell that forks several
+	// `bd --readonly --sandbox ready` subprocesses (one per identity candidate
+	// plus two per routed target). At the 5s cap a fully idle city therefore
+	// pays that multi-fork scan ~12x/min per dispatcher forever; on a
+	// multi-dispatcher city this idle polling is the dominant residual store
+	// load behind gastownhall/gascity#2463 (measured: ~50 serve events/min per
+	// dispatcher, dolt pegged while the city was otherwise quiescent). The deep
+	// cap only engages after ~52s of continuous emptiness (the 1s/2s/4s ramp
+	// plus nine 5s sweeps), and any relevant event or non-empty drain resets
+	// idleSweeps to 0, restoring the responsive 1s→5s ladder while a workflow
+	// is in flight. The only cost is worst-case pickup latency for transitions
+	// that publish no city event (raw `bd` writes, see workflowServeMaxIdleSleep
+	// comment above) arriving after a sustained quiet period: ≤30s for the
+	// first hop, after which the loop is active again at 1–5s.
+	workflowServeDeepIdleSleep = 30 * time.Second
+	// workflowServeDeepIdleThreshold is the consecutive-empty-sweep count at
+	// which the deep-idle cap engages. ≤0 disables deep idle entirely.
+	workflowServeDeepIdleThreshold = 12
 	// workflowServeWakeDebounce is the coalescing window opened once the first
 	// relevant event wakes the --follow loop. Additional buffered events that
 	// arrive during the window are drained and folded into the same wake so a
@@ -104,6 +124,14 @@ var (
 func followSleepDuration(idleSweeps int) time.Duration {
 	if idleSweeps <= 0 {
 		return workflowServeWakeSweepInterval
+	}
+	if workflowServeDeepIdleThreshold > 0 && idleSweeps >= workflowServeDeepIdleThreshold {
+		// Sustained emptiness: back off to the deep-idle cap (never below the
+		// responsive cap, in case a test or override inverts the two).
+		if workflowServeDeepIdleSleep > workflowServeMaxIdleSleep {
+			return workflowServeDeepIdleSleep
+		}
+		return workflowServeMaxIdleSleep
 	}
 	const maxShift = 30
 	shift := idleSweeps
