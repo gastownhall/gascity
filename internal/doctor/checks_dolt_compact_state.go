@@ -44,9 +44,10 @@ type compactStateMarker struct {
 	createdAt  string
 }
 
-func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, error) {
+func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, []string, error) {
 	packStateDir := doctorDoltPackStateDir(c.cityPath)
 	var markers []compactStateMarker
+	var readWarnings []string
 	for _, markerType := range compactStateMarkerDirs {
 		dir := filepath.Join(packStateDir, markerType)
 		entries, err := os.ReadDir(dir)
@@ -54,7 +55,7 @@ func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, error) {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return nil, fmt.Errorf("read %s: %w", dir, err)
+			return nil, nil, fmt.Errorf("read %s: %w", dir, err)
 		}
 		for _, e := range entries {
 			if e.Type()&fs.ModeType != 0 || strings.HasPrefix(e.Name(), ".") {
@@ -63,6 +64,7 @@ func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, error) {
 			markerPath := filepath.Join(dir, e.Name())
 			data, err := os.ReadFile(markerPath) //nolint:gosec
 			if err != nil {
+				readWarnings = append(readWarnings, fmt.Sprintf("unreadable marker %s: %v", markerPath, err))
 				continue
 			}
 			m := compactStateMarker{
@@ -80,7 +82,7 @@ func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, error) {
 			markers = append(markers, m)
 		}
 	}
-	return markers, nil
+	return markers, readWarnings, nil
 }
 
 // Run scans compact lifecycle markers.
@@ -92,35 +94,45 @@ func (c *DoltCompactStateCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	markers, err := c.scanMarkers()
+	markers, readWarnings, err := c.scanMarkers()
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("scan compact markers: %v", err)
 		return r
 	}
 
-	if len(markers) == 0 {
+	if len(markers) == 0 && len(readWarnings) == 0 {
 		r.Status = StatusOK
 		r.Message = "no stale compact markers"
 		return r
 	}
 
-	details := make([]string, 0, len(markers))
+	details := make([]string, 0, len(markers)+len(readWarnings))
 	for _, m := range markers {
 		details = append(details, fmt.Sprintf("marker: %s db=%s path=%s reason=%s created_at=%s",
 			m.markerType, m.db, m.path, m.reason, m.createdAt))
 	}
+	details = append(details, readWarnings...)
 	r.Details = details
 
 	markerLabels := make([]string, len(markers))
-	hintLines := make([]string, len(markers))
+	hintLines := make([]string, len(markers), len(markers)+len(readWarnings))
 	for i, m := range markers {
 		markerLabels[i] = fmt.Sprintf("%s for %s", m.markerType, m.db)
 		hintLines[i] = compactMarkerFixHint(m)
 	}
+	hintLines = append(hintLines, readWarnings...)
+
+	var msgParts []string
+	if len(markerLabels) > 0 {
+		msgParts = append(msgParts, fmt.Sprintf("compact lifecycle markers: %s", strings.Join(markerLabels, ", ")))
+	}
+	if len(readWarnings) > 0 {
+		msgParts = append(msgParts, fmt.Sprintf("%d marker file(s) unreadable", len(readWarnings)))
+	}
 
 	r.Status = StatusWarning
-	r.Message = fmt.Sprintf("compact lifecycle markers: %s", strings.Join(markerLabels, ", "))
+	r.Message = strings.Join(msgParts, "; ")
 	r.FixHint = strings.Join(hintLines, "\n")
 	return r
 }
