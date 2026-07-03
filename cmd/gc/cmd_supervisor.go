@@ -1154,6 +1154,17 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: ensuring home dir %s: %v\n", supervisor.DefaultHome(), err) //nolint:errcheck
 		return 1
 	}
+	// Bound supervisor.log before attaching to it. A supervisor that fails
+	// the same way on every start crash-loops under its service manager
+	// (systemd Restart=always, launchd KeepAlive) and appends identical
+	// failure lines through every restart — 645MB in one two-day
+	// bind-conflict incident (#3897) — so every start size-gates the log
+	// and archives it at the cap. Rotation failures are surfaced but never
+	// block startup: a supervisor with an oversized log beats no
+	// supervisor.
+	if err := maybeRotateSupervisorLog(supervisorLogPath(), time.Now()); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: rotating supervisor log: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
 	// Always tee to ~/.gc/supervisor.log so `gc supervisor logs` works
 	// regardless of how the supervisor was invoked. We skip the tee when
 	// stdout/stderr already point at the same file (manual `gc supervisor
