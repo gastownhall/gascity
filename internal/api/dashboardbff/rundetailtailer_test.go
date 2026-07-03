@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,12 +13,17 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
-// runDetailRootEvent builds a graph.v2 run-root molecule with the scope metadata
-// the detail snapshot projection requires (gc.scope_kind / gc.scope_ref /
-// gc.root_store_ref).
-func runDetailRootEvent(seq uint64, id, formula string) events.Event {
-	return beadCreatedEvent(seq, beads.Bead{
-		ID:        id,
+// runDetailRootEvent builds the canonical graph.v2 run-root molecule (run "run1",
+// formula mol-adopt-pr-v2) with the scope metadata the detail snapshot projection
+// requires (gc.scope_kind / gc.scope_ref / gc.root_store_ref). It is the first
+// event in these fixtures, so it carries seq 1.
+func runDetailRootEvent() events.Event {
+	const (
+		runID   = "run1"
+		formula = "mol-adopt-pr-v2"
+	)
+	return beadCreatedEvent(1, beads.Bead{
+		ID:        runID,
 		Title:     formula,
 		Status:    "open",
 		Type:      "molecule",
@@ -80,6 +86,13 @@ type runDetailWire struct {
 	Lanes []struct {
 		ID string `json:"id"`
 	} `json:"lanes"`
+	FormulaDetail struct {
+		Kind    string `json:"kind"`
+		Name    string `json:"name"`
+		Target  string `json:"target"`
+		Reason  string `json:"reason"`
+		Failure string `json:"failure"`
+	} `json:"formulaDetail"`
 }
 
 // TestRunDetailEndpoint drives the full endpoint: the warm fold projects one
@@ -88,7 +101,7 @@ func TestRunDetailEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, ".gc", "events.jsonl")
 	writeEventLog(t, logPath,
-		runDetailRootEvent(1, "run1", "mol-adopt-pr-v2"),
+		runDetailRootEvent(),
 		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
 	)
 
@@ -96,7 +109,7 @@ func TestRunDetailEndpoint(t *testing.T) {
 	p.Start(t.Context())
 	defer p.Stop()
 
-	resp := getRunDetail(t, p, "alpha", "run1", http.StatusOK)
+	resp := getRunDetail(t, p, "alpha", "run1")
 	if resp.RunID != "run1" {
 		t.Errorf("runId = %q, want run1", resp.RunID)
 	}
@@ -120,6 +133,217 @@ func TestRunDetailEndpoint(t *testing.T) {
 	}
 }
 
+// TestRunDetailEndpointFiltersNonRunBeads is the regression guard for the live
+// projection bypassing RunBeadFilter: message, session, and gc:-labeled control
+// beads that share a run root must be dropped at the projection boundary (the
+// analog of the frontend defaultBeadFilter) so they never surface as detail
+// nodes. Without the filter, the gc:-labeled child and the message bead below
+// are selected as run members and would inflate the node count past the real
+// root+step graph.
+func TestRunDetailEndpointFiltersNonRunBeads(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	// A distinct run id and city (filtering is not run- or city-specific) also
+	// keep the shared getRunDetail helper exercised with more than one run/city.
+	const runID = "runf1"
+	writeEventLog(t, logPath,
+		beadCreatedEvent(1, beads.Bead{
+			ID:        runID,
+			Title:     "mol-adopt-pr-v2",
+			Status:    "open",
+			Type:      "molecule",
+			Ref:       "mol-adopt-pr-v2",
+			CreatedAt: time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC),
+			UpdatedAt: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),
+			Metadata: map[string]string{
+				"gc.formula_contract": "graph.v2",
+				"gc.kind":             "run",
+				"gc.formula":          "mol-adopt-pr-v2",
+				"gc.run_target":       "rig:demo",
+				"gc.root_store_ref":   "rig:demo",
+				"gc.scope_kind":       "rig",
+				"gc.scope_ref":        "demo",
+			},
+		}),
+		runDetailStepEvent(2, runID+".1", runID, "preflight", "in_progress"),
+		// A gc:-labeled control bead whose id sits under the run root: without the
+		// filter, snapshotForRun selects it as a member and it becomes a node.
+		beadCreatedEvent(3, beads.Bead{
+			ID:        runID + ".ctl",
+			Title:     "control bead",
+			Status:    "open",
+			Type:      "task",
+			ParentID:  runID,
+			Labels:    []string{"gc:control"},
+			CreatedAt: time.Date(2026, 6, 1, 10, 2, 0, 0, time.UTC),
+			UpdatedAt: time.Date(2026, 6, 1, 10, 6, 0, 0, time.UTC),
+			Metadata:  map[string]string{"gc.root_bead_id": runID},
+		}),
+		// A message bead carrying the run root: not an engineering type and not
+		// gc.kind=run, so RunBeadFilter drops it.
+		beadCreatedEvent(4, beads.Bead{
+			ID:        "msg1",
+			Title:     "convoy message",
+			Status:    "open",
+			Type:      "message",
+			CreatedAt: time.Date(2026, 6, 1, 10, 3, 0, 0, time.UTC),
+			UpdatedAt: time.Date(2026, 6, 1, 10, 7, 0, 0, time.UTC),
+			Metadata:  map[string]string{"gc.root_bead_id": runID},
+		}),
+	)
+
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"beta": dir}}})
+	p.Start(t.Context())
+	defer p.Stop()
+
+	resp := getRunDetail(t, p, "beta", runID)
+	if len(resp.Nodes) != 2 {
+		t.Errorf("nodes = %d, want 2 (root + preflight); non-run/gc:-labeled beads must be filtered, got %+v", len(resp.Nodes), resp.Nodes)
+	}
+	for _, node := range resp.Nodes {
+		if node.ID == runID+".ctl" || node.ID == "msg1" {
+			t.Errorf("node %q leaked into detail; RunBeadFilter must drop it", node.ID)
+		}
+	}
+}
+
+// TestRunDetailEndpointLayersCompiledFormulaDetail proves the endpoint fetches
+// the supervisor's compiled formula detail at request time (like sessions) so a
+// graph.v2 run with a name+target resolves to an "available" formula-detail
+// state rather than the synthetic fetch_failed/upstream_error the bead-derived
+// projection emits on its own.
+func TestRunDetailEndpointLayersCompiledFormulaDetail(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	writeEventLog(t, logPath,
+		runDetailRootEvent(),
+		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
+	)
+
+	var gotFormulaQuery string
+	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/city/alpha/formulas/mol-adopt-pr-v2" {
+			gotFormulaQuery = r.URL.RawQuery
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"mol-adopt-pr-v2","steps":[{"id":"preflight"},{"id":"apply-fixes"}],"preview":{"nodes":[{"id":"preflight"},{"id":"apply-fixes"}]}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer supervisor.Close()
+
+	p := New(Deps{
+		Resolver:          fakeResolver{paths: map[string]string{"alpha": dir}},
+		SupervisorBaseURL: supervisor.URL,
+	})
+	p.Start(t.Context())
+	defer p.Stop()
+
+	resp := getRunDetail(t, p, "alpha", "run1")
+	if resp.FormulaDetail.Kind != "available" {
+		t.Errorf("formulaDetail.kind = %q, want available; full=%+v", resp.FormulaDetail.Kind, resp.FormulaDetail)
+	}
+	if resp.FormulaDetail.Name != "mol-adopt-pr-v2" || resp.FormulaDetail.Target != "rig:demo" {
+		t.Errorf("formulaDetail = %+v, want name mol-adopt-pr-v2 / target rig:demo", resp.FormulaDetail)
+	}
+	if resp.FormulaDetail.Failure != "" {
+		t.Errorf("formulaDetail.failure = %q, want empty (no synthetic upstream error)", resp.FormulaDetail.Failure)
+	}
+	// The run root is rig-scoped (gc.scope_kind=rig, gc.scope_ref=demo). The BFF
+	// must derive that scope from the run root and send it alongside target, so
+	// the endpoint resolves the compiled formula against the rig formula layer
+	// instead of the wrong layer or a required-scope rejection.
+	gotQuery, err := url.ParseQuery(gotFormulaQuery)
+	if err != nil {
+		t.Fatalf("parse compiled-formula fetch query %q: %v", gotFormulaQuery, err)
+	}
+	if got := gotQuery.Get("target"); got != "rig:demo" {
+		t.Errorf("compiled-formula fetch target = %q, want rig:demo (query %q)", got, gotFormulaQuery)
+	}
+	if got := gotQuery.Get("scope_kind"); got != "rig" {
+		t.Errorf("compiled-formula fetch scope_kind = %q, want rig (query %q)", got, gotFormulaQuery)
+	}
+	if got := gotQuery.Get("scope_ref"); got != "demo" {
+		t.Errorf("compiled-formula fetch scope_ref = %q, want demo (query %q)", got, gotFormulaQuery)
+	}
+}
+
+// TestRunDetailEndpointFormulaFetchFailureStaysHonest proves that when the
+// compiled-formula fetch is attempted but fails upstream, the detail state falls
+// back to the honest fetch_failed arm rather than fabricating availability.
+func TestRunDetailEndpointFormulaFetchFailureStaysHonest(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	writeEventLog(t, logPath, runDetailRootEvent())
+
+	var formulaFetchAttempted bool
+	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/city/alpha/formulas/mol-adopt-pr-v2" {
+			formulaFetchAttempted = true
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer supervisor.Close()
+
+	p := New(Deps{
+		Resolver:          fakeResolver{paths: map[string]string{"alpha": dir}},
+		SupervisorBaseURL: supervisor.URL,
+	})
+	p.Start(t.Context())
+	defer p.Stop()
+
+	resp := getRunDetail(t, p, "alpha", "run1")
+	if !formulaFetchAttempted {
+		t.Error("compiled-formula fetch was not attempted for a graph.v2 run with a target")
+	}
+	if resp.FormulaDetail.Kind != "unavailable" || resp.FormulaDetail.Reason != "fetch_failed" {
+		t.Errorf("formulaDetail = %+v, want unavailable/fetch_failed on upstream failure", resp.FormulaDetail)
+	}
+	if resp.FormulaDetail.Failure != "upstream_error" {
+		t.Errorf("formulaDetail.failure = %q, want upstream_error", resp.FormulaDetail.Failure)
+	}
+}
+
+// TestRunDetailEndpointFormulaFetch404IsNotFound proves the BFF preserves the
+// distinct not_found failure reason across the BFF/runproj boundary: a compiled
+// formula that the supervisor reports as HTTP 404 must resolve to
+// fetch_failed/not_found — a genuinely missing formula — rather than collapsing
+// into the generic upstream_error the non-404 path (see the sibling test above)
+// reports. Before this fix the BFF discarded the status code, so a 404 rendered
+// the wrong operator diagnostic on the run-detail page.
+func TestRunDetailEndpointFormulaFetch404IsNotFound(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	writeEventLog(t, logPath, runDetailRootEvent())
+
+	var formulaFetchAttempted bool
+	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/city/alpha/formulas/mol-adopt-pr-v2" {
+			formulaFetchAttempted = true
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer supervisor.Close()
+
+	p := New(Deps{
+		Resolver:          fakeResolver{paths: map[string]string{"alpha": dir}},
+		SupervisorBaseURL: supervisor.URL,
+	})
+	p.Start(t.Context())
+	defer p.Stop()
+
+	resp := getRunDetail(t, p, "alpha", "run1")
+	if !formulaFetchAttempted {
+		t.Error("compiled-formula fetch was not attempted for a graph.v2 run with a target")
+	}
+	if resp.FormulaDetail.Kind != "unavailable" || resp.FormulaDetail.Reason != "fetch_failed" {
+		t.Errorf("formulaDetail = %+v, want unavailable/fetch_failed on a 404", resp.FormulaDetail)
+	}
+	if resp.FormulaDetail.Failure != "not_found" {
+		t.Errorf("formulaDetail.failure = %q, want not_found (a 404 is a missing formula, not a generic upstream error)", resp.FormulaDetail.Failure)
+	}
+}
+
 // TestRunDetailEndpointUnknownCity404 confirms an unresolvable city 404s.
 func TestRunDetailEndpointUnknownCity404(t *testing.T) {
 	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{}}})
@@ -135,7 +359,7 @@ func TestRunDetailEndpointUnknownCity404(t *testing.T) {
 func TestRunDetailEndpointUnknownRun404(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, ".gc", "events.jsonl")
-	writeEventLog(t, logPath, runDetailRootEvent(1, "run1", "mol-adopt-pr-v2"))
+	writeEventLog(t, logPath, runDetailRootEvent())
 
 	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
 	p.Start(t.Context())
@@ -194,11 +418,14 @@ func getRunDetailExpectStatus(t *testing.T, p *Plane, city, runID string, want i
 	}
 }
 
-func getRunDetail(t *testing.T, p *Plane, city, runID string, want int) runDetailWire {
+// getRunDetail fetches a run's detail and decodes the success (200) body. Non-2xx
+// paths use getRunDetailRaw / getRunDetailExpectStatus, so the expected status is
+// fixed here rather than a parameter.
+func getRunDetail(t *testing.T, p *Plane, city, runID string) runDetailWire {
 	t.Helper()
 	rec := getRunDetailRaw(t, p, city, runID)
-	if rec.Code != want {
-		t.Fatalf("status = %d, want %d; body=%s", rec.Code, want, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	var resp runDetailWire
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {

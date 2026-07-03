@@ -73,7 +73,10 @@ func fromStoreRef(rootStoreRef string) (kind, ref string, ok bool) {
 }
 
 // stringValueOrEmpty trims a value; an all-whitespace or empty value becomes "".
-// Mirrors the TS run-scope stringValue (which returns null for empty).
+// Mirrors the TS run-scope stringValue (which returns null for empty). It
+// delegates to nonEmpty so the JS-faithful trim (String.prototype.trim(): BOM
+// stripped, NEL kept) is uniform with the rest of the package rather than
+// diverging on Go's unicode.IsSpace.
 func stringValueOrEmpty(value string) string {
-	return strings.TrimSpace(value)
+	return nonEmpty(value)
 }

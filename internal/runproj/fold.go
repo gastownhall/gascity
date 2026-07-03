@@ -60,19 +60,6 @@ func Apply(into map[string]beads.Bead, evts []events.Event) (lastSeq uint64) {
 	return lastSeq
 }
 
-// FoldFile reads the event log at path (events.ReadFiltered transparently walks
-// rotated .gz archives) and folds it, returning the bead map and the highest
-// seq seen — the cursor a live tailer resumes from.
-func FoldFile(path string) (beadsByID map[string]beads.Bead, lastSeq uint64, err error) {
-	evts, err := events.ReadFiltered(path, events.Filter{})
-	if err != nil {
-		return nil, 0, err
-	}
-	out := make(map[string]beads.Bead)
-	lastSeq = Apply(out, evts)
-	return out, lastSeq, nil
-}
-
 // decodeBead extracts a beads.Bead from a bead.* event payload. The current
 // payload shape is {"bead": <snapshot>}; older logs wrote the raw snapshot
 // directly, so both are accepted. A payload without an id is treated as a

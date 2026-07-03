@@ -435,7 +435,7 @@ func activeAssignees(issues []runIssue) []string {
 		if i.status == "closed" {
 			continue
 		}
-		a := strings.TrimSpace(i.assignee)
+		a := nonEmpty(i.assignee)
 		if a == "" || seen[a] {
 			continue
 		}
@@ -582,7 +582,8 @@ func runHealthUnavailable() RunLaneHealthState {
 }
 
 // RunBeadFilter reports whether a bead participates in run classification.
-// Port of TS runBeadFilter. (Exposed for parity; the builder does not call it.)
+// Port of TS runBeadFilter. (Exposed for parity; the builder does not call it —
+// live callers apply it at the projection boundary via FilterRunBeads.)
 func RunBeadFilter(b beads.Bead) bool {
 	for _, l := range b.Labels {
 		if strings.HasPrefix(l, "gc:") {
@@ -593,6 +594,25 @@ func RunBeadFilter(b beads.Bead) bool {
 		return true
 	}
 	return stringValue(b.Metadata[beadmeta.KindMetadataKey]) == "run"
+}
+
+// FilterRunBeads returns the subset of beadList that participates in run
+// classification, per RunBeadFilter. It is the projection-boundary analog of the
+// frontend runBeadFilter (summary.ts): BuildRunSummary and BuildRunDetail
+// are faithful ports of buildRunSummary/buildRunDetail, which receive
+// already-filtered beads, so a live caller that folds the raw event log — which
+// also carries message, session, and gc:-labeled control beads that can share a
+// run root — must apply this before building. Dropping those unrelated beads
+// keeps them from distorting lane status, counts, recent changes, and detail
+// nodes.
+func FilterRunBeads(beadList []beads.Bead) []beads.Bead {
+	out := make([]beads.Bead, 0, len(beadList))
+	for _, b := range beadList {
+		if RunBeadFilter(b) {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // runProgress resolves the lane's progress union. Port of TS runProgress.

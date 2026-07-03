@@ -147,6 +147,153 @@ func ReadFiltered(path string, filter Filter) ([]Event, error) {
 	return result, nil
 }
 
+// ReadFilteredWithInFlight is ReadFiltered plus events still stranded in
+// in-flight rotation files. When rotateLocked renames the active log to
+// events.jsonl.rotating-<ts>-seq-<a>-<b>, a background goroutine gzips it into
+// the canonical .gz archive and only then removes the rotating file. In that
+// window the just-rotated events live ONLY in the plain-JSONL rotating file,
+// which ReadFiltered (it lists only .gz archives) cannot see. The live run
+// tailer folds these in when it detects a rotation, before resetting its
+// active-file cursor, so events written to the old active log in the poll window
+// before the rename are not lost during the asynchronous compression.
+//
+// Callers must be seq-idempotent: during the brief window when a canonical .gz
+// and its source rotating file coexist, an event can appear in both. The result
+// is de-duplicated by seq and returned in seq order. Intended for the AfterSeq
+// catch-up path; a positive Filter.Limit bounds only ReadFiltered's own scan,
+// not the merged in-flight events.
+func ReadFilteredWithInFlight(path string, filter Filter) ([]Event, error) {
+	base, baseErr := ReadFiltered(path, filter)
+	inflight, inErr := readInFlightRotating(path, filter)
+	if len(inflight) == 0 {
+		if baseErr == nil {
+			return base, inErr
+		}
+		return base, baseErr
+	}
+	merged := mergeEventsBySeq(base, inflight)
+	if baseErr != nil {
+		return merged, baseErr
+	}
+	return merged, inErr
+}
+
+// readInFlightRotating reads events matching filter from any in-flight rotation
+// files (events.jsonl.rotating-<ts>-seq-<a>-<b>) beside path — the plain-JSONL
+// renames of a just-rotated active log the background gzip has not yet promoted
+// to a canonical .gz archive. Files whose seq window is fully excluded by
+// filter.AfterSeq are skipped without opening. Results are in seq order across
+// rotating files (sorted by FirstSeq; each file is internally seq ordered).
+// Returns (nil, nil) when nothing is rotating — the overwhelmingly common case.
+func readInFlightRotating(path string, filter Filter) ([]Event, error) {
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	type rotatingFile struct {
+		name     string
+		firstSeq uint64
+	}
+	var files []rotatingFile
+	for _, e := range entries {
+		if e.IsDir() || !hasRotatingPrefix(e.Name()) {
+			continue
+		}
+		_, first, last, ok := parseRotatingBasename(e.Name())
+		if !ok {
+			// Legacy rotating file without a seq window; the startup orphan
+			// reaper promotes it — a live reader skips it rather than guess.
+			continue
+		}
+		if filter.AfterSeq > 0 && last <= filter.AfterSeq {
+			continue
+		}
+		files = append(files, rotatingFile{name: e.Name(), firstSeq: first})
+	}
+	if len(files) == 0 {
+		return nil, nil
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].firstSeq < files[j].firstSeq })
+
+	var result []Event
+	for _, rf := range files {
+		evts, err := readPlainJSONLFiltered(filepath.Join(dir, rf.name), filter)
+		if err != nil {
+			return result, fmt.Errorf("reading in-flight rotation %q: %w", rf.name, err)
+		}
+		result = append(result, evts...)
+	}
+	return result, nil
+}
+
+// readPlainJSONLFiltered reads every filter-matching event from a plain-JSONL
+// events file, scanning the whole file from the start. Unlike ReadFrom it keeps
+// no byte offset; unlike the active-file scan in ReadFiltered it does not honor
+// Filter.Limit (its only caller merges the result under an AfterSeq filter).
+func readPlainJSONLFiltered(path string, filter Filter) ([]Event, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // read-only file
+
+	var result []Event
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var e Event
+		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+			continue // skip malformed lines (partial write mid-rename)
+		}
+		if !matchesFilter(e, filter) {
+			continue
+		}
+		result = append(result, e)
+	}
+	if err := scanner.Err(); err != nil {
+		return result, fmt.Errorf("scanning: %w", err)
+	}
+	return result, nil
+}
+
+// mergeEventsBySeq merges two seq-ascending event slices into one seq-ascending
+// slice, dropping exact seq duplicates — an event present in both a canonical
+// archive and its not-yet-removed source rotating file. Event seqs are globally
+// monotonic and unique, so equal seq means the same event.
+func mergeEventsBySeq(a, b []Event) []Event {
+	out := make([]Event, 0, len(a)+len(b))
+	appendUnique := func(e Event) {
+		if n := len(out); n > 0 && out[n-1].Seq == e.Seq {
+			return
+		}
+		out = append(out, e)
+	}
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if a[i].Seq <= b[j].Seq {
+			appendUnique(a[i])
+			i++
+		} else {
+			appendUnique(b[j])
+			j++
+		}
+	}
+	for ; i < len(a); i++ {
+		appendUnique(a[i])
+	}
+	for ; j < len(b); j++ {
+		appendUnique(b[j])
+	}
+	return out
+}
+
 // archiveFilesIn lists canonical events archives in dir, sorted by
 // FirstSeq ascending so callers can read them in chronological order.
 // Files that don't match the canonical name pattern (legacy archives,

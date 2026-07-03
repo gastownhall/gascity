@@ -3,6 +3,8 @@ package dashboardbff
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runproj"
 )
 
 type fakeResolver struct{ paths map[string]string }
@@ -132,6 +135,277 @@ func TestRunTailerColdLoadAndLiveTail(t *testing.T) {
 
 	cancel()
 	wg.Wait()
+}
+
+// TestRunTailerRotationCatchUp is the regression guard for the rotation
+// event-drop: events written to the active log in the poll window before a
+// rotation live only in the archived file, so on rotation the live tail must
+// catch up across archives instead of resetting its byte offset and reading only
+// the fresh active file. It drives foldNext directly (no ticker) so the
+// pre-rotation runs are provably archived before the tailer next folds — the
+// exact window the previous size-shrink reset silently dropped.
+func TestRunTailerRotationCatchUp(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	rec, err := events.NewFileRecorder(logPath, io.Discard)
+	if err != nil {
+		t.Fatalf("recorder: %v", err)
+	}
+	defer rec.Close() //nolint:errcheck
+
+	// Seed one run and cold-load it, so the tail cursor sits past the seed just
+	// like a warm tailer that has already folded the pre-rotation history.
+	rec.Record(runMoleculeEvent(0, "run1", "mol-adopt-pr-v2", "worker-1"))
+
+	tl := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
+	proj := runproj.NewProjector()
+	st := captureTailCursor(logPath)
+	if loadErr := proj.ColdLoad(logPath); loadErr != nil {
+		t.Fatalf("cold load: %v", loadErr)
+	}
+	st.marks = tl.build(proj, nil, nil)
+
+	// Append two more runs to the ACTIVE file, then rotate before the tailer
+	// folds them: after the rename these live only in the archived .gz.
+	rec.Record(runMoleculeEvent(0, "run2", "mol-design-review-v2", "worker-2"))
+	rec.Record(runMoleculeEvent(0, "run3", "mol-bugflow-v1", "worker-3"))
+	if _, err := rec.ForceRotate(); err != nil {
+		t.Fatalf("force rotate: %v", err)
+	}
+	rec.WaitForRotations() // the pre-rotation runs are now only in the .gz archive.
+
+	// A fresh run lands in the new active file after the rotation.
+	rec.Record(runMoleculeEvent(0, "run4", "mol-adopt-pr-v2", "worker-4"))
+
+	// One fold must reconcile the archived pre-rotation runs AND the fresh
+	// active-file run — no sequence gap, no stale lane.
+	tl.foldNext(proj, st)
+
+	got := map[string]bool{}
+	for _, lane := range tl.summary.Lanes {
+		got[lane.ID] = true
+	}
+	for _, want := range []string{"run1", "run2", "run3", "run4"} {
+		if !got[want] {
+			t.Errorf("lane %q missing after rotation; lanes=%v", want, laneIDsOf(tl.summary.Lanes))
+		}
+	}
+	if len(tl.summary.Lanes) != 4 {
+		t.Errorf("lane count = %d, want 4; lanes=%v", len(tl.summary.Lanes), laneIDsOf(tl.summary.Lanes))
+	}
+}
+
+func laneIDsOf(lanes []runproj.RunLane) []string {
+	ids := make([]string, 0, len(lanes))
+	for _, lane := range lanes {
+		ids = append(ids, lane.ID)
+	}
+	return ids
+}
+
+// lanePresent reports whether a run lane with the given id is in the tailer's
+// published summary. Safe to call directly in these single-goroutine tests that
+// drive foldNext by hand (no live loop mutates t.summary concurrently).
+func lanePresent(tl *cityRunTailer, id string) bool {
+	for _, lane := range tl.summary.Lanes {
+		if lane.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRunTailerRotationCatchUpInFlightArchive is the regression guard for the
+// async-compression window that TestRunTailerRotationCatchUp does not exercise
+// (it waits for the gzip). After the recorder renames the active log to a plain
+// events.jsonl.rotating-* file it gzips it in the BACKGROUND, so between the
+// rename and the canonical .gz the just-rotated events live only in the rotating
+// file — invisible to the .gz archive walker. A poll that folds during that
+// window must still catch them, not advance the tail past them for good. The
+// window is staged deterministically here: a real ForceRotate's gzip goroutine
+// races the fold, so driving foldNext "without WaitForRotations" would flake
+// (the gzip sometimes wins and the .gz path masks the bug). os.Rename preserves
+// the pre-rotation inode on the rotating file, exactly as the recorder does, so
+// foldNext detects the rotation by identity.
+func TestRunTailerRotationCatchUpInFlightArchive(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// A warm tailer that has already folded run1 (cursor past seq 1), like a
+	// tailer mid-run when a rotation happens.
+	writeEventLog(t, logPath, runMoleculeEvent(1, "run1", "mol-adopt-pr-v2", "worker-1"))
+	tl := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
+	proj := runproj.NewProjector()
+	st := captureTailCursor(logPath)
+	if loadErr := proj.ColdLoad(logPath); loadErr != nil {
+		t.Fatalf("cold load: %v", loadErr)
+	}
+	st.marks = tl.build(proj, nil, nil)
+
+	// run2, run3 land on the active log in the poll window before the rotation.
+	appendEvents(t, logPath,
+		runMoleculeEvent(2, "run2", "mol-design-review-v2", "worker-2"),
+		runMoleculeEvent(3, "run3", "mol-bugflow-v1", "worker-3"),
+	)
+
+	// Rotation, staged as the recorder does it but with the gzip still pending:
+	// rename the active log (seq 1-3) to a plain rotating-* file — no .gz yet —
+	// then open a fresh active log. The rename carries the old inode to the
+	// rotating file, so the fresh active log is a distinct identity.
+	rotating := filepath.Join(filepath.Dir(logPath), "events.jsonl.rotating-20260601T120000Z-seq-1-3")
+	if err := os.Rename(logPath, rotating); err != nil {
+		t.Fatalf("rename to rotating: %v", err)
+	}
+	writeEventLog(t, logPath, runMoleculeEvent(4, "run4", "mol-adopt-pr-v2", "worker-4"))
+
+	// One fold must reconcile the in-flight pre-rotation runs AND the fresh
+	// active-file run — the drop happens only if the catch-up ignores the
+	// rotating file.
+	tl.foldNext(proj, st)
+
+	got := map[string]bool{}
+	for _, lane := range tl.summary.Lanes {
+		got[lane.ID] = true
+	}
+	for _, want := range []string{"run1", "run2", "run3", "run4"} {
+		if !got[want] {
+			t.Errorf("lane %q missing after in-flight rotation; lanes=%v", want, laneIDsOf(tl.summary.Lanes))
+		}
+	}
+	if len(tl.summary.Lanes) != 4 {
+		t.Errorf("lane count = %d, want 4; lanes=%v", len(tl.summary.Lanes), laneIDsOf(tl.summary.Lanes))
+	}
+}
+
+// TestRunTailerStartupCursorRotationRaceDoesNotSkip is the regression guard for
+// the startup cursor split-stat race: the old capture read the byte offset and
+// the active-file identity with two separate stats, so a rotation between them
+// paired the OLD file's larger offset with the FRESH file's identity. The first
+// foldNext then saw no identity change, ReadFrom seeked past the fresh file's EOF
+// (reader.go returns the same offset when no bytes are available), and every
+// fresh event below the stale offset was silently dropped until restart. It
+// reproduces that exact corrupted cursor — a stale beyond-EOF offset on the
+// current active identity — and proves one foldNext still folds the fresh event.
+func TestRunTailerStartupCursorRotationRaceDoesNotSkip(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+
+	// A warm tailer that already folded run1..run3 (cursor past seq 3) off a
+	// larger pre-rotation active file.
+	writeEventLog(t, logPath,
+		runMoleculeEvent(1, "run1", "mol-adopt-pr-v2", "worker-1"),
+		runMoleculeEvent(2, "run2", "mol-design-review-v2", "worker-2"),
+		runMoleculeEvent(3, "run3", "mol-bugflow-v1", "worker-3"),
+	)
+	tl := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
+	proj := runproj.NewProjector()
+	if loadErr := proj.ColdLoad(logPath); loadErr != nil {
+		t.Fatalf("cold load: %v", loadErr)
+	}
+	st := captureTailCursor(logPath)
+	st.marks = tl.build(proj, nil, nil)
+	staleOffset := st.offset // the pre-rotation (larger) active-file size
+
+	// The fresh post-rotation active file is smaller and carries run4. Rewriting
+	// in place keeps a stable identity — exactly the one the racy two-stat capture
+	// would have paired with the OLD file's larger offset — so foldNext sees no
+	// identity change and must instead recover from the stale beyond-EOF offset.
+	writeEventLog(t, logPath, runMoleculeEvent(4, "run4", "mol-adopt-pr-v2", "worker-4"))
+	freshInfo, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat fresh active: %v", err)
+	}
+	if staleOffset <= freshInfo.Size() {
+		t.Fatalf("precondition: stale offset %d must exceed fresh size %d", staleOffset, freshInfo.Size())
+	}
+	st.offset = staleOffset
+	st.activeInfo = freshInfo
+
+	tl.foldNext(proj, st)
+
+	if !lanePresent(tl, "run4") {
+		t.Errorf("run4 skipped: a fresh event below the stale startup offset was dropped; lanes=%v", laneIDsOf(tl.summary.Lanes))
+	}
+	for _, want := range []string{"run1", "run2", "run3"} {
+		if !lanePresent(tl, want) {
+			t.Errorf("pre-rotation lane %q lost; lanes=%v", want, laneIDsOf(tl.summary.Lanes))
+		}
+	}
+}
+
+// TestRunTailerRotationCatchUpErrorRetriesNextPoll is the regression guard for
+// the rotation catch-up state-commit gap: on a detected rotation the tailer must
+// catch up the just-rotated events (now only in the archive) BEFORE advancing its
+// active identity and resetting its offset. The old code committed the fresh
+// identity and reset the offset even when the catch-up read failed, so the next
+// poll saw no rotation (SameFile) and the run2/run3 window was lost until restart.
+// A transient catch-up error must instead leave the old identity in place so the
+// next poll re-detects the rotation and recovers the whole window.
+func TestRunTailerRotationCatchUpErrorRetriesNextPoll(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+
+	// Warm tailer that folded run1 (cursor past seq 1).
+	writeEventLog(t, logPath, runMoleculeEvent(1, "run1", "mol-adopt-pr-v2", "worker-1"))
+	tl := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
+	proj := runproj.NewProjector()
+	if loadErr := proj.ColdLoad(logPath); loadErr != nil {
+		t.Fatalf("cold load: %v", loadErr)
+	}
+	st := captureTailCursor(logPath)
+	st.marks = tl.build(proj, nil, nil)
+	preRotationInfo := st.activeInfo
+
+	// run2, run3 land on the active log in the poll window, then a rotation moves
+	// them to a plain rotating-* archive and opens a fresh active file (run4). The
+	// rename carries the old inode to the rotating file, so the fresh active file
+	// is a distinct identity foldNext detects as a rotation.
+	appendEvents(t, logPath,
+		runMoleculeEvent(2, "run2", "mol-design-review-v2", "worker-2"),
+		runMoleculeEvent(3, "run3", "mol-bugflow-v1", "worker-3"),
+	)
+	rotating := filepath.Join(dir, ".gc", "events.jsonl.rotating-20260601T120000Z-seq-2-3")
+	if err := os.Rename(logPath, rotating); err != nil {
+		t.Fatalf("rename to rotating: %v", err)
+	}
+	writeEventLog(t, logPath, runMoleculeEvent(4, "run4", "mol-adopt-pr-v2", "worker-4"))
+
+	// Fail the first catch-up read, then fall through to the real reader.
+	defer func(prev func(string, events.Filter) ([]events.Event, error)) { readRotationCatchUp = prev }(readRotationCatchUp)
+	realCatchUp := events.ReadFilteredWithInFlight
+	calls := 0
+	readRotationCatchUp = func(path string, f events.Filter) ([]events.Event, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("transient catch-up read error")
+		}
+		return realCatchUp(path, f)
+	}
+
+	// First poll: catch-up errors. Nothing folds, and the tailer must not advance
+	// its active identity or the next poll can no longer re-detect the rotation.
+	tl.foldNext(proj, st)
+	if lanePresent(tl, "run2") || lanePresent(tl, "run3") || lanePresent(tl, "run4") {
+		t.Fatalf("events folded despite a catch-up error; lanes=%v", laneIDsOf(tl.summary.Lanes))
+	}
+	if !os.SameFile(preRotationInfo, st.activeInfo) {
+		t.Fatalf("active identity advanced on a catch-up error; the next poll can no longer re-detect the rotation")
+	}
+
+	// Second poll: catch-up succeeds and recovers the whole rotation window.
+	tl.foldNext(proj, st)
+	for _, want := range []string{"run1", "run2", "run3", "run4"} {
+		if !lanePresent(tl, want) {
+			t.Errorf("lane %q missing after catch-up retry; lanes=%v", want, laneIDsOf(tl.summary.Lanes))
+		}
+	}
 }
 
 // TestRunSummaryEndpointEnrichesFromSessions drives the full endpoint: the warm

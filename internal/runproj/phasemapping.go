@@ -339,9 +339,11 @@ func textForIssue(issue runIssue) string {
 
 // stringValue trims a string-typed metadata value; non-strings become "".
 // Port of TS stringValue. (Go metadata is map[string]string, so a missing key
-// yields "" naturally.)
+// yields "" naturally.) It delegates to nonEmpty so the JS-faithful trim
+// (String.prototype.trim(): BOM stripped, NEL kept) is uniform across the
+// package's metadata helpers rather than diverging on Go's unicode.IsSpace.
 func stringValue(value string) string {
-	return strings.TrimSpace(value)
+	return nonEmpty(value)
 }
 
 func parsePositiveInteger(value string) (int, bool) {
@@ -499,12 +501,36 @@ func stagesForFormula(formula string, hasFormula bool) []formulaStage {
 // formulaStageProgress maps formula stages to RunStage statuses.
 // Port of TS formulaStageProgress.
 func formulaStageProgress(stages []formulaStage, issues []runIssue) []RunStage {
+	primary := primaryStepIssues(issues)
+	activeIndex := formulaActiveStageIndex(stages, primary)
+	furthestClosedIndex := furthestClosedStageIndex(stages, primary)
+
+	out := make([]RunStage, len(stages))
+	for idx, stage := range stages {
+		out[idx] = RunStage{
+			Key:    stage.key,
+			Label:  stage.label,
+			Status: formulaStageStatus(idx, activeIndex, furthestClosedIndex, stage, primary),
+		}
+	}
+	return out
+}
+
+// primaryStepIssues keeps only the primary-step issues, mirroring the
+// isPrimaryStepIssue filter formulaStageProgress applies before stage mapping.
+func primaryStepIssues(issues []runIssue) []runIssue {
 	var primary []runIssue
 	for _, i := range issues {
 		if isPrimaryStepIssue(i) {
 			primary = append(primary, i)
 		}
 	}
+	return primary
+}
+
+// formulaActiveStageIndex resolves the active stage index: the stage carrying
+// the latest in-progress primary step, else the first open stage (-1 when none).
+func formulaActiveStageIndex(stages []formulaStage, primary []runIssue) int {
 	var inProgress []runIssue
 	for _, i := range primary {
 		if i.status == "in_progress" {
@@ -512,49 +538,45 @@ func formulaStageProgress(stages []formulaStage, issues []runIssue) []RunStage {
 		}
 	}
 	activeStepID, hasActiveStep := latestStepID(inProgress)
+	if !hasActiveStep {
+		return firstOpenStageIndex(stages, primary)
+	}
+	for idx, s := range stages {
+		if containsString(s.steps, activeStepID) {
+			return idx
+		}
+	}
+	return -1
+}
 
-	activeIndex := -1
-	if hasActiveStep {
-		for idx, s := range stages {
-			if containsString(s.steps, activeStepID) {
-				activeIndex = idx
-				break
+// formulaStageStatus resolves one stage's status relative to the active and
+// furthest-closed stage indices. Port of the TS status switch.
+func formulaStageStatus(idx, activeIndex, furthestClosedIndex int, stage formulaStage, primary []runIssue) string {
+	switch {
+	case activeIndex >= 0 && idx < activeIndex:
+		return "complete"
+	case activeIndex >= 0 && idx == activeIndex:
+		return "active"
+	case activeIndex >= 0:
+		return "pending"
+	case stageHasClosedStep(stage, primary) || idx < furthestClosedIndex:
+		return "complete"
+	default:
+		return "pending"
+	}
+}
+
+// stageHasClosedStep reports whether any of the stage's steps has a closed
+// primary issue.
+func stageHasClosedStep(stage formulaStage, primary []runIssue) bool {
+	for _, step := range stage.steps {
+		for _, i := range stepIssues(primary, step) {
+			if i.status == "closed" {
+				return true
 			}
 		}
-	} else {
-		activeIndex = firstOpenStageIndex(stages, primary)
 	}
-	furthestClosedIndex := furthestClosedStageIndex(stages, primary)
-
-	stageHasClosed := func(stage formulaStage) bool {
-		for _, step := range stage.steps {
-			for _, i := range stepIssues(primary, step) {
-				if i.status == "closed" {
-					return true
-				}
-			}
-		}
-		return false
-	}
-
-	out := make([]RunStage, len(stages))
-	for idx, stage := range stages {
-		var status string
-		switch {
-		case activeIndex >= 0 && idx < activeIndex:
-			status = "complete"
-		case activeIndex >= 0 && idx == activeIndex:
-			status = "active"
-		case activeIndex >= 0:
-			status = "pending"
-		case stageHasClosed(stage) || idx < furthestClosedIndex:
-			status = "complete"
-		default:
-			status = "pending"
-		}
-		out[idx] = RunStage{Key: stage.key, Label: stage.label, Status: status}
-	}
-	return out
+	return false
 }
 
 func firstOpenStageIndex(stages []formulaStage, issues []runIssue) int {

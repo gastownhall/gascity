@@ -57,17 +57,65 @@ func BuildRunDetail(beadList []beads.Bead, runID string, snapshotVersion int, sn
 // passes nil (BuildRunDetail); the live endpoint passes the loopback /v0 sessions
 // read. Session enrichment is NOT golden-gated.
 func BuildRunDetailWithSessions(beadList []beads.Bead, runID string, snapshotVersion int, snapshotEventSeq int64, sessions []DashboardSession) (FormulaRunDetail, error) {
+	return BuildRunDetailWithSessionsAndFormula(beadList, runID, snapshotVersion, snapshotEventSeq, sessions, nil, FormulaDetailUpstreamError)
+}
+
+// BuildRunDetailWithSessionsAndFormula is BuildRunDetailWithSessions with the
+// supervisor's compiled formula detail layered in as well. Like sessions, this
+// is request-time endpoint enrichment (NOT golden-gated): the live endpoint
+// fetches the compiled formula for a run's name+target and passes it here so the
+// run's nodes honor the authored step order and the formula-detail state resolves
+// to "available". A nil formulaDetail keeps the un-enriched projection — the
+// detail state then resolves from run metadata alone (a missing_* arm, or, once a
+// name+target are known but no detail was supplied, the fetch_failed arm that
+// honestly reports a run whose compiled formula could not be layered in).
+// fetchFailure is the reason the live fetch failed when formulaDetail is nil
+// (FormulaDetailNotFound for a supervisor 404, else FormulaDetailUpstreamError);
+// callers with no live fetch pass FormulaDetailUpstreamError.
+func BuildRunDetailWithSessionsAndFormula(beadList []beads.Bead, runID string, snapshotVersion int, snapshotEventSeq int64, sessions []DashboardSession, formulaDetail *FormulaOrderingDetail, fetchFailure RunFormulaDetailFetchFailure) (FormulaRunDetail, error) {
 	snap, err := snapshotForRun(beadList, runID, snapshotVersion, snapshotEventSeq)
 	if err != nil {
 		return FormulaRunDetail{}, err
 	}
-	return enrichFormulaRun(snap, sessions)
+	return enrichFormulaRun(snap, sessions, formulaDetail.toInput(), fetchFailure)
 }
 
-// snapshotForRun synthesizes a run snapshot for one root from the folded beads.
-// Faithful port of the golden generator's snapshotForRun + toRunSnapshotBead +
-// depsForMembers: member selection, the issue_type→kind / ref→step_ref
-// projection, root→member parent deps, and snapshot identity from root metadata.
+// RunFormulaTargetForRun resolves the compiled-formula name, preview target, and
+// run scope for the run rooted at runID, reusing the exact identity and scope
+// resolution the detail build applies. ok is false when the run is not a
+// fetchable graph.v2 run, lacks a formula name+target, or has no valid scope.
+//
+// The dashboard BFF calls this to decide whether to fetch the supervisor's
+// compiled formula detail and to target the correct formula layer. The
+// formula-detail endpoint resolves the compiled formula against scope-derived
+// search paths, so a rig-scoped run must send its scope_kind/scope_ref or the
+// lookup resolves the wrong layer (or is rejected for missing required scope).
+func RunFormulaTargetForRun(beadList []beads.Bead, runID string) (name, target, scopeKind, scopeRef string, ok bool) {
+	snap, err := snapshotForRun(beadList, runID, 0, 0)
+	if err != nil {
+		return "", "", "", "", false
+	}
+	if !isGraphV2(snap) {
+		return "", "", "", "", false
+	}
+	root := rootBead(dedupeBeads(snap.beads), nonEmpty(snap.rootBeadID))
+	name, _, target, hasName := resolveRunFormulaIdentityDetailState(root, "", false)
+	if !hasName || target == "" {
+		return "", "", "", "", false
+	}
+	scopeKind, scopeRef, scopeOK := fromSnapshotScope(snap)
+	if !scopeOK {
+		return "", "", "", "", false
+	}
+	return name, target, scopeKind, scopeRef, true
+}
+
+// snapshotForRun synthesizes a run snapshot for one root from the folded beads:
+// member selection, the issue_type→kind / ref→step_ref projection (port of the
+// golden generator's snapshotForRun + toRunSnapshotBead), snapshot identity from
+// root metadata, and the dependency edges via snapshotDeps — the real bead
+// dependencies plus the root→member parent edges, so the detail graph renders the
+// actual step→step DAG the supervisor snapshot carried, not just parent links.
 func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq int64) (runSnapshot, error) {
 	rootIdx := -1
 	for i := range beadList {
@@ -111,8 +159,12 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 		partial:           false,
 		storesScanned:     []string{rootStoreRef},
 		beads:             snapBeads,
-		deps:              depsForMembers(members),
-		logicalEdges:      nil,
+		deps:              snapshotDeps(members),
+		// logicalEdges stays nil on the bead-derived path: the supervisor's
+		// precomputed logical edges are not available here, so buildRunDisplayEdges
+		// derives the display graph from deps (bridging hidden scope-check nodes),
+		// which reproduces the supervisor's logical-edge behavior.
+		logicalEdges: nil,
 	}, nil
 }
 
@@ -138,40 +190,87 @@ func toRunSnapshotBead(b beads.Bead) runSnapshotBead {
 	}
 }
 
-// depsForMembers synthesizes root→member parent edges. Port of the generator's
-// depsForMembers (each non-root member depends on the first member, which is the
-// root in fold order).
-func depsForMembers(members []beads.Bead) []runSnapshotDep {
+// snapshotDeps synthesizes a run snapshot's dependency edges from the folded
+// members. It reproduces the supervisor RunSnapshot's dep set on the OSS-local
+// path: the real bead dependency edges each member carries (its Dependencies and
+// Needs) merged with the root→member parent edges, using the same edge direction
+// and dedup semantics as the supervisor graph API's collectWorkflowDeps
+// (internal/api/handler_convoy_dispatch.go) — the prerequisite (DependsOnID) is
+// the edge source and the dependent (IssueID) the target, carrying the dep type.
+// Edges to beads outside the run are dropped, since the detail graph can only
+// render members it holds. Without the real edges, buildRunDisplayEdges would
+// project only root→member parent edges and every genuine step→step dependency
+// (and the logical graph derived from it) would be lost.
+func snapshotDeps(members []beads.Bead) []runSnapshotDep {
 	if len(members) == 0 {
 		return nil
 	}
-	rootID := members[0].ID
+	memberIDs := make(map[string]bool, len(members))
+	for i := range members {
+		memberIDs[members[i].ID] = true
+	}
+
 	deps := make([]runSnapshotDep, 0, len(members))
+	seen := make(map[string]bool)
+	add := func(from, to, kind string) {
+		if from == "" || to == "" || from == to {
+			return
+		}
+		if !memberIDs[from] || !memberIDs[to] {
+			return
+		}
+		key := from + "\x00" + to + "\x00" + kind
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		deps = append(deps, runSnapshotDep{from: from, to: to, kind: kind})
+	}
+
+	// Real dependency edges the fold preserved on each member: the structured
+	// Dependencies (issue depends-on a prerequisite, carrying the dep type) and
+	// the simpler Needs prerequisite list. The prerequisite is the source and the
+	// dependent the target, matching collectWorkflowDeps.
+	for i := range members {
+		b := members[i]
+		for _, d := range b.Dependencies {
+			add(d.DependsOnID, d.IssueID, d.Type)
+		}
+		for _, need := range b.Needs {
+			add(need, b.ID, "")
+		}
+	}
+
+	// Root→member parent edges (the first-seen member is the root in fold order).
+	rootID := members[0].ID
 	for i := range members {
 		if members[i].ID == rootID {
 			continue
 		}
-		deps = append(deps, runSnapshotDep{from: rootID, to: members[i].ID, kind: "parent"})
+		add(rootID, members[i].ID, "parent")
 	}
 	return deps
 }
 
 // runningFormulaRunInput mirrors the TS RunningFormulaRunInput. formulaDetail and
 // sessions are nil on the bead-derived path; the live endpoint layers sessions in
-// at request time.
+// at request time. formulaDetailFailure records why the live fetch failed when
+// formulaDetail is nil (not_found for a 404, else upstream_error); it is empty on
+// the bead-derived path and defaults to upstream_error.
 type runningFormulaRunInput struct {
-	raw               runSnapshot
-	runID             string
-	rootBeadID        string
-	rootStoreRef      string
-	resolvedRootStore string
-	scopeKind         string
-	scopeRef          string
-	root              *runSnapshotBead
-	beads             []runSnapshotBead
-	rigRoot           string
-	sessions          []DashboardSession
-	formulaDetail     *formulaDetailInput
+	raw                  runSnapshot
+	runID                string
+	rootBeadID           string
+	rootStoreRef         string
+	resolvedRootStore    string
+	scopeKind            string
+	scopeRef             string
+	root                 *runSnapshotBead
+	beads                []runSnapshotBead
+	rigRoot              string
+	sessions             []DashboardSession
+	formulaDetail        *formulaDetailInput
+	formulaDetailFailure RunFormulaDetailFetchFailure
 }
 
 // runningFormulaRun carries the orchestrated detail outputs enrichFormulaRun
@@ -190,9 +289,11 @@ type runningFormulaRun struct {
 }
 
 // enrichFormulaRun is the bead-derived detail pipeline entry. Port of TS
-// enrichFormulaRun (enrich.ts). opts carries the optional session list (nil on
-// the golden path).
-func enrichFormulaRun(raw runSnapshot, sessions []DashboardSession) (FormulaRunDetail, error) {
+// enrichFormulaRun (enrich.ts). sessions and formulaDetail carry the optional
+// request-time enrichment (both nil on the golden path). fetchFailure records why
+// a live formula-detail fetch failed when formulaDetail is nil (empty on the
+// golden path, defaulting to upstream_error).
+func enrichFormulaRun(raw runSnapshot, sessions []DashboardSession, formulaDetail *formulaDetailInput, fetchFailure RunFormulaDetailFetchFailure) (FormulaRunDetail, error) {
 	if !isGraphV2(raw) {
 		return FormulaRunDetail{}, unsupportedRun("run is not a graph.v2 run", ReasonNotRunView)
 	}
@@ -213,16 +314,18 @@ func enrichFormulaRun(raw runSnapshot, sessions []DashboardSession) (FormulaRunD
 	}
 
 	formulaRun := buildRunningFormulaRun(runningFormulaRunInput{
-		raw:               raw,
-		runID:             runID,
-		rootBeadID:        rootBeadID,
-		rootStoreRef:      rootStoreRef,
-		resolvedRootStore: resolvedRootStore,
-		scopeKind:         scopeKind,
-		scopeRef:          scopeRef,
-		root:              root,
-		beads:             deduped,
-		sessions:          sessions,
+		raw:                  raw,
+		runID:                runID,
+		rootBeadID:           rootBeadID,
+		rootStoreRef:         rootStoreRef,
+		resolvedRootStore:    resolvedRootStore,
+		scopeKind:            scopeKind,
+		scopeRef:             scopeRef,
+		root:                 root,
+		beads:                deduped,
+		sessions:             sessions,
+		formulaDetail:        formulaDetail,
+		formulaDetailFailure: fetchFailure,
 	})
 
 	var partialReasons []string
@@ -279,7 +382,7 @@ func buildRunningFormulaRun(input runningFormulaRunInput) runningFormulaRun {
 
 	hasFormulaDetail := input.formulaDetail != nil
 	formula := runFormulaState(input.root, hasFormulaDetail)
-	formulaDetail := runFormulaDetailState(input.root, hasFormulaDetail)
+	formulaDetail := runFormulaDetailState(input.root, hasFormulaDetail, input.formulaDetailFailure)
 	executionPath := resolveRunExecutionPath(input.root, input.beads, input.rigRoot)
 
 	issues := make([]runIssue, 0, len(input.beads))
@@ -295,7 +398,7 @@ func buildRunningFormulaRun(input runningFormulaRunInput) runningFormulaRun {
 
 	title := input.runID
 	if input.root != nil {
-		if t := strings.TrimSpace(input.root.title); t != "" {
+		if t := nonEmpty(input.root.title); t != "" {
 			title = t
 		}
 	}
@@ -350,9 +453,13 @@ func runFormulaState(root *runSnapshotBead, hasFormulaDetail bool) RunFormula {
 }
 
 // runFormulaDetailState resolves the compiled-formula-detail union. Port of TS
-// runFormulaDetailState (the bead-derived path has no compiled detail, so it
-// resolves to fetch_failed/upstream_error once a name+target are known).
-func runFormulaDetailState(root *runSnapshotBead, hasFormulaDetail bool) RunFormulaDetailState {
+// runFormulaDetailState. When a name+target are known but no compiled detail was
+// layered in, it reports the fetch_failed arm with fetchFailure as the reason:
+// the live BFF passes not_found for a supervisor 404 and upstream_error for every
+// other failure, matching the TS formulaDetailFetchFailure mapping. The
+// bead-derived path (no live fetch) leaves fetchFailure empty and defaults to
+// upstream_error.
+func runFormulaDetailState(root *runSnapshotBead, hasFormulaDetail bool, fetchFailure RunFormulaDetailFetchFailure) RunFormulaDetailState {
 	name, _, target, hasName := resolveRunFormulaIdentityDetailState(root, "", hasFormulaDetail)
 	if !hasName {
 		return RunFormulaDetailState{Kind: "unavailable", Reason: "missing_formula_metadata"}
@@ -363,12 +470,16 @@ func runFormulaDetailState(root *runSnapshotBead, hasFormulaDetail bool) RunForm
 	if hasFormulaDetail {
 		return RunFormulaDetailState{Kind: "available", Name: name, Target: target}
 	}
+	failure := fetchFailure
+	if failure == "" {
+		failure = FormulaDetailUpstreamError
+	}
 	return RunFormulaDetailState{
 		Kind:    "unavailable",
 		Reason:  "fetch_failed",
 		Name:    name,
 		Target:  target,
-		Failure: "upstream_error",
+		Failure: string(failure),
 	}
 }
 
@@ -493,12 +604,24 @@ func dedupeBeads(in []runSnapshotBead) []runSnapshotBead {
 }
 
 // fromSnapshotScope resolves the run scope from the snapshot identity. Port of TS
-// fromSnapshotScope (bool mirrors null).
+// fromSnapshotScope (bool mirrors null), extended with the same gc.root_store_ref
+// fallback summary already applies via fromRootMetadataScope: the explicit
+// gc.scope_kind/gc.scope_ref pair wins, but a root carrying only gc.root_store_ref
+// recovers its scope from that store ref. Without the fallback a run that lists
+// successfully in /runs/summary (which uses fromRootMetadataScope) would 422 with
+// invalid_snapshot when opened in /runs/{id}/detail.
 func fromSnapshotScope(raw runSnapshot) (kind, ref string, ok bool) {
 	scopeKind, kindOK := parseRunScopeKind(raw.scopeKind)
 	scopeRef := stringValueOrEmpty(raw.scopeRef)
 	if kindOK && scopeRef != "" {
 		return scopeKind, scopeRef, true
+	}
+	// Fallback (gascity-dashboard-km0w): recover the scope from the snapshot's
+	// gc.root_store_ref, matching summary's fromRootMetadataScope so a run scoped
+	// only by its root store ref opens in detail instead of failing invalid.
+	parsedKind, parsedRef, storeOK := fromStoreRef(raw.rootStoreRef)
+	if storeOK && scopeRefRe.MatchString(parsedRef) {
+		return parsedKind, parsedRef, true
 	}
 	return "", "", false
 }

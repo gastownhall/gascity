@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,21 +109,51 @@ type cityRunTailer struct {
 	ready   bool
 }
 
+// tailState carries the fold cursor across poll iterations: the byte offset into
+// the active log, the active file's identity (so a rotation is detected by
+// dev/inode rather than a fragile size-shrink check), and the monotonic lane
+// progress marks.
+type tailState struct {
+	offset     int64
+	activeInfo os.FileInfo
+	marks      map[string]runproj.LaneProgressMark
+}
+
+// captureTailCursor snapshots the active log's byte size and identity from a
+// SINGLE os.Stat so the resume offset and the rotation-detection identity always
+// describe the same file. Splitting them across two stats (a size stat then an
+// identity stat) let a rotation land between the two and pair the old file's
+// larger offset with the fresh file's identity; the first foldNext then saw no
+// identity change, ReadFrom seeked past the fresh file's EOF, and every fresh
+// event below the stale offset was silently dropped until restart. A rotation
+// after this single snapshot is instead caught by foldNext's identity check; a
+// rotation before it yields a consistent size+identity for the new active file.
+func captureTailCursor(path string) *tailState {
+	st := &tailState{}
+	if info, err := os.Stat(path); err == nil {
+		st.offset = info.Size()
+		st.activeInfo = info
+	}
+	return st
+}
+
 // loop cold-replays the event log, publishes the bead-derived summary, then
 // tails newly appended events and republishes on each change. All folding and
 // summary-building happens on loop-owned locals; only the publish takes the lock.
 func (t *cityRunTailer) loop(ctx context.Context) {
 	proj := runproj.NewProjector()
 
-	// Capture the active log size BEFORE the cold replay so the tail resumes from
-	// exactly there. Any event appended during (or just after) the replay lands in
-	// [offset, EOF) and is re-read by the first tail poll; the seq filter drops
-	// the overlap the replay already folded. This makes the resume race-free —
-	// closing readyCh before computing the offset (the previous design) let an
-	// append between the two jump the tail past the new event, dropping it.
-	offset := fileSize(t.eventsPath)
+	// Capture the active log size and identity BEFORE the cold replay so the tail
+	// resumes from exactly there. Any event appended during (or just after) the
+	// replay lands in [offset, EOF) and is re-read by the first tail poll; the seq
+	// filter drops the overlap the replay already folded. This makes the resume
+	// race-free — closing readyCh before computing the offset (the previous design)
+	// let an append between the two jump the tail past the new event, dropping it.
+	// captureTailCursor reads the size and identity from one stat so a rotation
+	// cannot pair the old file's offset with the fresh file's identity.
+	st := captureTailCursor(t.eventsPath)
 	loadErr := proj.ColdLoad(t.eventsPath)
-	marks := t.build(proj, nil, loadErr)
+	st.marks = t.build(proj, nil, loadErr)
 	close(t.readyCh)
 
 	poll := time.NewTicker(runTailPollInterval)
@@ -132,26 +163,81 @@ func (t *cityRunTailer) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-poll.C:
-			// A log shorter than our offset means it rotated (active file renamed
-			// to an archive, fresh active file created): reset to the top. The
-			// pre-rotation events are already folded and now live in an archive, so
-			// re-reading from 0 only yields the new active file's fresh events.
-			if fileSize(t.eventsPath) < offset {
-				offset = 0
-			}
-			evts, newOffset, err := events.ReadFrom(t.eventsPath, offset)
-			if err != nil {
-				continue
-			}
-			offset = newOffset
-			fresh := eventsAfter(evts, proj.LastSeq())
-			if len(fresh) == 0 {
-				continue
-			}
-			if proj.Apply(fresh) {
-				marks = t.build(proj, marks, nil)
-			}
+			t.foldNext(proj, st)
 		}
+	}
+}
+
+// readRotationCatchUp is the rotation catch-up read, indirected through a
+// package var so a test can inject a transient read error and prove foldNext
+// retries the catch-up on the next poll instead of losing the just-rotated
+// events. Production always uses events.ReadFilteredWithInFlight.
+var readRotationCatchUp = events.ReadFilteredWithInFlight
+
+// foldNext performs one tail poll: it folds newly appended events into the
+// projector and republishes when a bead snapshot changed. It handles active-log
+// rotation by file identity: when the recorder renames the active file to an
+// archive and opens a fresh one, the events written to the old active file in
+// the poll window before the rename live only in the archive, so a bare offset
+// reset (the previous size-shrink heuristic) would drop them — and would also
+// fail to fire at all if the fresh file grew back past the stale offset within
+// one poll. On a detected rotation it first catches up across archives by
+// sequence, then re-tails the fresh active file from the top; the seq filter
+// drops the overlap the catch-up already folded.
+func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
+	info, statErr := os.Stat(t.eventsPath)
+	rotated := statErr == nil && st.activeInfo != nil && !os.SameFile(st.activeInfo, info)
+	if rotated {
+		// ReadFilteredWithInFlight walks the sibling .gz archives (skipping any
+		// whose seq window is fully below the cursor without gunzipping), the
+		// in-flight events.jsonl.rotating-* files a just-rotated log has not yet
+		// been gzipped into, AND the fresh active file. Including the rotating
+		// files closes the async-compression window: the recorder renames the old
+		// active log to a plain-JSONL rotating-* file and compresses it in the
+		// background, so between the rename and the .gz a plain ReadFiltered would
+		// miss those pre-rotation events and the offset reset below would advance
+		// the tail past them for good. eventsAfter + Apply are seq-idempotent, so
+		// the .gz/rotating overlap and the offset-0 re-read are both harmless.
+		//
+		// Catch up BEFORE advancing the identity or resetting the offset. Those
+		// pre-rotation events live only in the archive now, so a transient
+		// catch-up read error must leave the OLD identity in place and retry on
+		// the next poll — committing the fresh identity here would make the next
+		// poll see no rotation (SameFile) and lose that window until restart.
+		catchUp, err := readRotationCatchUp(t.eventsPath, events.Filter{AfterSeq: proj.LastSeq()})
+		if err != nil {
+			return
+		}
+		if fresh := eventsAfter(catchUp, proj.LastSeq()); len(fresh) > 0 && proj.Apply(fresh) {
+			st.marks = t.build(proj, st.marks, nil)
+		}
+		st.activeInfo = info
+		st.offset = 0
+	} else if statErr == nil {
+		st.activeInfo = info
+		// A byte offset beyond the current active file's EOF on the SAME identity
+		// is a stale cursor (e.g. one captured against a since-rotated larger
+		// file): ReadFrom would seek past EOF and silently skip every event below
+		// it. The active log only grows in place — rotation changes identity and
+		// is handled above — so offset > size can only mean the offset is stale.
+		// Rewind to re-read the fresh file from the top; eventsAfter drops the
+		// overlap already folded.
+		if st.offset > info.Size() {
+			st.offset = 0
+		}
+	}
+
+	evts, newOffset, err := events.ReadFrom(t.eventsPath, st.offset)
+	if err != nil {
+		return
+	}
+	st.offset = newOffset
+	fresh := eventsAfter(evts, proj.LastSeq())
+	if len(fresh) == 0 {
+		return
+	}
+	if proj.Apply(fresh) {
+		st.marks = t.build(proj, st.marks, nil)
 	}
 }
 
@@ -172,7 +258,17 @@ func eventsAfter(evts []events.Event, afterSeq uint64) []events.Event {
 // monotonic thrash marks against the prior generation, and publishes both under
 // the lock. It returns the advanced marks for the loop to carry forward.
 func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runproj.LaneProgressMark, loadErr error) map[string]runproj.LaneProgressMark {
-	summary := runproj.BuildRunSummary(proj.Beads())
+	// Apply the run-bead filter at the projection boundary, mirroring the
+	// frontend's runBeadFilter (summary.ts). The pure runproj builders
+	// assume already-filtered input, so folding the raw event log straight in —
+	// it also carries message, session, and gc:-labeled control beads that can
+	// share a run root — would let unrelated beads distort lane status, counts,
+	// recent changes, and detail nodes. Filtering once here feeds the same clean
+	// slice to both the summary and the detail projection. FilterRunBeads returns
+	// a fresh first-seen-ordered slice of the immutable-after-decode bead values,
+	// so the published snapshot is safe to read concurrently.
+	beadSlice := runproj.FilterRunBeads(proj.Beads())
+	summary := runproj.BuildRunSummary(beadSlice)
 	if loadErr != nil {
 		// A read failure must surface as a partial snapshot, not a silently empty
 		// "no runs" view.
@@ -184,12 +280,9 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 	inFlight = append(inFlight, summary.BlockedLanes...)
 	marks := runproj.AdvanceProgressMarks(prevMarks, inFlight)
 
-	// Publish the deterministic warm bead slice + fold cursor alongside the
-	// summary so the detail endpoint can project any one run off the same warm
-	// projection (BuildRunDetail does its own member selection). proj.Beads()
-	// returns a fresh first-seen-ordered slice; the bead values are immutable
-	// after decode, so the snapshot is safe to read concurrently.
-	beadSlice := proj.Beads()
+	// Publish the filtered warm bead slice + fold cursor alongside the summary so
+	// the detail endpoint projects any one run off the same clean projection
+	// (BuildRunDetail does its own member selection).
 	lastSeq := proj.LastSeq()
 
 	t.mu.Lock()
@@ -226,14 +319,34 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runproj.Formu
 	t.mu.RUnlock()
 
 	sessions, sessionsAvailable := t.mgr.fetchSessions(ctx, t.name)
+
+	// Layer the supervisor's compiled formula detail at request time (like
+	// sessions) so a graph.v2 run with a name+target resolves to the authored
+	// step order and an "available" formula-detail state instead of a synthetic
+	// fetch failure. A run with no fetchable formula, or a genuine fetch failure,
+	// leaves formulaDetail nil so the detail state stays honest (missing_* or, for
+	// a name+target we could not resolve, fetch_failed). On a fetch failure we keep
+	// the reason (not_found for a supervisor 404, else upstream_error) so runproj
+	// renders the right operator diagnostic instead of collapsing a missing formula
+	// into a generic upstream error.
+	var formulaDetail *runproj.FormulaOrderingDetail
+	formulaDetailFailure := runproj.FormulaDetailUpstreamError
+	if name, target, scopeKind, scopeRef, ok := runproj.RunFormulaTargetForRun(beadSlice, runID); ok {
+		if fetched, failure, fetchedOK := t.mgr.fetchFormulaDetail(ctx, t.name, name, target, scopeKind, scopeRef); fetchedOK {
+			formulaDetail = fetched
+		} else {
+			formulaDetailFailure = failure
+		}
+	}
+
 	var (
 		d   runproj.FormulaRunDetail
 		err error
 	)
 	if sessionsAvailable {
-		d, err = runproj.BuildRunDetailWithSessions(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq), sessions)
+		d, err = runproj.BuildRunDetailWithSessionsAndFormula(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq), sessions, formulaDetail, formulaDetailFailure)
 	} else {
-		d, err = runproj.BuildRunDetail(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq))
+		d, err = runproj.BuildRunDetailWithSessionsAndFormula(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq), nil, formulaDetail, formulaDetailFailure)
 	}
 	return d, ready, err
 }
@@ -300,12 +413,86 @@ func (m *runTailerManager) fetchSessions(ctx context.Context, name string) ([]ru
 	return env.Items, true
 }
 
-func fileSize(path string) int64 {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0
+// formulaNodeRef decodes the ordering-relevant id of a compiled-formula preview
+// node or step from the supervisor's formula-detail response.
+type formulaNodeRef struct {
+	ID string `json:"id"`
+}
+
+// fetchFormulaDetail reads
+// GET {base}/v0/city/{name}/formulas/{formula}?target={target}&scope_kind={kind}&scope_ref={ref}
+// over loopback and projects the compiled formula's ordering-relevant preview
+// nodes and steps into runproj's FormulaOrderingDetail. The scope is required by
+// the endpoint and selects the formula search layer, so a rig-scoped run must
+// send its scope or the lookup resolves the wrong layer (or is rejected). On
+// success it returns (detail, "", true). On failure it returns (nil, reason,
+// false) so the detail falls back to the un-enriched projection: the reason is
+// FormulaDetailNotFound for a supervisor 404 (the compiled formula is genuinely
+// missing) and FormulaDetailUpstreamError for every other failure, preserving the
+// distinction runproj renders as the operator diagnostic. Mirrors fetchSessions;
+// the reason mapping ports the TS formulaDetailFetchFailure helper.
+func (m *runTailerManager) fetchFormulaDetail(ctx context.Context, name, formula, target, scopeKind, scopeRef string) (*runproj.FormulaOrderingDetail, runproj.RunFormulaDetailFetchFailure, bool) {
+	base := strings.TrimRight(m.deps.SupervisorBaseURL, "/")
+	if base == "" {
+		return nil, runproj.FormulaDetailUpstreamError, false
 	}
-	return info.Size()
+	endpoint := base + "/v0/city/" + url.PathEscape(name) + "/formulas/" + url.PathEscape(formula)
+	query := url.Values{"target": {target}}
+	if scopeKind != "" {
+		query.Set("scope_kind", scopeKind)
+	}
+	if scopeRef != "" {
+		query.Set("scope_ref", scopeRef)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil)
+	if err != nil {
+		return nil, runproj.FormulaDetailUpstreamError, false
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := m.httpc.Do(req)
+	if err != nil {
+		return nil, runproj.FormulaDetailUpstreamError, false
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, runproj.FormulaDetailNotFound, false
+		}
+		return nil, runproj.FormulaDetailUpstreamError, false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return nil, runproj.FormulaDetailUpstreamError, false
+	}
+	var env struct {
+		Name    string           `json:"name"`
+		Steps   []formulaNodeRef `json:"steps"`
+		Preview struct {
+			Nodes []formulaNodeRef `json:"nodes"`
+		} `json:"preview"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, runproj.FormulaDetailUpstreamError, false
+	}
+	return &runproj.FormulaOrderingDetail{
+		Name:           env.Name,
+		PreviewNodeIDs: refIDs(env.Preview.Nodes),
+		StepIDs:        refIDs(env.Steps),
+	}, "", true
+}
+
+// refIDs lifts formula node/step ids into a plain slice, preserving nil (the
+// field was absent/null) versus non-nil empty (present-but-empty) so runproj's
+// preview-nodes-then-steps ordering fallback stays faithful to the dashboard.
+func refIDs(refs []formulaNodeRef) []string {
+	if refs == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(refs))
+	for _, r := range refs {
+		ids = append(ids, r.ID)
+	}
+	return ids
 }
 
 // ── Route ─────────────────────────────────────────────────────────────────
@@ -348,8 +535,14 @@ func (p *Plane) registerRunDetail() {
 				return
 			}
 			// The run root is absent from the warm projection. While the cold replay
-			// is still in flight the fold may be incomplete, so report warming (the
-			// client retries) rather than a hard 404 for a run that may yet appear.
+			// is still in flight the fold may be incomplete, so report warming
+			// rather than a hard 404 for a run that may yet appear. This 503 is a
+			// retry signal, not a terminal error: the SPA loader
+			// (supervisor/runDetail.ts loadSupervisorFormulaRunDetail) already
+			// retries any 5xx — including this warming 503 — with bounded backoff
+			// before surfacing it, so the client re-polls until the replay finishes
+			// (covered by runDetail.test.ts "retries while the projection is
+			// warming").
 			if !ready {
 				writeError(w, http.StatusServiceUnavailable, "run view is warming")
 				return

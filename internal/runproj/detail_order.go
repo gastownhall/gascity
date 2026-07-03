@@ -28,6 +28,70 @@ type formulaDetailInput struct {
 	steps        []formulaPreviewNode
 }
 
+// FormulaOrderingDetail is the ordering-relevant slice of the supervisor's
+// compiled formula detail. A live caller (the dashboard BFF) fetches the
+// supervisor formula endpoint and passes it to BuildRunDetailWithSessionsAndFormula
+// so the run's nodes honor the authored step order and the formula-detail state
+// resolves to "available" instead of a synthetic fetch failure. PreviewNodeIDs
+// mirrors preview.nodes: nil means the field was absent (ordering falls back to
+// StepIDs, matching the dashboard's `preview?.nodes ?? steps`); a non-nil empty
+// slice means present-but-empty (no fallback to steps).
+type FormulaOrderingDetail struct {
+	Name           string
+	PreviewNodeIDs []string
+	StepIDs        []string
+}
+
+// RunFormulaDetailFetchFailure enumerates why a live compiled-formula-detail
+// fetch did not yield a usable payload, mirroring the shared dashboard
+// RunFormulaDetailFetchFailure union. The live BFF distinguishes a genuine HTTP
+// 404 (the compiled formula is absent) from every other failure so the detail
+// page reports the right operator diagnostic instead of collapsing a missing
+// formula into a generic upstream error. Port of the TS formulaDetailFetchFailure
+// mapping (runDetail.ts): a 404 is not_found, everything else is upstream_error.
+type RunFormulaDetailFetchFailure string
+
+const (
+	// FormulaDetailUpstreamError is the default fetch-failure reason: the
+	// compiled formula could not be layered in for any reason other than a
+	// definite 404 (network error, timeout, non-404 status, unparseable body).
+	// It is also what the bead-derived projection reports when a name+target are
+	// known but no live detail was supplied.
+	FormulaDetailUpstreamError RunFormulaDetailFetchFailure = "upstream_error"
+	// FormulaDetailNotFound marks a fetch whose supervisor response was HTTP 404:
+	// the compiled formula is genuinely missing, distinct from a transient or
+	// upstream error.
+	FormulaDetailNotFound RunFormulaDetailFetchFailure = "not_found"
+)
+
+// toInput converts the exported ordering detail into the internal
+// formulaDetailInput, preserving the nil-vs-empty distinction on PreviewNodeIDs.
+// A nil receiver yields a nil input (the un-enriched path).
+func (d *FormulaOrderingDetail) toInput() *formulaDetailInput {
+	if d == nil {
+		return nil
+	}
+	return &formulaDetailInput{
+		name:         d.Name,
+		previewNodes: previewNodesFromIDs(d.PreviewNodeIDs),
+		steps:        previewNodesFromIDs(d.StepIDs),
+	}
+}
+
+// previewNodesFromIDs lifts node ids into formulaPreviewNode values, preserving
+// nil (absent) versus non-nil empty (present-but-empty) so the `??` fallback in
+// formulaRankByAlias behaves exactly as the dashboard's TS did.
+func previewNodesFromIDs(ids []string) []formulaPreviewNode {
+	if ids == nil {
+		return nil
+	}
+	nodes := make([]formulaPreviewNode, 0, len(ids))
+	for _, id := range ids {
+		nodes = append(nodes, formulaPreviewNode{id: id})
+	}
+	return nodes
+}
+
 // orderRunNodeGroups orders groups by the compiled formula's authored step order,
 // preserving snapshot order when no formula detail is available. Port of TS
 // orderRunNodeGroups (formula-order.ts).

@@ -26,11 +26,15 @@ func NewProjector() *Projector {
 	return &Projector{beads: make(map[string]beads.Bead)}
 }
 
-// ColdLoad folds the entire event log at path (events.ReadFiltered transparently
-// walks rotated .gz archives) into the projector. Safe to call once on a fresh
-// projector before the incremental tail begins.
+// ColdLoad folds the entire event log at path into the projector. It reads via
+// events.ReadFilteredWithInFlight so the replay spans rotated .gz archives AND
+// any in-flight events.jsonl.rotating-* file the recorder has not yet gzipped —
+// otherwise a cold start that lands in a rotation's compression window would
+// miss those pre-rotation events until the next rotation's catch-up. Safe to
+// call once on a fresh projector before the incremental tail begins; Apply is
+// seq-idempotent so the transient .gz/rotating overlap folds cleanly.
 func (p *Projector) ColdLoad(path string) error {
-	evts, err := events.ReadFiltered(path, events.Filter{})
+	evts, err := events.ReadFilteredWithInFlight(path, events.Filter{})
 	if err != nil {
 		return err
 	}
