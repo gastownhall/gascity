@@ -6390,6 +6390,52 @@ func TestFollowSleepDurationBacksOffThenCaps(t *testing.T) {
 	}
 }
 
+func TestFollowSleepDurationDeepIdleCap(t *testing.T) {
+	prevSweep := workflowServeWakeSweepInterval
+	prevMax := workflowServeMaxIdleSleep
+	prevDeep := workflowServeDeepIdleSleep
+	prevThreshold := workflowServeDeepIdleThreshold
+	workflowServeWakeSweepInterval = 1 * time.Second
+	workflowServeMaxIdleSleep = 5 * time.Second
+	workflowServeDeepIdleSleep = 30 * time.Second
+	workflowServeDeepIdleThreshold = 12
+	t.Cleanup(func() {
+		workflowServeWakeSweepInterval = prevSweep
+		workflowServeMaxIdleSleep = prevMax
+		workflowServeDeepIdleSleep = prevDeep
+		workflowServeDeepIdleThreshold = prevThreshold
+	})
+
+	// Below the threshold the responsive ladder and its 5s cap are unchanged.
+	if got := followSleepDuration(11); got != 5*time.Second {
+		t.Errorf("followSleepDuration(11) = %v, want 5s (responsive cap below threshold)", got)
+	}
+	// At and past the threshold the deep-idle cap engages.
+	if got := followSleepDuration(12); got != 30*time.Second {
+		t.Errorf("followSleepDuration(12) = %v, want 30s (deep idle at threshold)", got)
+	}
+	if got := followSleepDuration(1000); got != 30*time.Second {
+		t.Errorf("followSleepDuration(1000) = %v, want 30s (deep idle)", got)
+	}
+	// A wake resets idleSweeps to 0 in the serve loop; 0 must return the base.
+	if got := followSleepDuration(0); got != 1*time.Second {
+		t.Errorf("followSleepDuration(0) = %v, want base 1s after wake reset", got)
+	}
+
+	// threshold <= 0 disables deep idle entirely.
+	workflowServeDeepIdleThreshold = 0
+	if got := followSleepDuration(1000); got != 5*time.Second {
+		t.Errorf("followSleepDuration(1000) with threshold=0 = %v, want 5s (deep idle disabled)", got)
+	}
+	workflowServeDeepIdleThreshold = 12
+
+	// A deep cap accidentally set below the responsive cap must not shorten sleeps.
+	workflowServeDeepIdleSleep = 2 * time.Second
+	if got := followSleepDuration(12); got != 5*time.Second {
+		t.Errorf("followSleepDuration(12) with deep<max = %v, want 5s (never below responsive cap)", got)
+	}
+}
+
 func TestWaitForRelevantWorkflowWakeReturnsTrueOnRelevantEvent(t *testing.T) {
 	// Set the debounce explicitly so a lone relevant wake is fast and
 	// intentional rather than silently inheriting the package default.
