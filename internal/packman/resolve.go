@@ -11,6 +11,9 @@ import (
 // ErrNoSemverTags reports that a source has no semver tags to resolve.
 var ErrNoSemverTags = errors.New("no semver tags found")
 
+// ErrNoMatchingVersion reports that no candidate version satisfied a constraint.
+var ErrNoMatchingVersion = errors.New("no version matches constraint")
+
 // ResolvedVersion is the concrete source resolution for a version query.
 type ResolvedVersion struct {
 	Version string
@@ -36,9 +39,33 @@ func ResolveVersion(source, constraint string) (ResolvedVersion, error) {
 		return ResolvedVersion{}, fmt.Errorf("%w for %q", ErrNoSemverTags, source)
 	}
 
-	versions := make([]string, 0, len(tags))
-	for version := range tags {
+	resolved, err := SelectVersion(tags, constraint)
+	if err != nil {
+		if errors.Is(err, ErrNoMatchingVersion) {
+			return ResolvedVersion{}, fmt.Errorf("no tags for %q match constraint %q", source, constraint)
+		}
+		return ResolvedVersion{}, err
+	}
+	return resolved, nil
+}
+
+// SelectVersion picks the highest candidate version satisfying constraint.
+// candidates maps a semver version string to its commit; an empty constraint
+// selects the highest version. Candidates whose keys are not valid semver are
+// ignored. It returns ErrNoMatchingVersion when no candidate satisfies the
+// constraint (including when candidates is empty). It is the shared selection
+// algorithm used by both git-tag resolution (ResolveVersion) and registry
+// release resolution, so both honor identical constraint semantics.
+func SelectVersion(candidates map[string]string, constraint string) (ResolvedVersion, error) {
+	versions := make([]string, 0, len(candidates))
+	for version := range candidates {
+		if _, err := parseSemver(version); err != nil {
+			continue
+		}
 		versions = append(versions, version)
+	}
+	if len(versions) == 0 {
+		return ResolvedVersion{}, ErrNoMatchingVersion
 	}
 	sort.Slice(versions, func(i, j int) bool {
 		return compareSemver(mustParseSemver(versions[i]), mustParseSemver(versions[j])) > 0
@@ -48,11 +75,11 @@ func ResolveVersion(source, constraint string) (ResolvedVersion, error) {
 		if constraint == "" || matchesConstraint(version, constraint) {
 			return ResolvedVersion{
 				Version: version,
-				Commit:  tags[version],
+				Commit:  candidates[version],
 			}, nil
 		}
 	}
-	return ResolvedVersion{}, fmt.Errorf("no tags for %q match constraint %q", source, constraint)
+	return ResolvedVersion{}, ErrNoMatchingVersion
 }
 
 // DefaultConstraint returns the default caret constraint for a selected version.

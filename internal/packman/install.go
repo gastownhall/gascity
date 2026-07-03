@@ -247,6 +247,20 @@ func (s *syncState) resolveSource(source, constraint string) (bool, error) {
 		return false, fmt.Errorf("unknown install mode %d", s.mode)
 	}
 
+	if registryResolver != nil {
+		resolved, ok, err := registryResolver(source, constraint)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return s.storeChosen(source, LockedPack{
+				Version: resolved.Version,
+				Commit:  resolved.Commit,
+				Fetched: time.Now().UTC(),
+			}, true), nil
+		}
+	}
+
 	resolved, err := ResolveVersion(source, constraint)
 	if err != nil {
 		return false, err

@@ -676,6 +676,13 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 		return 1
 	}
 	allImports[scope.syntheticKey(name)] = scope.imports[name]
+	if gitBacked {
+		// Refresh-on-miss: ensure registry catalogs are present so a
+		// registry-owned source resolves its version against the published
+		// release→commit table even on a cold cache. Confined to this
+		// interactive command; the deep resolver stays offline.
+		ensureRegistryCatalogsForImport(stderr)
+	}
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck

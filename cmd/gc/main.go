@@ -22,10 +22,15 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
 )
+
+// registryResolverOnce guards installing the registry-aware version resolver
+// so repeated run() calls (tests, embedded invocations) install it exactly once.
+var registryResolverOnce sync.Once
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -145,6 +150,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}()
 		telemetry.SetProcessOTELAttrs()
 	}
+
+	// Install the registry-aware version resolver once per process so every
+	// import path (add/install/remove/upgrade, including nested imports) routes
+	// registry-owned sources through the published release→commit table before
+	// falling back to git tags.
+	registryResolverOnce.Do(func() {
+		packman.SetVersionResolver(newRegistryVersionResolver())
+	})
 
 	execStdout := &switchableWriter{target: stdout}
 	var jsonStdout bytes.Buffer

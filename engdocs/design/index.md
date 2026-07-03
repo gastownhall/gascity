@@ -29,6 +29,7 @@ lives in the [Architecture](../architecture/index.md) section.
 | `session-model-unification` | Accepted | Unified post-pool session model: config factories, canonical named identities, exact session ownership, and `scale_check`-only controller demand |
 | `session-lifecycle-domain-cleanup-plan` | Implemented with hardening | Red-green-refactor plan for centralizing session lifecycle projection and transition writes behind typed abstractions |
 | `pack-import-export-surface` | Proposed | Replace `transitive` / `export` with explicit imports plus exports |
+| `registry-aware-version-resolution` | Proposed | Resolve `--version` constraints for registry-known sources against the published release→commit table; git tags fall back only for unknown sources |
 | `external-messaging-fabric` | Implemented | Provider-neutral external conversation bindings, delivery context, and group sessions |
 | `external-messaging-shared-threads` | Implemented | Transcript-backed shared-thread model with membership replay and speaker-only group routing |
 | `worker-conformance` | Proposed | Canonical WorkerCore/WorkerInference contract, transcript-first conformance, and migration toward `internal/worker` |
