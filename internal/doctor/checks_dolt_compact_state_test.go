@@ -112,6 +112,25 @@ func TestDoltCompactStateCheckReportsStaleMarkersWithFixHints(t *testing.T) {
 	}
 }
 
+func TestDoltCompactStateCheckSurfacesUnreadableMarker(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root can read any file")
+	}
+
+	dir := newDoltCompactStateTestCity(t)
+	markerPath := writeDoltCompactStateMarker(t, dir, "compact-quarantine", "unreadable-db", "post-flatten row count decreased", compactStateOldCreatedAt)
+	if err := os.Chmod(markerPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(markerPath, 0o600) })
+
+	r := newTestDoltCompactStateCheck(dir).Run(&CheckContext{CityPath: dir})
+	if r.Status == StatusOK {
+		t.Fatalf("status = OK, want warning for unreadable marker; msg = %s", r.Message)
+	}
+	assertDoltCompactStateMentions(t, r, markerPath)
+}
+
 func TestDoltCompactStateCheckRepresentsKnownPendingPushMarkers(t *testing.T) {
 	dir := newDoltCompactStateTestCity(t)
 	markers := map[string]string{
