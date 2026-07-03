@@ -84,11 +84,14 @@ func TestPreflightBlocksNativeOnContextDisagreement(t *testing.T) {
 
 // An UNREACHABLE bd context (e.g. a non-git city root where `bd context` cannot
 // run) is not evidence of a backend disagreement — it only means the native
-// store's bd-context cross-checks cannot be verified. It must DEGRADE eligibility
-// (operator opt-in) rather than hard-BLOCK it, so the bd-context-derived checks
-// report WARN, not FAIL. (A real disagreement, with a readable bd context, still
+// store's bd-context cross-checks cannot be verified. The bd-context-derived
+// checks report WARN, not FAIL. When gc has INDEPENDENTLY confirmed the dolt
+// backend by connecting to the server and matching project_id (identity_match
+// PASS), that direct verification is stronger evidence than bd context's
+// cross-check, so eligibility is upgraded to ELIGIBLE rather than falling back
+// to per-call bd. (A real disagreement, with a readable bd context, still
 // blocks — see TestPreflightBlocksNativeOnContextDisagreement.)
-func TestPreflightDegradesNativeOnUnreachableBDContext(t *testing.T) {
+func TestPreflightEligibleOnUnreachableBDContextWhenIdentityVerified(t *testing.T) {
 	scope := "/city"
 	fs := fsys.NewFake()
 	fs.Dirs[filepath.Join(scope, ".beads")] = true
@@ -115,11 +118,60 @@ func TestPreflightDegradesNativeOnUnreachableBDContext(t *testing.T) {
 		t.Fatalf("Check() error = %v", err)
 	}
 
-	// Unreachable (not disagreeing) bd context => DEGRADED + opt-in, never BLOCKED.
+	// Unreachable bd context + independent identity proof => ELIGIBLE.
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
+	// The bd-context cross-checks still report WARN; they are informational —
+	// the verdict is upgraded on the strength of the independent identity match.
+	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckWarn)
+	assertCheckState(t, result, PreflightCheckDoltModeSafe, PreflightCheckWarn)
+	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckWarn)
+	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckPass)
+	// The result flags that eligibility came via the identity-fallback path.
+	if !result.NativeEligibleViaIdentityFallback {
+		t.Errorf("NativeEligibleViaIdentityFallback = false, want true on the identity-verified upgrade")
+	}
+}
+
+// Without independent identity proof, an unreachable bd context must stay
+// DEGRADED (per-call bd fallback): gc has no other evidence that the native
+// store would read the correct dolt backend.
+func TestPreflightDegradesOnUnreachableBDContextWithoutIdentityProof(t *testing.T) {
+	scope := "/city"
+	fs := fsys.NewFake()
+	fs.Dirs[filepath.Join(scope, ".beads")] = true
+	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`)
+	checker := PreflightChecker{
+		FS:                  fs,
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.0.4",
+		BDContext: func(string) (PreflightBDContext, error) {
+			return PreflightBDContext{}, errors.New("bd context unavailable: not a git repository")
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			return "", false, nil
+		},
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	// Unreachable bd context, no independent proof => DEGRADED, never BLOCKED.
 	assertPreflightVerdict(t, result, PreflightVerdictDegraded, false)
 	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckDoltModeSafe, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckWarn)
+	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckWarn)
+	// No upgrade happened, so the identity-fallback flag stays false.
+	if result.NativeEligibleViaIdentityFallback {
+		t.Errorf("NativeEligibleViaIdentityFallback = true, want false when the verdict stays DEGRADED")
+	}
 }
 
 func TestPreflightBlocksNativeOnIdentityMismatch(t *testing.T) {

@@ -75,6 +75,10 @@ type PreflightResult struct {
 	NativeStoreEligible bool                   `json:"native_store_eligible"`
 	Fallback            PreflightFallback      `json:"fallback,omitempty"`
 	FallbackReason      string                 `json:"fallback_reason,omitempty"`
+	// NativeEligibleViaIdentityFallback records that the verdict was upgraded
+	// from DEGRADED to ELIGIBLE solely because identity_match independently
+	// PASSED while bd context was unreachable.
+	NativeEligibleViaIdentityFallback bool `json:"native_eligible_via_identity_fallback,omitempty"`
 }
 
 // NewPreflightResult returns result with all nested diagnostic details redacted.
