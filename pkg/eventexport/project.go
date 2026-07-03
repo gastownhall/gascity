@@ -74,7 +74,7 @@ import (
 // v2 replaced the cleartext city_id with a salted, non-reversible city_hash so
 // an operator-chosen city name (which can itself embed a customer/org
 // identifier) no longer leaves the box.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // Profile selects the redaction profile. There is exactly one today; it is part
 // of the public API so Validate can stay profile-aware as profiles are added
@@ -118,7 +118,6 @@ var allowedTypes = map[string]bool{
 	"session.drain_acked_with_assigned_work": true,
 	"session.reset_stalled":                  true,
 	"project.identity.stamped":               true,
-	"gc.store.maintenance.done":              true,
 	"mail.sent":                              true, // reduced to {type, ts}; see ProjectEvent
 }
 

@@ -65,6 +65,13 @@ func TestIsTestConfigPath_ProcessTempDirTestPrefix(t *testing.T) {
 	}
 }
 
+func TestIsTestConfigPath_GoBuildTmpManagedDoltConfig(t *testing.T) {
+	cfg := "/var/tmp/gc-build-tmp/TestGcBeadsBdStartUsesRootBeadsDataDir802378814/001/.gc/runtime/packs/dolt/dolt-config.yaml"
+	if !isTestConfigPath(cfg, "/home/u", "/var/tmp/gc-build-tmp") {
+		t.Fatalf("expected managed Dolt config under process TempDir Test* root to be a test path: %s", cfg)
+	}
+}
+
 func TestIsTestConfigPath_KnownGCTestPrefix(t *testing.T) {
 	if !isTestConfigPath("/data/tmp/gc-state-mutation-builtin-123/.gc/runtime/packs/dolt/dolt-config.yaml", "/home/u", "/data/tmp") {
 		t.Error("expected known gc-* test prefix under os.TempDir() to be a test path")
@@ -128,6 +135,22 @@ func TestClassifyDoltProcess_OrphanByTestPath(t *testing.T) {
 	}
 	if got.ConfigPath != "/tmp/TestMailRouter9182/config.yaml" {
 		t.Errorf("ConfigPath = %q", got.ConfigPath)
+	}
+}
+
+func TestClassifyDoltProcess_ReapsGoBuildTmpManagedDoltConfig(t *testing.T) {
+	cfg := "/var/tmp/gc-build-tmp/TestBuildDesiredStateManagedDolt123/001/.gc/runtime/packs/dolt/dolt-config.yaml"
+	p := DoltProcInfo{
+		PID:   2225,
+		Argv:  []string{"dolt", "sql-server", "--config", cfg},
+		Ports: []int{},
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "/var/tmp/gc-build-tmp", nil)
+	if got.Action != "reap" {
+		t.Fatalf("Action = %q, want reap for managed Dolt test config %q", got.Action, cfg)
+	}
+	if got.ConfigPath != cfg {
+		t.Fatalf("ConfigPath = %q, want %q", got.ConfigPath, cfg)
 	}
 }
 

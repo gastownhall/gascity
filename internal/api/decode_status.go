@@ -74,12 +74,6 @@ func statusViewFromGen(body *genclient.StatusBody) StatusView {
 			Warning:     sh.Warning,
 			ThresholdMB: sh.ThresholdMbPerRow,
 		}
-		if sh.LastGcAt != nil {
-			view.LastGCAt = *sh.LastGcAt
-		}
-		if sh.LastGcStatus != nil {
-			view.LastGCStatus = *sh.LastGcStatus
-		}
 		out.StoreHealth = &view
 	}
 	if body.Beads != nil {

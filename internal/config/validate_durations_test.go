@@ -320,47 +320,6 @@ func TestValidateDurationsMultipleIssues(t *testing.T) {
 	}
 }
 
-func TestValidateDurationsBadMaintenanceDoltFields(t *testing.T) {
-	cfg := &City{
-		Maintenance: MaintenanceConfig{
-			Dolt: DoltMaintenance{
-				Interval:  "one week",
-				GCTimeout: "ten minutes",
-			},
-		},
-	}
-	warnings := ValidateDurations(cfg, "city.toml")
-	if len(warnings) != 2 {
-		t.Fatalf("expected 2 warnings, got %d: %v", len(warnings), warnings)
-	}
-	joined := strings.Join(warnings, "|")
-	if !strings.Contains(joined, "[maintenance.dolt]") {
-		t.Errorf("warnings should mention section [maintenance.dolt]: %v", warnings)
-	}
-	if !strings.Contains(joined, "interval") {
-		t.Errorf("warnings should mention interval field: %v", warnings)
-	}
-	if !strings.Contains(joined, "gc_timeout") {
-		t.Errorf("warnings should mention gc_timeout field: %v", warnings)
-	}
-}
-
-func TestValidateDurationsMaintenanceDoltValidOK(t *testing.T) {
-	cfg := &City{
-		Maintenance: MaintenanceConfig{
-			Dolt: DoltMaintenance{
-				Enabled:   true,
-				Interval:  "168h",
-				GCTimeout: "10m",
-			},
-		},
-	}
-	warnings := ValidateDurations(cfg, "city.toml")
-	if len(warnings) != 0 {
-		t.Errorf("expected no warnings for valid maintenance.dolt, got: %v", warnings)
-	}
-}
-
 func TestValidateDurationsIncludesSource(t *testing.T) {
 	cfg := &City{
 		Session: SessionConfig{SetupTimeout: "invalid"},

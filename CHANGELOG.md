@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING: `[maintenance.dolt]` subsystem and its two API endpoints are
+  removed.** `GET /v0/city/{city}/maintenance/status` and
+  `POST /v0/city/{city}/maintenance/dolt-gc` return 404 on upgraded
+  deployments. No known deployments had `[maintenance.dolt] enabled=true`.
+  Equivalent capabilities are available via the mol-dog-compactor exec
+  order: `GC_DOLT_COMPACT_MIN_FREE_BYTES` (disk pre-flight) and
+  `GC_DOLT_COMPACT_BACKUP_REMOTE` (pre-GC backup sync).
+
 ### Fixed
 
 - **Pin the `beads` dependency to the stable v1.0.4.** v1.3.0 built against

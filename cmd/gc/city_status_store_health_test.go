@@ -7,11 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -29,15 +27,6 @@ func stubSupervisorAlive(t *testing.T) {
 		supervisorAliveHook = oldAlive
 		supervisorCityRunningHook = oldRunning
 	})
-}
-
-// stubStoreHealthEvents installs a test hook returning ep from
-// openStoreHealthEvents. ep may be nil.
-func stubStoreHealthEvents(t *testing.T, ep events.Provider) {
-	t.Helper()
-	old := openStoreHealthEvents
-	openStoreHealthEvents = func(string, io.Writer) events.Provider { return ep }
-	t.Cleanup(func() { openStoreHealthEvents = old })
 }
 
 func TestCityStatusSnapshotOmitsStoreHealthWhenControllerStopped(t *testing.T) {
@@ -62,12 +51,6 @@ func TestCityStatusSnapshotIncludesStoreHealthWhenControllerRunning(t *testing.T
 	cityPath := registerCityForSnapshot(t)
 	stubSupervisorAlive(t)
 
-	ep := events.NewFake()
-	ts := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
-	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 5})
-	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: ts, Payload: payload})
-	stubStoreHealthEvents(t, ep)
-
 	store := beads.NewMemStore()
 	for i := 0; i < 3; i++ {
 		if _, err := store.Create(beads.Bead{Title: "b"}); err != nil {
@@ -91,12 +74,6 @@ func TestCityStatusSnapshotIncludesStoreHealthWhenControllerRunning(t *testing.T
 	if h.Warning {
 		t.Errorf("Warning = true, want false for empty store dir")
 	}
-	if h.LastGCAt != "2026-04-01T03:00:00Z" {
-		t.Errorf("LastGCAt = %q, want 2026-04-01T03:00:00Z", h.LastGCAt)
-	}
-	if h.LastGCStatus != "success" {
-		t.Errorf("LastGCStatus = %q, want success", h.LastGCStatus)
-	}
 	if !strings.HasSuffix(h.Path, filepath.Join(".beads", "dolt")) {
 		t.Errorf("Path = %q, want .beads/dolt suffix", h.Path)
 	}
@@ -105,7 +82,6 @@ func TestCityStatusSnapshotIncludesStoreHealthWhenControllerRunning(t *testing.T
 func TestCityStatusJSONIncludesStoreHealthWhenSupervisorAlive(t *testing.T) {
 	cityPath := registerCityForSnapshot(t)
 	stubSupervisorAlive(t)
-	stubStoreHealthEvents(t, events.NewFake())
 
 	store := beads.NewMemStore()
 	oldOpen := openCityStoreAtForStatus
@@ -148,7 +124,6 @@ func TestCityStatusJSONOmitsStoreHealthWhenSupervisorDown(t *testing.T) {
 func TestCityStatusTextIncludesStoreHealthBlockWhenSupervisorAlive(t *testing.T) {
 	cityPath := registerCityForSnapshot(t)
 	stubSupervisorAlive(t)
-	stubStoreHealthEvents(t, events.NewFake())
 
 	store := beads.NewMemStore()
 	oldOpen := openCityStoreAtForStatus
@@ -173,20 +148,19 @@ func TestCityStatusTextIncludesStoreHealthBlockWhenSupervisorAlive(t *testing.T)
 func TestCityStatusSnapshotWarnsOnHighRatio(t *testing.T) {
 	cityPath := registerCityForSnapshot(t)
 	stubSupervisorAlive(t)
-	stubStoreHealthEvents(t, events.NewFake())
 
 	// 221 rows is enough to exceed the 1 MB/row threshold against a
 	// simulated 11.2 GB on disk. Since WalkSize reads the real FS and
 	// an empty tempdir won't hit the threshold, we exercise the math
 	// via storeHealthFromInputs directly instead.
 	rows := 221
-	const bytes = int64(11_200_000_000)
-	h := storeHealthFromInputs(cityPath, bytes, rows, time.Time{}, "")
+	const diskBytes = int64(11_200_000_000)
+	h := storeHealthFromInputs(cityPath, diskBytes, rows)
 	if !h.Warning {
-		t.Fatalf("Warning = false, want true for %d bytes / %d rows", bytes, rows)
+		t.Fatalf("Warning = false, want true for %d bytes / %d rows", diskBytes, rows)
 	}
 	// Sanity: below-threshold case.
-	h = storeHealthFromInputs(cityPath, 50_000_000, rows, time.Time{}, "")
+	h = storeHealthFromInputs(cityPath, 50_000_000, rows)
 	if h.Warning {
 		t.Fatalf("Warning = true, want false for 50 MB / %d rows", rows)
 	}

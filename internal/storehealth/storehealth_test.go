@@ -1,13 +1,9 @@
 package storehealth
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
-
-	"github.com/gastownhall/gascity/internal/events"
 )
 
 func TestStorePath(t *testing.T) {
@@ -38,7 +34,7 @@ func TestStorePath_DoltliteMetadata(t *testing.T) {
 func TestComputeWarningHighRatio(t *testing.T) {
 	// 11.2 GB (decimal) / 221 rows = ~50.68 MB/row, warning.
 	const size = 11_200_000_000
-	h := Compute("/c", size, 221, time.Time{}, "")
+	h := Compute("/c", size, 221)
 	if !h.Warning {
 		t.Fatalf("Warning = false, want true for size=%d rows=221", size)
 	}
@@ -56,7 +52,7 @@ func TestComputeWarningHighRatio(t *testing.T) {
 func TestComputeNoWarningLowRatio(t *testing.T) {
 	// 50 MB / 221 rows = ~0.23 MB/row, no warning.
 	const size = 50_000_000
-	h := Compute("/c", size, 221, time.Time{}, "")
+	h := Compute("/c", size, 221)
 	if h.Warning {
 		t.Fatalf("Warning = true, want false for size=%d rows=221", size)
 	}
@@ -69,7 +65,7 @@ func TestComputeZeroRowsNonZeroBytesWarns(t *testing.T) {
 	// Degenerate case: bytes on disk with zero live rows. The literal
 	// threshold expression (size > 1M * rows) warns; the ratio is left
 	// at its zero value since dividing by zero is meaningless.
-	h := Compute("/c", 1_000_001, 0, time.Time{}, "")
+	h := Compute("/c", 1_000_001, 0)
 	if !h.Warning {
 		t.Fatalf("Warning = false, want true when bytes > 0 and rows = 0")
 	}
@@ -79,7 +75,7 @@ func TestComputeZeroRowsNonZeroBytesWarns(t *testing.T) {
 }
 
 func TestComputeZeroEverything(t *testing.T) {
-	h := Compute("/c", 0, 0, time.Time{}, "")
+	h := Compute("/c", 0, 0)
 	if h.Warning {
 		t.Fatalf("Warning = true, want false for all-zero inputs")
 	}
@@ -89,24 +85,13 @@ func TestComputeBoundary(t *testing.T) {
 	// Exactly at the threshold: size = 1M * rows should NOT warn
 	// (the inequality is strict ">", not ">=").
 	const rows = 10
-	h := Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows), rows, time.Time{}, "")
+	h := Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows), rows)
 	if h.Warning {
 		t.Fatalf("Warning = true at exact threshold, want false")
 	}
-	h = Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows)+1, rows, time.Time{}, "")
+	h = Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows)+1, rows)
 	if !h.Warning {
 		t.Fatalf("Warning = false one byte over threshold, want true")
-	}
-}
-
-func TestComputeCarriesLastGC(t *testing.T) {
-	ts := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
-	h := Compute("/c", 1, 1, ts, "success")
-	if !h.LastGCAt.Equal(ts) {
-		t.Fatalf("LastGCAt = %v, want %v", h.LastGCAt, ts)
-	}
-	if h.LastGCStatus != "success" {
-		t.Fatalf("LastGCStatus = %q, want success", h.LastGCStatus)
 	}
 }
 
@@ -135,57 +120,5 @@ func TestWalkSizeSumsFiles(t *testing.T) {
 	got := WalkSize(dir)
 	if got != 367 {
 		t.Fatalf("WalkSize = %d, want 367", got)
-	}
-}
-
-func TestLastMaintenanceNilProvider(t *testing.T) {
-	ts, status := LastMaintenance(nil)
-	if !ts.IsZero() || status != "" {
-		t.Fatalf("LastMaintenance(nil) = (%v,%q), want (zero,\"\")", ts, status)
-	}
-}
-
-func TestLastMaintenanceReturnsLatestAcrossTypes(t *testing.T) {
-	ep := events.NewFake()
-	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
-	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
-
-	payloadDone, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
-	payloadFail, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
-
-	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
-	ep.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
-
-	ts, status := LastMaintenance(ep)
-	if !ts.Equal(newer) {
-		t.Fatalf("ts = %v, want %v", ts, newer)
-	}
-	if status != "failed" {
-		t.Fatalf("status = %q, want failed", status)
-	}
-}
-
-func TestLastMaintenanceOnlyDoneEvents(t *testing.T) {
-	ep := events.NewFake()
-	t1 := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
-	t2 := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
-	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 2})
-	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: t1, Payload: payload})
-	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: t2, Payload: payload})
-
-	ts, status := LastMaintenance(ep)
-	if !ts.Equal(t2) {
-		t.Fatalf("ts = %v, want %v", ts, t2)
-	}
-	if status != "success" {
-		t.Fatalf("status = %q, want success", status)
-	}
-}
-
-func TestLastMaintenanceNoEvents(t *testing.T) {
-	ep := events.NewFake()
-	ts, status := LastMaintenance(ep)
-	if !ts.IsZero() || status != "" {
-		t.Fatalf("LastMaintenance(empty) = (%v,%q), want (zero,\"\")", ts, status)
 	}
 }

@@ -39,7 +39,6 @@ City is the top-level configuration for a Gas City instance.
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
-| `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
 | `extmsg` | ExtMsgConfig |  |  | ExtMsg configures the external-messaging fabric (default routes for inbound conversations with no binding). |
@@ -356,17 +355,6 @@ DoltConfig holds optional dolt server overrides.
 | `write_timeout_millis` | integer |  | `300000` | WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis. 0 means use the managed default. |
 | `dolt_lock_release_timeout` | string |  | `1m` | DoltLockReleaseTimeout is how long managed-dolt lifecycle operations wait for dolt's on-disk exclusive store locks (the root-level `&lt;data_dir&gt;/.dolt/noms/LOCK` and per-database `&lt;data_dir&gt;/&lt;db&gt;/.dolt/noms/LOCK` forms) to be released by a prior server process before failing closed. The start path refuses to launch a second `dolt sql-server` against a data_dir whose lock is still held — a prior instance that is shutting down holds the lock until its chunk journal is flushed, and binding before release corrupts the journal (see gastownhall/gascity#3174). The stop path uses the same window to wait for lock release after process exit before reporting success. Duration string (e.g., "1m", "90s"). Defaults to "1m", which covers the flush window of multi-GB journals on commodity SSDs. Set to "0s" to probe once with no wait (still fail-closed when held). Negative values are rejected at config load. The managed lifecycle also projects this value into the gc-beads-bd.sh shell fallback as GC_DOLT_LOCK_RELEASE_TIMEOUT_MS (milliseconds), so both paths honor the configured window. |
 
-## DoltMaintenance
-
-DoltMaintenance configures the periodic Dolt store maintenance loop.
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `enabled` | boolean |  |  | Enabled toggles the maintenance loop. Defaults to false (opt-in). |
-| `interval` | string |  | `168h` | Interval is the cadence between maintenance runs as a duration string (e.g., "168h"). Defaults to 168h (weekly). |
-| `alert_to` | string |  |  | AlertTo is the agent identity to mail on failure (e.g., "gascity/mayor"). Empty disables alert mail. |
-| `gc_timeout` | string |  | `10m` | GCTimeout is the ceiling for CALL DOLT_GC() as a duration string. Defaults to 10m. |
-
 ## EventsConfig
 
 EventsConfig holds events provider settings.
@@ -500,14 +488,6 @@ MailConfig holds mail provider settings.
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the mail backend: "fake", "fail", "exec:&lt;script&gt;", or "" (default: beadmail). |
 | `retention_ttl` | string |  |  | RetentionTTL is how long read messages are retained before purge. Empty or "0" disables read-message retention. |
-
-## MaintenanceConfig
-
-MaintenanceConfig groups periodic store-maintenance subsections.
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `dolt` | DoltMaintenance |  |  | Dolt configures the weekly Dolt store maintenance loop (CALL DOLT_GC + backup snapshot). |
 
 ## ModelPricing
 

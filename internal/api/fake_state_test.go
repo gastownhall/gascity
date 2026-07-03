@@ -55,7 +55,6 @@ type fakeState struct {
 	pokeCount         int
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
-	maintenance       MaintenanceProvider
 }
 
 func newFakeState(t testing.TB) *fakeState {
@@ -147,7 +146,6 @@ func (f *fakeState) Poke()                                    { f.pokeCount++ }
 func (f *fakeState) ServiceRegistry() workspacesvc.Registry   { return f.services }
 func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgSvc }
 func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }
-func (f *fakeState) MaintenanceLoop() MaintenanceProvider     { return f.maintenance }
 
 func (f *fakeState) RawConfig() *config.City {
 	if f.rawCfg != nil {

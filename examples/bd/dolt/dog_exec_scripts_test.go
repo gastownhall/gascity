@@ -1,6 +1,7 @@
 package dolt_test
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -133,6 +134,7 @@ func newCompactScriptFixture(t *testing.T) compactScriptFixture {
 	binDir := t.TempDir()
 	gcLog := writeCompactFakeGC(t, binDir)
 	doltLog := writeCompactFakeDolt(t, binDir)
+	writeCompactFakeDf(t, binDir)
 	stateFile := filepath.Join(binDir, "head-state")
 	if err := os.WriteFile(stateFile, []byte("headcommit\n"), 0o644); err != nil {
 		t.Fatalf("write fake dolt state: %v", err)
@@ -188,6 +190,10 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_FAKE_DOLT_HASH_STATE_FILE",
 		"GC_PACK_STATE_DIR",
 		"GC_CITY_RUNTIME_DIR",
+		"GC_DOLT_COMPACT_MIN_FREE_BYTES",
+		"GC_FAKE_DF_MODE",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE",
+		"GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS",
 	),
 		"PATH="+f.binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+f.cityPath,
@@ -305,6 +311,28 @@ exit 0
 	return logPath
 }
 
+func writeCompactFakeDf(t *testing.T, binDir string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "df"), `#!/bin/sh
+case "${GC_FAKE_DF_MODE:-}" in
+  df_critical)
+    printf 'Filesystem\t1024-blocks\tUsed\tAvailable\tCapacity\tMounted on\n'
+    printf 'tmpfs\t104857600\t103809024\t1048576\t99%%\t/\n'
+    exit 0
+    ;;
+  df_probe_failure)
+    printf 'df: stat failed\n' >&2
+    exit 1
+    ;;
+  *)
+    printf 'Filesystem\t1024-blocks\tUsed\tAvailable\tCapacity\tMounted on\n'
+    printf 'tmpfs\t104857600\t84457472\t20971520\t81%%\t/\n'
+    exit 0
+    ;;
+esac
+`)
+}
+
 func readCompactGCLog(t *testing.T, fixture compactScriptFixture) string {
 	t.Helper()
 	data, err := os.ReadFile(fixture.gcLog)
@@ -355,6 +383,18 @@ func assertCompactBeadsQuarantineAlert(t *testing.T, fixture compactScriptFixtur
 	}
 }
 
+func writeCompactQuarantineMarker(t *testing.T, fixture compactScriptFixture, reason string) string {
+	t.Helper()
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("db=beads\nreason="+reason+"\ncreated_at=2026-05-01T00:00:00Z\n"), 0o600); err != nil {
+		t.Fatalf("write quarantine marker: %v", err)
+	}
+	return marker
+}
+
 func writeCompactFakeDolt(t *testing.T, binDir string) string {
 	t.Helper()
 	logPath := filepath.Join(binDir, "dolt.log")
@@ -367,6 +407,18 @@ state_file="${GC_FAKE_DOLT_STATE_FILE:-}"
 hash_state_file="${GC_FAKE_DOLT_HASH_STATE_FILE:-}"
 query=""
 db=""
+if [ "${1:-} ${2:-}" = "backup sync" ]; then
+  printf 'dolt backup sync %%s\n' "${3:-}" >> "$log"
+  case "$mode" in
+    backup_sync_failure|backup_sync_failure_bare_gc)
+      printf 'dolt backup sync failed\n' >&2
+      exit 1
+      ;;
+    *)
+      exit 0
+      ;;
+  esac
+fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --use-db)
@@ -910,6 +962,14 @@ case "$query" in
     else
       print_cell 10
     fi
+    exit 0
+    ;;
+  *"DOLT_DIFF("*)
+    if [ "$mode" = "quarantine_autoclear_probe_failure" ]; then
+      printf 'diff probe unavailable\n' >&2
+      exit 55
+    fi
+    print_cell 0
     exit 0
     ;;
   *"DOLT_DIFF_STAT"*)
@@ -4960,6 +5020,125 @@ func TestCompactScriptSkipFetchFlagBypassesFetch(t *testing.T) {
 	}
 }
 
+func TestCompactScriptAutoClearsKnownSameCountQuarantineWhenPreservationProven(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	const reason = "post-flatten table value hash changed without row-count increase"
+	marker := writeCompactQuarantineMarker(t, fixture, reason)
+
+	out, err := fixture.run(t, "quarantine_autoclear_preserved", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact should auto-clear proven false-positive quarantine: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("proven false-positive quarantine marker should be cleared; stat=%v", err)
+	}
+	if strings.Contains(out, "integrity quarantine marker exists") {
+		t.Fatalf("auto-clear path must not hard-block after proof:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	for _, want := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("auto-clear proof path missing %s:\n%s", want, log)
+		}
+	}
+	assertCompactBeadsQuarantineAlert(t, fixture, "mayor", marker, "compact-quarantine", reason)
+}
+
+func TestCompactScriptAutoClearsKnownQuarantineAfterHeadAdvancedWhenPreservationProven(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	const reason = "post-flatten value hash changed without row-count increase"
+	marker := writeCompactQuarantineMarker(t, fixture, reason)
+	if err := os.WriteFile(fixture.stateFile, []byte("writercommit\n"), 0o644); err != nil {
+		t.Fatalf("advance fake HEAD beyond quarantined run: %v", err)
+	}
+
+	out, err := fixture.run(t, "quarantine_autoclear_preserved", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact should auto-clear proven HEAD-advanced quarantine: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("proven HEAD-advanced quarantine marker should be cleared; stat=%v", err)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	for _, want := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("HEAD-advanced auto-clear path missing %s:\n%s", want, log)
+		}
+	}
+	assertCompactBeadsQuarantineAlert(t, fixture, "mayor", marker, "compact-quarantine", reason)
+}
+
+func TestCompactScriptKnownQuarantineProbeFailureStillHardBlocksAndAlerts(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	const reason = "post-flatten table value hash changed without row-count increase"
+	marker := writeCompactQuarantineMarker(t, fixture, reason)
+
+	out, err := fixture.run(t, "table_discovery_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact auto-cleared despite unprovable preservation probe:\n%s", out)
+	}
+	if !strings.Contains(out, "probe failed") && !strings.Contains(out, "probe unavailable") {
+		t.Fatalf("unprovable known quarantine should surface preservation probe failure:\n%s", out)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("unprovable quarantine marker should remain: %v", err)
+	}
+	assertCompactBeadsQuarantineAlert(t, fixture, "mayor", marker, "compact-quarantine", reason)
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("known race-class marker should attempt preservation proof before hard-blocking: %v", err)
+	}
+	log := string(logData)
+	for _, forbidden := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("unprovable quarantine must hard-block before %s:\n%s", forbidden, log)
+		}
+	}
+}
+
+func TestCompactScriptHardBlockQuarantineReasonsDoNotAutoClearAndAlert(t *testing.T) {
+	for _, reason := range []string{
+		"post-flatten table list changed",
+		"post-flatten row count decreased",
+		"unexpected manual quarantine",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			marker := writeCompactQuarantineMarker(t, fixture, reason)
+
+			out, err := fixture.run(t, "quarantine_autoclear_preserved", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err == nil {
+				t.Fatalf("compact auto-cleared hard-block reason %q:\n%s", reason, out)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("hard-block quarantine marker should remain: %v", err)
+			}
+			assertCompactBeadsQuarantineAlert(t, fixture, "mayor", marker, "compact-quarantine", reason)
+			logData, err := os.ReadFile(fixture.doltLog)
+			if os.IsNotExist(err) {
+				return
+			}
+			if err != nil {
+				t.Fatalf("read dolt log: %v", err)
+			}
+			log := string(logData)
+			for _, forbidden := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
+				if strings.Contains(log, forbidden) {
+					t.Fatalf("hard-block reason %q must block before %s:\n%s", reason, forbidden, log)
+				}
+			}
+		})
+	}
+}
+
 func TestCompactScriptSkipFetchPerDBList(t *testing.T) {
 	// db "beads" is the sole database compacted in remote_success mode, so a
 	// list naming it skips the fetch while a list that omits it does not. This
@@ -5046,5 +5225,190 @@ func TestCompactScriptSkipFetchRejectsInvalidValue(t *testing.T) {
 		if strings.Contains(string(logData), "DOLT_GC") {
 			t.Fatalf("invalid skip-fetch value must exit before any DOLT_GC call:\n%s", logData)
 		}
+	}
+}
+
+func TestCompactScriptDiskPreflightSufficientProceedsNormally(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success")
+	if err != nil {
+		t.Fatalf("compact exited with error on sufficient disk: %v\nout=%s", err, out)
+	}
+	if strings.Contains(out, "disk CRITICAL") || strings.Contains(out, "pre-flight probe failed") {
+		t.Fatalf("unexpected disk preflight output on sufficient disk:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightCriticalExitsZero(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_critical")
+	if err != nil {
+		t.Fatalf("compact should exit 0 on critical disk (skip not fail): %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "disk CRITICAL") {
+		t.Fatalf("expected 'disk CRITICAL' in output:\n%s", out)
+	}
+	if !strings.Contains(out, "free_bytes=") {
+		t.Fatalf("expected free_bytes in CRITICAL output:\n%s", out)
+	}
+	if !strings.Contains(out, "floor=") {
+		t.Fatalf("expected floor in CRITICAL output:\n%s", out)
+	}
+	if !strings.Contains(out, fixture.dataDir) {
+		t.Fatalf("expected DOLT_DATA_DIR in CRITICAL output:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightProbeFailureProceedsNormally(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_probe_failure")
+	if err != nil {
+		t.Fatalf("compact should proceed (fail open) on probe failure: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "disk pre-flight probe failed") {
+		t.Fatalf("expected 'disk pre-flight probe failed' in output:\n%s", out)
+	}
+	if strings.Contains(out, "disk CRITICAL") {
+		t.Fatalf("probe failure must not emit CRITICAL:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightZeroThresholdDisablesCheck(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_MIN_FREE_BYTES=0")
+	if err != nil {
+		t.Fatalf("compact should proceed normally with zero threshold: %v\nout=%s", err, out)
+	}
+	if strings.Contains(out, "disk CRITICAL") || strings.Contains(out, "pre-flight probe failed") {
+		t.Fatalf("zero threshold must disable disk preflight:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightInvalidEnvExitsTwo(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_MIN_FREE_BYTES=notanumber")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("invalid GC_DOLT_COMPACT_MIN_FREE_BYTES should exit 2: got err=%v\nout=%s", err, out)
+	}
+}
+
+func TestCompactScriptBackupUnsetProceedsNormally(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success")
+	if err != nil {
+		t.Fatalf("compact without backup remote should succeed: %v\nout=%s", err, out)
+	}
+	doltLog, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(doltLog), "backup sync") {
+		t.Fatalf("unset backup remote must not trigger backup sync:\n%s", doltLog)
+	}
+}
+
+func TestCompactScriptBackupSyncSuccessBeforeFlatten(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")
+	if err != nil {
+		t.Fatalf("compact with successful backup should succeed: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "backup sync to remote=prod-backup -- ok") {
+		t.Fatalf("expected backup ok log:\n%s", out)
+	}
+	doltLog, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if !strings.Contains(string(doltLog), "backup sync prod-backup") {
+		t.Fatalf("expected 'backup sync prod-backup' in dolt log:\n%s", doltLog)
+	}
+}
+
+func TestCompactScriptBackupSyncFailureBeforeFlattenExitsOne(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "backup_sync_failure", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("backup sync failure should exit 1: got err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "backup sync to remote=prod-backup failed; aborting compaction") {
+		t.Fatalf("expected backup failure log:\n%s", out)
+	}
+	doltLog, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(doltLog), "DOLT_RESET") || strings.Contains(string(doltLog), "DOLT_COMMIT") {
+		t.Fatalf("backup failure must abort before flatten:\n%s", doltLog)
+	}
+}
+
+func TestCompactScriptBackupSyncSuccessBeforeBareGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_BARE_GC=1",
+	)
+	if err != nil {
+		t.Fatalf("compact with successful backup (bare GC) should succeed: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "backup sync to remote=prod-backup -- ok") {
+		t.Fatalf("expected backup ok log for bare GC path:\n%s", out)
+	}
+}
+
+func TestCompactScriptBackupSyncFailureBeforeBareGCExitsOne(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "backup_sync_failure_bare_gc",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_BARE_GC=1",
+	)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("backup sync failure (bare GC) should exit 1: got err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "backup sync to remote=prod-backup failed; aborting compaction") {
+		t.Fatalf("expected backup failure log for bare GC path:\n%s", out)
+	}
+}
+
+func TestCompactScriptBackupInvalidRemoteNameExitsTwo(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_BACKUP_REMOTE=has space")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("backup remote with whitespace should exit 2: got err=%v\nout=%s", err, out)
+	}
+}
+
+func TestCompactScriptBackupInvalidTimeoutExitsTwo(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS=notanumber",
+	)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("invalid backup timeout should exit 2: got err=%v\nout=%s", err, out)
+	}
+}
+
+func TestCompactScriptBackupNonDoltDirInDataDirSucceeds(t *testing.T) {
+	// DB discovery filters by .dolt presence; a directory without .dolt is
+	// never discovered and never passed to backup_sync_database. The script
+	// must succeed cleanly with no error output for the non-dolt dir.
+	fixture := newCompactScriptFixture(t)
+	nodoltDB := filepath.Join(fixture.dataDir, "nodolt")
+	if err := os.MkdirAll(nodoltDB, 0o755); err != nil {
+		t.Fatalf("mkdir nodolt db: %v", err)
+	}
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")
+	if err != nil {
+		t.Fatalf("compact should succeed even with non-dolt directory in data dir: %v\nout=%s", err, out)
+	}
+	if strings.Contains(out, "nodolt") {
+		t.Fatalf("non-dolt dir must produce no output — got:\n%s", out)
 	}
 }

@@ -1996,7 +1996,6 @@ func reconcileCities(
 		cs.services = cityRuntime.svc
 		cityRuntime.setControllerState(cs)
 		cs.startBeadEventWatcher(cityCtx)
-		cs.startMaintenanceLoop(cityCtx)
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {

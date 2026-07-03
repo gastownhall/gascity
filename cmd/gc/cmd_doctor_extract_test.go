@@ -36,6 +36,30 @@ func TestBuildDoctorChecks_NameSetUnchanged(t *testing.T) {
 	}
 }
 
+func TestBuildDoctorChecksRegistersDoltCompactStateCheck(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+
+	names := doctorCheckNames(buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    false,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+	}))
+
+	noms := doctorCheckIndex(names, "dolt-noms-size")
+	if noms < 0 {
+		t.Fatalf("dolt-noms-size check missing: %v", names)
+	}
+	got := doctorCheckIndex(names, "dolt-compact-state")
+	if got != noms+1 {
+		t.Fatalf("dolt-compact-state index = %d, want immediately after dolt-noms-size at %d; names=%v", got, noms, names)
+	}
+}
+
 func TestBuildDoctorChecksRegistersNamedAlwaysMinConflictCheck(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {

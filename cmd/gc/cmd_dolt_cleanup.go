@@ -229,6 +229,18 @@ type cleanupOptions struct {
 // CleanupReport JSON envelope or a human-readable summary to stdout.
 // Returns the exit code.
 //
+// goTestTempDir returns the effective root that Go's test runner uses for
+// t.TempDir() allocations. Under the build fleet, GOTMPDIR overrides the
+// default os.TempDir() so test directories land under a non-standard root
+// (e.g. /var/tmp/gc-build-tmp). The reaper needs this to recognize managed
+// Dolt configs created by tests on those hosts.
+func goTestTempDir() string {
+	if d := os.Getenv("GOTMPDIR"); d != "" {
+		return d
+	}
+	return os.TempDir()
+}
+
 // Drop and purge stages are populated when a Dolt SQL client is available;
 // otherwise the report still renders with errors describing the unreachable
 // data plane.
@@ -898,7 +910,7 @@ can still return successfully after emitting the report.`,
 				Force:        force,
 				Host:         cfg.Dolt.Host,
 				HomeDir:      homeDir,
-				TempDir:      os.TempDir(),
+				TempDir:      goTestTempDir(),
 				MaxOrphanDBs: maxOrphanDBs,
 			}
 

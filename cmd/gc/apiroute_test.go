@@ -57,9 +57,7 @@ func TestStandaloneControllerClient(t *testing.T) {
 // TestAPIClientRouting covers apiClient's routing: the standalone endpoint when
 // the socket is alive and an [api] port is configured, nil (the caller's local
 // fallback) when alive without a standalone port, the supervisor client when the
-// socket is down, and nil under the GC_NO_API escape hatch. The supervisor
-// fall-through for a managed city with no [api] port is scoped to maintenance —
-// see TestMaintenanceAPIClientRoutesToSupervisor. (gascity ga-tp7)
+// socket is down, and nil under the GC_NO_API escape hatch. (gascity ga-tp7)
 func TestAPIClientRouting(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
 
@@ -109,48 +107,6 @@ func TestAPIClientRouting(t *testing.T) {
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
 		if got := apiClient(dir); got != nil {
 			t.Fatalf("apiClient = %p, want nil under GC_NO_API escape hatch", got)
-		}
-	})
-}
-
-// TestMaintenanceAPIClientRoutesToSupervisor proves the maintenance-scoped
-// fall-through: when the controller socket is alive but the supervisor-managed
-// city omits a standalone [api] port, maintenanceAPIClient routes to the
-// supervisor-managed client (maintenance has no local fallback), where general
-// commands' apiClient returns nil. (gascity ga-tp7)
-func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
-	sentinel := api.NewClient("http://supervisor.sentinel:1")
-	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
-	t.Cleanup(func() {
-		apiRouteControllerAliveHook = origAlive
-		apiRouteSupervisorClientHook = origSup
-	})
-
-	t.Run("alive-no-api-port-routes-to-supervisor", func(t *testing.T) {
-		t.Setenv("GC_NO_API", "")
-		apiRouteControllerAliveHook = func(string) int { return 4242 }
-		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
-		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
-		c, reason := maintenanceAPIClient(dir)
-		if c != sentinel {
-			t.Fatalf("maintenanceAPIClient client = %p, want supervisor sentinel %p", c, sentinel)
-		}
-		if reason != "" {
-			t.Fatalf("maintenanceAPIClient reason = %q, want empty", reason)
-		}
-	})
-
-	t.Run("escape-hatch-skips-supervisor", func(t *testing.T) {
-		t.Setenv("GC_NO_API", "1")
-		apiRouteControllerAliveHook = func(string) int { return 4242 }
-		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
-		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
-		c, reason := maintenanceAPIClient(dir)
-		if c != nil {
-			t.Fatalf("maintenanceAPIClient client = %p, want nil under GC_NO_API", c)
-		}
-		if reason != "escape-hatch" {
-			t.Fatalf("maintenanceAPIClient reason = %q, want \"escape-hatch\"", reason)
 		}
 	})
 }

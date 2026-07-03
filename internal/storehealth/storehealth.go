@@ -4,39 +4,34 @@
 // derived MB-per-row ratio, and a warning flag when the ratio exceeds
 // the configured threshold.
 //
-// Design: ADR 0002 (docs/adr/0002-dolt-store-maintenance-runbook.md)
-// and bead ga-d5y design D9.
+// Design: bead ga-d5y design D9.
 package storehealth
 
 import (
 	"io/fs"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// DefaultThresholdMB is the MB-per-row threshold above which maintenance
-// is flagged overdue. 1 MB per row matches the bad case observed in
-// production (.beads/dolt at ~11 GB with ~64 rows).
+// DefaultThresholdMB is the MB-per-row threshold above which the
+// size-to-row ratio is flagged. 1 MB per row matches the bad case
+// observed in production (.beads/dolt at ~11 GB with ~64 rows).
 const DefaultThresholdMB = 1.0
 
-// Health summarizes disk and maintenance health of the Dolt bead store.
-// A pointer *Health is included in status payloads so "no data" (e.g.
-// supervisor not running) is representable as nil rather than a
-// confusing zero-valued block.
+// Health summarizes disk health of the Dolt bead store. A pointer
+// *Health is included in status payloads so "no data" (e.g. supervisor
+// not running) is representable as nil rather than a confusing
+// zero-valued block.
 type Health struct {
-	Path         string
-	SizeBytes    int64
-	LiveRows     int
-	RatioMB      float64
-	Warning      bool
-	ThresholdMB  float64
-	LastGCAt     time.Time
-	LastGCStatus string
+	Path        string
+	SizeBytes   int64
+	LiveRows    int
+	RatioMB     float64
+	Warning     bool
+	ThresholdMB float64
 }
 
 // StorePath returns the canonical on-disk location of the Dolt store
@@ -52,15 +47,13 @@ func StorePath(cityPath string) string {
 }
 
 // Compute builds a Health from measured inputs. Pure function — all
-// I/O is performed by the caller via WalkSize and LastMaintenance.
-func Compute(cityPath string, sizeBytes int64, liveRows int, lastGCAt time.Time, lastGCStatus string) Health {
+// I/O is performed by the caller via WalkSize.
+func Compute(cityPath string, sizeBytes int64, liveRows int) Health {
 	h := Health{
-		Path:         StorePath(cityPath),
-		SizeBytes:    sizeBytes,
-		LiveRows:     liveRows,
-		ThresholdMB:  DefaultThresholdMB,
-		LastGCAt:     lastGCAt,
-		LastGCStatus: lastGCStatus,
+		Path:        StorePath(cityPath),
+		SizeBytes:   sizeBytes,
+		LiveRows:    liveRows,
+		ThresholdMB: DefaultThresholdMB,
 	}
 	if liveRows > 0 {
 		h.RatioMB = float64(sizeBytes) / (bytesPerMB * float64(liveRows))
@@ -72,8 +65,7 @@ func Compute(cityPath string, sizeBytes int64, liveRows int, lastGCAt time.Time,
 // WalkSize returns the total size in bytes of path's contents,
 // recursing into subdirectories. Missing paths and read errors are
 // treated as zero bytes — a fresh city has no Dolt directory yet, and
-// partial read failures during maintenance should not mask the rest
-// of the status output.
+// partial read failures should not mask the rest of the status output.
 func WalkSize(path string) int64 {
 	var total int64
 	_ = filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
@@ -88,39 +80,6 @@ func WalkSize(path string) int64 {
 		return nil
 	})
 	return total
-}
-
-// LastMaintenance returns the timestamp and status ("success" or
-// "failed") of the most-recent store-maintenance event in provider.
-// Zero time and empty status when no events, provider is nil, or the
-// provider returns an error.
-func LastMaintenance(ep events.Provider) (time.Time, string) {
-	if ep == nil {
-		return time.Time{}, ""
-	}
-	var (
-		latestTs     time.Time
-		latestStatus string
-	)
-	for _, spec := range []struct {
-		typ    string
-		status string
-	}{
-		{events.StoreMaintenanceDone, "success"},
-		{events.StoreMaintenanceFailed, "failed"},
-	} {
-		evts, err := ep.List(events.Filter{Type: spec.typ})
-		if err != nil {
-			continue
-		}
-		for _, e := range evts {
-			if e.Ts.After(latestTs) {
-				latestTs = e.Ts
-				latestStatus = spec.status
-			}
-		}
-	}
-	return latestTs, latestStatus
 }
 
 const bytesPerMB = 1_000_000

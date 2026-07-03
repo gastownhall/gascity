@@ -2,13 +2,10 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
 
@@ -32,35 +29,6 @@ func TestStoreHealthSIBytes(t *testing.T) {
 	}
 }
 
-func TestStoreHealthFromInputsOmitsLastGCWhenZero(t *testing.T) {
-	h := storeHealthFromInputs("/c", 1_000_000, 1, time.Time{}, "")
-	if h.LastGCAt != "" {
-		t.Errorf("LastGCAt = %q, want empty", h.LastGCAt)
-	}
-	if h.LastGCStatus != "" {
-		t.Errorf("LastGCStatus = %q, want empty", h.LastGCStatus)
-	}
-
-	data, err := json.Marshal(h)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	if strings.Contains(string(data), "last_gc_at") {
-		t.Errorf("JSON contains last_gc_at when zero, got: %s", data)
-	}
-}
-
-func TestStoreHealthFromInputsFormatsLastGCAsRFC3339(t *testing.T) {
-	ts := time.Date(2026, 4, 1, 3, 15, 30, 0, time.UTC)
-	h := storeHealthFromInputs("/c", 0, 0, ts, "success")
-	if h.LastGCAt != "2026-04-01T03:15:30Z" {
-		t.Errorf("LastGCAt = %q, want 2026-04-01T03:15:30Z", h.LastGCAt)
-	}
-	if h.LastGCStatus != "success" {
-		t.Errorf("LastGCStatus = %q, want success", h.LastGCStatus)
-	}
-}
-
 func TestRenderStoreHealthBlockNil(t *testing.T) {
 	var buf bytes.Buffer
 	renderStoreHealthBlock(&buf, nil)
@@ -70,7 +38,7 @@ func TestRenderStoreHealthBlockNil(t *testing.T) {
 }
 
 func TestRenderStoreHealthBlockWarning(t *testing.T) {
-	h := storeHealthFromInputs("/c", 11_200_000_000, 221, time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC), "success")
+	h := storeHealthFromInputs("/c", 11_200_000_000, 221)
 	var buf bytes.Buffer
 	renderStoreHealthBlock(&buf, h)
 
@@ -82,8 +50,7 @@ func TestRenderStoreHealthBlockWarning(t *testing.T) {
 		"Live rows:   221",
 		"MB/row",
 		"(threshold 1.0 MB/row)",
-		"\u26a0 maintenance overdue",
-		"Last GC:     2026-04-01T03:00:00Z (success)",
+		"\u26a0 size-to-row ratio exceeds threshold",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
@@ -92,7 +59,7 @@ func TestRenderStoreHealthBlockWarning(t *testing.T) {
 }
 
 func TestRenderStoreHealthBlockNoWarning(t *testing.T) {
-	h := storeHealthFromInputs("/c", 50_000_000, 221, time.Time{}, "")
+	h := storeHealthFromInputs("/c", 50_000_000, 221)
 	var buf bytes.Buffer
 	renderStoreHealthBlock(&buf, h)
 
@@ -100,11 +67,8 @@ func TestRenderStoreHealthBlockNoWarning(t *testing.T) {
 	if strings.Contains(out, "\u26a0") {
 		t.Errorf("output contains warning glyph when Warning=false:\n%s", out)
 	}
-	if strings.Contains(out, "maintenance overdue") {
+	if strings.Contains(out, "overdue") {
 		t.Errorf("output contains overdue text when Warning=false:\n%s", out)
-	}
-	if strings.Contains(out, "Last GC:") {
-		t.Errorf("output contains Last GC when not set:\n%s", out)
 	}
 }
 
@@ -145,28 +109,18 @@ func TestLiveRowCountIncludesClosedBeads(t *testing.T) {
 	}
 }
 
-func TestCollectStoreHealthReadsEvents(t *testing.T) {
+func TestCollectStoreHealth(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{Title: "x"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	ep := events.NewFake()
-	ts := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
-	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 5})
-	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: ts, Payload: payload})
 
-	h := collectStoreHealth("/c", store, ep)
+	h := collectStoreHealth("/c", store)
 	if h == nil {
 		t.Fatal("collectStoreHealth returned nil")
 	}
 	if h.LiveRows != 1 {
 		t.Errorf("LiveRows = %d, want 1", h.LiveRows)
-	}
-	if h.LastGCAt != "2026-04-08T12:00:00Z" {
-		t.Errorf("LastGCAt = %q, want 2026-04-08T12:00:00Z", h.LastGCAt)
-	}
-	if h.LastGCStatus != "success" {
-		t.Errorf("LastGCStatus = %q, want success", h.LastGCStatus)
 	}
 	if h.Path != storehealth.StorePath("/c") {
 		t.Errorf("Path = %q, want %q", h.Path, storehealth.StorePath("/c"))

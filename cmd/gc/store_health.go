@@ -3,20 +3,15 @@ package main
 import (
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
 
-// storeHealthFromInputs assembles a CLI-facing *StoreHealth from the raw
-// measurements. LastGCAt is serialized as RFC3339 UTC when present;
-// when the maintenance log is empty, LastGCAt and LastGCStatus are
-// omitted (json:"omitempty").
-func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastGCAt time.Time, lastGCStatus string) *StoreHealth {
-	h := storehealth.Compute(cityPath, sizeBytes, liveRows, lastGCAt, lastGCStatus)
-	out := &StoreHealth{
+// storeHealthFromInputs assembles a CLI-facing *StoreHealth from the raw measurements.
+func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int) *StoreHealth {
+	h := storehealth.Compute(cityPath, sizeBytes, liveRows)
+	return &StoreHealth{
 		Path:        h.Path,
 		SizeBytes:   h.SizeBytes,
 		LiveRows:    h.LiveRows,
@@ -24,22 +19,15 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastG
 		Warning:     h.Warning,
 		ThresholdMB: h.ThresholdMB,
 	}
-	if !h.LastGCAt.IsZero() {
-		out.LastGCAt = h.LastGCAt.UTC().Format(time.RFC3339)
-		out.LastGCStatus = h.LastGCStatus
-	}
-	return out
 }
 
-// collectStoreHealth measures the Dolt store at cityPath and the latest
-// maintenance event via ep, returning a populated *StoreHealth.
-// liveRowCount provides the live row count; callers without a store pass
-// nil and LiveRows is reported as zero.
-func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
+// collectStoreHealth measures the Dolt store at cityPath and returns a
+// populated *StoreHealth. liveRowCount provides the live row count; callers
+// without a store pass nil and LiveRows is reported as zero.
+func collectStoreHealth(cityPath string, store beads.Store) *StoreHealth {
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
 	rows := liveRowCount(store)
-	lastAt, lastStatus := storehealth.LastMaintenance(ep)
-	return storeHealthFromInputs(cityPath, size, rows, lastAt, lastStatus)
+	return storeHealthFromInputs(cityPath, size, rows)
 }
 
 // liveRowCount returns the number of beads known to store, or 0 when
@@ -70,12 +58,9 @@ func renderStoreHealthBlock(w io.Writer, h *StoreHealth) {
 	fmt.Fprintf(w, "  Live rows:   %d\n", h.LiveRows)                      //nolint:errcheck // best-effort stdout
 	suffix := ""
 	if h.Warning {
-		suffix = "  \u26a0 maintenance overdue"
+		suffix = "  \u26a0 size-to-row ratio exceeds threshold"
 	}
 	fmt.Fprintf(w, "  Ratio:       %.1f MB/row  (threshold %.1f MB/row)%s\n", h.RatioMB, h.ThresholdMB, suffix) //nolint:errcheck // best-effort stdout
-	if h.LastGCAt != "" {
-		fmt.Fprintf(w, "  Last GC:     %s (%s)\n", h.LastGCAt, h.LastGCStatus) //nolint:errcheck // best-effort stdout
-	}
 }
 
 // storeHealthSIBytes formats n with SI prefixes (1 KB = 1000 B, 1 MB =

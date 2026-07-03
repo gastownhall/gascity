@@ -352,6 +352,67 @@ func TestRequireNoLeakedDoltAfterWithFilterReportsAndKillsOwnedPID(t *testing.T)
 	}
 }
 
+func TestRequireNoLeakedDoltAfterWithFilterReportsGoBuildTmpManagedDoltConfig(t *testing.T) {
+	ownedRoot := filepath.Join("/var/tmp", "gc-build-tmp", "TestBuildDesiredStateManagedDolt123")
+	ownedConfig := filepath.Join(ownedRoot, "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	owned := DoltProcInfo{
+		PID: 7331,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			ownedConfig,
+		},
+	}
+	productionConfig := filepath.Join("/home", "u", "projects", "gascity", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	production := DoltProcInfo{
+		PID: 7332,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			productionConfig,
+		},
+	}
+	enumerate := scriptedDoltEnumerator(t,
+		nil,
+		[]DoltProcInfo{owned, production},
+	)
+	type killCall struct {
+		pid int
+		sig syscall.Signal
+	}
+	var killed []killCall
+	inner := &recordingTB{}
+	requireNoLeakedDoltAfterWithFilterAndKiller(inner, enumerate, func(configPath string) bool {
+		return samePath(configPath, ownedRoot) || strings.HasPrefix(configPath, ownedRoot+string(filepath.Separator))
+	}, func(pid int, sig syscall.Signal) error {
+		killed = append(killed, killCall{pid: pid, sig: sig})
+		return nil
+	})
+	inner.runCleanups()
+
+	if !inner.failed() {
+		t.Fatalf("expected leak Errorf for managed Dolt test config; nothing recorded")
+	}
+	msg := strings.Join(inner.errors, "\n")
+	for _, want := range []string{"7331", ownedConfig} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error missing %q; got %q", want, msg)
+		}
+	}
+	if strings.Contains(msg, "7332") || strings.Contains(msg, productionConfig) {
+		t.Fatalf("production Dolt config must not be reported as test-owned leak; got %q", msg)
+	}
+	wantKilled := []killCall{
+		{pid: 7331, sig: syscall.SIGTERM},
+		{pid: 7331, sig: syscall.SIGKILL},
+	}
+	if fmt.Sprint(killed) != fmt.Sprint(wantKilled) {
+		t.Fatalf("killed = %v, want %v", killed, wantKilled)
+	}
+}
+
 func TestRequireNoLeakedDoltAfterWithFilterReportsKillErrors(t *testing.T) {
 	ownedRoot := filepath.Join("/tmp", "TestDoltLeakHelper", "owned-city")
 	owned := DoltProcInfo{

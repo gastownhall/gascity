@@ -587,12 +587,4 @@ func init() {
 	events.RegisterPayload(events.WorkerOperation, WorkerOperationEventPayload{})
 	events.RegisterPayload(events.ProjectIdentityStamped, ProjectIdentityStampedPayload{})
 	events.RegisterPayload(events.MoleculeResolved, MoleculeResolvedPayload{})
-
-	// gc.store.maintenance.* — supervisor StoreMaintenanceLoop outcomes.
-	events.RegisterPayload(events.StoreMaintenanceDone, events.StoreMaintenanceDonePayload{})
-	events.RegisterPayload(events.StoreMaintenanceFailed, events.StoreMaintenanceFailedPayload{})
-
-	// gc.store.disk_* — ENOSPC pre-flight events emitted before CALL DOLT_GC.
-	events.RegisterPayload(events.StoreDiskWarn, events.StoreDiskWarnPayload{})
-	events.RegisterPayload(events.StoreDiskCritical, events.StoreDiskCriticalPayload{})
 }

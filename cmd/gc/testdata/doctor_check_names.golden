@@ -62,6 +62,7 @@ session-model
 dolt-server
 fork-rate
 dolt-noms-size
+dolt-compact-state
 dolt-journal-size
 dolt-config
 dolt-version
