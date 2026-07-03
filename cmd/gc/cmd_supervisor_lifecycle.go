@@ -1894,7 +1894,8 @@ func stopSupervisorSystemdForWarmRefresh(service string) ([]string, error) {
 func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Writer) int {
 	sweepStaleIsolatedSupervisorServices(stderr)
 	// Check the binary guard before probing systemd so a refused install
-	// emits no systemctl calls.
+	// emits no systemctl calls for the install itself (the stale-service
+	// sweep above may still have issued best-effort systemctl calls).
 	path := supervisorSystemdServicePath()
 	existing, err := os.ReadFile(path)
 	hadCurrent := err == nil
