@@ -41,7 +41,7 @@ If the post-flatten integrity check detects unexpected data changes, the databas
 
 ### Doctor checks
 
-`gc doctor` includes a `dolt-compact-state` check that surfaces quarantine markers, pending-GC state, and store-size heuristics. The `dolt-noms-size` check warns when the noms store has grown beyond the size-to-row-count ratio threshold. A healthy compact cadence keeps both green.
+`gc doctor` includes a `dolt-compact-state` check that surfaces quarantine markers and pending-GC state. The `dolt-noms-size` check warns when the noms store has grown beyond the size-to-row-count ratio threshold. A healthy compact cadence keeps both green.
 
 ## Troubleshooting Quick Reference
 
