@@ -24,7 +24,7 @@ origin/main. The cherry-pick applied without conflicts.
 |---|-----------|--------|----------|
 | 1 | Review PASS present | PASS | ga-bytd3q is closed with `REVIEW VERDICT: PASS` for commit 5e8459b3893fdc2e18f127c8200c98fc1fac1cf2. |
 | 2 | Acceptance criteria met | FAIL | Cannot verify acceptance on the final clean branch because the branch does not compile under the fast unit gate. |
-| 3 | Tests pass | FAIL | `TMPDIR=/var/tmp/gc-nlz18e-test make test-fast-parallel` failed in `unit-core`: `internal/api/store_health_test.go:171:9: not enough arguments in call to s.computeStoreHealth; have (); want ("context".Context)`. All six `cmd/gc` fast shards completed ok after the core failure. |
+| 3 | Tests pass | FAIL | `TMPDIR=/var/tmp/gc-nlz18e-test make test-fast-parallel` failed in `unit-core` on rerun 2026-07-04; logs: `/var/tmp/gc-nlz18e-test/gc-local-tests.4AZgID`. Blocking compile error: `internal/api/store_health_test.go:171:9: not enough arguments in call to s.computeStoreHealth; have (); want ("context".Context)`. All six `cmd/gc` fast shards completed ok after the core failure. |
 | 4 | No high-severity review findings open | PASS | Reviewer notes report no blockers and only one non-blocking security observation; unresolved HIGH finding count is 0. |
 | 5 | Final branch is clean | PASS | Worktree was clean after the clean cherry-pick and before writing this gate file. |
 | 6 | Branch diverges cleanly from main | PASS | Clean branch was cut from origin/main and the reviewed commit cherry-picked with no merge conflicts. |
@@ -37,3 +37,8 @@ The isolated status patch needs a rebase/update against current origin/main.
 `TestComputeStoreHealthUsesDoltlitePathFromMetadata` still calls it with no
 argument after the clean cherry-pick. This is a technical gate failure; no PR was
 opened.
+
+The same rerun also reported unrelated `/tmp` tmpfs exhaustion failures in
+`examples/bd/dolt` and `internal/mail/exec` despite using `/var/tmp` for the Go
+test runner. Those environmental failures are not the routing reason; the
+`internal/api` compile error is deterministic and sufficient to fail the gate.
