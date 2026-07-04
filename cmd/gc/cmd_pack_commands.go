@@ -56,6 +56,14 @@ func quietLoadCityConfig(cityPath string) (*config.City, error) {
 // silently if not in a city or config fails to load — core commands
 // always work.
 func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
+	// git spawns `gc git-credential` mid-clone, while gc may already hold the
+	// repo-cache lock for the very import being fetched (a credentialed
+	// `gc import install`). Pack-command discovery loads city config, which
+	// re-acquires that lock — a self-deadlock that hangs every credentialed
+	// import. The helper needs no pack commands, so skip discovery for it.
+	if isCredentialHelperInvocation(os.Args) {
+		return
+	}
 	cityPath, err := resolveCity()
 	if err != nil {
 		return
@@ -70,6 +78,20 @@ func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
 	}
 
 	addDiscoveredCommandsToRoot(root, cfg.PackCommands, cityPath, loadedCityName(cfg, cityPath), stdout, stderr, false)
+}
+
+// isCredentialHelperInvocation reports whether argv invokes the hidden
+// `gc git-credential` helper (git runs it as `gc git-credential <op>`). The
+// helper is a leaf command on git's clone hot path, so it must skip the
+// config-loading pack-command discovery that runs for normal invocations.
+func isCredentialHelperInvocation(argv []string) bool {
+	for i := 1; i < len(argv); i++ {
+		if strings.HasPrefix(argv[i], "-") {
+			continue
+		}
+		return argv[i] == "git-credential"
+	}
+	return false
 }
 
 // coreCommandNames returns the set of built-in command names that packs

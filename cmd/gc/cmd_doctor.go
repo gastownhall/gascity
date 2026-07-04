@@ -251,6 +251,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewPackCacheCheck(cfg.Packs, cityPath))
 	}
 
+	// Pack-source credential check: validates credentials.toml load and reports
+	// which remote imports lack a matching rule.
+	if cfgErr == nil && cfg != nil {
+		register(doctor.NewPackCredentialsCheck(cfg.Imports))
+	}
+
 	// Infrastructure checks — universal dependencies.
 	// dolt/bd/flock are checked by pack doctor scripts (check-bd.sh,
 	// check-dolt.sh) which also verify versions and service health.

@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/gitcred"
 )
 
 // ErrNoSemverTags reports that a source has no semver tags to resolve.
@@ -19,7 +21,9 @@ type ResolvedVersion struct {
 
 // ResolveVersion discovers tags for source and selects the highest tag matching constraint.
 // Empty constraint means "latest stable semver tag". "sha:<hex>" bypasses tag discovery.
-func ResolveVersion(source, constraint string) (ResolvedVersion, error) {
+// cityRoot scopes credential resolution for the network ls-remote; "" skips only
+// the per-city rule layer.
+func ResolveVersion(cityRoot, source, constraint string) (ResolvedVersion, error) {
 	if strings.HasPrefix(constraint, "sha:") {
 		commit := strings.TrimPrefix(constraint, "sha:")
 		if commit == "" {
@@ -28,7 +32,7 @@ func ResolveVersion(source, constraint string) (ResolvedVersion, error) {
 		return ResolvedVersion{Version: constraint, Commit: commit}, nil
 	}
 
-	tags, err := listRemoteTags(source)
+	tags, err := listRemoteTags(cityRoot, source)
 	if err != nil {
 		return ResolvedVersion{}, err
 	}
@@ -64,10 +68,11 @@ func DefaultConstraint(version string) (string, error) {
 	return fmt.Sprintf("^%d.%d", v.Major, v.Minor), nil
 }
 
-func listRemoteTags(source string) (map[string]string, error) {
-	out, err := runGit("", "ls-remote", "--tags", normalizeRemoteSource(source).CloneURL)
+func listRemoteTags(cityRoot, source string) (map[string]string, error) {
+	cloneURL := normalizeRemoteSource(source).CloneURL
+	out, err := runNetworkGit(cityRoot, cloneURL, "", "ls-remote", "--tags", cloneURL)
 	if err != nil {
-		return nil, fmt.Errorf("listing tags for %q: %w", source, err)
+		return nil, fmt.Errorf("listing tags for %q: %w", gitcred.RedactUserinfo(source), err)
 	}
 
 	tags := make(map[string]string)

@@ -210,7 +210,7 @@ func ensureRequiredBuiltinSourcesCached(cityPath string) error {
 		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) == nil {
 			continue
 		}
-		if _, err := packman.EnsureRepoInCache(source, commit); err != nil {
+		if _, err := packman.EnsureRepoInCache(cityPath, source, commit); err != nil {
 			return fmt.Errorf("caching bundled %s pack: %w", name, err)
 		}
 	}

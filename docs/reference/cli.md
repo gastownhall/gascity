@@ -1753,6 +1753,7 @@ gc import
 |------------|-------------|
 | [gc import add](#gc-import-add) | Add a pack import |
 | [gc import check](#gc-import-check) | Validate installed pack import state |
+| [gc import credential](#gc-import-credential) | Manage pack-source git credentials |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
 | [gc import prune](#gc-import-prune) | Remove unreferenced clones from the global pack cache |
@@ -1810,6 +1811,57 @@ Validate installed pack import state
 ```
 gc import check
 ```
+
+## gc import credential
+
+Manage pack-source git credentials
+
+```
+gc import credential
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc import credential add](#gc-import-credential-add) | Register a pack-source credential |
+| [gc import credential list](#gc-import-credential-list) | List registered pack-source credentials |
+| [gc import credential remove](#gc-import-credential-remove) | Remove a registered pack-source credential |
+
+## gc import credential add
+
+Register a pack-source credential
+
+```
+gc import credential add <match> (--helper CMD | --token-file PATH | --token-env NAME | --ssh-key-file PATH) [--username NAME] [--global] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--global` | bool |  | Write $GC_HOME/credentials.toml instead of the city file |
+| `--helper` | string |  | Command whose stdout is the token (executed per fetch) |
+| `--ssh-key-file` | string |  | Path to an SSH private key for git@/ssh:// sources |
+| `--token-env` | string |  | Name of an environment variable holding the token |
+| `--token-file` | string |  | Path to a file containing the token |
+| `--username` | string |  | Username sent to the remote (default x-access-token) |
+
+## gc import credential list
+
+List registered pack-source credentials
+
+```
+gc import credential list
+```
+
+## gc import credential remove
+
+Remove a registered pack-source credential
+
+```
+gc import credential remove <match> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--global` | bool |  | Remove from $GC_HOME/credentials.toml instead of the city file |
 
 ## gc import install
 

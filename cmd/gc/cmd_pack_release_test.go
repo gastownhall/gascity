@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/packregistry"
 )
 
@@ -245,5 +247,46 @@ func TestRunPackReleaseGitCommandIgnoresPoisonedGitEnv(t *testing.T) {
 
 	if err := runPackReleaseGitCommand(repo, "status", "--porcelain"); err != nil {
 		t.Fatalf("runPackReleaseGitCommand with poisoned git env: %v", err)
+	}
+}
+
+func TestRunPackReleaseNetworkGitClassifiesAuthFailure(t *testing.T) {
+	installFakeGit(t, "authfail")
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(gitcred.EnvCredentialsFile, "")
+	t.Setenv(gitcred.EnvCredentialCommand, "")
+
+	err := runPackReleaseNetworkGitCommand("https://github.com/gascity/gas-city-inc", "",
+		"clone", "--quiet", "https://github.com/gascity/gas-city-inc", t.TempDir())
+	var authErr *gitcred.AuthError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("expected *gitcred.AuthError, got %v", err)
+	}
+}
+
+func TestRunPackReleaseNetworkGitInjectsCredentialHelper(t *testing.T) {
+	fakeDir := installFakeGit(t, "ok")
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+	t.Setenv(gitcred.EnvCredentialsFile, "")
+	t.Setenv(gitcred.EnvCredentialCommand, "")
+	// A GC_HOME credential layer applies even though registry authoring is
+	// city-less.
+	if err := os.WriteFile(filepath.Join(home, "credentials.toml"),
+		[]byte("[[credential]]\nmatch=\"github.com/gascity\"\nhelper=\"echo tok\"\n"), 0o600); err != nil {
+		t.Fatalf("write cred: %v", err)
+	}
+	if err := os.Chmod(filepath.Join(home, "credentials.toml"), 0o600); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	_ = runPackReleaseNetworkGitCommand("https://github.com/gascity/gas-city-inc", "",
+		"clone", "--quiet", "https://github.com/gascity/gas-city-inc", t.TempDir())
+	argv, err := os.ReadFile(filepath.Join(fakeDir, "argv"))
+	if err != nil {
+		t.Fatalf("fake git argv not recorded: %v", err)
+	}
+	if !strings.Contains(string(argv), "credential.helper=") {
+		t.Fatalf("injected git argv missing credential.helper: %q", string(argv))
 	}
 }

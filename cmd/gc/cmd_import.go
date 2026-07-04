@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/importsvc"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -34,6 +35,10 @@ var (
 	defaultImportConstraint = packman.DefaultConstraint
 	resolveImportHeadCommit = defaultImportHeadCommit
 )
+
+// resolveImportVersion and resolveImportHeadCommit carry a leading cityRoot so
+// the network ls-remote can resolve per-city pack credentials. Command tests
+// stub these vars; the importsvc.Deps mapping in importSvcDeps threads them.
 
 const cityPackSchema = 1
 
@@ -102,8 +107,26 @@ func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 		newImportWhyCmd(stdout, stderr),
 		newImportMigrateCmd(stdout, stderr),
 		newImportPruneCmd(stdout, stderr),
+		newImportCredentialCmd(stdout, stderr),
 	)
 	return cmd
+}
+
+// printCredentialHint appends the pack-credential remediation hint when err
+// carries an auth classification from a network git run. It is deliberately
+// separate from importAddErrorLine's framing (pinned by exact-match tests).
+func printCredentialHint(stderr io.Writer, err error) {
+	var authErr *gitcred.AuthError
+	if !errors.As(err, &authErr) {
+		return
+	}
+	if authErr.Matched {
+		fmt.Fprintf(stderr, "hint: credential rule from %s matched but the remote rejected it; check the token is valid and has contents:read on this repository (gc import credential list)\n", authErr.RuleOrigin) //nolint:errcheck
+		return
+	}
+	fmt.Fprintf(stderr, "hint: this source requires authentication; register a pack credential and retry:\n")                                            //nolint:errcheck
+	fmt.Fprintf(stderr, "  gc import credential add %s --helper 'gh auth token'\n", authErr.OrgPrefix)                                                   //nolint:errcheck
+	fmt.Fprintf(stderr, "  (--token-file, --token-env, and --ssh-key-file are the non-interactive alternatives; see gc import credential add --help)\n") //nolint:errcheck
 }
 
 func newImportAddCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -619,6 +642,7 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 	res, err := importsvc.AddImportWith(fs, cityPath, source, nameOverride, versionFlag, importSvcDeps())
 	if err != nil {
 		fmt.Fprintln(stderr, importAddErrorLine(source, nameOverride, err)) //nolint:errcheck
+		printCredentialHint(stderr, err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Added import %q from %s\n", res.Name, res.Source) //nolint:errcheck
@@ -643,7 +667,10 @@ func importAddErrorLine(source, nameOverride string, err error) string {
 	case errors.Is(err, importsvc.ErrScopeLoad), errors.Is(err, importsvc.ErrImportExists):
 		return fmt.Sprintf("gc import add: %v", err)
 	default:
-		return fmt.Sprintf("gc import add %q: %v", source, err)
+		// Redact any userinfo in the source so a credential-bearing URL never
+		// reaches the error line. RedactUserinfo is the identity on clean URLs, so
+		// every pinned public-source test stays byte-identical.
+		return fmt.Sprintf("gc import add %q: %v", gitcred.RedactUserinfo(source), err)
 	}
 }
 
@@ -673,6 +700,7 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
+		printCredentialHint(stderr, err)
 		return 1
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
@@ -683,6 +711,7 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 	lock, err = installLockedImports(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
+		printCredentialHint(stderr, err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Installed %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
@@ -771,11 +800,13 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "gc import upgrade %q: %v\n", target, err) //nolint:errcheck
+			printCredentialHint(stderr, err)
 			return 1
 		}
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import upgrade: %v\n", err) //nolint:errcheck
+		printCredentialHint(stderr, err)
 		return 1
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
@@ -1346,15 +1377,15 @@ func hasRepositoryRefInSource(source string) bool {
 	return strings.Contains(source, "#")
 }
 
-func defaultImportVersionForSource(source string) (string, error) {
-	resolved, err := resolveImportVersion(source, "")
+func defaultImportVersionForSource(cityRoot, source string) (string, error) {
+	resolved, err := resolveImportVersion(cityRoot, source, "")
 	if err == nil {
 		return defaultImportConstraint(resolved.Version)
 	}
 	if !errors.Is(err, packman.ErrNoSemverTags) {
 		return "", err
 	}
-	commit, err := resolveImportHeadCommit(source)
+	commit, err := resolveImportHeadCommit(cityRoot, source)
 	if err != nil {
 		return "", err
 	}
@@ -1399,20 +1430,31 @@ func localGitRepoRoot(targetDir string) (string, bool, error) {
 	return strings.TrimSpace(string(out)), true, nil
 }
 
-func defaultImportHeadCommit(source string) (string, error) {
+func defaultImportHeadCommit(cityRoot, source string) (string, error) {
 	cloneURL := config.NormalizeRemoteSource(source)
-	cmd := exec.Command("git", "ls-remote", cloneURL, "HEAD")
+	inj, err := gitcred.CredentialedNetworkArgs("", cityRoot, cloneURL)
+	if err != nil {
+		return "", fmt.Errorf("loading git credentials for %s: %w", gitcred.RedactUserinfo(cloneURL), err)
+	}
+	// inj.CfgArgs go before the subcommand. This site keeps its SanitizedEnv base
+	// and does NOT add the UntrustedRemoteGitConfigArgs hardening that the
+	// importsvc HEAD probe (site 3) carries — a pre-existing asymmetry preserved
+	// here for byte-identical behavior and flagged for a later unify.
+	cmd := exec.Command("git", append(inj.CfgArgs, "ls-remote", cloneURL, "HEAD")...)
 	// Strip git-locating env vars so a leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE
 	// (or config injection) from a parent pre-commit hook or worktree tooling
 	// cannot perturb how this remote HEAD probe runs.
-	cmd.Env = git.SanitizedEnv()
+	cmd.Env = append(git.SanitizedEnv(), inj.Env...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("resolving HEAD for %q: %w", source, err)
+		if authErr := gitcred.ClassifyAuthError(cloneURL, inj, string(out), err); authErr != nil {
+			return "", authErr
+		}
+		return "", fmt.Errorf("resolving HEAD for %q: %w", gitcred.RedactUserinfo(source), err)
 	}
 	fields := strings.Fields(string(out))
 	if len(fields) == 0 {
-		return "", fmt.Errorf("resolving HEAD for %q: empty response", source)
+		return "", fmt.Errorf("resolving HEAD for %q: empty response", gitcred.RedactUserinfo(source))
 	}
 	return fields[0], nil
 }
