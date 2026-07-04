@@ -24,10 +24,10 @@ origin/main. The cherry-pick applied without conflicts.
 | # | Criterion | Result | Evidence |
 |---|-----------|--------|----------|
 | 1 | Review PASS present | PASS | ga-bytd3q is closed with `REVIEW VERDICT: PASS` for commit 5e8459b3893fdc2e18f127c8200c98fc1fac1cf2. |
-| 2 | Acceptance criteria met | PASS | Verified on the final clean branch (a61385aa2) after the compile fix below; `go build ./...` and `go vet ./...` clean, `gofmt -l` clean on the touched file. |
-| 3 | Tests pass | PASS | See "Test verification after fix" below. |
+| 2 | Acceptance criteria met | PASS | Verified on the final clean branch (code commit a61385aa2, gate tip 00b7977a); `go build ./...`, `go vet ./...`, `git diff --check`, and `gofmt -l` on touched Go files are clean. |
+| 3 | Tests pass | PASS | See "Deployer re-verification before PR" below; `make test-fast-parallel` passed all 8 shards on the final branch. |
 | 4 | No high-severity review findings open | PASS | Reviewer notes report no blockers and only one non-blocking security observation; unresolved HIGH finding count is 0. |
-| 5 | Final branch is clean | PASS | Worktree clean at a61385aa2. |
+| 5 | Final branch is clean | PASS | Worktree clean before this evidence refresh; final status rechecked after committing the refreshed gate. |
 | 6 | Branch diverges cleanly from main | PASS | Clean branch was cut from origin/main and the reviewed commit cherry-picked with no merge conflicts. |
 | 7 | Single feature theme | PASS | The clean branch contains only the status/API scoped BdStore cancellation change (plus the one-line test compile fix), not the unrelated graph-only readiness parent stack. |
 
@@ -44,30 +44,21 @@ Fix: commit a61385aa2 on `release/ga-nlz18e-ctx-bound-scoped-bdstore` — one-li
 compile-only, no behavior change (passes `context.Background()`, matching the
 sibling call sites).
 
-## Test verification after fix
+## Deployer re-verification before PR
 
-Ran with `TMPDIR=/var/tmp/gc-nlz18e-verify2*` (this box's `/tmp` tmpfs is at
-~100% full independent of this change — see mail to mayor 2026-07-04; using
-`/var/tmp` avoids spurious "no space left on device" noise).
+Ran with `TMPDIR=/var/tmp/gc-nlz18e-deploy` from branch tip 00b7977a (same code
+candidate a61385aa2; the only later commit is this release gate).
 
-- `go build ./...`, `go vet ./...`: clean.
-- `gofmt -l internal/api/store_health_test.go`: clean.
-- `go test ./internal/api/... -run TestComputeStoreHealthUsesDoltlitePathFromMetadata -v`: PASS.
-- `go test ./internal/api/...` (full package): all PASS (58.0s).
-- `TMPDIR=/var/tmp/gc-nlz18e-verify2-full make test-fast-parallel`: 5/8 shards
-  PASS. 3 shards failed, all on the same 3 tests:
-  `TestRegisterCityWithSupervisorRejectsStandaloneController`,
-  `TestRegisterCityWithSupervisorRejectsStandaloneControllerForStoppedManagedCity`,
-  `TestSupervisorCreatesControllerSocketForManagedCity` (`cmd/gc`, unrelated
-  supervisor/dolt-lifecycle package — no import relationship to
-  `internal/api/store_health_test.go`). All three fail on a hard 50-60s
-  supervisor/dolt-city startup timeout, not an assertion mismatch.
-  **Confirmed pre-existing/environmental, not caused by this change:** re-ran
-  the same 3 tests in isolation against a clean, unmodified `origin/main`
-  checkout (`git worktree add --detach /var/tmp/gc-main-verify-nlz18e
-  origin/main`, commit d82074594) under the same load — identical failures,
-  identical signatures, comparable timings (46-60s). This box is running a
-  very large number of concurrent agent/test workloads right now; these tests
-  spin up a real supervisor + dolt sql-server and are sensitive to that load.
-  Worktree removed after comparison (`git worktree remove
-  /var/tmp/gc-main-verify-nlz18e`).
+- `git fetch origin main`: origin/main remains d82074594.
+- `git merge-tree --write-tree HEAD origin/main`: PASS, tree
+  a9fe60a569e349d2eed6213de90f28aa85fa00c1, no conflicts.
+- `git diff --check origin/main...HEAD`: clean.
+- `gofmt -l` on all touched Go files: clean.
+- `go build ./...`: PASS.
+- `go vet ./...`: PASS.
+- `go test ./internal/api/... ./internal/beads/...`: PASS.
+- `GC_REAL_PROCESS_SIGNAL_TESTS=1 GC_FAST_UNIT=0 go test ./cmd/gc ./internal/api
+  -run 'Test(ScopedBdStoreForCityKillsChildOnCtxCancel|LoadStatusSessionSnapshotKillsBdChildOnTimeout|StatusSessionSnapshotKillsBdChildOnTimeout|StatusListStoreWithTimeoutKillsBdChildOnTimeout|ComputeStoreHealthUsesDoltlitePathFromMetadata)$'
+  -count=1 -v`: PASS.
+- `make test-fast-parallel`: PASS, all 8 fast shards passed.
+- `make dashboard-check`: PASS; OpenAPI/generated dashboard paths have no diff.
