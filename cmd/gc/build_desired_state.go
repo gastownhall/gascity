@@ -4917,13 +4917,19 @@ func materializeProviderOverlaysBeforeFingerprint(
 		PackOverlayDirs:     packDirs,
 		OverlayDir:          overlayDir,
 	})
+	// Skip reconciler-owned mergeable hook/settings files here: hooks.Install
+	// runs immediately after this staging on the SAME workDir (see
+	// prepareTemplateResolution), so it must be the sole writer of those files.
+	// Staging them too leaves two writers with disagreeing hook-entry matchers
+	// and a permanent codex-hooks-drift hybrid. The runtime
+	// task-worktree staging path keeps staging them — it is their sole writer.
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDir(od, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDir(overlayDir, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}
