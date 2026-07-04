@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,7 +68,7 @@ func TestMaybeRotateSupervisorLogBelowCapIsNoop(t *testing.T) {
 		t.Fatalf("seed log: %v", err)
 	}
 
-	if err := maybeRotateSupervisorLog(logPath, time.Now()); err != nil {
+	if err := maybeRotateSupervisorLog(logPath, time.Now(), io.Discard); err != nil {
 		t.Fatalf("maybeRotateSupervisorLog: %v", err)
 	}
 
@@ -87,7 +88,7 @@ func TestMaybeRotateSupervisorLogMissingFileIsNoop(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "supervisor.log")
 	setSupervisorLogRotation(t, 1, 3)
 
-	if err := maybeRotateSupervisorLog(logPath, time.Now()); err != nil {
+	if err := maybeRotateSupervisorLog(logPath, time.Now(), io.Discard); err != nil {
 		t.Fatalf("maybeRotateSupervisorLog on missing file: %v", err)
 	}
 	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
@@ -104,7 +105,7 @@ func TestMaybeRotateSupervisorLogArchivesAndTruncates(t *testing.T) {
 	}
 
 	now := time.Date(2026, 7, 3, 10, 11, 12, 0, time.UTC)
-	if err := maybeRotateSupervisorLog(logPath, now); err != nil {
+	if err := maybeRotateSupervisorLog(logPath, now, io.Discard); err != nil {
 		t.Fatalf("maybeRotateSupervisorLog: %v", err)
 	}
 
@@ -147,7 +148,7 @@ func TestMaybeRotateSupervisorLogPreservesAppendWriters(t *testing.T) {
 	}
 	defer writer.Close() //nolint:errcheck // test handle
 
-	if err := maybeRotateSupervisorLog(logPath, time.Now()); err != nil {
+	if err := maybeRotateSupervisorLog(logPath, time.Now(), io.Discard); err != nil {
 		t.Fatalf("maybeRotateSupervisorLog: %v", err)
 	}
 
@@ -172,7 +173,7 @@ func TestMaybeRotateSupervisorLogSameSecondRotationsGetUniqueNames(t *testing.T)
 		if err := os.WriteFile(logPath, []byte(generation), 0o644); err != nil {
 			t.Fatalf("seed log: %v", err)
 		}
-		if err := maybeRotateSupervisorLog(logPath, now); err != nil {
+		if err := maybeRotateSupervisorLog(logPath, now, io.Discard); err != nil {
 			t.Fatalf("maybeRotateSupervisorLog(%q): %v", generation, err)
 		}
 	}
@@ -220,7 +221,7 @@ func TestMaybeRotateSupervisorLogPrunesOldestArchives(t *testing.T) {
 		t.Fatalf("seed log: %v", err)
 	}
 
-	if err := maybeRotateSupervisorLog(logPath, now); err != nil {
+	if err := maybeRotateSupervisorLog(logPath, now, io.Discard); err != nil {
 		t.Fatalf("maybeRotateSupervisorLog: %v", err)
 	}
 
@@ -241,9 +242,159 @@ func TestMaybeRotateSupervisorLogDirectoryPathErrors(t *testing.T) {
 		t.Fatalf("seed log path as directory: %v", err)
 	}
 
-	err := maybeRotateSupervisorLog(logPath, time.Now())
+	err := maybeRotateSupervisorLog(logPath, time.Now(), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "is a directory") {
 		t.Fatalf("maybeRotateSupervisorLog on directory = %v, want is-a-directory error", err)
+	}
+}
+
+// TestMaybeRotateSupervisorLogBoundsArchiveAndWarnsOnDroppedTail pins the
+// archive bound: an oversized log is archived only up to
+// supervisorLogArchiveMaxBytes, the tail beyond the bound is dropped with a
+// warning, and the active log is still truncated.
+func TestMaybeRotateSupervisorLogBoundsArchiveAndWarnsOnDroppedTail(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "supervisor.log")
+	setSupervisorLogRotation(t, 1024, 3)
+	prevBound := supervisorLogArchiveMaxBytes
+	supervisorLogArchiveMaxBytes = 2048
+	t.Cleanup(func() { supervisorLogArchiveMaxBytes = prevBound })
+
+	content := strings.Repeat("b", 8192)
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("seed log: %v", err)
+	}
+
+	var warn bytes.Buffer
+	if err := maybeRotateSupervisorLog(logPath, time.Now(), &warn); err != nil {
+		t.Fatalf("maybeRotateSupervisorLog: %v", err)
+	}
+
+	archives := listSupervisorLogArchives(t, logPath)
+	if len(archives) != 1 {
+		t.Fatalf("archives = %v, want exactly one", archives)
+	}
+	if got := gunzipSupervisorLogArchive(t, archives[0]); got != content[:2048] {
+		t.Fatalf("archive holds %d bytes, want the first 2048 bytes of the log", len(got))
+	}
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat active log: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("active log size = %d, want 0 after rotation", info.Size())
+	}
+	if !strings.Contains(warn.String(), "archive bound") {
+		t.Fatalf("warn = %q, want dropped-tail notice mentioning the archive bound", warn.String())
+	}
+}
+
+// TestMaybeRotateSupervisorLogSweepsStagingLeftovers pins the staging
+// sweep: .archive-*.tmp leftovers from rotations that crashed between
+// staging and rename are removed by the next successful rotation.
+func TestMaybeRotateSupervisorLogSweepsStagingLeftovers(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "supervisor.log")
+	setSupervisorLogRotation(t, 1024, 3)
+	leftover := logPath + ".archive-12345.tmp"
+	if err := os.WriteFile(leftover, []byte("half-staged archive"), 0o644); err != nil {
+		t.Fatalf("seed staging leftover: %v", err)
+	}
+	content := strings.Repeat("api: listen 127.0.0.1:8372 failed\n", 64)
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("seed log: %v", err)
+	}
+
+	if err := maybeRotateSupervisorLog(logPath, time.Now(), io.Discard); err != nil {
+		t.Fatalf("maybeRotateSupervisorLog: %v", err)
+	}
+
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("stat staging leftover = %v, want swept away", err)
+	}
+	if archives := listSupervisorLogArchives(t, logPath); len(archives) != 1 {
+		t.Fatalf("archives = %v, want exactly one intact archive", archives)
+	}
+}
+
+// tryGunzipSupervisorLogArchive decompresses one archive, returning an
+// error instead of failing the test so concurrency tests can treat a
+// corrupt archive as "contributes nothing" rather than aborting.
+func tryGunzipSupervisorLogArchive(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close() //nolint:errcheck // read-only test handle
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", err
+	}
+	defer gz.Close() //nolint:errcheck // read-only test handle
+	data, err := io.ReadAll(gz)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// TestMaybeRotateSupervisorLogConcurrentRotationsNeverLoseContent is the
+// concurrency regression for the #3897 hardening. Rotation used to stage
+// every racer's archive at one fixed path (<log>.archive.tmp), so one
+// racer's O_TRUNC wiped another's staged bytes before its rename: the
+// corrupt archive was renamed into place and the truncate then destroyed
+// the only intact copy of the log. Production serializes rotation under
+// the supervisor single-instance lock; this test drives the unlocked
+// rotation directly to pin the second layer of defense — per-rotation
+// os.CreateTemp staging must never lose content even without the lock.
+func TestMaybeRotateSupervisorLogConcurrentRotationsNeverLoseContent(t *testing.T) {
+	// keep must exceed the racer count: pruning a racer's full archive
+	// mid-race would read as a false content loss.
+	setSupervisorLogRotation(t, 1024, 32)
+	// Multi-megabyte content forces the gzip copy through several write
+	// syscalls, so racing rotations genuinely interleave instead of each
+	// landing one atomic write.
+	content := strings.Repeat("api: listen 127.0.0.1:8372 failed: bind: address already in use\n", 32*1024)
+
+	const rounds = 10
+	const racers = 16
+	for round := 0; round < rounds; round++ {
+		logPath := filepath.Join(t.TempDir(), "supervisor.log")
+		if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+			t.Fatalf("round %d: seed log: %v", round, err)
+		}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := 0; i < racers; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				// Stagger arrivals across the rotation window so late
+				// racers hit every phase of an in-flight rotation, the
+				// shape of supervisor processes racing at startup.
+				time.Sleep(time.Duration(i) * 500 * time.Microsecond)
+				// Individual racers may error (losing a staging or rename
+				// race); the invariant under test is content survival, not
+				// per-call success.
+				_ = maybeRotateSupervisorLog(logPath, time.Now(), io.Discard)
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		fullCopies := 0
+		archives := listSupervisorLogArchives(t, logPath)
+		for _, a := range archives {
+			if got, err := tryGunzipSupervisorLogArchive(a); err == nil && got == content {
+				fullCopies++
+			}
+		}
+		if active, err := os.ReadFile(logPath); err == nil && string(active) == content {
+			fullCopies++
+		}
+		if fullCopies == 0 {
+			t.Fatalf("round %d: original log content lost: no intact copy across %d archives and the active log", round, len(archives))
+		}
 	}
 }
 
