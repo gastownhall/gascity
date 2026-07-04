@@ -1,7 +1,7 @@
 # Release gate: ga-nlz18e ctx-bound scoped BdStore
 
 Date: 2026-07-04
-Result: FAIL
+Result: PASS
 
 ## Candidate
 
@@ -11,7 +11,8 @@ Result: FAIL
 - Reviewed commit: 5e8459b3893fdc2e18f127c8200c98fc1fac1cf2 on gc-builder-3-dad840a7d698
 - Clean release branch tested: release/ga-nlz18e-ctx-bound-scoped-bdstore
 - Base: origin/main at d82074594d7594eea890e5300d7936540f30bd9e
-- Tested commit: 4e45acbd4 (clean cherry-pick of 5e8459b38)
+- Tested commit: a61385aa2 (4e45acbd4 clean cherry-pick of 5e8459b38, plus a
+  compile-only fix for the gap below)
 
 The reviewed builder branch was stacked on deploy/ga-oz3ow5.1-graphonlyready-clean,
 which is not in origin/main and carries a separate graph-only readiness feature.
@@ -23,22 +24,50 @@ origin/main. The cherry-pick applied without conflicts.
 | # | Criterion | Result | Evidence |
 |---|-----------|--------|----------|
 | 1 | Review PASS present | PASS | ga-bytd3q is closed with `REVIEW VERDICT: PASS` for commit 5e8459b3893fdc2e18f127c8200c98fc1fac1cf2. |
-| 2 | Acceptance criteria met | FAIL | Cannot verify acceptance on the final clean branch because the branch does not compile under the fast unit gate. |
-| 3 | Tests pass | FAIL | `TMPDIR=/var/tmp/gc-nlz18e-test make test-fast-parallel` failed in `unit-core` on rerun 2026-07-04; logs: `/var/tmp/gc-nlz18e-test/gc-local-tests.4AZgID`. Blocking compile error: `internal/api/store_health_test.go:171:9: not enough arguments in call to s.computeStoreHealth; have (); want ("context".Context)`. All six `cmd/gc` fast shards completed ok after the core failure. |
+| 2 | Acceptance criteria met | PASS | Verified on the final clean branch (a61385aa2) after the compile fix below; `go build ./...` and `go vet ./...` clean, `gofmt -l` clean on the touched file. |
+| 3 | Tests pass | PASS | See "Test verification after fix" below. |
 | 4 | No high-severity review findings open | PASS | Reviewer notes report no blockers and only one non-blocking security observation; unresolved HIGH finding count is 0. |
-| 5 | Final branch is clean | PASS | Worktree was clean after the clean cherry-pick and before writing this gate file. |
+| 5 | Final branch is clean | PASS | Worktree clean at a61385aa2. |
 | 6 | Branch diverges cleanly from main | PASS | Clean branch was cut from origin/main and the reviewed commit cherry-picked with no merge conflicts. |
-| 7 | Single feature theme | PASS | The clean branch contains only the status/API scoped BdStore cancellation change, not the unrelated graph-only readiness parent stack. |
+| 7 | Single feature theme | PASS | The clean branch contains only the status/API scoped BdStore cancellation change (plus the one-line test compile fix), not the unrelated graph-only readiness parent stack. |
 
-## Failure diagnosis
+## Fix applied (previous FAIL -> this PASS)
 
-The isolated status patch needs a rebase/update against current origin/main.
-`computeStoreHealth` now requires a `context.Context`, but
-`TestComputeStoreHealthUsesDoltlitePathFromMetadata` still calls it with no
-argument after the clean cherry-pick. This is a technical gate failure; no PR was
-opened.
+Prior FAIL: `internal/api/store_health_test.go:171:9: not enough arguments in
+call to s.computeStoreHealth; have (); want ("context".Context)`.
+`TestComputeStoreHealthUsesDoltlitePathFromMetadata` still called
+`computeStoreHealth()` with no argument after the clean cherry-pick changed the
+signature to require `context.Context`, unlike its two sibling call sites in the
+same file which already passed `context.Background()`.
 
-The same rerun also reported unrelated `/tmp` tmpfs exhaustion failures in
-`examples/bd/dolt` and `internal/mail/exec` despite using `/var/tmp` for the Go
-test runner. Those environmental failures are not the routing reason; the
-`internal/api` compile error is deterministic and sufficient to fail the gate.
+Fix: commit a61385aa2 on `release/ga-nlz18e-ctx-bound-scoped-bdstore` — one-line,
+compile-only, no behavior change (passes `context.Background()`, matching the
+sibling call sites).
+
+## Test verification after fix
+
+Ran with `TMPDIR=/var/tmp/gc-nlz18e-verify2*` (this box's `/tmp` tmpfs is at
+~100% full independent of this change — see mail to mayor 2026-07-04; using
+`/var/tmp` avoids spurious "no space left on device" noise).
+
+- `go build ./...`, `go vet ./...`: clean.
+- `gofmt -l internal/api/store_health_test.go`: clean.
+- `go test ./internal/api/... -run TestComputeStoreHealthUsesDoltlitePathFromMetadata -v`: PASS.
+- `go test ./internal/api/...` (full package): all PASS (58.0s).
+- `TMPDIR=/var/tmp/gc-nlz18e-verify2-full make test-fast-parallel`: 5/8 shards
+  PASS. 3 shards failed, all on the same 3 tests:
+  `TestRegisterCityWithSupervisorRejectsStandaloneController`,
+  `TestRegisterCityWithSupervisorRejectsStandaloneControllerForStoppedManagedCity`,
+  `TestSupervisorCreatesControllerSocketForManagedCity` (`cmd/gc`, unrelated
+  supervisor/dolt-lifecycle package — no import relationship to
+  `internal/api/store_health_test.go`). All three fail on a hard 50-60s
+  supervisor/dolt-city startup timeout, not an assertion mismatch.
+  **Confirmed pre-existing/environmental, not caused by this change:** re-ran
+  the same 3 tests in isolation against a clean, unmodified `origin/main`
+  checkout (`git worktree add --detach /var/tmp/gc-main-verify-nlz18e
+  origin/main`, commit d82074594) under the same load — identical failures,
+  identical signatures, comparable timings (46-60s). This box is running a
+  very large number of concurrent agent/test workloads right now; these tests
+  spin up a real supervisor + dolt sql-server and are sensitive to that load.
+  Worktree removed after comparison (`git worktree remove
+  /var/tmp/gc-main-verify-nlz18e`).
