@@ -168,7 +168,7 @@ func TestComputeStoreHealthUsesDoltlitePathFromMetadata(t *testing.T) {
 		cityBeadStore: beads.NewMemStore(),
 	}
 	s := &Server{state: state}
-	got := s.computeStoreHealth()
+	got := s.computeStoreHealth(context.Background())
 	if got == nil {
 		t.Fatal("computeStoreHealth returned nil")
 	}
