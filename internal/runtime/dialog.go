@@ -1008,6 +1008,18 @@ func ContainsRateLimitDialog(content string) bool {
 		strings.Contains(content, "Rate limit")
 }
 
+// ContainsModelSwitchModal reports whether pane content shows the mid-session
+// "approaching rate limits — switch to a cheaper model?" modal that Codex/GPT
+// raises (offering to downgrade the model). Unlike ContainsRateLimitDialog — a
+// permissive matcher used only at startup — this requires BOTH the switch offer
+// and the keep-current-model option, so ordinary agent output that merely
+// mentions "rate limit" cannot false-match and receive spurious keystrokes when
+// checked mid-session against an arbitrary working pane.
+func ContainsModelSwitchModal(content string) bool {
+	return strings.Contains(content, "Keep current model") &&
+		strings.Contains(content, "Switch to ")
+}
+
 // ContainsProviderRateLimitScreen reports whether pane content has
 // high-confidence provider rate-limit screen evidence.
 func ContainsProviderRateLimitScreen(content string) bool {
