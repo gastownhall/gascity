@@ -127,6 +127,112 @@ func (g *Git) WorktreeRemove(path string, force bool) error {
 	return nil
 }
 
+// WorktreeAdd creates a git worktree at path checked out to ref. When detach
+// is true the worktree is left at a detached HEAD on ref; otherwise git checks
+// out ref (creating a branch named after the leaf directory when ref is not an
+// existing branch).
+//
+// This is the create half of the worktree lifecycle whose reap half is
+// WorktreeRemove/WorktreeList/WorktreePrune. It is written to provision
+// pre-seeded pool slots: git worktree add refuses a non-empty existing
+// directory even with --force, but pool member directories already contain
+// seed files (.claude, .gc). WorktreeAdd evacuates any pre-seeded contents,
+// populates the worktree in place, then restores the seed on top of the
+// checkout so the checked-out tree wins on collision.
+func (g *Git) WorktreeAdd(path, ref string, detach bool) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("worktree add: path is required")
+	}
+	if strings.TrimSpace(ref) == "" {
+		return fmt.Errorf("worktree add %q: ref is required", path)
+	}
+	// Ensure the parent exists so git can create the leaf worktree directory
+	// under a not-yet-materialized worktrees root.
+	if parent := filepath.Dir(path); parent != "" {
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			return fmt.Errorf("creating worktree parent %q: %w", parent, err)
+		}
+	}
+
+	seed, err := evacuateSeed(path)
+	if err != nil {
+		return fmt.Errorf("evacuating pre-seeded worktree dir %q: %w", path, err)
+	}
+
+	args := []string{"worktree", "add"}
+	if detach {
+		args = append(args, "--detach")
+	}
+	args = append(args, path, ref)
+	if _, err := g.run(args...); err != nil {
+		if seed != "" {
+			_ = restoreSeed(seed, path) // best effort; surface the add error
+		}
+		return fmt.Errorf("adding worktree %q at %q: %w", path, ref, err)
+	}
+
+	if seed != "" {
+		if err := restoreSeed(seed, path); err != nil {
+			return fmt.Errorf("restoring seed into worktree %q: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// evacuateSeed moves the top-level contents of dir into a temporary sibling
+// directory when dir exists and is non-empty, returning that temp directory
+// (empty string when there was nothing to evacuate). git worktree add refuses
+// to populate a non-empty existing directory, so pre-seeded contents are
+// staged out of the way and restored by restoreSeed afterwards.
+func evacuateSeed(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	if len(entries) == 0 {
+		return "", nil
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(dir), "."+filepath.Base(dir)+".seed-")
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		if err := os.Rename(filepath.Join(dir, e.Name()), filepath.Join(tmp, e.Name())); err != nil {
+			return "", fmt.Errorf("moving %q aside: %w", e.Name(), err)
+		}
+	}
+	return tmp, nil
+}
+
+// restoreSeed moves entries from the seed temp directory back into dst,
+// skipping any entry that the checkout already produced (the tracked file
+// wins over the seed copy), then removes the now-empty seed directory.
+func restoreSeed(seed, dst string) error {
+	entries, err := os.ReadDir(seed)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		src := filepath.Join(seed, e.Name())
+		target := filepath.Join(dst, e.Name())
+		if _, err := os.Lstat(target); err == nil {
+			// Checkout already produced this path; drop the seed copy.
+			if err := os.RemoveAll(src); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.Rename(src, target); err != nil {
+			return fmt.Errorf("restoring %q: %w", e.Name(), err)
+		}
+	}
+	return os.RemoveAll(seed)
+}
+
 // WorktreeList returns all worktrees in porcelain format.
 func (g *Git) WorktreeList() ([]Worktree, error) {
 	out, err := g.run("worktree", "list", "--porcelain")
