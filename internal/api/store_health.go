@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -15,7 +16,7 @@ const storeHealthCacheTTL = 30 * time.Second
 
 // cachedStoreHealth returns the memoized StoreHealth block, refreshing
 // when the TTL has elapsed. Safe for concurrent callers.
-func (s *Server) cachedStoreHealth(now time.Time) *StatusStoreHealth {
+func (s *Server) cachedStoreHealth(ctx context.Context, now time.Time) *StatusStoreHealth {
 	s.storeHealthMu.Lock()
 	if s.storeHealthEntry != nil && now.Before(s.storeHealthExpires) {
 		entry := s.storeHealthEntry
@@ -28,7 +29,7 @@ func (s *Server) cachedStoreHealth(now time.Time) *StatusStoreHealth {
 	}
 	s.storeHealthMu.Unlock()
 
-	h := compute()
+	h := compute(ctx)
 
 	s.storeHealthMu.Lock()
 	defer s.storeHealthMu.Unlock()
@@ -43,7 +44,7 @@ func (s *Server) cachedStoreHealth(now time.Time) *StatusStoreHealth {
 // computeStoreHealth measures the Dolt store on disk and the latest
 // gc.store.maintenance event via the server's State. Returns nil when
 // the city path is empty (no state to measure against).
-func (s *Server) computeStoreHealth() *StatusStoreHealth {
+func (s *Server) computeStoreHealth(ctx context.Context) *StatusStoreHealth {
 	cityPath := s.state.CityPath()
 	if cityPath == "" {
 		return nil
@@ -53,7 +54,7 @@ func (s *Server) computeStoreHealth() *StatusStoreHealth {
 	// context/timeout through WalkSize is deferred until it shows up
 	// in profiles.
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
-	rows := countBeadStoreRows(s.state.CityBeadStore())
+	rows := countBeadStoreRows(ctx, s.state, s.state.CityBeadStore())
 	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider())
 	h := storehealth.Compute(cityPath, size, rows, lastAt, lastStatus)
 	return statusStoreHealthFromDomain(h)
@@ -81,12 +82,15 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 // store is nil or the scan fails — the ratio is best-effort. The
 // closed-inclusive query is never answerable from the in-memory cache,
 // so this path always hydrates; counting closed history without
-// hydration needs backend support (#1896 follow-up).
-func countBeadStoreRows(store beads.Store) int {
+// hydration needs backend support (#1896 follow-up). Because it always
+// hydrates, this is the store-health block's exposure to ga-cdmx6x's
+// bd-child leak; statusListStoreWithTimeout's state.ScopedStoreLike wiring
+// covers it the same way as the work-count fallback.
+func countBeadStoreRows(ctx context.Context, state State, store beads.Store) int {
 	if store == nil {
 		return 0
 	}
-	list, err := statusListStoreWithTimeout(store, beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	list, err := statusListStoreWithTimeout(ctx, state, store, beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err != nil {
 		return 0
 	}

@@ -124,7 +124,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
-	sessionSnapshot := s.statusSessionSnapshot()
+	sessionSnapshot := s.statusSessionSnapshot(ctx)
 	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
 
 	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
@@ -285,7 +285,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// sub-cache). Omitted in lite mode so a cold lite poll never triggers it.
 	var storeHealth *StatusStoreHealth
 	if !lite {
-		storeHealth = s.cachedStoreHealth(time.Now())
+		storeHealth = s.cachedStoreHealth(ctx, time.Now())
 	}
 
 	return StatusBody{
@@ -436,7 +436,7 @@ type statusSessionInfo struct {
 	state       session.State
 }
 
-func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
+func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapshot {
 	snapshot := statusSessionSnapshot{
 		bySessionName: make(map[string]statusSessionInfo),
 		byTemplate:    make(map[string][]statusSessionInfo),
@@ -446,6 +446,22 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 		return snapshot
 	}
 
+	// A throwaway, ctx-bound clone of store when it's bd-CLI-backed: on
+	// timeout below, canceling reqCtx kills an in-flight bd child instead
+	// of abandoning it to run past this function's return (gascity
+	// ga-cdmx6x). ScopedStoreLike answers (nil, nil) for non-bd-CLI
+	// backends, which have no subprocess to leak — those keep reading
+	// through store directly, unchanged.
+	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
+	defer cancel()
+	readStore := store
+	if scoped, err := s.state.ScopedStoreLike(reqCtx, store); err != nil {
+		snapshot.partialErrors = []string{fmt.Sprintf("sessions: resolving scoped store: %v", err)}
+		return snapshot
+	} else if scoped != nil {
+		readStore = scoped
+	}
+
 	type snapshotResult struct {
 		rows          []beads.Bead
 		partialErrors []string
@@ -453,7 +469,7 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 	}
 	done := make(chan snapshotResult, 1)
 	go func() {
-		rows, partialErrors, err := sessionReadModelRows(store)
+		rows, partialErrors, err := sessionReadModelRows(readStore)
 		done <- snapshotResult{rows: rows, partialErrors: partialErrors, err: err}
 	}()
 
@@ -532,7 +548,7 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 		wg.Add(1)
 		go func(i int, rigName string, store beads.Store) {
 			defer wg.Done()
-			results[i] = statusStoreWorkCounts(ctx, rigName, store)
+			results[i] = statusStoreWorkCounts(ctx, s.state, rigName, store)
 		}(i, rigName, stores[rigName])
 	}
 	wg.Wait()
@@ -552,7 +568,7 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 // hydration-free Counter path. Operational count failures (timeouts,
 // connection errors) report a partial error without retrying via List —
 // the List scan would hit the same backend and pay the timeout again.
-func statusStoreWorkCounts(ctx context.Context, rigName string, store beads.Store) statusWorkResult {
+func statusStoreWorkCounts(ctx context.Context, state State, rigName string, store beads.Store) statusWorkResult {
 	if counter, ok := store.(beads.Counter); ok {
 		wc, err := statusCountWork(ctx, counter)
 		if err == nil {
@@ -563,7 +579,7 @@ func statusStoreWorkCounts(ctx context.Context, rigName string, store beads.Stor
 		}
 	}
 
-	list, err := statusListStoreWithTimeout(store, beads.ListQuery{AllowScan: true})
+	list, err := statusListStoreWithTimeout(ctx, state, store, beads.ListQuery{AllowScan: true})
 	var result statusWorkResult
 	if err != nil {
 		result.errs = append(result.errs, fmt.Sprintf("rig %s work: %v", rigName, err))
@@ -616,12 +632,22 @@ func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, er
 
 // statusListStoreWithTimeout lists with the per-store read timeout.
 // Store.List takes no context, so on timeout the goroutine is abandoned
-// (it keeps its connection until the scan returns). Counter-capable
-// stores avoid this path entirely; fixing it for the remaining stores
-// requires plumbing context through Store.List.
-func statusListStoreWithTimeout(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
+// (it keeps its connection until the scan returns) — unless state offers a
+// ctx-bound scoped clone of store (bd-CLI-backed stores do; native/file/mem
+// stores don't and are read unchanged), in which case cancellation kills
+// the in-flight backend command instead of abandoning it (gascity
+// ga-cdmx6x). Counter-capable stores avoid this path entirely.
+func statusListStoreWithTimeout(ctx context.Context, state State, store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
+	defer cancel()
+	readStore := store
+	if scoped, err := state.ScopedStoreLike(reqCtx, store); err != nil {
+		return nil, fmt.Errorf("resolving scoped store: %w", err)
+	} else if scoped != nil {
+		readStore = scoped
 	}
 	type listResult struct {
 		rows []beads.Bead
@@ -629,7 +655,7 @@ func statusListStoreWithTimeout(store beads.Store, query beads.ListQuery) ([]bea
 	}
 	done := make(chan listResult, 1)
 	go func() {
-		rows, err := store.List(query)
+		rows, err := readStore.List(query)
 		done <- listResult{rows: rows, err: err}
 	}()
 	select {

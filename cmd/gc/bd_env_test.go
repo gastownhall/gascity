@@ -318,6 +318,67 @@ func TestBdRuntimeEnvIncludesDoltHost(t *testing.T) {
 	}
 }
 
+// TestBdRuntimeEnvNoRecoveryMatchesRecoveryForExternalTarget proves the
+// NoRecovery variant (used by ga-cdmx6x's scoped throwaway stores) still
+// resolves an explicitly configured external Dolt target identically to
+// the recovery-allowing default — only the managed-dolt
+// recovery/health-check/autostart side effect is skipped, not the
+// ordinary external-config path.
+func TestBdRuntimeEnvNoRecoveryMatchesRecoveryForExternalTarget(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_HOST", "mini2.hippo-tilapia.ts.net")
+	t.Setenv("GC_DOLT_PORT", "3307")
+	t.Setenv("GC_DOLT_USER", "agent")
+	t.Setenv("GC_DOLT_PASSWORD", "s3cret")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := t.TempDir()
+	env, err := bdRuntimeEnvWithErrorNoRecovery(cityPath)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvWithErrorNoRecovery() error = %v", err)
+	}
+
+	if got := env["GC_DOLT_HOST"]; got != "mini2.hippo-tilapia.ts.net" {
+		t.Errorf("GC_DOLT_HOST = %q, want %q", got, "mini2.hippo-tilapia.ts.net")
+	}
+	if got := env["GC_DOLT_PORT"]; got != "3307" {
+		t.Errorf("GC_DOLT_PORT = %q, want %q", got, "3307")
+	}
+	if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
+		t.Errorf("BEADS_DOLT_AUTO_START = %q, want %q", got, "0")
+	}
+}
+
+// TestBdRuntimeEnvForRigNoRecoveryMatchesRecoveryForExternalTarget is
+// TestBdRuntimeEnvNoRecoveryMatchesRecoveryForExternalTarget for the
+// rig-scoped resolver.
+func TestBdRuntimeEnvForRigNoRecoveryMatchesRecoveryForExternalTarget(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_HOST", "mini2.hippo-tilapia.ts.net")
+	t.Setenv("GC_DOLT_PORT", "3307")
+	t.Setenv("GC_DOLT_USER", "agent")
+	t.Setenv("GC_DOLT_PASSWORD", "s3cret")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "repo")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: "rigs/repo"}}}
+
+	env, err := bdRuntimeEnvForRigWithErrorNoRecovery(cityPath, cfg, rigPath)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvForRigWithErrorNoRecovery() error = %v", err)
+	}
+	if got := env["GC_DOLT_HOST"]; got != "mini2.hippo-tilapia.ts.net" {
+		t.Errorf("GC_DOLT_HOST = %q, want %q", got, "mini2.hippo-tilapia.ts.net")
+	}
+	if got := env["GC_RIG"]; got != "repo" {
+		t.Errorf("GC_RIG = %q, want repo", got)
+	}
+}
+
 func TestBdRuntimeEnvDisablesCLIRemoteSync(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("BD_DOLT_SYNC_CLI_REMOTES", "true")
