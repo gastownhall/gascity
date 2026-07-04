@@ -884,6 +884,20 @@ func buildPreparedStartWithWorkDirResolver(
 	// those already-rendered strings so scaffold staging lands next to the
 	// session it actually launches into, not the directory templating assumed.
 	agentCfg.PreStart = retargetPreStartWorkDir(agentCfg.PreStart, preOverrideWorkDir, agentCfg.WorkDir)
+	// Worktree self-provision: a work_dir under the city worktrees root must
+	// be a real git checkout before the provider stages into it, or the
+	// session launches into a bare directory and strands its routed work.
+	// Runs here — after the final work_dir is known, before StartResolved
+	// triggers provider staging — and never on the attach/rebuild path.
+	if cityPath != "" {
+		rigRoot := strings.TrimSpace(tp.RigRoot)
+		if rigRoot == "" && agentCfg.Env != nil {
+			rigRoot = strings.TrimSpace(agentCfg.Env["GC_RIG_ROOT"])
+		}
+		if err := provisionSessionWorktree(cityPath, rigRoot, agentCfg.WorkDir); err != nil {
+			return nil, fmt.Errorf("session %s: %w", candidate.name(), err)
+		}
+	}
 	// Pre-flight stale-resume guard: if the bead carries a session_key whose
 	// keyed transcript is no longer on disk (provider session retention
 	// disabled, manual cleanup, worktree rebuild), a resume would hard-fail

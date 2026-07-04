@@ -2691,10 +2691,35 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 	if workspace := packWorkspaceSlug(request); workspace != "" {
 		return filepath.Join(base, workspace)
 	}
+	if wd := rigScopedTriggerWorktreeDir(bp, cfgAgent, base, request.WorkBeadID); wd != "" {
+		return wd
+	}
 	if slug := triggerBeadPathSlug(request.WorkBeadID, request.WorkBeadTitle); slug != "" {
 		return filepath.Join(base, slug)
 	}
 	return ""
+}
+
+// rigScopedTriggerWorktreeDir returns WorktreesRoot/<rig>/<beadID> for a work
+// bead routed to a rig-associated pool agent whose configured base already
+// opts into the city worktrees root; "" otherwise. This is the layout
+// reapClosedBeadWorktrees scans, so a worktree provisioned for a routed bead
+// is reclaimed when that bead closes — the previous <base>/<bead-slug> layout
+// sat outside the reaper's root and leaked.
+func rigScopedTriggerWorktreeDir(bp *agentBuildParams, cfgAgent *config.Agent, base, workBeadID string) string {
+	rigName := workdirutil.ConfiguredRigName(bp.cityPath, *cfgAgent, bp.rigs)
+	if rigName == "" {
+		return ""
+	}
+	root := workdirutil.WorktreesRoot(bp.cityPath)
+	if !isStrictlyUnderDir(root, base) {
+		return ""
+	}
+	leaf := safePathSlug(workBeadID, 32)
+	if leaf == "" {
+		return ""
+	}
+	return filepath.Join(root, rigName, leaf)
 }
 
 func packWorkspaceSlug(request SessionRequest) string {

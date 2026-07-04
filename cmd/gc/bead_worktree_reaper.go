@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/sling"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 // reapClosedBeadWorktrees scans per-bead git worktrees under
@@ -46,7 +47,10 @@ func reapClosedBeadWorktrees(
 		}
 	}
 
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	// Share one root with the create half (provisionSessionWorktree):
+	// workdirutil.WorktreesRoot honors GC_WORKTREES_DIR/T3CODE_* overrides,
+	// so worktrees provisioned under an overridden root are still reaped.
+	wtRoot := workdirutil.WorktreesRoot(cityPath)
 	reaped := 0
 
 	for rigName, store := range rigBeadStores {
@@ -125,8 +129,14 @@ func reapClosedBeadWorktrees(
 			branch, _ := wg.CurrentBranch()
 
 			// Remove the worktree. git worktree remove must be run from the
-			// main repo root, not from within the worktree being removed.
-			mainRepo := git.New(cityPath)
+			// repository that owns the worktree — the rig root — not from
+			// within the worktree being removed. Fall back to cityPath for
+			// layouts where the city itself is the repository.
+			repoRoot := workdirutil.RigRootForName(rigName, cfg.Rigs)
+			if repoRoot == "" {
+				repoRoot = cityPath
+			}
+			mainRepo := git.New(repoRoot)
 			if err := mainRepo.WorktreeRemove(worktreePath, false); err != nil {
 				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: removing %s: %v\n", worktreePath, err) //nolint:errcheck
 				continue
