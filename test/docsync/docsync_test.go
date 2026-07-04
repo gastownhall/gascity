@@ -41,6 +41,16 @@ var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates"}
 // gitignored scratch space for local work).
 var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp", "worktrees"}
 
+// isNestedWorktreeRoot reports whether path is the root of a linked git
+// worktree checked out inside this tree. Linked worktrees have a .git FILE
+// (a "gitdir: ..." pointer) rather than a .git directory, so this catches
+// worktrees regardless of naming convention — unlike docTreeIgnored's
+// "worktrees" entry above, which only catches that exact name.
+func isNestedWorktreeRoot(path string) bool {
+	info, err := os.Lstat(filepath.Join(path, ".git"))
+	return err == nil && !info.IsDir()
+}
+
 // knownBrokenLinks lists links to docs that do not exist yet. These are
 // excluded from TestLocalMarkdownLinks failures but still logged. Remove
 // entries as the missing docs are created.
@@ -803,8 +813,11 @@ func TestDocDirCoverage(t *testing.T) {
 		if known[name] {
 			continue
 		}
-		// Check if this directory contains any markdown.
 		dirPath := filepath.Join(root, name)
+		if isNestedWorktreeRoot(dirPath) {
+			continue
+		}
+		// Check if this directory contains any markdown.
 		hasMarkdown := false
 		_ = filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || hasMarkdown {
