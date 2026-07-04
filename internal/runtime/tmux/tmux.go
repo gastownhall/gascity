@@ -1717,6 +1717,7 @@ func submitEnterAndConfirm(sendEnter func() error, wake func(), busy func() (boo
 			lastErr = err
 			continue
 		}
+		lastErr = nil // a later send succeeded; don't surface an earlier transient failure
 		wake()
 		for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
 			if isBusy, err := busy(); err == nil && isBusy {

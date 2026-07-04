@@ -95,6 +95,33 @@ func TestSubmitEnterAndConfirmBestEffortWhenNeverBusy(t *testing.T) {
 	}
 }
 
+// TestSubmitEnterAndConfirmClearsStaleSendError proves a transient first-send
+// failure followed by a successful send (busy never observed) is reported as
+// best-effort delivery (false, nil), not a stale error — matching the
+// historical "nil == handed to tmux" contract.
+func TestSubmitEnterAndConfirmClearsStaleSendError(t *testing.T) {
+	var enters int
+	sendEnter := func() error {
+		enters++
+		if enters == 1 {
+			return errors.New("transient: no server yet")
+		}
+		return nil
+	}
+	busy := func() (bool, error) { return false, nil }
+
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	if err != nil {
+		t.Fatalf("err = %v, want nil (later send succeeded)", err)
+	}
+	if confirmed {
+		t.Fatal("confirmed = true, want false (never busy)")
+	}
+	if enters != submitEnterMaxSends {
+		t.Fatalf("enters = %d, want %d", enters, submitEnterMaxSends)
+	}
+}
+
 // TestSubmitEnterAndConfirmReturnsSendError proves a genuine tmux-layer send
 // failure (session gone) is surfaced, matching the pre-fix contract.
 func TestSubmitEnterAndConfirmReturnsSendError(t *testing.T) {
