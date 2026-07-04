@@ -1675,6 +1675,81 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 	return fmt.Errorf("agent not ready for input after %s: %w", timeout, lastErr)
 }
 
+// Verified-submit tuning. After the message is pasted, the submit Enter can be
+// dropped when it races an unfinished bracketed paste or a detached-pane wake,
+// leaving the text drafted but never submitted (ga-bwm). For providers with a
+// reliable "busy" indicator we confirm the submit landed and re-send Enter only
+// while the pane is still idle — an already-submitted turn (busy) is never
+// re-entered, so this cannot double-submit.
+const (
+	submitEnterMaxSends       = 3
+	submitConfirmPollsPerSend = 4
+	submitConfirmPollInterval = 150 * time.Millisecond
+	submitReEnterBackoff      = 200 * time.Millisecond
+)
+
+// submitEnterAndConfirm sends Enter and confirms the message submitted by
+// observing the agent transition to its busy/processing state. It re-sends
+// Enter only while the pane remains idle (submission not yet observed), so a
+// turn that already started can never receive a second Enter.
+//
+// Returns:
+//   - (true, nil)  — the agent went busy: the message submitted.
+//   - (false, nil) — Enter was delivered to tmux but busy was never observed
+//     within the budget (best-effort; preserves the historical "nil == handed
+//     to tmux" contract so callers do not re-paste).
+//   - (false, err) — every Enter send failed at the tmux layer.
+//
+// All side effects are injected so the decision logic is unit-testable without
+// a live tmux server.
+func submitEnterAndConfirm(sendEnter func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, error) {
+	var lastErr error
+	for send := 0; send < submitEnterMaxSends; send++ {
+		if send > 0 {
+			// Re-confirm the pane is still idle before re-sending. A turn that
+			// already submitted (busy) must never receive a second Enter.
+			if isBusy, err := busy(); err == nil && isBusy {
+				return true, nil
+			}
+			sleep(submitReEnterBackoff)
+		}
+		if err := sendEnter(); err != nil {
+			lastErr = err
+			continue
+		}
+		lastErr = nil // a later send succeeded; don't surface an earlier transient failure
+		wake()
+		for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
+			if isBusy, err := busy(); err == nil && isBusy {
+				return true, nil
+			}
+			sleep(submitConfirmPollInterval)
+		}
+	}
+	return false, lastErr
+}
+
+// paneBusy reports whether the target pane shows an active processing indicator
+// (Claude's live spinner / "esc to interrupt"). Used to confirm a submitted turn.
+func (t *Tmux) paneBusy(target string) (bool, error) {
+	lines, err := t.CapturePaneLines(target, promptObservationLines)
+	if err != nil {
+		return false, err
+	}
+	return paneContainsBusyIndicator(lines), nil
+}
+
+// submitVerifyEligible reports whether the target runs a provider whose busy
+// indicator is reliable enough to confirm a submit. Scoped to the Claude family
+// (the confirmed ga-bwm failure); other providers keep best-effort single
+// delivery so this change cannot regress them.
+func (t *Tmux) submitVerifyEligible(target string) bool {
+	if provider := t.providerEnv(target); provider != "" {
+		return sessionlog.ProviderFamily(provider) == "claude"
+	}
+	return t.targetLooksLikeProvider(target, "claude")
+}
+
 // NudgeSession sends a message to a Claude Code session reliably.
 // This is the canonical way to send messages to Claude sessions.
 // Uses: literal mode + 500ms debounce + separate Enter.
@@ -1734,21 +1809,35 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// detached but drop the submit key until a terminal resize wakes their loop.
 	t.WakePaneIfDetached(session)
 
-	// 5. Send Enter with retry (critical for message submission)
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			time.Sleep(200 * time.Millisecond)
+	// 5. Send Enter and, for providers with a reliable busy indicator, confirm
+	// the draft actually submitted — re-sending Enter only while the pane stays
+	// idle. A lost submit Enter (raced against the paste or a detached-pane
+	// wake) is the ga-bwm "drafted but not submitted" stall; confirming here
+	// removes the town's dependence on an external observer re-kicking the
+	// session. Providers without a reliable indicator keep best-effort delivery.
+	sendEnter := func() error { _, err := t.run("send-keys", "-t", target, "Enter"); return err }
+	wake := func() { t.WakePaneIfDetached(session) }
+	if t.submitVerifyEligible(target) {
+		if _, err := submitEnterAndConfirm(sendEnter, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep); err != nil {
+			return fmt.Errorf("failed to send Enter: %w", err)
 		}
-		if _, err := t.run("send-keys", "-t", target, "Enter"); err != nil {
+		return nil
+	}
+	// Fallback: best-effort single delivery (unchanged historical behavior).
+	var lastErr error
+	for attempt := 0; attempt < submitEnterMaxSends; attempt++ {
+		if attempt > 0 {
+			time.Sleep(submitReEnterBackoff)
+		}
+		if err := sendEnter(); err != nil {
 			lastErr = err
 			continue
 		}
 		// 6. Wake again so the submitted turn is processed promptly.
-		t.WakePaneIfDetached(session)
+		wake()
 		return nil
 	}
-	return fmt.Errorf("failed to send Enter after 3 attempts: %w", lastErr)
+	return fmt.Errorf("failed to send Enter after %d attempts: %w", submitEnterMaxSends, lastErr)
 }
 
 // NudgePane sends a message to a specific pane reliably.
