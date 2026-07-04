@@ -364,12 +364,60 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
-	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
-	if !follow {
-		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+	targets, err := workflowServeTargets(cityPath, cfg, &agentCfg, workDir, workEnv)
+	if err != nil {
 		return err
 	}
-	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+	workflowTracef("serve start agent=%s city=%s dir=%s stores=%d", agentCfg.QualifiedName(), cityPath, workDir, len(targets))
+	if !follow {
+		_, err := drainWorkflowServeWork(agentCfg, cityPath, targets, workQuery, stderr)
+		return err
+	}
+	return runWorkflowServeFollow(agentCfg, cityPath, targets, workQuery, stderr)
+}
+
+// workflowServeTarget pairs a bead store root with the env that pins the
+// serve loop's ready query and per-bead dispatch to that store.
+type workflowServeTarget struct {
+	storePath string
+	workEnv   map[string]string
+}
+
+// workflowServeTargets returns every store the serve loop must scan for the
+// resolved agent. A rig-scoped dispatcher instance watches only its own rig
+// store. The city-singleton control dispatcher also owns rig-routed control
+// beads — config.PreferredDeterministicControlDispatcher stamps rig-store
+// control beads with the singleton's qualified name — so its loop fans
+// across the city store plus every configured rig store, mirroring how the
+// one-shot path locates beads with findBeadAcrossStores. A city-only scan
+// strands rig control beads: their routed demand points at a loop that
+// cannot see them, while the rig dispatcher sees no demand and never scales
+// from zero (gastownhall/gascity#3872, incident 2). Agents with a custom
+// work_query keep the single-store behavior: their query text may embed
+// rig-specific template expansions that do not transfer across stores.
+func workflowServeTargets(cityPath string, cfg *config.City, agentCfg *config.Agent, workDir string, workEnv map[string]string) ([]workflowServeTarget, error) {
+	targets := []workflowServeTarget{{storePath: workDir, workEnv: workEnv}}
+	if !isWorkflowServeControlDispatcherAgent(*agentCfg) ||
+		strings.TrimSpace(agentCfg.Dir) != "" ||
+		strings.TrimSpace(agentCfg.WorkQuery) != "" {
+		return targets, nil
+	}
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		rigAgent := *agentCfg
+		rigAgent.Dir = rig.Name
+		env, err := controllerWorkQueryEnv(cityPath, cfg, &rigAgent)
+		if err != nil {
+			return nil, fmt.Errorf("building work query env for rig %q: %w", rig.Name, err)
+		}
+		targets = append(targets, workflowServeTarget{
+			storePath: agentCommandDir(cityPath, &rigAgent, cfg.Rigs),
+			workEnv:   env,
+		})
+	}
+	return targets, nil
 }
 
 func requireWorkflowServeFollowSessionEnv() error {
@@ -465,10 +513,25 @@ type workflowServeDrainResult struct {
 }
 
 // drainWorkflowServeWork runs the control-dispatcher drain loop to completion
-// for a single invocation. Returns whether it advanced a control bead and
-// whether the queue still contains only pending work so the --follow caller
-// can distinguish blocked work from genuine idle.
-func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
+// for a single invocation, scanning every serve target in order. Returns
+// whether it advanced a control bead and whether any store's queue still
+// contains only pending work so the --follow caller can distinguish blocked
+// work from genuine idle.
+func drainWorkflowServeWork(agentCfg config.Agent, cityPath string, targets []workflowServeTarget, workQuery string, stderr io.Writer) (workflowServeDrainResult, error) {
+	combined := workflowServeDrainResult{}
+	for _, target := range targets {
+		result, err := drainWorkflowServeWorkInStore(agentCfg, cityPath, target.storePath, workQuery, target.workEnv, stderr)
+		combined.processedAny = combined.processedAny || result.processedAny
+		combined.pendingAny = combined.pendingAny || result.pendingAny
+		if err != nil {
+			return combined, err
+		}
+	}
+	return combined, nil
+}
+
+// drainWorkflowServeWorkInStore drains ready control beads from one store.
+func drainWorkflowServeWorkInStore(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
 	result := workflowServeDrainResult{}
 	idlePolls := 0
 	for {
@@ -541,7 +604,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 	}
 }
 
-func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) error {
+func runWorkflowServeFollow(agentCfg config.Agent, cityPath string, targets []workflowServeTarget, workQuery string, stderr io.Writer) error {
 	ep, err := workflowServeOpenEventsProvider(stderr)
 	if err != nil {
 		return err
@@ -566,7 +629,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	idleSweeps := 0
 	var pendingWakeErr error
 	for {
-		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
+		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, targets, workQuery, stderr)
 		if err != nil {
 			// A transient work-query/store failure — most commonly the
 			// work-query timeout (hookWorkQueryTimeout) when the bead store is
