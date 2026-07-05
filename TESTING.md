@@ -234,6 +234,34 @@ coherence, and end-to-end provider wiring. Do not put low-level edge cases
 here. Corrupt files, exact parser failures, request validation branches, and
 single handler error cases belong in unit tests next to the implementation.
 
+#### Dashboard serve-level projection tests (`test/dashport`)
+
+`test/dashport` is the Go serve-level (Layer A) e2e for the dashboard. It stands
+up the real supervisor stack — the typed `/v0` API, the host-side `/api` plane,
+and the embedded SPA — over a **seeded event log + bead store** via the exported
+`api.ServeSeededCity` seam, then drives the exact endpoints each dashboard view
+consumes and asserts the projected JSON. It is the layer that catches the
+run-view class of regression: a projection break is visible at the Go wire level
+here even when every request still returns 200.
+
+The anchor test (`TestAnchorRunProjection`) seeds one run two ways from a single
+`testdata/dashport/` corpus — as a store-resident graph.v2 molecule (the
+`/workflow/{id}` read) **and** as a `bead.*` event stream in
+`<cityPath>/.gc/events.jsonl` (the runproj-backed `/api/city/{c}/runs/summary`
+and `/runs/{id}/detail` routes) — and asserts the run is present and non-empty on
+both paths. Responses decode into the generated Go wire types
+(`internal/api/genclient`) and the `internal/runproj` projection structs, never
+`map[string]any`, so a wire-shape drift fails compilation.
+
+Run it in isolation with `make dashboard-e2e-go`
+(`go test -tags integration ./test/dashport/...`). It is a Tier 3 integration
+package: the CI `packages` integration shard (`go list ./...` under
+`scripts/test-integration-shard packages`, invoked by
+`make test-integration-shards-parallel`) picks it up automatically alongside the
+REST/formula shards — no dedicated shard registration is needed. The
+structured-transcript view is not covered here; it lands with its serving path
+(PR #3931) and is asserted then.
+
 #### Live worker inference tests (`//go:build acceptance_c`)
 
 `test/acceptance/worker_inference` runs live Claude/Codex/Gemini/OpenCode CLI
