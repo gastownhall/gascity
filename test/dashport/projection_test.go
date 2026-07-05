@@ -156,8 +156,8 @@ func TestBeadsView(t *testing.T) {
 	if bead.Id != corpusWorkBeadID {
 		t.Errorf("bead detail id = %q, want %q", bead.Id, corpusWorkBeadID)
 	}
-	if bead.Title == "" {
-		t.Error("bead detail has empty title; detail projected thin")
+	if bead.Title != corpusWorkBeadName {
+		t.Errorf("bead detail title = %q, want %q", bead.Title, corpusWorkBeadName)
 	}
 }
 

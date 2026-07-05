@@ -1195,6 +1195,28 @@ jobs:
       - name: Build
         run: npm run build --silent
         working-directory: internal/api/dashboardspa/web
+      # Sync the freshly built bundle into the embedded dist/ the fakesupervisor
+      # serves, so the Playwright render smoke (Layer B) runs against the SPA
+      # this job just built, not a stale committed embed.
+      - name: Sync embedded SPA bundle
+        run: rm -rf internal/api/dashboardspa/dist && cp -rf internal/api/dashboardspa/web/frontend/dist internal/api/dashboardspa/dist
+      - name: Build seeded fakesupervisor (Layer B server)
+        run: go build -tags integration -o fakesupervisor .
+        working-directory: test/dashport/cmd/fakesupervisor
+      - name: Install Playwright Chromium
+        run: npm run test:e2e:install
+        working-directory: internal/api/dashboardspa/web/frontend
+      - name: Playwright render smoke (Layer B)
+        run: npm run test:e2e
+        working-directory: internal/api/dashboardspa/web/frontend
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-report
+          path: internal/api/dashboardspa/web/frontend/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
 
   # openclaw-bridge Node test suite. The bridge ships its own npm tests
   # (inbound at-least-once redelivery + gc client wire shapes); without this
