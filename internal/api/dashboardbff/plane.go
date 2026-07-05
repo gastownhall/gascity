@@ -24,12 +24,24 @@ import (
 	"time"
 )
 
+// CityRef is a registered city's name and on-disk root path, as reported by
+// CityResolver.Cities for eager tailer warm-up at Plane.Start.
+type CityRef struct {
+	Name string
+	Path string
+}
+
 // CityResolver resolves a managed city name to its on-disk root path. The
 // supervisor's city registry implements this; resolving the path from the
 // registry (instead of joining the untrusted name onto a base) keeps
 // city-name path traversal out of the host-side plane entirely.
 type CityResolver interface {
 	CityPath(name string) (path string, ok bool)
+	// Cities returns every registered city so Plane.Start can eager-warm each
+	// city's run-view fold at startup (instead of on the operator's first
+	// click). It may be empty (no cities registered yet); cities registered
+	// after Start keep the lazy per-city start on their first request.
+	Cities() []CityRef
 }
 
 // Deps are the collaborators the /api plane needs.
@@ -84,13 +96,19 @@ func New(deps Deps) *Plane {
 // middleware (logging, recovery, request-id, host/CORS) via Handler().
 func (p *Plane) Handler() http.Handler { return p.guard(p.mux) }
 
-// Start enables the per-city samplers. Each city's sampler is launched lazily
-// on first request for that city's data (matching the BFF's lazy per-city
-// runtime) and runs until ctx is canceled or Stop is called.
+// Start enables the per-city samplers and eager-warms every registered city's
+// run-view fold. Each city's sampler is launched lazily on first request for
+// that city's data (matching the BFF's lazy per-city runtime); the run tailers,
+// by contrast, are eager-started here for all served cities so the first run
+// view (and the first after a supervisor restart) is a warm read rather than a
+// cold ~5s replay. eagerWarmTailers is non-blocking — it only spawns each fold
+// goroutine — so Start stays fast and never waits on any city's cold load.
+// Everything runs until ctx is canceled or Stop is called.
 func (p *Plane) Start(ctx context.Context) {
 	ctx, p.stop = context.WithCancel(ctx)
 	p.samplers.enable(ctx, &p.wg)
 	p.runTailers.enable(ctx, &p.wg)
+	p.eagerWarmTailers()
 }
 
 // Stop signals the samplers to halt and waits for them to drain.

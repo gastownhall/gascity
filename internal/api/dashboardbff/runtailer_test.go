@@ -19,11 +19,29 @@ import (
 	"github.com/gastownhall/gascity/internal/runproj"
 )
 
-type fakeResolver struct{ paths map[string]string }
+type fakeResolver struct {
+	paths map[string]string
+	// cities, when non-nil, is what Cities returns (so a test can control the
+	// eager-warm set and ordering independently of the CityPath map, or model a
+	// resolver whose registry is empty at Start). When nil, Cities is derived
+	// from paths so existing tests get eager-warming for free.
+	cities []CityRef
+}
 
 func (f fakeResolver) CityPath(name string) (string, bool) {
 	p, ok := f.paths[name]
 	return p, ok
+}
+
+func (f fakeResolver) Cities() []CityRef {
+	if f.cities != nil {
+		return f.cities
+	}
+	refs := make([]CityRef, 0, len(f.paths))
+	for name, path := range f.paths {
+		refs = append(refs, CityRef{Name: name, Path: path})
+	}
+	return refs
 }
 
 // runMoleculeEvent builds a bead.created event for a run-molecule lane carrying

@@ -178,6 +178,15 @@ func (t *cityRunTailer) loop(ctx context.Context) {
 	t.logDecodeMisses(proj, st)
 	close(t.readyCh)
 
+	// Best-effort prime the per-city sessions cache now that the fold is warm, so
+	// the first detail() serves a fully-warm read instead of paying the loopback
+	// sessions fetch inline. It degrades silently (the cache already falls back to
+	// (nil, false) when the supervisor loopback isn't serving yet — e.g. mid-start
+	// before the /v0 API is up) and respects ctx cancellation via the request it
+	// issues, so it never blocks the tail loop below. Formulas stay lazy: they are
+	// per-run, compile fast, and are cached with a long TTL once first fetched.
+	t.mgr.fetchSessions(ctx, t.name)
+
 	poll := time.NewTicker(runTailPollInterval)
 	defer poll.Stop()
 	for {
@@ -766,6 +775,31 @@ func (p *Plane) cityRunTailer(name string) (*cityRunTailer, bool) {
 	if !ok {
 		return nil, false
 	}
-	eventsPath := filepath.Join(path, ".gc", "events.jsonl")
-	return p.runTailers.ensure(name, eventsPath), true
+	return p.runTailers.ensure(name, cityEventsPath(path)), true
+}
+
+// cityEventsPath is the single source of truth for a city's append-only event
+// log path, so the lazy per-request start and the eager Start-time warm-up
+// (eagerWarmTailers) fold the exact same file.
+func cityEventsPath(cityRoot string) string {
+	return filepath.Join(cityRoot, ".gc", "events.jsonl")
+}
+
+// eagerWarmTailers starts the run-view fold for every currently-registered city
+// so the cold replay of .gc/events.jsonl happens at startup — in each tailer's
+// own background goroutine — instead of on the operator's first click. It is
+// non-blocking: ensure spawns the fold goroutine and returns immediately, so
+// Start never waits on any city's cold load. A nil resolver or an empty city
+// set is a no-op, and cities registered after Start keep the lazy start on
+// their first request.
+func (p *Plane) eagerWarmTailers() {
+	if p.deps.Resolver == nil {
+		return
+	}
+	for _, c := range p.deps.Resolver.Cities() {
+		if !validCityName(c.Name) || c.Path == "" {
+			continue
+		}
+		p.runTailers.ensure(c.Name, cityEventsPath(c.Path))
+	}
 }
