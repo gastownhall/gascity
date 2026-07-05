@@ -58,8 +58,11 @@ var (
 	// At the former 30s cap each graph hop could wait up to ~30s, so a
 	// multi-step workflow accumulated minutes of pure wake latency (the bulk of
 	// the TestGraphWorkflowSuccessPath flake). 5s keeps the loop responsive
-	// across hops while still backing off from the 1s base; the cost is one
-	// serve loop polling every 5s rather than 30s when a city is fully idle.
+	// across hops while still backing off from the 1s base. This is the
+	// responsive-tier cap; once the loop has been continuously empty for
+	// workflowServeDeepIdleThreshold sweeps it relaxes further to
+	// workflowServeDeepIdleSleep (see below), so a fully idle city eventually
+	// polls every 30s rather than every 5s.
 	// (Complementary to the wake-debounce coalescing below, which only helps
 	// the event-arrival path; a raw-bd-write close publishes no event.)
 	workflowServeMaxIdleSleep = 5 * time.Second
@@ -79,6 +82,19 @@ var (
 	// that publish no city event (raw `bd` writes, see workflowServeMaxIdleSleep
 	// comment above) arriving after a sustained quiet period: ≤30s for the
 	// first hop, after which the loop is active again at 1–5s.
+	//
+	// Sustained transient work-query failures engage this deep tier too: a
+	// timed-out/saturated-store drain is downgraded to an empty sweep in
+	// runWorkflowServeFollow (it must not kill the long-running dispatcher), and
+	// the SessionWorkQueryFailed event it publishes is not workflowEventRelevant,
+	// so it does not reset idleSweeps. After ~52s of continuous failures the cap
+	// therefore stretches to 30s. This is deliberate, not incidental: each sweep
+	// is itself a multi-fork `bd ready` scan against the very store that is
+	// struggling, so backing off is load-shedding that helps a pegged store
+	// recover — the goal of #2463 — rather than hammering it 12x/min. The
+	// residual exposure is narrow: bead events published through normal paths
+	// still wake the loop immediately, so only work written by a raw `bd` write
+	// *during* an active outage is discovered up to 30s late instead of 5s.
 	workflowServeDeepIdleSleep = 30 * time.Second
 	// workflowServeDeepIdleThreshold is the consecutive-empty-sweep count at
 	// which the deep-idle cap engages. ≤0 disables deep idle entirely.

@@ -5376,6 +5376,93 @@ func TestRunWorkflowServeFollowSurvivesDoltCircuitBreakerOutage(t *testing.T) {
 	}
 }
 
+// TestRunWorkflowServeFollowDeepIdlesUnderSustainedTransientFailures pins the
+// deliberate behavior documented on workflowServeDeepIdleSleep: a run of
+// transient work-query failures (a saturated/timed-out store) is treated like
+// sustained emptiness, so idleSweeps keeps climbing and the retry cap stretches
+// from the responsive 5s to the 30s deep-idle cap. That is intended
+// load-shedding — each sweep is itself a multi-fork `bd ready` scan against the
+// struggling store (#2463) — not an accident. The existing transient-timeout
+// test stubs the wait without observing sleepDur, so it cannot see this; this
+// test captures the sleepDur passed to workflowServeWaitForWake across the
+// failure run.
+func TestRunWorkflowServeFollowDeepIdlesUnderSustainedTransientFailures(t *testing.T) {
+	eventsDir := t.TempDir()
+	ep := newTestProvider(t, eventsDir)
+
+	prevList := workflowServeList
+	prevProvider := workflowServeOpenEventsProvider
+	prevWait := workflowServeWaitForWake
+	prevSweep := workflowServeWakeSweepInterval
+	prevMax := workflowServeMaxIdleSleep
+	prevDeep := workflowServeDeepIdleSleep
+	prevThreshold := workflowServeDeepIdleThreshold
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		workflowServeOpenEventsProvider = prevProvider
+		workflowServeWaitForWake = prevWait
+		workflowServeWakeSweepInterval = prevSweep
+		workflowServeMaxIdleSleep = prevMax
+		workflowServeDeepIdleSleep = prevDeep
+		workflowServeDeepIdleThreshold = prevThreshold
+	})
+	workflowServeWakeSweepInterval = 1 * time.Second
+	workflowServeMaxIdleSleep = 5 * time.Second
+	workflowServeDeepIdleSleep = 30 * time.Second
+	workflowServeDeepIdleThreshold = 12
+
+	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
+
+	// Every drain hits the transient work-query timeout (wraps DeadlineExceeded),
+	// so the loop survives each one and downgrades it to an empty sweep.
+	transientErr := fmt.Errorf("querying control work: running work query %q: timed out after 30s: %w", "bd ready", context.DeadlineExceeded)
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		return nil, transientErr
+	}
+
+	// Capture the sleepDur handed to each wait; after enough samples to cross the
+	// deep-idle threshold, return a fatal wait error to break the serve loop.
+	stopErr := errors.New("stop serve loop")
+	const samples = 14 // > threshold (12), so idleSweeps 0..13 are all observed
+	var sleeps []time.Duration
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, sleepDur time.Duration, _ int) (bool, error) {
+		sleeps = append(sleeps, sleepDur)
+		if len(sleeps) >= samples {
+			return false, stopErr
+		}
+		return false, nil
+	}
+
+	agent := config.Agent{Name: "control-dispatcher"}
+	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, io.Discard)
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("runWorkflowServeFollow err = %v, want %v after the sampled failure run", err, stopErr)
+	}
+	if len(sleeps) != samples {
+		t.Fatalf("captured %d sleepDur samples, want %d", len(sleeps), samples)
+	}
+
+	// sleeps[i] is followSleepDuration(i): the first wait runs at idleSweeps=0 and
+	// each surviving transient failure increments it (no reset, no relevant event).
+	if sleeps[0] != workflowServeWakeSweepInterval {
+		t.Errorf("sleeps[0] = %v, want base %v (first sweep, idleSweeps=0)", sleeps[0], workflowServeWakeSweepInterval)
+	}
+	// Below the threshold the responsive cap holds — a transient failure must not
+	// jump straight to deep idle.
+	for i := 0; i < workflowServeDeepIdleThreshold; i++ {
+		if sleeps[i] > workflowServeMaxIdleSleep {
+			t.Errorf("sleeps[%d] = %v, want <= responsive cap %v below the deep threshold", i, sleeps[i], workflowServeMaxIdleSleep)
+		}
+	}
+	// At and past the threshold the sustained failures engage the deep-idle cap
+	// (the documented load-shedding behavior for a saturated store).
+	for i := workflowServeDeepIdleThreshold; i < samples; i++ {
+		if sleeps[i] != workflowServeDeepIdleSleep {
+			t.Errorf("sleeps[%d] = %v, want deep cap %v (sustained transient failures engage deep idle)", i, sleeps[i], workflowServeDeepIdleSleep)
+		}
+	}
+}
+
 func TestWorkflowEventRelevantAcceptsBeadLifecycleEvents(t *testing.T) {
 	for _, evt := range []events.Event{
 		{Type: events.BeadCreated},
