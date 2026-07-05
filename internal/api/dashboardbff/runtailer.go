@@ -349,6 +349,16 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runproj.Formu
 	ready := t.ready
 	t.mu.RUnlock()
 
+	// Fold the run ONCE: the snapshot serves both the formula-target extraction
+	// (which formula to fetch) and the build. The old path scanned the city's
+	// beads twice — RunFormulaTargetForRun at version/seq 0, then
+	// BuildRunDetailWithSessionsAndFormula at the real version/seq — for identical
+	// (name,target,scope), since those are snapshot-identity-independent fields.
+	snap, err := runproj.SnapshotForRun(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq))
+	if err != nil {
+		return runproj.FormulaRunDetail{}, ready, err
+	}
+
 	sessions, sessionsAvailable := t.mgr.fetchSessions(ctx, t.name)
 
 	// Layer the supervisor's compiled formula detail at request time (like
@@ -362,7 +372,7 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runproj.Formu
 	// into a generic upstream error.
 	var formulaDetail *runproj.FormulaOrderingDetail
 	formulaDetailFailure := runproj.FormulaDetailUpstreamError
-	if name, target, scopeKind, scopeRef, ok := runproj.RunFormulaTargetForRun(beadSlice, runID); ok {
+	if name, target, scopeKind, scopeRef, ok := runproj.FormulaTargetFromSnapshot(snap); ok {
 		if fetched, failure, fetchedOK := t.mgr.fetchFormulaDetail(ctx, t.name, name, target, scopeKind, scopeRef); fetchedOK {
 			formulaDetail = fetched
 		} else {
@@ -370,15 +380,10 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runproj.Formu
 		}
 	}
 
-	var (
-		d   runproj.FormulaRunDetail
-		err error
-	)
-	if sessionsAvailable {
-		d, err = runproj.BuildRunDetailWithSessionsAndFormula(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq), sessions, formulaDetail, formulaDetailFailure)
-	} else {
-		d, err = runproj.BuildRunDetailWithSessionsAndFormula(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq), nil, formulaDetail, formulaDetailFailure)
+	if !sessionsAvailable {
+		sessions = nil
 	}
+	d, err := runproj.BuildRunDetailFromSnapshot(snap, sessions, formulaDetail, formulaDetailFailure)
 	return d, ready, err
 }
 
