@@ -1158,6 +1158,9 @@ jobs:
       - name: Typecheck (tsc --noEmit)
         run: npm run typecheck
         working-directory: internal/api/dashboardspa/web
+      - name: Typecheck test files (tsc -p tsconfig.test.json)
+        run: npm run --workspace gas-city-dashboard-frontend typecheck:test
+        working-directory: internal/api/dashboardspa/web
       - name: Vitest
         run: npm run --workspace gas-city-dashboard-frontend test
         working-directory: internal/api/dashboardspa/web
