@@ -2507,6 +2507,233 @@ func TestForwardCompatibility_UnknownState(t *testing.T) {
 	}
 }
 
+// --- interrupted-close reap tests (#2085) ---
+
+// TestReconcile_InterruptedCloseStateReaped verifies that an open session
+// bead stamped with a terminal ClosePatch stateCode the reconciler doesn't
+// otherwise process (an interrupted close: state written, status flip lost)
+// is closed rather than skipped forever. Before the fix these beads spun in
+// the unknown-state skip on every tick, permanently holding their agent's
+// pool slot, and gc restart could not recover because bd is the source of
+// truth (#2085).
+func TestReconcile_InterruptedCloseStateReaped(t *testing.T) {
+	// Covers the uncontroversial terminal codes plus the higher-risk
+	// hold-flavored reasons the pool retire path passes through
+	// (sleep_reason vocabulary) — all of which can only land on a
+	// pool-managed bead at their sole write site, so all must reap.
+	states := []string{
+		"duplicate", "stale-session", "gc_swept", "idle-timeout",
+		"idle", "no-wake-reason", "config-drift", "city-stop",
+		"user-hold", "wait-hold", "rate_limit", "provider-terminal-error",
+	}
+	for _, state := range states {
+		t.Run(state, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			env.addDesired("worker", "worker", false)
+
+			session := env.createSessionBead("worker", "worker")
+			env.setSessionMetadata(&session, map[string]string{
+				"state":                state,
+				poolManagedMetadataKey: boolMetadata(true),
+			})
+
+			woken := env.reconcile([]beads.Bead{session})
+			if woken != 0 {
+				t.Errorf("expected 0 woken for interrupted-close state, got %d", woken)
+			}
+
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get(session): %v", err)
+			}
+			if got.Status != "closed" {
+				t.Errorf("expected bead closed for interrupted-close state %q, got status %q", state, got.Status)
+			}
+			if !strings.Contains(env.stderr.String(), "interrupted-close") {
+				t.Errorf("expected interrupted-close reap message in stderr, got: %s", env.stderr.String())
+			}
+		})
+	}
+}
+
+// TestReconcile_InterruptedCloseStateKeptWhileWorkAssigned verifies the reap
+// defers to the assigned-work guard: a bead with open assigned work is not
+// closed, so the work is not orphaned mid-flight.
+func TestReconcile_InterruptedCloseStateKeptWhileWorkAssigned(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "duplicate",
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	task, err := env.store.Create(beads.Bead{Title: "assigned task", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(task): %v", err)
+	}
+	status := "in_progress"
+	assignee := session.ID
+	if err := env.store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(task): %v", err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Errorf("expected bead kept open while work is assigned, got status %q", got.Status)
+	}
+}
+
+// TestReconcile_InterruptedCloseStateKeptWhileRuntimeAlive verifies the reap
+// only fires when the provider session is not running: a live runtime under
+// an interrupted-close bead is left for the owning close path to finish.
+func TestReconcile_InterruptedCloseStateKeptWhileRuntimeAlive(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "duplicate",
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Errorf("expected bead kept open while runtime is alive, got status %q", got.Status)
+	}
+}
+
+// TestReconcile_InterruptedCloseStateDeferredUnderPartialStore verifies the
+// reap defers when the store view is degraded: a partial view is exactly when
+// a false "no assigned work" read is most likely, so no closes may fire.
+func TestReconcile_InterruptedCloseStateDeferredUnderPartialStore(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "duplicate",
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, env.dt, map[string]int{"worker": 1},
+		true, // storeQueryPartial: degraded view, closes must defer
+		nil, "", nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Errorf("expected bead kept open under storeQueryPartial, got status %q", got.Status)
+	}
+}
+
+// TestReconcile_InterruptedCloseStateDeferredOnBoot verifies the reap honors
+// the boot-window close deferral, matching the orphan/failed-create paths.
+func TestReconcile_InterruptedCloseStateDeferredOnBoot(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "duplicate",
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, env.dt, map[string]int{"worker": 1},
+		false, nil, "", nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		withDeferSessionClosesOnBoot(),
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Errorf("expected bead kept open under boot close deferral, got status %q", got.Status)
+	}
+}
+
+// TestReconcile_GenuinelyUnknownStateStillSkipped pins the forward-compat
+// contract alongside the interrupted-close reap: a state outside both
+// knownSessionStates and interruptedCloseSessionStates (e.g. written by a
+// newer version) is skipped untouched, exactly as before.
+func TestReconcile_GenuinelyUnknownStateStillSkipped(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{"state": "archived"})
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Errorf("expected genuinely-unknown state left open, got status %q", got.Status)
+	}
+	if !strings.Contains(env.stderr.String(), "unknown state") {
+		t.Errorf("expected unknown-state skip message in stderr, got: %s", env.stderr.String())
+	}
+}
+
+// TestReconcile_InterruptedCloseStateNamedSessionNotReaped pins the
+// pool-managed guard: a named/singleton (non-pool) session bead carrying an
+// interrupted-close stateCode is NOT reaped — it falls through to the skip, so
+// a named session never loses its identity to the reap path even if a future
+// write stamped one of these reasons onto its state field. The reap is scoped
+// to pool slots, whose loss is a cheap respawn. Runtime is not alive here, so
+// the pool-managed guard is the sole reason the bead is kept open.
+func TestReconcile_InterruptedCloseStateNamedSessionNotReaped(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+
+	// No pool_managed / pool_slot metadata -> isPoolManagedSessionBead is false.
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{"state": "duplicate"})
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Errorf("expected non-pool session kept open (identity-preserving skip), got status %q", got.Status)
+	}
+	if !strings.Contains(env.stderr.String(), "unknown state") {
+		t.Errorf("expected unknown-state skip message for non-pool bead, got: %s", env.stderr.String())
+	}
+}
+
 // TestReconcileSessionBeads_FailedCreateDesiredTargetNotStarted verifies that
 // state=failed-create cannot reach the provider start path even if a stale
 // desired-state entry points at that session_name.

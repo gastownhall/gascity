@@ -1183,11 +1183,44 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// rollback: if a newer version writes "draining" or "archived", the
 		// older reconciler ignores those beads rather than crashing.
 		if !isKnownState(*session) {
+			state := session.Metadata["state"]
+			// Interrupted close: ClosePatch stamped a terminal state but the
+			// status flip to closed was lost. Finish the close so the bead
+			// stops holding its pool slot (#2085); fall through to the skip
+			// when the runtime is still alive, the store view is partial, or
+			// the work guard declines.
+			//
+			// Gated on isPoolManagedSessionBead as defense-in-depth: every
+			// stateCode in interruptedCloseSessionStates is written only at
+			// the pool retire path (session_reconciler.go closeBead call site),
+			// which is itself pool-managed-gated, so today these states can
+			// only land on a pool bead. Enforcing that here rather than relying
+			// on the cross-file invariant means a future write that stamped one
+			// of these reasons onto a named/singleton session's state field
+			// would be skipped (the older, safe behavior) instead of finishing
+			// a close that costs a named session its identity/continuity.
+			if isInterruptedCloseState(*session) && isPoolManagedSessionBead(*session) && !storeQueryPartial && !reconcileOpts.deferSessionClosesOnBoot {
+				providerAlive, aliveErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, session.ID)
+				if aliveErr != nil {
+					providerAlive = false
+				}
+				if !providerAlive && closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, state, clk.Now().UTC(), stderr) {
+					fmt.Fprintf(stderr, "session reconciler: reaped %s with interrupted-close state %q\n", //nolint:errcheck // best-effort stderr
+						name, state)
+					if trace != nil {
+						trace.recordDecision("reconciler.session.unknown_state", session.Metadata["template"], name, "interrupted_close_reaped", "closed", traceRecordPayload{
+							"state": state,
+						}, nil, "")
+					}
+					session.Status = "closed"
+					continue
+				}
+			}
 			fmt.Fprintf(stderr, "session reconciler: skipping %s with unknown state %q\n", //nolint:errcheck // best-effort stderr
-				session.Metadata["session_name"], session.Metadata["state"])
+				name, state)
 			if trace != nil {
-				trace.recordDecision("reconciler.session.unknown_state", session.Metadata["template"], session.Metadata["session_name"], "unknown_state_skipped", "skipped", traceRecordPayload{
-					"state": session.Metadata["state"],
+				trace.recordDecision("reconciler.session.unknown_state", session.Metadata["template"], name, "unknown_state_skipped", "skipped", traceRecordPayload{
+					"state": state,
 				}, nil, "")
 			}
 			continue
